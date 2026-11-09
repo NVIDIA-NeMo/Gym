@@ -60,9 +60,21 @@ to write the next function directly.
 ## Dependencies
 
 The resources server executes generated SciCode solutions in its own venv, so its
-`requirements.txt` pins `scipy<1.14` — the last range that keeps `scipy.integrate.simps` (used by
-some test cases, removed in scipy 1.14) while still providing Python 3.12 wheels — plus `numpy`,
-`matplotlib`, `h5py`, and `sympy`.
+`pyproject.toml` declares the scientific dependencies (`scipy>=1.14.1`, `numpy`, `matplotlib`,
+`h5py`, `sympy`, `networkx`; `uv.lock` has the exact versions). Python 3.13 needs scipy 1.14 or
+newer, and scipy 1.14 removed `scipy.integrate.simps`, which the benchmark's own dependency header
+imports for problems 2 and 28 (`from scipy.integrate import simps`) and a few solutions call.
+`config.yaml` therefore sets `provide_removed_scipy_aliases: true` on the resources server: when
+`scipy.integrate` has no `simps`, every grading program first restores it as a forward to `simpson`
+(the call scipy 1.13 made; results are bit-identical on odd and even sample counts). Nothing changes
+on a scipy that still has `simps`. Other removed scipy names (for example `scipy.special.sph_harm`)
+are not restored.
+
+Problems 13 and 62 each have one sub-step the benchmark prefills with reference code instead of
+generating it (13.6 builds `class Maxwell`, 62.1 builds `class Block` and `class EnlargedBlock`);
+every later step of the problem uses that class. The agent inserts the official reference files for
+these two steps whole, from `responses_api_agents/scicode_agent/prefilled_steps/`, so the cumulative
+program defines the classes. This also shows the model the whole class in the later steps' prompts.
 
 ## Running servers
 

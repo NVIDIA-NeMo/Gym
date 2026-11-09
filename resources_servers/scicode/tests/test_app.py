@@ -32,6 +32,7 @@ from resources_servers.scicode.app import (
 )
 from resources_servers.scicode.scicode_integration.runner import (
     DEFAULT_OUTPUT_TAIL_CHARS,
+    SCIPY_COMPAT_PRELUDE,
     build_test_program,
     exception_class_from_stderr,
     preflight_grading_interpreter,
@@ -141,6 +142,64 @@ def test_build_test_program_injects_path_and_targets():
     assert "process_hdf5_to_tuple('1.1', 1)" in program
     assert "target = targets[0]" in program
     assert "def cmp_tuple_or_list" in program
+
+
+def test_build_test_program_scipy_compat_is_opt_in():
+    args = ("def f(x):\n    return x", "/data/test_data.h5", "1.1", ["assert f(1) == target"])
+    assert build_test_program(*args).startswith("def f(x):")
+    assert SCIPY_COMPAT_PRELUDE not in build_test_program(*args)
+    compat = build_test_program(*args, scipy_compat=True)
+    assert compat.startswith(SCIPY_COMPAT_PRELUDE + "def f(x):")
+    # Only the prelude is added; the rest of the program is byte-identical.
+    assert compat[len(SCIPY_COMPAT_PRELUDE) :] == build_test_program(*args)
+
+
+# scipy removed scipy.integrate.simps in 1.14; the benchmark's dependency header for problems 2 and 28 imports it.
+_SIMPS_HEADER = "import numpy as np\nfrom scipy.integrate import simps\n"
+_scipy_has_simps = hasattr(__import__("scipy.integrate").integrate, "simps")
+
+
+@pytest.mark.skipif(_scipy_has_simps, reason="this scipy still provides simps, so there is nothing to restore")
+def test_simps_dependency_header_fails_without_the_compat_prelude():
+    result = run_substep(_SIMPS_HEADER + "assert True", timeout_secs=60.0)
+    assert result["passed"] is False
+    assert result["exception_class"] == "ImportError"
+
+
+@pytest.mark.skipif(_scipy_has_simps, reason="this scipy still provides simps, so there is nothing to restore")
+def test_compat_prelude_lets_the_simps_dependency_header_import():
+    program = (
+        SCIPY_COMPAT_PRELUDE + _SIMPS_HEADER + "x = np.linspace(0, 1, 11)\nassert np.isclose(simps(x**2, x), 1 / 3)"
+    )
+    assert run_substep(program, timeout_secs=60.0)["passed"] is True
+    # The alias is also reachable the way a solution would write it.
+    attribute_use = SCIPY_COMPAT_PRELUDE + "import scipy.integrate as si\nassert si.simps([1.0, 1.0, 1.0]) == 2.0"
+    assert run_substep(attribute_use, timeout_secs=60.0)["passed"] is True
+
+
+def test_compat_prelude_simps_matches_simpson_for_odd_and_even_sample_counts():
+    program = (
+        SCIPY_COMPAT_PRELUDE
+        + "import numpy as np\nfrom scipy.integrate import simpson, simps\n"
+        + "for n in (2, 3, 4, 5, 10, 11, 50):\n"
+        + "    y = np.sin(np.linspace(0, 3, n)) + np.arange(n) ** 2 * 0.01\n"
+        + "    x = np.cumsum(0.1 + np.arange(n) * 0.01)\n"
+        + "    assert simps(y) == simpson(y) and simps(y, x) == simpson(y, x=x) and simps(y, dx=0.37) == simpson(y, dx=0.37)\n"
+        + "    y2 = np.outer(np.arange(3) + 1.0, y)\n"
+        + "    assert np.array_equal(simps(y2, x, axis=1), simpson(y2, x=x, axis=1))\n"
+    )
+    assert run_substep(program, timeout_secs=60.0)["passed"] is True
+
+
+def test_compat_prelude_keeps_a_simps_scipy_already_has():
+    program = (
+        "import scipy.integrate as si\n"
+        + "native = lambda *a, **k: 'native'\n"
+        + "si.simps = native\n"
+        + SCIPY_COMPAT_PRELUDE
+        + "assert si.simps is native\n"
+    )
+    assert run_substep(program, timeout_secs=60.0)["passed"] is True
 
 
 def test_run_substep_pass():
@@ -522,6 +581,25 @@ class TestApp:
         server = _server(test_data_fpath="nonexistent/test_data.h5")
         with pytest.raises(RuntimeError, match=str(PARENT_DIR)):
             await server.verify(_request(solutions={"1.1": "x = 1", "1.2": "y = 2"}))
+
+    def test_removed_scipy_aliases_are_off_by_default(self):
+        assert _server().config.provide_removed_scipy_aliases is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("enabled", [False, True])
+    async def test_verify_adds_the_scipy_compat_prelude_only_when_configured(self, enabled):
+        programs = []
+
+        def fake(program, timeout_secs, python_executable=None, **kwargs):
+            programs.append(program)
+            return {"passed": True, "error": ""}
+
+        with tempfile.NamedTemporaryFile(suffix=".h5") as h5, patch.object(app, "run_substep", fake):
+            server = _server(h5.name, provide_removed_scipy_aliases=enabled)
+            result = await server.verify(_request(solutions={"1.1": "a", "1.2": "b"}))
+        assert result.reward == 1.0
+        assert len(programs) == 2
+        assert all(program.startswith(SCIPY_COMPAT_PRELUDE) is enabled for program in programs)
 
     @pytest.mark.asyncio
     async def test_verify_all_pass(self):

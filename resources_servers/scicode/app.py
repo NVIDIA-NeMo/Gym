@@ -83,6 +83,10 @@ class ScicodeResourcesServerConfig(BaseResourcesServerConfig):
     required_grading_interpreters: int = Field(default=1, ge=1)
     # The canonical OR rule short-circuits after the first pass. Enable this only for diagnostics.
     run_all_grading_interpreters: bool = False
+    # Restore `scipy.integrate.simps` (removed in scipy 1.14) in every grading program, so SciCode's own
+    # dependency header `from scipy.integrate import simps` (problems 2 and 28) imports. Off by default so
+    # grading stays byte-identical for configs that grade with a scipy that still has it.
+    provide_removed_scipy_aliases: bool = False
     # Opt-in: keep each scored sub-step's execution record (exit code, timeout, duration, exception class
     # and bounded stdout/stderr tails) in the verify response as `step_outputs`, aligned with `step_results`.
     # Off by default: the record carries model-generated output text and grows every rollout row.
@@ -305,7 +309,13 @@ class ScicodeResourcesServer(SimpleResourcesServer):
                 status = "out_of_context" if code == _OUT_OF_CONTEXT else "empty"
                 return False, {}, {}, _step_output(i, status, False) if record else None, _step_exit({})
             sanitized = [sanitize_test(tc) for tc in sub_step["test_cases"]]
-            program = build_test_program(code, h5_path, sub_step["step_number"], sanitized)
+            program = build_test_program(
+                code,
+                h5_path,
+                sub_step["step_number"],
+                sanitized,
+                scipy_compat=self.config.provide_removed_scipy_aliases,
+            )
             per_environment = {}
             per_environment_errors = {}
             attempts: List[tuple[str, dict]] = []
