@@ -28,6 +28,7 @@ from pydantic import ConfigDict, Field, ValidationError, model_validator
 from pydantic_core import InitErrorDetails, PydanticCustomError
 
 from nemo_gym.agents import (
+    AGENT_TIMEOUT_METADATA_KEY,
     AgentCloseSessionResponse,
     AgentOutcome,
     AgentSeedSessionRequest,
@@ -37,6 +38,7 @@ from nemo_gym.agents import (
     Body,
     SandboxSession,
     SimpleResponsesAPIAgent,
+    resolve_agent_timeout,
     sandbox_server_url,
 )
 from nemo_gym.config import ModelServerRef, get_global_config_dict
@@ -419,10 +421,12 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 "truncation_recovery": self.config.truncation_recovery,
             },
         }
+        # A task row's own budget shortens the run; it never extends the configured one.
+        timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.sandbox_runner_timeout_seconds)
         try:
             output = await state.execute(
                 payload,
-                timeout=self.config.sandbox_runner_timeout_seconds,
+                timeout=timeout,
                 close_timeout=self.config.session_close_timeout_seconds,
             )
         except TimeoutError:
@@ -449,6 +453,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             tools=[],
             metadata={
                 "elapsed_seconds": str(output["elapsed_seconds"]),
+                AGENT_TIMEOUT_METADATA_KEY: str(timeout),
                 **({"stop_reason": output["stop_reason"]} if output["stop_reason"] else {}),
             },
             status=output["observations"]["status"],
