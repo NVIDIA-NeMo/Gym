@@ -58,6 +58,8 @@ widesearch_opencode_benchmark:
       thinking: true
       timeout: 7200
       sandbox_install_timeout_seconds: 900
+      # Above the exa_search worst case (http_timeout_s x max_http_attempts plus backoff, about 183 s).
+      mcp_tool_timeout_seconds: 300
       context_window: 262144
       max_output_tokens: 131072
       opencode_version: 1.17.11

@@ -24,7 +24,7 @@ from time import time
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Sequence
 from urllib.parse import unquote, urlparse, urlsplit, urlunsplit
 
-from aiohttp import ClientConnectionError, ClientPayloadError, ClientTimeout
+from aiohttp import ClientConnectionError, ClientPayloadError, ClientTimeout, ContentTypeError
 from fastapi import FastAPI, Request
 from httpx import AsyncClient
 from pydantic import BaseModel, Field, PrivateAttr, model_validator
@@ -185,6 +185,9 @@ class TavilySearchAIOHTTPClient(BaseModel):
     auth_header: str = "authorization"
     auth_prefix: str = "Bearer "
     provider_name: str = "Tavily"
+    # Statuses that mean this key cannot serve the call (rejected or out of credits), so the next key is tried:
+    # Tavily's 401 and its 432/433 plan and pay-as-you-go limits by default.
+    rejected_key_statuses: frozenset[int] = frozenset({401, 432, 433})
 
     async def post(self, endpoint: str, content: str, timeout: float) -> TavilySearchAIOHTTPClientResponse:
         headers = {key.lower(): value for key, value in self.headers.items()}
@@ -211,8 +214,16 @@ class TavilySearchAIOHTTPClient(BaseModel):
                     _max_connection_retries=0,
                 )
                 if response.status == 200:
-                    return TavilySearchAIOHTTPClientResponse(status_code=200, data=await response.json())
-                key_rejected = response.status in {401, 432, 433}
+                    try:
+                        data = await response.json()
+                    except (ContentTypeError, ValueError):
+                        data = None
+                    if not isinstance(data, dict):
+                        # The decode error's repr carries the request headers, key included, and a validation
+                        # error would quote the body; name only the provider.
+                        raise RuntimeError(f"{self.provider_name} HTTP 200 with an unreadable body")
+                    return TavilySearchAIOHTTPClientResponse(status_code=200, data=data)
+                key_rejected = response.status in self.rejected_key_statuses
                 if key_rejected:
                     rejected.add(headers[self.auth_header])
                 retryable = response.status in RETRY_ERROR_CODES or (
@@ -400,6 +411,8 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                         auth_header="x-api-key",
                         auth_prefix="",
                         provider_name="Exa",
+                        # 402: the key's credits or spending budget are exhausted.
+                        rejected_key_statuses=frozenset({401, 402}),
                     )
                 )
                 for index, key in enumerate(exa_api_keys)
@@ -622,7 +635,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             else:
                 page_content = ""
 
-            if self.config.max_cached_pages:
+            # An empty page is usually a failed fetch (Tavily's failed_results, an Exa crawl error in statuses);
+            # caching it would hide the page from every later session.
+            if page_content and self.config.max_cached_pages:
                 if self.config.max_cached_page_chars is not None:
                     page_content = page_content[: self.config.max_cached_page_chars]
                 self._page_cache[body.url] = page_content

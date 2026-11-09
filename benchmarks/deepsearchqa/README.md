@@ -38,9 +38,14 @@ a shared agent config. There are two kinds:
   [`tavily_search`](../../resources_servers/tavily_search/README.md) server with
   `search_provider: exa`. Its exclusion policy,
   [`search_exclusions.json`](search_exclusions.json), keeps the dataset's
-  Hugging Face pages out of results and page reads. The sandbox calls the model
+  Hugging Face pages out of the results and page reads of these three tools; it
+  does not restrict the sandbox's own network access, so a shell or a harness's
+  own fetch tool can still reach them. The sandbox calls the model
   server and `exa_search` on the Gym host, so these configs set
-  `use_absolute_ip: true`: the sandbox must be able to reach that host.
+  `use_absolute_ip: true`: the sandbox must be able to reach that host. These
+  copies use different search tools, result formats and exclusions than their
+  earlier `harness_exa_search` versions, so their scores are not directly
+  comparable with runs of those versions.
 - **Claude Code, Cline, Prime Agent, Simple Strands, and NeMo Fabric
   DeepAgents** still run through the deprecated `harness_exa_search` agent
   behind `legacy_agent`, which starts the harness and its Exa integration in a

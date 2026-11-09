@@ -57,7 +57,9 @@ deepsearchqa_agent:
       model: ${policy_model_name}
       thinking: 'off'
       timeout: 7200
-      setup_timeout: 900
+      sandbox_install_timeout_seconds: 900
+      # Above the exa_search worst case (http_timeout_s x max_http_attempts plus backoff, about 183 s).
+      mcp_tool_timeout_seconds: 300
       context_window: 262144
       max_output_tokens: 131072
       openclaw_version: 2026.6.11

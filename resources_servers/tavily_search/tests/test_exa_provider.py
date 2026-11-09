@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiohttp import ClientConnectionError
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from resources_servers.tavily_search import app as module
@@ -104,6 +105,7 @@ async def test_web_search_asks_exa_and_keeps_the_exclusion_policy(server, post):
                 {"url": "https://blocked.test/a", "title": "blocked", "highlights": ["blocked secret"]},
                 {"url": "https://ok.test/answers", "title": "blocked path", "highlights": ["answer key"]},
                 {"url": "https://ok.test/page", "title": None, "highlights": ["first passage", "", "second passage"]},
+                {"title": "no url", "highlights": ["unplaceable passage"]},
                 "not a result",
             ]
         },
@@ -112,11 +114,12 @@ async def test_web_search_asks_exa_and_keeps_the_exclusion_policy(server, post):
 
     assert "first passage ... second passage" in result.results_string
     assert "[1]  (ok.test)" in result.results_string
-    assert all(text not in result.results_string for text in ("blocked secret", "answer key"))
+    assert all(text not in result.results_string for text in ("blocked secret", "answer key", "unplaceable"))
     (call,) = post.await_args_list
     assert call.kwargs["url"] == "https://exa.test/search"
     assert call.kwargs["headers"]["x-api-key"] == "exa-one"
     assert "authorization" not in call.kwargs["headers"]
+    assert call.kwargs["headers"]["content-type"] == "application/json"
     assert sent(call) == {
         "query": "what is exa",
         "numResults": 10,
@@ -124,6 +127,12 @@ async def test_web_search_asks_exa_and_keeps_the_exclusion_policy(server, post):
         "excludeDomains": ["blocked.test"],
     }
     assert server._session_id_to_metrics["test-session"].async_tavily_calls[0].function == "search"
+
+
+async def test_web_search_asks_exa_for_the_configured_number_of_results(exclusions, post):
+    server = _server(exclusions, search_provider="exa", exa_api_key="exa-key", max_results=3)
+    await server.web_search(tool_request(), TavilySearchRequest(query="q"))
+    assert sent(post.await_args_list[0])["numResults"] == 3
 
 
 async def test_no_provider_exclusions_sends_no_exclude_domains(exclusions, post):
@@ -161,6 +170,20 @@ async def test_scroll_page_reads_and_caches_the_page_text(server, post):
     assert sent(call) == {"urls": ["https://ok.test/page"], "text": True}
 
 
+async def test_scroll_page_does_not_cache_a_page_exa_failed_to_fetch(server, post):
+    failed = {"results": [], "statuses": [{"id": "https://ok.test/page", "status": "error"}]}
+    post.side_effect = [
+        http_response(200, failed),
+        http_response(200, {"results": [{"url": "https://ok.test/page", "text": "a b c d"}]}),
+    ]
+    first = await server.scroll_page(tool_request(), ScrollPageRequest(url="https://ok.test/page"))
+    assert first.total_words == 0
+    assert "https://ok.test/page" not in server._page_cache
+    second = await server.scroll_page(tool_request(), ScrollPageRequest(url="https://ok.test/page"))
+    assert second.total_words == 4
+    assert len(post.await_args_list) == 2
+
+
 @pytest.mark.parametrize("tool", ["find_in_page", "scroll_page"])
 async def test_a_page_exa_resolves_to_an_excluded_url_is_dropped(server, post, tool):
     post.return_value = http_response(200, {"results": [{"url": "https://blocked.test/key", "text": "answer key"}]})
@@ -176,6 +199,38 @@ async def test_exa_keys_rotate_on_rate_limits_and_rejections(server, post):
     await server.web_search(tool_request(), TavilySearchRequest(query="q"))
     assert [c.kwargs["headers"]["x-api-key"] for c in post.await_args_list] == ["exa-one", "exa-two", "exa-one"]
     assert all(sent(c)["query"] == "q" for c in post.await_args_list)
+
+
+async def test_an_exa_key_out_of_credits_falls_over_to_the_next_key(exclusions, post):
+    server = _server(exclusions, search_provider="exa", exa_api_key="exa-one,exa-two,exa-three")
+    post.side_effect = [http_response(402), http_response(402), http_response(200, {"results": []})]
+    await server.web_search(tool_request(), TavilySearchRequest(query="q"))
+    assert [c.kwargs["headers"]["x-api-key"] for c in post.await_args_list] == ["exa-one", "exa-two", "exa-three"]
+
+
+async def test_an_exa_402_on_every_key_fails_without_reusing_a_spent_key(server, post):
+    post.side_effect = [http_response(402), http_response(402)]
+    with pytest.raises(RuntimeError, match="Exa HTTP 402 after 2 attempts"):
+        await server.web_search(tool_request(), TavilySearchRequest(query="q"))
+
+
+@pytest.mark.parametrize("decode_error", [ValueError("Expecting value"), None])
+async def test_an_unreadable_exa_reply_names_the_provider_without_its_body_or_key(server, post, decode_error):
+    response = http_response(200, ["private-body"])
+    if decode_error is not None:
+        response.json.side_effect = decode_error
+    post.return_value = response
+    with pytest.raises(RuntimeError, match="Exa HTTP 200 with an unreadable body") as error:
+        await server.web_search(tool_request(), TavilySearchRequest(query="q"))
+    assert all(secret not in repr(error.value) for secret in ("private-body", "exa-one"))
+    assert error.value.__context__ is None
+    response.release.assert_called_once()
+
+
+async def test_exa_transport_failures_name_the_provider(server, post):
+    post.side_effect = ClientConnectionError("connection reset")
+    with pytest.raises(RuntimeError, match="Exa transport failure after 3 attempts"):
+        await server.web_search(tool_request(), TavilySearchRequest(query="q"))
 
 
 async def test_exa_failures_name_the_provider_without_its_reply(server, post):

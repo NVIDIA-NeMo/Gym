@@ -54,6 +54,8 @@ Set `search_provider: exa` and `exa_api_key` to serve the same three tools from
 when Exa returns none), and `scroll_page` reads the page text. The exclusion
 policy, the provider-side domain subset (sent as Exa's `excludeDomains`), output
 limits, page cache, key pool and bounded retries work as they do for Tavily; a
-401 tries the next Exa key. `exa_base_url` defaults to `https://api.exa.ai`.
+401 (invalid key) or 402 (credits or budget exhausted) tries the next Exa key.
+`search_depth` applies to Tavily only, and `tavily_exclude_domains_limit` also
+caps Exa's `excludeDomains`. `exa_base_url` defaults to `https://api.exa.ai`.
 Tavily stays the default. The DeepSearchQA and WideSearch session configs run
 this as their `exa_search` tool server.

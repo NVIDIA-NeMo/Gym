@@ -21,6 +21,8 @@ exa_search:
       use_judge: false
       max_cached_page_chars: 200000
       max_scroll_words: 2000
+      # Hermes cancels an MCP tool call after 120 s; 30 s x 3 attempts plus backoff stays under it.
+      http_timeout_s: 30
       verified: false
 
 deepsearchqa:
@@ -58,6 +60,9 @@ deepsearchqa_agent:
       max_turns: 200
       max_tokens: null
       enabled_toolsets: null
+      # Hermes registers its own web_search when a search key such as EXA_API_KEY is in the sandbox environment
+      # (the local provider passes the host's); keep only the granted exa_search tools.
+      disabled_toolsets: [web]
       temperature: 1.0
       terminal_backend: local
       terminal_timeout: 180

@@ -61,12 +61,16 @@ widesearch_kilocode_benchmark:
       context_window: 262144
       max_output_tokens: 131072
       kilo_version: 7.4.15
+      # Per-call MCP tool timeout in ms (Kilo's default is the MCP SDK's 60 s), above the exa_search worst case
+      # of about 183 s. The sandbox lifetime is left to Kilo, which sizes it from setup_timeout and timeout.
+      kilo_config:
+        experimental:
+          mcp_timeout: 300000
       system_prompt: You must search the web with the web_search tool before answering, and read pages with find_in_page or scroll_page. Research the request on the web and return exactly the requested Markdown table.
       concurrency: 32
       sandbox_provider: sandbox
       sandbox_config:
         image: nikolaik/python-nodejs:python3.13-nodejs22-slim
-        ttl_s: 9000
         resources:
           memory_mib: 8192
       datasets:

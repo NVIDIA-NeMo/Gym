@@ -140,7 +140,8 @@ These behaviors apply to all Tavily configurations:
   access does not require restarting the server. Other non-retryable client errors
   still fail immediately. See [Tavily's error codes](https://help.tavily.com/articles/8645538886-understanding-http-errors).
 - The page cache evicts the least recently used page at `max_cached_pages`
-  (default 128); zero disables it.
+  (default 128); zero disables it. An empty page, usually a failed fetch, is not
+  cached, so a later `scroll_page` fetches it again.
   `max_cached_page_chars` limits stored page content and applies only when caching
   is enabled (including the initial response). `max_scroll_words` caps each response
   independently of caching.
@@ -153,5 +154,7 @@ pool) to serve the same tools from [Exa](https://exa.ai); no Tavily key is neede
 `find_in_page` returns the passages of the page that match its query (or the page
 text when there are none), and `scroll_page` reads the page text. Exclusions, the
 provider-side domain subset (sent as `excludeDomains`), output limits, the page
-cache, and the retry and key-failover rules above apply unchanged, with 401 as the
-rejected-key status. `search_provider` defaults to `tavily`.
+cache, and the retry and key-failover rules above apply unchanged, with 401 (invalid
+key) and 402 (credits or spending budget exhausted) as the statuses that try another
+key. `search_depth` applies to Tavily only, and `tavily_exclude_domains_limit` also
+caps the `excludeDomains` sent to Exa. `search_provider` defaults to `tavily`.

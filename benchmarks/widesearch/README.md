@@ -38,9 +38,14 @@ a shared agent config. There are two kinds:
   [`tavily_search`](../../resources_servers/tavily_search/README.md) server with
   `search_provider: exa`. Its exclusion policy,
   [`search_exclusions.json`](search_exclusions.json), keeps the dataset's
-  Hugging Face pages out of results and page reads. The sandbox calls the model
+  Hugging Face pages out of the results and page reads of these three tools; it
+  does not restrict the sandbox's own network access, so a shell or a harness's
+  own fetch tool can still reach them. The sandbox calls the model
   server and `exa_search` on the Gym host, so these configs set
-  `use_absolute_ip: true`: the sandbox must be able to reach that host.
+  `use_absolute_ip: true`: the sandbox must be able to reach that host. These
+  copies use different search tools, result formats and exclusions than their
+  earlier `harness_exa_search` versions, so their scores are not directly
+  comparable with runs of those versions.
 - **Claude Code, Cline, Prime Agent, Simple Strands, and NeMo Fabric
   DeepAgents** still run through the deprecated `harness_exa_search` agent
   behind `legacy_agent`, which starts the harness and its Exa integration in a
@@ -49,8 +54,9 @@ a shared agent config. There are two kinds:
   field selects a name from Gym's shared `harness_agent` registry, and
   `agent_kwargs` contains that agent's settings.
 
-Export `EXA_API_KEY` for either kind, and pass a sandbox provider config next
-to the config copy.
+The session harnesses read `EXA_API_KEY`; export it, and pass a sandbox
+provider config next to the config copy. The `harness_exa_search` copies set
+`exa_api_key: null`, so set it in the copy to give those harnesses Exa.
 
 The Claude Code configs install Gym and the Claude CLI in a fresh sandbox
 using `setup_command`. No cluster runtime archive is required.
