@@ -6,10 +6,12 @@ import tomllib
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 import yaml
 from fastapi import HTTPException
 from harbor.agents.terminus_2.terminus_2 import Terminus2
+from harbor.llms.chat import Chat
 from harbor.models.agent.context import AgentContext
 from pydantic import ValidationError
 
@@ -21,6 +23,7 @@ from responses_api_agents.terminus_2_agent.app import (
     Terminus2AgentConfig,
     _extract_instruction,
 )
+from responses_api_agents.terminus_2_agent.llm import NemoGymLLM
 from responses_api_agents.terminus_2_agent.output import trajectory_to_responses
 from responses_api_agents.terminus_2_agent.terminus import LocalEnvironment, LocalTmuxSession, StandaloneTerminus2
 
@@ -142,6 +145,28 @@ class TestStandaloneTerminus2:
         with patch.object(Terminus2, "_handle_llm_interaction", new=AsyncMock(return_value=non_completion)):
             await agent._handle_llm_interaction()
         assert agent.finished_naturally is False
+
+    @pytest.mark.parametrize(("status_code", "requests"), [(401, 1), (503, 3)])
+    async def test_a_turn_sends_the_model_call_through_one_retry_layer(
+        self, tmp_path: Path, status_code: int, requests: int
+    ) -> None:
+        llm = NemoGymLLM(model_name="m", api_base="http://model/v1")
+        agent = StandaloneTerminus2(logs_dir=tmp_path, model_name="m", llm=llm)
+        client = AsyncMock()
+        client.post = AsyncMock(
+            return_value=httpx.Response(
+                status_code=status_code, request=httpx.Request("POST", "http://model/v1/chat/completions")
+            )
+        )
+
+        with (
+            patch("httpx.AsyncClient", return_value=client),
+            patch.object(NemoGymLLM.call.retry, "sleep", AsyncMock()),
+        ):
+            with pytest.raises(httpx.HTTPStatusError):
+                await agent._query_llm(Chat(llm), "prompt", (None, None, None))
+
+        assert client.post.await_count == requests
 
 
 class TestTrajectoryOutput:

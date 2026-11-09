@@ -369,6 +369,87 @@ async def test_a_failed_attempt_remains_unknown_after_a_successful_retry():
     assert llm.calls_without_usage == 1
 
 
+def _http_response(status_code: int) -> httpx.Response:
+    return httpx.Response(
+        status_code=status_code,
+        text="model server error",
+        request=httpx.Request("POST", "http://localhost:8000/v1/chat/completions"),
+    )
+
+
+@pytest.fixture
+def retry_sleeps():
+    """The backoff sleeps between attempts of ``NemoGymLLM.call``, recorded instead of slept."""
+    sleeps: list[float] = []
+
+    async def record(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    with patch.object(NemoGymLLM.call.retry, "sleep", record):
+        yield sleeps
+
+
+@pytest.mark.parametrize("status_code", [400, 401, 403, 404, 413, 422])
+async def test_a_non_transient_status_fails_on_the_first_attempt(status_code, retry_sleeps):
+    llm = _make_llm()
+    client = AsyncMock()
+    client.post = AsyncMock(return_value=_http_response(status_code))
+
+    with patch("httpx.AsyncClient", return_value=client):
+        with pytest.raises(httpx.HTTPStatusError) as raised:
+            await llm.call(prompt="hello")
+
+    assert raised.value.response.status_code == status_code
+    assert client.post.await_count == 1
+    assert retry_sleeps == []
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        *(pytest.param(_http_response(code), id=str(code)) for code in (408, 425, 429, 500, 502, 503, 504)),
+        pytest.param(httpx.ConnectError("connection refused"), id="refused"),
+        pytest.param(httpx.ReadError("connection reset by peer"), id="reset"),
+        pytest.param(httpx.RemoteProtocolError("server disconnected without sending a response"), id="dropped"),
+        pytest.param(httpx.ReadTimeout("timed out"), id="timeout"),
+    ],
+)
+async def test_a_transient_failure_is_retried_within_the_wait_bound(failure, retry_sleeps):
+    llm = _make_llm()
+    client = AsyncMock()
+    if isinstance(failure, httpx.Response):
+        client.post = AsyncMock(return_value=failure)
+    else:
+        client.post = AsyncMock(side_effect=failure)
+
+    with patch("httpx.AsyncClient", return_value=client):
+        with pytest.raises((httpx.HTTPStatusError, httpx.TransportError)):
+            await llm.call(prompt="hello")
+
+    assert client.post.await_count == 3
+    assert len(retry_sleeps) == 2
+    assert all(4 <= seconds <= 15 for seconds in retry_sleeps)
+    assert sum(retry_sleeps) <= 30
+
+
+async def test_a_transient_status_then_an_answer_returns_the_answer(retry_sleeps):
+    llm = _make_llm()
+    client = AsyncMock()
+    answer = httpx.Response(
+        status_code=200,
+        json=_mock_response(content="recovered", id="chatcmpl-after-503"),
+        request=httpx.Request("POST", "http://localhost:8000/v1/chat/completions"),
+    )
+    client.post = AsyncMock(side_effect=[_http_response(503), answer])
+
+    with patch("httpx.AsyncClient", return_value=client):
+        response = await llm.call(prompt="hello")
+
+    assert response.content == "recovered"
+    assert client.post.await_count == 2
+    assert len(retry_sleeps) == 1
+
+
 @pytest.mark.asyncio
 async def test_missing_cache_detail_stays_unknown_after_a_later_reported_count():
     llm = _make_llm()

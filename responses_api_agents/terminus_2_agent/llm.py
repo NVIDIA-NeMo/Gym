@@ -24,17 +24,24 @@ from harbor.llms.base import (
     OutputLengthExceededError,
 )
 from harbor.models.metric import UsageInfo
-from tenacity import (
-    retry,
-    retry_if_exception_type,
-    retry_if_not_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-)
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 
 _RoutedExperts = list[list[list[int]]] | str
 _RolloutDetailsKey = tuple[tuple[int, ...], tuple[int, ...], tuple[float, ...] | None]
+
+_RETRYABLE_STATUS_CODES = frozenset({408, 425, 429})
+
+
+def _is_transient_model_error(exc: BaseException) -> bool:
+    """Whether a failed model call may succeed when sent again: HTTP 408, 425, 429 or 5xx, or a transport error.
+
+    Any other 4xx (400, 401, 403, 404, 413, 422, ...) fails the same way on every attempt.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        status_code = exc.response.status_code
+        return status_code in _RETRYABLE_STATUS_CODES or 500 <= status_code < 600
+    return isinstance(exc, (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError))
 
 
 _CONTEXT_LENGTH_ERROR_PHRASES = (
@@ -126,18 +133,12 @@ class NemoGymLLM(BaseLLM):
             )
         )
 
+    # The only retry layer for Terminus-2's model calls (StandaloneTerminus2 drops Harbor's): at most 3 attempts with
+    # at most 15 s between them, so a call waits at most 30 s beyond its request timeouts.
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=4, max=15),
-        retry=(
-            retry_if_exception_type(Exception)
-            & retry_if_not_exception_type(
-                (
-                    ContextLengthExceededError,
-                    OutputLengthExceededError,
-                )
-            )
-        ),
+        retry=retry_if_exception(_is_transient_model_error),
         reraise=True,
     )
     async def call(

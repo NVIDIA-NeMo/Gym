@@ -150,6 +150,10 @@ class LocalTmuxSession(TmuxSession):
 class StandaloneTerminus2(Terminus2):
     """Run Terminus-2 in a unique tmux session."""
 
+    # Harbor sends a turn again up to three times on any error, 4xx included, around NemoGymLLM.call's own retries.
+    # Its undecorated method leaves NemoGymLLM.call's retry of transient model errors as the only layer.
+    _query_llm = Terminus2._query_llm.__wrapped__
+
     async def _handle_llm_interaction(self, *args: Any, **kwargs: Any) -> tuple[Any, ...]:
         """Track Terminus-2's consecutive two-response completion handshake."""
         result = await super()._handle_llm_interaction(*args, **kwargs)
