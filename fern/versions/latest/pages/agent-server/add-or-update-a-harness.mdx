@@ -785,18 +785,26 @@ The current adapters:
 | Adapter | Prompt images | Tool-reply images |
 | --- | --- | --- |
 | `simple_agent` | Sent to the model unchanged, as Responses input. | `direct_http`: the images leave the tool output and follow the turn's tool outputs, one user message each. |
-| `opencode_agent` (agent sessions) | Staged in the sandbox and attached with `opencode run --file`, in the user message only. Image input is always declared. | `mcp`: OpenCode passes MCP image content to the model. |
+| `opencode_agent` (agent sessions) | Staged with `stage_media()` and attached with `opencode run --file`, in the user message only. Image input is always declared. | `mcp`: OpenCode passes MCP image content to the model. |
 | `opencode_sandboxed_agent` | Attached to the user turn. Image input is declared only for a turn with images. | `mcp`: images reach the model only on a turn whose prompt also has images, because only that turn declares image input. |
 | Codex, Hermes, Pi, OpenClaw, Kilo | Rejected with HTTP 422. | Codex's `view_image` returns images in its tool output; see [Tool-reply images](#tool-reply-images) for the Model Server setting this needs. |
 
 ### Prompt images
 
-1. Split each input message with `split_text_and_media(content)` from `nemo_gym.core`. It returns the joined text and a list of `MediaFile` objects (PNG, JPEG, GIF, or WebP), and it checks each file's leading bytes, so a file's type always matches its content. For a remote URL, a file ID, an unsupported type, or a part that is neither text nor an image, it raises `UnsupportedContentError`. Return HTTP 422 with its message.
+The shared pieces are in `nemo_gym.core` and `nemo_gym.sandbox` (see [Shared helpers](#shared-helpers) and [Startup Files and File Transfer](/main/infrastructure/sandbox#startup-files-and-file-transfer)). The OpenCode adapter is the reference: `_session_input()` in `responses_api_agents/opencode_agent/app.py` decodes the request, and `stage_activation()` in `responses_api_agents/opencode_agent/sandbox.py` stages the files.
+
+1. Split each input message with `split_text_and_media(content)` from `nemo_gym.core`. It returns the joined text and a list of `MediaFile` objects (PNG, JPEG, GIF, or WebP). It reads each file's type from its leading bytes. When the `data:` URI's label disagrees, the content wins, so the file is written with the extension its content needs. It refuses an empty payload or one that holds no supported type, because harnesses such as Pi tell an image from its bytes and read an unrecognized file as text. For a remote URL, a file ID, an unsupported type, or a part that is neither text nor an image, it raises `UnsupportedContentError`. Return HTTP 422 with its message.
 2. Accept images only where the harness can place them. Most CLIs attach files to the user prompt only, so reject an image in a system or developer message with 422; do not move it into the user prompt.
 3. Give the images to the harness in the form it reads:
-   - A harness in the sandbox reads files. Write them with `stage_media(sandbox, files)` and pass the returned paths in the harness's attachment syntax, such as `--file <path>` for OpenCode. The paths depend only on the content, so every rollout of a task gets the same prompt.
+   - A harness in the sandbox reads files. Write them with `stage_media(sandbox, files)` and pass the returned paths in the harness's attachment syntax, such as `--file <path>` for OpenCode. The section after this list explains the paths.
    - An in-process harness takes the `data:` URIs as image parts in its SDK's message format.
-4. Document in the adapter README where the harness puts the images relative to the text, and which part fields it ignores. OpenCode puts attached images, in order, before the task text and ignores `detail`.
+4. Decode once per activation request. A retried activation is compared with the stored request, so it never decodes the images again; a continuation activation reuses the result of its validation.
+5. Stage the files inside the activation's execution, as OpenCode's `stage_activation()` does, not in seed and not before the session's close fence. Close then cancels an upload that is still running before it releases the sandbox, and a continuation activation's deadline bounds the upload.
+6. Document in the adapter README where the harness puts the images relative to the text, and which part fields it ignores. OpenCode puts attached images, in order, before the task text and ignores `detail`.
+
+`stage_media()` writes each file to `/tmp/nemo-gym-media/<sha256>.<extension>` and returns the paths in order. `media_path(file)` gives a file's path before it is staged. The paths are named by content because a harness can show the path to the model, as OpenCode does: a path that changed per activation would change the prompt between rollouts of one task. Each distinct file is uploaded once under a unique partial name and then renamed onto its path. Sessions that share a borrowed sandbox therefore never read a partly written file, and replacing a file swaps in identical bytes. Close does not delete staged files, because another session may be reading them. In a borrowed sandbox they stay until the sandbox's owner stops it, bounded by the number of distinct images; an owned sandbox is destroyed at close.
+
+For image files a sandbox needs from its start, rather than per activation, put `bytes` values in `SandboxSpec.files`: a `str` value is written as UTF-8 text and a `bytes` value unchanged. To move bytes into or out of a running sandbox, use `upload_bytes()` and `download_bytes()`, which never pass the content through a shell.
 
 ### Tool-reply images
 
