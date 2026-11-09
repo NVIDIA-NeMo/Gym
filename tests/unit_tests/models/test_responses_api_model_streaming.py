@@ -35,6 +35,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.responses_api_types import (
+    SSE_KEEPALIVE,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
@@ -1559,40 +1560,53 @@ class TestResponsesStreamKeepalive:
     @pytest.mark.parametrize(
         ("path", "backend", "body"),
         [
-            ("/v1/responses", "_invoke_responses", STREAM_BODY),
-            ("/v1/chat/completions", "_invoke_chat_completions", {"stream": True, "messages": []}),
+            ("/v1/responses", "responses", STREAM_BODY),
+            ("/v1/chat/completions", "chat_completions", {"stream": True, "messages": []}),
         ],
     )
-    async def test_disconnect_before_the_first_chunk_cancels_the_backend(
-        self, monkeypatch, path, backend, body
+    @pytest.mark.parametrize("phase", ["first_interval", "before_first_chunk", "after_keepalive"])
+    @pytest.mark.parametrize("spec_version", ["2.0", "2.4"])
+    async def test_disconnect_waits_for_backend_cleanup(
+        self, monkeypatch, path, backend, body, phase, spec_version
     ) -> None:
-        # Through the real cancellation middleware: the client leaves after the handler returned the
-        # keepalive stream but before its body started, so the body's own cleanup never runs.
-        monkeypatch.setattr("nemo_gym.models.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", _KEEPALIVE_S)
-        client, server = _keepalive_client(_EchoModel)
+        keepalive_s = 30.0 if phase == "first_interval" else _KEEPALIVE_S
+        monkeypatch.setattr("nemo_gym.models.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", keepalive_s)
+        client, server = _keepalive_client(_EchoModel, keepalive_s=keepalive_s)
         server.setup_cancellation_middleware(client.app)
-        started, cancelled = asyncio.Event(), asyncio.Event()
+        started, cleanup_started = asyncio.Event(), asyncio.Event()
+        cleanup_release, cleanup_complete = asyncio.Event(), asyncio.Event()
+        backend_tasks: list[asyncio.Task] = []
 
         async def blocked(*args, **kwargs):
+            task = asyncio.current_task()
+            assert task is not None
+            backend_tasks.append(task)
             started.set()
             try:
                 await asyncio.Event().wait()
             finally:
-                cancelled.set()
+                cleanup_started.set()
+                await cleanup_release.wait()
+                cleanup_complete.set()
 
+        # The model's external backend is held; invocation, streaming and disconnect handling stay real.
         monkeypatch.setattr(_EchoModel, backend, blocked)
         incoming: asyncio.Queue[dict] = asyncio.Queue()
         await incoming.put({"type": "http.request", "body": json.dumps(body).encode(), "more_body": False})
-        response_started = asyncio.Event()
+        phase_reached = asyncio.Event()
 
         async def send(message: dict) -> None:
-            if message["type"] == "http.response.start":
-                response_started.set()
-                await asyncio.Event().wait()  # The client is gone before any body chunk arrives.
+            if phase == "before_first_chunk" and message["type"] == "http.response.start":
+                phase_reached.set()
+                await asyncio.Event().wait()
+            elif phase == "after_keepalive" and message["type"] == "http.response.body":
+                chunk = message.get("body", b"")
+                if chunk == SSE_KEEPALIVE or b"event: response.in_progress\n" in chunk:
+                    phase_reached.set()
 
         scope = {
             "type": "http",
-            "asgi": {"version": "3.0"},
+            "asgi": {"version": "3.0", "spec_version": spec_version},
             "http_version": "1.1",
             "method": "POST",
             "scheme": "http",
@@ -1604,12 +1618,30 @@ class TestResponsesStreamKeepalive:
             "client": ("127.0.0.1", 50000),
             "server": ("testserver", 80),
         }
-        call = asyncio.create_task(client.app(scope, incoming.get, send))
-        await asyncio.wait_for(response_started.wait(), 5)
-        assert started.is_set() and not cancelled.is_set()
-        await incoming.put({"type": "http.disconnect"})
-        await asyncio.wait_for(call, 5)
-        await asyncio.wait_for(cancelled.wait(), 5)
+
+        async def request() -> tuple[bool, bool, bool]:
+            await client.app(scope, incoming.get, send)
+            task = backend_tasks[0]
+            return cleanup_complete.is_set(), task.done(), task.cancelled()
+
+        call = asyncio.create_task(request())
+        try:
+            await asyncio.wait_for(started.wait(), 5)
+            if phase != "first_interval":
+                await asyncio.wait_for(phase_reached.wait(), 5)
+            await incoming.put({"type": "http.disconnect"})
+            await asyncio.wait_for(cleanup_started.wait(), 5)
+            assert not call.done(), "the request must wait for the backend's asynchronous cleanup"
+            cleanup_release.set()
+            assert await asyncio.wait_for(call, 5) == (True, True, True)
+        finally:
+            cleanup_release.set()
+            if not call.done():
+                call.cancel()
+            for task in backend_tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(call, *backend_tasks, return_exceptions=True)
 
     @staticmethod
     def _blocked_backend(monkeypatch) -> tuple[asyncio.Event, asyncio.Event]:

@@ -32,6 +32,7 @@ from uuid import uuid4
 
 import orjson
 from aiohttp import ClientResponseError
+from anyio import CancelScope
 from fastapi import Body, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
@@ -215,6 +216,15 @@ def _plain(value: Any) -> Any:
     return value
 
 
+async def _cancel_and_wait_for_backend(backend: asyncio.Task[Any]) -> None:
+    # Disconnects cancel the enclosing AnyIO scope at every checkpoint. Protect the backend's own
+    # asynchronous teardown from that cancellation and from another cleanup owner cancelling it twice.
+    with CancelScope(shield=True):
+        if not backend.done() and not backend.cancelling():
+            backend.cancel()
+        await asyncio.gather(backend, return_exceptions=True)
+
+
 class _BackendStreamingResponse(StreamingResponse):
     """A keepalive stream that owns the backend call its body waits for.
 
@@ -232,9 +242,7 @@ class _BackendStreamingResponse(StreamingResponse):
         try:
             await super().__call__(scope, receive, send)
         finally:
-            if not self.backend.done():
-                self.backend.cancel()
-            await asyncio.gather(self.backend, return_exceptions=True)
+            await _cancel_and_wait_for_backend(self.backend)
 
 
 def _orjson_dispatch_response(content: Any) -> Any:
@@ -612,8 +620,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             # first, so a call that finishes sooner keeps the buffered events and HTTP error statuses.
             done, _ = await asyncio.wait({pending}, timeout=keepalive_s)
         except BaseException:
-            pending.cancel()
-            await asyncio.gather(pending, return_exceptions=True)
+            await _cancel_and_wait_for_backend(pending)
             raise
         if done:
             return await self._stream_buffered_responses(request, pending, ns_map)
@@ -683,9 +690,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             async for event in served.body_iterator:
                 yield _with_stream_report(event, report)
         finally:
-            if not pending.done():
-                pending.cancel()
-            await asyncio.gather(pending, return_exceptions=True)
+            await _cancel_and_wait_for_backend(pending)
 
     def _streamed_responses_failure(self, exc: Exception) -> tuple[Optional[str], str]:
         """The ``(code, message)`` of the ``response.failed`` event that reports a failure after keepalives.
@@ -784,9 +789,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             if done:
                 return await completed_stream(await pending)
         except BaseException:
-            if not pending.done():
-                pending.cancel()
-            await asyncio.gather(pending, return_exceptions=True)
+            await _cancel_and_wait_for_backend(pending)
             raise
 
         async def events() -> AsyncIterator[str | bytes]:
@@ -848,9 +851,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                 if last is not None:
                     yield last
             finally:
-                if not pending.done():
-                    pending.cancel()
-                await asyncio.gather(pending, return_exceptions=True)
+                await _cancel_and_wait_for_backend(pending)
 
         return _BackendStreamingResponse(events(), backend=pending)
 
