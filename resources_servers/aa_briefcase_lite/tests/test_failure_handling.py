@@ -4,6 +4,7 @@
 
 import json
 import logging
+import shutil
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -93,6 +94,21 @@ async def test_a_task_whose_every_reference_gave_unusable_answers_is_a_judge_fai
     assert row["mask_sample"] is True
     assert row["failure_kind"] == "judge_failed"
     assert row["reward"] == 0.0
+
+
+async def test_a_task_with_no_reference_to_judge_masks_the_row_as_a_verifier_error(
+    make_server, tmp_path: Path, monkeypatch
+) -> None:
+    server = make_server(reward_mode="pairwise")
+    for name in ("ref_a", "ref_b"):
+        shutil.rmtree(tmp_path / name / "task_w1_t1")
+    monkeypatch.setattr("resources_servers.aa_briefcase_lite.app.run_trials", pytest.fail)
+
+    row = await _verify(server, tmp_path, {"report.md": "x"})
+
+    assert row["mask_sample"] is True
+    assert row["failure_kind"] == "verifier_error"
+    assert "no pairwise reference could be judged" in row["failure_reason"]
 
 
 async def test_one_failed_reference_does_not_fail_the_task(make_server, tmp_path: Path, monkeypatch) -> None:

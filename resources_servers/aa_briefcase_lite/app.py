@@ -845,12 +845,16 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
             wins += matchup_wins
             losses += matchup_losses
             ties += matchup_ties
-        if attempted and len(failed) == attempted:
+        if not attempted:
+            # Every reference was left out, so no vote was cast: the row has no pairwise score, and 0.0 would read as
+            # the model losing every matchup.
+            skipped = {item["reference_id"]: item["skipped_reason"] for item in results}
+            raise AAEvaluationFault(f"no pairwise reference could be judged for task {body.task_id}: {skipped}")
+        if len(failed) == attempted:
             # Nothing was judged, so the task has no pairwise score; the last failure masks the row.
             raise list(failed.values())[-1]
         judged = wins + losses + ties
-        reward = (wins + 0.5 * ties) / judged if judged else 0.0
-        return reward, results, wins, losses, ties
+        return (wins + 0.5 * ties) / judged, results, wins, losses, ties
 
     async def web_search(self, body: Any) -> str:
         raise HTTPException(status_code=404, detail="AA-Briefcase-Lite offers no web tools")
