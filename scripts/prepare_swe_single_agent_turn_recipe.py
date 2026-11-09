@@ -287,6 +287,11 @@ def configure_gym(
             settings["datasets"] = []
         if route == "old-run":
             settings["sandbox_provider"] = "sandbox"
+            # Old harnesses persist transcripts on the host; their defaults are
+            # relative to the component source, which can be mounted read-only.
+            if harness in ("opencode", "hermes", "pi"):
+                artifact_key = "results_dir" if harness == "hermes" else "artifacts_dir"
+                settings[artifact_key] = str(output / "harness-artifacts" / harness)
         settings["resources_server"] = (
             {"type": "resources_servers", "name": "swe_resources"} if route == "old-run" else None
         )
