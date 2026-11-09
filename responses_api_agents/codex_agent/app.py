@@ -1070,7 +1070,6 @@ class CodexAgent(SimpleResponsesAPIAgent):
         base_url = self._resolve_call_base_url(invocation_id)
         config = self._build_config(base_url, developer_instructions=system, mcp_servers=mcp_servers or None)
         config["model_providers"]["gym"]["http_headers"] = {"x-session-id": invocation_id}
-        await state.upload_text("home/.codex/config.toml", toml_dumps(config))
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         command = self._build_command("-", state.session.workdir)
         command.remove("--ephemeral")
@@ -1098,8 +1097,13 @@ class CodexAgent(SimpleResponsesAPIAgent):
         failure = None
         try:
             async with self.sem:
+                # The configuration carries the MCP grant headers. Staging it inside the session's execute lets close
+                # stop the upload before it releases the sandbox.
                 raw = await state.execute(
-                    payload, timeout=timeout, close_timeout=self.config.session_close_timeout_seconds
+                    payload,
+                    timeout=timeout,
+                    close_timeout=self.config.session_close_timeout_seconds,
+                    files={"home/.codex/config.toml": toml_dumps(config)},
                 )
         except BaseException as exc:
             failure = exc
