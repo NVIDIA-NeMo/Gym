@@ -6,6 +6,7 @@ export PYTHONDONTWRITEBYTECODE=1
 
 dry_run=0
 source_mount=0
+reuse_swe_rebench_venv=0
 gym_root_override=
 excluded_nodes=
 wandb_project=
@@ -15,6 +16,7 @@ while (( $# )); do
     case "$1" in
         --dry-run) dry_run=1 ;;
         --source-mount) source_mount=1 ;;
+        --reuse-swe-rebench-venv) reuse_swe_rebench_venv=1 ;;
         --exclude) excluded_nodes=${2:?Pass the excluded node list}; shift ;;
         --walltime) WALLTIME=${2:?Pass the Slurm time limit}; shift ;;
         --wandb-project) wandb_project=${2:?Pass the W&B project}; shift ;;
@@ -59,6 +61,14 @@ if (( source_mount )); then
 fi
 export USE_CUSTOM_VLLM=0
 export SETUP_COMMAND=""
+if (( reuse_swe_rebench_venv )); then
+    # These two resource servers use the same dependencies. Reuse the compiled
+    # environment in the disposable container; the mounted source stays read-only.
+    export SETUP_COMMAND='if [[ ! -e /opt/gym_venvs/resources_servers/swe_next/.venv ]]; then
+mkdir -p /opt/gym_venvs/resources_servers/swe_next
+ln -s /opt/gym_venvs/resources_servers/swe_rebench/.venv /opt/gym_venvs/resources_servers/swe_next/.venv
+fi'
+fi
 export OMP_NUM_THREADS=16
 export NRL_VLLM_ASYNC_TIMEOUT_SECONDS=1800
 driver=(uv run --no-sync examples/run_grpo_single_controller.py --config "$CONFIG_PATH")
