@@ -14,11 +14,11 @@
 # limitations under the License.
 """Prepare the GSM8K benchmark (test split).
 
-Mirrors nemo-skills' `nemo_skills/dataset/gsm8k/prepare.py` exactly:
+Mirrors nemo-skills' `nemo_skills/dataset/gsm8k/prepare.py` transforms:
 same upstream URL, same hardcoded answer fixes, same "<<...>>" calc
 stripping from the reference solution, and same int-cast when the
-expected answer is an integer value. The only Gym-side difference is
-the `problem` -> `question` rename.
+expected answer is an integer value. Gym renames `problem` to `question`
+and serializes expected answers as strings for `math_with_judge`.
 """
 
 import json
@@ -72,6 +72,7 @@ def prepare() -> Path:
                 new_entry["reference_solution"] = re.sub(r"<<.*?>>", "", solution)
                 if original_entry["question"] in FIXES:
                     new_entry["expected_answer"] = FIXES[original_entry["question"]]
+                new_entry["expected_answer"] = str(new_entry["expected_answer"])
                 fout.write(json.dumps(new_entry) + "\n")
                 count += 1
     finally:

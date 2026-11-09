@@ -22,15 +22,17 @@ from typing import Any
 from fastapi import Request, Response
 from pydantic import ConfigDict, Field
 
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.agents import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseUsage,
+    accumulate_response_usage,
 )
-from nemo_gym.responses_converter import ResponsesConverter
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.models import ChatCompletionsConverter, chat_completion_usage_to_response_usage
 from responses_api_agents.conversational_tool_use_policy_tool_generation.generation import PolicyToolGenerator
 from responses_api_agents.conversational_tool_use_policy_tool_generation.models import (
     CallPhase,
@@ -96,6 +98,7 @@ class PolicyToolGenerationAgent(SimpleResponsesAPIAgent):
             attempt: int,
             ordinal: int,
         ) -> NeMoGymChatCompletion:
+            nonlocal usage
             del phase, attempt, ordinal
             model_server = self.config.policy_model_server if role == "policy" else self.config.judge_model_server
             model_response = await self.server_client.post(
@@ -105,8 +108,13 @@ class PolicyToolGenerationAgent(SimpleResponsesAPIAgent):
                 cookies=request.cookies,
             )
             await raise_for_status(model_response)
-            return NeMoGymChatCompletion.model_validate(await get_response_json(model_response))
+            completion = NeMoGymChatCompletion.model_validate(await get_response_json(model_response))
+            if role == "policy":
+                # Judge calls are auxiliary models; the rollout's usage covers the policy model only.
+                usage = accumulate_response_usage(usage, chat_completion_usage_to_response_usage(completion.usage))
+            return completion
 
+        usage: NeMoGymResponseUsage | None = None
         result, generation_trace, final_completion = await PolicyToolGenerator(
             max_retries=self.config.max_retries,
             use_refinement=self.config.use_refinement,
@@ -121,9 +129,11 @@ class PolicyToolGenerationAgent(SimpleResponsesAPIAgent):
             random_seed=self.config.random_seed,
         ).generate(body, caller)
         response_params = body.responses_create_params.model_copy(update={"model": final_completion.model})
-        final_response = ResponsesConverter(return_token_id_information=False).chat_completion_to_response(
+        final_response = ChatCompletionsConverter(return_token_id_information=False).chat_completion_to_response(
             response_params, final_completion
         )
+        # The response text is the final completion; usage covers every policy call in the rollout.
+        final_response.usage = usage
         response_payload = body.model_dump()
         response_payload.update(
             response=final_response,

@@ -22,15 +22,39 @@ from resources_servers.terminal_bench_4.task import (
 )
 
 
-def package(path):
+def package(path, toml=None):
     path.mkdir(parents=True)
     (path / "environment").mkdir()
     (path / "environment/Dockerfile").write_text("FROM public")
     (path / "instruction.md").write_text("<!-- canary marker -->\n\nDo the task.\n")
     (path / "task.toml").write_text(
-        '[task]\nname="terminal-bench/test"\n[environment]\ndocker_image="agent"\n[verifier.environment]\ndocker_image="verifier"\n'
+        toml
+        or '[task]\nname="terminal-bench/test"\n[environment]\ndocker_image="agent"\n[verifier.environment]\ndocker_image="verifier"\n'
     )
     return path
+
+
+# Terminal-Bench-Science shape: no prebuilt images, verifier built from tests/ and offline.
+DOCKERFILE_ONLY_TOML = """schema_version = "1.2"
+artifacts = ["/app/results/result.json"]
+[task]
+name = "terminal-bench-science/test"
+[verifier]
+timeout_sec = 120.0
+environment_mode = "separate"
+[verifier.environment]
+network_mode = "no-network"
+[agent]
+timeout_sec = 28800.0
+[environment]
+build_timeout_sec = 900.0
+cpus = 2
+memory_mb = 4096
+storage_mb = 10240
+gpus = 0
+network_mode = "public"
+mcp_servers = []
+"""
 
 
 def settings():
@@ -66,7 +90,15 @@ async def test_warm_cache_revalidated_and_instruction_stripped(tmp_path):
         await loader.load("terminal-bench/test", ref)
 
 
-@pytest.mark.parametrize("name,ref", [("terminal-bench/test", "latest"), ("../test", "sha256:" + "a" * 64)])
+@pytest.mark.parametrize(
+    "name,ref",
+    [
+        ("terminal-bench/test", "latest"),
+        ("../test", "sha256:" + "a" * 64),
+        ("terminal-bench-science", "sha256:" + "a" * 64),
+        ("org/../test", "sha256:" + "a" * 64),
+    ],
+)
 async def test_loader_rejects_unpinned_and_unsafe_names(tmp_path, name, ref):
     with pytest.raises(ValueError):
         await PackageLoader(tmp_path).load(name, ref)
@@ -128,6 +160,39 @@ async def test_cold_cache_atomic_download_and_shared_load(tmp_path, monkeypatch,
         assert call.await_count == 2
         assert call.await_args_list[0].kwargs["json"]["p_ref"] == ref
     assert not list(loader.root.rglob(".tb4-download-*"))
+
+
+async def test_loader_fetches_dockerfile_only_packages_from_other_orgs(tmp_path, monkeypatch):
+    source = package(tmp_path / "source", DOCKERFILE_ONLY_TOML)
+    (source / "tests").mkdir()
+    (source / "tests/Dockerfile").write_text("FROM public\nCOPY . /tests/")
+    (source / "tests/test.sh").write_text("#!/bin/bash\necho 1 > /logs/verifier/reward.txt\n")
+    ref = "sha256:" + content_hash(source)
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode="w:gz") as tar:
+        tar.add(source, arcname=".")
+    call = AsyncMock(
+        side_effect=[
+            Response(data={"content_hash": ref[7:], "archive_path": "packages/archive.tar.gz"}),
+            Response(blob=stream.getvalue()),
+        ]
+    )
+    monkeypatch.setattr(module, "request", call)
+    loaded = await PackageLoader(tmp_path / "cache").load("terminal-bench-science/test", ref)
+    assert call.await_args_list[0].kwargs["json"] == {
+        "p_org": "terminal-bench-science",
+        "p_name": "test",
+        "p_ref": ref,
+    }
+    assert loaded.path == tmp_path / "cache/terminal-bench-science/test" / ref[7:]
+    settings = loaded.config
+    assert settings.environment.docker_image is None and settings.verifier_environment.docker_image is None
+    assert (settings.agent.timeout_sec, settings.verifier.timeout_sec) == (28800, 120)
+    assert (settings.environment.network_mode, settings.verifier_environment.network_mode) == ("public", "no-network")
+    assert [artifact.source for artifact in settings.collected_artifacts] == [
+        "/logs/artifacts",
+        "/app/results/result.json",
+    ]
 
 
 @pytest.mark.parametrize("winner", [True, False])

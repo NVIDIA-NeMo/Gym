@@ -6,6 +6,11 @@ Verifies a model-generated SQL query by executing it against the per-``db_id``
 SQLite database from the BIRD dev split, then comparing the result set against
 the ground-truth query's result set via unordered set equality (the official
 BIRD evaluator's rule).
+
+Only the model's query is scored. When the verifier itself cannot measure it (the
+database is missing or corrupt, the gold query cannot run, the executor crashes)
+the row keeps the model's answer, is masked and names ``failure_kind``
+``verifier_error`` instead of entering the score as a wrong answer.
 """
 
 import asyncio
@@ -17,17 +22,25 @@ from typing import Any, ClassVar, Dict, List, Optional
 
 from pydantic import ConfigDict
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.core import (
+    VERIFIER_ERROR,
+    FailureBoundary,
+    NgFailureEvent,
+    current_verifier_invocation_id,
+    observe_failure,
+)
+from nemo_gym.metrics import (
+    compute_pass_majority_metrics,
+    compute_subset_metrics,
+    highest_k_metrics,
+)
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
-)
-from nemo_gym.reward_profile import (
-    compute_pass_majority_metrics,
-    compute_subset_metrics,
-    highest_k_metrics,
+    observe_programmatic_grading,
 )
 from resources_servers.bird_sql.eval_utils import execute_and_compare
 from resources_servers.bird_sql.setup_bird_sql import ensure_bird_sql
@@ -37,6 +50,9 @@ logger = logging.getLogger(__name__)
 
 
 class FailureCode(str, Enum):
+    """Why ``reward`` is what it is. The first five are scored outcomes of the model's query; the
+    rest are verifier failures, on which the row is masked and ``failure_kind`` is set."""
+
     NONE = "none"
     NO_SQL_EXTRACTED = "no_sql_extracted"
     RESULT_MISMATCH = "result_mismatch"
@@ -44,7 +60,24 @@ class FailureCode(str, Enum):
     EXECUTION_TIMEOUT = "execution_timeout"
     GOLD_EXECUTION_ERROR = "gold_execution_error"
     GOLD_EXECUTION_TIMEOUT = "gold_execution_timeout"
+    DATABASE_MISSING = "database_missing"
     UNKNOWN_ERROR = "unknown_error"
+
+
+def _observe_verifier_failure(reason: str, *, cause: Optional[BaseException] = None) -> None:
+    """Record a verifier failure for this request's failure report; the reply row names the same kind."""
+    operation_id = current_verifier_invocation_id()
+    failure = NgFailureEvent(
+        boundary=FailureBoundary.RESOURCES_SERVER,
+        failure_kind=VERIFIER_ERROR,
+        failure_reason=reason,
+        operation="verify",
+        operation_id=operation_id,
+        stage="verification",
+        exception_type=type(cause).__name__ if cause is not None else None,
+    )
+    failure.__cause__ = cause
+    observe_failure(failure)
 
 
 def extract_sql_from_response(text: Optional[str]) -> Optional[str]:
@@ -131,14 +164,11 @@ class BirdSqlResourcesServer(SimpleResourcesServer):
         generated = body.response.output_text or ""
         db_path = self._db_path(body.db_id)
 
-        reward = 0.0
-        execution_match = False
-
         base_payload = body.model_dump()
         for f in ("question", "gt_sql", "db_id", "difficulty", "id"):
             base_payload.pop(f, None)
 
-        def _response(**kwargs) -> BirdSqlVerifyResponse:
+        def _response(*, reward: float, execution_match: bool = False, **kwargs) -> BirdSqlVerifyResponse:
             return BirdSqlVerifyResponse(
                 **base_payload,
                 reward=reward,
@@ -153,17 +183,45 @@ class BirdSqlResourcesServer(SimpleResourcesServer):
             )
 
         extracted_sql = extract_sql_from_response(generated)
-        had_codeblock = extracted_sql is not None
 
         if extracted_sql is None:
             # No fenced ```sql``` block at all -- nothing to execute. Scored as a hard 0
             # rather than running a filler query like "SELECT 1" against the gold query:
             # that filler always mismatches anyway, so it added execution cost and a
             # misleading EXECUTION_ERROR-shaped failure without changing the reward.
+            return observe_programmatic_grading(
+                lambda: _response(
+                    reward=0.0,
+                    extracted_sql=None,
+                    failure_reason=FailureCode.NO_SQL_EXTRACTED,
+                    had_codeblock=False,
+                )
+            )
+
+        def _verifier_failure(
+            code: FailureCode, reason: str, cause: Optional[BaseException] = None
+        ) -> BirdSqlVerifyResponse:
+            # The verifier failed, not the model: its query was never measured against the gold
+            # result. The row keeps the answer and is masked under a typed kind rather than scored
+            # as a wrong answer; the event joins the request's failure report so the collector can
+            # group the outage. A stateless reverify can grade the saved answer once the cause is fixed.
+            _observe_verifier_failure(reason, cause=cause)
             return _response(
-                extracted_sql=None,
-                failure_reason=FailureCode.NO_SQL_EXTRACTED,
-                had_codeblock=False,
+                reward=0.0,
+                mask_sample=True,
+                failure_kind=VERIFIER_ERROR,
+                failure_reason=code,
+                extracted_sql=extracted_sql,
+                had_codeblock=True,
+            )
+
+        if not db_path.is_file():
+            # Checked before connecting: sqlite3.connect would create an empty database at this
+            # path and then report the gold query as broken, hiding the missing data behind a
+            # per-row execution error.
+            logger.error("BIRD verify on id=%s: database %s is missing", body.id, db_path)
+            return _verifier_failure(
+                FailureCode.DATABASE_MISSING, f"BIRD database for db_id={body.db_id!r} is missing"
             )
 
         try:
@@ -176,31 +234,38 @@ class BirdSqlResourcesServer(SimpleResourcesServer):
             )
         except Exception as e:
             logger.exception("BIRD verify execution error on id=%s db_id=%s: %s", body.id, body.db_id, e)
-            return _response(
-                extracted_sql=extracted_sql,
-                failure_reason=FailureCode.UNKNOWN_ERROR,
-                had_codeblock=had_codeblock,
-            )
+            return _verifier_failure(FailureCode.UNKNOWN_ERROR, f"BIRD verifier crashed: {type(e).__name__}", cause=e)
 
         if err == "gold_sql_error":
-            failure_reason = FailureCode.GOLD_EXECUTION_ERROR
-        elif err == "gold_sql_timeout":
-            failure_reason = FailureCode.GOLD_EXECUTION_TIMEOUT
-        elif err == "pred_sql_error":
-            failure_reason = FailureCode.EXECUTION_ERROR
-        elif err == "pred_sql_timeout":
-            failure_reason = FailureCode.EXECUTION_TIMEOUT
-        else:
-            execution_match = match
-            failure_reason = FailureCode.NONE if match else FailureCode.RESULT_MISMATCH
+            # The ground-truth query could not run against its database (a corrupt or incomplete
+            # database, a broken gold query): no model output can be measured until that is fixed.
+            return _verifier_failure(
+                FailureCode.GOLD_EXECUTION_ERROR, f"BIRD gold SQL failed to execute on db_id={body.db_id!r}"
+            )
+        if err == "gold_sql_timeout":
+            return _verifier_failure(
+                FailureCode.GOLD_EXECUTION_TIMEOUT, f"BIRD gold SQL timed out on db_id={body.db_id!r}"
+            )
 
-        reward = 1.0 if execution_match else 0.0
+        def _grade() -> BirdSqlVerifyResponse:
+            # The model's own query failing or timing out is its answer being wrong, as in the
+            # official BIRD evaluator, so these stay scored zeros.
+            if err == "pred_sql_error":
+                execution_match, failure_reason = False, FailureCode.EXECUTION_ERROR
+            elif err == "pred_sql_timeout":
+                execution_match, failure_reason = False, FailureCode.EXECUTION_TIMEOUT
+            else:
+                execution_match = match
+                failure_reason = FailureCode.NONE if match else FailureCode.RESULT_MISMATCH
+            return _response(
+                reward=1.0 if execution_match else 0.0,
+                execution_match=execution_match,
+                extracted_sql=extracted_sql,
+                failure_reason=failure_reason,
+                had_codeblock=True,
+            )
 
-        return _response(
-            extracted_sql=extracted_sql,
-            failure_reason=failure_reason,
-            had_codeblock=had_codeblock,
-        )
+        return observe_programmatic_grading(_grade)
 
     @staticmethod
     def _score_fn(r: dict) -> Dict[str, float]:

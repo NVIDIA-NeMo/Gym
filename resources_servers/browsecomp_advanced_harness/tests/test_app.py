@@ -19,20 +19,20 @@ from unittest.mock import AsyncMock, MagicMock
 import orjson
 from pytest import approx, fixture
 
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.client import SESSION_ID_KEY
 
 
 _TEST_DIR = os.path.dirname(os.path.abspath(__file__))
 _DUMMY_EXCLUDE_DOMAINS_FILE = os.path.join(os.path.dirname(_TEST_DIR), "tests", "dummy_exclude_domains_file.json")
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import ServerClient
 from resources_servers.browsecomp_advanced_harness.app import (
     BrowseRequest,
     TavilySearchRequest,
@@ -250,6 +250,26 @@ class TestApp:
 
         assert res.reward == approx(1.0)
         assert res.extracted_final_answer == "Paris"
+        assert res.timed_out == 0
+
+    async def test_verify_of_a_timed_out_rollout_scores_zero_without_the_judge(
+        self, config: TavilySearchResourcesServerConfig
+    ) -> None:
+        """An Environment Server verifies every rollout, including one the agent stopped at rollout_timeout_s,
+        which the agent's /run scored 0 without a verify."""
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock()
+        server = TavilySearchResourcesServer(config=config, server_client=server_client)
+        response = self._create_model_response("Exact Answer: Paris").model_dump(mode="json") | {"timed_out": True}
+
+        req = TavilySearchVerifyRequest.model_validate(
+            {"responses_create_params": {"input": []}, "response": response, "ground_truth": "Paris", "question": "?"}
+        )
+        res = await server.verify(self._create_dummy_request(), req)
+
+        assert res.reward == 0.0
+        assert res.timed_out == 1
+        server_client.post.assert_not_awaited()
 
     async def test_verify_incorrect_answer(self, config: TavilySearchResourcesServerConfig) -> None:
         server_client = MagicMock(spec=ServerClient)
