@@ -65,7 +65,9 @@ RESERVED_ROW_KEYS = frozenset(
         "responses_create_params",
         # A multi-turn row's requests, one per turn beside ``task_data`` (the Harbor materializer's ``turns``).
         "turns",
-        # What the agent session receives (nemo_gym.server_runtime.agent_context); the Resources Server never sees it.
+        # What the agent session receives (nemo_gym.server_runtime.agent_context).
+        # single_agent_turn keeps it from the Resources Server.
+        # On an agent's legacy /run it is one more row field, which the agent may forward.
         AGENT_CONTEXT_KEY_NAME,
         "agent_ref",
         "task_source",

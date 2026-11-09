@@ -301,7 +301,7 @@ Validate grant support with an authenticated MCP fixture and a real harness run:
 
 ### Agent context
 
-Some harnesses need task data beyond the initial model input, such as a document to render, images to embed, or the prompt for a later stage. The task row carries that data in `agent_context`, next to `verifier_metadata`, and the Environment Server passes it to the agent in `AgentSeedSessionRequest.agent_context`. Nothing else from the row reaches the agent. The initial conversation stays in `responses_create_params.input`, and verifier data stays with the Resources Server, which does not receive `agent_context`. Do not use `responses_create_params.metadata` to carry task data to the harness.
+Some harnesses need task data beyond the initial model input, such as a document to render, images to embed, or the prompt for a later stage. The task row carries that data in `agent_context`, next to `verifier_metadata`, and the `single_agent_turn` Environment Server passes it to the agent in `AgentSeedSessionRequest.agent_context`. Nothing else from the row reaches the agent. The initial conversation stays in `responses_create_params.input`, and verifier data stays with the Resources Server, which does not receive `agent_context`. Do not use `responses_create_params.metadata` to carry task data to the harness.
 
 ```json
 {
@@ -314,18 +314,18 @@ Some harnesses need task data beyond the initial model input, such as a document
 }
 ```
 
-- `values` holds small inline JSON fields, at most 64 KiB in all as UTF-8 JSON.
+- `values` holds small inline JSON fields. The complete `agent_context`, including artifact references, is limited to 64 KiB as UTF-8 JSON.
 - `artifacts` names files and directories by a path relative to a root the agent configures. The path cannot be absolute or contain `..` or a NUL byte. The content never travels in the seed.
 - A key appears in `values` or in `artifacts`, not both.
 - An empty `agent_context` counts as none: the seed then omits the key.
 
-An agent declares the keys it reads as a Pydantic model in `agent_context_model`. A field typed `AgentContextArtifact` takes an artifact; any other field takes a value. Before `_seed_agent_session_state()` runs, the base class checks the seed against that model and refuses it with HTTP 422 when:
+An agent declares the keys it reads as a Pydantic model in `agent_context_model`. A field typed `AgentContextArtifact` (or a subclass), optionally unioned with `None`, takes an artifact; any other field takes a value. Omit an optional artifact to use its default of `None`. Unions mixing artifact and value types are unsupported; declare separate fields instead. Before `_seed_agent_session_state()` runs, the base class checks the seed against that model and refuses it with HTTP 422 when:
 
 - the agent declares no model and the seed carries any context,
 - the seed carries a key the model does not declare,
-- a required key is missing or a value has the wrong type.
+- a required key is missing, a value has the wrong type, or a key is supplied through the wrong map.
 
-No agent declares a model by default, so a task with context fails on an agent that cannot use it instead of running without it. Where the agent builds its session state, read the typed context with `self.parse_agent_context(body)` and resolve each artifact with `resolve_agent_context_artifact(artifact, root, kind=...)` from `nemo_gym.agents`. It refuses with HTTP 422 a path that leaves `root`, also through a symlink, that is not a file or directory as `kind` says, or that cannot be looked up, such as a name that is too long. The check runs on resolved paths, so a directory under `root` that is a symlink to other storage counts as outside it: configure the real directory as the root. For a directory artifact, only the directory itself is checked; files under it can be symlinks to anywhere, so resolve each file you read and check that it stays under the directory. Read or stage the content when the activation runs, and remove anything you staged, such as a temporary directory or a sandbox upload, when the session closes.
+No agent declares a model by default, so a task with context fails on an agent that cannot use it instead of running without it. Where the agent builds its session state, read the typed context with `self.parse_agent_context(body)` and resolve each artifact with `resolve_agent_context_artifact(artifact, root, kind=...)` from `nemo_gym.agents`. It refuses with HTTP 422 a path that leaves `root`, also through a symlink, that is not a file or directory as `kind` says, or that cannot be looked up, such as a name that is too long. The check runs on resolved paths, so a directory under `root` that is a symlink to other storage counts as outside it: configure the real directory as the root. For a directory artifact, only the directory itself is checked; files under it can be symlinks to anywhere, so resolve each file you read and check that it stays under the directory. Read or stage the content when the activation runs, and remove anything you staged, such as a temporary directory or a sandbox upload, when the session closes and in `retire_agent_session` when a checkpoint retires the session instead. Retirement does not call the close hook.
 
 A `SimpleAgent` subclass resolves its context in `_new_session_state()`, which the seed and a checkpoint restore both call; context resolved only in `_seed_agent_session_state()` is lost when a restore rebuilds the session. It puts the context into the model request in `_create_session_episode()`, which creates each session activation's episode. Override `_create_session_episode()`, never `responses()`: environment validation infers `custom-gym-agent-loop` for any agent that overrides `responses()`, while the agent loop is still Simple Agent's.
 
@@ -358,7 +358,7 @@ class FigureAgent(SimpleAgent):
         return await super()._create_session_episode(state, body, **kwargs)
 ```
 
-On the legacy `/run` path, `agent_context` is one more field of the row the agent receives.
+On an agent's legacy `/run` path, `agent_context` is one more field of the row the agent receives and may forward to the Resources Server. The agent-only routing described above applies to `single_agent_turn`.
 
 ## Configure the adapter
 

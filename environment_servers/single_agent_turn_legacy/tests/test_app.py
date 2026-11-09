@@ -244,6 +244,28 @@ def test_a_malformed_agent_context_gets_the_typed_runs_final_422() -> None:
     assert client.calls == []
 
 
+@pytest.mark.parametrize(
+    "invalid_fields, detail",
+    [
+        ({"task_source": ""}, "task_source must be a non-empty string"),
+        ({"task_source": "unbound"}, "names none of this Environment Server's instances"),
+        ({"agent_ref": {"name": "other"}}, "does not match configured agent server"),
+        ({"_ng_attempt_index": -1}, "Invalid episode attempt"),
+        ({"_ng_attempt_index": True}, "Invalid episode attempt"),
+    ],
+)
+def test_invalid_flat_row_identity_returns_terminal_422(invalid_fields: dict, detail: str) -> None:
+    environment_server, client = _environment_server()
+    adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
+    row = {"task_id": "task", "_ng_rollout_id": "rollout", "responses_create_params": {"input": "task"}}
+
+    response = TestClient(adapter.setup_webserver()).post("/run", json={**row, **invalid_fields})
+
+    assert response.status_code == 422
+    assert detail in response.json()["detail"]
+    assert client.calls == []
+
+
 @pytest.mark.parametrize("task_id_field", ["task_id", "problem_id", "instance_id"])
 def test_explicit_identity_does_not_require_collector_indexes(task_id_field: str) -> None:
     environment_server, client = _environment_server()

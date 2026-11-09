@@ -770,8 +770,6 @@ def _build_verify_payload(pair: InputRolloutPair) -> Dict:
             if fields[key] != task_data[key]:
                 raise ConfigError(f"reverify: conflicting task field {key!r} inside and outside task_data")
         payload = row_keys | task_data | fields | {"response": response}
-    # The task's agent_context is the agent's input, not a verifier field.
-    payload.pop(AGENT_CONTEXT_KEY_NAME, None)
     # File-backed verifiers need the artifact path produced by the rollout, and
     # adaptive comparison needs the exact reference subset used for that row.
     # Preserve only verifier inputs, not rewards or failure bookkeeping. SciCode's /verify grades the accumulated
@@ -956,9 +954,15 @@ def _run_verification_payloads(
             request_row = {
                 key: value
                 for key, value in row.items()
-                if key not in (ATIF_PROVENANCE_KEY, _SOURCE_RUN_ID_KEY, _SOURCE_ANSWER_KEY)
+                if key not in (ATIF_PROVENANCE_KEY, _SOURCE_RUN_ID_KEY, _SOURCE_ANSWER_KEY, AGENT_CONTEXT_KEY_NAME)
                 and key not in _IDENTITY_KEYS
             }
+            # Agent context belongs only to the agent, including when a flat row keeps it in task_data.
+            # Filter at the shared HTTP boundary so native and ATIF inputs preserve the same separation.
+            if isinstance(request_row.get("task_data"), dict):
+                request_row["task_data"] = {
+                    key: value for key, value in request_row["task_data"].items() if key != AGENT_CONTEXT_KEY_NAME
+                }
             # A /verify request that may have been delivered is never resent: the verifier may already have graded it
             # (and called its judge). A refused connection is still retried. A lost outcome fails this run; with
             # settle_into_source the outcomes already answered are settled and its admission is withdrawn, so a
