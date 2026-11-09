@@ -6,7 +6,12 @@ from itsdangerous import URLSafeSerializer
 
 from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.server_runtime.base_resources_server import mcp_session_token_serializer
-from nemo_gym.server_runtime.episode_tokens import _EPISODE_TOKEN_SALT, EpisodeTokens
+from nemo_gym.server_runtime.episode_tokens import (
+    _EPISODE_TOKEN_SALT,
+    EPISODE_TOKEN_SECRET_ENV,
+    EpisodeTokens,
+    episode_token_secret,
+)
 
 
 SECRET = "EnvironmentServer___bird_interact"
@@ -71,6 +76,14 @@ def test_a_forged_token_with_a_guessed_nonce_does_not_match() -> None:
             id="invalid-episode",
         ),
         pytest.param(URLSafeSerializer(SECRET, salt=_EPISODE_TOKEN_SALT).dumps(["3-0", "n"]), id="not-an-object"),
+        pytest.param(
+            URLSafeSerializer(SECRET, salt=_EPISODE_TOKEN_SALT).make_signer().sign(b"not base64 json!").decode(),
+            id="signed-undecodable-payload",
+        ),
+        pytest.param(
+            URLSafeSerializer(SECRET, salt=_EPISODE_TOKEN_SALT).dumps({"episode": "3-0", "nonce": "\u00e9"}),
+            id="non-ascii-nonce",
+        ),
     ],
 )
 def test_a_string_this_server_did_not_mint_reads_as_none(token: str) -> None:
@@ -83,3 +96,18 @@ def test_a_tampered_token_reads_as_none() -> None:
     payload, signature = token.rsplit(".", 1)
 
     assert tokens.read(f"{payload}.{signature[::-1]}") is None
+
+
+def test_the_secret_is_random_for_each_run_and_shared_with_the_workers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The main process makes the secret; a worker started after it inherits the same one from the environment."""
+    monkeypatch.delenv(EPISODE_TOKEN_SECRET_ENV, raising=False)
+    main_process = episode_token_secret()
+    assert main_process != SECRET and len(main_process) >= 32
+    assert episode_token_secret() == main_process
+
+    token, kept = EpisodeTokens(main_process).mint(EpisodeId(rollout_id="3-0"))
+    worker = EpisodeTokens(episode_token_secret())
+    assert kept.matches(worker.read(token))
+
+    monkeypatch.delenv(EPISODE_TOKEN_SECRET_ENV)
+    assert episode_token_secret() != main_process
