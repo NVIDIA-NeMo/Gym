@@ -3,10 +3,12 @@
 
 import asyncio
 import base64
+import hashlib
 import json
 import shlex
 import sqlite3
 import subprocess
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -168,6 +170,12 @@ class Sandbox:
             return SimpleNamespace(return_code=0, stdout="opencode.db\n", stderr="", error_type=None)
         if "stop.request" in command:
             await self.request_stop()
+        if command.startswith("{ mv -f -- /tmp/nemo-gym-media/"):
+            # stage_media renames its partial uploads onto their content-named paths in one command.
+            renames = command[command.index("{ ") + 2 : command.index("; }")]
+            for move in renames.split(" && "):
+                _, _, _, source, destination = shlex.split(move)
+                self.files[destination] = self.files.pop(source)
         return self.exec.return_value
 
     async def upload(self, source, destination):
@@ -360,7 +368,7 @@ def capture_observations(sandbox, tmp_path):
     return database
 
 
-PNG = b"\x89PNG\r\n\x1a\n\x00\xff"
+PNG = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00"
 PNG_URI = "data:image/png;base64," + base64.b64encode(PNG).decode()
 JPEG = b"\xff\xd8\xff\xe0\x00\xfe"
 JPEG_URI = "data:image/jpeg;base64," + base64.b64encode(JPEG).decode()
@@ -401,16 +409,62 @@ def test_session_attaches_prompt_images_and_declares_image_input(setup, monkeypa
         assert payload["prompt"] == "What is shown?"
         command = payload["command"]
         paths = [command[index + 1] for index, arg in enumerate(command) if arg == "--file"]
-        # The path reaches the model's prompt, so it holds no activation segment.
+        # The path reaches the model's prompt, so it depends only on the image.
         assert paths == [
-            f"{sandbox.directory}/input-media/media-0.png",
-            f"{sandbox.directory}/input-media/media-1.jpg",
+            f"/tmp/nemo-gym-media/{hashlib.sha256(PNG).hexdigest()}.png",
+            f"/tmp/nemo-gym-media/{hashlib.sha256(JPEG).hexdigest()}.jpg",
         ]
         assert [sandbox.files[path] for path in paths] == [PNG, JPEG]
+        assert not [path for path in sandbox.files if path.endswith(".partial")]
         model = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])["provider"]["nemo_gym"]["models"]["dummy_model"]
         assert model["modalities"] == {"input": ["text", "image"], "output": ["text"]}
         closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
         assert closed.status_code == 200, closed.text
+
+
+def test_session_close_stops_media_staging_before_releasing_the_sandbox(setup):
+    agent, sandbox = setup
+    events = []
+    started = threading.Event()
+    upload = sandbox.upload
+
+    async def stall_media(source, destination):
+        if "/nemo-gym-media/" not in destination:
+            return await upload(source, destination)
+        started.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            events.append("upload cancelled")
+            raise
+
+    async def released(*args, **kwargs):
+        events.append("sandbox released")
+
+    sandbox.upload = stall_media
+    sandbox.stop.side_effect = released
+    sandbox.disconnect.side_effect = released
+    prompt = [
+        {"type": "input_text", "text": "What is shown?"},
+        {"type": "input_image", "image_url": PNG_URI, "detail": "auto"},
+    ]
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        activation = threading.Thread(
+            target=client.post,
+            args=("/ng-rollout/opencode-smoke-a2/v1/responses",),
+            kwargs={"json": {"input": [{"role": "user", "content": prompt}]}},
+        )
+        activation.start()
+        assert started.wait(10)
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        assert closed.status_code == 200, closed.text
+        activation.join(10)
+        assert not activation.is_alive()
+    # Staging belongs to the activation, so close stops it before giving the sandbox back.
+    assert events[:2] == ["upload cancelled", "sandbox released"], events
+    assert not sandbox.launch.called
 
 
 @pytest.mark.parametrize(

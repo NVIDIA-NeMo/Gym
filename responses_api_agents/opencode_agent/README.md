@@ -144,8 +144,10 @@ receipt fails the activation even if the CLI ignored a plugin-loading error.
 
 The session path accepts one user task, optional system/developer text and
 `instructions`. The user task may include images as base64 data-URI `input_image` parts,
-alongside nonempty text. The adapter uploads them into the session directory and attaches them
-with `opencode run --file`. OpenCode places the images, in order, before the task text and does
+alongside nonempty text. The adapter writes each image to `/tmp/nemo-gym-media/<sha256>.<ext>`
+with `nemo_gym.sandbox.stage_media` and attaches it with `opencode run --file`. OpenCode shows
+that path to the model, so naming the file by its content keeps the prompt the same across
+rollouts of a task. In a borrowed sandbox these files remain after the session closes. OpenCode places the images, in order, before the task text and does
 not use the `detail` setting. Sessions always declare image input on the Gym model, so OpenCode
 also passes on images its read tool returns; a text-only deployment rejects such requests.
 Images outside the user task and image URLs are rejected. Saved trajectories keep only the
