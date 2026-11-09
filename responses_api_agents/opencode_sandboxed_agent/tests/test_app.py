@@ -367,6 +367,7 @@ class TestOpenCodeSandboxedAgent:
         assert combined.output_tokens_details.reasoning_tokens == 2 * reasoning
         assert combined.total_tokens == combined.input_tokens + combined.output_tokens
 
+    @mark.parametrize("stage_opencode", [False, True])
     @mark.parametrize("stage_ripgrep", [False, True])
     @mark.parametrize("remaining_context", [False, True])
     @mark.parametrize("observability_enabled", [False, True])
@@ -376,6 +377,7 @@ class TestOpenCodeSandboxedAgent:
         monkeypatch: MonkeyPatch,
         tmp_path: Path,
         stage_ripgrep: bool,
+        stage_opencode: bool,
         remaining_context: bool,
         observability_enabled: bool,
     ) -> None:
@@ -390,6 +392,11 @@ class TestOpenCodeSandboxedAgent:
             )
             config.preinstalled_opencode = True
             config.opencode_version = "test"
+        if stage_opencode:
+            opencode_binary = tmp_path / "opencode with spaces"
+            opencode_binary.write_bytes(b"supplied task-platform binary")
+            config.local_opencode_binary_path = opencode_binary
+            config.preinstalled_opencode = False
         client = MagicMock(spec=ServerClient)
         client.global_config_dict = {"observability_enabled": observability_enabled}
         server = OpenCodeSandboxedAgent(config=config, server_client=client)
@@ -451,6 +458,12 @@ class TestOpenCodeSandboxedAgent:
             ),
         )
         command = sandbox_mock.exec.await_args_list[0].kwargs["command"]
+        if stage_opencode:
+            sandbox_mock.upload.assert_any_await(opencode_binary, "/tmp/nemo-gym-opencode-")
+            assert "curl" not in command
+            assert 'cp /tmp/nemo-gym-opencode- "$HOME/.opencode/bin/opencode"' in command
+            assert 'chmod 755 "$HOME/.opencode/bin/opencode"' in command
+            assert 'test "$(opencode --version)"' in command
         command_config = next(
             arg.split("=", 1)[1] for arg in shlex.split(command) if arg.startswith("OPENCODE_CONFIG_CONTENT=")
         )
@@ -465,7 +478,7 @@ class TestOpenCodeSandboxedAgent:
             assert plugins == ["file:///user-plugin.js"]
 
         assert sandbox_mock.upload.await_count == (
-            len(server._plugin_uploads()) + int(observability_enabled) + int(stage_ripgrep)
+            len(server._plugin_uploads()) + int(observability_enabled) + int(stage_ripgrep) + int(stage_opencode)
         )
 
         expected_response = NeMoGymResponse(
@@ -548,6 +561,8 @@ class TestOpenCodeSandboxedAgent:
         assert expected_response == actual_response
         # Execution uploads plugins even when a resource supplied this sandbox.
         expected_uploads = []
+        if stage_opencode:
+            expected_uploads.append(call(opencode_binary, "/tmp/nemo-gym-opencode-"))
         if remaining_context:
             expected_uploads.append(
                 call(Path(app_module.__file__).with_name("remaining-context.js"), "/tmp/nemo-gym-remaining-context.js")
@@ -558,7 +573,7 @@ class TestOpenCodeSandboxedAgent:
             expected_uploads.append(call(binary, "/tmp/nemo-gym-ripgrep-"))
         assert sandbox_mock.upload.await_args_list == expected_uploads
         # Each plugin upload is followed by its read-back; the patch and ripgrep stay plain uploads.
-        expected_calls = ["upload", "download"] * int(remaining_context)
+        expected_calls = ["upload"] * int(stage_opencode) + ["upload", "download"] * int(remaining_context)
         expected_calls += ["upload"] * (int(observability_enabled) + int(stage_ripgrep))
         assert [mock_call[0] for mock_call in sandbox_mock.mock_calls[: len(expected_calls) + 1]] == [
             *expected_calls,
@@ -584,9 +599,15 @@ class TestOpenCodeSandboxedAgent:
                 'else rg --version && touch "$HOME/agent-started"; fi\n'
             )
             opencode.chmod(0o755)
+            if stage_opencode:
+                opencode_binary.write_bytes(opencode.read_bytes())
             local_command = command.replace("/tmp/nemo-gym-ripgrep-", shlex.quote(str(uploaded))).replace(
                 "/tmp/nemo-gym-mcp-setup-error", shlex.quote(str(tmp_path / "mcp-error"))
             )
+            if stage_opencode:
+                local_command = local_command.replace(
+                    "/tmp/nemo-gym-opencode- ", shlex.quote(str(opencode_binary)) + " "
+                )
             try:
                 completed = subprocess.run(
                     ["sh", "-c", local_command],
@@ -606,6 +627,8 @@ class TestOpenCodeSandboxedAgent:
             assert (home / "agent-started").is_file()
             (home / "agent-started").unlink()
             opencode.write_bytes(opencode.read_bytes().replace(b"echo test", b"echo wrong-version"))
+            if stage_opencode:
+                opencode_binary.write_bytes(opencode.read_bytes())
             mismatched = subprocess.run(
                 ["sh", "-c", local_command],
                 env={"HOME": str(home), "PATH": f"{bin_dir}{os.pathsep}{os.defpath}"},

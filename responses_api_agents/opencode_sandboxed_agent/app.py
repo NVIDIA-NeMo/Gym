@@ -561,6 +561,10 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     remote_opencode_install_script_path: Optional[str] = None
     remote_opencode_binary_path: Optional[str] = None
     remote_opencode_musl_binary_path: Optional[str] = None
+    local_opencode_binary_path: FilePath | None = Field(
+        default=None,
+        description="Host binary matching the task platform and opencode_version; uploaded instead of downloading in the task.",
+    )
     local_ripgrep_binary_path: FilePath | None = None
     opencode_config: Dict[str, Any] = Field(default_factory=dict)
     opencode_max_context_window: int
@@ -1280,7 +1284,16 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         install_str = ":"
         if not self.config.preinstalled_opencode:
-            if self.config.remote_opencode_binary_path and self.config.remote_opencode_install_script_path:
+            if self.config.local_opencode_binary_path is not None:
+                remote_binary = f"/tmp/nemo-gym-opencode-{uuid4().hex}"
+                await sandbox.upload(self.config.local_opencode_binary_path, remote_binary)
+                install_str = (
+                    'mkdir -p "$HOME/.opencode/bin" '
+                    f'&& cp {quote(remote_binary)} "$HOME/.opencode/bin/opencode" '
+                    '&& chmod 755 "$HOME/.opencode/bin/opencode" '
+                    f"&& rm -f {quote(remote_binary)}"
+                )
+            elif self.config.remote_opencode_binary_path and self.config.remote_opencode_install_script_path:
                 if self.config.remote_opencode_musl_binary_path:
                     install_str = _build_remote_opencode_install_command(
                         install_script_path=self.config.remote_opencode_install_script_path,
