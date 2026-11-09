@@ -687,6 +687,7 @@ async def _run_with_lifespan(app: FastAPI, *runs: Awaitable[_Response]) -> list[
     ],
 )
 def test_the_episode_is_granted_over_each_configured_transport(transports: list[str], granted: list[type]) -> None:
+    """With one transport its grant is required; with both, each is optional, so each agent takes the one it can use."""
     seen: list[ServedTools] = []
 
     async def agent(server: _Server, counter: _Counter, served: ServedTools) -> None:
@@ -697,6 +698,7 @@ def test_the_episode_is_granted_over_each_configured_transport(transports: list[
 
     accesses = seen[0].tool_accesses
     assert [type(access) for access in accesses] == granted
+    assert [access.required for access in accesses] == [len(granted) == 1] * len(granted)
     tokens = {
         (access.connection.headers if isinstance(access, MCPToolAccess) else access.headers)[EPISODE_TOKEN_HEADER]
         for access in accesses
@@ -741,18 +743,23 @@ def test_mcp_lists_the_episodes_tools_and_shares_its_calls_with_direct_http() ->
     "headers",
     [pytest.param({}, id="missing"), pytest.param({EPISODE_TOKEN_HEADER: "garbage"}, id="garbage")],
 )
-def test_mcp_without_the_episodes_token_lists_no_tools_and_refuses_calls(headers: dict[str, str]) -> None:
+def test_mcp_without_the_episodes_token_refuses_the_listing_and_calls(headers: dict[str, str]) -> None:
+    """A refused listing is an error, not an empty list: an MCP-only harness would run the episode with no tools."""
     seen: dict[str, Any] = {}
 
     async def agent(server: _Server, counter: _Counter, served: ServedTools) -> None:
         async with _mcp_session(app, headers) as session:
-            seen["tools"] = (await session.list_tools()).tools
+            try:
+                await session.list_tools()
+            # McpError in MCP SDK 1, MCPError in 2.
+            except Exception as error:
+                seen["listing"] = error
             seen["call"] = await session.call_tool("add", {"amount": 2})
 
     server, app = _app(agent, tool_transports=["mcp"])
     (response,) = asyncio.run(_run_with_lifespan(app, server.run_request(_request())))
 
-    assert seen["tools"] == []
+    assert "needs a valid" in str(seen["listing"])
     assert seen["call"].isError is True and "needs a valid" in _text(seen["call"])
     assert response.result == "total=0 calls=0"
 
@@ -804,6 +811,32 @@ def test_each_episode_lists_only_its_own_tools_over_mcp() -> None:
     asyncio.run(_run_with_lifespan(app, server.run_request(_request("3-0")), server.run_request(_request("4-0"))))
 
     assert sorted(listed) == [sorted(spec.name for spec in TypedToolset(_Counter()).specs()), ["lookup"]]
+
+
+@pytest.mark.parametrize(
+    "name, arguments, detail",
+    [
+        pytest.param("fail", {}, "RuntimeError", id="broken-tool"),
+        pytest.param("add", {"amount": "two"}, "amount", id="invalid-arguments"),
+        pytest.param("lookup", {}, "no tool 'lookup'", id="another-episodes-tool"),
+    ],
+)
+def test_an_mcp_call_the_tool_cannot_run_is_an_error_result_and_recorded(
+    name: str, arguments: dict[str, Any], detail: str
+) -> None:
+    """Over MCP, a failed call is a result with isError, as over direct HTTP it is an error status."""
+    seen: dict[str, Any] = {}
+
+    async def agent(server: _Server, counter: _Counter, served: ServedTools) -> None:
+        async with _mcp_session(app, _mcp_headers(served)) as session:
+            seen["result"] = await session.call_tool(name, arguments)
+        seen["calls"] = list(served.calls)
+
+    server, app = _app(agent, tool_transports=["mcp"])
+    asyncio.run(_run_with_lifespan(app, server.run_request(_request())))
+
+    assert seen["result"].isError is True and detail in _text(seen["result"])
+    assert [(call.name, call.arguments, call.is_error) for call in seen["calls"]] == [(name, arguments, True)]
 
 
 def test_an_mcp_grant_refuses_tool_names_mcp_clients_reject() -> None:

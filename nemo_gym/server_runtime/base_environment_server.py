@@ -673,7 +673,7 @@ class BaseEnvironmentServerWithToolsConfig(BaseEnvironmentServerConfig):
         description=(
             "The transports serve_tools grants, in order. direct_http calls POST /<tool name>, for agents such as "
             "simple_agent. mcp serves the episode's tools at /mcp, for agents that take only MCP grants, such as "
-            "Codex, Pi and Hermes."
+            "Codex, Pi and Hermes. With both, each grant is optional, so each agent takes the one it supports."
         ),
     )
 
@@ -873,13 +873,15 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
         cleanup.register_cleanup("episode tools", stop_serving)
         base_url = self.server_client._resolve_base_url(self.config.name).rstrip("/")
         headers = {EPISODE_TOKEN_HEADER: token}
+        # An agent refuses a required grant it cannot use, so with both transports each grant is optional.
+        required = len(self.config.tool_transports) == 1
         grants: dict[ToolTransport, ToolAccess] = {
             "direct_http": DirectHTTPToolAccess(
-                name=f"{self.config.name}.direct_http", required=True, base_url=base_url, headers=headers
+                name=f"{self.config.name}.direct_http", required=required, base_url=base_url, headers=headers
             ),
             "mcp": MCPToolAccess(
                 name=self.config.name,
-                required=True,
+                required=required,
                 connection=MCPStreamableHTTPConnection(url=f"{base_url}{_MCP_PATH}", headers=headers),
             ),
         }
@@ -914,7 +916,10 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
         async def list_tools(request: Optional[Request]) -> list["mcp.types.Tool"]:
             episode = episode_for(request)
             if isinstance(episode, _Refusal):
-                return []
+                # An error, not an empty list: an MCP-only harness that checks only that its server connected
+                # would otherwise run the episode with no tools.
+                # The SDK answers an exception from a handler with a JSON-RPC error, in versions 1 and 2.
+                raise PermissionError(episode.detail)
             return [
                 types.Tool(name=spec.name, description=spec.description, inputSchema=spec.parameters)
                 for spec in episode.specs.values()
