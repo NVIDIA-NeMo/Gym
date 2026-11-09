@@ -142,10 +142,16 @@ its private HOME. The adapter requires a fresh successful-initialization receipt
 the task environment hook before accepting a gradable result. A missing or invalid
 receipt fails the activation even if the CLI ignored a plugin-loading error.
 
-The session path accepts one text task, optional system/developer text and
-`instructions`. Request `temperature` and `top_p` are applied to every OpenCode agent
-(see [Owner extensions](#owner-extensions)). Other controls, images, history replay and
-required direct-HTTP tool grants are rejected. MCP tool grants become OpenCode `remote` MCP servers, and the model sees
+The session path accepts one user task, optional system/developer text and
+`instructions`. The user task may include images as base64 data-URI `input_image` parts.
+The adapter uploads them into the session directory and attaches them with `opencode run --file`.
+Sessions always declare image input on the Gym model, so OpenCode also passes on images its
+read tool returns; a text-only deployment rejects such requests. Request `temperature` and `top_p`
+are applied to every OpenCode agent (see [Owner extensions](#owner-extensions)). A request
+`max_output_tokens` passes when it is at least the configured `max_output_tokens`, because OpenCode's
+limit for each model call already stays within it. NeMo RL sets it on every row. A smaller value
+returns 422. Other controls, images outside the user task, image URLs, history replay and required
+direct-HTTP tool grants are rejected. MCP tool grants become OpenCode `remote` MCP servers, and the model sees
 their tools as `<grant>_<tool>`. `mcp_tool_timeout_seconds` sets their connection and per-call
 timeout; without it, OpenCode allows 30 seconds to connect and 60 seconds per call. A call still
 fails after about 300 seconds, Bun's default `fetch` timeout. Before the first model call,
@@ -156,11 +162,21 @@ also fails, because nothing confirms its required tools; a run that failed for a
 that cause. `context_window` and `max_output_tokens` are independent
 config settings; leave room for the prompt in the served model's context. Request-level overrides
 are not silently ignored.
-Session `opencode_config` permits only `permission` and `tools`, preserving Gym capture.
+Session `opencode_config` permits only `permission`, `tools`, `compaction.auto` and
+`agent.build.steps`, preserving Gym capture. With token capture on, a session refuses
+`agent.build.steps` (see below).
 OpenCode turns a `tools` map into base permission rules and merges `permission` on top,
 so a later `permission` rule such as `"*": "allow"` re-enables tools that `tools`
 disabled. Set `tools: null` (or `{}`) to make `permission` the only rule source; the
 adapter then omits `tools` and passes `permission` exactly as given.
+Setting `compaction.auto: false` keeps OpenCode from
+summarizing the session and continuing from the summary, in model calls that training cannot join
+to the scored call; a run that fills the context then ends with a context-limit error.
+`agent.build.steps` sets the step limit of the `build` agent, which the session runs, for each
+prompt. From the call at the limit on, OpenCode adds an assistant message to each request that
+asks for a text answer. It still offers the tools, so a model that keeps calling them runs past
+the limit. Token capture cannot join a call that carries this message to the earlier calls of the
+rollout, so with token capture on a session refuses `agent.build.steps`.
 
 Text, reasoning, tool results, partial output and usage come from the persisted
 session tree. Unavailable artifacts or usage details are reported as observation
@@ -208,37 +224,13 @@ stricter, single-activation contract described above. The intentional difference
 | Setting | Local CLI | Sandbox session |
 | --- | --- | --- |
 | System text | Prepended to the user prompt; request `instructions` is not applied | Config/system/developer text and request `instructions` form an instructions file |
-| Provider name | `nemo` (`provider_id`) | `nemo_gym` (internal alias for the same Gym model server) |
+| Provider name | `nemo` | `nemo_gym` (internal alias for the same Gym model server) |
 | `env`, `extra_args`, custom `command` | Applied | Rejected at seed, not silently ignored |
-| Request controls | Existing local compatibility behavior | `temperature` and `top_p` applied with OpenCode 1.17.11; other controls rejected explicitly |
+| Request controls | Existing local compatibility behavior | `temperature` and `top_p` applied with OpenCode 1.17.11; `max_output_tokens` accepted when at least the configured limit; other controls rejected explicitly |
 
 Both paths honor configured `thinking` and declare interleaved `reasoning_content`.
 Different prompt placement can affect results; this integration does not establish
 local/session score parity or migrate existing benchmark defaults.
-
-## Local runs: images and session placement
-
-These options apply to the local CLI path (`/run` and `/v1/responses` without a
-sandbox session). All default to off, which keeps the existing behavior.
-
-| Option | Effect |
-| --- | --- |
-| `attach_images` | Writes the data-URL images of the last user message into the run directory as `image_<i>.<ext>` and attaches them with `-f`. |
-| `vision` | Declares the generated `model_server` model entry image-capable (`attachment`, image input modality), so OpenCode sends attachments and `read` returns image files as images. |
-| `private_tmp` | Runs each session in a fresh user and mount namespace (`unshare`) whose `/tmp` is the run's own, so concurrent runs that write fixed `/tmp` names do not collide. Needs unprivileged user namespaces. |
-| `session_nodes` | Spreads sessions over this many Ray nodes (this server's node first, then other alive nodes by IP), each session a Ray task pinned to one node. Only the session database comes back. Needs the `ray` extra and identical paths on every node. |
-| `session_exclude_actor_classes` | Ray actor class names (for example a training worker) whose nodes never host sessions. |
-| `session_sandbox` | Runs each session in its own sandbox from a `nemo_gym.sandbox` provider (for example OpenSandbox) instead of on a cluster node: the run directory is uploaded, OpenCode runs there, the session database is downloaded and the sandbox is deleted. Only OpenCode's database files in the run's data directory come back, each to the same path on the agent host. A provider failure, a failed setup or a run the sandbox does not confirm raises a sandbox failure for the episode instead of scoring an empty answer; a task timeout (exit 124/137) is still scored by the benchmark's timeout policy. Provider credentials come from environment variables named in `provider_secret_env`. Excludes `session_nodes > 1`. |
-| `provider_id` | OpenCode provider id of the generated model entry (default `nemo`). OpenCode's system prompt names the model as `<provider>/<model>`. |
-
-Every local session runs in its own process group, which is killed when the
-session ends, so commands the model left running do not outlive it. Local runs
-also pass `--title`, so OpenCode does not spend a policy call naming the session.
-
-`session_sandbox` and `session_nodes > 1` copy only the run directory to where
-the session runs, so they reject `repo_dir` (whose generated `opencode.json`
-and images would not arrive). With `session_sandbox`, the sandbox image or its
-`setup_command` provides OpenCode; the agent host does not install it.
 
 ## Multi-turn continuation
 

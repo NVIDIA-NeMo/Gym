@@ -53,20 +53,30 @@ CPU_CAP_ENV_VARS: tuple[str, ...] = (
 )
 
 
-async def upload_text(sandbox: AsyncSandbox, *, path: str, text: str) -> None:
-    """Upload UTF-8 text through file transfer without shell interpolation."""
+async def upload_bytes(sandbox: AsyncSandbox, *, path: str, data: bytes) -> None:
+    """Upload bytes unchanged through file transfer without shell interpolation."""
     with tempfile.TemporaryDirectory(prefix="sandbox-upload-") as directory:
         source = Path(directory) / "payload"
-        source.write_text(text, encoding="utf-8")
+        source.write_bytes(data)
         await sandbox.upload(source, path)
+
+
+async def upload_text(sandbox: AsyncSandbox, *, path: str, text: str) -> None:
+    """Upload UTF-8 text through file transfer without shell interpolation."""
+    await upload_bytes(sandbox, path=path, data=text.encode("utf-8"))
+
+
+async def download_bytes(sandbox: AsyncSandbox, *, path: str) -> bytes:
+    """Download a file's bytes unchanged through file transfer."""
+    with tempfile.TemporaryDirectory(prefix="sandbox-download-") as directory:
+        destination = Path(directory) / "payload"
+        await sandbox.download(path, destination)
+        return destination.read_bytes()
 
 
 async def read_text(sandbox: AsyncSandbox, *, path: str) -> str:
     """Download UTF-8 text, replacing invalid bytes in partial process output."""
-    with tempfile.TemporaryDirectory(prefix="sandbox-download-") as directory:
-        destination = Path(directory) / "payload"
-        await sandbox.download(path, destination)
-        return destination.read_text(encoding="utf-8", errors="replace")
+    return (await download_bytes(sandbox, path=path)).decode("utf-8", errors="replace")
 
 
 def cpu_cap_env(cpu: float | int | None) -> dict[str, str]:

@@ -27,4 +27,6 @@ gym eval run \
     ++policy_model_name=<>
 ```
 
+Each task runs OpenCode in its own sandbox session, as in [`babyvision_opencode`](../babyvision_opencode/README.md#run).
+
 Tests for both prepare scripts live in `benchmarks/babyvision_opencode/tests`.

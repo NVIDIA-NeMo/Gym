@@ -84,23 +84,7 @@ def sanitize_streaming_chat_body(body: dict[str, Any]) -> tuple[dict[str, Any], 
     dropped = sorted(set(body) - _PARAM_FIELDS)
     if dropped:
         LOG.debug("Dropping unsupported fields from a streaming /v1/chat/completions request: %s", dropped)
-    _drop_echoed_reasoning(body.get("messages"))
     return {key: value for key, value in body.items() if key in _PARAM_FIELDS}, include_usage
-
-
-def _drop_echoed_reasoning(messages: Any) -> None:
-    """Remove the ``reasoning`` field streaming harnesses echo on assistant history messages.
-
-    OpenCode (``interleaved.field: reasoning``) sends each earlier assistant turn's reasoning back in
-    a ``reasoning`` field, which the strict assistant-message model forbids, so every request after
-    the first tool call was rejected with 422. The model's own reasoning is not lost: token capture
-    pins the parent call's sampled tokens, and its lineage fingerprint ignores reasoning.
-    """
-    if not isinstance(messages, list):
-        return
-    for message in messages:
-        if isinstance(message, dict) and message.get("role") == "assistant":
-            message.pop("reasoning", None)
 
 
 def _sse_data(payload: dict[str, Any]) -> str:

@@ -4,10 +4,11 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi.testclient import TestClient
 
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
-from nemo_gym.core import NeMoGymResponse
+from nemo_gym.core import NeMoGymChatCompletion, NeMoGymResponse
 from nemo_gym.verification import JudgeError
 from resources_servers.visual_coding_opencode.app import (
     JUDGE_SYSTEM,
@@ -64,13 +65,17 @@ def server() -> VisualCodingOpenCodeServer:
     [
         ('{"verdict": "equivalent", "confidence": 1, "reason": "same"}', "equivalent"),
         ('Sure. {"verdict": "DIFFERENT", "reason": "x"}', "different"),
-        ('{"verdict": "maybe"}', "unsure"),
-        ("not json", "unsure"),
-        ("", "unsure"),
+        ('{"verdict": "unsure", "reason": "no final answer"}', "unsure"),
     ],
 )
 def test_parse_verdict(reply: str, verdict: str) -> None:
     assert parse_verdict(reply)["verdict"] == verdict
+
+
+@pytest.mark.parametrize("reply", ['{"verdict": "maybe"}', '{"reason": "no verdict"}', "not json", "", "[1, 2]"])
+def test_a_reply_without_a_valid_verdict_is_a_judge_failure(reply: str) -> None:
+    with pytest.raises(JudgeError):
+        parse_verdict(reply)
 
 
 @pytest.mark.asyncio
@@ -105,11 +110,32 @@ async def test_empty_response_is_wrong_without_a_judge_call(server) -> None:
     judge.assert_not_called()
 
 
-@pytest.mark.asyncio
-async def test_judge_error_scores_zero(server) -> None:
-    with patch.object(VisualCodingOpenCodeServer, "judge", AsyncMock(side_effect=JudgeError("down"))):
-        result = await server.verify(request("\\boxed{(4,7)}"))
-    assert result.reward == 0.0 and result.failure_reason == "judge_error"
+@pytest.mark.parametrize("judge_reply", ["judge down", "not json", '{"verdict": "maybe"}'])
+def test_a_judge_failure_masks_the_row_instead_of_scoring_zero(server, judge_reply: str) -> None:
+    async def call_judge(*args, **kwargs):
+        if judge_reply == "judge down":
+            raise JudgeError("judge down")
+        return NeMoGymChatCompletion.model_validate(
+            {
+                "id": "c",
+                "created": 0,
+                "model": "gpt",
+                "object": "chat.completion",
+                "choices": [
+                    {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": judge_reply}}
+                ],
+            }
+        )
+
+    client = TestClient(server.setup_webserver())
+    with patch("resources_servers.visual_coding_opencode.app.call_judge", call_judge):
+        reply = client.post("/verify", json=request("\\boxed{(4,7)}").model_dump(mode="json"))
+
+    assert reply.status_code == 200, reply.text
+    row = reply.json()
+    # The base class's judge_failsafe masks the row, so RL does not train on it as a wrong answer.
+    assert row["mask_sample"] is True and row["reward"] == 0.0
+    assert row["failure_kind"] == "judge_failed"
 
 
 @pytest.mark.asyncio

@@ -41,6 +41,9 @@ def create_visual_coding_opencode_server() -> "VisualCodingOpenCodeServer":
         resolved.visual_coding_opencode.resources_servers.visual_coding_opencode, resolve=True
     )
     config_values["name"] = "visual_coding_opencode"
+    # Grading never reads the lent sandbox, so the verifier runs without one (and without a sandbox image).
+    config_values["sandbox_provider"] = None
+    config_values["sandbox_network_access"] = "inherit"
     config = VisualCodingOpenCodeConfig.model_validate(config_values)
     return VisualCodingOpenCodeServer(config=config, server_client=MagicMock(spec=ServerClient))
 
