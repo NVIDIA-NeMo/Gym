@@ -31,6 +31,7 @@ from fastapi.responses import JSONResponse
 from openai.types.completion_usage import CompletionTokensDetails, CompletionUsage, PromptTokensDetails
 from openai.types.shared import ReasoningEffort
 from pydantic import Field, PositiveFloat, PrivateAttr, TypeAdapter, ValidationError, model_validator
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from nemo_gym.client import MAX_NUM_TRIES, SESSION_ID_KEY, NeMoGymAsyncOpenAI
 from nemo_gym.client.http_client import _redacted_url
@@ -428,6 +429,43 @@ def _set_reasoning(message_dict: dict[str, Any], reasoning: str, mode: Reasoning
         message_dict["reasoning_content"] = reasoning
     if mode in ("both", "reasoning"):
         message_dict["reasoning"] = reasoning
+
+
+class _ContextErrorMiddleware:
+    """Return an engine refusal the client must see, such as a context overflow, instead of Gym's generic 500.
+
+    The engine's message and param are preserved verbatim inside OpenAI's error envelope.
+    The code says whether compacting the prompt is the remedy.
+    Every other error, and any error after the reply has started, propagates.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        started = False
+
+        async def send_tracking_start(message: Message) -> None:
+            nonlocal started
+            started = started or message["type"] == "http.response.start"
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_tracking_start)
+        except ClientResponseError as error:
+            if started or not is_propagated_refusal(error):
+                raise
+            message, code, param = context_overflow_error_fields(error)
+            response = JSONResponse(
+                content={"error": {"message": message, "type": "invalid_request_error", "param": param, "code": code}},
+                status_code=error.status,
+                headers=FailureHeader.encode(failure_report_for(error)),
+            )
+            await response(scope, receive, send)
 
 
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
@@ -840,29 +878,8 @@ class VLLMModel(SimpleResponsesAPIModel):
         return len(tokens) if isinstance(tokens, list) else None
 
     def setup_exception_middleware(self, app) -> None:
-        @app.middleware("http")
-        async def context_error_middleware(request: Request, call_next):
-            try:
-                return await call_next(request)
-            except ClientResponseError as error:
-                if is_propagated_refusal(error):
-                    # The engine's message and param are preserved verbatim inside OpenAI's error
-                    # envelope; the code says whether compacting the prompt is the remedy.
-                    message, code, param = context_overflow_error_fields(error)
-                    return JSONResponse(
-                        content={
-                            "error": {
-                                "message": message,
-                                "type": "invalid_request_error",
-                                "param": param,
-                                "code": code,
-                            }
-                        },
-                        status_code=error.status,
-                        headers=FailureHeader.encode(failure_report_for(error)),
-                    )
-                raise
-
+        # Registered before Gym's exception middleware, so it runs inside it and sees the error first.
+        app.add_middleware(_ContextErrorMiddleware)
         super().setup_exception_middleware(app)
 
     def setup_webserver(self) -> FastAPI:
