@@ -38,6 +38,10 @@ arrives after its session closed is refused with 409 for `session_close_retry_wi
 closed session gets 404 with `failure_kind: session_lost`, and a `/verify` for one returns a masked sample with
 reward 0.
 
+Cancelling a Python tool request leaves its bounded backend request owned until it finishes. Close waits for that
+request before deleting the session, including when cleanup itself is cancelled and retried. Verification preserves
+the delegated verifier's mask and failure diagnostics, so a judge outage remains masked.
+
 ## Sample data format
 Each sample requires:
 - `question`: The math question being asked

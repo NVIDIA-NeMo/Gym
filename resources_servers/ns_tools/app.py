@@ -112,6 +112,7 @@ class NSToolsToolManager(ToolManager):
     ) -> None:
         super().__init__(module_specs=module_specs, overrides=overrides, context=context)
         self._execution: ContextVar[Optional[_PythonExecution]] = ContextVar("ns_tools_execution", default=None)
+        self._python_requests: Dict[str, asyncio.Task[Dict[str, Any]]] = {}
         for tool in self._tools.values():
             if isinstance(tool, DirectPythonTool):
                 self._track_python_requests(tool)
@@ -126,10 +127,17 @@ class NSToolsToolManager(ToolManager):
                 tool.requests_to_sessions[execution.request_id] = execution.session_id
             # A DELETE must not overtake this POST and acknowledge 404 before it creates its session.
             # Shield only this request (Skills bounds it by timeout + 5), never the full history replay.
+            pending = asyncio.create_task(send_request(body, timeout))
+            if execution is not None:
+                self._python_requests[execution.request_id] = pending
             try:
                 with CancelScope(shield=True):
-                    return await send_request(body, timeout)
+                    return await asyncio.shield(pending)
             finally:
+                # An asyncio Task.cancel() bypasses AnyIO's shield. Keep its still-running POST owned so
+                # cleanup (or a later tool call) waits for the response before touching the Python session.
+                if execution is not None and pending.done():
+                    self._python_requests.pop(execution.request_id, None)
                 await checkpoint_if_cancelled()
 
         tool._sandbox._send_request = tracked_send_request
@@ -141,6 +149,7 @@ class NSToolsToolManager(ToolManager):
         request_id = (extra_args or {}).get("request_id")
         if not isinstance(tool, DirectPythonTool) or request_id is None:
             return await super().execute_tool(raw_name, args, extra_args)
+        await self._wait_for_python_request(request_id)
         execution = _PythonExecution(request_id=request_id)
         token = self._execution.set(execution)
         try:
@@ -152,7 +161,21 @@ class NSToolsToolManager(ToolManager):
                 tool.requests_to_sessions[request_id] = execution.session_id
             self._execution.reset(token)
 
+    async def _wait_for_python_request(self, request_id: str) -> None:
+        pending = self._python_requests.get(request_id)
+        if pending is None:
+            return
+        try:
+            await asyncio.shield(pending)
+        except Exception:
+            # A failed response can still have allocated a session; deletion must be attempted afterwards.
+            logger.warning("Python request failed before cleanup of %s", request_id, exc_info=True)
+        finally:
+            if pending.done():
+                self._python_requests.pop(request_id, None)
+
     async def cleanup_request(self, request_id: str) -> None:
+        await self._wait_for_python_request(request_id)
         for tool in self._tools.values():
             if not isinstance(tool, DirectPythonTool):
                 await tool.cleanup_request(request_id)
@@ -610,7 +633,13 @@ class NSToolsResourcesServer(SimpleResourcesServer):
             raise ValueError(f"Verifier did not return 'reward' field. Response: {result}")
 
         return NSToolsVerifyResponse(
-            **body.model_dump(),
+            **{
+                **body.model_dump(),
+                # A delegated judge outage must stay masked, even if the request carries stale verdict fields.
+                "mask_sample": result.get("mask_sample", False),
+                "failure_kind": result.get("failure_kind"),
+                "failure_reason": result.get("failure_reason"),
+            },
             reward=result["reward"],
             delegated_response=result,
             **metrics,

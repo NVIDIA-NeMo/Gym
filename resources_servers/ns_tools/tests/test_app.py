@@ -40,7 +40,7 @@ from nemo_gym.client import (
 )
 from nemo_gym.client import request as http_request
 from nemo_gym.config import ResourcesServerRef
-from nemo_gym.core import EpisodeId, NeMoGymResponse, TaskId
+from nemo_gym.core import JUDGE_FAILED, JUDGE_UNPARSEABLE, VERIFIER_ERROR, EpisodeId, NeMoGymResponse, TaskId
 from nemo_gym.server_runtime import (
     BaseSeedSessionRequest,
     ResourcesCloseSessionRequest,
@@ -169,6 +169,8 @@ class TestApp:
         result = await server.verify(request, verify_request)
 
         assert result.reward == 1.0
+        assert result.mask_sample is False
+        assert result.failure_kind is None
         assert result.delegated_response is not None
         assert result.delegated_response["reward"] == 1.0
 
@@ -203,6 +205,101 @@ class TestApp:
             await server.verify(request, verify_request)
 
         server.tool_manager.cleanup_request.assert_awaited_once_with("rollout-123")
+
+    @pytest.mark.parametrize(
+        ("delegated", "expected"),
+        [
+            pytest.param({"reward": 1.0}, (1.0, False, None, None), id="scored"),
+            # The row math_with_judge's judge_failsafe returns when its judge call fails: an outage, not a wrong answer.
+            pytest.param(
+                {
+                    "reward": 0.0,
+                    "mask_sample": True,
+                    "failure_kind": JUDGE_FAILED,
+                    "failure_reason": "judge request timed out",
+                    "_ng_failure_class": "judge_failed",
+                },
+                (0.0, True, JUDGE_FAILED, "judge request timed out"),
+                id="masked_judge_failure",
+            ),
+            # Naming a failure kind does not mask the sample.
+            pytest.param(
+                {
+                    "reward": 0.0,
+                    "mask_sample": False,
+                    "failure_kind": JUDGE_UNPARSEABLE,
+                    "failure_reason": "judge verdict had no grade",
+                },
+                (0.0, False, JUDGE_UNPARSEABLE, "judge verdict had no grade"),
+                id="unmasked_diagnostic",
+            ),
+        ],
+    )
+    @pytest.mark.parametrize(
+        "request_fields",
+        [
+            pytest.param({}, id="no_conflict"),
+            pytest.param({"mask_sample": True}, id="request_masked"),
+            pytest.param({"mask_sample": False}, id="request_unmasked"),
+            pytest.param({"failure_kind": VERIFIER_ERROR}, id="request_failure_kind"),
+            pytest.param({"failure_reason": "reason the request carried"}, id="request_failure_reason"),
+        ],
+    )
+    async def test_verify_takes_verdict_fields_from_delegated_result(
+        self, delegated: dict, expected: tuple, request_fields: dict
+    ) -> None:
+        """reward, mask_sample, failure_kind and failure_reason come from the delegated result, not the request."""
+        verifiers = {
+            "math_with_judge": ResourcesServerRef(type="resources_servers", name="math_with_judge"),
+        }
+        config = NSToolsConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="ns_tools",
+            verifiers=verifiers,
+            default_verifier="math_with_judge",
+        )
+        server = NSToolsResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+        mock_response = AsyncMock()
+        mock_response.json = AsyncMock(return_value=delegated)
+        server.server_client.post = AsyncMock(return_value=mock_response)
+
+        response = NeMoGymResponse(
+            id="resp_test",
+            created_at=0.0,
+            model="dummy",
+            object="response",
+            output=[
+                {
+                    "id": "msg_test",
+                    "content": [{"annotations": [], "text": "\\boxed{4}", "type": "output_text"}],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+        )
+        verify_request = NSToolsVerifyRequest(
+            responses_create_params={
+                "input": [{"role": "user", "content": "What is 2 + 2?"}],
+            },
+            response=response,
+            question="What is 2 + 2?",
+            expected_answer="4",
+            **request_fields,
+        )
+
+        result = await server.verify(None, verify_request)
+
+        assert (result.reward, result.mask_sample, result.failure_kind, result.failure_reason) == expected
+        assert result.delegated_response == delegated
+        # Request fields the verdict does not name stay on the response.
+        assert result.model_dump()["question"] == "What is 2 + 2?"
 
     async def test_verify_uses_default_verifier(self) -> None:
         """Test that default verifier is used when verifier_type not specified."""
@@ -261,6 +358,9 @@ class TestApp:
         result = await server.verify(None, verify_request)
 
         assert result.reward == 0.0
+        # An ordinary wrong answer is a valid measurement, so it stays unmasked.
+        assert result.mask_sample is False
+        assert result.failure_kind is None
         call_args = server.server_client.post.call_args
         assert call_args.kwargs["server_name"] == "math_with_judge"
 
@@ -749,8 +849,9 @@ class TestResourcesSessions:
         assert tool_manager.python_sessions == {} and server._timing_by_session == {}
         assert server._session_episodes == {} and participant._sessions == {}
 
+    @pytest.mark.parametrize("cancel_mode", ["anyio", "asyncio", "asyncio_close_retry"])
     async def test_cancelled_python_call_keeps_ownership_until_close(
-        self, unused_tcp_port: int, monkeypatch: pytest.MonkeyPatch
+        self, unused_tcp_port: int, monkeypatch: pytest.MonkeyPatch, cancel_mode: str
     ) -> None:
         received, finish = asyncio.Event(), asyncio.Event()
         sessions, scopes, cancellations = set(), [], []
@@ -804,17 +905,34 @@ class TestResourcesSessions:
         close = None
         try:
             await asyncio.wait_for(received.wait(), timeout=5)
-            scopes[0].cancel()
+            if cancel_mode == "anyio":
+                scopes[0].cancel()
+            else:
+                call.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await call
             # A close that races the cancelled call must not DELETE before the POST creates the python session.
             close = asyncio.create_task(
                 server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close("rs-1")))
             )
             await asyncio.sleep(0.05)
-            assert not call.done() and not close.done()
+            assert not close.done()
+            if cancel_mode == "anyio":
+                assert not call.done()
+            if cancel_mode == "asyncio_close_retry":
+                close.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await close
+                assert not server.session_is_closed("rs-1")
+                close = asyncio.create_task(
+                    server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close("rs-1")))
+                )
             finish.set()
-            await asyncio.wait_for(call, timeout=5)
+            if cancel_mode == "anyio":
+                await asyncio.wait_for(call, timeout=5)
             await asyncio.wait_for(close, timeout=5)
             assert cancellations == [True]
+            assert manager._python_requests == {}
             assert sessions == set()
             assert "rs-1" not in tool.requests_to_sessions
         finally:
