@@ -47,18 +47,24 @@ gym env start \
 
 ## Dataset Preparation
 
-Build a dataset that contains data for both servers. Add the agent ref used to route requests to the correct agent server to each record.
+Build one dataset that contains data for both servers by passing `--resources-server` once per environment to `gym dataset collate`. Collation stamps each row with a `task_source` naming the environment that declared it, and NeMo Gym routes each row to that environment's agent when rollouts are dispatched.
 ```bash
-jq -c '. + {"agent_ref": {"type": "responses_api_agents", "name": "example_single_tool_call_simple_agent"}}' resources_servers/example_single_tool_call/data/example.jsonl >> results/test_multiverifier_input.jsonl
-jq -c '. + {"agent_ref": {"type": "responses_api_agents", "name": "example_multi_step_simple_agent"}}' resources_servers/example_multi_step/data/example.jsonl >> results/test_multiverifier_input.jsonl
+gym dataset collate \
+    --model-type openai_model \
+    --resources-server example_single_tool_call \
+    --resources-server example_multi_step \
+    --mode example_validation \
+    --output-dir results/multiverifier
 ```
+
+This writes the example rows of both environments to `results/multiverifier/example.jsonl`. For environments with downloadable `train` and `validation` datasets, `--mode train_preparation --download` collates those into `train.jsonl` and `validation.jsonl` instead; the two example environments here have no public training data.
 
 ## Rollout Collection
 
 Run rollout collection as usual.
 ```bash
 gym eval run --no-serve \
-    --input results/test_multiverifier_input.jsonl \
+    --input results/multiverifier/example.jsonl \
     --output results/test_multiverifier_outputs.jsonl
 ```
 

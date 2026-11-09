@@ -30,7 +30,7 @@ git submodule update --init --recursive
 
 ## 1. Prepare training data
 
-Using NeMo Gym, prepare the training dataset for your environment. Each row needs an `agent_ref` field so NeMo Gym can route it to the right agent:
+Using NeMo Gym, prepare the training dataset for your environment:
 
 ```bash
 cd $NEMO_GYM_ROOT
@@ -45,7 +45,20 @@ gym dataset collate \
     +data_source=huggingface
 ```
 
-This produces `data/workplace_assistant/{train,validation}.jsonl` ready for training.
+This produces `data/workplace_assistant/{train,validation}.jsonl`.
+
+`gym dataset collate` stamps each row with a `task_source` field, which NeMo Gym resolves to an agent at run time. The veRL recipe reads each row's agent from an `agent_ref` field instead and rejects rows without one, so add it after collating. Workplace Assistant declares its datasets on its agent, so `task_source` already holds the agent name:
+
+```bash
+for split in train validation; do
+    f=data/workplace_assistant/$split.jsonl
+    jq -c '.agent_ref //= {type: "responses_api_agents", name: .task_source}' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+done
+```
+
+This preserves an existing `agent_ref`, including rows collated by older Gym versions that do not have `task_source`.
+
+For an environment that declares its datasets on its resources server, `task_source` names the resources server; set `name` to the agent that NeMo Gym routes it to instead: the agent its datasets pin with an `agent` key, or else the one agent instance whose config references that resources server.
 
 ## 2. Set environment variables
 
@@ -103,7 +116,19 @@ sbatch recipe/nemo_gym/submit_workplace.sh
 
 ## Multi-environment training
 
-To train on multiple environments simultaneously, create a mixed dataset where each row has an `agent_ref` pointing to its environment, and include all environment config paths in the YAML:
+To train on multiple environments simultaneously, collate them into one mixed dataset by passing `--resources-server` once per environment, then add `agent_ref` to `data/multienv/{train,validation}.jsonl` as in [step 1](#1-prepare-training-data):
+
+```bash
+gym dataset collate \
+    --resources-server math_with_judge \
+    --resources-server workplace_assistant \
+    --config responses_api_models/vllm_model/configs/vllm_model_for_training.yaml \
+    --output-dir data/multienv \
+    --mode train_preparation \
+    --download
+```
+
+Then list every environment's config:
 
 ```yaml
 # recipe/nemo_gym/configs/multienv.yaml
@@ -115,7 +140,7 @@ nemo_gym:
     - $NEMO_GYM_ROOT/resources_servers/workplace_assistant/configs/workplace_assistant.yaml
 ```
 
-NeMo Gym routes each row to its environment via the `agent_ref` field. The data blend determines the sampling ratio between environments — if precise blending or curriculum is desired, do not shuffle the dataset after creation.
+NeMo Gym routes each row to its environment through the row's `agent_ref`. The data blend determines the sampling ratio between environments — if precise blending or curriculum is desired, do not shuffle the dataset after creation.
 
 <Note>
 
