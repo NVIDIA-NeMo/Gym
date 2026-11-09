@@ -26,7 +26,9 @@ match, plus `task_id` (`<puzzle>_<test index>`), `puzzle_id` and `test_index` fo
 """
 
 import argparse
+import io
 import json
+import tarfile
 import urllib.request
 from pathlib import Path
 
@@ -39,11 +41,6 @@ NO_TOOLS_FPATH = DATA_DIR / "arc_agi_2_no_tools.jsonl"
 REPO = "arcprize/ARC-AGI-2"
 REF = "main"  # resolved to a commit at download time and recorded in data/source.json
 TASK_DIR = "data/evaluation"
-
-
-def _get_json(url: str):
-    with urllib.request.urlopen(url, timeout=60) as response:
-        return json.load(response)
 
 
 def grid_to_text(grid) -> str:
@@ -62,15 +59,21 @@ def question_text(examples, test_input) -> str:
 
 
 def download(ref: str = REF):
-    """{puzzle_id: task} for every evaluation task, and the commit they were read at."""
-    commit = _get_json(f"https://api.github.com/repos/{REPO}/commits/{ref}")["sha"]
-    listing = _get_json(f"https://api.github.com/repos/{REPO}/contents/{TASK_DIR}?ref={commit}")
+    """{puzzle_id: task} for every evaluation task, and the commit they were read at.
+
+    Reads the repository archive (not the GitHub API, which rate-limits shared cluster addresses). GitHub writes the
+    archive's commit into the tar's global header comment.
+    """
+    with urllib.request.urlopen(f"https://github.com/{REPO}/archive/{ref}.tar.gz", timeout=120) as response:
+        archive = tarfile.open(fileobj=io.BytesIO(response.read()), mode="r:gz")
+    commit = archive.pax_headers.get("comment", ref)
     tasks = {}
-    for entry in sorted(listing, key=lambda e: e["name"]):
-        if entry["name"].endswith(".json"):
-            tasks[entry["name"][: -len(".json")]] = _get_json(
-                f"https://raw.githubusercontent.com/{REPO}/{commit}/{TASK_DIR}/{entry['name']}"
-            )
+    for member in archive.getmembers():
+        parts = member.name.split("/")
+        if member.isfile() and "/".join(parts[1:-1]) == TASK_DIR and parts[-1].endswith(".json"):
+            tasks[parts[-1][: -len(".json")]] = json.load(archive.extractfile(member))
+    if not tasks:
+        raise RuntimeError(f"no tasks under {TASK_DIR} in {REPO}@{ref}")
     return tasks, commit
 
 
