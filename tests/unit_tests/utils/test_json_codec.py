@@ -118,6 +118,19 @@ def test_a_default_that_consumes_its_argument_writes_the_same_output_in_either_k
     assert json.loads(data) == {"a": [0, 1, 2], "n": WIDE}
 
 
+def test_a_default_that_raises_once_still_fails_the_write() -> None:
+    calls = []
+
+    def fails_first(value: object) -> str:
+        calls.append(value)
+        if len(calls) == 1:
+            raise TypeError("not yet")
+        return "ok"
+
+    with pytest.raises(orjson.JSONEncodeError):
+        dumps_json({"a": object()}, default=fails_first)
+
+
 @dataclasses.dataclass
 class _Call:
     name: str

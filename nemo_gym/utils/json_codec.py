@@ -71,24 +71,32 @@ def dumps_json(value: object, *, default: Callable[[Any], Any] | None = None, op
     ``option`` takes ``orjson`` flags; the fallback supports ``OPT_SORT_KEYS``, ``OPT_INDENT_2`` and
     ``OPT_APPEND_NEWLINE``. Object keys must be strings: the fallback refuses other keys rather than coerce them,
     which could merge two keys into one. The fallback accepts only the types ``orjson`` accepts, and for the others
-    reuses what ``default`` returned during the ``orjson`` pass, so a ``default`` that consumes its argument, such as
-    ``list`` on a generator, still gives the same output.
+    reuses what ``default`` returned or raised during the ``orjson`` pass, so a ``default`` that consumes its argument,
+    such as ``list`` on a generator, still gives the same output.
 
     Raises:
         orjson.JSONEncodeError: ``value`` holds something neither encoder can write exactly, or ``orjson`` rejects
             it while ``option`` holds a flag the fallback cannot honor.
     """
-    # Each object ``default`` saw, kept alive so its id is not reused, with what ``default`` returned for it.
-    results: dict[int, tuple[object, object]] = {}
+    # Each object ``default`` saw, kept alive so its id is not reused, with what ``default`` returned or raised for it.
+    results: dict[int, tuple[object, object, BaseException | None]] = {}
 
     def recording_default(obj: Any) -> Any:
-        result = default(obj)
-        results.setdefault(id(obj), (obj, result))
+        try:
+            result = default(obj)
+        except Exception as error:
+            results.setdefault(id(obj), (obj, None, error))
+            raise
+        results.setdefault(id(obj), (obj, result, None))
         return result
 
     def replaying_default(obj: Any) -> Any:
         seen = results.get(id(obj))
-        return seen[1] if seen is not None and seen[0] is obj else default(obj)
+        if seen is None or seen[0] is not obj:
+            return default(obj)
+        if seen[2] is not None:
+            raise seen[2]
+        return seen[1]
 
     try:
         return orjson.dumps(value, default=recording_default if default else None, option=option)
