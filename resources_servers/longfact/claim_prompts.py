@@ -1,6 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# claim_listing_v1 prompt text: OpenAI, GPT-5 System Card, Appendix 2, arXiv:2601.03267v1, CC-BY-4.0.
+# Source: https://arxiv.org/html/2601.03267v1 ; license: https://creativecommons.org/licenses/by/4.0/
+# Adapted formatting and optional browse-off instructions.
+
 """Versioned claim-extraction prompts shared by LongFact and replay tools."""
 
 from __future__ import annotations

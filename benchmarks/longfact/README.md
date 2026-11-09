@@ -94,9 +94,13 @@ API keys are read only from the environment and must never be committed.
 ## GPT-5 system card adaptation
 
 `benchmarks/longfact/gpt5_card.yaml` grades with an adaptation of the method in
-the [GPT-5 system card](https://cdn.openai.com/gpt-5-system-card.pdf)
+the [GPT-5 system card](https://arxiv.org/html/2601.03267v1)
 (section 3.7 and Appendix 2). It is not the card's harness, and no equivalence
 with the card's numbers has been validated.
+
+Prompt text is attributed to OpenAI under CC-BY-4.0 at that paper revision.
+The adaptation changes formatting, adds validated claim IDs, and replaces
+iterative browsing with one search-planning pass.
 
 What it takes from the card:
 

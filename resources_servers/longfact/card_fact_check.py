@@ -1,6 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# Prompt text: OpenAI, GPT-5 System Card, Appendix 2, arXiv:2601.03267v1, CC-BY-4.0.
+# Source: https://arxiv.org/html/2601.03267v1 ; license: https://creativecommons.org/licenses/by/4.0/
+# Adapted formatting, validated claim IDs and a single search-planning pass.
+
 """Batched claim fact-checking adapted from the GPT-5 system card (section 3.7, Appendix 2).
 
 This is an adaptation, not the card's harness. The card's grader browses the web itself and can
@@ -8,7 +12,7 @@ search again after reading evidence. Here the grader plans up to three searches 
 the configured search backend runs them, and the grader labels the batch from those results in
 one pass, with the card's fact-checking prompt; only its sentences about browsing are changed.
 No equivalence with the card's numbers has been validated.
-Source: https://cdn.openai.com/gpt-5-system-card.pdf
+Source revision: https://arxiv.org/html/2601.03267v1
 """
 
 from __future__ import annotations
