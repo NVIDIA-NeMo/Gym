@@ -801,7 +801,7 @@ def _selected_rescoring_rows(store: RolloutStore) -> Iterator[Dict]:
     """Read answers on demand so a bounded re-score does not materialize the whole run."""
     for record in store.selected_records("success").values():
         row = record.read()
-        yield row | {
+        yield _project_reverification_row(row) | {
             _SOURCE_RUN_ID_KEY: store.manifest.run_id,
             _SOURCE_ANSWER_KEY: _rescoring_source_answer(row, store.manifest.run_id),
         }
@@ -1295,7 +1295,8 @@ def _load_reverified_results(
         stamps_by_key, source_keys = _source_identity_stamps(identity_sources)
         for r in results:
             for key, value in stamps_by_key.get((r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]), {}).items():
-                r.setdefault(key, value)
+                if key != RUN_ID_KEY or _SOURCE_RUN_ID_KEY not in r:
+                    r.setdefault(key, value)
         unresolved = [
             (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
             for r in results
