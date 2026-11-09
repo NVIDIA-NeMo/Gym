@@ -2449,8 +2449,13 @@ class OpenSandboxProvider:
                     if _to_sandbox_status(state) in {SandboxStatus.ERROR, SandboxStatus.STOPPED}:
                         # The lifecycle API exposes a workload reason without a container identity.
                         # Keep OOMKilled as evidence, but do not attribute a possible sidecar OOM.
+                        # Keep the control plane's own report as bounded evidence: it is what tells a reader
+                        # whether the workload hit its limit or was evicted. It never changes the failure kind.
+                        report = getattr(status, "message", None)
+                        detail = f", message={report[:256]!r}" if isinstance(report, str) and report else ""
                         terminal_notice = _SandboxDeathNotice(
-                            f"Sandbox is unavailable; lifecycle status: state={state!r}, reason={str(reason)[:256]!r}",
+                            f"Sandbox is unavailable; lifecycle status: state={state!r}, "
+                            f"reason={str(reason)[:256]!r}{detail}",
                             failure_kind=PROVIDER_UNAVAILABLE,
                             provider_status_reason=reason if isinstance(reason, str) else None,
                         )
