@@ -18,4 +18,7 @@ opencode_agent:
         compaction: {auto: false}
         permission:
           '*': deny
+          # Replace the base profile's specific maps; a wildcard does not override them after composition.
+          bash: deny
+          edit: deny
           'claweval_*': allow
