@@ -3,11 +3,12 @@
 
 """MCP wrapping must preserve a seed handler's validation and request injection."""
 
-from typing import Annotated
+import inspect
+from typing import Annotated, Any
 from unittest.mock import MagicMock
 
 import pytest
-from fastapi import Request
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from pydantic import BeforeValidator, Field
 
@@ -22,7 +23,7 @@ from nemo_gym.server_runtime.base_resources_server import (
     ResourcesSeedSessionResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.server_runtime.mcp_auto_exposure import TOKEN_HEADER, maybe_auto_expose
+from nemo_gym.server_runtime.mcp_auto_exposure import TOKEN_HEADER, _wrap_seed_session, maybe_auto_expose
 
 
 def _cookie_row(value: object) -> object:
@@ -126,3 +127,58 @@ def test_mcp_seed_keeps_a_validator_annotated_directly_on_the_body() -> None:
         ok = client.post("/seed_session", json={"value": 1})
         assert ok.status_code == 200, ok.text
         assert TOKEN_HEADER in ok.json()["mcp"]["headers"]
+
+
+class CustomRequest(Request):
+    pass
+
+
+@pytest.mark.parametrize("annotated", [False, True])
+def test_mcp_seed_reuses_request_subclass_parameter(annotated: bool) -> None:
+    app = FastAPI()
+    seen = []
+
+    async def seed(body: NonNegativeSeed, request: CustomRequest) -> dict:
+        seen.append(request)
+        return {"value": body.value, "path": request.url.path}
+
+    if annotated:
+        seed.__annotations__["request"] = Annotated[CustomRequest, "caller"]
+    app.post("/seed_session")(seed)
+    _wrap_seed_session(app, lambda request, body: {"value": body["value"]})
+    with TestClient(app) as client:
+        result = client.post("/seed_session", json={"value": 3})
+    assert result.status_code == 200, result.text
+    assert result.json() == {"value": 3, "path": "/seed_session", "mcp": {"value": 3}}
+    # FastAPI injects the live Request even when the annotation names a subclass.
+    assert len(seen) == 1 and isinstance(seen[0], Request)
+
+
+def test_mcp_seed_honors_factory_signature_over_annotations() -> None:
+    app = FastAPI()
+    seen = []
+
+    async def seed(body: Any, request: Request) -> dict:
+        seen.append(body)
+        return {"value": body.value}
+
+    signature = inspect.signature(seed)
+    seed.__signature__ = signature.replace(
+        parameters=[
+            param.replace(annotation=Annotated[NonNegativeSeed, BeforeValidator(_reject_negative)])
+            if name == "body"
+            else param
+            for name, param in signature.parameters.items()
+        ]
+    )
+    app.post("/seed_session")(seed)
+    with TestClient(app) as client:
+        assert client.post("/seed_session", json={"value": -1}).status_code == 422
+        assert client.post("/seed_session", json={"value": 3}).json() == {"value": 3}
+    _wrap_seed_session(app, lambda request, body: {"value": body["value"]})
+    with TestClient(app) as client:
+        assert client.post("/seed_session", json={"value": -1}).status_code == 422
+        result = client.post("/seed_session", json={"value": 3})
+    assert result.status_code == 200, result.text
+    assert result.json() == {"value": 3, "mcp": {"value": 3}}
+    assert len(seen) == 2 and all(isinstance(body, NonNegativeSeed) for body in seen)

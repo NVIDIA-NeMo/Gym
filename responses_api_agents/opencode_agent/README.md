@@ -13,9 +13,17 @@ It preserves the existing command restrictions; run configs can override individ
 permissions under `opencode_agent.responses_api_agents.opencode_agent.opencode_config.permission`.
 These command filters are not network or filesystem isolation.
 They are adapted from Gym's benchmark runner restrictions, not OpenCode defaults,
-and apply to local calls too. Subagents (`task`) are intentionally enabled for this
+and apply to local calls too. The profile also denies the `webfetch`, `websearch` and
+`skill` tools. Subagents (`task`) are intentionally enabled for this
 general-purpose integration; the separate `opencode_sandboxed_agent` benchmark
-profile still disables them. Use explicit tool overrides when comparing scores.
+profile still disables them. Use explicit `permission` overrides when comparing scores.
+The command filters were written for SWE-style repositories: they also deny Git history
+commands (`git reflog`, `git show`, `git log --all`, ...) and every `git fetch`, which some
+terminal tasks need (for example recovering a lost commit or fetching a local bundle).
+Allow those per run with `permission.bash` rules when a benchmark requires them.
+Restrict tools with `permission` rules, not a `tools` map: OpenCode 1.17.11 places the keys
+a `tools` map names before the permission map's `"*"` rule and applies the last matching rule,
+so `"*": allow` then overrides every rule for those keys (naming `bash` voids every command filter).
 
 Existing flat-row benchmarks keep the `opencode_sandboxed_agent` entrypoint
 and configuration for their Resources-owned lifecycle.
@@ -180,17 +188,9 @@ so the sandbox reaches only the model server; a search preset overrides it with 
 sandbox cannot download OpenCode, so supply `sandbox_executable_path` and `sandbox_executable_sha256` for a binary
 in the image.
 
-The pairing also needs one Environment Server setting. HLE's Environment Server, like those of HLE Diamond, GPQA and
-APEX Shortlist, grants the agent its Resources server over `direct_http`, which this agent cannot use, so every seed
-fails with a 422. The judge offers the agent no tools, so load this alongside the benchmark, the profile and the
-model config, under the benchmark's own Environment Server name (`gym env resolve` shows it):
-
-```yaml
-hle_equivalence_llm_judge_environment_server:
-  environment_servers:
-    single_agent_turn_legacy:
-      resources_tool_transports: []
-```
+HLE, HLE Diamond, GPQA and APEX Shortlist need no Environment Server setting: their judges serve no tools, so their
+Environment Servers grant the agent none. This agent rejects a required `direct_http` grant with a 422, so a
+benchmark whose Resources server serves its tools over direct HTTP does not pair with it.
 
 ## Configuration compatibility
 

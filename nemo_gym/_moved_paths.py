@@ -207,7 +207,7 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             """
             _connectable_client_host _TRACEPARENT_PATTERN apply_rollout_prefix ConfigDict ConnectionError
             get_server_url NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME
-            rollout_path_prefix ServerStatus setup_server_client trace_context_path_segment
+            rollout_path_prefix ServerStatus SESSION_ID_KEY setup_server_client trace_context_path_segment
             """,
         ),
         **_names(
@@ -290,6 +290,11 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             """,
         ),
         **_names(
+            "nemo_gym.server_runtime.request_handling.session_routing",
+            "0.8.0",
+            "SESSION_ACQUIRE_SCOPE_KEY SESSION_ID_SCOPE_KEY",
+        ),
+        **_names(
             "nemo_gym.server_runtime.request_handling.trace_context",
             "0.8.0",
             """
@@ -324,7 +329,7 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             _format_upstream_error_log _set_tcp_keepalive GlobalAIOHTTPAsyncClientConfig
             """,
         ),
-        **_names("nemo_gym.client.server_client", "0.8.0", "ServerClient SESSION_ID_KEY"),
+        **_names("nemo_gym.client.server_client", "0.8.0", "ServerClient"),
         **_names("nemo_gym.server_runtime.ray_support", "0.8.0", "_connect_server_to_ray maybe_ray_cluster_exit"),
         **_names(
             "nemo_gym.server_runtime.request_handling.disconnect",
@@ -665,6 +670,9 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
         **_names("nemo_gym.sandbox.compose_config", "0.8.0", "deployment_platform"),
         **_names("nemo_gym.sandbox.config", "0.8.0", "SANDBOX_BLOCK_VOLUME_SOURCES_KEY validate_volume_sources"),
         **_names("nemo_gym.utils.path_utils", "0.8.0", "materialized_path_for"),
+    },
+    "nemo_gym.comparison.runner": {
+        **_names("nemo_gym.eval.comparison.loading", "0.8.0", "resolve_agent_selections"),
     },
     "nemo_gym.cli.eval": {
         # Split out of eval. The helpers lost their leading underscore because other modules call them now.

@@ -97,6 +97,9 @@ def test_cancellation_clears_response_error_and_preserves_partial_output_and_dia
     assert response.error is None
     assert response.output == episode.response.output
     assert [gap.model_dump(mode="json") for gap in observations.gaps] == [
+        {"code": "cancelled", "invocation_id": None, "agent_instance": None, "span_id": None, "detail": diagnostic}
+    ]
+    assert json.loads(observations.model_dump_json())["gaps"] == [
         {"code": "cancelled", "invocation_id": None, "detail": diagnostic}
     ]
 
