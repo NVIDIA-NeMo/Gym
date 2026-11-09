@@ -30,9 +30,11 @@ repeats and primary pass@5.
 
 For restricted OpenSandbox runs, compose
 [`opencode_sessions_opensandbox.yaml`](opencode_sessions_opensandbox.yaml) after
-the recipe and provide the six offline-runtime pins and task image. All network modes install/probe the private namespace runtime during
-seed; a failed namespace probe stops setup. Live OpenSandbox deployment validation
-remains outstanding. Supply provider credentials in
+the recipe and provide the six offline-runtime pins and task image. Owned
+OpenSandbox sessions use provider process isolation and creation-time egress;
+they do not install the nested namespace wrapper. The tested deployment completed
+real sessions in all three network modes with separate Gym control endpoints.
+Qualify that separation for your deployment. Supply provider credentials in
 the runtime environment and an image with the task's required libraries. See
 the [agent session setup](../../responses_api_agents/opencode_multimodal_agent/README.md#agent-sessions)
 and [network boundary](../../responses_api_agents/opencode_multimodal_agent/network-policy.md#provider-execution-and-deployment-qualification)
@@ -40,7 +42,7 @@ for runtime requirements and deployment checks.
 
 The `opencode_relay.yaml` configurations in [ONBOARDING.md](ONBOARDING.md) retain
 the local Bubblewrap compatibility path for existing runs and training. They do
-use the provider session lifecycle, but enforce the same inner process/network
+not use the provider session lifecycle; they enforce the private process/network
 boundary. Resume existing results
 with their recorded configuration; choose the provider recipe for a new run.
 
@@ -151,3 +153,23 @@ must not be reported as the pinned reference run without matching these hashes.
 
 Prepared VStar, HRBench8K and VTCBench image inputs use embedded data URLs.
 Hosted model endpoints need no access to the preparation machine’s image paths.
+
+## Dataset licensing
+
+Manifest `licensing` describes the dataset, separately from the integration code.
+Use an applicable publisher-declared dataset license when established; `unknown`
+means that this metadata has not been established, not that the publisher has
+granted unrestricted use. Dataset contents are not distributed with these entries.
+
+| Dataset | Publisher metadata and conditions |
+| --- | --- |
+| VStar | The [pinned TSV mirror card](https://huggingface.co/datasets/xjtupanda/VStar_Bench/blob/b1312e6fbf89ace5a50cc5b0214010aeb0f69bdc/README.md) declares no dataset license. The original project's MIT statement is not substituted for a verified license on the external dataset. |
+| HRBench8K | The [pinned card](https://huggingface.co/datasets/DreamMr/HR-Bench/blob/83b9013d6293b85dc507e87199ca52517536939c/README.md) declares `other`, but its linked `LICENSE` file is empty at that revision. The applicable dataset terms remain unresolved. |
+| VTCBench | The [pinned publisher repository](https://github.com/zhuzil/VTC-Bench/tree/5e0a5533f597b0c56dae7d9705771498202ab19b) does not establish a dataset license in its root documentation. Apache-2.0 notices for its evaluator subtree concern that code, not the dataset. |
+| ZeroBench | The [dataset page](https://huggingface.co/datasets/jonathan-roberts1/zerobench) requires accepting its access conditions, including no training and no public redistribution of answers. The pinned dataset metadata does not identify a standard dataset license. The scoring example's MIT license is separate. |
+
+The current manifests retain `unknown` for these unresolved dataset-license
+fields. Gym's local `env publish` finalizer currently rejects `unknown`, although
+existing experimental catalog entries also use it. Manifest validation and
+verifier checks can pass independently; do not report the publication check as
+passed or replace these values with a guessed license to bypass it.
