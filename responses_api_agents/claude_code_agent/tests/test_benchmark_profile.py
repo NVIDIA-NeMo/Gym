@@ -16,11 +16,22 @@
 
 import pytest
 
-from tests.session_harness_profiles import check_hle_seed
+from nemo_gym.config import get_first_server_config_dict
+from tests.session_harness_profiles import REQUIRED_SETTING_VALUES, check_hle_seed, compose_profile_on_hle
 
 
-@pytest.mark.parametrize("pairing", [True, False], ids=["with_override", "without_override"])
-async def test_hle_seed_reaches_the_agents_own_sandbox_only_with_the_pairing_override(
-    pairing: bool, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("transports", [None, ["direct_http"]], ids=["as_shipped", "direct_http_granted"])
+async def test_hle_seed_reaches_the_agents_own_sandbox_unless_a_direct_http_grant_is_required(
+    transports: list[str] | None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    await check_hle_seed("claude_code_agent", pairing, monkeypatch)
+    await check_hle_seed("claude_code_agent", transports, monkeypatch)
+
+
+def test_profile_restricts_the_sandbox_to_the_model_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    # HLE grades what the model knows, so the profile keeps the harness from looking answers up.
+    settings = get_first_server_config_dict(
+        compose_profile_on_hle("claude_code_agent", monkeypatch), "hle_equivalence_llm_judge_claude_code_agent"
+    )
+    assert settings.network_access == "model_only"
+    # The Claude Code CLI is uploaded from the Agent Server, so it needs no sandbox network.
+    assert all(settings.get(key) is None for key in REQUIRED_SETTING_VALUES)

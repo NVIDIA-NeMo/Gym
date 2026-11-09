@@ -165,6 +165,8 @@ Live mode is the one that matches the published benchmark.
 
 Prefetch writes `tickers.json` and `filings_metadata/` only. Filing bodies under `filings/` are written by the resource server on the first `parse_html_page` of an EDGAR URL when `use_cache: true`.
 
+The server writes cache files `0664` and new cache directories `2775`, so users in the cache root's group can read and extend a shared cache. Create the root yourself with group write and the setgid bit (`chmod 2775`) before sharing it.
+
 ### Cache location
 
 | Scenario | Location |

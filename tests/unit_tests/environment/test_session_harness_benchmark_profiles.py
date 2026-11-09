@@ -23,7 +23,16 @@ from omegaconf import OmegaConf
 from nemo_gym.config.config_types import ConfigMissingValuesError
 from nemo_gym.config.global_config import get_first_server_config_dict
 from nemo_gym.environment.agent_registry import discover_agents
-from tests.session_harness_profiles import HARNESSES, HLE_ENVIRONMENT, IMAGE, REPO_ROOT, compose_profile_on_hle
+from tests.session_harness_profiles import (
+    HARNESSES,
+    HLE_ENVIRONMENT,
+    IMAGE,
+    MODEL_ONLY_PROFILES,
+    REPO_ROOT,
+    REQUIRED_SETTING_VALUES,
+    REQUIRED_SETTINGS,
+    compose_profile_on_hle,
+)
 
 
 @pytest.mark.parametrize("agent", HARNESSES)
@@ -45,6 +54,10 @@ def test_profile_composes_onto_hle_with_its_limits_and_a_loopback_head_server(
     assert settings.sandbox_provider == "sandbox"
     assert settings.sandbox_config.image == IMAGE
     assert settings.sandbox_config.ready_timeout_s == 1200
+    # Graded on what the model knows: the sandbox reaches only the model server, from a runtime in the image.
+    assert settings.get("network_access", "inherit") == ("model_only" if agent in MODEL_ONLY_PROFILES else "inherit")
+    for key in REQUIRED_SETTINGS[agent]:
+        assert settings[key] == REQUIRED_SETTING_VALUES[key]
     # Hermes derives its TTL from its own timeouts; the others would get OpenSandbox's 10-minute default.
     assert settings.sandbox_config.get("ttl_s") == (None if agent == "hermes_agent" else 14400)
     if agent == "claude_code_agent":
@@ -52,7 +65,8 @@ def test_profile_composes_onto_hle_with_its_limits_and_a_loopback_head_server(
         assert settings.model_server.name == "policy_model"
     environment = get_first_server_config_dict(config, HLE_ENVIRONMENT)
     assert environment.agent_server.name == composed
-    assert list(environment.resources_tool_transports) == []
+    # HLE's judge serves no tools, so its Environment Server sets no transports and grants none.
+    assert list(environment.get("resources_tool_transports", [])) == []
     # Sandboxes reach the model server at the caller's address; the head server and the agent stay on loopback.
     assert config.head_server.host == "127.0.0.1"
     assert settings.host == "127.0.0.1"
@@ -64,3 +78,19 @@ def test_profile_composes_onto_hle_with_its_limits_and_a_loopback_head_server(
 def test_profile_without_an_image_fails_at_resolve(agent: str, monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(ConfigMissingValuesError, match=rf"hle_equivalence_llm_judge_{agent}\..*sandbox_config\.image"):
         compose_profile_on_hle(agent, monkeypatch, image=False)
+
+
+@pytest.mark.parametrize(
+    ("agent", "key"), [(agent, key) for agent in sorted(REQUIRED_SETTINGS) for key in REQUIRED_SETTINGS[agent]]
+)
+def test_restricted_profile_without_its_required_setting_fails_at_resolve(
+    agent: str, key: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A model_only sandbox cannot download the harness, so its runtime or binary is required before any episode.
+    supplied = [
+        f"++hle_equivalence_llm_judge_{agent}.responses_api_agents.{agent}.{other}={REQUIRED_SETTING_VALUES[other]}"
+        for other in REQUIRED_SETTINGS[agent]
+        if other != key
+    ]
+    with pytest.raises(ConfigMissingValuesError, match=rf"hle_equivalence_llm_judge_{agent}\..*{key}"):
+        compose_profile_on_hle(agent, monkeypatch, required=False, cli_args=tuple(supplied))
