@@ -1,4 +1,4 @@
-input_container_fpath: results/vllm/vllm-openai:v0.32.0___with_gym_vllmfixes___mooncakemetricstry2___kvcacheremoveintermediatemamba.sqsh
+input_container_fpath: results/vllm/vllm-openai:v0.32.0___with_gym_vllmfixes___mooncakemetricstry2___fixduplicatemambaforward.sqsh
 output_container_fpath: results/vllm/vllm-openai:v0.32.0___with_gym_vllmfixes___dwdp_nvfp4_optim.sqsh
 
 slurm:
