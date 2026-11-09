@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Adapted from https://github.com/image2code/vision2code (Apache-2.0).
 # Source: vision2code/evaluation/dataset_rubrics.py; base revision 000f2e162dd62fac5637c718e018d7123b3aff1e.
+# DocVQA and EEE-Bench defaults restored from the unmodified base; previous variants use -v2 names.
 # Modified source SHA-256: b81999419c92ef403fce7905f01ccd2a7a47eebbc6960b67c0f8cfab1e2595b8 (see NOTICE).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -25,6 +26,7 @@ import json
 import math
 import re
 from copy import deepcopy
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
@@ -332,6 +334,55 @@ DATASET_RUBRICS: Dict[str, Dict[str, Any]] = {
         "prompt_notes": [
             "Visible text should be accurate and legible if the source is legible.",
             "Layout should stay close to the reference, but exact decorative styling matters less than information and structure.",
+            "Moderate layout drift with exact text can still deserve a solid score.",
+        ],
+        "categories": [
+            _category(
+                "text_information_fidelity",
+                "Text Information Fidelity",
+                0.35,
+                "Visible text, numbers, and key document information remain accurate.",
+            ),
+            _category(
+                "document_structure_layout",
+                "Document Structure and Layout",
+                0.30,
+                "Reading order, section placement, tables, blocks, and layout structure stay faithful.",
+            ),
+            _category(
+                "legibility_noncrowding",
+                "Legibility and Non-Crowding",
+                0.20,
+                "Content remains readable, not overly crowded, and reasonably well spaced.",
+            ),
+            _category(
+                "key_visual_elements",
+                "Key Visual Elements",
+                0.15,
+                "Important icons, tables, charts, callouts, or emphasis boxes remain present when they matter.",
+            ),
+        ],
+        "cap_profile": BALANCED_CAP_PROFILE,
+        "extra_caps": [
+            _extra_cap(
+                "material_key_text_error",
+                2.5,
+                "Materially wrong key text or numbers cap the score on this dataset.",
+                any_of=[
+                    {"id": "text_information_fidelity", "max": 2.4},
+                ],
+            ),
+        ],
+    },
+    "DocVQA-v2": {
+        "dataset": "DocVQA-v2",
+        "guidance": (
+            "Judge text and structure first. Be strict, but stay fair on hard infographics: if the source itself is "
+            "visually dense or difficult, do not over-penalize ambiguity that is already present in the reference."
+        ),
+        "prompt_notes": [
+            "Visible text should be accurate and legible if the source is legible.",
+            "Layout should stay close to the reference, but exact decorative styling matters less than information and structure.",
             "Visible layout drift should lower the layout score even when the text is exact.",
             "Match background, text, and graphic colors to the reference; visible color mismatches should lower the key_visual_elements score.",
         ],
@@ -375,6 +426,57 @@ DATASET_RUBRICS: Dict[str, Dict[str, Any]] = {
     },
     "EEE-Bench": {
         "dataset": "EEE-Bench",
+        "guidance": (
+            "Focus on circuit topology, component identity, labels, values, signs, and current or voltage direction. "
+            "Be lenient on stylistic drawing differences such as zig-zag versus curved resistor style when the component "
+            "identity is still clearly correct."
+        ),
+        "prompt_notes": [
+            "Wrong direction, sign, label, or connectivity matters more than cosmetic symbol style.",
+            "Component identity must be preserved even if the drawn shape style varies slightly.",
+            "Treat small labels and values as potentially important.",
+        ],
+        "categories": [
+            _category(
+                "circuit_topology_connectivity",
+                "Circuit Topology and Connectivity",
+                0.35,
+                "Wiring relationships, placement relationships, and the overall circuit topology are correct.",
+            ),
+            _category(
+                "component_identity_symbols",
+                "Component Identity and Symbols",
+                0.25,
+                "Resistors, capacitors, sources, and other component identities remain correct.",
+            ),
+            _category(
+                "labels_values_directions",
+                "Labels, Values, and Directions",
+                0.25,
+                "Current directions, voltage labels, signs, and numeric values remain accurate.",
+            ),
+            _category(
+                "readability_completeness",
+                "Readability and Completeness",
+                0.15,
+                "The circuit is readable, uncluttered, and not missing major visible content.",
+            ),
+        ],
+        "cap_profile": BALANCED_CAP_PROFILE,
+        "extra_caps": [
+            _extra_cap(
+                "circuit_semantic_error",
+                2.5,
+                "Wrong topology, wrong labels or values, or wrong current or voltage direction cap the score on this dataset.",
+                any_of=[
+                    {"id": "circuit_topology_connectivity", "max": 2.4},
+                    {"id": "labels_values_directions", "max": 2.4},
+                ],
+            ),
+        ],
+    },
+    "EEE-Bench-v2": {
+        "dataset": "EEE-Bench-v2",
         "revision": "eee_background_v1",
         "guidance": (
             "Focus on circuit topology, component identity, labels, values, signs, and current or voltage direction. "
@@ -965,10 +1067,16 @@ Return JSON only. Do not include markdown fences.
 
 def encode_image_to_data_url(image_path: Path) -> str:
     raw = image_path.read_bytes()
-    b64 = base64.b64encode(raw).decode("utf-8")
     # Preparation accepts images by their contents, including extensionless files.
     with Image.open(image_path) as image:
-        mime = Image.MIME[image.format]
+        if image.format in {"PNG", "JPEG", "WEBP", "GIF"}:
+            mime = Image.MIME[image.format]
+        else:
+            buffer = BytesIO()
+            image.convert("RGBA").save(buffer, format="PNG")
+            raw = buffer.getvalue()
+            mime = "image/png"
+    b64 = base64.b64encode(raw).decode("utf-8")
     return f"data:{mime};base64,{b64}"
 
 

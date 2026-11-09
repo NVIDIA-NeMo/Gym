@@ -11,11 +11,30 @@ from io import BytesIO
 from pathlib import Path
 from time import monotonic
 
+from omegaconf import OmegaConf
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field
 
+from nemo_gym.config import GlobalConfigDictParser
 from resources_servers.vision2code.evaluation import RubricName
 from resources_servers.vision2code.prompts import SYSTEM_PROMPT, USER_PROMPT
+
+
+class PreparationConfig(BaseModel):
+    """Optional additions to the base generation prompt, applied during preparation."""
+
+    model_config = ConfigDict(extra="forbid")
+    include_canvas_dimensions: bool = False
+    include_rendering_instructions: bool = False
+    include_library_instructions: bool = False
+
+
+def load_preparation_config(path: Path) -> PreparationConfig:
+    """Read prompt options from a composed environment config without resolving credentials."""
+    _, configs = GlobalConfigDictParser().load_extra_config_paths([str(path)])
+    config = OmegaConf.merge(*configs)
+    options = OmegaConf.select(config, "vision2code.resources_servers.vision2code.preparation")
+    return PreparationConfig.model_validate(OmegaConf.to_container(options, resolve=True) if options else {})
 
 
 class Reference(BaseModel):
@@ -42,7 +61,14 @@ def read_reference(path: Path) -> tuple[bytes, str, int, int]:
     return raw, mime, width, height
 
 
-def prepare(manifest: Path, output: Path) -> int:
+def prepare(
+    manifest: Path,
+    output: Path,
+    *,
+    include_canvas_dimensions: bool = False,
+    include_rendering_instructions: bool = False,
+    include_library_instructions: bool = False,
+) -> int:
     """Validate the complete manifest before replacing the destination JSONL."""
     started = last_report = monotonic()
     print(f"Reading manifest: {manifest}", file=sys.stderr, flush=True)
@@ -72,13 +98,21 @@ def prepare(manifest: Path, output: Path) -> int:
             height=height,
             sha256=hashlib.sha256(raw).hexdigest(),
         )
-        instruction = (
-            f"{USER_PROMPT}\nThe target image is {width} pixels wide and {height} pixels tall. "
-            "The launcher provides OUTPUT_PATH='/workspace/output.png', TARGET_WIDTH, and TARGET_HEIGHT "
-            "as Python globals and environment variables. Save a PNG at OUTPUT_PATH with exactly these dimensions. "
-            "Available libraries: matplotlib, NumPy, Pillow, pandas, NetworkX; DejaVu and Liberation fonts. "
-            "The renderer has no network access and does not contain the reference image."
-        )
+        instruction = USER_PROMPT
+        if include_canvas_dimensions:
+            instruction += f" Target canvas: {width} x {height} pixels."
+        if include_rendering_instructions:
+            instruction += (
+                f"\nThe target image is {width} pixels wide and {height} pixels tall. "
+                "The launcher provides OUTPUT_PATH='/workspace/output.png', TARGET_WIDTH, and TARGET_HEIGHT "
+                "as Python globals and environment variables. Save a PNG at OUTPUT_PATH with exactly these dimensions. "
+                "The renderer has no network access and does not contain the reference image."
+            )
+        if include_library_instructions:
+            instruction += (
+                "\nAvailable libraries: matplotlib, NumPy, Pillow, pandas, NetworkX, RDKit, Schemdraw, SciPy, "
+                "Seaborn, Shapely, svgwrite, CairoSVG, ReportLab; DejaVu and Liberation fonts."
+            )
         rows.append(
             {
                 "id": sample_id,
@@ -128,8 +162,35 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("manifest", type=Path)
     parser.add_argument("output", type=Path)
+    parser.add_argument("--config", type=Path, help="Environment YAML containing preparation prompt options.")
+    parser.add_argument(
+        "--include-canvas-dimensions",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Append only the target canvas dimensions.",
+    )
+    parser.add_argument(
+        "--include-rendering-instructions",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Append dimensions and sandbox/output instructions.",
+    )
+    parser.add_argument(
+        "--include-library-instructions",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Append the available rendering libraries and fonts.",
+    )
     args = parser.parse_args()
-    print(f"Prepared {prepare(args.manifest, args.output)} tasks in {args.output}")
+    options = load_preparation_config(args.config) if args.config else PreparationConfig()
+    overrides = {name: value for name in PreparationConfig.model_fields if (value := getattr(args, name)) is not None}
+    options = options.model_copy(update=overrides)
+    count = prepare(
+        args.manifest,
+        args.output,
+        **options.model_dump(),
+    )
+    print(f"Prepared {count} tasks in {args.output}")
 
 
 if __name__ == "__main__":

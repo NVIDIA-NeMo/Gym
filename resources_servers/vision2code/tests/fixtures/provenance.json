@@ -10,5 +10,16 @@
   "generic_rubric_version": "generic_recreation_rubric_v1_equal_weight",
   "image_metrics_source": "vision2code/evaluation/image_metrics.py",
   "image_metrics_source_sha256": "9d6b487e325d4ad7ad941140fddfe75948b7a60edf5c0c8e337bfc53771d6ebe",
-  "image_metrics_golden": "image-metrics-golden.json: upstream image_metrics and apply_blend_a outputs for test_image_metrics.write_images cases"
+  "image_metrics_golden": "image-metrics-golden.json: upstream image_metrics and apply_blend_a outputs for test_image_metrics.write_images cases",
+  "original_doc_eee_fixture": "original-doc-eee.json: unmodified public source definitions and scoring; historical DocVQA/EEE-Bench fixtures validate -v2 variants",
+  "judge_recovery_source": {
+    "repository": "https://gitlab-master.nvidia.com/asohrabizade/vision2code_internal",
+    "revision": "e86d3ccbd4e2d16c9f33e3b6a525750e419eff49",
+    "license": "Apache-2.0",
+    "files": [
+      "vision2code/evaluation/dataset_rubrics.py",
+      "vision2code/evaluation/generic_rubric.py",
+      "vision2code/benchmark/run_benchmark.py"
+    ]
+  }
 }

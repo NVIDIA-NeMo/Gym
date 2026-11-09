@@ -23,7 +23,7 @@ def test_manifest(tmp_path):
     names = get_args(RubricName)
     manifest.write_text("".join(json.dumps({"id": n, "rubric": n, "image_path": image.name}) + "\n" for n in names))
     output = tmp_path / "tasks.jsonl"
-    assert prepare(manifest, output) == 17
+    assert prepare(manifest, output) == 19
     report = validate_jsonl_rows("vision2code", TypeAdapter(TaskData), str(output), output.read_text().splitlines())
     assert report.clean, report.summary()
     rows = [json.loads(line) for line in output.read_text().splitlines()]
@@ -38,8 +38,7 @@ def test_manifest(tmp_path):
         assert params["tools"] == []
         content = params["input"][1]["content"]
         assert base64.b64decode(content[0]["image_url"].split(",")[1]) == image.read_bytes()
-        assert "60 pixels wide and 80 pixels tall" in content[1]["text"]
-        assert "/workspace/output.png" in content[1]["text"]
+        assert content[1]["text"] == "Generate Python code to recreate this image. Return code only."
 
 
 @pytest.mark.parametrize("bad", ["unknown", "strict-category", "geometry", "graph_algorithms", "duplicate", "corrupt"])
@@ -58,3 +57,41 @@ def test_invalid_manifest_is_atomic(tmp_path, bad):
     with pytest.raises((ValueError, OSError)):
         prepare(manifest, output)
     assert output.read_text() == "previous"
+
+
+@pytest.mark.parametrize("rendering,libraries", [(False, True), (True, False), (True, True)])
+def test_optional_task_instructions(tmp_path, rendering, libraries):
+    Image.new("RGB", (60, 80)).save(tmp_path / "reference.png")
+    manifest = tmp_path / "manifest.jsonl"
+    manifest.write_text(json.dumps({"id": "x", "rubric": "DocVQA-v2", "image_path": "reference.png"}))
+    output = tmp_path / "tasks.jsonl"
+    prepare(manifest, output, include_rendering_instructions=rendering, include_library_instructions=libraries)
+    row = json.loads(output.read_text())
+    text = row["responses_create_params"]["input"][1]["content"][1]["text"]
+    assert ("60 pixels wide and 80 pixels tall" in text) == rendering
+    assert ("/workspace/output.png" in text) == rendering
+    assert ("no network" in text) == rendering
+    assert ("RDKit" in text and "ReportLab" in text) == libraries
+    assert row["verifier_metadata"]["rubric"] == "DocVQA-v2"
+
+
+@pytest.mark.parametrize("rendering,libraries", [(False, False), (True, False), (False, True), (True, True)])
+def test_canvas_dimensions_preserve_optional_instructions(tmp_path, rendering, libraries):
+    Image.new("RGB", (60, 80)).save(tmp_path / "reference.png")
+    manifest = tmp_path / "manifest.jsonl"
+    manifest.write_text(json.dumps({"id": "x", "rubric": "generic", "image_path": "reference.png"}))
+    output = tmp_path / "tasks.jsonl"
+    prepare(
+        manifest,
+        output,
+        include_canvas_dimensions=True,
+        include_rendering_instructions=rendering,
+        include_library_instructions=libraries,
+    )
+    text = json.loads(output.read_text())["responses_create_params"]["input"][1]["content"][1]["text"]
+    base = "Generate Python code to recreate this image. Return code only. Target canvas: 60 x 80 pixels."
+    assert text.startswith(base)
+    assert ("/workspace/output.png" in text) == rendering
+    assert ("Available libraries:" in text) == libraries
+    if not rendering and not libraries:
+        assert text == base

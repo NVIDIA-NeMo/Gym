@@ -1,5 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright 2026 Vision2Code Authors
 # SPDX-License-Identifier: Apache-2.0
+# Judge recovery adapted from https://gitlab-master.nvidia.com/asohrabizade/vision2code_internal
+# Source: vision2code/benchmark/run_benchmark.py; revision e86d3ccbd4e2d16c9f33e3b6a525750e419eff49.
+# License: Apache-2.0; see NOTICE.
 """Stateless verification of reference image → Python → Enroot render → rubric reward."""
 
 import asyncio
@@ -9,19 +13,20 @@ import time
 import uuid
 from io import BytesIO
 from pathlib import Path
+from typing import Literal
 
 from PIL import Image
 from pydantic import ConfigDict, Field, JsonValue, PrivateAttr, model_validator
 
 from nemo_gym.config import ModelServerRef
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.verification import JudgeError, call_judge
+from nemo_gym.verification import JUDGE_FAILURES, is_judge_failure
 from resources_servers.vision2code.evaluation import (
     aggregate_rating,
     build_rater_user_content,
@@ -30,15 +35,22 @@ from resources_servers.vision2code.evaluation import (
     system_prompt,
 )
 from resources_servers.vision2code.image_metrics import apply_blend_a, image_metrics
-from resources_servers.vision2code.prepare import Reference, read_reference
+from resources_servers.vision2code.judge_recovery import REJUDGE_PROMPT, recovery_schema, repair_prompt
+from resources_servers.vision2code.judge_transport import request_judgment
+from resources_servers.vision2code.prepare import PreparationConfig, Reference, read_reference
 from resources_servers.vision2code.render import RenderResult, render
-from resources_servers.vision2code.rubrics import inspect_candidate_image, parse_json_object
+from resources_servers.vision2code.rubrics import encode_image_to_data_url, inspect_candidate_image, parse_json_object
 from resources_servers.vision2code.tests.verifier_fixture import VERIFIER_FIXTURE as VERIFIER_FIXTURE
 
 
 class Vision2CodeConfig(BaseResourcesServerConfig):
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
+    judge_repair_attempts: int = Field(default=2, ge=0, strict=True)
+    judge_repair_mode: Literal["retry", "repair", "rejudge"] = "retry"
+    judge_transport_attempts: int = Field(default=3, ge=1, strict=True)
+    preparation: PreparationConfig = Field(default_factory=PreparationConfig)
+    judge_repair_max_output_tokens: int | None = Field(default=None, gt=0, strict=True)
     sandbox_image: str
     sandbox_provider: dict[str, dict] = Field(default_factory=lambda: {"enroot": {}})
     execution_timeout: float = Field(default=60, gt=0)
@@ -52,6 +64,7 @@ class Vision2CodeConfig(BaseResourcesServerConfig):
         default=False,
         description="When using Blend A, apply rubric caps to the unrounded judge term; keep pixel terms unchanged.",
     )
+    spatial_uncapped_judge_squared: bool = False
     artifact_dir: str = "artifacts/vision2code"
 
     @model_validator(mode="after")
@@ -75,17 +88,22 @@ class Vision2CodeVerifyRequest(BaseVerifyRequest):
     model_config = ConfigDict(extra="allow")
     id: str | None = None
     verifier_metadata: Reference
+    include_rendered_image: bool = False
+    include_pixel_scores: bool = False
 
 
 class Vision2CodeVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
     id: str | None = None
     verifier_metadata: Reference
+    rendered_image: str | None = None
+    pixel_scores: dict[str, JsonValue] | None = None
     render: RenderResult | None = None
     rubric_result: dict[str, JsonValue] | None = None
     reward_power: float = 2.0
     use_blended_reward: bool = False
     blended_reward_apply_judge_caps: bool = False
+    spatial_uncapped_judge_squared: bool = False
     judge_diagnostics: dict[str, JsonValue] = Field(default_factory=dict)
     artifacts: dict[str, str] = Field(default_factory=dict)
     timings: dict[str, float] = Field(default_factory=dict)
@@ -124,18 +142,20 @@ class Vision2CodeServer(SimpleResourcesServer):
 
     async def verify(self, body: Vision2CodeVerifyRequest) -> Vision2CodeVerifyResponse:
         ref = body.verifier_metadata
+        spatial_squared = self.config.spatial_uncapped_judge_squared and ref.rubric == "spatialvlm_qa"
+        use_blended_reward = self.config.use_blended_reward and not spatial_squared
         directory = Path(self.config.artifact_dir).resolve() / uuid.uuid4().hex
         directory.mkdir(parents=True)
         # Preserve Gym task/rollout bookkeeping, but never reuse verifier outputs
         # when an existing rollout is submitted for reverification.
         derived = set(Vision2CodeVerifyResponse.model_fields) - set(Vision2CodeVerifyRequest.model_fields)
         result = Vision2CodeVerifyResponse(
-            **body.model_dump(exclude=derived | {"_ng_failure_class", "_ng_failure_judge_error"}),
+            **body.model_dump(exclude=derived | {"_ng_failure_class", "_ng_failure_id", "_ng_failure_judge_error"}),
             reward=0.0,
-            reward_power=1.0 if self.config.use_blended_reward else self.config.reward_power,
-            use_blended_reward=self.config.use_blended_reward,
-            blended_reward_apply_judge_caps=self.config.use_blended_reward
-            and self.config.blended_reward_apply_judge_caps,
+            reward_power=2.0 if spatial_squared else (1.0 if use_blended_reward else self.config.reward_power),
+            use_blended_reward=use_blended_reward,
+            blended_reward_apply_judge_caps=use_blended_reward and self.config.blended_reward_apply_judge_caps,
+            spatial_uncapped_judge_squared=spatial_squared,
         )
         instance = result.model_extra.get("instance_config")
         if isinstance(instance, dict):
@@ -180,13 +200,15 @@ class Vision2CodeServer(SimpleResourcesServer):
                 return result
             if result.render.status != "ok":
                 result.rubric_result = build_render_failure_rating(result.render.status, dataset_name=ref.rubric)
-                if self.config.use_blended_reward:
+                if result.use_blended_reward:
                     result.rubric_result = apply_blend_a(
                         result.rubric_result, apply_judge_caps=result.blended_reward_apply_judge_caps
                     )
                 return result
             candidate = directory / "output.png"
             result.artifacts["image"] = str(candidate)
+            if body.include_rendered_image:
+                result.rendered_image = encode_image_to_data_url(candidate)
             inspection = inspect_candidate_image(candidate)
             # Reuse the exact upstream prompt, translating only Chat content types
             # to Gym Responses types. The model adapter owns endpoint translation.
@@ -209,41 +231,94 @@ class Vision2CodeServer(SimpleResourcesServer):
                 ],
                 tools=[],
             )
-            stage = "judge"
+            stage = "judge_parse"
             judge_start = time.perf_counter()
+            attempts = []
+            result.judge_diagnostics = {"candidate_inspection": inspection, "attempts": attempts}
+            request_params = params
             try:
-                judge = await call_judge(
-                    self.server_client,
-                    server_name=self.config.judge_model_server.name,
-                    url_path="/v1/responses",
-                    json=NeMoGymResponseCreateParamsNonStreaming.model_validate(params),
-                    response_model=NeMoGymResponse,
-                )
+                for attempt in range(self.config.judge_repair_attempts + 1):
+                    judge = await request_judgment(
+                        self.server_client,
+                        server_name=self.config.judge_model_server.name,
+                        params=NeMoGymResponseCreateParamsNonStreaming.model_validate(request_params),
+                        attempts=self.config.judge_transport_attempts,
+                    )
+                    raw_response = response_text(judge)
+                    result.judge_diagnostics["response"] = judge.model_dump(mode="json")
+                    record = {
+                        "mode": "initial" if attempt == 0 else self.config.judge_repair_mode,
+                        "response": judge.model_dump(mode="json"),
+                    }
+                    attempts.append(record)
+                    try:
+                        parsed = parse_json_object(raw_response)
+                        result.rubric_result = aggregate_rating(
+                            parsed,
+                            dataset_name=ref.rubric,
+                            candidate_inspection=inspection,
+                            reference_image_path=str(reference_path),
+                            candidate_image_path=str(candidate),
+                        )
+                        break
+                    except (ValueError, TypeError, KeyError) as exc:
+                        record["error"] = str(exc)
+                        if attempt == self.config.judge_repair_attempts:
+                            raise
+                        if self.config.judge_repair_mode == "retry":
+                            request_params = params
+                            continue
+                        prompt = (
+                            REJUDGE_PROMPT
+                            if self.config.judge_repair_mode == "rejudge"
+                            else repair_prompt(raw_response, str(exc), dataset_name=ref.rubric)
+                        )
+                        request_params = {
+                            **params,
+                            "temperature": 0.0,
+                            "input": [
+                                params["input"][0],
+                                {
+                                    "role": "user",
+                                    "content": [*response_content, {"type": "input_text", "text": prompt}],
+                                },
+                            ],
+                        }
+                        if self.config.judge_repair_max_output_tokens is not None:
+                            request_params["max_output_tokens"] = self.config.judge_repair_max_output_tokens
+                        if self.config.judge_repair_mode == "rejudge":
+                            request_params["text"] = {
+                                "format": {
+                                    "type": "json_schema",
+                                    "name": "vision2code_rubric",
+                                    "strict": True,
+                                    "schema": recovery_schema(ref.rubric),
+                                }
+                            }
             finally:
                 result.timings["judge_s"] = time.perf_counter() - judge_start
-            result.judge_diagnostics = {"response": judge.model_dump(mode="json"), "candidate_inspection": inspection}
-            stage = "judge_parse"
-            parsed = parse_json_object(response_text(judge))
-            result.rubric_result = aggregate_rating(
-                parsed,
-                dataset_name=ref.rubric,
-                candidate_inspection=inspection,
-                reference_image_path=str(reference_path),
-                candidate_image_path=str(candidate),
-            )
-            if self.config.use_blended_reward:
+            if result.use_blended_reward or body.include_pixel_scores:
                 stage = "image_metrics"
-                metrics = await asyncio.to_thread(image_metrics, reference_path, candidate)
+                result.pixel_scores = await asyncio.to_thread(image_metrics, reference_path, candidate)
+            if result.use_blended_reward:
+                stage = "image_metrics"
                 result.rubric_result = apply_blend_a(
-                    result.rubric_result, metrics, apply_judge_caps=result.blended_reward_apply_judge_caps
+                    result.rubric_result, result.pixel_scores, apply_judge_caps=result.blended_reward_apply_judge_caps
                 )
-            result.reward = rating_to_reward(result.rubric_result["final_rating_0_to_5"], power=result.reward_power)
+            if spatial_squared:
+                result.rubric_result["scoring_method"] = "uncapped_judge_squared"
+            reward_rating = result.rubric_result["raw_score_0_to_5" if spatial_squared else "final_rating_0_to_5"]
+            result.reward = rating_to_reward(reward_rating, power=result.reward_power)
             return result
         except asyncio.CancelledError:
             mask_failure(result, kind="cancelled", reason=f"Cancelled during {stage}")
             raise
-        except JudgeError as exc:
+        except JUDGE_FAILURES as exc:
+            if not is_judge_failure(exc):
+                raise
             mask_failure(result, kind="judge_failed", reason=str(exc))
+            if isinstance(exc, NgFailureEvent):
+                result.model_extra["_ng_failure_id"] = exc.event_id
             result.judge_diagnostics["error"] = str(exc)
             return result
         except Exception as exc:
@@ -259,7 +334,7 @@ class Vision2CodeServer(SimpleResourcesServer):
             (directory / "judge.json").write_text(json.dumps(result.judge_diagnostics, indent=2))
             result.artifacts["judge"] = str(directory / "judge.json")
             # Avoid duplicating base64 reference images and full policy inputs.
-            saved = result.model_dump(mode="json", exclude={"response", "responses_create_params"})
+            saved = result.model_dump(mode="json", exclude={"response", "responses_create_params", "rendered_image"})
             (directory / "result.json").write_text(json.dumps(saved, indent=2))
 
 

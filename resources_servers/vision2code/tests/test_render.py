@@ -211,15 +211,13 @@ def test_code_normalization(text):
     assert module.normalize_code(text) == "print(1)\n"
 
 
-@pytest.mark.parametrize("kind", ["symlink", "jpeg", "bytes", "pixels", "corrupt"])
+@pytest.mark.parametrize("kind", ["symlink", "bytes", "pixels", "corrupt"])
 def test_output_limits(tmp_path, kind):
     path = tmp_path / "output.png"
     if kind == "symlink":
         target = tmp_path / "target.png"
         Image.new("RGB", (40, 40)).save(target)
         path.symlink_to(target)
-    elif kind == "jpeg":
-        Image.new("RGB", (40, 40)).save(path, format="JPEG")
     elif kind == "bytes":
         with path.open("wb") as f:
             f.truncate(module.MAX_BYTES + 1)
@@ -228,7 +226,7 @@ def test_output_limits(tmp_path, kind):
     else:
         path.write_bytes(b"\x89PNG\r\n\x1a\n")
     with pytest.raises((ValueError, OSError)):
-        module.validate_png(path)
+        module.validate_image(path)
 
 
 @pytest.mark.asyncio
@@ -246,3 +244,10 @@ async def test_cancellation_during_stop_is_recorded(fake_sandbox, tmp_path):
         await task
     assert instances[0].stopped
     assert json.loads((tmp_path / "execution.json").read_text())["status"] == "cancelled"
+
+
+@pytest.mark.parametrize("image_format", ["PNG", "JPEG", "WEBP", "GIF", "TIFF", "BMP"])
+def test_output_validation_uses_contents_not_filename(tmp_path, image_format):
+    path = tmp_path / "output.png"
+    Image.new("RGB", (80, 60), "red").save(path, format=image_format)
+    assert module.validate_image(path) == (80, 60)

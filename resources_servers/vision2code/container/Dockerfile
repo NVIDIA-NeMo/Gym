@@ -5,7 +5,8 @@ FROM docker.io/library/python:3.13.7-slim-bookworm@sha256:adafcc17694d715c905b4c
 RUN rm -f /etc/apt/sources.list.d/debian.sources && \
     printf 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20251001T000000Z bookworm main\n' > /etc/apt/sources.list && \
     apt-get -o APT::Sandbox::User=root update && apt-get -o APT::Sandbox::User=root install -y --no-install-recommends \
-      util-linux=2.38.1-5+deb12u3 fonts-dejavu-core=2.37-6 fonts-liberation2=2.1.5-1 && \
+      util-linux=2.38.1-5+deb12u3 fonts-dejavu-core=2.37-6 fonts-liberation2=2.1.5-1 \
+      libcairo2=1.16.0-7 libxrender1=1:0.9.10-1.1 && \
     rm -rf /var/lib/apt/lists/*
 COPY requirements.txt /tmp/requirements.txt
 RUN python -m pip install --no-cache-dir --no-deps -r /tmp/requirements.txt && \

@@ -74,8 +74,44 @@ fig.savefig(OUTPUT_PATH)
         code=code, width=80, height=60, image=IMAGE, provider=PROVIDER, artifact_dir=tmp_path, timeout=10
     )
     assert result.status == "ok", result.model_dump()
-    assert result.dimension_mismatch and (result.width, result.height) == (100, 100)
+    assert not result.dimension_mismatch and (result.width, result.height) == (80, 60)
     assert result.diagnostics["stopped"]
+
+
+@pytest.mark.parametrize(
+    "save",
+    [
+        "plt.savefig('/missing/incorrect.svg', dpi=250, bbox_inches='tight', pad_inches=2)",
+        "fig.savefig(fname='/missing/incorrect.pdf', dpi=250, bbox_inches='tight', pad_inches=2)",
+    ],
+    ids=["pyplot", "figure"],
+)
+async def test_real_matplotlib_output_helpers(tmp_path: Path, save: str) -> None:
+    from PIL import Image
+
+    code = (
+        """
+import matplotlib.pyplot as plt
+fig = plt.figure(figsize=(5, 5), dpi=300, facecolor='red')
+ax = fig.add_axes([0.25, 0.25, 0.5, 0.5])
+ax.set_facecolor('blue')
+ax.set_xticks([])
+ax.set_yticks([])
+"""
+        + save
+    )
+    result = await render(
+        code=code, width=160, height=120, image=IMAGE, provider=PROVIDER, artifact_dir=tmp_path, timeout=10
+    )
+    assert result.status == "ok", result.model_dump()
+    assert not result.dimension_mismatch and (result.width, result.height) == (160, 120)
+    assert result.diagnostics["stopped"]
+    with Image.open(tmp_path / "output.png") as rendered:
+        assert rendered.format == "PNG"
+        assert rendered.info["dpi"] == pytest.approx((100, 100), abs=0.01)
+        # Cropping must retain the full figure background, not just the central axes.
+        assert rendered.convert("RGB").getpixel((0, 0)) == (255, 0, 0)
+        assert rendered.convert("RGB").getpixel((80, 60)) == (0, 0, 255)
 
 
 async def test_real_concurrent_workspaces(tmp_path):
@@ -100,6 +136,90 @@ async def test_real_concurrent_workspaces(tmp_path):
             assert im.getpixel((0, 0)) == (index, 0, 0)
 
     await asyncio.gather(*(one(i) for i in range(4)))
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        pytest.param(
+            """
+from rdkit import Chem
+from rdkit.Chem.Draw import rdMolDraw2D
+drawer = rdMolDraw2D.MolDraw2DCairo(TARGET_WIDTH, TARGET_HEIGHT)
+drawer.DrawMolecule(Chem.MolFromSmiles('CC(=O)O'))
+drawer.FinishDrawing()
+drawer.WriteDrawingText(OUTPUT_PATH)
+""",
+            id="rdkit-cairo",
+        ),
+        pytest.param(
+            """
+import cairosvg
+import schemdraw
+import schemdraw.elements as elm
+drawing = schemdraw.Drawing(canvas='svg', show=False)
+drawing.add(elm.Resistor().label('R1'))
+cairosvg.svg2png(bytestring=drawing.get_imagedata('svg'), write_to=OUTPUT_PATH,
+                output_width=TARGET_WIDTH, output_height=TARGET_HEIGHT, background_color='white')
+""",
+            id="schemdraw-cairosvg",
+        ),
+        pytest.param(
+            """
+import matplotlib.pyplot as plt
+import numpy as np
+import seaborn as sns
+from scipy.ndimage import gaussian_filter1d
+values = gaussian_filter1d(np.array([0., 1., 4., 1., 0.]), sigma=0.5)
+fig, ax = plt.subplots(figsize=(TARGET_WIDTH / 100, TARGET_HEIGHT / 100), dpi=100)
+sns.lineplot(x=np.arange(len(values)), y=values, ax=ax)
+fig.savefig(OUTPUT_PATH, dpi=100)
+""",
+            id="scipy-seaborn",
+        ),
+        pytest.param(
+            """
+import cairosvg
+import svgwrite
+from shapely.geometry import Polygon, box
+shape = Polygon([(10, 10), (150, 10), (80, 110)]).intersection(box(20, 20, 140, 100))
+drawing = svgwrite.Drawing(size=(TARGET_WIDTH, TARGET_HEIGHT))
+drawing.add(drawing.polygon(list(shape.exterior.coords), fill='blue'))
+cairosvg.svg2png(bytestring=drawing.tostring().encode(), write_to=OUTPUT_PATH,
+                background_color='white')
+""",
+            id="shapely-svgwrite",
+        ),
+        pytest.param(
+            """
+import cairosvg
+from reportlab.graphics import renderSVG
+from reportlab.graphics.shapes import Drawing, Rect, String
+from reportlab.lib.colors import blue
+drawing = Drawing(TARGET_WIDTH, TARGET_HEIGHT)
+drawing.add(Rect(10, 10, 100, 60, fillColor=blue))
+drawing.add(String(10, 90, 'ReportLab'))
+cairosvg.svg2png(bytestring=renderSVG.drawToString(drawing).encode(), write_to=OUTPUT_PATH,
+                background_color='white')
+""",
+            id="reportlab-svg",
+        ),
+    ],
+)
+async def test_real_rendering_libraries(tmp_path: Path, code: str) -> None:
+    """Exercise native extensions, drawing backends, and SVG rasterization in isolation."""
+    from PIL import Image
+
+    result = await render(
+        code=code, width=160, height=120, image=IMAGE, provider=PROVIDER, artifact_dir=tmp_path, timeout=30
+    )
+    assert result.status == "ok", result.model_dump()
+    assert (result.width, result.height) == (160, 120)
+    assert not result.dimension_mismatch
+    assert result.diagnostics["stopped"]
+    with Image.open(tmp_path / "output.png") as rendered:
+        assert rendered.convert("L").getextrema()[0] < 200
+        assert rendered.convert("L").getextrema()[1] > 240
 
 
 async def test_real_worker_isolation(tmp_path: Path) -> None:
@@ -143,3 +263,26 @@ im.save(OUTPUT_PATH)
     )
     assert result.status == "ok", result.model_dump()
     assert result.diagnostics["stopped"]
+
+
+@pytest.mark.parametrize("image_format,tight", [("JPEG", False), ("PNG", True)])
+async def test_real_matplotlib_preserves_format_and_global_cropping(tmp_path, image_format, tight):
+    from PIL import Image
+
+    code = f"""
+import matplotlib.pyplot as plt
+plt.rcParams['savefig.bbox'] = {"tight" if tight else None!r}
+fig = plt.figure(figsize=(5, 5), dpi=300)
+ax = fig.add_axes([0.25, 0.25, 0.5, 0.5])
+ax.plot([0, 1], [0, 1])
+ax.set_axis_off()
+fig.savefig('/missing/image.png', format={image_format!r})
+"""
+    result = await render(
+        code=code, width=160, height=120, image=IMAGE, provider=PROVIDER, artifact_dir=tmp_path, timeout=15
+    )
+    assert result.status == "ok", result.model_dump()
+    assert result.diagnostics["stopped"]
+    with Image.open(tmp_path / "output.png") as image:
+        assert image.format == image_format
+        assert (image.size != (160, 120)) == tight

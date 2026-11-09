@@ -216,6 +216,44 @@ async def test_stopping_and_last_reward(harness, rewards, expected):
             assert "/artifacts" not in call.input[-1].content
 
 
+@pytest.mark.parametrize("rewards,selected", [([0.8, 0.3, 0.5], 1), ([0.2, 0.8, 0.8], 2), ([0.1, 0.4, 0.9], 3)])
+async def test_best_pass_returns_matching_response_artifacts_and_all_usage(harness, rewards, selected):
+    agent, request, body, calls, _ = harness(num_passes=3, results=[{"reward": r} for r in rewards])
+    agent.config.result_selection = "best"
+    result = await agent.run(request, body)
+    assert len(calls) == 3
+    assert result.reward == max(rewards)
+    assert result.response.id == f"response-{selected}"
+    assert result.artifacts == {"directory": f"/artifacts/{selected}"}
+    assert result.selected_pass == selected and result.result_selection == "best"
+    assert result.response.usage.total_tokens == 45
+    assert [attempt["reward"] for attempt in result.attempts] == rewards
+    trajectory = TrajectoryRecord.model_validate(result.ng_trajectory)
+    assert len(trajectory.turns) == 3
+    assert [call.response_id for call in trajectory.invocations[0].model_calls] == [
+        "response-1",
+        "response-2",
+        "response-3",
+    ]
+
+
+async def test_best_pass_excludes_failed_renders(harness):
+    agent, request, body, _, _ = harness(
+        num_passes=2, results=[{"reward": 0.4}, {"reward": 0, "render": {"status": "code_error"}}]
+    )
+    agent.config.result_selection = "best"
+    result = await agent.run(request, body)
+    assert result.selected_pass == 1 and result.reward == 0.4
+    assert result.render["status"] == "ok"
+
+
+async def test_best_pass_does_not_hide_masked_failure(harness):
+    agent, request, body, _, _ = harness(num_passes=2, results=[{"reward": 0.8}, {"reward": 0, "mask_sample": True}])
+    agent.config.result_selection = "best"
+    result = await agent.run(request, body)
+    assert result.mask_sample and result.reward == 0 and result.selected_pass == 2
+
+
 async def test_feedback_includes_only_imperfect_category_rationales(harness):
     rubric = {
         "category_scores": {
@@ -361,3 +399,134 @@ def test_run_route_registers_its_success_response_schema(harness):
     schema = agent.setup_webserver().openapi()
     response = schema["paths"]["/run"]["post"]["responses"]["200"]
     assert response["content"]["application/json"]["schema"]["$ref"].endswith("/SimpleAgentVerifyResponse")
+
+
+@pytest.mark.parametrize("include_image", [True, False])
+async def test_rendered_image_feedback_is_embedded(harness, include_image):
+    image = "data:image/png;base64,rendered"
+    agent, request, body, calls, verified = harness(num_passes=2, results=[{"rendered_image": image}, {"reward": 1}])
+    agent.config.include_rendered_image = include_image
+    original = body.model_dump()
+    await agent.run(request, body)
+    assert body.model_dump() == original
+    assert verified[0]["include_rendered_image"] == include_image
+    content = calls[1].input[-1].content
+    if include_image:
+        assert content[1]["image_url"] == image
+        assert "Fix label 1" in content[2]["text"]
+        assert "Numeric feedback" not in content[2]["text"]
+    else:
+        assert isinstance(content, str) and image not in content
+
+
+@pytest.mark.parametrize("judge_scores,pixel_scores", [(False, False), (True, False), (False, True), (True, True)])
+async def test_numeric_feedback_is_opt_in(harness, judge_scores, pixel_scores):
+    fields = {
+        "rubric_result": {"raw_score_0_to_5": 3.75, "category_scores": {}},
+        "pixel_scores": {
+            "foreground_rgb_similarity": 0.123,
+            "foreground_tolerant_f1": 0.234,
+            "edge_tolerant_f1": 0.345,
+            "rgb_overlap": 0.456,
+            "reference_sha256": "PRIVATE_HASH",
+            "candidate_sha256": "PRIVATE_HASH",
+        },
+    }
+    agent, request, body, calls, verified = harness(num_passes=2, results=[fields, {"reward": 1}])
+    agent.config.include_judge_scores = judge_scores
+    agent.config.include_pixel_scores = pixel_scores
+    await agent.run(request, body)
+    content = calls[1].input[-1].content
+    assert ("judge_score_0_to_5" in content) == judge_scores
+    assert ("3.75" in content) == judge_scores
+    assert ("pixel_scores_0_to_1" in content) == pixel_scores
+    assert ("0.123" in content) == pixel_scores
+    assert "PRIVATE_HASH" not in content
+    assert verified[0]["include_pixel_scores"] == pixel_scores
+
+
+@pytest.mark.parametrize("score,expected", [(5, 1), (4.9999, 2), (None, 2)])
+async def test_stop_on_raw_judge_score_is_independent_of_pixel_reward(harness, score, expected):
+    fields = {"reward": 0.6, "rubric_result": {"raw_score_0_to_5": score}, "use_blended_reward": True}
+    agent, request, body, calls, _ = harness(num_passes=2, results=[fields, fields])
+    agent.config.stop_on = "judge_score"
+    result = await agent.run(request, body)
+    assert len(calls) == expected and result.reward == 0.6
+
+
+async def test_failed_render_cannot_stop_on_stale_judge_score(harness):
+    fields = {"reward": 0, "render": {"status": "code_error"}, "rubric_result": {"raw_score_0_to_5": 5}}
+    agent, request, body, calls, _ = harness(num_passes=2, results=[fields, fields])
+    agent.config.stop_on = "judge_score"
+    await agent.run(request, body)
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("blended", [False, True])
+async def test_stops_at_rounded_final_judge_score(harness, blended):
+    rubric = {"raw_score_0_to_5": 4.96, "final_rating_0_to_5": 4.2 if blended else 5.0}
+    if blended:
+        rubric["llm_final_rating_0_to_5"] = 5.0
+    agent, request, body, calls, _ = harness(num_passes=3, results=[{"reward": 0.84, "rubric_result": rubric}])
+    agent.config.stop_on = "final_judge_score"
+    result = await agent.run(request, body)
+    assert len(calls) == 1 and result.reward == 0.84
+
+
+@pytest.mark.parametrize(
+    "score,edge,same_dimensions,expected",
+    [
+        (4.5, 0.9, True, 1),
+        (4.4, 0.9, True, 2),
+        (4.5, 0.89, True, 2),
+        (4.5, 0.9, False, 2),
+    ],
+)
+async def test_acceptance_thresholds_request_metrics_and_stop(harness, score, edge, same_dimensions, expected):
+    fields = {
+        "rubric_result": {"final_rating_0_to_5": score},
+        "pixel_scores": {"edge_tolerant_f1": edge, "same_dimensions": same_dimensions},
+    }
+    agent, request, body, calls, verified = harness(num_passes=2, results=[fields, fields])
+    agent.config.minimum_scores = {"overall_rubric_score": 4.5, "edge_tolerant_f1": 0.9}
+    result = await agent.run(request, body)
+    assert len(calls) == expected
+    assert all(item["include_pixel_scores"] for item in verified)
+    assert result.reward == 0.5
+
+
+@pytest.mark.parametrize(
+    "minimums",
+    [
+        {"edge_tolerant_f1": 1.1},
+        {"overall_rubric_score": 5.1},
+        {"rgb_overlap": -0.1},
+        {"rgb_overlap": float("nan")},
+        {"unknown": 0.5},
+    ],
+)
+def test_invalid_acceptance_thresholds(minimums):
+    with pytest.raises(ValidationError):
+        config(minimum_scores=minimums)
+
+
+async def test_acceptance_can_ignore_dimensions_without_exposing_numeric_feedback(harness):
+    fields = {
+        "rubric_result": {"final_rating_0_to_5": 4.5},
+        "pixel_scores": {"edge_tolerant_f1": 0.9, "same_dimensions": False},
+    }
+    agent, request, body, calls, _ = harness(num_passes=2, results=[fields, fields])
+    agent.config.minimum_scores = {"edge_tolerant_f1": 0.9}
+    agent.config.require_same_dimensions = False
+    result = await agent.run(request, body)
+    assert len(calls) == 1
+    assert "Numeric feedback" not in result.attempts[0]["feedback"]
+
+
+@pytest.mark.parametrize("score", [None, 4.9])
+async def test_final_judge_stopping_requires_available_perfect_rating(harness, score):
+    fields = {"rubric_result": {"raw_score_0_to_5": 5.0, "final_rating_0_to_5": score}}
+    agent, request, body, calls, _ = harness(num_passes=2, results=[fields, fields])
+    agent.config.stop_on = "final_judge_score"
+    result = await agent.run(request, body)
+    assert len(calls) == 2 and result.reward == 0.5

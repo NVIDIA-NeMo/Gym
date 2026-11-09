@@ -49,15 +49,15 @@ def normalize_code(text: str) -> str:
     return (match.group(1) if match else text) + "\n"
 
 
-def validate_png(path: Path) -> tuple[int, int]:
+def validate_image(path: Path) -> tuple[int, int]:
     """Reject unsafe or invalid downloads before exposing them to the judge."""
     if path.is_symlink() or not path.is_file():
         raise ValueError("Output is not a regular file")
     if path.stat().st_size > MAX_BYTES:
         raise ValueError("Output exceeds 32 MiB")
     with Image.open(path) as im:
-        if im.format != "PNG":
-            raise ValueError("Output is not PNG")
+        if im.format not in {"PNG", "JPEG", "WEBP", "GIF", "TIFF", "BMP"}:
+            raise ValueError(f"Unsupported output image format: {im.format}")
         width, height = im.size
         if width * height > MAX_PIXELS:
             raise ValueError("Output exceeds 25 million pixels")
@@ -204,7 +204,7 @@ async def render(
         path = artifact_dir / "output.png"
         await sandbox.download("/workspace/output.png", path)
         try:
-            result.width, result.height = validate_png(path)
+            result.width, result.height = validate_image(path)
         except (ValueError, OSError, SyntaxError, Image.DecompressionBombError) as exc:
             # Pillow raises SyntaxError for malformed PNG chunks and checksum failures.
             path.unlink(missing_ok=True)

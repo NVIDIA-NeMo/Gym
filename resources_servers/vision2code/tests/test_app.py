@@ -56,6 +56,8 @@ def setup(tmp_path, monkeypatch):
             input=[], temperature=0, max_output_tokens=4096
         ),
         sandbox_image="/image.sqsh",
+        judge_repair_mode="repair",
+        judge_repair_attempts=1,
         artifact_dir=str(tmp_path / "artifacts"),
     )
     server = app.Vision2CodeServer(config=config, server_client=MagicMock(spec=ServerClient))
@@ -84,7 +86,7 @@ def setup(tmp_path, monkeypatch):
     render_mock = AsyncMock(side_effect=render)
     judge_mock = AsyncMock()
     monkeypatch.setattr(app, "render", render_mock)
-    monkeypatch.setattr(app, "call_judge", judge_mock)
+    monkeypatch.setattr(app, "request_judgment", judge_mock)
     return server, body, render_mock, judge_mock
 
 
@@ -132,6 +134,7 @@ async def test_reward_curve_applies_after_rubric_caps(setup):
 async def test_blend_caps_only_the_judge_term_and_bypasses_power(setup, power, apply_caps, expected_reward):
     server, body, _, judge = setup
     server.config.use_blended_reward = True
+    server.config.spatial_uncapped_judge_squared = True
     server.config.blended_reward_apply_judge_caps = apply_caps
     server.config.reward_power = power
     ref = Path(body.verifier_metadata.image_path)
@@ -150,11 +153,48 @@ async def test_blend_caps_only_the_judge_term_and_bypasses_power(setup, power, a
     assert result.rubric_result["raw_score_0_to_5"] == 3.8
     assert result.rubric_result["final_rating_0_to_5"] == pytest.approx(5 * expected_reward)
     assert result.blended_reward_apply_judge_caps == apply_caps
+    assert not result.spatial_uncapped_judge_squared
     assert result.rubric_result["scoring_method"] == ("blend_a_capped" if apply_caps else "blend_a")
     assert result.rubric_result["deterministic_scores"]["foreground_rgb_similarity"] == 1
     saved = json.loads(Path(result.artifacts["result"]).read_text())
     assert saved["use_blended_reward"] and saved["reward"] == pytest.approx(expected_reward)
     assert saved["blended_reward_apply_judge_caps"] == apply_caps
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("override", [False, True])
+async def test_spatial_training_reward_uses_uncapped_unrounded_judge_without_pixels(setup, monkeypatch, override):
+    server, body, _, judge = setup
+    body.verifier_metadata.rubric = "spatialvlm_qa"
+    server.config.spatial_uncapped_judge_squared = override
+    server.config.use_blended_reward = True
+    server.config.blended_reward_apply_judge_caps = True
+    scores = {category["id"]: 4.7 for category in DATASET_RUBRICS["spatialvlm_qa"]["categories"]}
+    scores["spatial_relation_correctness"] = 1.0
+    judge.return_value = response(json.dumps({"category_scores": scores, "rationales": {}}))
+    metric_mock = MagicMock(
+        return_value=dict.fromkeys(
+            ("foreground_rgb_similarity", "foreground_tolerant_f1", "edge_tolerant_f1", "deterministic_weighted"), 1.0
+        )
+    )
+    monkeypatch.setattr(app, "image_metrics", metric_mock)
+    result = await server.verify(body)
+    assert not result.mask_sample
+    raw = result.rubric_result["raw_score_0_to_5"]
+    capped = result.rubric_result.get("llm_final_rating_0_to_5", result.rubric_result["final_rating_0_to_5"])
+    assert raw > capped
+    assert result.spatial_uncapped_judge_squared == override
+    if override:
+        assert result.reward == pytest.approx((raw / 5) ** 2)
+        assert result.reward != pytest.approx((round(raw, 1) / 5) ** 2)
+        assert not result.use_blended_reward and result.reward_power == 2
+        metric_mock.assert_not_called()
+    else:
+        assert result.use_blended_reward and result.reward_power == 1
+        metric_mock.assert_called_once()
+    saved = json.loads(Path(result.artifacts["result"]).read_text())
+    assert saved["reward"] == result.reward
+    assert saved["spatial_uncapped_judge_squared"] == override
 
 
 @pytest.mark.asyncio
@@ -197,8 +237,8 @@ async def test_same_environment_all_rubrics(setup, name):
     assert result.reward_power == 2.0
     kwargs = judge.call_args.kwargs
     assert kwargs["server_name"] == "separate_judge"
-    assert kwargs["url_path"] == "/v1/responses"
-    request = kwargs["json"].model_dump()
+    assert kwargs["attempts"] == 3
+    request = kwargs["params"].model_dump()
     assert request["temperature"] == 0
     assert request["tools"] == []
     assert request["input"][0]["content"] == system_prompt(dataset_name=name)
@@ -284,7 +324,7 @@ async def test_committed_reference_is_independent_of_server_working_directory(se
     judge.return_value = judge_result("ChartQA")
     result = await server.verify(body)
     assert result.reward == pytest.approx(0.64) and not result.mask_sample
-    content = judge.call_args.kwargs["json"].model_dump()["input"][1]["content"]
+    content = judge.call_args.kwargs["params"].model_dump()["input"][1]["content"]
     expected = json.loads(example.read_text().splitlines()[0])["responses_create_params"]["input"][1]["content"][0][
         "image_url"
     ]
@@ -370,6 +410,7 @@ async def test_reverification_clears_stale_failure_fields(setup):
             "mask_sample": True,
             "failure_kind": "judge_failed",
             "_ng_failure_class": "judge_failed",
+            "_ng_failure_id": "previous-judge-failure",
             "instance_config": {"mask_sample": True},
         }
     )
@@ -378,4 +419,133 @@ async def test_reverification_clears_stale_failure_fields(setup):
     assert result.reward == pytest.approx(0.64) and not result.mask_sample
     assert result.reward_power == 2.0
     assert result.failure_kind is None and "_ng_failure_class" not in result.model_dump()
+    assert "_ng_failure_id" not in result.model_dump()
     assert result.model_dump()["instance_config"]["mask_sample"] is False
+
+
+@pytest.mark.parametrize("mode", ["repair", "rejudge"])
+@pytest.mark.parametrize("name", ["ChartQA", "generic", "DocVQA-v2", "EEE-Bench-v2"])
+async def test_judge_recovery_preserves_images_and_rubric(setup, mode, name):
+    server, body, _, judge = setup
+    body.verifier_metadata.rubric = name
+    server.config.judge_repair_mode = mode
+    server.config.judge_repair_max_output_tokens = 6000
+    judge.side_effect = [response("malformed prior response"), judge_result(name)]
+    result = await server.verify(body)
+    assert not result.mask_sample and result.reward == pytest.approx(0.64)
+    assert judge.await_count == 2
+    first, second = [call.kwargs["params"].model_dump() for call in judge.await_args_list]
+    assert second["input"][0] == first["input"][0]
+    assert second["input"][1]["content"][:-1] == first["input"][1]["content"]
+    assert second["max_output_tokens"] == 6000 and second["temperature"] == 0
+    prompt = second["input"][1]["content"][-1]["text"]
+    if mode == "repair":
+        assert "malformed prior response" in prompt
+    else:
+        assert "malformed prior response" not in prompt
+        schema = second["text"]["format"]["schema"]
+        definition = GENERIC_RUBRIC if name == "generic" else DATASET_RUBRICS[name]
+        assert set(schema["properties"]["category_scores"]["required"]) == {c["id"] for c in definition["categories"]}
+        assert schema["properties"]["issues"]["maxItems"] == 5
+    assert [attempt["mode"] for attempt in result.judge_diagnostics["attempts"]] == ["initial", mode]
+    assert "error" in result.judge_diagnostics["attempts"][0]
+
+
+@pytest.mark.parametrize("limit", [0, 1, 2])
+async def test_judge_recovery_is_bounded_and_masks_exhaustion(setup, limit):
+    server, body, _, judge = setup
+    server.config.judge_repair_attempts = limit
+    judge.return_value = response("invalid")
+    result = await server.verify(body)
+    assert judge.await_count == limit + 1
+    assert result.mask_sample and result.failure_kind == "judge_unparseable"
+    assert len(result.judge_diagnostics["attempts"]) == limit + 1
+
+
+async def test_recovery_uses_latest_invalid_response_and_validates_scores(setup):
+    server, body, _, judge = setup
+    server.config.judge_repair_attempts = 2
+    judge.side_effect = [response("first invalid"), judge_result("ChartQA", "NaN"), judge_result("ChartQA")]
+    result = await server.verify(body)
+    assert not result.mask_sample
+    prompt = judge.await_args_list[-1].kwargs["params"].model_dump()["input"][1]["content"][-1]["text"]
+    assert "NaN" in prompt and "first invalid" not in prompt
+
+
+async def test_feedback_image_and_metrics_are_explicit_transport_fields(setup):
+    import base64
+
+    server, body, _, judge = setup
+    judge.return_value = judge_result("ChartQA")
+    baseline = await server.verify(body)
+    assert baseline.rendered_image is None and baseline.pixel_scores is None
+    body.include_rendered_image = True
+    body.include_pixel_scores = True
+    result = await server.verify(body)
+    assert result.reward == baseline.reward and not result.mask_sample
+    assert base64.b64decode(result.rendered_image.split(",")[1]) == Path(result.artifacts["image"]).read_bytes()
+    assert "edge_tolerant_f1" in result.pixel_scores
+    saved = json.loads(Path(result.artifacts["result"]).read_text())
+    assert "rendered_image" not in saved
+
+
+async def test_judge_transport_event_is_not_json_failure(setup):
+    from nemo_gym.core import FailureBoundary, NgFailureEvent
+
+    server, body, _, judge = setup
+    failure = NgFailureEvent(
+        boundary=FailureBoundary.RESOURCES_SERVER,
+        failure_kind="judge_failed",
+        failure_reason="Judge endpoint returned HTTP 500",
+        http_status=500,
+    )
+    judge.side_effect = failure
+    result = await server.verify(body)
+    assert result.mask_sample and result.failure_kind == "judge_failed"
+    assert result.model_extra["_ng_failure_id"] == failure.event_id
+    assert judge.await_count == 1  # Transport retries are separate from JSON recovery.
+    assert result.judge_diagnostics["attempts"] == []
+
+
+async def test_invalid_judgment_retries_exact_original_request(setup):
+    server, body, _, judge = setup
+    server.config.judge_repair_mode = "retry"
+    server.config.judge_repair_attempts = 2
+    server.config.judge_repair_max_output_tokens = 6000
+    server.config.judge_responses_create_params.temperature = 0.7
+    judge.side_effect = [response("truncated"), judge_result("ChartQA", "NaN"), judge_result("ChartQA")]
+    result = await server.verify(body)
+    assert not result.mask_sample
+    requests = [call.kwargs["params"].model_dump() for call in judge.await_args_list]
+    assert requests[0] == requests[1] == requests[2]
+    assert requests[0]["temperature"] == 0.7 and requests[0]["max_output_tokens"] == 4096
+    assert [item["mode"] for item in result.judge_diagnostics["attempts"]] == ["initial", "retry", "retry"]
+
+
+async def test_feedback_image_mime_matches_rendered_contents(setup):
+    server, body, renderer, judge = setup
+
+    async def jpeg_render(**kwargs):
+        Image.new("RGB", (80, 60), "red").save(kwargs["artifact_dir"] / "output.png", format="JPEG")
+        return RenderResult(status="ok")
+
+    renderer.side_effect = jpeg_render
+    judge.return_value = judge_result("ChartQA")
+    body.include_rendered_image = True
+    result = await server.verify(body)
+    assert not result.mask_sample
+    assert result.rendered_image.startswith("data:image/jpeg;base64,")
+    request = judge.await_args.kwargs["params"].model_dump()
+    images = [part["image_url"] for part in request["input"][1]["content"] if part["type"] == "input_image"]
+    assert images[1].startswith("data:image/jpeg;base64,")
+
+
+async def test_final_judge_rating_rounds_weighted_score(setup):
+    server, body, _, judge = setup
+    scores = {category["id"]: 4 for category in DATASET_RUBRICS["ChartQA"]["categories"]}
+    scores["numeric_information_fidelity"] = 4.1
+    judge.return_value = response(json.dumps({"category_scores": scores, "rationales": {}}))
+    result = await server.verify(body)
+    assert result.rubric_result["raw_score_0_to_5"] == 4.03
+    assert result.rubric_result["final_rating_0_to_5"] == 4.0
+    assert result.reward == pytest.approx(0.64)

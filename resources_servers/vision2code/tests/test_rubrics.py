@@ -12,35 +12,61 @@ from resources_servers.vision2code import evaluation, generic_rubric, rubrics
 
 FIXTURES = Path(__file__).parent / "fixtures"
 CASES = json.loads((FIXTURES / "golden.json").read_text())
+ORIGINAL = json.loads((FIXTURES / "original-doc-eee.json").read_text())["rubrics"]
+VARIANTS = {"DocVQA": "DocVQA-v2", "EEE-Bench": "EEE-Bench-v2"}
+
+
+def historical_name(name):
+    return VARIANTS.get(name, name)
+
+
+def rename_dataset(value, name, replacement):
+    return json.loads(json.dumps(value).replace(name, replacement))
 
 
 @pytest.mark.parametrize("case", CASES, ids=[f"{c['dataset']}-{i}" for i, c in enumerate(CASES)])
 def test_upstream_golden(case):
     actual = evaluation.aggregate_rating(
-        case["parsed"], dataset_name=case["dataset"], candidate_inspection=case["inspection"]
+        case["parsed"], dataset_name=historical_name(case["dataset"]), candidate_inspection=case["inspection"]
     )
-    assert {key: actual[key] for key in case["expected"]} == case["expected"]
+    expected = rename_dataset(case["expected"], case["dataset"], historical_name(case["dataset"]))
+    assert {key: actual[key] for key in expected} == expected
 
 
 def test_definitions_and_system_prompt():
     definitions = json.loads((FIXTURES / "definitions.json").read_text())
+    for name, variant in VARIANTS.items():
+        definitions[variant] = rename_dataset(definitions[name], name, variant)
+        definitions[name] = ORIGINAL[name]["definition"]
     assert {**rubrics.DATASET_RUBRICS, "generic": generic_rubric.GENERIC_RUBRIC} == definitions
     assert rubrics.RATER_SYSTEM_PROMPT == (FIXTURES / "system-prompt.txt").read_text()
     assert set(definitions) == set(get_args(evaluation.RubricName))
-    assert len(definitions) == 17
+    assert len(definitions) == 19
     assert generic_rubric.GENERIC_RATER_SYSTEM_PROMPT == (FIXTURES / "generic-system-prompt.txt").read_text()
 
 
 @pytest.mark.parametrize("name", get_args(evaluation.RubricName))
 def test_failure_matches_upstream(name):
-    expected = json.loads((FIXTURES / "failure-golden.json").read_text())[name]
+    if name in ORIGINAL:
+        expected = ORIGINAL[name]["failure"] | {"rubric_version": rubrics.RUBRIC_VERSION}
+    else:
+        source_name = next((key for key, value in VARIANTS.items() if value == name), name)
+        expected = json.loads((FIXTURES / "failure-golden.json").read_text())[source_name]
+        expected = rename_dataset(expected, source_name, name)
     assert evaluation.build_render_failure_rating("code_error", dataset_name=name) == expected
 
 
 def test_user_prompts(tmp_path):
     path = tmp_path / "ref.png"
     Image.new("RGB", (40, 40), "white").save(path)
-    for name, expected in json.loads((FIXTURES / "user-prompts.json").read_text()).items():
+    prompts = json.loads((FIXTURES / "user-prompts.json").read_text())
+    for name, variant in VARIANTS.items():
+        prompts[variant] = rename_dataset(prompts[name], name, variant)
+        # Only the existing Gym-wide rubric version label differs from the original prompt.
+        prompts[name] = rename_dataset(
+            ORIGINAL[name]["user_prompt"], "recreation_rubric_v4_decimal_per_dataset", rubrics.RUBRIC_VERSION
+        )
+    for name, expected in prompts.items():
         actual = evaluation.build_rater_user_content(
             source_image_path=path, rendered_image_path=path, dataset_name=name
         )
@@ -98,3 +124,26 @@ def test_invalid_scores(name, score):
 def test_json_parser(wrapper):
     obj = {"category_scores": {"x": 3}}
     assert rubrics.parse_json_object(wrapper.format(json.dumps(obj))) == obj
+
+
+@pytest.mark.parametrize("name", ["DocVQA", "EEE-Bench"])
+def test_original_rubric_weights_and_caps(name):
+    for case in ORIGINAL[name]["golden"]:
+        actual = evaluation.aggregate_rating(case["parsed"], dataset_name=name, candidate_inspection={})
+        assert {key: actual[key] for key in case["expected"]} == case["expected"]
+
+
+@pytest.mark.parametrize("image_format", ["TIFF", "BMP"])
+def test_judge_image_encoding_converts_raster_formats_without_changing_artifact(tmp_path, image_format):
+    import base64
+    from io import BytesIO
+
+    path = tmp_path / "output.png"
+    Image.new("RGB", (80, 60), "red").save(path, format=image_format)
+    original = path.read_bytes()
+    url = rubrics.encode_image_to_data_url(path)
+    assert url.startswith("data:image/png;base64,")
+    with Image.open(BytesIO(base64.b64decode(url.split(",")[1]))) as decoded:
+        assert decoded.size == (80, 60)
+        assert decoded.getpixel((0, 0)) == (255, 0, 0, 255)
+    assert path.read_bytes() == original
