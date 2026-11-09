@@ -471,6 +471,33 @@ digest-covered `media` summary. Deploy the paired RL changes with this adapter; 
 checkpoints written in either older format need a separate migration. Supported
 processors and modalities are enforced by the framework's inference worker.
 
+## Sampler top-k and tool images in local capture
+
+Under worker custody the framework's inference worker stages the sampler's top-k and each
+call's new media tensors itself, as attachments (see above). Local capture
+(`return_token_id_information: true` with Gym's token sink and the rebuilt `response.output`)
+records both in its own records:
+
+- **Sampler top-k.** Set `sampling_overrides: {top_logprobs: <k>}` on the `vllm_model` server;
+  overrides apply after the capture path's zero default. The served message carries
+  `sampler_topk_token_ids` and `sampler_topk_logprobs`, one row of `k` candidates per generated
+  token. They come from the message when the server attaches them (NeMo RL's names) and otherwise
+  from each position's `top_logprobs`. The record stores them once per call, and the rebuilt
+  output puts them on the item that carries that call's generated tokens, next to
+  `routed_experts`. vLLM reports the candidates in its configured `logprobs_mode`; run it with
+  `processed_logprobs` when the trainer needs the distribution the sampler drew from. A request
+  that echoes them back on an assistant turn does not send them to the engine. The
+  `/v1/completions` rendering path (`render_chat_template`) does not read them.
+- **Tool images.** A call whose request continues a model turn records the images in the
+  messages after that turn (`TokenEntry.interstitial_images`), for example a crop returned in a
+  tool message or a following user message. The rebuilt output places them as an image-only
+  `user` message without token fields right before the generated item of the call that saw
+  them, so a trainer that bins images on non-assistant items to the next generated item gets the
+  pixels for each turn's image placeholders. The root call's images are the rollout's input and
+  are not repeated. Image parts inside a Responses `function_call_output` are not recorded: the
+  model server sends them to the engine as a text placeholder unless it inlines tool-output images,
+  and capture cannot see that setting.
+
 ## Retire capture ledgers
 
 With external staging, the model server keeps a capture ledger for each rollout: one `<rollout_id>.lineage.jsonl` file in the lineage store's directory, recording the model calls the rollout made without their token arrays.

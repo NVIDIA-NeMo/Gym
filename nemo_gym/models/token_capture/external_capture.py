@@ -97,12 +97,8 @@ def _strip_capture_transport_fields(payload: dict[str, Any]) -> None:
         choice.pop("token_ids", None)
         message = choice.get("message")
         if isinstance(message, dict):
-            for field_name in (
-                *TOKEN_FIELDS,
-                *_MEGATRON_TRANSPORT_FIELDS,
-                "sampler_topk_token_ids",
-                "sampler_topk_logprobs",
-            ):
+            # ``TOKEN_FIELDS`` includes the sampler top-k, which the worker stages beside the record.
+            for field_name in (*TOKEN_FIELDS, *_MEGATRON_TRANSPORT_FIELDS):
                 message.pop(field_name, None)
 
 

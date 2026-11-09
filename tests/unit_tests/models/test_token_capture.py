@@ -127,6 +127,8 @@ def test_extract_token_fields_responses_shape():
         "generation_token_ids": GTOKS,
         "generation_log_probs": LPS,
         "routed_experts": None,
+        "sampler_topk_token_ids": None,
+        "sampler_topk_logprobs": None,
     }
 
 

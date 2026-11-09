@@ -53,6 +53,7 @@ from nemo_gym.models.token_capture.records import (
     ParentResolutionStatus,
     TokenEntry,
     extract_token_fields,
+    interstitial_image_sources,
     response_finish_reason,
     response_to_output_items,
     stamp_lineage,
@@ -626,6 +627,13 @@ async def capture_tokens(
             generation_token_ids=info["generation_token_ids"],
             generation_log_probs=info["generation_log_probs"],
             routed_experts=info.get("routed_experts"),
+            sampler_topk_token_ids=info.get("sampler_topk_token_ids"),
+            sampler_topk_logprobs=info.get("sampler_topk_logprobs"),
+            # Pixels of tool-produced images reach a trainer only through the record:
+            # the prompt token ids carry just their placeholders.
+            interstitial_images=(
+                interstitial_image_sources(list(request_messages)) if request_messages is not None else None
+            ),
             # Preserve content for text-based training penalties.
             output_items=content_items,
             token_item_index=token_item_index,

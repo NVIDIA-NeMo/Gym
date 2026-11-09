@@ -99,6 +99,7 @@ if TYPE_CHECKING:
     from nemo_gym.models.token_capture.records import (
         CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
         ENGINE_REFUSED_CALL_REASON,
+        SAMPLER_TOPK_FIELDS,
         TOKEN_ENTRY_MIN_SCHEMA_VERSION,
         TOKEN_ENTRY_RECORD_SCHEMA_VERSION,
         TOKEN_FIELDS,
@@ -113,7 +114,9 @@ if TYPE_CHECKING:
         cumulative_tokens,
         extract_token_fields,
         incomplete_reason_for_finish_reason,
+        interstitial_image_sources,
         stamp_lineage,
+        validate_sampler_topk,
     )
     from nemo_gym.models.token_capture.sink import (
         NG_CAPTURE_FIELD,
@@ -165,6 +168,7 @@ _PUBLIC_API = {
     "RolloutLineage": "lineage",
     "RolloutRemovalPayload": "protocols",
     "RolloutRetiredError": "protocols",
+    "SAMPLER_TOPK_FIELDS": "records",
     "TOKEN_ENTRY_MIN_SCHEMA_VERSION": "records",
     "TOKEN_ENTRY_RECORD_SCHEMA_VERSION": "records",
     "TOKEN_FIELDS": "records",
@@ -201,6 +205,7 @@ _PUBLIC_API = {
     "installed_lineage_store": "protocols",
     "installed_token_sink": "protocols",
     "installed_token_source": "protocols",
+    "interstitial_image_sources": "records",
     "make_token_store": "store",
     "mark_external_staging_committed": "sink",
     "mask_incomplete_when_attributed_from_config": "consumer",
@@ -222,6 +227,7 @@ _PUBLIC_API = {
     "trajectories_for_rollout": "consumer",
     "trajectories_from_source": "consumer",
     "validate_rollout_id": "store",
+    "validate_sampler_topk": "records",
 }
 __getattr__, __dir__ = lazy_exports(__name__, _PUBLIC_API)
 __all__ = sorted(_PUBLIC_API)
