@@ -411,6 +411,9 @@ def prepare(args: argparse.Namespace) -> dict:
     """Write a fixed cohort/task/harness order and its complete configuration provenance."""
     rl_root, output = args.rl_root.resolve(), args.output_dir.resolve()
     validate_harnesses(args.harnesses, route=args.route)
+    grader_archive = getattr(args, "grader_python_archive", None)
+    if grader_archive is not None and args.route != "harbor":
+        raise ValueError("--grader-python-archive requires --route harbor")
     generations = getattr(args, "generations_per_prompt", 4)
     if generations <= 0:
         raise ValueError("Generations per prompt must be positive")
@@ -471,6 +474,7 @@ def prepare(args: argparse.Namespace) -> dict:
             agent_timeout_sec=480,
             evaluation_timeout_sec=180,
             default_source="swe_rebench",
+            grader_python_archive=grader_archive,
         )
         prepared = prepare_target(
             str(output / "harbor"), output_root=output / "prepared", sandbox_provider="opensandbox"
@@ -539,6 +543,7 @@ def prepare(args: argparse.Namespace) -> dict:
         "parser": {"path": str(parser_cache / "SWE-rebench-V2"), "commit": PARSER_REVISION},
         "model": model_provenance,
         "route": args.route,
+        "grader_python_archive": str(grader_archive) if grader_archive is not None else None,
         "harnesses": args.harnesses,
         "hardware_profile": profile_name,
         "tasks": tasks,
@@ -585,6 +590,11 @@ def main() -> None:
     for name in ("roster", "image-pins"):
         parser.add_argument(f"--{name}", type=Path, default=ROOT / "examples/training/swe_selection.json")
     parser.add_argument("--route", choices=("old-run", "single-agent-turn", "harbor"), default="single-agent-turn")
+    parser.add_argument(
+        "--grader-python-archive",
+        type=Path,
+        help="Harbor only: supplied task-platform standalone Python archive for hidden grading; task tests keep their interpreter",
+    )
     parser.add_argument("--harnesses", choices=HARNESSES, nargs="+", default=["opencode"])
     parser.add_argument(
         "--codex-catalog", type=Path, help="Pinned export models.json with adjacent fallback.json and provenance.json"

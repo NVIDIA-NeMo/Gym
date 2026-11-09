@@ -626,6 +626,8 @@ def test_preparation_materializes_the_requested_update_budget(
         "load_rl_config",
         lambda root: OmegaConf.load(recipe.ROOT / "examples/training/swe_single_agent_turn.yaml"),
     )
+    converter_options = {}
+    grader_archive = tmp_path / "qualified-python.tar.gz" if route == "harbor" and steps == 20 else None
     if route == "harbor":
         # Image/registry preparation is covered separately; exercise the real Harbor row materializer here.
         folder = tmp_path / "harbor-tasks"
@@ -641,7 +643,7 @@ def test_preparation_materializes_the_requested_update_budget(
             )
             for row in rows
         ]
-        monkeypatch.setattr(recipe, "convert", lambda *args, **kwargs: None)
+        monkeypatch.setattr(recipe, "convert", lambda *args, **kwargs: converter_options.update(kwargs))
         monkeypatch.setattr(
             recipe, "prepare_target", lambda *args, **kwargs: SimpleNamespace(tasks=tasks, folder=folder, skipped=[])
         )
@@ -663,12 +665,16 @@ def test_preparation_materializes_the_requested_update_budget(
         wandb_project=None,
         codex_catalog=codex_catalog if "codex" in harnesses else None,
         hardware_profile=hardware_profile,
+        grader_python_archive=grader_archive,
     )
     if count < 8:
         args.max_inflight_prompts = 2
         args.wandb_project = "test-training"
         args.wandb_entity = "test-entity"
     manifest = recipe.prepare(args)
+    assert manifest["grader_python_archive"] == (str(grader_archive) if grader_archive is not None else None)
+    if route == "harbor":
+        assert converter_options["grader_python_archive"] == grader_archive
     config = OmegaConf.load(args.output_dir / "config.yaml")
     # The RL driver resolves the whole prepared config before Gym injects any aliases.
     resolved_config = OmegaConf.to_container(config, resolve=True, throw_on_missing=True)
