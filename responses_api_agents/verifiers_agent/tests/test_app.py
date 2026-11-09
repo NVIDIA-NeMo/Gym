@@ -933,7 +933,7 @@ class TestRolloutErrorFact:
         fact = _rollout_error_fact({"error": "ValueError", "message": "x" * 5000})
         assert len(fact["message_head"]) == 500
 
-    def _run(self, error, *, call_errors=(), **config_options) -> dict:
+    def _run(self, error, *, call_errors=(), rubric_reward=0.0, **config_options) -> dict:
         """One rollout whose policy client sees each of ``call_errors`` (an exception raises, anything else returns)
         before verifiers reports ``error`` as the error the rollout ended on."""
         config = VerifiersAgentConfig(
@@ -956,7 +956,7 @@ class TestRolloutErrorFact:
                         await client.get_native_response([], "policy", {})
                     except Exception:
                         pass
-            return [{"reward": 0.0, "metrics": {}, "completion": [], "trajectory": [], "error": error}]
+            return [{"reward": rubric_reward, "metrics": {}, "completion": [], "trajectory": [], "error": error}]
 
         env = MagicMock()
         env.run_group = fake_run_group
@@ -1030,6 +1030,44 @@ class TestRolloutErrorFact:
         assert (body["reward"], body["mask_sample"], body["failure_kind"]) == (0.0, False, "model_request_error")
         assert is_policy_counted_zero(body)
         assert masked_infrastructure_kind(body) is None
+
+    def test_a_counted_zero_is_a_zero_even_when_the_rubric_scored_the_errored_rollout_positive(self) -> None:
+        body = self._run(self._ended_on_model_error(400), call_errors=[self._http_error(400)], rubric_reward=1.0)
+
+        assert (body["reward"], body["mask_sample"], body["failure_outcome_action"]) == (0.0, False, "count_as_zero")
+        assert is_policy_counted_zero(body)
+
+    def test_a_masked_retry_keeps_the_rubric_reward_it_was_given(self) -> None:
+        body = self._run(self._ended_on_model_error(503), call_errors=[self._http_error(503)], rubric_reward=1.0)
+
+        assert body["mask_sample"] is True and body["failure_outcome_action"] == "retry"
+        assert body["reward"] == 1.0
+
+    @pytest.mark.parametrize(
+        "override",
+        [
+            StageOutcomePolicyConfig(by_stage={"agent": {"by_status_code": {503: "fail"}}}),
+            {"by_stage": {"agent": {"by_status_code": {503: "fail"}}}},
+        ],
+    )
+    def test_a_partial_policy_override_keeps_the_untouched_default_rules(self, override) -> None:
+        agent_policy = VerifiersAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            outcome_policy=override,
+        ).outcome_policy.by_stage["agent"]
+
+        assert agent_policy.by_status_code[503] == "fail"
+        assert agent_policy.by_status_code[429] == "retry" and agent_policy.by_status_code[400] == "count_as_zero"
+        assert agent_policy.by_failure_kind["model_transport_error"] == "retry"
+
+        body = self._run(self._ended_on_model_error(429), call_errors=[self._http_error(429)], outcome_policy=override)
+        assert body["failure_outcome_action"] == "retry"
+        body = self._run(self._ended_on_model_error(400), call_errors=[self._http_error(400)], outcome_policy=override)
+        assert is_policy_counted_zero(body)
 
     def test_a_configured_rule_counts_a_server_error_as_a_zero(self) -> None:
         policy = StageOutcomePolicyConfig(by_stage={"agent": {"by_status_code": {503: "count_as_zero"}}})

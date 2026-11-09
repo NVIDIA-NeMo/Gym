@@ -39,7 +39,7 @@ from openai import (
     DefaultAsyncHttpxClient,
     Timeout,
 )
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, field_validator
 from verifiers.clients import NeMoRLChatCompletionsClient
 
 from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
@@ -525,6 +525,12 @@ class VerifiersAgentConfig(BaseResponsesAPIAgentConfig):
     outcome_policy: StageOutcomePolicyConfig = Field(default_factory=_default_outcome_policy)
     model_name: str = Field(default="", description="Model name")
 
+    @field_validator("outcome_policy", mode="before")
+    @classmethod
+    def keep_untouched_default_rules(cls, value: object) -> object:
+        """A partial override changes only the rules it names; the others keep this agent's defaults."""
+        return StageOutcomePolicyConfig.overlay(_default_outcome_policy(), value)
+
     vf_env_id: str = Field(default="", description="Verifiers environment ID")
     vf_env_args: dict = Field(default_factory=dict, description="Verifiers environment arguments")
     export_state_columns: list[str] = Field(
@@ -975,7 +981,8 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                 ng_agent_observations=resp.ng_agent_observations,
                 responses_create_params=body.responses_create_params,
                 response=resp,
-                reward=resp.reward,
+                # A selected zero is the result, whatever the rubric scored the rollout that errored.
+                reward=0.0 if row.get("failure_outcome_action") == OutcomeAction.COUNT_AS_ZERO else resp.reward,
                 rollout_error=resp.rollout_error,
                 **row,
             )
