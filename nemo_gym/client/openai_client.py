@@ -308,11 +308,11 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         description="Extra headers to include in every request.",
     )
 
-    rollout_id_headers: List[str] = Field(
+    session_key_headers: List[str] = Field(
         default_factory=list,
         description=(
-            "Headers that carry the current rollout id on every request made for a rollout, e.g. for "
-            "session-affinity routing upstream. Requests outside a rollout do not get them."
+            "Headers that carry the current session key (`current_session_key()`) on every request made for a "
+            "rollout, e.g. for session-affinity routing upstream. Requests outside a rollout do not get them."
         ),
     )
 
@@ -391,11 +391,11 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         # Only the attempt that tripped it is the cause; later calls raise without one (no attempt was made).
         self._raise_permanent_error(cause)
 
-    def _rollout_headers(self) -> Dict[str, str]:
+    def _session_headers(self) -> Dict[str, str]:
         session_key = current_session_key()
         if session_key is None:
             return {}
-        return {name: session_key for name in self.rollout_id_headers}
+        return {name: session_key for name in self.session_key_headers}
 
     async def _request(self, **request_kwargs: Dict) -> ClientResponse:
         if self._permanent_trip is not None:
@@ -408,7 +408,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             connection_retries = MAX_NUM_TRIES
         headers = _merge_headers(
             self.default_headers,
-            self._rollout_headers(),
+            self._session_headers(),
             request_headers,
             {"Authorization": f"Bearer {self.api_key}"},
         )

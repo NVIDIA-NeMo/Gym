@@ -29,12 +29,12 @@ clients retain their existing unbounded extension for rate-limit statuses;
 ## Session-affinity routing
 
 Endpoints behind a router that pins a session to one replica (to reuse its KV cache) need every
-request of a rollout to carry the same session id. `rollout_id_headers` sends the rollout id in the
+request of a session to carry the same session id. `session_key_headers` sends the session key in the
 named headers on every upstream request made for a rollout:
 
 ```bash
 ++rollout_correlation=true \
-++policy_model.responses_api_models.openai_model.rollout_id_headers='[X-Session-Id]'
+++policy_model.responses_api_models.openai_model.session_key_headers='[X-Session-Id]'
 ```
 
 The model server learns the rollout from the `/ng-rollout/<id>` prefix that agents add to their

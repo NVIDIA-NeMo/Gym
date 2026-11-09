@@ -1673,12 +1673,12 @@ class TestApp:
         server = self._setup_server(monkeypatch)
         server._clients = [MagicMock(spec=NeMoGymAsyncOpenAI) for _ in range(4)]
         upstream = NeMoGymAsyncOpenAI(
-            api_key="abc", base_url="https://example.test/v1", rollout_id_headers=["X-Session-Id"]
+            api_key="abc", base_url="https://example.test/v1", session_key_headers=["X-Session-Id"]
         )
 
         for capture_key in ("task-7-0", "task-7-0-a2"):
             with rollout_context(capture_key):
-                header = upstream._rollout_headers()["X-Session-Id"]
+                header = upstream._session_headers()["X-Session-Id"]
                 server._resolve_client(self._request_for_session("a-cookie-session"))
 
             assert header == capture_key

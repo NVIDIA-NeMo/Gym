@@ -138,11 +138,11 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
         description="Opt-in HTTP 400 policy-refusal codes represented as refusal content, preserving error evidence and unknown usage.",
     )
     openai_default_headers: Dict[str, str] = Field(default_factory=dict)
-    rollout_id_headers: List[str] = Field(
+    session_key_headers: List[str] = Field(
         default_factory=list,
         description=(
-            "Headers that carry the rollout id to the upstream endpoint, e.g. for session-affinity routing. "
-            "The id reaches this server only when agents add the rollout prefix: set rollout_correlation, "
+            "Headers that carry the session key to the upstream endpoint, e.g. for session-affinity routing. "
+            "The key reaches this server only when agents add the rollout prefix: set rollout_correlation, "
             "observability_enabled or token capture."
         ),
     )
@@ -268,7 +268,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
             base_url=self.config.openai_base_url,
             api_key=self.config.openai_api_key,
             default_headers=self.config.openai_default_headers,
-            rollout_id_headers=self.config.rollout_id_headers,
+            session_key_headers=self.config.session_key_headers,
             max_num_tries=self.config.upstream_max_num_tries,
             # A provider that refuses connections fails the call after max_http_attempts tries, like an HTTP
             # error; left unset, the transport would retry the connection forever.

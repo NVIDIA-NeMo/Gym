@@ -105,7 +105,7 @@ class TestOpenAIUtils:
         assert captured["timeout"].total == 300
         assert captured["timeout"].connect == 60
 
-    async def test_rollout_id_headers_carry_the_current_rollout(self, monkeypatch) -> None:
+    async def test_session_key_headers_carry_the_current_rollout(self, monkeypatch) -> None:
         sent = []
 
         async def fake_request(**kwargs):
@@ -117,7 +117,7 @@ class TestOpenAIUtils:
             api_key="abc",
             base_url="https://example.test/v1",
             default_headers={"X-Static": "1"},
-            rollout_id_headers=["X-Session", "X-Other-Session"],
+            session_key_headers=["X-Session", "X-Other-Session"],
         )
 
         with rollout_context("trial-1"):
@@ -141,7 +141,7 @@ class TestOpenAIUtils:
 
         monkeypatch.setattr(openai_client_module, "request", fake_request)
         client = NeMoGymAsyncOpenAI(
-            api_key="abc", base_url="https://example.test/v1", rollout_id_headers=["X-Session"]
+            api_key="abc", base_url="https://example.test/v1", session_key_headers=["X-Session"]
         )
 
         with rollout_context("trial-1"):
@@ -163,7 +163,7 @@ class TestOpenAIUtils:
             api_key="abc",
             base_url="https://example.test/v1",
             default_headers={"x-session": "static"},
-            rollout_id_headers=["X-Session"],
+            session_key_headers=["X-Session"],
         )
 
         with rollout_context("trial-1"):
@@ -187,7 +187,7 @@ class TestOpenAIUtils:
 
         assert [value for name, value in sent[0].items() if name.lower() == "authorization"] == ["Bearer abc"]
 
-    async def test_rollout_id_headers_carry_the_session_key(self, monkeypatch) -> None:
+    async def test_session_key_headers_carry_the_session_key(self, monkeypatch) -> None:
         sent = []
 
         async def fake_request(**kwargs):
@@ -197,14 +197,14 @@ class TestOpenAIUtils:
         monkeypatch.setattr(openai_client_module, "request", fake_request)
         monkeypatch.setattr(openai_client_module, "current_session_key", lambda: "session-of-the-call")
         client = NeMoGymAsyncOpenAI(
-            api_key="abc", base_url="https://example.test/v1", rollout_id_headers=["X-Session"]
+            api_key="abc", base_url="https://example.test/v1", session_key_headers=["X-Session"]
         )
 
         await client._request(method="POST", url="https://example.test/v1/responses")
 
         assert sent[0]["X-Session"] == "session-of-the-call"
 
-    async def test_rollout_id_headers_are_off_by_default(self, monkeypatch) -> None:
+    async def test_session_key_headers_are_off_by_default(self, monkeypatch) -> None:
         sent = []
 
         async def fake_request(**kwargs):
