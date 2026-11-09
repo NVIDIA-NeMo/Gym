@@ -76,8 +76,9 @@ Beyond the families, the protocol's own refusals:
 - **Queries** are refused (each check runs on the query as written and NFKC-folded, with format
   characters such as zero-width spaces, soft hyphens and word joiners, and every other default-ignorable
   code point such as variation selectors and Hangul fillers, read three ways: all removed, all as a space,
-  and as Unicode word segmentation reads them, where a zero-width space separates words and the others are
-  removed) when they match `url_patterns` or
+  and a third reading in which a zero-width space separates words and every other one is removed, which is
+  how UAX #29 word segmentation reads format and extend characters; Hangul fillers are letters to it, and
+  this server drops them too, as NFKC_Casefold does) when they match `url_patterns` or
   `patterns_case_sensitive`, when a `site:`
   operand names a blocked domain (the operand is read as host characters only, so `(site:a.org OR
   site:b.org)`, `site:a.org|site:b.org` and `site:b.org,` each yield the bare host; typographic quotes

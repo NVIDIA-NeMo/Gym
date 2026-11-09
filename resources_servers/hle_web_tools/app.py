@@ -621,10 +621,10 @@ def markdown_heading_title(markdown: str) -> str:
     return ""
 
 
-# Default_Ignorable_Code_Point (Unicode DerivedCoreProperties) outside category Cf: shown as nothing, and dropped by
-# NFKC_Casefold, among them variation selectors and the Hangul fillers (category Lo; NFKC maps U+3164 and U+FFA0 to
-# U+1160, which is listed too). Python's ``unicodedata`` has no such property, so the ranges are listed as that
-# file lists them.
+# Default_Ignorable_Code_Point (Unicode DerivedCoreProperties), which includes points outside category Cf: shown as
+# nothing, and dropped by NFKC_Casefold, among them variation selectors and the Hangul fillers (category Lo; NFKC maps
+# U+3164 and U+FFA0 to U+1160, which is listed too). Python's ``unicodedata`` has no such property, so the ranges are
+# listed as that file lists them, adjacent ranges merged.
 _DEFAULT_IGNORABLE_RANGES = (
     "00AD 034F 061C 115F..1160 17B4..17B5 180B..180F 200B..200F 202A..202E 2060..206F 3164 FE00..FE0F FEFF "
     "FFA0 FFF0..FFF8 1BCA0..1BCA3 1D173..1D17A E0000..E0FFF"
@@ -635,9 +635,10 @@ _DEFAULT_IGNORABLE = frozenset(
     for code in range(int(first, 16), int(last or first, 16) + 1)
 )
 # Whether an engine drops an ignorable character or splits words at it is not known, so the checks read text three
-# ways: every one removed (``sp<SHY>in`` is ``spin``), every one as a space (``How<WJ>many`` is two words), and as
-# Unicode word segmentation (UAX #29) reads them, where a zero-width space separates words and every other one is
-# removed (``How<ZWSP>many no<SHY>nvanishing`` is ``How many nonvanishing``).
+# ways: every one removed (``sp<SHY>in`` is ``spin``), every one as a space (``How<WJ>many`` is two words), and a
+# zero-width space as a word break with every other one removed (``How<ZWSP>many no<SHY>nvanishing`` is ``How many
+# nonvanishing``). UAX #29 word segmentation reads format and extend characters this way and U+200B as a break; the
+# Hangul fillers are letters (ALetter) to it, and are dropped here because NFKC_Casefold drops them.
 IGNORABLE_READINGS = ("removed", "space", "word_break")
 
 
