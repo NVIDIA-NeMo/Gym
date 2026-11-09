@@ -297,7 +297,7 @@ class RnaDesignResourcesServer(SimpleResourcesServer):
                 **base,
                 reward=0.0,
                 mask_sample=True,
-                failure_kind=failure_kinds.AGENT_RUN_ERROR,
+                failure_kind=failure_kinds.SESSION_LOST,
                 failure_reason="no campaign for this session",
             )
         try:
@@ -311,7 +311,7 @@ class RnaDesignResourcesServer(SimpleResourcesServer):
                 **base,
                 reward=0.0,
                 mask_sample=True,
-                failure_kind=failure_kinds.AGENT_RUN_ERROR,
+                failure_kind=failure_kinds.VERIFIER_ERROR,
                 failure_reason=reply["error"],
             )
         result = reply["result"]
