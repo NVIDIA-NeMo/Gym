@@ -48,5 +48,9 @@ job_bench_claude_code_environment_server:
       # Bounds the task sandboxes that run at once, as the agent's concurrency did behind legacy_agent.
       max_concurrent_episodes: 32
       queue_timeout_seconds: 86400
-      # The agent's 2-hour budget plus runtime setup, grading and cleanup, inside the sandbox's ttl_s (10800).
-      default_episode_timeout_seconds: 9000
+      # Covers the slowest scored path, so a slow grade is not a timeout that reruns the 2-hour episode: sandbox
+      # start (ready_timeout_s 1200), agent CLI setup (up to 1200, outside the agent's timeout), the agent's 7200 s,
+      # output collection, and one round of rubric judging (300 s x 3 tries each, max_judge_workers at a time).
+      # Verify starts well before the session's ttl_s (10800) ends; the task sandbox is stopped after collection
+      # and the judge runs on this host.
+      default_episode_timeout_seconds: 11400
