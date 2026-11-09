@@ -294,6 +294,77 @@ async def test_model_only_lends_a_sandbox_that_reaches_only_the_model_server(mon
     }
 
 
+def test_model_and_tools_needs_tool_servers_and_only_it_takes_them() -> None:
+    with pytest.raises(ValueError, match="needs tool_servers"):
+        LentSandboxes(
+            "sandbox",
+            SandboxConfig(),
+            image=None,
+            workdir="/workspace",
+            network_access="model_and_tools",
+            model_server="policy_model",
+        )
+    with pytest.raises(ValueError, match="needs model_server"):
+        LentSandboxes(
+            "sandbox",
+            SandboxConfig(),
+            image=None,
+            workdir="/workspace",
+            network_access="model_and_tools",
+            tool_servers=["agentic_mme"],
+        )
+    for network_access in ("inherit", "model_only"):
+        with pytest.raises(ValueError, match="only to network_access model_and_tools"):
+            LentSandboxes(
+                "sandbox",
+                SandboxConfig(),
+                image=None,
+                workdir="/workspace",
+                network_access=network_access,
+                model_server="policy_model",
+                tool_servers=["agentic_mme"],
+            )
+
+
+async def test_model_and_tools_lends_a_sandbox_that_reaches_the_model_and_tool_servers(monkeypatch) -> None:
+    monkeypatch.setattr(sandbox_lending, "get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}})
+    urls = {
+        "policy_model": "http://10.1.2.3:8000",
+        "agentic_mme": "http://10.4.5.6:9000",
+        "search": "http://10.1.2.3:7000",
+    }
+    asked = []
+
+    def server_url(name: str) -> str:
+        asked.append(name)
+        return urls[name]
+
+    monkeypatch.setattr(sandbox_lending, "get_server_url", server_url)
+    monkeypatch.setattr(_RecordingSandbox, "created", [])
+    monkeypatch.setattr(sandbox_lending, "AsyncSandbox", _RecordingSandbox)
+    lender = LentSandboxes(
+        "sandbox",
+        SandboxConfig(),
+        image="task-image",
+        workdir="/workspace",
+        network_access="model_and_tools",
+        model_server="policy_model",
+        tool_servers=["agentic_mme", "search"],
+    )
+
+    await lender.lend("session", TASK)
+
+    (sandbox,) = _RecordingSandbox.created
+    assert asked == ["policy_model", "agentic_mme", "search"]
+    # One rule per host: the tool server that shares the model server's host adds no rule of its own.
+    assert sandbox.spec.provider_options == {
+        "network_policy": {
+            "defaultAction": "deny",
+            "egress": [{"action": "allow", "target": "10.1.2.3"}, {"action": "allow", "target": "10.4.5.6"}],
+        },
+    }
+
+
 async def test_model_only_on_a_provider_without_network_policies_is_refused_before_a_sandbox_starts(
     workdir, started, monkeypatch
 ) -> None:
