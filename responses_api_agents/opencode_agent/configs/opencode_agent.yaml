@@ -35,19 +35,4 @@ opencode_agent:
       session_import_path: null  # absolute sandbox path of an OpenCode export to continue, if present
       return_session_trajectory: false  # close also returns an ordinary session's own turns (no compaction summaries)
 
-      opencode_config:
-        tools:
-          bash: true
-          edit: true
-          read: true
-          glob: true
-          grep: true
-          write: true
-          apply_patch: true
-          webfetch: false
-          websearch: false
-          task: true
-          skill: false
-          todowrite: true
-
       datasets: []
