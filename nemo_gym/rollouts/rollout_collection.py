@@ -2429,7 +2429,7 @@ def _dispatch_span(row: Mapping[str, Any], dispatch_name: str, *, server_name: s
 
 def _record_rollout_outcome(result: Dict[str, Any], outcome: str, dispatch_name: str) -> None:
     """Count a persisted attempt, including its numeric reward when scored."""
-    if not is_span_group_enabled(GymSpanGroup.ROLLOUT):
+    if not is_metrics_exporter_active():
         return
     # These are the dispatch's original routing fields, captured before the
     # canonical persisted record maps kinds to sidecar classes. Keep main's
