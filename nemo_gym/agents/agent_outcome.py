@@ -267,7 +267,8 @@ class RunEvidence:
     """Whether any reply of the policy model was observed in this run; ``None`` when the adapter cannot tell."""
 
     stopped: bool = False
-    """A rollout stop (``POST /rollouts/{rollout_id}/stop``) ended the run."""
+    """A rollout stop (``POST /rollouts/{rollout_id}/stop``) or the session's close ended the run before it finished.
+    Only a rollout stop gains the ``ng_rollout_stop`` marker (``finish_response``)."""
 
     context_limit: bool = False
     """The harness or the model endpoint explicitly reported that the model's context window was exceeded. An HTTP
