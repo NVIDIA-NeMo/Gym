@@ -257,9 +257,14 @@ detail, not a separate endpoint or a setup step users must run.
 ## Results and limits
 
 Responses retain thinking text, tool calls/results, and Pi-reported usage, including cached
-input tokens. Model limits and timeouts preserve gradable partial work after successful agent close.
-Reported provider errors retain partial output and a classified cause for the Environment Server to decide grading and episode retries; independent runtime failures remain execution errors;
-they must not be reported as incorrect solutions. When Pi's overflow recovery fails on its compaction
+input tokens. The adapter reads Pi's events into the shared outcome ladder (`finish_response`), which sets the
+response's status and failure kind. Context overflows, output limits (including the model server's empty
+`length` completion) and timeouts return gradable partial work as `incomplete`.
+Reported provider errors retain partial output and a classified cause for the Environment Server to decide grading
+and episode retries, even when Pi then exits nonzero. A run without a usable result (a nonzero exit with no model
+error, no reply, or no terminal reply) returns a failed response with `agent_run_error`, which the Environment Server
+retries by default; it is never reported as an incorrect solution. Supervisor failures and required MCP tools that
+never started remain execution errors. When Pi's overflow recovery fails on its compaction
 call, the run is reported as a provider error with an `unknown` cause, which makes it eligible for an
 episode retry by default, even when that call itself hit the context limit. Close still returns
 captured observations.
@@ -270,8 +275,8 @@ the pinned Pi version. When `timeout` stops a run that was still working and in 
 `finish_tool_names` tool had succeeded, the metadata also has `stop_reason: wall_time`, as Stirrup reports a timeout,
 so a benchmark can tell a timeout from a run that ended without a submission. A run has ended once a reply stops
 (`stop` or `length`) without a tool call, even if `timeout` then stops Pi's compaction call, unless it is an empty
-`length` reply at a full context window: Pi counts that as a context overflow and compacts to retry it (Pi 0.80.2 then
-exits with code 1, which fails the run). A timeout while Pi waits to retry a failed model call, or while
+`length` reply at a full context window: Pi counts that as a context overflow and compacts to retry it (a run that
+ends there is graded as a context limit). A timeout while Pi waits to retry a failed model call, or while
 the provider gives up on the supervisor after the deadline, is reported the same way. Model-call references and tool
 observations are returned by agent close.
 Tool timestamps are supervisor receipt times, not executor timestamps; unsupported evidence

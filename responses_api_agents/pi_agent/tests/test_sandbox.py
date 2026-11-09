@@ -463,7 +463,16 @@ def test_cookie_identity_and_single_activation(setup):
     sandbox.launch.assert_awaited_once()
 
 
-@pytest.mark.parametrize("reason,expected", [("aborted", "incomplete"), ("length", "incomplete")])
+@pytest.mark.parametrize(
+    "reason,expected",
+    [
+        # Outside a deadline an aborted reply is no answer (no usable result); before the outcome ladder it was
+        # graded as incomplete.
+        ("aborted", ("failed", "no_result")),
+        # An output-limit stop, which is also what Pi reports for the model server's empty `length` completion.
+        ("length", ("incomplete", "output_limit")),
+    ],
+)
 def test_failed_or_partial_pi_output_is_preserved(setup, reason, expected):
     agent, sandbox = setup
     sandbox.events = events(stop_reason=reason)
@@ -471,7 +480,7 @@ def test_failed_or_partial_pi_output_is_preserved(setup, reason, expected):
         session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
         result = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "task"})
         assert result.status_code == 200
-        assert result.json()["status"] == expected
+        assert (result.json()["status"], result.json()["metadata"]["ng_agent_stop_reason"]) == expected
         assert result.json()["output"][-1]["content"][0]["text"] == "Fixed"
         assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
 
@@ -506,13 +515,15 @@ def test_aborted_preserves_worker_failure_unless_deadline_confirmed(setup, retur
     with TestClient(app) as client:
         session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
         result = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "task"})
+        # The outcome ladder answers 200 either way (a worker failure raised a 500 before it).
+        assert result.status_code == 200
+        assert result.json()["output"][-1]["content"][0]["text"] == "Fixed"
         if timed_out:
-            assert result.status_code == 200
             assert result.json()["status"] == "incomplete"
-            assert result.json()["output"][-1]["content"][0]["text"] == "Fixed"
         else:
-            assert result.status_code == 500
-            assert f"Pi exited with code {return_code}" in result.text
+            assert result.json()["status"] == "failed"
+            assert json.loads(result.json()["metadata"]["ng_agent_outcome"]) == {"failure_kind": "agent_run_error"}
+            assert f"Pi exited with code {return_code}" in result.json()["error"]["message"]
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
         assert closed.status_code == 200
         assert closed.json()["agent_observations"]["records"]
@@ -661,11 +672,15 @@ async def test_mcp_setup_exit_fails_the_episode_with_its_cause(setup, granted):
     request, session_id, task = await activate(
         agent, sandbox, seed_with_tools(mcp_grant("resources")) if granted else None
     )
-    message = (
-        f"Required Gym MCP tools could not be initialized: {re.escape(cause)}" if granted else "Pi exited with code 78"
-    )
-    with pytest.raises(RuntimeError, match=message):
-        await task
+    if granted:
+        # Required tools that never started are a lifecycle failure, not a run outcome.
+        with pytest.raises(RuntimeError, match=f"Required Gym MCP tools could not be initialized: {re.escape(cause)}"):
+            await task
+    else:
+        # Without grants exit 78 is Pi's own failure: no usable result.
+        response = await task
+        assert (response.status, response.error.message) == ("failed", "Pi exited with code 78")
+        assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "agent_run_error"}
     close = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     if granted:
         # Episode failure rows carry the close observations, so the cause reaches them too.
@@ -762,8 +777,9 @@ async def test_run_ending_on_other_tool_calls_is_not_a_result(setup, details, is
     agent, sandbox = setup
     sandbox.events = finish_events(details=details, is_error=is_error, with_bash=with_bash)
     request, session_id, task = await activate(agent, sandbox, seed_with_tools(mcp_grant("resources")))
-    with pytest.raises(RuntimeError, match="Pi ended without a terminal assistant result"):
-        await task
+    response = await task
+    assert (response.status, response.error.message) == ("failed", "Pi ended without a terminal assistant result")
+    assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "agent_run_error"}
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
 
 
@@ -1026,8 +1042,9 @@ async def test_worker_diagnostics_never_override_exit_or_cleanup(setup, artifact
         if artifact != "unknown_exit":
             assert "harness_hostname" not in response.metadata
     else:
-        with pytest.raises(RuntimeError, match="exited with code 7"):
-            await task
+        response = await task
+        assert (response.status, response.error.message) == ("failed", "Pi exited with code 7")
+        assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "agent_run_error"}
     state = agent._session_records[session_id].state
     assert state.session.cleanup["cleanup_confirmed"] is True
     if artifact != "unknown_exit":
@@ -2167,6 +2184,39 @@ async def test_provider_failure_is_reported_but_context_limit_preserves_patch(
     sandbox.stop.assert_not_awaited()
 
 
+@pytest.mark.parametrize(
+    "context_overflow,return_code,expected",
+    [
+        # The default vLLM model server answers a context overflow with an empty completion stopping on `length`,
+        # with zero usage, which Pi does not count as an overflow: an output-limit stop.
+        (False, 0, ("incomplete", "output_limit", "max_output_tokens")),
+        # The same stop after a worker failure is not the run's end: no usable result.
+        (False, 1, ("failed", "no_result", None)),
+        # Pi's own verdict (an empty `length` reply at a full window): graded as a context limit, whatever the exit
+        # (a 500 before the outcome ladder when Pi then exited nonzero).
+        (True, 0, ("incomplete", "context_limit", None)),
+        (True, 1, ("incomplete", "context_limit", None)),
+    ],
+)
+async def test_empty_length_reply_is_an_output_or_context_limit(setup, context_overflow, return_code, expected):
+    agent, sandbox = setup
+    reply = {"role": "assistant", "content": [], "stopReason": "length", "usage": {"input": 0, "output": 0}}
+    recorded = [
+        {"type": "ng_pi_outcome", "context_overflow": context_overflow},
+        {"type": "message_end", "message": reply},
+        {"type": "agent_end", "messages": [reply]},
+    ]
+    sandbox.events = "\n".join(json.dumps([float(i), event]) for i, event in enumerate(recorded))
+    sandbox.result["return_code"] = return_code
+    request, session_id, task = await activate(agent, sandbox)
+    response = await task
+    status, stop_reason, incomplete_reason = expected
+    assert (response.status, response.metadata["ng_agent_stop_reason"]) == (status, stop_reason)
+    assert (response.incomplete_details.reason if response.incomplete_details else None) == incomplete_reason
+    assert ("ng_agent_outcome" in response.metadata) == (status == "failed")
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+
+
 @pytest.mark.parametrize("interrupted", [False, True])
 async def test_session_retry_ownership_uses_provider_correlation(setup, interrupted) -> None:
     agent, sandbox = setup
@@ -2267,33 +2317,39 @@ async def test_terminal_model_error_reports_partial_output_and_usage(
 
 
 @pytest.mark.parametrize(
-    "error_message,return_code,ended,timed_out,expected_error",
+    "return_code,ended,timed_out,expected",
     [
-        ("400 rejected request", 1, True, False, "Pi exited with code 1"),
-        ("400 rejected request", 137, True, False, "Pi exited with code 137"),
-        ("400 rejected request", None, True, False, "400 rejected request"),
-        ("400 rejected request", 0, False, False, "400 rejected request"),
-        ("400 rejected request", 0, True, True, "400 rejected request"),
+        # Pi stopped on the model's error, so it is the run's outcome whatever Pi's exit (each raised a 500 before
+        # the outcome ladder). A 400 before any model reply is the run's setup's fault.
+        (1, True, False, ("failed", "model_request_rejected")),
+        (137, True, False, ("failed", "model_request_rejected")),
+        (None, True, False, ("failed", "model_request_rejected")),
+        (0, False, False, ("failed", "model_request_rejected")),
+        # The deadline decides: Pi's deadlines are graded.
+        (0, True, True, ("incomplete", None)),
     ],
 )
 async def test_model_error_does_not_hide_incomplete_execution(
     setup: tuple[PiAgent, Sandbox],
-    error_message: str,
     return_code: int | None,
     ended: bool,
     timed_out: bool,
-    expected_error: str,
+    expected: tuple[str, str | None],
 ) -> None:
     agent, sandbox = setup
-    message = {"role": "assistant", "content": [], "stopReason": "error", "errorMessage": error_message}
+    message = {"role": "assistant", "content": [], "stopReason": "error", "errorMessage": "400 rejected request"}
     recorded = [{"type": "message_end", "message": message}]
     if ended:
         recorded.append({"type": "agent_end", "messages": [message]})
     sandbox.events = "\n".join(json.dumps([float(i), event]) for i, event in enumerate(recorded))
     sandbox.result.update(return_code=return_code, timed_out=timed_out)
     request, session_id, task = await activate(agent, sandbox)
-    with pytest.raises(RuntimeError, match=expected_error):
-        await task
+    response = await task
+    outcome = response.metadata.get("ng_agent_outcome")
+    assert (response.status, json.loads(outcome)["failure_kind"] if outcome else None) == expected
+    assert (response.error.message if response.error else None) == (
+        "400 rejected request" if expected[0] == "failed" else None
+    )
     close = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     assert close.agent_observations.records
     sandbox.launch.assert_awaited_once()
@@ -2747,8 +2803,9 @@ async def test_missing_exit_and_empty_output_are_not_success(setup):
     sandbox.result["return_code"] = None
     sandbox.events = ""
     request, session_id, task = await activate(agent, sandbox)
-    with pytest.raises(RuntimeError, match="no assistant result"):
-        await task
+    response = await task
+    assert (response.status, response.error.message) == ("failed", "Pi produced no assistant result")
+    assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "agent_run_error"}
     state = agent._session_records[session_id].state
     assert state.session.cleanup["cleanup_confirmed"] is True
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
@@ -2807,15 +2864,16 @@ def test_task_timeout_does_not_allow_other_metadata_or_consume_activation(
 
 
 @pytest.mark.parametrize(
-    "message,status",
+    "message,outcome",
     [
-        ("400 bad request", 400),
-        ("HTTP 503: unavailable", 503),
-        ("500 status code (no body)", 500),
-        ("401 unauthorized", 401),
+        # The outcome ladder: a 4xx other than 408/425/429 before any model reply is the run's setup's fault.
+        ("400 bad request", {"failure_kind": "model_request_rejected"}),
+        ("HTTP 503: unavailable", {"failure_kind": "model_request_error", "status_code": 503}),
+        ("500 status code (no body)", {"failure_kind": "model_request_error", "status_code": 500}),
+        ("401 unauthorized", {"failure_kind": "model_request_rejected"}),
     ],
 )
-def test_native_model_error_is_reported_with_classification(setup, message, status):
+def test_native_model_error_is_reported_with_classification(setup, message, outcome):
     agent, sandbox = setup
     native = {"role": "assistant", "stopReason": "error", "errorMessage": message, "content": []}
     response, observations = sandbox_event_response(
@@ -2828,10 +2886,7 @@ def test_native_model_error_is_reported_with_classification(setup, message, stat
     )
     assert response["status"] == "failed"
     assert response["error"]["message"] == message
-    assert json.loads(response["metadata"]["ng_agent_outcome"]) == {
-        "failure_kind": "model_request_error",
-        "status_code": status,
-    }
+    assert json.loads(response["metadata"]["ng_agent_outcome"]) == outcome
     assert observations["records"][0]["status"] == "failed"
 
 
@@ -2861,7 +2916,7 @@ def test_terminal_provider_failure_uses_default_episode_policy(setup, message, f
     assert policy == OutcomeAction.RETRY
 
 
-def test_process_exit_before_promised_retry_is_execution_failure(setup):
+def test_process_exit_before_promised_retry_reports_the_error(setup):
     agent, sandbox = setup
     message = {"role": "assistant", "content": [], "stopReason": "error", "errorMessage": "503 unavailable"}
     sandbox.events = "\n".join(
@@ -2876,7 +2931,13 @@ def test_process_exit_before_promised_retry_is_execution_failure(setup):
     with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
         session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
         response = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "task"})
-        assert response.status_code == 500
+        # The run ended on the 503 Pi meant to retry: the outcome ladder reports it (a 500 before), and the
+        # Environment Server retries the episode.
+        assert response.status_code == 200
+        assert json.loads(response.json()["metadata"]["ng_agent_outcome"]) == {
+            "failure_kind": "model_request_error",
+            "status_code": 503,
+        }
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
         assert closed.status_code == 200
         assert closed.json()["agent_observations"]["records"][0]["status"] == "failed"

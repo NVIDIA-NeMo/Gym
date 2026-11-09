@@ -29,6 +29,7 @@ from typing import Any, ClassVar, Literal, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
+from openai.types.responses import ResponseError
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from nemo_gym.agents import (
@@ -43,6 +44,7 @@ from nemo_gym.agents import (
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    RunEvidence,
     SandboxNetworkAccess,
     SandboxSession,
     SimpleResponsesAPIAgent,
@@ -93,17 +95,6 @@ MCP_SETUP_ERROR_EXIT_CODE = 78  # Must match gym_mcp.mjs (EX_CONFIG).
 # gym_mcp.mjs names each tool `<grant>_<tool>` and allows at most 64 of these characters.
 _MCP_SERVER_NAME = re.compile(r"[A-Za-z0-9_-]{1,62}")
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
-
-
-def _reported_model_error(assistant: Mapping[str, Any], cleanup: Mapping[str, Any], *, will_retry: bool) -> bool:
-    """Recognize Pi 0.80.2's final agent_end error report without hiding worker or cleanup failures."""
-    return (
-        cleanup["return_code"] == 0
-        and not cleanup["timed_out"]
-        and not cleanup["error"]
-        and assistant.get("stopReason") == "error"
-        and not will_retry
-    )
 
 
 def _ends_on_finish_tool(messages: list[Any]) -> bool:
@@ -1158,42 +1149,50 @@ class PiAgent(SimpleResponsesAPIAgent):
         cleanup = state.session.cleanup
         runtime = state.runtime_info
         assert cleanup is not None
-        model_limit = bool(stop_reasons and stop_reasons[-1] == "error" and context_overflow)
-        compaction_failure = None
-        if recovery_error and stop_reasons and stop_reasons[-1] == "error":
+        # A supervisor error, or required MCP tools that never started: the run has no outcome to judge.
+        lifecycle_failure = cleanup["error"]
+        if mcp_servers and cleanup["return_code"] == MCP_SETUP_ERROR_EXIT_CODE:
+            cause = f": {mcp_setup_failure}" if mcp_setup_failure else ""
+            lifecycle_failure = lifecycle_failure or f"Required Gym MCP tools could not be initialized{cause}"
+        last_stop = stop_reasons[-1] if stop_reasons else None
+        # outcome.mjs reports Pi's own verdict on each reply: an overflow error, or an empty `length` reply at a full
+        # context window, which Pi compacts to retry.
+        context_limit = context_overflow and last_stop in ("error", "length")
+        native_error = None
+        if last_stop == "error":
+            # Pi emits failed attempts before retrying; only the terminal assistant decides the error.
+            terminal = next((event for _, event in reversed(events) if event.get("type") == "agent_end"), {})
+            native_error = next(
+                (m for m in reversed(terminal.get("messages") or messages) if m.get("role") == "assistant"), {}
+            )
+        if recovery_error and (last_stop == "error" or context_limit):
             # Pi's overflow recovery failed on its compaction call, so the failed call was never retried, even when
             # Gym does not count its error as an overflow. Pi wraps the compaction call's error in its own message,
             # which classify_outcome leaves unknown: retryable by default, even if that call hit the context limit.
-            model_limit, terminal_error = False, recovery_error
-            compaction_failure = {"stopReason": "error", "errorMessage": recovery_error}
-        terminal = next((event for _, event in reversed(events) if event.get("type") == "agent_end"), {})
-        retrying = terminal.get("willRetry") is True
-        if model_limit or (stop_reasons and stop_reasons[-1] == "aborted") or (cleanup["timed_out"] and retrying):
-            # Expected model limits/interruptions, including a deadline before Pi's retry of an error, do not
-            # invalidate partial work. They must not erase an independently confirmed worker or cleanup failure.
-            terminal_error = None
-        execution_error = cleanup["error"]
-        if mcp_servers and cleanup["return_code"] == MCP_SETUP_ERROR_EXIT_CODE:
-            cause = f": {mcp_setup_failure}" if mcp_setup_failure else ""
-            execution_error = execution_error or f"Required Gym MCP tools could not be initialized{cause}"
+            context_limit, terminal_error = False, recovery_error
+            native_error = {"stopReason": "error", "errorMessage": recovery_error}
+        clean_exit = cleanup["return_code"] in (None, 0)
         ended_on_finish_tool = _ends_on_finish_tool(messages)
-        if cleanup["return_code"] not in (None, 0) and not cleanup["timed_out"] and not model_limit:
-            execution_error = execution_error or f"Pi exited with code {cleanup['return_code']}"
         if not stop_reasons:
             cached_tokens = None
-            execution_error = execution_error or "Pi produced no assistant result"
-        elif (
-            stop_reasons[-1] not in ("stop", "length", "error", "aborted")
-            and not cleanup["timed_out"]
-            and not ended_on_finish_tool
-        ):
-            execution_error = execution_error or "Pi ended without a terminal assistant result"
-        incomplete = (
-            cleanup["timed_out"] or model_limit or (stop_reasons and stop_reasons[-1] in ("length", "aborted"))
+        if not clean_exit and not cleanup["timed_out"]:
+            problem = f"Pi exited with code {cleanup['return_code']}"
+        elif not stop_reasons:
+            problem = "Pi produced no assistant result"
+        elif last_stop not in ("stop", "length", "error", "aborted") and not ended_on_finish_tool:
+            problem = "Pi ended without a terminal assistant result"
+        else:
+            problem = None
+        evidence = RunEvidence(
+            # An `aborted` reply is not an answer: Pi aborts a reply only when stopped.
+            has_result=clean_exit and (last_stop == "stop" or ended_on_finish_tool),
+            timed_out=cleanup["timed_out"],
+            model_replied=any(reason not in ("error", "aborted") for reason in stop_reasons),
+            context_limit=context_limit,
+            model_limit="output" if last_stop == "length" and clean_exit else None,
+            # Pi's final error, even after a nonzero exit: Pi stopped on it, so it is why the run has no result.
+            error=self.classify_outcome(native_error) if native_error is not None else None,
         )
-        if cleanup["timed_out"] and not stop_reasons and cleanup["error"] is None:
-            execution_error = None
-        error = execution_error or terminal_error
         response = NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
@@ -1206,8 +1205,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                 else item
                 for item in output
             ],
-            status="failed" if error else "incomplete" if incomplete else "completed",
-            error={"code": "server_error", "message": error} if error else None,
+            status="completed",
             tool_choice=body.tool_choice,
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,
@@ -1227,6 +1225,12 @@ class PiAgent(SimpleResponsesAPIAgent):
                 **({"stop_reason": "wall_time"} if cleanup["timed_out"] and _was_still_working(events) else {}),
             },
         )
+        if lifecycle_failure is None:
+            response = self.finish_response(response, evidence, session=state.session)
+            # A failed response names the run's own reason in place of the ladder's generic one.
+            message = terminal_error if evidence.error is not None else problem or terminal_error
+            if response.status == "failed" and message:
+                response = response.model_copy(update={"error": ResponseError(code="server_error", message=message)})
         conversation_input = [NeMoGymEasyInputMessage(role="system", content=system)] if system else []
         conversation_input.append(NeMoGymEasyInputMessage(role="user", content=prompt))
         try:
@@ -1245,10 +1249,10 @@ class PiAgent(SimpleResponsesAPIAgent):
             state.observations = AgentObservationBundle(
                 source="pi", gaps=[ObservationGap(code="observation_parse_failed")]
             )
-        if incomplete and not error:
+        if lifecycle_failure is None and response.status in ("failed", "incomplete"):
             for record in state.observations.records:
                 if isinstance(record, AgentInvocation):
-                    record.status = "incomplete"
+                    record.status = response.status
         if runtime is None:
             state.observations.gaps.append(ObservationGap(code="runtime_info_unavailable"))
         if cleanup["return_code"] is None:
@@ -1262,12 +1266,8 @@ class PiAgent(SimpleResponsesAPIAgent):
                     detail="Pi cache counters are absent, invalid, or defaulted to zero",
                 )
             )
-        if error:
-            assistant = next((m for m in reversed(terminal.get("messages") or []) if m.get("role") == "assistant"), {})
-            if not execution_error and _reported_model_error(assistant, cleanup, will_retry=retrying):
-                # Classify a failed compaction call, not the overflow it was recovering from.
-                return self.report_outcome(response, compaction_failure or assistant)
-            raise RuntimeError(f"Pi agent failed: {error}")
+        if lifecycle_failure is not None:
+            raise RuntimeError(f"Pi agent failed: {lifecycle_failure}")
         return response
 
     def model_post_init(self, __context: Any) -> None:

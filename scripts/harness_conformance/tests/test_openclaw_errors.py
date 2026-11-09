@@ -51,8 +51,21 @@ def test_openclaw_failure_reaches_environment(case: str, tmp_path: Path) -> None
     witness = json.loads((output / "witness.json").read_text())
     assert not witness["violations"]
     assert witness["seeded"] == witness["closed"] == 1
-    assert not witness["verifications"]
     (response,) = witness["agent_responses"]
+    if case.startswith("context-"):
+        # The outcome ladder grades a context overflow as incomplete; it was a failed, ungraded model_context_limit.
+        assert response["status"] == "incomplete"
+        assert response["metadata"]["ng_agent_stop_reason"] == "context_limit"
+        assert "ng_agent_outcome" not in response["metadata"]
+        assert len(witness["verifications"]) == 1
+        if case == "context-precheck":
+            assert witness["attempts"] == []
+        else:
+            assert witness["attempts"]
+            assert all(attempt["status_code"] == 400 for attempt in witness["attempts"])
+        assert len((output / "rollouts.jsonl").read_text().splitlines()) == 1
+        return
+    assert not witness["verifications"]
     assert response["status"] == "failed"
     outcome = json.loads(response["metadata"]["ng_agent_outcome"])
     if case.startswith("http-"):
@@ -60,14 +73,6 @@ def test_openclaw_failure_reaches_environment(case: str, tmp_path: Path) -> None
         assert outcome == {"failure_kind": "model_request_error", "status_code": status}
         assert len(witness["attempts"]) == 3
         assert all(attempt["status_code"] == status for attempt in witness["attempts"])
-    elif case.startswith("context-"):
-        assert outcome == {"failure_kind": "model_context_limit"}
-        assert "context" in response["error"]["message"].lower()
-        if case == "context-precheck":
-            assert witness["attempts"] == []
-        else:
-            assert witness["attempts"]
-            assert all(attempt["status_code"] == 400 for attempt in witness["attempts"])
     else:
         assert outcome == {"failure_kind": "model_transport_error"}
         expected = {"reset": "Connection error.", "stream-reset": "terminated", "idle": "LLM idle timeout"}
@@ -80,9 +85,8 @@ def test_openclaw_failure_reaches_environment(case: str, tmp_path: Path) -> None
     retained = failure["_ng_failure_partial_response"]
     assert json.loads(retained["metadata"]["ng_agent_outcome"]) == outcome
     assert retained["error"] == response["error"]
-    # Context limits default to fail; transport / exhausted HTTP errors default
-    # to retry. Neither becomes a verified, rewarded rollout by accident.
-    assert failure["_ng_failure_terminal"] == case.startswith("context-")
+    # Transport and exhausted HTTP errors default to retry: never a verified, rewarded rollout by accident.
+    assert not failure["_ng_failure_terminal"]
     assert failure["ng_agent_observations"]["records"][0]["status"] == "failed"
 
 

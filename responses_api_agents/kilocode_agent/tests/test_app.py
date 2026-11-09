@@ -464,9 +464,11 @@ class TestLocalRunOutcome:
             return asyncio.run(agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="hi")))
 
     @staticmethod
-    def _assert_failed(response, message: str) -> None:
+    def _assert_failed(response, message: str, failure_kind: str | None = None) -> None:
         assert response.status == "failed"
         assert message in response.error.message
+        if failure_kind is not None:
+            assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": failure_kind}
 
     def test_completed_run(self, tmp_path) -> None:
         response = self._respond(tmp_path, _fake_kilo(tmp_path, stdout=_events(_text_event("42"), self.STEP)))
@@ -480,27 +482,35 @@ class TestLocalRunOutcome:
         assert response.output[0].content[0].text == "partial"
 
     def test_timeout_before_any_model_call_fails(self, tmp_path) -> None:
+        # Kilo retries an unreachable model silently, so this deadline stays retried (unknown) for now.
         self._assert_failed(
-            self._respond(tmp_path, _fake_kilo(tmp_path, sleep=30), timeout=1), "before any model call completed"
+            self._respond(tmp_path, _fake_kilo(tmp_path, sleep=30), timeout=1),
+            "before any model call completed",
+            "unknown",
         )
 
     def test_nonzero_exit_fails(self, tmp_path) -> None:
         command = _fake_kilo(tmp_path, stdout=_events(_text_event("x"), self.STEP), exit_code=3)
-        self._assert_failed(self._respond(tmp_path, command), "Kilo exited 3")
+        self._assert_failed(self._respond(tmp_path, command), "Kilo exited 3", "agent_run_error")
 
     def test_cli_error_event_fails(self, tmp_path) -> None:
         stdout = _events({"type": "error", "error": {"name": "APIError"}})
-        self._assert_failed(self._respond(tmp_path, _fake_kilo(tmp_path, stdout=stdout)), "execution error")
+        self._assert_failed(self._respond(tmp_path, _fake_kilo(tmp_path, stdout=stdout)), "execution error", "unknown")
 
-    def test_model_http_error_preserves_status(self, tmp_path) -> None:
-        error = {"name": "APIError", "data": {"message": "controlled model failure", "statusCode": 400}}
+    @pytest.mark.parametrize(
+        "status_code,outcome",
+        [
+            # The outcome ladder: a 4xx other than 408/425/429 before any model reply is the run's setup's fault.
+            (400, {"failure_kind": "model_request_rejected"}),
+            (503, {"failure_kind": "model_request_error", "status_code": 503}),
+        ],
+    )
+    def test_model_http_error_preserves_status(self, tmp_path, status_code, outcome) -> None:
+        error = {"name": "APIError", "data": {"message": "controlled model failure", "statusCode": status_code}}
         stdout = _events({"type": "error", "error": error})
         response = self._respond(tmp_path, _fake_kilo(tmp_path, stdout=stdout, exit_code=1))
         self._assert_failed(response, "controlled model failure")
-        assert json.loads(response.metadata["ng_agent_outcome"]) == {
-            "failure_kind": "model_request_error",
-            "status_code": 400,
-        }
+        assert json.loads(response.metadata["ng_agent_outcome"]) == outcome
 
     def test_rollout_calls_carry_observations_with_the_run_outcome(self, tmp_path) -> None:
         stdout = _events({"type": "error", "error": {"name": "APIError"}})
