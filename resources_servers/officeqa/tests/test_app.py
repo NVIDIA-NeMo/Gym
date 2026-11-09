@@ -251,7 +251,7 @@ async def test_concurrent_seed_and_close_cannot_leave_a_sandbox(server, sandbox)
     release.set()
     await asyncio.gather(seeding, closing)
     assert not server._sessions
-    assert not server._fence._locks
+    assert not server._locks._locks
     sandbox.stop.assert_awaited_once()
 
 
@@ -471,5 +471,5 @@ async def test_successful_session_cycles_release_inactive_locks(server, sandbox)
             ResourcesCloseSessionRequest(resources_session_id=body.resources_session_id, episode_id=body.episode_id),
         )
         assert not server._sessions
-        assert not server._fence._locks
+        assert not server._locks._locks
     assert sandbox.start.await_count == sandbox.stop.await_count == 30
