@@ -31,6 +31,11 @@ modifications. It requires that fork's `evaluation/task_catalog.py` and
 and grading code are required. The adapter does not install or edit Claw-Eval. Its worker observes the native
 sandbox context manager to report outcomes while retaining its lifecycle.
 
+When `CLAW_EVAL_REVISION` is set, the worker requires a matching HEAD and a clean
+checkout, including untracked files. Commit required harness changes and update
+the revision before running a pinned evaluation. Unpinned development runs still
+retain a runtime content hash, but do not establish reproducible baselines.
+
 ## Setup
 
 Install this Gym checkout with its usual development environment. Choose a

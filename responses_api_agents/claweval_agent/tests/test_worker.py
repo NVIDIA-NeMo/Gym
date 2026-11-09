@@ -203,10 +203,31 @@ def test_worker_preserves_contract_errors(boundary, monkeypatch):
     b.native.run_one.assert_not_called()
 
 
-def test_source_revision_mismatch_is_a_contract_error(boundary, monkeypatch):
-    from types import SimpleNamespace
+@pytest.mark.parametrize("change", ["clean", "tracked", "staged", "untracked"])
+def test_source_revision_requires_matching_clean_git_tree(boundary, change):
+    import subprocess
 
-    monkeypatch.setattr(worker.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(stdout="a" * 40))
-    assert worker.source_root(str(boundary.root), expected_revision="a" * 40) == boundary.root
+    root = boundary.root
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(root), *args], capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+    git("init")
+    git("config", "user.name", "ClawEval test")
+    git("config", "user.email", "claweval-test@example.com")
+    git("add", ".")
+    git("commit", "-m", "Source fixture")
+    revision = git("rev-parse", "HEAD")
     with pytest.raises(worker.ClawEvalContractError, match="revision mismatch"):
-        worker.source_root(str(boundary.root), expected_revision="b" * 40)
+        worker.source_root(str(root), expected_revision="b" * 40)
+    if change == "clean":
+        assert worker.source_root(str(root), expected_revision=revision) == root
+    else:
+        path = root / ("extra.py" if change == "untracked" else "src/claw_eval/config.py")
+        path.write_text("# Unpublished runtime change\n")
+        if change == "staged":
+            git("add", str(path))
+        with pytest.raises(worker.ClawEvalContractError, match="checkout is dirty"):
+            worker.source_root(str(root), expected_revision=revision)

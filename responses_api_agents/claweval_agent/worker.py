@@ -22,7 +22,7 @@ class ClawEvalContractError(ValueError):
 
 
 def source_root(value: str, *, expected_revision: str | None = None) -> Path:
-    """Validate the ClawEval layout and optional HEAD pin; runtime hashes retain local edits."""
+    """Validate the ClawEval layout; a revision pin requires a clean checkout."""
     root = Path(value).expanduser().resolve()
     for relative in (
         "src/claw_eval/config.py",
@@ -37,6 +37,17 @@ def source_root(value: str, *, expected_revision: str | None = None) -> Path:
         ).stdout.strip()
         if revision != expected_revision:
             raise ClawEvalContractError(f"Claw-Eval revision mismatch: expected {expected_revision}, got {revision}")
+        changes = subprocess.run(
+            ["git", "-C", str(root), "status", "--porcelain", "--untracked-files=all"],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            check=True,
+        ).stdout
+        if changes.strip():
+            raise ClawEvalContractError(
+                "Pinned Claw-Eval checkout is dirty; commit the source changes and update the configured revision"
+            )
     return root
 
 
