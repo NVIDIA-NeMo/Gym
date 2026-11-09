@@ -121,8 +121,8 @@ This tutorial trains [Nemotron Nano 9B v2](https://huggingface.co/nvidia/NVIDIA-
 CONTAINER_IMAGE_PATH=nvcr.io/nvidia/nemo-rl:v0.4.0.nemotron_3_nano
 
 NUM_ACTOR_NODES=1
-ACCOUNT=<ACCOUNT_NAME>
-PARTITION=<PARTITION>
+ACCOUNT=your_slurm_account
+PARTITION=your_slurm_partition
 
 CONTAINER_WORKDIR=$PWD
 MOUNTS="$PWD:$PWD"
@@ -171,8 +171,8 @@ git submodule update --init --recursive
 Download the model used in the following tests:
 
 ```bash
+export HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxxxxxxx  # your Hugging Face token
 HF_HOME=$PWD/.cache/ \
-HF_TOKEN={your HF token} \
     hf download Qwen/Qwen3-0.6B
 ```
 
@@ -221,10 +221,10 @@ source .venv/bin/activate
 uv sync --active --extra dev
 ```
 
-Add your HuggingFace token to download Gym datasets from HuggingFace. This command will store your HF token in a file that is excluded from Git, so it will never be committed or pushed:
+Add your HuggingFace token to download Gym datasets from HuggingFace. This command stores the `HF_TOKEN` you exported in step 4 in a file that is excluded from Git, so it will never be committed or pushed:
 
 ```bash
-echo "hf_token: {your HF token}" >> env.yaml
+echo "hf_token: $HF_TOKEN" >> env.yaml
 ```
 
 Prepare the data:

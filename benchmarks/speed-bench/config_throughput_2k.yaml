@@ -16,6 +16,7 @@ speed_bench_throughput_2k_simple_agent:
         jsonl_fpath: benchmarks/speed-bench/data/speed_bench_throughput_2k_benchmark.jsonl
         prompt_config: null
         prepare_script: benchmarks/speed-bench/prepare_throughput_2k.py
+        prepare_dependencies: [numpy, pandas, tiktoken]
         license: NVIDIA Evaluation Dataset License Agreement
 
 speed_bench_throughput_2k_simple_environment_server:

@@ -1,0 +1,14 @@
+config_paths:
+  - benchmarks/swe_atlas_qa/config.yaml
+
+swe_atlas_qa_agent:
+  responses_api_agents:
+    harness_agent:
+      agent: prime
+      agent_kwargs:
+        # Bundle paths. A command on the bundled node avoids the online installer.
+        command: /work/gym_mount/runtime/node/bin/node /work/gym_mount/runtime/prime/node_modules/prime-agent/dist/bundle/cli.js
+        env:
+          PRIME_AGENT_KERNEL_PYTHON: /work/gym_mount/runtime/python/bin/python3.13
+        # Some models reject the default reasoning effort, and the failed calls score as empty answers.
+        thinking: high

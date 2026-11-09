@@ -24,19 +24,32 @@ from fastapi import FastAPI
 from pydantic import model_validator
 from verifiable_instructions import instructions_registry
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from resources_servers.instruction_following.count_unique import CountUniqueChecker
+from resources_servers.instruction_following.counting_composition import CountingCompositionChecker
 from resources_servers.instruction_following.indicifeval import (
     IndicIFEvalMetadata,
     IndicIFEvalScores,
     aggregate_scores,
     score_response,
 )
+
+
+# The upstream count:counting_composition and count:count_unique checkers count punctuation tokens as
+# words, so responses that follow their instruction fail (https://github.com/NVIDIA-NeMo/Gym/issues/4613,
+# https://github.com/NVIDIA-NeMo/Gym/issues/5067). Both are replaced by local fixes. Every other
+# instruction uses the upstream checker unchanged.
+INSTRUCTION_DICT = {
+    **instructions_registry.INSTRUCTION_DICT,
+    "count:counting_composition": CountingCompositionChecker,
+    "count:count_unique": CountUniqueChecker,
+}
 
 
 class InstructionFollowingResourcesServerConfig(BaseResourcesServerConfig):
@@ -169,7 +182,7 @@ class InstructionFollowingResourcesServer(SimpleResourcesServer):
         for instruction_id, kwargs in zip(instruction_list, kwargs_list):
             try:
                 # Create instruction instance
-                instruction_cls = instructions_registry.INSTRUCTION_DICT[instruction_id]
+                instruction_cls = INSTRUCTION_DICT[instruction_id]
                 instruction = instruction_cls(instruction_id)
 
                 # Handle None kwargs

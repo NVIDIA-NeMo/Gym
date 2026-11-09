@@ -55,12 +55,34 @@ class Session:
     slots: Any = None
     config: Any = None
     persist: Callable = field(default=lambda: None, repr=False)
+    # Episode sessions: the seed request, the SandboxAccess response or the HTTP
+    # error the seed replays, and the first verify body (retries must repeat it exactly).
+    resources_request: Any = None
+    resources_response: Any = None
+    resources_error: tuple[int, str] | None = None
+    resources_verify_body: Any = None
 
 
 def exception(session, error, error_type=None):
     record = {"exception_type": error_type or type(error).__name__, "exception_message": str(error)}
     session.result.setdefault("exception_info", record)
     session.diagnostics.append({"phase": session.phase, "subphase": session.subphase, **record})
+
+
+def interrupted(session, reason):
+    """Mark the attempt's result as cut short, in result.json and the state record, so that no later reader (an
+    audit, a resumed run) takes what it recorded for a graded outcome. The first reason stands."""
+    session.result.setdefault(
+        "interrupted", {"reason": reason, "phase": session.phase, "subphase": session.subphase, "at": now()}
+    )
+
+
+def released(session):
+    """Whether every sandbox this session allocated (task, verifier, EFS helper) has stopped."""
+    return all(
+        resource is None or resource.closed
+        for resource in (session.environment, session.verifier_environment, session.shared_logs)
+    )
 
 
 async def cleanup(session):
@@ -108,6 +130,10 @@ async def prepare_session(session, loader):
     await session.slots.acquire()
     session.owns_slot = True
     session.task = await loader.load(session.request.task_name, session.request.task_ref)
+    # Before any sandbox starts or the agent runs: this task's settings could not produce a valid verification.
+    session.config.environment.require_exec_limit_covers(
+        session.task.name, session.config.environment.verifier_timeout_sec(session.task)
+    )
     session.environment = Environment(session.task, session.config.environment, session.session_id, session.directory)
     # Construct and validate the verifier configuration before allocating
     # either environment, but allocate its resources only after collection.
@@ -117,6 +143,7 @@ async def prepare_session(session, loader):
         session.session_id + "__verifier__trial",
         session.directory,
         verifier=True,
+        placement_group=session.environment.placement_group,
     )
     if session.config.environment.efs_logs_host_path:
         session.shared_logs = SharedLogs(session.environment)
@@ -178,6 +205,13 @@ async def finalize_session(session, *, grade):
             session, session.termination.detail
         ):
             return
+        if session.termination.reason == "killed":
+            # A self-kill and a per-process OOM kill look the same afterwards, and either ends the attempt.
+            exception(session, session.termination.detail or "Agent was killed", "NonZeroAgentExitCodeError")
+            session.result["verifier_result"] = {"rewards": {"reward": 0.0}, "source": "agent_killed"}
+            # The zero stands for this attempt, but the agent did not finish: it is never a result to reuse.
+            interrupted(session, "agent_killed")
+            return
         session.subphase = "quiesce"
         session.persist()
         await session.environment.quiesce_agent(session.session_id)
@@ -238,15 +272,26 @@ async def finalize_session(session, *, grade):
             await restore(session.verifier_environment, session.directory / "artifacts")
             session.subphase = "verifier_execution"
             session.persist()
+            timeout_sec = session.config.environment.verifier_timeout_sec(session.task)
+            if timeout_sec != session.task.config.verifier.timeout_sec:
+                session.diagnostics.append(
+                    {
+                        "operation": "verifier_timeout_override",
+                        "package_timeout_sec": session.task.config.verifier.timeout_sec,
+                        "timeout_sec": timeout_sec,
+                    }
+                )
             session.result["verifier_result"] = await run_verifier(
                 session.verifier_environment,
                 session.directory,
                 session.diagnostics,
+                timeout_sec=timeout_sec,
             )
         finally:
             session.result["verifier"]["finished_at"] = now()
     except asyncio.CancelledError:
         exception(session, "Resources shutdown interrupted evaluation", "CancelledError")
+        interrupted(session, "resources_shutdown")
     except Exception as exc:
         exception(session, exc)
         if grade and session.subphase in ("quiesce", "collect"):
@@ -279,7 +324,8 @@ async def shutdown(sessions: list[Session], timeout: float) -> None:
             if session.finalization in pending and session.subphase != "cleanup":
                 session.finalization.cancel()
         await asyncio.gather(*finalizers, return_exceptions=True)
-    # Includes provisioned sessions whose agent disconnected or died before verification.
+    # Includes provisioned sessions whose agent disconnected or died before verification. Their attempt was in flight.
     for session in sessions:
         if session.phase != "closed":
+            interrupted(session, "resources_shutdown")
             await cleanup(session)

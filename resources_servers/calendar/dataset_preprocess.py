@@ -17,7 +17,7 @@ from argparse import ArgumentParser
 
 from tqdm import tqdm
 
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 

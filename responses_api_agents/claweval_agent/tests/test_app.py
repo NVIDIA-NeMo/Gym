@@ -11,9 +11,9 @@ from unittest.mock import MagicMock
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from nemo_gym.benchmarks import BenchmarkConfig
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, GlobalConfigDictParser
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, GlobalConfigDictParser
+from nemo_gym.environment import BenchmarkConfig
 from responses_api_agents.claweval_agent.app import (
     ClawEvalAgent,
     ClawEvalAgentConfig,

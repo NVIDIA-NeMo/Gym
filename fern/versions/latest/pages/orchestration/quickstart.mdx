@@ -71,7 +71,7 @@ Things worth knowing about this file:
 
 <Note>
 
-`otel.enabled` defaults to **true**. An enabled collector requires `otel.endpoint`, `otel.service_name`, and a token in the submitting shell, and the submit fails before anything is staged if they are missing. This quickstart turns the collector off. To keep it, see [Collector for Submitted Jobs](/observability/eval-submit-collector).
+`otel.enabled` defaults to **true**. Local collection needs no backend credentials. Remote export requires `otel.endpoint`, `otel.service_name`, and a token in the submitting shell; a missing or empty token disables remote export with a warning. Set `otel.remote_export: false` to explicitly keep only local dumps. This quickstart turns the collector off. To keep it, see [Collector for Submitted Jobs](/observability/eval-submit-collector).
 
 </Note>
 

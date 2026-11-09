@@ -9,11 +9,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-from nemo_gym.base_responses_api_model import merge_model_call_capture_into_record
-from nemo_gym.harness_capabilities.checker import inspect_record
-from nemo_gym.rollout_collection import RolloutCollectionHelper, _attach_trajectory_record
-from nemo_gym.rollout_health import run_health_checks
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.rollouts import RolloutCollectionHelper, merge_model_call_capture_into_record, run_health_checks
+from nemo_gym.rollouts.harness_capabilities import inspect_record
+from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
 from responses_api_agents.claweval_agent.app import ClawEvalAgent, ClawEvalRunRequest, benchmark_metrics
 from responses_api_agents.claweval_agent.tests.test_app import fake_root, make_agent, write_trace
 from responses_api_models.openai_model.app import NeMoGymAsyncOpenAI, SimpleModelServer, SimpleModelServerConfig
@@ -209,8 +208,8 @@ async def test_worker_failure_is_masked_and_excluded_from_scores(tmp_path, monke
 @pytest.mark.parametrize("repeats", [1, 3])
 @pytest.mark.parametrize("split", ["general", "multimodal", "multi_turn"])
 def test_repetition_produces_exact_task_seed_pairs(repeats, split, monkeypatch):
-    from nemo_gym.benchmarks import BenchmarkConfig
-    from nemo_gym.train_data_utils import TrainDataProcessor
+    from nemo_gym.data import TrainDataProcessor
+    from nemo_gym.environment import BenchmarkConfig
 
     for key in ("CLAW_EVAL_ROOT", "CLAW_EVAL_SANDBOX_IMAGE", "CLAW_EVAL_SANDBOX_DEPS"):
         monkeypatch.setenv(key, "/tmp/test")

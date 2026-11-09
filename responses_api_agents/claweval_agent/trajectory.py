@@ -8,8 +8,8 @@ from pathlib import Path
 from time import time
 from typing import Any
 
-from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.rollout_observability import (
+from nemo_gym.core import NeMoGymResponse
+from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
     ObservationGap,
