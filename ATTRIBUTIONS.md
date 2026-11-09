@@ -27,6 +27,28 @@ external executable (GPL-2.0-or-later). Its source and binaries are **not**
 included in this repository. The optional Linux startup installer downloads
 revision `6441b478418350b338589cbfb1b4397fed4a490e` (abc2midi 4.88) into an ignored local directory.
 
+## MCP-Atlas
+
+The MCP-Atlas integration adapts material from
+[scaleapi/mcp-atlas](https://github.com/scaleapi/mcp-atlas/tree/5c11ac44e96d31b91b92a0affad5f2648255907a),
+revision `5c11ac44e96d31b91b92a0affad5f2648255907a`:
+
+| Upstream file | Gym file | Adapted material |
+|---|---|---|
+| `services/scoring/score_claims.py` | `benchmarks/mcp_atlas/prepare.py` | Claim normalization and extraction rules. |
+| `services/scoring/score_claims.py` | `resources_servers/mcp_atlas/verifier.py` | Claim prompt, structured verdict schema, response truncation and coverage rules. |
+
+The upstream material is MIT licensed, Copyright (c) 2026 Scale. The full upstream permission and warranty
+notice is retained in both affected files. NVIDIA modifications are licensed under Apache-2.0: NeMo Gym
+dataset download, row preparation, catalog validation, response extraction, judge requests and verdict validation.
+
+The dataset and example rows originate from
+[ScaleAI/MCP-Atlas](https://huggingface.co/datasets/ScaleAI/MCP-Atlas/tree/8c563b55d7c967755f474299848049834d624617),
+revision `8c563b55d7c967755f474299848049834d624617`, by Scale AI, under
+[CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/). NeMo Gym reformats the rows, normalizes claims,
+and selects the image-supported tool schemas. The external `ghcr.io/scaleapi/mcp-atlas:1.2.7` runtime image
+is not vendored; `resources_servers/mcp_atlas/tool_catalog.json` contains its exported MCP tool schemas.
+
 ## Python Package Dependencies
 
 | Component | Version | License | URL |

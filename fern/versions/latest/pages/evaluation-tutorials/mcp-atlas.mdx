@@ -1,0 +1,107 @@
+---
+title: "Evaluate MCP-Atlas"
+description: "Prepare MCP-Atlas tasks, configure service accounts and inspect claim-coverage results."
+---
+
+# Evaluate MCP-Atlas
+
+MCP-Atlas evaluates multi-step tool use against real MCP services. The NeMo Gym integration targets
+the 500 public tasks from [ScaleAI/MCP-Atlas](https://huggingface.co/datasets/ScaleAI/MCP-Atlas/tree/8c563b55d7c967755f474299848049834d624617),
+at revision `8c563b55d7c967755f474299848049834d624617`, with the upstream
+`ghcr.io/scaleapi/mcp-atlas:1.2.7` agent-environment image.
+
+<Warning>
+This integration is pending validation. The committed catalog lacks the authenticated Slack schemas
+needed by 60 tasks. Preparation fails until those schemas are exported and committed; credentials alone
+do not repair the catalog. The default Apptainer configuration also shares the host network. It requires
+a verified access boundary between evaluated code, other rollouts and the NeMo Gym control plane before
+benchmark scoring. Separate filesystems and host ports do not establish that boundary.
+</Warning>
+
+## Prepare the runtime and accounts
+
+Complete [installation](/main/get-started/installation) and configure a policy endpoint that supports
+function calls. Follow the [resources-server setup](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/mcp_atlas/README.md#setup)
+to build a non-root-readable SIF of the upstream image. Its tools may install packages at startup, so
+the sandbox needs outbound access to the task services, PyPI, npm and GitHub.
+
+Provision the service credentials in the runtime environment using the upstream variable names listed in
+[`SERVICE_ENV_NAMES`](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/mcp_atlas/app.py).
+Airtable, Google Calendar, Notion, MongoDB and Slack also require accounts populated with the upstream
+`data_exports/` fixtures. Use approved secret configuration; do not put credential values in commands or commits.
+
+Export the missing Slack tool schemas from an authenticated image using
+[`export_tool_catalog.py`](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/mcp_atlas/export_tool_catalog.py).
+The exporter combines saved `/list-tools` responses. Preserve every supported tool requested by the tasks;
+do not remove Slack tasks or replace their schemas with guesses.
+
+## Prepare all 500 tasks
+
+After the complete catalog is available, run from the repository root:
+
+```bash
+gym eval prepare --benchmark mcp_atlas
+```
+
+Preparation downloads the pinned public Parquet file and writes
+`benchmarks/mcp_atlas/data/mcp_atlas_benchmark.jsonl`. It requires 500 rows and refuses requested tools
+missing from an image-supported server's catalog. Tools belonging to servers the image does not ship
+are recorded in `verifier_metadata.dropped_tools`, following the upstream integration.
+
+## Configure and collect
+
+These keys control the benchmark's runtime:
+
+| Key | Purpose |
+|---|---|
+| `mcp_atlas_sandbox_image` | Absolute path to the staged SIF. |
+| `mcp_atlas.resources_servers.mcp_atlas.sandbox_provider` | Provider configuration; its transport must be compatible with the server's endpoints. |
+| `mcp_atlas.resources_servers.mcp_atlas.sandbox_max_concurrency` | Maximum simultaneous task sandboxes. |
+| `mcp_atlas_judge_base_url` | OpenAI-compatible judge endpoint. |
+| `mcp_atlas_judge_model_name` | Exact judge model name served by that endpoint. |
+| `mcp_atlas_judge_api_key` | Judge credential; resolve it from the runtime environment. |
+
+The defaults select Gemini 3.1 Pro (`gemini-3.1-pro-preview`) on Google's OpenAI-compatible endpoint.
+Changing the judge, sampling or task set changes the comparison protocol. The
+[`benchmark config`](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/mcp_atlas/config.yaml)
+selects the Simple Agent, its resources server and one repeat per task.
+
+Once the credential, catalog and network prerequisites are satisfied, the benchmark command starts
+the resources, agent and model-wrapper servers, collects responses and verifies final answers:
+
+```bash
+gym eval run --benchmark mcp_atlas \
+  --model-type vllm_model --model-url http://POLICY_HOST:8000/v1 --model POLICY_MODEL \
+  --output results/mcp_atlas/rollouts.jsonl \
+  ++mcp_atlas_sandbox_image=/absolute/path/mcp-atlas-1.2.7-nonroot.sif \
+  ++mcp_atlas_judge_api_key='${oc.env:MCP_ATLAS_JUDGE_API_KEY}'
+```
+
+Set `MCP_ATLAS_JUDGE_API_KEY` through approved secret configuration before starting the command. Use
+`--limit 3` for a small smoke; a limited run is not the 500-task benchmark. The development-only
+`mcp_atlas_sandbox_url` connects every task to one shared environment and must not be used for scores.
+
+## Inspect results and failures
+
+The verifier judges each ground-truth claim against the final assistant answer. A fulfilled claim scores
+1, a partial claim 0.5 and an unfulfilled claim 0. Coverage is the mean claim score rounded to three places.
+`reward` is 1 when coverage reaches 0.75. Thus `mean/reward` is pass rate, while `mean/coverage` measures
+claim coverage; neither is a percentage unless multiplied by 100 for display.
+
+Read the saved trajectories, `verdicts`, `coverage`, `reward`, `tool_calls` and `service_errors` alongside
+the [rollout-health artifacts](/main/evaluation/rollout-health). Environment or judge failures are masked
+separately from model failures. Confirm the complete expected task set and inspect failed rows before
+reporting an aggregate. The integration has not yet been baselined; retain `verified: false` until review
+and representative real model rollouts support it.
+
+Use the generated materialized inputs and rollout files for repeat analysis:
+
+```bash
+gym eval profile \
+  --inputs results/mcp_atlas/rollouts_materialized_inputs.jsonl \
+  --rollouts results/mcp_atlas/rollouts.jsonl
+```
+
+Profiling cannot repair missing tasks, credentials or incomplete rollouts. The
+[implementation README](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/mcp_atlas/README.md)
+records tool limits, timeout behavior, masking rules, upstream differences and source/data attribution.
