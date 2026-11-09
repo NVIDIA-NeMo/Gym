@@ -21,6 +21,7 @@ from time import monotonic
 from typing import Annotated, Any, Literal
 from uuid import uuid4
 
+import anyio
 from fastapi import Request
 from pydantic import BaseModel, BeforeValidator, Field, model_validator
 
@@ -59,7 +60,7 @@ from resources_servers.deepswe.app import (
 from resources_servers.deepswe.task_store import task_sandbox_resources
 from resources_servers.deepswe_external1.inline_task import InlineTask
 from resources_servers.deepswe_external1.task_data import TaskData
-from resources_servers.swebench.sandbox_sessions import SandboxSessionResourcesServer
+from resources_servers.swebench.sandbox_sessions import STOP_TIMEOUT_S, SandboxSessionResourcesServer
 
 
 logger = logging.getLogger(__name__)
@@ -280,12 +281,31 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer, SandboxSessionReso
         logger.info("Verifier Python setup: %s", details)
 
     async def _release_sandbox(self, sandbox: AsyncSandbox, *, task_id: str, phase: str) -> bool:
+        """Stop a golden- or null-validation sandbox, which no session owns, and say whether it stopped.
+
+        The stop is shielded and bounded, so a cancelled request still stops it instead of leaving it to ``ttl_s``.
+        """
         try:
-            await sandbox.stop()
+            with anyio.CancelScope(shield=True), anyio.fail_after(STOP_TIMEOUT_S):
+                await sandbox.stop()
             return True
         except Exception:
             logger.exception("Could not release %s sandbox for %s", phase, task_id)
             return False
+
+    async def _stop_session_verifier(self, session_id: str, *, task_id: str) -> bool:
+        """Stop the verifier registered with the session, trying twice, and say whether it stopped.
+
+        Both tries run before the verdict is made, so ``cleanup_errors`` names a verifier only when it is still
+        running after them. The session keeps it then, and the verify wrapper, an episode's close or shutdown stops it.
+        """
+        for _ in range(2):
+            try:
+                await self._stop_verifier_sandbox(session_id)
+                return True
+            except Exception:
+                logger.exception("Could not release verifier sandbox for %s", task_id)
+        return False
 
     async def seed_session(
         self,
@@ -362,8 +382,8 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer, SandboxSessionReso
     ) -> str | None:
         """Return the ID of the agent sandbox the session seeded, or raise when it does not match the verify task.
 
-        The shared base already matched an episode session's verify task against its seed; its retry may find the
-        sandbox stopped and the patch saved.
+        The shared base already matched an episode session's verify task against its seed. Its retry may find the
+        sandbox stopped and return ``None``; the saved capture then holds the sandbox's ID.
         """
         seeded = self._seeded_agent_sandboxes.get(session_id)
         record = self._task_sessions.get(session_id)
@@ -474,12 +494,16 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer, SandboxSessionReso
                     agent_id = self._check_seeded_agent_sandbox(session_id, body, task)
                     failure_stage = "patch_collection"
                     started = monotonic()
-                    # An episode session keeps the capture, so a verify cancelled after it reuses it on retry. A
-                    # failed stop below is masked instead, and that verdict is the one a retry replays.
-                    model_patch = await self.capture_task_sandbox_patch(
-                        session_id,
-                        lambda: self._collect_model_patch(self._session_id_to_sandbox[session_id], task),
-                    )
+                    seeded_id = agent_id
+
+                    async def capture() -> tuple[str | None, bytes]:
+                        sandbox = self._session_id_to_sandbox[session_id]
+                        return seeded_id, await self._collect_model_patch(sandbox, task)
+
+                    # An episode session keeps the capture with its sandbox's ID, so a verify cancelled after it
+                    # reports the same sandbox and patch on retry. A failed stop below is masked instead, and that
+                    # verdict is the one a retry replays.
+                    agent_id, model_patch = await self.capture_task_sandbox_patch(session_id, capture)
                     collect_time = monotonic() - started
                 finally:
                     try:
@@ -556,10 +580,10 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer, SandboxSessionReso
                 if not await self._release_sandbox(agent_sandbox, task_id=task_id, phase="agent"):
                     cleanup_errors.append("agent")
             if verifier_sandbox is not None:
-                if await self._release_sandbox(verifier_sandbox, task_id=task_id, phase="verifier"):
-                    if self._verifier_sandboxes.get(session_id) is verifier_sandbox:
-                        self._verifier_sandboxes.pop(session_id)
-                else:
+                if mode == "agent":
+                    if not await self._stop_session_verifier(session_id, task_id=task_id):
+                        cleanup_errors.append("verifier")
+                elif not await self._release_sandbox(verifier_sandbox, task_id=task_id, phase="verifier"):
                     cleanup_errors.append("verifier")
 
         response = DeepsweExternal1VerifyResponse.model_validate(
