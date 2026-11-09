@@ -91,6 +91,7 @@ def make_capture_harness(
     model_config=None,
     decide_input=None,
     parent_resolution_mode="source_history",
+    allow_system_suffix=False,
     checkpoint=False,
     stream_keepalive_s=None,
     dynamo=False,
@@ -108,6 +109,7 @@ def make_capture_harness(
             "enabled": True,
             "external_staging": True,
             "parent_resolution": parent_resolution_mode,
+            "allow_system_suffix": allow_system_suffix,
             "rebuild_response": False,
             "lineage_store": "nemo_gym.models.token_capture.lineage:FileLineageStore",
             "lineage_store_kwargs": {"root": str(tmp_path / "lineage")},
@@ -1646,3 +1648,21 @@ def test_messages_replay_keeps_continuations_and_roots_edited_history(monkeypatc
     assert len(final.records) == 3
     assert not final.failures and not final.pending_call_ids
     assert final.records[0].response_id == first["id"]
+
+
+@pytest.mark.parametrize("allow_system_suffix", [False, True])
+def test_system_suffix_requires_worker_opt_in(monkeypatch, tmp_path, allow_system_suffix):
+    harness = make_capture_harness(monkeypatch, tmp_path, allow_system_suffix=allow_system_suffix)
+    path = "/ng-rollout/attempt/training-token-capture/v1/chat/completions"
+    history = [{"role": "user", "content": "question"}]
+    first = assert_clean(harness.client.post(path, json={"messages": history}))
+    parent = harness.manifest("attempt").records[0]
+    history += [
+        {"role": "assistant", "content": first["choices"][0]["message"]["content"]},
+        {"role": "system", "content": "remaining budget: 100"},
+    ]
+    assert_clean(harness.client.post(path, json={"messages": history}))
+    admission = harness.worker_calls[-1][0]
+    assert admission.mode == ("candidate" if allow_system_suffix else "text")
+    assert admission.parent_call_id == (parent.model_call_id if allow_system_suffix else None)
+    assert admission.root_reason == (None if allow_system_suffix else "non_user_suffix")

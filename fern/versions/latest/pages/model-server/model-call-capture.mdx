@@ -98,6 +98,13 @@ Source-history candidates carry an explicit source-match proof. Deploy compatibl
 revisions together: a missing proof is an error, not permission to assume an exact match.
 Direct roots retain replay evidence and framework safety checks so later calls can continue them.
 
+`token_id_capture.allow_system_suffix` defaults to `false`. Enable it only with a worker that
+checks that the full tokenized prompt starts with the separately rendered historical prefix
+before installing captured tokens. This permits appended system messages such as CLI budget
+updates. If the template moves the update ahead of the historical prefix, the worker must
+capture a new root (`worker_rooted`). Workers that only check message boundaries must leave
+this setting disabled.
+
 Staging admissions, snapshots, commit coordinates, manifests and receipts identify the current capture
 attempt with `capture_key`. A carried-over `CallRecord.source_capture_key` identifies the earlier
 attempt that staged that call; when absent, the receipt's own capture key applies. Logical rollout IDs,
