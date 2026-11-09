@@ -395,6 +395,7 @@ class TestOpenCodeSandboxedAgent:
             "nemo_gym.models.chat_completions_converter.uuid4", MagicMock(return_value=MagicMock(hex=""))
         )
         monkeypatch.setattr("responses_api_agents.opencode_sandboxed_agent.app.time", MagicMock(return_value=0.0))
+        monkeypatch.setattr(app_module, "perf_counter", MagicMock(side_effect=[100.0, 112.5]))
 
         actual_response = await server.responses(
             request=MagicMock(
@@ -502,6 +503,7 @@ class TestOpenCodeSandboxedAgent:
         )
 
         assert expected_response == actual_response
+        assert server._sandbox_id_to_run_result[""]["opencode_runtime"] == 12.5
         # Execution uploads plugins even when a resource supplied this sandbox.
         expected_uploads = []
         if remaining_context:
@@ -595,6 +597,43 @@ class TestOpenCodeSandboxedAgent:
         monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value={}))
         monkeypatch.setattr("responses_api_agents.opencode_sandboxed_agent.app.Path.exists", lambda self: False)
         return sandbox_mock
+
+    @mark.parametrize("failure", ["exit", "timeout", "exception"])
+    async def test_runtime_includes_failed_execution_but_excludes_export(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, failure: str
+    ) -> None:
+        config = self._create_config()
+        config.artifacts_dir = str(tmp_path)
+        server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        sandbox = self._mock_sandbox(monkeypatch, server)
+        elapsed = 100.0
+
+        async def execute(*, command, timeout_s, env=None):
+            nonlocal elapsed
+            if "opencode run --title" in command:
+                elapsed += 12.5
+                if failure == "exception":
+                    raise TimeoutError("execution timed out")
+                return SimpleNamespace(
+                    stdout="Shell: bash",
+                    stderr="",
+                    return_code=1 if failure == "exit" else None,
+                    error_type="timeout" if failure == "timeout" else None,
+                )
+            elapsed += 50.0
+            return SimpleNamespace(stdout="", stderr="", return_code=1, error_type=None)
+
+        sandbox.exec = AsyncMock(side_effect=execute)
+        monkeypatch.setattr(app_module, "perf_counter", lambda: elapsed)
+        await server.responses(
+            self._responses_request(),
+            NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}]),
+        )
+        run_result = server._sandbox_id_to_run_result[""]
+        assert run_result["opencode_runtime"] == 12.5
+        assert run_result["opencode_failed"]
+        assert not run_result["opencode_finished"]
+        assert elapsed == 162.5
 
     async def test_responses_uploads_input_images_and_attaches_them_to_the_run(self, monkeypatch: MonkeyPatch) -> None:
         """Each input_image data URI is decoded, uploaded under the fixed attachments directory with the
@@ -1061,10 +1100,13 @@ class TestOpenCodeSandboxedAgent:
         )
 
         try:
+            monkeypatch.setattr(app_module, "perf_counter", MagicMock(side_effect=[100.0, 112.5]))
             result = await server.run(request, body)
         finally:
             connection.close()
 
+        assert result.opencode_runtime == 12.5
+        assert result.model_dump()["opencode_runtime"] == 12.5
         parent_usage = NeMoGymResponseUsage.sum_from_list(server._opencode_export_to_usages(opencode_export_test_data))
         usage = result.response.usage
         assert usage.input_tokens == parent_usage.input_tokens + (0 if snapshot_failure else 30)
@@ -1337,6 +1379,7 @@ class TestBenchmarkLifecycle:
                 "opencode_run_stdout": "",
                 "opencode_run_stderr": "",
                 "opencode_finished": False,
+                "opencode_runtime": 21.5,
                 "opencode_export_found": False,
                 "opencode_failed": True,
                 "opencode_error_type": "TimeoutError",
@@ -1355,6 +1398,7 @@ class TestBenchmarkLifecycle:
         assert result.reward == 0.0
         assert result.opencode_failed
         assert result.opencode_error_type == "TimeoutError"
+        assert result.opencode_runtime == 21.5
         assert client.post.await_count == 2
         assert client.post.await_args.kwargs["json"]["response"]["output"] == []
         assert result.model_dump()["library_reward"] == 0.0

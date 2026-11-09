@@ -27,7 +27,7 @@ from copy import deepcopy
 from functools import cache
 from pathlib import Path
 from shlex import quote
-from time import time
+from time import perf_counter, time
 from traceback import format_exc
 from typing import Any, ClassVar, Dict, List, Literal, NamedTuple, Optional
 from uuid import uuid4
@@ -623,6 +623,9 @@ class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
     opencode_run_stdout: str
     opencode_run_stderr: str
     opencode_finished: bool
+    opencode_runtime: float = Field(
+        description="Wall-clock seconds awaiting the sandbox install-and-run command, excluding export and verification."
+    )
     opencode_export_found: bool
     opencode_exit_code: Optional[int] = None
     opencode_error_type: Optional[str] = None
@@ -1018,6 +1021,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             await sandbox.upload(self.config.local_ripgrep_binary_path, ripgrep_remote_path)
 
         run_error_type = None
+        run_started = perf_counter()
         try:
             result = await sandbox.exec(
                 command=command,
@@ -1027,6 +1031,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             result = None
             run_error_type = type(exc).__name__
             print("OpenCode exec hit error.", format_exc(), file=sys.stderr)
+        finally:
+            opencode_runtime = perf_counter() - run_started
 
         if self.config.debug and result:
             print("OpenCode install and run stdout:\n", result.stdout, file=sys.stderr)
@@ -1214,6 +1220,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             "opencode_run_stderr": result_stderr,
             "opencode_export_found": opencode_export_found,
             "opencode_finished": opencode_finished,
+            "opencode_runtime": opencode_runtime,
             "opencode_attachment_count": len(attachments),
         }
         if collect_observations:
