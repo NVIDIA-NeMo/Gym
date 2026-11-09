@@ -161,7 +161,7 @@ async def test_sandbox_spans_have_no_rollout_id_outside_a_rollout(
         if span.name.startswith("gym.sandbox."):
             names.add(span.name)
             assert "nemo.gym.rollout.id" not in span.attributes
-    assert names == {"gym.sandbox.start", "gym.sandbox.exec", "gym.sandbox.stop"}
+    assert names == {"gym.sandbox.request", "gym.sandbox.start", "gym.sandbox.exec", "gym.sandbox.stop"}
 
 
 class _FailingProvider(_StubProvider):

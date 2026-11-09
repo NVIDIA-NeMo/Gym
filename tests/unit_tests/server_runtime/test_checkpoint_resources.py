@@ -1499,10 +1499,10 @@ async def test_live_sessions_outside_the_commit_scope_are_not_exported(tmp_path:
 
 class GatedVerifyServer(ReplayVerifyServer):
     verify_gate: Any = None
-    verifying: Any = None
+    verify_started: Any = None
 
     async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
-        self.verifying.set()
+        self.verify_started.set()
         await self.verify_gate.wait()
         return await super().verify(body)
 
@@ -1511,13 +1511,13 @@ async def test_a_replayable_verify_that_ends_between_environment_and_resources_p
     tmp_path: Path,
 ) -> None:
     server, client = make_server(GatedVerifyServer)
-    server.verify_gate, server.verifying = asyncio.Event(), asyncio.Event()
+    server.verify_gate, server.verify_started = asyncio.Event(), asyncio.Event()
     close = {"resources_session_id": "s", "episode_id": {"rollout_id": "r", "attempt": 1}}
     async with client:
         await client.post("/ng-rollout/r/seed_session", json=SEED)
         cookies = dict(client.cookies)
         verify = asyncio.create_task(client.post("/ng-rollout/r/verify", json=VERIFY, headers=CLOSE_FOLLOWS))
-        await server.verifying.wait()
+        await server.verify_started.wait()
         # Coordination prepares the environment first.
         # It records the episode's boundary before this verification, which a restore runs again,
         # and it does not reach this server, whose admission is still open.
@@ -1530,7 +1530,7 @@ async def test_a_replayable_verify_that_ends_between_environment_and_resources_p
         await client.post("/ng-control/v1/checkpoint/resume", json=control(), headers=AUTH)
 
     restored, fresh = make_server(GatedVerifyServer)
-    restored.verify_gate, restored.verifying = asyncio.Event(), asyncio.Event()
+    restored.verify_gate, restored.verify_started = asyncio.Event(), asyncio.Event()
     restored.verify_gate.set()
     async with fresh:
         fresh.cookies.update(cookies)

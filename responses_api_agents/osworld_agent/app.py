@@ -380,7 +380,7 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     ray_task_resources: Dict[str, float] = Field(default_factory=dict)
     docker_port_lock_timeout: float = Field(default=300.0, gt=0)  # concurrent Docker VM port allocation
     evaluator_disable_gpu: bool = True
-    reward_mode: Literal["binary", "raw"] = "binary"
+    reward_mode: Literal["binary", "raw", "signed_v1"] = "binary"  # see reward_modes.py
     runner_name: str = DEFAULT_RUNNER_NAME
     action_space: Optional[str] = None
     observation_type: Optional[str] = None
@@ -824,6 +824,7 @@ def _build_messages_model_fn(
             )
             if structured_response and isinstance(normalized, dict):
                 normalized["finish_reason"] = choice.finish_reason
+                _record_served_response_id(normalized, resp)
             return normalized
 
         normalization_error = None
@@ -836,6 +837,7 @@ def _build_messages_model_fn(
             )
             if structured_response and isinstance(normalized, dict):
                 normalized["finish_reason"] = choice.finish_reason
+                _record_served_response_id(normalized, resp)
         except Exception as exc:  # noqa: BLE001 - log raw output before preserving the original error.
             normalization_exc = exc
             normalization_error = {"type": type(exc).__name__, "message": repr(exc)}
@@ -867,6 +869,19 @@ def _build_messages_model_fn(
         return normalized
 
     return _call
+
+
+def _record_served_response_id(normalized: Dict[str, Any], resp: Any) -> None:
+    """Keep the served Chat envelope id beside one structured model response.
+
+    Token capture keys each captured call by this id. Returning it lets the
+    agent name its scored call (``terminal_response_id``) without inventing
+    an identity the model server never served.
+    """
+
+    response_id = getattr(resp, "id", None)
+    if isinstance(response_id, str) and response_id:
+        normalized["response_id"] = response_id
 
 
 def _recover_first_fenced_action(content: str) -> str | None:
@@ -1658,6 +1673,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 max_trajectory_length=self.config.max_trajectory_length,
                 max_output_tokens=max_tokens,
                 exact_trace_transport_version=self.config.exact_trace_transport_version,
+                served_call_output=self._token_id_capture_enabled(),
             )
 
 
@@ -1725,8 +1741,16 @@ def _build_response(
     max_trajectory_length: Optional[int] = None,
     max_output_tokens: Optional[int] = None,
     exact_trace_transport_version: Literal[2, 3] = 2,
+    served_call_output: bool = False,
 ) -> OSWorldVerifyResponse:
-    """Pack one run without changing its prompt policy for training consumers."""
+    """Pack one run without changing its prompt policy for training consumers.
+
+    ``served_call_output`` is set when training-token capture owns the token
+    evidence. The model server then withholds token arrays from the agent, so
+    exact-trace output is unavailable; the returned history instead carries
+    accepted generations verbatim. Complete call evidence still includes
+    rejected attempts, independently of training selection.
+    """
 
     steps = result.get("steps", [])
     if not isinstance(steps, list):
@@ -1805,6 +1829,11 @@ def _build_response(
             # training evidence. The full projected prompts and their duplicate
             # generation arrays are validation/debug data, not transport data.
             trajectory_fields.pop("trajectory_model_calls", None)
+    terminal_response_id: Optional[str] = None
+    if served_call_output and not capabilities["exact_model_call_evidence"] and model_calls:
+        # An empty accepted history is meaningful; never replace it with
+        # parser-normalized step text that cannot identify captured calls.
+        output, terminal_response_id = _served_model_call_output(model_calls)
 
     response_dict: Dict[str, Any] = {
         "id": f"osworld-{(body.verifier_metadata or {}).get('task_id', 'unknown')}",
@@ -1865,12 +1894,63 @@ def _build_response(
         "verifier_metadata": metadata,
         **runtime_admission,
     }
+    if terminal_response_id is not None:
+        # Names the scored (last) generation by the id the model server served.
+        response_fields["terminal_response_id"] = terminal_response_id
     # A refused rollout is a typed failure row: an infrastructure cause retries, a failed policy call is the model's.
     response_fields |= _admission_failure_fields(result, runtime_admission)
     sandbox_start_failure = result.get("sandbox_start_failure")
     if isinstance(sandbox_start_failure, Mapping):
         response_fields |= _sandbox_start_failure_fields(result.get("error"), sandbox_start_failure)
     return OSWorldVerifyResponse(**response_fields)
+
+
+def _served_model_call_output(
+    model_calls: List[Dict[str, Any]],
+) -> tuple[List[Dict[str, Any]], Optional[str]]:
+    """Return accepted served generations and the last observed served call ID.
+
+    Capture fingerprints the content the model server served, which keeps the
+    reasoning inline as ``<think>...</think>``. Step text strips that reasoning
+    and omits parser-retry calls, so it cannot identify captured calls.
+
+    Missing responses and empty served content (such as a local context-overflow
+    reply) provide no usable returned-content witness. Both are skipped; the
+    capture ledger independently records what ran. Rejected calls remain in
+    trajectory evidence but not in accepted history. The terminal still names
+    the last observed non-empty served response,
+    even when rejected. A returned-history consumer must reject an absent
+    terminal or missing selected parent, not silently select another call;
+    an explicit all-captured policy may include rejected calls.
+    """
+
+    output: List[Dict[str, Any]] = []
+    terminal_response_id: Optional[str] = None
+    terminal_accepted = True
+    for model_call in model_calls:
+        response = model_call.get("response")
+        if not isinstance(response, Mapping):
+            continue
+        raw_content = response.get("raw_content")
+        if not isinstance(raw_content, str) or not raw_content:
+            continue
+        response_id = response.get("response_id")
+        terminal_response_id = response_id if isinstance(response_id, str) and response_id else None
+        terminal_accepted = model_call.get("accepted") is True
+        if not terminal_accepted:
+            continue
+        output.append(
+            {
+                "id": f"msg-call-{model_call['turn_id']}",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "annotations": [], "text": raw_content}],
+            }
+        )
+    if not terminal_accepted and terminal_response_id is None:
+        raise ValueError("Rejected terminal call has no served response_id; cannot attribute the captured reward")
+    return output, terminal_response_id
 
 
 # Runtime-admission reasons the policy did not cause: the row is a retryable ``infrastructure_error``. A sandbox guest

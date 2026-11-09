@@ -151,7 +151,7 @@ class TestApp:
                 task_data={},
             ),
             keeps_state=True,
-            holds_state=lambda resources_session_id: resources_session_id in server._session_episodes,
+            holds_state=lambda resources_session_id: resources_session_id in server._episode_by_session,
         )
 
     def test_close_route_releases_the_session(self) -> None:
@@ -179,7 +179,7 @@ class TestApp:
         )
         assert close.status_code == 200
         # The route reached this server's close, not the base default, so the session was released.
-        assert resources_session_id not in server._session_episodes
+        assert resources_session_id not in server._episode_by_session
         assert server._fences.get(resources_session_id) == episode_id
 
     def test_close_of_a_closed_session_naming_another_episode_is_refused(self) -> None:
