@@ -6,14 +6,19 @@
 import asyncio
 import logging
 from collections.abc import Mapping
+from dataclasses import replace
+from typing import Literal
 
 import anyio
 
+from nemo_gym.client.server_client import get_server_url
 from nemo_gym.config.global_config import get_global_config_dict
 from nemo_gym.core.episode_types import TaskId
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.config import SandboxConfig, resolve_provider_config
+from nemo_gym.server_runtime.base_resources_server import ResourcesSeedRejectedError
+from nemo_gym.utils.network_policy import restricted_network_policy
 
 
 LOGGER = logging.getLogger(__name__)
@@ -23,6 +28,9 @@ _LABEL_LIMIT = 63
 STOP_TIMEOUT_S = 120.0
 # The supervisor gives a server about a second to exit, so shutdown stops sandboxes concurrently, this many at a time.
 SHUTDOWN_STOP_CONCURRENCY = 64
+
+# Egress of a lent sandbox: ``inherit`` keeps the provider's network, ``model_only`` allows only the model server.
+LentSandboxNetworkAccess = Literal["inherit", "model_only"]
 
 
 class LentSandboxes:
@@ -38,15 +46,33 @@ class LentSandboxes:
     gives up after ``STOP_TIMEOUT_S``. A session that is never closed keeps its sandbox until shutdown, or until the
     provider reclaims it after ``sandbox_config.ttl_s``, so set ``ttl_s`` above the episode deadline plus the time
     that grading and cleanup take.
+
+    With ``network_access="model_only"``, each sandbox is created with an egress rule that allows only the host of
+    ``model_server``, the model server that a harness in the sandbox calls (every port of that host is open). The
+    harness that borrows the sandbox keeps this network; it cannot change it.
     """
 
     def __init__(
-        self, sandbox_provider: str, sandbox_config: SandboxConfig, *, image: str | None, workdir: str
+        self,
+        sandbox_provider: str,
+        sandbox_config: SandboxConfig,
+        *,
+        image: str | None,
+        workdir: str,
+        network_access: LentSandboxNetworkAccess = "inherit",
+        model_server: str | None = None,
     ) -> None:
+        if network_access == "model_only":
+            if not model_server:
+                raise ValueError("network_access model_only needs model_server, the model server the sandbox calls")
+            if "network_policy" in sandbox_config.provider_options:
+                raise ValueError("Set network_access or sandbox_config.provider_options.network_policy, not both")
         self._provider = sandbox_provider
         self._config = sandbox_config
         self._image = image
         self._workdir = workdir
+        self._network_access = network_access
+        self._model_server = model_server
         self._sandboxes: dict[str, AsyncSandbox] = {}
 
     def get(self, resources_session_id: str) -> AsyncSandbox | None:
@@ -78,7 +104,12 @@ class LentSandboxes:
             files=files,
             named_configs=named_configs,
         )
-        sandbox = AsyncSandbox(resolve_provider_config(self._provider, named_configs))
+        provider_config = resolve_provider_config(self._provider, named_configs)
+        if self._network_access == "model_only":
+            spec = replace(
+                spec, provider_options={**spec.provider_options, "network_policy": self._model_only(provider_config)}
+            )
+        sandbox = AsyncSandbox(provider_config)
         # start() stops the sandbox itself when delivering the files fails.
         await sandbox.start(spec)
         try:
@@ -114,6 +145,15 @@ class LentSandboxes:
                     LOGGER.exception("Failed to stop the sandbox lent for resources session %s", resources_session_id)
 
         await asyncio.gather(*(release(resources_session_id) for resources_session_id in list(self._sandboxes)))
+
+    def _model_only(self, provider_config: Mapping[str, object]) -> dict[str, object]:
+        """The egress rule that allows only the model server's host, refused (422) where it cannot be enforced."""
+        (provider_name,) = provider_config
+        try:
+            return restricted_network_policy(provider_name, [get_server_url(self._model_server)])
+        except ValueError as error:
+            # A provider without network policies or a model server on a loopback address: no retry can fix it.
+            raise ResourcesSeedRejectedError(f"Cannot lend a model_only sandbox: {error}") from error
 
     async def _access(self, sandbox: AsyncSandbox) -> SandboxAccess:
         return SandboxAccess(

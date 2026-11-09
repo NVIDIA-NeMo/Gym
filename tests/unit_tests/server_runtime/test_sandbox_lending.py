@@ -14,6 +14,7 @@ from nemo_gym.core.episode_types import TaskId
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.config import SandboxConfig
 from nemo_gym.server_runtime import sandbox_lending
+from nemo_gym.server_runtime.base_resources_server import ResourcesSeedRejectedError
 from nemo_gym.server_runtime.sandbox_lending import LentSandboxes
 
 
@@ -226,3 +227,98 @@ async def test_a_lend_cancelled_while_describing_the_sandbox_still_stops_it(work
 
     assert len(finished) == 1
     assert lender.get("session") is None
+
+
+class _RecordingSandbox:
+    """Stands in for AsyncSandbox on a provider this test cannot start: records the provider and the spec."""
+
+    created: list["_RecordingSandbox"] = []
+
+    def __init__(self, provider) -> None:
+        self.provider = provider
+        self.spec = None
+        _RecordingSandbox.created.append(self)
+
+    async def start(self, spec) -> None:
+        self.spec = spec
+
+    async def serialize(self, *, scope: str) -> dict:
+        return {"sandbox_id": "recorded"}
+
+    async def stop(self) -> None:
+        pass
+
+
+def test_model_only_needs_a_model_server_and_no_explicit_network_policy() -> None:
+    with pytest.raises(ValueError, match="needs model_server"):
+        LentSandboxes("sandbox", SandboxConfig(), image=None, workdir="/workspace", network_access="model_only")
+    with pytest.raises(ValueError, match="not both"):
+        LentSandboxes(
+            "sandbox",
+            SandboxConfig(provider_options={"network_policy": {"defaultAction": "deny"}}),
+            image=None,
+            workdir="/workspace",
+            network_access="model_only",
+            model_server="policy_model",
+        )
+
+
+async def test_model_only_lends_a_sandbox_that_reaches_only_the_model_server(monkeypatch) -> None:
+    monkeypatch.setattr(sandbox_lending, "get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}})
+    asked = []
+
+    def server_url(name: str) -> str:
+        asked.append(name)
+        return "http://10.1.2.3:8000"
+
+    monkeypatch.setattr(sandbox_lending, "get_server_url", server_url)
+    monkeypatch.setattr(_RecordingSandbox, "created", [])
+    monkeypatch.setattr(sandbox_lending, "AsyncSandbox", _RecordingSandbox)
+    lender = LentSandboxes(
+        "sandbox",
+        SandboxConfig(provider_options={"keep": True}),
+        image="task-image",
+        workdir="/workspace",
+        network_access="model_only",
+        model_server="policy_model",
+    )
+
+    await lender.lend("session", TASK)
+
+    (sandbox,) = _RecordingSandbox.created
+    assert asked == ["policy_model"]
+    assert sandbox.provider == {"opensandbox": {}}
+    assert sandbox.spec.provider_options == {
+        "keep": True,
+        "network_policy": {"defaultAction": "deny", "egress": [{"action": "allow", "target": "10.1.2.3"}]},
+    }
+
+
+async def test_model_only_on_a_provider_without_network_policies_is_refused_before_a_sandbox_starts(
+    workdir, started, monkeypatch
+) -> None:
+    monkeypatch.setattr(sandbox_lending, "get_server_url", lambda name: "http://10.1.2.3:8000")
+    lender = LentSandboxes(
+        "sandbox",
+        SandboxConfig(),
+        image=None,
+        workdir=str(workdir),
+        network_access="model_only",
+        model_server="policy_model",
+    )
+
+    with pytest.raises(ResourcesSeedRejectedError, match="requires the OpenSandbox network-policy provider") as error:
+        await lender.lend("session", TASK)
+
+    assert error.value.status_code == 422
+    assert started == []
+    assert lender.get("session") is None
+
+
+async def test_inherit_leaves_the_provider_network_alone(workdir, started) -> None:
+    lender = _lender(workdir)
+
+    await lender.lend("session", TASK)
+
+    assert "network_policy" not in started[0].provider_options
+    await lender.release_all()
