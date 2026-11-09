@@ -278,6 +278,8 @@ async def test_episode_crash_is_persistable_zero(monkeypatch, tmp_path, reason, 
     "provider_error,finish,expected",
     [
         ({"name": "APIError", "data": {"statusCode": 400}}, None, ("model_request_error", 400)),
+        ({"name": "APIError", "data": {"statusCode": 413}}, None, ("model_request_error", 413)),
+        ({"name": "APIError", "data": {"statusCode": 422}}, None, ("model_request_error", 422)),
         ({"name": "APIError", "data": {"statusCode": 429}}, None, ("model_request_error", 429)),
         ({"name": "APIError", "data": {"statusCode": 500}}, None, ("model_request_error", 500)),
         ({"name": "APIError", "data": {"isRetryable": True}}, None, ("model_transport_error", None)),
@@ -301,7 +303,9 @@ async def test_provider_evidence_selects_scoring_or_retry(monkeypatch, tmp_path,
     error = ClientResponseError(SimpleNamespace(real_url="http://agent/v1/responses"), (), status=500)
     error.response_content = json.dumps({"detail": detail}).encode()
     monkeypatch.setattr(OpenCodeMultimodalAgent, "run", AsyncMock(side_effect=error))
-    model_caused = expected[0] == "model_context_limit" or expected == ("model_request_error", 400)
+    model_caused = expected[0] == "model_context_limit" or (
+        expected[0] == "model_request_error" and expected[1] in (400, 413, 422)
+    )
     if not model_caused:
         with pytest.raises(ClientResponseError) as caught:
             await runner.run(MagicMock(), OpenCodeMultimodalRunRequest(responses_create_params=body()))

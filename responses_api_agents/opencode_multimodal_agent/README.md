@@ -388,8 +388,14 @@ process-group cleanup after timeout/cancellation. Shared string matching exposes
 the previous `app_passrate.py` entrypoint delegates to the common verifier.
 
 An enforced turn budget requires matching agent and visual gateway configuration
-and rejects another model entrypoint at agent startup. Existing turn counting and
-notice/grace thresholds are retained. The hosted gateway preset preserves explicit
+and rejects another model entrypoint at agent startup. Turns count valid returned
+completions; upstream errors, cancellations and invalid completion envelopes do not
+advance the turn counter or spend grace tool calls. Exhaustion returns permanent
+HTTP 422. The 55+10 budget and early notice/grace thresholds are retained. This
+completion-based accounting changes the protocol for runs with failed attempts;
+historical evaluations retain their recorded source revision and attempt-based
+accounting. Episode wall-clock limits still apply. Provider attempts remain tracked
+separately from the completed-turn budget. The hosted gateway preset preserves explicit
 server sampling/template settings while omitting harness sampling defaults.
 
 Enroot/local execution and the compatibility Bubblewrap path require

@@ -2,15 +2,18 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
+from aiohttp import ClientConnectionError
 from fastapi import HTTPException, Request
 
+from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymChatCompletion, NeMoGymChatCompletionCreateParamsNonStreaming, rollout_context
 from responses_api_agents.opencode_multimodal_agent.eval_budget import FINAL_TURN_NOTICE, EvalTurnBudget
 from responses_api_models.vllm_model.app import VLLMModel
-from responses_api_models.vllm_model.visual_eval import VisualEvalModel
+from responses_api_models.vllm_model.hosted_visual_eval import HostedVisualEvalModel
+from responses_api_models.vllm_model.visual_eval import VisualEvalModel, VisualEvalModelConfig
 
 
 def request():
@@ -49,12 +52,21 @@ def completion(tools=3):
     )
 
 
-def gateway(monkeypatch, budget):
-    monkeypatch.setattr(VisualEvalModel, "model_post_init", lambda self, context: None)
-    model = VisualEvalModel.model_construct(config=SimpleNamespace(turn_budget=budget))
-    # The startup patch also bypasses Pydantic's private-attribute initialization.
-    model.__pydantic_private__ = {"_turn_states": {}}
-    return model
+def gateway(monkeypatch, budget, model_class=VisualEvalModel):
+    monkeypatch.setattr(VLLMModel, "_post_init", lambda self: None)
+    config = VisualEvalModelConfig(
+        host="localhost",
+        port=8081,
+        name="policy",
+        entrypoint="visual_eval.py",
+        base_url="http://localhost/v1",
+        api_key="unused",
+        model="policy",
+        return_token_id_information=False,
+        uses_reasoning_parser=False,
+        turn_budget=budget,
+    )
+    return model_class(config=config, server_client=MagicMock(spec=ServerClient))
 
 
 @pytest.mark.asyncio
@@ -76,7 +88,7 @@ async def test_55_plus_10_enforced_even_if_client_and_model_ignore_limits(monkey
         for _ in range(3):
             with pytest.raises(HTTPException) as error:
                 await model.chat_completions(request(), body())
-            assert error.value.status_code == 400
+            assert error.value.status_code == 422
     assert len(seen) == 65
     assert all(FINAL_TURN_NOTICE not in str(p.messages) for p in seen[:54])
     assert all(p.messages[-1]["content"] == FINAL_TURN_NOTICE for p in seen[54:])
@@ -107,6 +119,143 @@ async def test_concurrent_requests_cannot_race_past_hard_limit_and_rollouts_are_
     with rollout_context("b"):
         await model.chat_completions(request(), body())
     assert len(upstream_calls) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_class", [VisualEvalModel, HostedVisualEvalModel])
+@pytest.mark.parametrize(
+    "error_factory",
+    [
+        pytest.param(lambda: HTTPException(429, "rate limited"), id="429"),
+        pytest.param(lambda: HTTPException(503, "unavailable"), id="503"),
+        pytest.param(lambda: ClientConnectionError("disconnected"), id="transport"),
+        pytest.param(lambda: TimeoutError("upstream timed out"), id="timeout"),
+    ],
+)
+async def test_failed_calls_then_success_count_as_one_turn(monkeypatch, model_class, error_factory):
+    model = gateway(monkeypatch, EvalTurnBudget(), model_class)
+    attempts = 0
+
+    async def upstream(self, req, params):
+        nonlocal attempts
+        attempts += 1
+        if attempts <= 12:
+            raise error_factory()
+        return completion(0)
+
+    monkeypatch.setattr(VLLMModel, "chat_completions", upstream)
+    with rollout_context("episode"):
+        for _ in range(12):
+            with pytest.raises(type(error_factory())):
+                await model.chat_completions(request(), body())
+            assert model._turn_states["episode"].turns == 0
+        await model.chat_completions(request(), body())
+    assert attempts == 13
+    assert model._turn_states["episode"].turns == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_boundary_attempts_preserve_notice_and_grace_allowance(monkeypatch):
+    model = gateway(monkeypatch, EvalTurnBudget())
+    fail_next = False
+    seen = []
+
+    async def upstream(self, req, params):
+        nonlocal fail_next
+        seen.append(params)
+        if fail_next:
+            fail_next = False
+            raise HTTPException(503, "unavailable")
+        return completion()
+
+    monkeypatch.setattr(VLLMModel, "chat_completions", upstream)
+    successful = []
+    with rollout_context("episode"):
+        for turn in range(1, 66):
+            if turn in (54, 55, 56, 57, 58, 65):
+                state = model._turn_states["episode"]
+                before = (state.turns, state.grace_tool_calls)
+                fail_next = True
+                with pytest.raises(HTTPException):
+                    await model.chat_completions(request(), body())
+                assert (state.turns, state.grace_tool_calls) == before
+            successful.append(await model.chat_completions(request(), body()))
+            if turn in (54, 55, 56, 57, 58, 65):
+                assert seen[-2].model_dump() == seen[-1].model_dump()
+        with pytest.raises(HTTPException) as error:
+            await model.chat_completions(request(), body())
+    assert error.value.status_code == 422
+    assert model._turn_states["episode"].turns == 65
+    assert model._turn_states["episode"].grace_tool_calls == 2
+    assert [len(r.choices[0].message.tool_calls or []) for r in successful[55:]] == [1, 1] + [0] * 8
+    assert successful[-1].choices[0].finish_reason == "stop"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_call_does_not_spend_a_turn_or_hold_the_lock(monkeypatch):
+    model = gateway(monkeypatch, EvalTurnBudget())
+    entered = asyncio.Event()
+
+    async def upstream(self, req, params):
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(VLLMModel, "chat_completions", upstream)
+    with rollout_context("episode"):
+        task = asyncio.create_task(model.chat_completions(request(), body()))
+        await asyncio.wait_for(entered.wait(), 1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert model._turn_states["episode"].turns == 0
+
+        async def success(self, req, params):
+            return completion(0)
+
+        monkeypatch.setattr(VLLMModel, "chat_completions", success)
+        await asyncio.wait_for(model.chat_completions(request(), body()), 1)
+    assert model._turn_states["episode"].turns == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("choice_count", [0, 2])
+async def test_invalid_completion_does_not_spend_a_turn(monkeypatch, choice_count):
+    model = gateway(monkeypatch, EvalTurnBudget())
+
+    async def upstream(self, req, params):
+        response = completion(0)
+        return response.model_copy(update={"choices": response.choices * choice_count})
+
+    monkeypatch.setattr(VLLMModel, "chat_completions", upstream)
+    with rollout_context("episode"), pytest.raises(ValueError, match="exactly one returned completion"):
+        await model.chat_completions(request(), body())
+    assert model._turn_states["episode"].turns == 0
+
+
+@pytest.mark.asyncio
+async def test_concurrent_failures_do_not_exhaust_successful_turn_budget(monkeypatch):
+    model = gateway(monkeypatch, EvalTurnBudget(regular_turns=1, grace_turns=1, grace_tool_turns=0))
+    attempts = 0
+
+    async def upstream(self, req, params):
+        nonlocal attempts
+        attempts += 1
+        await asyncio.sleep(0)
+        if attempts <= 12:
+            raise HTTPException(503, "unavailable")
+        return completion(0)
+
+    monkeypatch.setattr(VLLMModel, "chat_completions", upstream)
+    with rollout_context("episode"):
+        results = await asyncio.gather(
+            *(model.chat_completions(request(), body()) for _ in range(20)), return_exceptions=True
+        )
+    statuses = [r.status_code for r in results if isinstance(r, HTTPException)]
+    assert statuses.count(503) == 12
+    assert statuses.count(422) == 6
+    assert sum(isinstance(r, NeMoGymChatCompletion) for r in results) == 2
+    assert attempts == 14
+    assert model._turn_states["episode"].turns == 2
 
 
 @pytest.mark.asyncio

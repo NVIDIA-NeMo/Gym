@@ -63,9 +63,10 @@ class VisualEvalModel(VLLMModel):
                 LOG.warning("visual_turn_budget rollout=%s hard_stop=%d", rollout_id, state.turns)
                 # Non-retryable error: no further upstream generation is possible,
                 # even if the client ignores a terminal response and asks again.
-                raise HTTPException(400, "Evaluation hard turn limit reached; this episode is stopped")
-            state.turns += 1
-            turn = state.turns
+                raise HTTPException(422, "Evaluation hard turn limit reached; this episode is stopped")
+            # Retry the same turn after an upstream failure or cancellation.
+            # The lock serializes attempts; commit only a valid, processed completion.
+            turn = state.turns + 1
             allowance = budget.tool_allowance(turn, state.grace_tool_calls)
             updates = {}
             if turn >= budget.regular_turns:
@@ -79,6 +80,7 @@ class VisualEvalModel(VLLMModel):
             if len(response.choices) != 1:
                 raise ValueError("Enforced eval budget requires exactly one returned completion")
             removed = 0
+            grace_tool_calls = state.grace_tool_calls
             if allowance is not None:
                 response = response.model_copy(deep=True)
                 for choice in response.choices:
@@ -88,11 +90,13 @@ class VisualEvalModel(VLLMModel):
                     choice.message.tool_calls = kept or None
                     # Do not let legacy function_call bypass the tools policy.
                     choice.message.function_call = None
-                    state.grace_tool_calls += len(kept)
+                    grace_tool_calls += len(kept)
                     if not kept and choice.finish_reason in ("tool_calls", "function_call"):
                         choice.finish_reason = "stop"
                     if turn == budget.hard_limit:
                         choice.finish_reason = "stop"
+            state.turns = turn
+            state.grace_tool_calls = grace_tool_calls
             LOG.info(
                 "visual_turn_budget rollout=%s turn=%d hard_limit=%d tool_choice=%s "
                 "grace_tool_calls=%d removed_tool_calls=%d",
