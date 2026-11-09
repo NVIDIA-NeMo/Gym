@@ -26,17 +26,34 @@ def test_f1_at_100_matches_safe_formula():
 
 
 def test_zero_judged_claims_have_perfect_precision_and_zero_f1():
-    supported = 0
-    not_supported = 0
-    denominator = supported + not_supported
-    precision = supported / denominator if denominator else 1.0
+    async def extract(*_args, **_kwargs):
+        return AtomicFacts([])
 
-    assert precision == 1.0
-    assert LongFactSafeServer._f1_at_k(supported, not_supported, 100) == 0.0
+    server = SimpleNamespace(
+        config=SimpleNamespace(
+            max_claims=0,
+            f1_max_claims=100,
+            claim_extraction_prompt="claim_listing_v1",
+            claim_verdict_mode="three_way",
+            fact_check_mode="per_claim",
+        ),
+        _generate_json=extract,
+        _claim_extraction_request=lambda *_args: "extract claims",
+        _f1_at_k=LongFactSafeServer._f1_at_k,
+    )
+
+    evaluation = asyncio.run(LongFactSafeServer._evaluate(server, "Question", "Response"))
+
+    assert evaluation["num_extracted_claims"] == 0
+    assert evaluation["precision"] == 1.0
+    assert evaluation["f1_at_k"] == 0.0
+    assert evaluation["traces"] == []
 
 
 def test_claim_listing_prompt_includes_question_response_and_raw_json_contract():
-    server = SimpleNamespace(config=SimpleNamespace(claim_extraction_prompt="claim_listing_v1"))
+    server = SimpleNamespace(
+        config=SimpleNamespace(claim_extraction_prompt="claim_listing_v1", browse_off_instructions=False)
+    )
 
     request = LongFactSafeServer._claim_extraction_request(server, "Who is Ada?", "She was a mathematician.")
 
@@ -47,7 +64,9 @@ def test_claim_listing_prompt_includes_question_response_and_raw_json_contract()
 
 
 def test_legacy_claim_prompt_does_not_change_or_include_question():
-    server = SimpleNamespace(config=SimpleNamespace(claim_extraction_prompt="legacy_v1"))
+    server = SimpleNamespace(
+        config=SimpleNamespace(claim_extraction_prompt="legacy_v1", browse_off_instructions=False)
+    )
 
     request = LongFactSafeServer._claim_extraction_request(server, "SECRET QUESTION", "A factual response.")
 
@@ -69,6 +88,7 @@ def test_reset_rejects_missing_or_wrong_contract():
 def test_compute_metrics_reports_safe_prompt_mean_and_micro_diagnostic():
     server = SimpleNamespace(config=SimpleNamespace(f1_max_claims=100))
     server._f1_at_k = LongFactSafeServer._f1_at_k
+    server._error_rates = LongFactSafeServer._error_rates
     metrics = LongFactSafeServer.compute_metrics(
         server,
         [
@@ -187,7 +207,11 @@ def test_unverdicted_claim_becomes_an_error_claim():
 
     server = SimpleNamespace(
         config=SimpleNamespace(
-            max_claims=0, f1_max_claims=100, claim_verdict_mode="three_way", claim_extraction_prompt="legacy_v1"
+            max_claims=0,
+            f1_max_claims=100,
+            claim_verdict_mode="three_way",
+            claim_extraction_prompt="legacy_v1",
+            fact_check_mode="per_claim",
         ),
         _generate_json=extract,
         _evaluate_fact=no_verdict,
@@ -233,7 +257,9 @@ def test_evaluator_identity_mismatch_is_not_downgraded_to_claim_error():
         raise EvaluatorIdentityError("judge model changed")
 
     server = SimpleNamespace(
-        config=SimpleNamespace(max_claims=0, f1_max_claims=100, claim_verdict_mode="three_way"),
+        config=SimpleNamespace(
+            max_claims=0, f1_max_claims=100, claim_verdict_mode="three_way", fact_check_mode="per_claim"
+        ),
         _generate_json=extract,
         _evaluate_fact=mismatched_identity,
         _claim_extraction_request=lambda *_args: "extract claims",
@@ -259,6 +285,7 @@ def test_longfact_json_parser_salvages_unfenced_qwen_commentary():
 def test_compute_metrics_reports_three_way_diagnostics():
     server = SimpleNamespace(config=SimpleNamespace(f1_max_claims=100))
     server._f1_at_k = LongFactSafeServer._f1_at_k
+    server._error_rates = LongFactSafeServer._error_rates
     metrics = LongFactSafeServer.compute_metrics(
         server,
         [
@@ -363,6 +390,7 @@ def test_step_scores_a_fully_checked_episode(monkeypatch):
 def test_compute_metrics_names_f1_by_k():
     server = SimpleNamespace(config=SimpleNamespace(f1_max_claims=64))
     server._f1_at_k = LongFactSafeServer._f1_at_k
+    server._error_rates = LongFactSafeServer._error_rates
     record = {"f1_at_k": 1.0, "precision": 1.0, "supported_claims": 64, "not_supported_claims": 0}
 
     metrics = LongFactSafeServer.compute_metrics(server, [[{"info": record}]])
@@ -375,6 +403,7 @@ def test_compute_metrics_names_f1_by_k():
 def test_micro_f1_does_not_grow_with_repeated_identical_episodes():
     server = SimpleNamespace(config=SimpleNamespace(f1_max_claims=100))
     server._f1_at_k = LongFactSafeServer._f1_at_k
+    server._error_rates = LongFactSafeServer._error_rates
     record = {"f1_at_k": 0.4, "precision": 1.0, "supported_claims": 25, "not_supported_claims": 0}
 
     one = LongFactSafeServer.compute_metrics(server, [[{"info": record}]])
@@ -387,7 +416,7 @@ def test_micro_f1_does_not_grow_with_repeated_identical_episodes():
 def _http_server():
     from unittest.mock import MagicMock
 
-    from nemo_gym.server_utils import ServerClient
+    from nemo_gym.client import ServerClient
     from resources_servers.longfact.app import LongFactConfig
 
     config = LongFactConfig(

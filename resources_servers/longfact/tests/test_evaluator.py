@@ -9,7 +9,7 @@ from aiohttp import ClientResponseError
 from pydantic import BaseModel, Field
 
 import resources_servers.longfact.evaluator as evaluator_module
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from resources_servers.longfact.evaluator import (
     EvaluatorIdentityError,
     EvaluatorResponseError,
@@ -69,6 +69,36 @@ def test_free_form_json_parser_rejects_unfenced_commentary():
                 '"search_query":"authority","relevant_urls":[]}'
             ),
         )
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        '["The notation [] means an empty array.',
+        '["The notation {} means an empty object.',
+        'Here are the claims: ["The notation [] means an empty array.',
+        '{"claims": ["The notation [] means an empty array.',
+    ],
+)
+def test_embedded_json_recovery_rejects_a_malformed_outer_payload(response):
+    with pytest.raises(ValueError, match="parseable JSON"):
+        JsonEvaluator._load_json(response, salvage_embedded_json=True)
+
+
+@pytest.mark.parametrize(
+    ("response", "expected"),
+    [
+        ("[]", []),
+        ('["The notation [] means an empty array."]', ["The notation [] means an empty array."]),
+        ('Claims: ["The notation [] means an empty array."] Done.', ["The notation [] means an empty array."]),
+        (
+            'Here is the verdict: {"label":"SUPPORTED","explanation":"Evidence agrees."} Thanks.',
+            {"label": "SUPPORTED", "explanation": "Evidence agrees."},
+        ),
+    ],
+)
+def test_embedded_json_recovery_preserves_complete_outer_payloads(response, expected):
+    assert JsonEvaluator._load_json(response, salvage_embedded_json=True) == expected
 
 
 def test_judgment_parser_mode_does_not_repair_invalid_escapes():

@@ -1,0 +1,17 @@
+# LongFact graded with an adaptation of the GPT-5 system card's method (section 3.7, Appendix 2): the
+# card's claim-listing prompt, fact-checks in batches of 10 claims labelled true, false or unsure, and
+# claim-level error rates (longfact_safe/micro_error_rate, per subset under longfact_safe/<subset>/).
+# Unlike the card's grader, which browses and can search again, the grader plans its searches once and
+# the configured backend runs them; equivalence with the card's numbers is not validated. Add it after
+# the benchmark config and an evaluator config; the card's grader is o3:
+#   gym eval run --benchmark longfact \
+#     '+config_paths=[benchmarks/longfact/evaluator_openai.yaml,benchmarks/longfact/gpt5_card.yaml]' ...
+longfact:
+  resources_servers:
+    longfact:
+      claim_extraction_prompt: claim_listing_v1
+      claim_verdict_mode: three_way
+      fact_check_mode: gpt5_card_batch
+      fact_check_batch_size: 10
+      # The evaluated policy has no web access, as in the card's browsing-off setting.
+      browse_off_instructions: true

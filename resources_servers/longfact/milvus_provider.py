@@ -145,22 +145,19 @@ class MilvusProvider:
         for raw_hit in raw_hits:
             entity = raw_hit.get("entity") or {}
             text = str(entity.get("text") or "").strip()
-            if not text or text in seen_texts:
-                continue
-            seen_texts.add(text)
-            result_id = raw_hit.get("id")
-            original_id = str(entity.get("orig_id") or result_id)
-            distance = float(raw_hit.get("distance", 0.0))
-            evidence.append(
-                MilvusEvidence(
-                    title=original_id,
-                    url=f"milvus://{self._collection_name}/{original_id}",
-                    snippet=text[: self._max_result_chars],
-                    search_score=-distance,
+            if text and text not in seen_texts and len(evidence) < self._max_results:
+                seen_texts.add(text)
+                result_id = raw_hit.get("id")
+                original_id = str(entity.get("orig_id") or result_id)
+                distance = float(raw_hit.get("distance", 0.0))
+                evidence.append(
+                    MilvusEvidence(
+                        title=original_id,
+                        url=f"milvus://{self._collection_name}/{original_id}",
+                        snippet=text[: self._max_result_chars],
+                        search_score=-distance,
+                    )
                 )
-            )
-            if len(evidence) == self._max_results:
-                break
 
         self._cache_put(query, evidence)
         return list(evidence)

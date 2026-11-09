@@ -87,19 +87,16 @@ class TantivyProvider:
         evidence: list[TantivyEvidence] = []
         for score, document in documents:
             row = rows.get(self._value(document, "docid"))
-            if row is None:
-                continue
-            url, text = row
-            evidence.append(
-                TantivyEvidence(
-                    title=self._value(document, "title") or url,
-                    url=self._value(document, "url") or url,
-                    snippet=" ".join(text.split()),
-                    search_score=score,
+            if row is not None and len(evidence) < self._max_results:
+                url, text = row
+                evidence.append(
+                    TantivyEvidence(
+                        title=self._value(document, "title") or url,
+                        url=self._value(document, "url") or url,
+                        snippet=" ".join(text.split()),
+                        search_score=score,
+                    )
                 )
-            )
-            if len(evidence) == self._max_results:
-                break
         return evidence
 
     def _fetch_rows(self, docids: list[str]) -> dict[str, tuple[str, str]]:

@@ -11,6 +11,7 @@ from resources_servers.longfact.tavily_provider import (
     CACHE_FORMAT_VERSION,
     CACHE_METADATA_KEY,
     CACHE_RESPONSE_KEY,
+    TavilyCacheCorruptionError,
     TavilyProvider,
     TavilyProviderError,
 )
@@ -118,26 +119,30 @@ async def test_search_passes_configured_timeout_to_tavily_sdk(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("raw_results", "expected_error"),
+    ("response", "expected_error"),
     [
-        (None, "results as NoneType, expected array"),
-        (["not-an-object"], "result 0 was str, expected object"),
+        ({}, "missing results"),
+        ({"error": "search unavailable"}, "missing results"),
+        ({"results": None}, "results as NoneType, expected array"),
+        ({"results": ["not-an-object"]}, "result 0 was str, expected object"),
     ],
 )
+@pytest.mark.parametrize("cache_mode", ["live", "read_write"])
 @pytest.mark.asyncio
 async def test_malformed_success_payload_becomes_provider_error(
     tmp_path,
-    raw_results,
+    response,
     expected_error,
+    cache_mode,
 ):
     class MalformedClient(FakeTavilyClient):
         async def search(self, **kwargs):
             self.search_calls += 1
             self.search_kwargs.append(kwargs)
-            return {"results": raw_results}
+            return response
 
     client = MalformedClient()
-    provider = _provider(tmp_path, client, cache_mode="live")
+    provider = _provider(tmp_path, client, cache_mode=cache_mode)
 
     with pytest.raises(TavilyProviderError, match=expected_error):
         await provider.search("malformed response")
@@ -145,6 +150,59 @@ async def test_malformed_success_payload_becomes_provider_error(
     # A structurally invalid successful response follows the released
     # searcher's failed-step path; it is not replayed as a transport retry.
     assert client.search_calls == 1
+    assert not list(tmp_path.glob("search-*.json"))
+    assert provider.cache_stats["writes"] == 0
+
+
+@pytest.mark.asyncio
+async def test_explicit_empty_results_are_cached_and_replayed(tmp_path):
+    class EmptyClient(FakeTavilyClient):
+        async def search(self, **kwargs):
+            self.search_calls += 1
+            return {"results": []}
+
+    client = EmptyClient()
+    provider = _provider(tmp_path, client)
+
+    assert await provider.search("no matches") == []
+    assert await _provider(tmp_path, cache_mode="replay").search("no matches") == []
+    assert client.search_calls == 1
+    assert provider.cache_stats["writes"] == 1
+
+
+@pytest.mark.parametrize("response", [{}, {"error": "search unavailable"}])
+@pytest.mark.asyncio
+async def test_replay_rejects_legacy_cache_missing_results(tmp_path, response):
+    provider = _provider(tmp_path, FakeTavilyClient())
+    await provider.search("malformed cached response")
+    cache_path = next(tmp_path.glob("search-*.json"))
+    cache_path.write_text(json.dumps(response), encoding="utf-8")
+
+    with pytest.raises(TavilyCacheCorruptionError, match="missing results"):
+        await _provider(tmp_path, cache_mode="replay").search("malformed cached response")
+
+
+@pytest.mark.parametrize("response", [{}, {"error": "search unavailable"}])
+@pytest.mark.asyncio
+async def test_read_write_preserves_and_refreshes_cache_missing_results(tmp_path, response):
+    provider = _provider(tmp_path, FakeTavilyClient())
+    await provider.search("malformed cached response")
+    cache_path = next(tmp_path.glob("search-*.json"))
+    document = json.loads(cache_path.read_text(encoding="utf-8"))
+    document[CACHE_RESPONSE_KEY] = response
+    document[CACHE_METADATA_KEY]["response_sha256"] = provider._response_digest(response)
+    cache_path.write_text(json.dumps(document), encoding="utf-8")
+    client = FakeTavilyClient()
+    refreshed = _provider(tmp_path, client)
+
+    evidence = await refreshed.search("malformed cached response")
+
+    assert client.search_calls == 1
+    assert evidence[0].snippet == "Relevant snippet"
+    assert refreshed.cache_stats["corruptions"] == 1
+    quarantined = list((tmp_path / ".corrupt").glob("search-*.corrupt"))
+    assert len(quarantined) == 1
+    assert json.loads(quarantined[0].read_text(encoding="utf-8")) == document
 
 
 @pytest.mark.asyncio

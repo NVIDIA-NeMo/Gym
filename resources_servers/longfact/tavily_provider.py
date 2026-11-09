@@ -171,7 +171,7 @@ class TavilyProvider:
             "topic": "general",
         }
         data = await self._call("search", payload)
-        raw_results = data.get("results", [])
+        raw_results = data["results"]
         if not isinstance(raw_results, list):
             raise TavilyProviderError(
                 f"Tavily search returned results as {type(raw_results).__name__}, expected array"
@@ -181,16 +181,15 @@ class TavilyProvider:
             if not isinstance(item, dict):
                 raise TavilyProviderError(f"Tavily search result {index} was {type(item).__name__}, expected object")
             url = str(item.get("url") or "").strip()
-            if not url:
-                continue
-            results.append(
-                TavilyEvidence(
-                    title=str(item.get("title") or ""),
-                    url=url,
-                    snippet=str(item.get("content") or ""),
-                    search_score=item.get("score"),
+            if url:
+                results.append(
+                    TavilyEvidence(
+                        title=str(item.get("title") or ""),
+                        url=url,
+                        snippet=str(item.get("content") or ""),
+                        search_score=item.get("score"),
+                    )
                 )
-            )
         return results
 
     async def _call(self, operation: Literal["search"], payload: dict[str, Any]) -> dict[str, Any]:
@@ -259,13 +258,11 @@ class TavilyProvider:
                 last_error = exc
                 if attempt < max_attempts:
                     await asyncio.sleep(min(2 ** (attempt - 1), 4))
-                    continue
-                break
-
-            if not isinstance(data, dict):
-                raise TavilyProviderError(f"Tavily {operation} returned {type(data).__name__}, expected object")
-            self._validate_response(operation, data)
-            return data
+            else:
+                if not isinstance(data, dict):
+                    raise TavilyProviderError(f"Tavily {operation} returned {type(data).__name__}, expected object")
+                self._validate_response(operation, data)
+                return data
 
         raise TavilyProviderError(
             f"Tavily {operation} failed after {max_attempts} attempts: {last_error}"
@@ -279,7 +276,7 @@ class TavilyProvider:
     ) -> dict[str, Any]:
         async with self._cache_lock(cache_path):
             # Recheck while holding a cross-process lock. This prevents two
-            # evaluations sharing a filesystem from paying for the same cache miss.
+            # evaluations sharing Lustre from paying for the same cache miss.
             try:
                 cached = self._read_cache(cache_path, operation, payload, require_checksum=True)
             except TavilyCacheCorruptionError as exc:
@@ -350,7 +347,9 @@ class TavilyProvider:
     def _validate_response(operation: str, response: dict[str, Any]) -> None:
         if operation != "search":  # pragma: no cover - operation type is currently search-only.
             raise TavilyProviderError(f"Unsupported Tavily operation: {operation}")
-        raw_results = response.get("results", [])
+        if "results" not in response:
+            raise TavilyProviderError("Tavily search response is missing results")
+        raw_results = response["results"]
         if not isinstance(raw_results, list):
             raise TavilyProviderError(
                 f"Tavily search returned results as {type(raw_results).__name__}, expected array"

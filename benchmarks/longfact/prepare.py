@@ -106,6 +106,7 @@ def _format_row(
     prompt = prompt.strip()
     return {
         "id": f"longfact-{subset}-{topic}-{source_index:02d}",
+        "task_id": f"longfact-{subset}-{topic}-{source_index:02d}",
         "benchmark_variant": BENCHMARK_VARIANT,
         "subset": subset,
         "topic": topic,

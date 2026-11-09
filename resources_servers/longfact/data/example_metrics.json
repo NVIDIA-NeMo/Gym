@@ -3,9 +3,10 @@
     "type": "example",
     "jsonl_fpath": "resources_servers/longfact/data/example.jsonl",
     "num_repeats": 1,
+    "source": null,
     "gitlab_identifier": null,
     "huggingface_identifier": null,
-    "license": "Apache 2.0",
+    "license": "CC-BY-4.0",
     "Number of examples": 5,
     "Number of tools": {
         "Total # non-null values": 0,
@@ -16,10 +17,10 @@
     },
     "Json-dumped number of words (proxy for token count)": {
         "Total # non-null values": 5,
-        "Average": 52.2,
-        "Min": 37.0,
-        "Max": 65.0,
-        "Standard deviation": 12.38
+        "Average": 17.6,
+        "Min": 10.0,
+        "Max": 24.0,
+        "Standard deviation": 6.19
     },
     "Number of turns": {
         "Total # non-null values": 5,
@@ -39,6 +40,10 @@
         "unique_count": 5,
         "total_count": 5
     },
+    "benchmark_variant": {
+        "unique_count": 1,
+        "total_count": 5
+    },
     "subset": {
         "unique_count": 2,
         "total_count": 5
@@ -48,6 +53,10 @@
         "total_count": 5
     },
     "prompt": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "task_id": {
         "unique_count": 5,
         "total_count": 5
     }

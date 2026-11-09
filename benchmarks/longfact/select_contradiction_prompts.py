@@ -54,17 +54,17 @@ def load_verdicts(paths: list[Path]) -> dict[str, tuple[str, int]]:
                 values = {name: pattern.search(info) for name, pattern in FIELD_PATTERNS.items()}
                 if values["contradicted_claims"] is None:
                     missing_three_way += 1
-                    continue
-                if values["task_id"] is None or values["subset"] is None:
-                    raise ValueError(f"Missing task identity in {path}")
-                task_id = values["task_id"].group(1)
-                verdict = (
-                    values["subset"].group(1),
-                    int(values["contradicted_claims"].group(1)),
-                )
-                previous = verdicts.setdefault(task_id, verdict)
-                if previous != verdict:
-                    raise ValueError(f"Conflicting verdicts for {task_id}")
+                else:
+                    if values["task_id"] is None or values["subset"] is None:
+                        raise ValueError(f"Missing task identity in {path}")
+                    task_id = values["task_id"].group(1)
+                    verdict = (
+                        values["subset"].group(1),
+                        int(values["contradicted_claims"].group(1)),
+                    )
+                    previous = verdicts.setdefault(task_id, verdict)
+                    if previous != verdict:
+                        raise ValueError(f"Conflicting verdicts for {task_id}")
     print(f"Loaded {len(verdicts)} three-way verdicts; skipped {missing_three_way} legacy rows")
     return verdicts
 

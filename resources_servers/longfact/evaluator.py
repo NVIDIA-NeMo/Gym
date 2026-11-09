@@ -15,9 +15,9 @@ from typing import TypeVar
 from aiohttp import ClientResponseError
 from pydantic import BaseModel, ValidationError
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from resources_servers.gymnasium import extract_text
 
 
@@ -123,7 +123,9 @@ class JsonEvaluator:
         last_error: Exception | None = None
         response_text: str | None = None
         async with self._semaphore:
-            for attempt in range(1, self._max_attempts + 1):
+            attempt = 0
+            while response_text is None and attempt < self._max_attempts:
+                attempt += 1
                 try:
                     await asyncio.sleep(random.uniform(0, 0.2))
                     response = await self._server_client.post(
@@ -138,7 +140,6 @@ class JsonEvaluator:
                     self._validate_model_identity(parsed)
                     self._validate_reasoning_identity(parsed, reasoning_effort)
                     response_text = extract_text(parsed)
-                    break
                 except EvaluatorIdentityError:
                     # A successful response from an unexpected model is a
                     # provenance failure, not a transient transport failure.
@@ -314,15 +315,13 @@ class JsonEvaluator:
             return json.loads(candidate)
         except json.JSONDecodeError as exc:
             if salvage_embedded_json:
-                decoder = json.JSONDecoder()
-                for index, character in enumerate(candidate):
-                    if character not in "[{":
-                        continue
+                payload_start = re.search(r"[\[{]", candidate)
+                if payload_start is not None:
                     try:
-                        payload, _ = decoder.raw_decode(candidate[index:])
+                        payload, _ = json.JSONDecoder().raw_decode(candidate[payload_start.start() :])
                         return payload
-                    except json.JSONDecodeError:
-                        continue
+                    except json.JSONDecodeError as embedded_exc:
+                        raise ValueError("Evaluator did not return parseable JSON") from embedded_exc
             raise ValueError("Evaluator did not return parseable JSON") from exc
 
     @staticmethod

@@ -13,6 +13,7 @@ from benchmarks.longfact.prepare import (
     build_rows,
     select_rows,
 )
+from nemo_gym.data import materialize_task
 
 
 def test_source_path_uses_official_layout():
@@ -54,14 +55,19 @@ def test_build_rows_preserves_subset_topic_and_row_order(tmp_path, monkeypatch):
     assert [row["id"] for row in rows[:2]] == ["longfact-concepts-alpha-00", "longfact-concepts-alpha-01"]
     assert rows[30]["id"] == "longfact-concepts-beta-00"
     assert all(row["benchmark_variant"] == BENCHMARK_VARIANT for row in rows)
+    assert all(row["task_id"] == row["id"] for row in rows)
+    original = [materialize_task(row, taskset="longfact") for row in rows]
+    reordered = [materialize_task(row, taskset="longfact") for row in reversed(rows)]
+    assert {task["task_id"]["task_id"] for task in original} == {row["id"] for row in rows}
+    assert original == list(reversed(reordered))
 
 
 def test_select_rows_is_reproducible_and_retains_original_rows():
     rows = [{"id": str(index)} for index in range(100)]
 
-    selected = select_rows(rows, sample_size=100, sample_seed=17)
+    selected = select_rows(rows, sample_size=17, sample_seed=17)
 
-    assert selected == select_rows(rows, sample_size=100, sample_seed=17)
-    assert len(selected) == 100
-    assert len({row["id"] for row in selected}) == 100
-    assert selected == rows
+    assert selected == select_rows(rows, sample_size=17, sample_seed=17)
+    assert len(selected) == 17
+    assert len({row["id"] for row in selected}) == 17
+    assert all(row in rows for row in selected)

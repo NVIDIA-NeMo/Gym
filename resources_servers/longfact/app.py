@@ -12,16 +12,23 @@ from __future__ import annotations
 
 import asyncio
 from collections import Counter
-from typing import Any, Literal, Optional
+from typing import Any, Callable, Literal, Optional
 
 from fastapi import FastAPI, Request
 from pydantic import BaseModel, Field, PrivateAttr, RootModel, field_validator
 
-from nemo_gym.base_resources_server import BaseResourcesServerConfig
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_runtime import BaseResourcesServerConfig
 from resources_servers.gymnasium import GymnasiumServer, extract_text
+from resources_servers.longfact.card_fact_check import (
+    CARD_LABELS,
+    BatchSearchPlan,
+    CardBatchVerdicts,
+    build_fact_check_request,
+    build_search_plan_request,
+)
 from resources_servers.longfact.claim_prompts import ClaimExtractionPrompt, build_claim_extraction_request
 from resources_servers.longfact.evaluator import (
     EvaluatorIdentityError,
@@ -76,6 +83,10 @@ class ThreeWayClaimJudgment(BaseModel):
 ClaimJudgment = BinaryClaimJudgment | ThreeWayClaimJudgment
 
 
+class CardBatchMismatchError(ValueError):
+    """A card search plan or verdict list did not name every claim of its batch exactly once."""
+
+
 class LongFactClaimCheckError(RuntimeError):
     """At least one extracted claim has no verdict after every configured attempt."""
 
@@ -86,6 +97,12 @@ class LongFactConfig(BaseResourcesServerConfig):
     evaluator_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     claim_extraction_prompt: ClaimExtractionPrompt = "legacy_v1"
     claim_verdict_mode: Literal["binary", "three_way"] = "three_way"
+    # per_claim: SAFE-style relevance, queries and verdict per claim. gpt5_card_batch: the GPT-5 system card's
+    # batched fact-check (card_fact_check.py); needs three_way verdicts.
+    fact_check_mode: Literal["per_claim", "gpt5_card_batch"] = "per_claim"
+    fact_check_batch_size: int = Field(default=10, ge=1)
+    # The card's extra instructions for a policy that had no web access (claim_listing_v1 and card mode).
+    browse_off_instructions: bool = False
     search_backend: Literal["tantivy", "tavily", "milvus"] = "tantivy"
     tavily_api_key: str = "MISSING"
     tantivy_index_dir: str = "MISSING"
@@ -128,6 +145,8 @@ class LongFactSafeServer(GymnasiumServer):
     _search_provider: TantivyProvider | TavilyProvider | MilvusProvider = PrivateAttr()
 
     def model_post_init(self, context: Any) -> None:
+        if self.config.fact_check_mode == "gpt5_card_batch" and self.config.claim_verdict_mode != "three_way":
+            raise ValueError("fact_check_mode=gpt5_card_batch needs claim_verdict_mode=three_way (true/false/unsure)")
         self._evaluator = JsonEvaluator(
             server_client=self.server_client,
             model_server=self.config.evaluator_model_server,
@@ -261,7 +280,13 @@ class LongFactSafeServer(GymnasiumServer):
                     "evidence": [],
                 }
 
-        results = await asyncio.gather(*(evaluate_fact_safely(fact) for fact in facts))
+        if self.config.fact_check_mode == "gpt5_card_batch":
+            size = self.config.fact_check_batch_size
+            batches = [facts[start : start + size] for start in range(0, len(facts), size)]
+            checked = await asyncio.gather(*(self._check_batch_safely(prompt, response, batch) for batch in batches))
+            results = [trace for batch_traces in checked for trace in batch_traces]
+        else:
+            results = await asyncio.gather(*(evaluate_fact_safely(fact) for fact in facts))
         labels = Counter(result["label"] for result in results)
         supported = labels["SUPPORTED"]
         contradicted = labels["CONTRADICTED"]
@@ -275,6 +300,7 @@ class LongFactSafeServer(GymnasiumServer):
         evaluation = {
             "claim_extraction_prompt": self.config.claim_extraction_prompt,
             "claim_verdict_mode": self.config.claim_verdict_mode,
+            "fact_check_mode": self.config.fact_check_mode,
             "num_extracted_claims": len(facts),
             "supported_claims": supported,
             "not_supported_claims": not_supported,
@@ -299,7 +325,106 @@ class LongFactSafeServer(GymnasiumServer):
         return evaluation
 
     def _claim_extraction_request(self, prompt: str, response: str) -> str:
-        return build_claim_extraction_request(self.config.claim_extraction_prompt, prompt, response)
+        return build_claim_extraction_request(
+            self.config.claim_extraction_prompt,
+            prompt,
+            response,
+            browse_off=self.config.browse_off_instructions,
+        )
+
+    async def _check_batch_safely(self, prompt: str, response: str, claims: list[str]) -> list[dict[str, Any]]:
+        try:
+            return await self._check_batch(prompt, response, claims)
+        except EvaluatorIdentityError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - every claim in the batch keeps the failure provenance.
+            return [
+                {"atomic_fact": claim, "label": "ERROR", "fact_error": repr(exc), "evidence": []} for claim in claims
+            ]
+
+    async def _check_batch(self, prompt: str, response: str, claims: list[str]) -> list[dict[str, Any]]:
+        """Plan searches for a batch, run them, then label the batch with the card's fact-check prompt.
+
+        Each claim gets a claim_id; a plan or verdict list must name every claim_id exactly once, or the
+        call is repeated (evaluator_max_attempts in all). Searches run once, after a valid plan.
+        """
+        by_id = {f"C{index}": claim for index, claim in enumerate(claims, start=1)}
+        # Both card calls use strict schemas (card_fact_check._StrictModel), so they are always constrained.
+        plan = await self._generate_covering(
+            BatchSearchPlan,
+            build_search_plan_request(prompt, response, by_id, self.config.max_queries),
+            lambda result: result.claims,
+            by_id,
+            "search plan",
+        )
+        queries = {
+            claim_id: [query.strip() for query in plan[claim_id].queries if query.strip()][: self.config.max_queries]
+            or [by_id[claim_id]]
+            for claim_id in by_id
+        }
+        ordered = [(claim_id, query) for claim_id in by_id for query in queries[claim_id]]
+        searched = await asyncio.gather(*(self._search_provider.search(query) for _claim_id, query in ordered))
+        evidence: dict[str, list[dict[str, Any]]] = {claim_id: [] for claim_id in by_id}
+        for (claim_id, query), sources in zip(ordered, searched, strict=True):
+            evidence[claim_id].extend(
+                {"query": query, "title": source.title, "url": source.url, "text": source.snippet}
+                for source in sources
+            )
+        verdicts = await self._generate_covering(
+            CardBatchVerdicts,
+            build_fact_check_request(
+                prompt, response, by_id, evidence, browse_off=self.config.browse_off_instructions
+            ),
+            lambda result: result.verdicts,
+            by_id,
+            "fact-check",
+        )
+        return [
+            {
+                "atomic_fact": claim,
+                "claim_id": claim_id,
+                # The grader's copy of the claim, kept so the id mapping can be audited.
+                "judged_claim": verdicts[claim_id].claim,
+                "queries": queries[claim_id],
+                "evidence": evidence[claim_id],
+                "label": CARD_LABELS[verdicts[claim_id].answer],
+                "explanation": verdicts[claim_id].reasoning,
+                "supporting_evidence": [item.model_dump() for item in verdicts[claim_id].supporting_evidence],
+            }
+            for claim_id, claim in by_id.items()
+        ]
+
+    async def _generate_covering(
+        self,
+        schema: type[BaseModel],
+        request: str,
+        items_of: Callable[[Any], list[Any]],
+        by_id: dict[str, str],
+        what: str,
+    ) -> dict[str, Any]:
+        """Generate ``schema`` until its items name each claim_id of ``by_id`` exactly once; return them by id."""
+        problem = ""
+        for _ in range(self.config.evaluator_max_attempts):
+            items = items_of(await self._generate_json(schema, request, constrain=True))
+            ids = [item.claim_id for item in items]
+            problem = self._claim_id_problem(ids, by_id)
+            if not problem:
+                return {item.claim_id: item for item in items}
+        raise CardBatchMismatchError(
+            f"The {what} did not cover the batch after {self.config.evaluator_max_attempts} attempts: {problem}"
+        )
+
+    @staticmethod
+    def _claim_id_problem(ids: list[str], by_id: dict[str, str]) -> str:
+        duplicated = sorted({claim_id for claim_id in ids if ids.count(claim_id) > 1})
+        unknown = sorted(set(ids) - set(by_id))
+        missing = sorted(set(by_id) - set(ids))
+        parts = [
+            f"{name} {values}"
+            for name, values in (("duplicated", duplicated), ("unknown", unknown), ("missing", missing))
+            if values
+        ]
+        return "; ".join(parts)
 
     async def _evaluate_fact(self, prompt: str, response: str, fact: str) -> dict[str, Any]:
         prepared = await self._prepare_fact(prompt, response, fact)
@@ -401,7 +526,7 @@ RETRIEVED EVIDENCE:
         # No verdict is a judge failure, not UNSURE: the claim becomes ERROR and the rollout fails.
         return await self._generate_json(schema, request)
 
-    async def _generate_json(self, schema: type[BaseModel], prompt: str) -> Any:
+    async def _generate_json(self, schema: type[BaseModel], prompt: str, *, constrain: bool | None = None) -> Any:
         last_error: ValueError | None = None
         for _ in range(self.config.evaluator_max_attempts):
             try:
@@ -412,7 +537,9 @@ RETRIEVED EVIDENCE:
                     reasoning_effort=None,
                     include_schema_instruction=False,
                     salvage_embedded_json=True,
-                    constrain_json_schema=self.config.evaluator_constrain_json_schema,
+                    constrain_json_schema=(
+                        self.config.evaluator_constrain_json_schema if constrain is None else constrain
+                    ),
                 )
             except ValueError as exc:
                 last_error = exc
@@ -442,6 +569,8 @@ RETRIEVED EVIDENCE:
                 "search_provider": self.config.search_backend,
                 "claim_extraction_prompt": self.config.claim_extraction_prompt,
                 "claim_verdict_mode": self.config.claim_verdict_mode,
+                "fact_check_mode": self.config.fact_check_mode,
+                "browse_off_instructions": self.config.browse_off_instructions,
                 "original_search_provider": "serper",
                 "f1_max_claims": self.config.f1_max_claims,
             },
@@ -449,6 +578,7 @@ RETRIEVED EVIDENCE:
         for key in (
             "claim_extraction_prompt",
             "claim_verdict_mode",
+            "fact_check_mode",
             "num_extracted_claims",
             "supported_claims",
             "not_supported_claims",
@@ -550,7 +680,36 @@ RETRIEVED EVIDENCE:
                     "longfact_safe/micro_decisive_precision": (three_way_supported / decisive if decisive else 1.0),
                 }
             )
+            # The GPT-5 system card's claim-level error rate, overall and per subset (it reports Concepts and
+            # Objects apart). Two denominators, because the card does not say whether unsure claims count.
+            groups = {"": three_way}
+            for subset in sorted({str(record.get("subset")) for record in three_way if record.get("subset")}):
+                groups[f"{subset}/"] = [record for record in three_way if record.get("subset") == subset]
+            for prefix, group in groups.items():
+                metrics.update(self._error_rates(group, prefix))
         return metrics
+
+    @staticmethod
+    def _error_rates(records: list[dict[str, Any]], prefix: str) -> dict[str, float | int]:
+        total = lambda key: sum(int(record.get(key, 0)) for record in records)
+        supported, contradicted, unsure = (
+            total("supported_claims"),
+            total("contradicted_claims"),
+            total("unsure_claims"),
+        )
+        classified, decisive = supported + contradicted + unsure, supported + contradicted
+        return {
+            f"longfact_safe/{prefix}episodes_scored": len(records),
+            # false / (true + false + unsure), pooled over claims.
+            f"longfact_safe/{prefix}micro_error_rate": contradicted / classified if classified else 0.0,
+            # false / (true + false), pooled over claims.
+            f"longfact_safe/{prefix}micro_decisive_error_rate": contradicted / decisive if decisive else 0.0,
+            # unsure / (true + false + unsure), pooled over claims.
+            f"longfact_safe/{prefix}micro_unsure_rate": unsure / classified if classified else 0.0,
+            # false / (true + false + unsure) per prompt, averaged over prompts.
+            f"longfact_safe/{prefix}mean_error_rate": sum(float(record["contradiction_rate"]) for record in records)
+            / len(records),
+        }
 
 
 if __name__ == "__main__":

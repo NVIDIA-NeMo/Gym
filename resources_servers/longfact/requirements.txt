@@ -1,5 +1,0 @@
--e nemo-gym[dev] @ ../../
-tavily-python==0.7.21
-tantivy
-pymilvus==3.0.1
-sentence-transformers>=5.1,<6

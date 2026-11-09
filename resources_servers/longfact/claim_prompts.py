@@ -7,12 +7,20 @@ from __future__ import annotations
 
 from typing import Literal
 
+from resources_servers.longfact.card_fact_check import BROWSE_OFF_CLAIM_LISTING
+
 
 ClaimExtractionPrompt = Literal["legacy_v1", "claim_listing_v1"]
 
 
-def build_claim_extraction_request(version: ClaimExtractionPrompt, prompt: str, response: str) -> str:
+def build_claim_extraction_request(
+    version: ClaimExtractionPrompt, prompt: str, response: str, *, browse_off: bool = False
+) -> str:
+    if browse_off and version != "claim_listing_v1":
+        raise ValueError("browse_off applies only to the claim_listing_v1 prompt")
     if version == "claim_listing_v1":
+        # The GPT-5 system card appends this to the instructions when the evaluated model had no web access.
+        browse_off_line = f"\n{BROWSE_OFF_CLAIM_LISTING}" if browse_off else ""
         return f"""### Introduction
 Your task is to list relevant facts in an assistant's response to a given prompt. Your output will be used as the first step in the following fact-checking pipeline used to evaluate an assistant's response for factual correctness.
 
@@ -29,7 +37,7 @@ Fact-Checking Pipeline:
 - Each claim that you list should be a single self-contained sentence, and replace pronouns or references with their actual terms.
 - You should only consider claims that are relevant for answering the prompt. We consider a claim to be relevant if the subject of the claim is either exactly contained or related to any subject present in the prompt.
 - If the same claim is repeated multiple times, you should only list it once.
-- Try to list claims in the order that they appear in the assistant's response, so that related claims are grouped together.
+- Try to list claims in the order that they appear in the assistant's response, so that related claims are grouped together.{browse_off_line}
 
 ### Formatting
 Return only a raw JSON array of strings, without Markdown fences or commentary:

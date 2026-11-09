@@ -17,6 +17,12 @@ the selected backend and are not official SAFE leaderboard values.
 
 ## Datasets
 
+The prompts are Copyright 2024 DeepMind Technologies Limited and licensed
+under [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/). The pinned
+[upstream license statement](https://github.com/google-deepmind/long-form-factuality/blob/9d27158d198ced0a9d8271a80147cae580614601/README.md#license-and-disclaimer)
+distinguishes the prompt materials from its Apache-2.0 software. Preparation
+adds NeMo Gym fields; the hard-200 set also selects and reorders prompts.
+
 The `longfact` dataset contains all 2,280 upstream prompts. It is downloaded
 from a pinned upstream commit by the preparation script:
 
@@ -51,8 +57,10 @@ export TANTIVY_INDEX_DIR=/path/to/tantivy-index
 export CORPUS_DB_PATH=/path/to/corpus.db
 ```
 
-The index must store `doc_id` and `text` fields. `corpus.db` must provide the
-document text expected by the provider.
+The index must index `text` and `url` and store `docid` for each result.
+`corpus.db` must contain a `corpus` table with `docid`, `url`, and `text`
+columns; its `docid` values must match the stored index IDs. Stored `title`
+and `url` fields are optional display overrides.
 
 ### Milvus
 
@@ -83,17 +91,69 @@ Use `live` to disable the persistent cache or `replay` to require an existing
 cache without network access. In replay mode, `TAVILY_API_KEY` is not required.
 API keys are read only from the environment and must never be committed.
 
+## GPT-5 system card adaptation
+
+`benchmarks/longfact/gpt5_card.yaml` grades with an adaptation of the method in
+the [GPT-5 system card](https://cdn.openai.com/gpt-5-system-card.pdf)
+(section 3.7 and Appendix 2). It is not the card's harness, and no equivalence
+with the card's numbers has been validated.
+
+What it takes from the card:
+
+- The claim-listing prompt (`claim_listing_v1`).
+- Fact-checks in batches of 10 claims with the card's fact-checking prompt,
+  which labels each claim true, false or unsure.
+- The card's sentences for a policy without web access.
+- Claim-level error rates, reported for Objects and Concepts separately.
+
+How it differs:
+
+- The card's grader browses the web itself and can search again after reading
+  evidence. Here the grader plans up to three searches per claim once, the
+  configured search backend runs them, and the grader labels the batch from
+  those results in one pass.
+- Each claim in a batch has a `claim_id`. A search plan or a verdict list must
+  name every `claim_id` exactly once, or the call is repeated up to
+  `evaluator_max_attempts` times; an exhausted batch fails the rollout.
+
+The card does not say whether unsure claims count in the denominator or how
+rates are averaged, so several are reported:
+
+- `longfact_safe/micro_error_rate`: false / (true + false + unsure), pooled.
+- `longfact_safe/micro_decisive_error_rate`: false / (true + false), pooled.
+- `longfact_safe/micro_unsure_rate`: unsure / (true + false + unsure), pooled.
+- `longfact_safe/mean_error_rate`: false / (true + false + unsure) per prompt,
+  averaged over prompts.
+
+Each is also reported per subset under `longfact_safe/objects/` and
+`longfact_safe/concepts/`. The card names o3 as its grader.
+
 ## Running
 
-Run the full suite from the benchmark configuration, or override its input
-with the checked-in stress set. For example:
+Configure the policy variables below and the evaluator and search-backend
+variables above. Run all 2,280 prompts from the benchmark configuration with
+sampling disabled (the default):
 
 ```bash
 gym eval run --benchmark longfact \
-  --input benchmarks/longfact/data/hard200.jsonl
+  --model-type vllm_model --model "$POLICY_MODEL" \
+  --model-url "$POLICY_BASE_URL" --model-api-key "$POLICY_API_KEY" \
+  --split benchmark --output results/longfact/rollouts.jsonl
 ```
 
-Add the policy and evaluator model configuration required by your deployment.
+For the checked-in 200-prompt stress set, start the servers and then collect
+against the running LongFact agent in another terminal:
+
+```bash
+gym env start --benchmark longfact --model-type vllm_model \
+  --model "$POLICY_MODEL" --model-url "$POLICY_BASE_URL" \
+  --model-api-key "$POLICY_API_KEY"
+
+# After the servers are ready, in another terminal:
+gym eval run --no-serve --agent longfact_longfact_gymnasium_agent \
+  --input benchmarks/longfact/data/hard200.jsonl \
+  --output results/longfact-hard200/rollouts.jsonl
+```
 
 The default claim extraction prompt is `legacy_v1` for compatibility with
 historical runs. The prompt-aware extraction contract used for hard-200 can be
