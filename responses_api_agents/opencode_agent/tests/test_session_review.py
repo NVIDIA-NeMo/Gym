@@ -11,7 +11,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from nemo_gym.agents.testing.failure_assertions import raises_agent_failure
+from nemo_gym.agents import raises_agent_failure
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.opencode_agent.runtime import OBSERVABILITY_PATCH
 from responses_api_agents.opencode_agent.sandbox import format_error_message
@@ -115,6 +115,8 @@ def test_observation_parse_failure_preserves_response(setup, caplog):
         closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
         closed.raise_for_status()
     assert "observation_capture_failed" in {gap["code"] for gap in closed.json()["agent_observations"]["gaps"]}
+    # With no parsed session, close sends no trajectory, so collection keeps its call-built turns.
+    assert "trajectory" not in closed.json()
     assert "Failed to parse OpenCode observations" in caplog.text
 
 

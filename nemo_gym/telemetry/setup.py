@@ -102,6 +102,7 @@ _ENV_FIELD_MAP = {
     "run_id": f"{_OTEL_PREFIX}_RUN_ID",
     # Gym-owned flag, read back by init_telemetry rather than by lens.
     "service_name_per_server": f"{_OTEL_PREFIX}_SERVICE_NAME_PER_SERVER",
+    "sandbox_resource_sample_interval_seconds": f"{_OTEL_PREFIX}_SANDBOX_RESOURCE_SAMPLE_INTERVAL_SECONDS",
 }
 
 #: The ``_ENV_FIELD_MAP`` fields that nemo-lens itself reads, each with a ``NEMO_LENS_<KEY>`` fallback.
@@ -391,8 +392,11 @@ def server_venv_requirements() -> list:
     runs the pinned commit. Reading the installed distribution's ``direct_url.json``
     makes that skew impossible by construction instead of by keeping two pins in sync.
 
-    Returns an empty list when telemetry is off or nemo-lens is not installed, so a
-    normal run's venvs are byte-for-byte what they are today.
+    The locked component installer selects the telemetry extra and checks these
+    parent requirements against the resulting environment. A version or source
+    mismatch uses compatibility resolution with the inherited parent requirements.
+    Failed syncs and stale locks remain fatal.
+    Returns an empty list when telemetry is off or nemo-lens is not installed.
     """
     if not is_telemetry_env_enabled():
         return []
@@ -429,6 +433,27 @@ def _build_resource_attributes(server_name: Optional[str], server_type: Optional
     return attrs
 
 
+def _service_instance_id(run_id: str, server_name: Optional[str]) -> str:
+    """A globally unique name for this process, behind a readable prefix.
+
+    The server name makes it legible and the PID separates one server's Uvicorn workers,
+    but neither is unique on its own: a PID repeats across hosts and across container PID
+    namespaces. The random suffix is what actually satisfies the semantic convention.
+    Absent parts are omitted rather than left as empty segments.
+
+    The run id is included only when this process was configured with one. A standalone
+    server gets ``<name>-<pid>-<nonce>``; nemo-lens still mints a ``nemo.run.id`` for it
+    afterwards, inside ``setup_telemetry``, which is too late to appear here.
+
+    Called once per process: ``init_telemetry`` sets ``_INITIALISED`` under ``_INIT_LOCK``
+    and returns early afterwards, so the suffix is stable for the process's lifetime.
+    """
+    # Eight hex digits, like the truncated run id above: this only has to separate the
+    # processes of one run, not be unique across every run ever submitted.
+    nonce = uuid4().hex[:8]
+    return "-".join(part for part in (run_id, server_name, str(os.getpid()), nonce) if part)
+
+
 def _sdk_meter_provider_installed() -> bool:
     """Whether a real OpenTelemetry SDK meter provider, not a no-op or proxy, is registered."""
     try:
@@ -452,7 +477,7 @@ def _sdk_tracer_provider_installed() -> bool:
 def rollout_span_attributes() -> dict[str, str]:
     """The correlation attribute Gym's endpoint spans carry, for spans opened by code that does not
     know about rollouts (the sandbox API). Empty outside a rollout context."""
-    from nemo_gym.core.episode import current_rollout_id
+    from nemo_gym.core.episode_context import current_rollout_id
 
     rollout_id = current_rollout_id()
     return {"nemo.gym.rollout.id": rollout_id} if rollout_id else {}
@@ -554,6 +579,16 @@ def init_telemetry(
         # reports no rank, since the collector could not filter it by rank.
         attrs[NV_DL_RANK] = 0
         attrs[NV_DL_WORLD_SIZE] = 1
+        # Named here because nemo-lens derives it as f"{run_id}-rank{rank}" otherwise.
+        # With the rank above pinned to 0 and run_id shared fleet-wide by design, that
+        # derivation hands every server in the job the same instance id.
+        #
+        # nemo-lens ranks caller attributes above environment ones, so this replaces a
+        # ``service.instance.id`` set in ``OTEL_RESOURCE_ATTRIBUTES``. That is what a
+        # fleet needs: Gym's servers are spawned into one shared environment, so a single
+        # inherited value would name every one of them identically. A caller that wants
+        # its own id passes ``resource_attributes`` below, which still wins.
+        attrs["service.instance.id"] = _service_instance_id(config.run_id, server_name)
         if resource_attributes:
             attrs.update(resource_attributes)
 
@@ -599,6 +634,20 @@ def is_metrics_exporter_active() -> bool:
     :func:`is_telemetry_metrics_enabled`, this stays false until telemetry is set up.
     """
     return _METRICS_EXPORTING
+
+
+def is_span_group_or_metrics_active(group: str) -> bool:
+    """Whether a site that both spans ``group`` and records metrics should take its instrumented path.
+
+    Spans follow ``span_groups`` and metrics follow the metrics exporter, independently, so a
+    site instruments when either is on. ``managed_span`` still checks the span group itself.
+    """
+    if _METRICS_EXPORTING:
+        return True
+    # Function-local, like every lens import in this module.
+    from nemo_gym.telemetry._fallbacks import is_span_group_enabled
+
+    return is_span_group_enabled(group)
 
 
 def is_trace_exporter_active() -> bool:

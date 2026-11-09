@@ -40,9 +40,9 @@ from fastapi import Request, Response
 from pydantic import BaseModel, model_validator
 
 from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT
-from nemo_gym.core.episode import VERIFIER_INVOCATION_HEADER, rollout_context
+from nemo_gym.core.episode_context import VERIFIER_INVOCATION_HEADER, rollout_context
+from nemo_gym.core.failure_transport import FailureHeader, RequestFailureLog
 from nemo_gym.core.responses_api_types import SSE_KEEPALIVE
-from nemo_gym.failure_transport import FailureHeader, RequestFailureLog
 from nemo_gym.models._checkpoint import (
     attach_capture_context,
     ledger_removal_refusal,
@@ -78,6 +78,13 @@ class ModelExecutionOutcome(TypedDict):
     response_source: Literal["upstream", "local"] | None
     upstream_status_code: int | None
     local_response_reason: str | None
+    # Why generation stopped, as the chat backend reported it: a Responses payload cannot say it unless cut short.
+    finish_reason: NotRequired[str]
+    # Set when the adapter lowered the call's output budget to fit the engine's context window and sent it again.
+    requested_max_tokens: NotRequired[int]
+    applied_max_tokens: NotRequired[int]
+    # The same refit as one event: ``requested_max_tokens``, the engine's ``window`` and ``applied_max_tokens``.
+    output_budget_refit: NotRequired[dict[str, int]]
 
 
 def start_model_execution(request: Request, *, upstream_attempted: bool) -> ModelExecutionOutcome:
@@ -92,10 +99,24 @@ def start_model_execution(request: Request, *, upstream_attempted: bool) -> Mode
     return outcome
 
 
+def note_finish_reason(request: Request, finish_reason: str | None) -> None:
+    """Note why a chat backend stopped generating with the call's execution facts, which capture saves.
+
+    A Responses payload converted from a chat completion cannot say it unless generation was cut short.
+    """
+    if finish_reason is None:
+        return
+    execution = getattr(request.state, "nemo_gym_model_execution", None)
+    if not isinstance(execution, dict):
+        execution = start_model_execution(request, upstream_attempted=True)
+    execution["finish_reason"] = finish_reason
+
+
 class ModelCallCaptureConfig(BaseModel):
     """Run-wide model-call capture settings from Gym's global config."""
 
     observability_enabled: bool = False
+    trajectory_schema_version: Literal["1.0", "2.0"] = "1.0"
     model_call_capture_dir: Optional[Path] = None
 
     @model_validator(mode="after")
@@ -711,17 +732,19 @@ async def _fail_uncommitted_external_call(context: CaptureContext | None) -> Non
         logger.error(
             "Cannot poison uncommitted call %s for rollout %s: the lineage resolver is not a CaptureLedger.",
             context.model_call_id,
-            context.rollout_id,
+            context.capture_key,
         )
         return
     try:
         # A disconnected caller must not cancel the write before it reaches the ledger.
-        await asyncio.shield(ledger.record_failure(context.rollout_id, context.model_call_id, UNCOMMITTED_CALL_REASON))
+        await asyncio.shield(
+            ledger.record_failure(context.capture_key, context.model_call_id, UNCOMMITTED_CALL_REASON)
+        )
     except Exception:
         logger.exception(
             "Could not poison uncommitted call %s for rollout %s.",
             context.model_call_id,
-            context.rollout_id,
+            context.capture_key,
         )
 
 
@@ -906,7 +929,7 @@ class _CaptureMiddleware:
         capture_context = None
         if capture_wanted:
             capture_context = CaptureContext(
-                rollout_id=rollout_id,
+                capture_key=rollout_id,
                 model_call_id=model_call_id,
                 token_sink=token_sink,
                 lineage_store=self._capture_ledger if self._external_staging else self._lineage_store,

@@ -4,6 +4,7 @@
 
 import asyncio
 import json
+import os
 import shlex
 import shutil
 import sys
@@ -15,10 +16,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from nemo_gym.agents import SandboxSession
-from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent
 from nemo_gym.sandbox import SandboxExecResult
-from nemo_gym.sandbox.providers.base import SandboxExecResult
-from nemo_gym.typed_exceptions import NgFailureEvent
 from responses_api_agents.pool_agent.configuration import pool_config
 from responses_api_agents.pool_agent.sandbox import PoolSession
 from responses_api_agents.pool_agent.tests.test_app import PoolAgent, agent, seed
@@ -136,6 +135,35 @@ async def execute(state, timeout=10):
         timeout=timeout,
         close_timeout=10,
     )
+
+
+@pytest.mark.parametrize("resolve", [True, False])
+async def test_stage_supplies_its_own_runner_interpreter(tmp_path, monkeypatch, resolve):
+    state, sandbox = session(tmp_path)
+    await state.install(version="v1.0.16", accept_eula=True, timeout=10)
+    bindir = tmp_path / "interpreter resolver"
+    bindir.mkdir()
+    resolver = bindir / "python3"
+    resolver.write_text("#!/bin/sh\n" + (f"printf '%s\\n' {shlex.quote(sys.executable)}\n" if resolve else "exit 1\n"))
+    resolver.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}:{os.environ['PATH']}")
+
+    command = await state.stage(prompt="task input", config="{}")
+    assert command.argv[1:] == [
+        "-I",
+        f"{state.session.session_dir}/sandbox_runner",
+        state.session.session_dir,
+        state.session.workdir,
+    ]
+    if resolve:
+        interpreter = Path(command.argv[0])
+        assert interpreter.name == "pool-runner"
+        assert interpreter.is_symlink()
+        result = await sandbox.exec(shlex.join([str(interpreter), "-I", "-c", "print('runner works')"]))
+        assert result.return_code == 0
+        assert result.stdout.strip() == "runner works"
+    else:
+        assert command.argv[0] == "python3"
 
 
 @pytest.mark.asyncio

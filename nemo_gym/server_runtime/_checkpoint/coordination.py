@@ -46,7 +46,7 @@ What the controller still owns:
   Until then every participant keeps one entry for the rollout.
 
 Restore is all-or-nothing: if any participant fails, the replacement attempts are retired everywhere,
-which frees the restored state, every participant is resumed,
+which releases the restored state, every participant is resumed,
 and the controller restarts those rollouts from their inputs.
 """
 
@@ -62,7 +62,7 @@ import orjson
 
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.global_config import SERVER_TYPE_KEYS
-from nemo_gym.core.episode import EpisodeId
+from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.server_runtime._checkpoint.control import CHECKPOINT_ROUTE_PREFIX, CheckpointMode, next_attempt
 from nemo_gym.server_runtime._checkpoint.telemetry import OperationSpan, checkpoint_span
 from nemo_gym.server_runtime._checkpoint.telemetry import operation as checkpoint_operation
@@ -224,7 +224,7 @@ async def renew(participants: Participants, checkpoint_id: str, *, deadline_ts: 
 async def retire(
     participants: Participants, checkpoint_id: str, episode_ids: Iterable[EpisodeId], *, deadline_ts: float
 ) -> None:
-    """Stop these attempts everywhere and free their state; their rollouts restart from input.
+    """Stop these attempts everywhere and release their state; their rollouts restart from input.
 
     Refused while a checkpoint is open: resume first.
     """
@@ -321,7 +321,7 @@ async def restore(
         LOGGER.warning("checkpoint %s restore failed; retiring the restored state everywhere", checkpoint_id)
         cleanup_deadline = max(deadline_ts, time.time() + 30)
         try:
-            # Retiring the replacement attempts frees their restored state,
+            # Retiring the replacement attempts releases their restored state,
             # so nothing can continue from a partial restore.
             await retire(
                 participants, checkpoint_id, [next_attempt(e) for e in episode_ids], deadline_ts=cleanup_deadline

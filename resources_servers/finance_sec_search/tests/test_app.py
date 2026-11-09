@@ -28,9 +28,9 @@ from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
 )
-from nemo_gym.typed_exceptions import NgFailureEvent
-from nemo_gym.verification.judge import is_judge_failure
+from nemo_gym.verification import is_judge_failure
 from resources_servers.finance_sec_search.app import (
     EdgarSearchRequest,
     FinanceAgentResourcesServer,
@@ -1062,7 +1062,17 @@ class TestDownloadAndParseFiling:
         url = "https://www.sec.gov/Archives/edgar/data/320193/000032019325000008/"
         path = server._url_to_filing_path(url)
         assert path is not None
-        assert path.name == "index.txt"
+        assert path.name == "%index.txt"
+        assert path != server._url_to_filing_path(url + "index")
+
+    def test_url_to_filing_path_lossy_names_do_not_collide(self, server) -> None:
+        base = "https://www.sec.gov/Archives/edgar/data/320193/000032019325000008"
+        p_nested = server._url_to_filing_path(f"{base}/exhibits/ex-21.htm")
+        p_flat = server._url_to_filing_path(f"{base}/exhibits_ex-21.htm")
+        p_encoded = server._url_to_filing_path(f"{base}/AAPL%20Report.HTM")
+        p_underscore = server._url_to_filing_path(f"{base}/AAPL_20Report.HTM")
+        assert len({p_nested, p_flat, p_encoded, p_underscore}) == 4
+        assert p_nested.parent == p_flat.parent
 
     def test_url_to_filing_path_invalid(self, server) -> None:
         """Invalid URLs return None."""

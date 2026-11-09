@@ -71,9 +71,15 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
+    observe_llm_judge_grading,
 )
-from nemo_gym.verification import JudgeError, call_judge
-from nemo_gym.verification.judge import JUDGE_FAILURES, is_judge_failure
+from nemo_gym.verification import (
+    JUDGE_FAILURES,
+    JudgeError,
+    call_judge,
+    is_judge_failure,
+    record_parsed_judge_verdict,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -262,13 +268,17 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
             return self._build_response(body, evaluations)
 
         task_prompt = str(meta.get("prompt", ""))
-        evaluations = await asyncio.gather(
-            *(
-                self._judge_criterion(criterion=c, generated_answer=generated, task_prompt=task_prompt)
-                for c in criteria
+
+        async def grade() -> GdpPdfVerifyResponse:
+            evaluations = await asyncio.gather(
+                *(
+                    self._judge_criterion(criterion=c, generated_answer=generated, task_prompt=task_prompt)
+                    for c in criteria
+                )
             )
-        )
-        return self._build_response(body, list(evaluations))
+            return self._build_response(body, list(evaluations))
+
+        return await observe_llm_judge_grading(grade)
 
     @staticmethod
     def _build_response(body: GdpPdfVerifyRequest, evaluations: List[CriterionEvaluation]) -> GdpPdfVerifyResponse:
@@ -343,6 +353,7 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
                 last_error = e
                 continue
 
+            record_parsed_judge_verdict()
             evaluation.score = str(score)
             evaluation.rationale = rationale
             evaluation.passed = _criterion_passes(score)

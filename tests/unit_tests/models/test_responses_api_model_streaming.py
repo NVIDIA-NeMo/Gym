@@ -49,7 +49,7 @@ from nemo_gym.models.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
     SimpleResponsesAPIModel,
 )
-from nemo_gym.models.chat_completions_converter import ResponsesConverter
+from nemo_gym.models.chat_completions_converter import ChatCompletionsConverter
 from nemo_gym.models.model_call_capture import CaptureStore
 from nemo_gym.models.responses_streaming import (
     flatten_namespace_tools,
@@ -287,7 +287,7 @@ ITEM_FIXTURES: dict[str, dict] = {
 
 
 # These Responses item types have no Chat Completions representation.
-# ``ResponsesConverter.responses_to_chat_completion_create_params`` raises ``NotImplementedError`` for them.
+# ``ChatCompletionsConverter.responses_to_chat_completion_create_params`` raises ``NotImplementedError`` for them.
 #
 # ``openai_model`` passes Responses requests through without conversion.
 # ``vllm_model`` and ``inference_provider`` convert requests to Chat Completions.
@@ -368,9 +368,9 @@ class TestSanitizeStreamingBody:
         assert actual["id"].startswith("msg_") if missing_id else actual["id"] == "msg_original"
         assert body == original
         params = validate_streaming_responses_params(cleaned)
-        converted = ResponsesConverter(return_token_id_information=False).responses_to_chat_completion_create_params(
-            params
-        )
+        converted = ChatCompletionsConverter(
+            return_token_id_information=False
+        ).responses_to_chat_completion_create_params(params)
         assert converted.messages == [
             {"role": "user", "content": "before"},
             {"role": "assistant", "content": text},
@@ -391,7 +391,9 @@ class TestSanitizeStreamingBody:
         assert actual == message
         # Chat cannot express phase; preserving it must keep that explicit error.
         with pytest.raises(NotImplementedError, match="phase has no Chat Completions representation"):
-            ResponsesConverter(return_token_id_information=False).responses_to_chat_completion_create_params(params)
+            ChatCompletionsConverter(return_token_id_information=False).responses_to_chat_completion_create_params(
+                params
+            )
 
     @pytest.mark.parametrize("provided_id", [None, "rs_original"])
     def test_codex_reasoning_replay_survives_validation_and_chat_conversion(self, provided_id) -> None:
@@ -414,9 +416,9 @@ class TestSanitizeStreamingBody:
         params = validate_streaming_responses_params(cleaned)
         assert params.input[1].id == provided_id
         assert params.input[1].summary[0].text == summary
-        converted = ResponsesConverter(return_token_id_information=False).responses_to_chat_completion_create_params(
-            params
-        )
+        converted = ChatCompletionsConverter(
+            return_token_id_information=False
+        ).responses_to_chat_completion_create_params(params)
         assert [message["role"] for message in converted.messages] == ["user", "assistant", "tool"]
         assert converted.messages[1]["content"] == f"<think>{summary}</think>"
         assert converted.messages[1]["tool_calls"][0]["id"] == call["call_id"]
@@ -1768,7 +1770,7 @@ class TestUnionItemTypesThroughDispatch:
         The converter supports a subset of those item types.
         Unsupported types raise ``NotImplementedError`` during conversion.
         """
-        converter = ResponsesConverter(return_token_id_information=False)
+        converter = ChatCompletionsConverter(return_token_id_information=False)
         params = NeMoGymResponseCreateParamsNonStreaming(input=[ITEM_FIXTURES[tag]])
         try:
             converter.responses_to_chat_completion_create_params(params)

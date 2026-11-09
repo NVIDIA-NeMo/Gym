@@ -36,7 +36,7 @@ mode=${1:-}
 case "$mode" in
   probe) [[ $# = 1 ]] || fail 'usage: probe'; probe; exit 0 ;;
   check) [[ $# = 4 ]] || fail 'usage: check <runtime> <fingerprint> <health code>' ;;
-  install) [[ $# = 6 ]] || fail 'usage: install <runtime> <fingerprint> <source sha256> <python sha256> <health code>' ;;
+  install) [[ $# = 6 || $# = 7 ]] || fail 'usage: install <runtime> <fingerprint> <source sha256> <python sha256> <health code> [wheels sha256]' ;;
   *) fail 'expected probe, check, or install' ;;
 esac
 runtime=$2
@@ -81,6 +81,8 @@ require bash tar gzip sha256sum flock sleep mktemp ln mv rm
 probe >/dev/null
 source_sha256=$4
 python_sha256=$5
+wheels_sha256=${7:-}
+[[ -z "$wheels_sha256" || "$wheels_sha256" =~ ^[0-9a-f]{64}$ ]] || fail 'wheel checksum must be a SHA-256 digest'
 [[ "$source_sha256" =~ ^[0-9a-f]{64}$ && "$python_sha256" =~ ^[0-9a-f]{64}$ ]] \
   || fail 'source and Python checksums must be SHA-256 digests'
 parent=${runtime%/*}
@@ -97,9 +99,12 @@ done
 if ready; then exit 0; fi
 [[ ! -e "$runtime" || -L "$runtime" ]] \
   || fail 'publication path is a real directory; choose a fresh runtime fingerprint without removing it'
-# Neither archive is extracted until both expected digests have been verified.
+# No archive is extracted until every expected digest has been verified.
 printf '%s  %s\n' "$source_sha256" "$scratch/source.tar.gz" "$python_sha256" "$scratch/python.tar.gz" \
   | sha256sum -c -
+if [[ -n "$wheels_sha256" ]]; then
+  printf '%s  %s\n' "$wheels_sha256" "$scratch/wheels.tar.gz" | sha256sum -c -
+fi
 mkdir -p "$parent/.builds"
 generation=$(mktemp -d "$parent/.builds/$name.XXXXXX")
 mkdir -p "$generation/python" "$generation/source/cache"
@@ -107,8 +112,24 @@ tar -xzf "$scratch/python.tar.gz" -C "$generation/python" --strip-components=1
 tar -xzf "$scratch/source.tar.gz" -C "$generation/source"
 # Installed console scripts reference this permanent path, so never rename the generation.
 # The installer alone owns the lock; an orphaned pip process cannot retain it after a kill.
-"$generation/python/bin/python3" -I -B -m pip --isolated install --no-cache-dir \
-  "$generation/source" -r "$generation/source/runtime-requirements.txt" 9>&-
+if [[ -n "$wheels_sha256" ]]; then
+  mkdir -p "$generation/wheels"
+  tar -xzf "$scratch/wheels.tar.gz" -C "$generation/wheels"
+  # Every package, including Gym and pinned NOOA, was built outside the task.
+  # Explicit wheel paths and --no-deps prevent direct-URL metadata from causing downloads.
+  "$generation/python/bin/python3" -I -B -m pip --isolated install --no-cache-dir \
+    --no-index --no-deps --only-binary=:all: "$generation/wheels/"*.whl 9>&-
+  # Offline health checks and workers must use LiteLLM's bundled model metadata.
+  # A private-prefix startup hook also applies to later isolated (-I) interpreters,
+  # without changing the task's Python or process environment.
+  site_packages="$generation/python/lib/python3.13/site-packages"
+  mkdir -p "$site_packages"
+  printf '%s\n' 'import os; os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"' \
+    > "$site_packages/nooa_offline_runtime.pth"
+else
+  "$generation/python/bin/python3" -I -B -m pip --isolated install --no-cache-dir \
+    "$generation/source" -r "$generation/source/runtime-requirements.txt" 9>&-
+fi
 health "$generation"
 printf '%s\n' "$fingerprint" > "$generation/ready"
 publish="$parent/.${generation##*/}.publish"

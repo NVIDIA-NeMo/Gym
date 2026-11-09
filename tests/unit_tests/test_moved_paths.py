@@ -593,7 +593,7 @@ class TestImportSurface:
         Keep its replacement in the snapshot so compatibility checks cannot silently discard the canonical API.
         The v1 EpisodeFailure data envelope is retained; only its old raised-error wrapper and type variable go away.
         """
-        from nemo_gym.typed_exceptions import NgFailureEvent
+        from nemo_gym.core.typed_exceptions import NgFailureEvent
 
         retired = {
             "nemo_gym.agent_utils.sandbox_session": ("HarnessTerminationError",),
@@ -607,8 +607,8 @@ class TestImportSurface:
             for name in old_names:
                 assert name not in self.surface[module]
                 assert not hasattr(current, name)
-        assert "NgFailureEvent" in self.surface["nemo_gym.typed_exceptions"]
-        assert "FailureReportRow" in self.surface["nemo_gym.failure_transport"]
+        assert "NgFailureEvent" in self.surface["nemo_gym.core.typed_exceptions"]
+        assert "FailureReportRow" in self.surface["nemo_gym.core.failure_transport"]
 
     def test_every_recorded_name_still_resolves_at_its_old_path(self) -> None:
         missing = []
@@ -771,5 +771,39 @@ def test_package_facade_warns_once_for_a_renamed_name() -> None:
         "messages = [str(w.message) for w in caught if issubclass(w.category, DeprecationWarning)]\n"
         "assert len(messages) == 1, messages\n"
         "assert messages[0].startswith('`nemo_gym.config.TOKEN_ID_CAPTURE_BLOCK` moved to'), messages\n"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)
+
+
+@pytest.mark.parametrize(
+    ("module", "old_name", "new_name"),
+    [
+        # Released in 0.7.0.
+        ("nemo_gym.responses_converter", "ResponsesConverter", "ChatCompletionsConverter"),
+        ("nemo_gym.responses_converter", "ResponsesConverterState", "ChatCompletionsConverterState"),
+        # Paths the reorganization introduced before the rename.
+        ("nemo_gym.models.chat_completions_converter", "ResponsesConverter", "ChatCompletionsConverter"),
+        ("nemo_gym.models.chat_completions_converter", "ResponsesConverterState", "ChatCompletionsConverterState"),
+        ("nemo_gym.models", "ResponsesConverter", "ChatCompletionsConverter"),
+        ("nemo_gym.models.token_capture.completion", "ResponsesConverter", "ChatCompletionsConverter"),
+        ("nemo_gym.token_id_capture.completion", "ResponsesConverter", "ChatCompletionsConverter"),
+    ],
+)
+def test_renamed_converter_resolves_at_each_old_path_with_a_warning(module: str, old_name: str, new_name: str) -> None:
+    # In a fresh interpreter: each old path warns only on its first use in a process.
+    code = textwrap.dedent(
+        f"""
+        import warnings
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            from {module} import {old_name} as old
+        from nemo_gym.models.chat_completions_converter import {new_name} as new
+        assert old is new, (old, new)
+        messages = [str(w.message) for w in caught if w.category is DeprecationWarning and "{old_name}`" in str(w.message)]
+        assert len(messages) == 1, messages
+        (message,) = messages
+        assert "chat_completions_converter.{new_name}`" in message, message
+        assert "removed in nemo_gym 0.10.0" in message, message
+        """
     )
     subprocess.run([sys.executable, "-c", code], check=True)

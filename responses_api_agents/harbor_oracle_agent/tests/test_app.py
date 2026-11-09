@@ -11,7 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
-from nemo_gym.agents.testing.failure_assertions import raises_agent_failure
+from nemo_gym.agents import raises_agent_failure
 from nemo_gym.client import ServerClient
 from nemo_gym.data.tasks.harbor import answer_write_command
 from nemo_gym.sandbox import TRANSFER_USER, SandboxExecResult
@@ -527,7 +527,8 @@ def test_responses_requires_seeded_session(monkeypatch):
 def test_legacy_run_route_is_not_supported(monkeypatch):
     agent, _, _ = make_agent(monkeypatch)
     response = TestClient(agent.setup_webserver()).post("/run", json={"responses_create_params": {"input": []}})
-    assert response.status_code == 501
+    assert response.status_code == 422
+    assert "OracleAgent does not implement /run" in response.json()["detail"]
 
 
 @pytest.mark.parametrize("cap,expected", [(None, 7200.0), (8000.0, 7200.0), (60.0, 60.0), (0.5, 0.5)])

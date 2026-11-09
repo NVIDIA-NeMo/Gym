@@ -18,8 +18,7 @@ import nemo_gym.rollouts.rollout_collection
 from nemo_gym.agents import AgentOutcomePolicyConfig, OutcomeAction
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ATTEMPT_INDEX_KEY_NAME
-from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.core.failure_kinds import MODEL_POLICY_RESPONSE_TIMEOUT
+from nemo_gym.core import MODEL_POLICY_RESPONSE_TIMEOUT, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.metrics import compute_aggregate_metrics
 from nemo_gym.rollouts import NG_TERMINAL_KEY, RolloutCollectionConfig, RolloutCollectionHelper
 from nemo_gym.rollouts.rollout_collection import NG_FAILURE_COUNTS_AS_ZERO_KEY, _failures_path_for
@@ -83,13 +82,17 @@ def install_fake_server_client(monkeypatch: pytest.MonkeyPatch, post: AsyncMock)
     return server_client
 
 
-@pytest.mark.parametrize("field", ["default_action", "by_failure_kind", "by_status_code"])
+@pytest.mark.parametrize("field", ["default_action", "by_failure_kind", "by_status_code", "by_failure_class"])
 def test_boundary_rejects_unsupported_actions_at_load(field):
     def value(action):
         return (
             action
             if field == "default_action"
-            else {MODEL_POLICY_RESPONSE_TIMEOUT if field == "by_failure_kind" else 500: action}
+            else {
+                MODEL_POLICY_RESPONSE_TIMEOUT
+                if field == "by_failure_kind"
+                else ("model" if field == "by_failure_class" else 500): action
+            }
         )
 
     with pytest.raises(ValidationError, match="does not support verify"):
@@ -140,10 +143,14 @@ async def test_confirmed_timeout_policy_actions_keep_facts_and_collection_budget
 
     from nemo_gym.agents import OutcomeAction
     from nemo_gym.client import NeMoGymAsyncOpenAI
-    from nemo_gym.core.failure_kinds import MODEL_POLICY_RESPONSE_TIMEOUT
-    from nemo_gym.failure_transport import FailureHeader, RequestFailureLog
-    from nemo_gym.server_runtime import FailureBoundary
-    from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
+    from nemo_gym.core import (
+        MODEL_POLICY_RESPONSE_TIMEOUT,
+        FailureBoundary,
+        FailureHeader,
+        NgFailureEvent,
+        RequestFailureLog,
+        failure_report_for,
+    )
     from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig, SimpleAgentRunRequest
 
     connections = []
