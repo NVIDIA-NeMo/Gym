@@ -32,6 +32,9 @@ from nemo_gym.core import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
+from nemo_gym.models.token_capture import ParentResolutionStatus, TokenEntry, resolve_terminal, stamp_lineage
+from nemo_gym.models.token_capture.consumer import _assemble
+from nemo_gym.models.token_capture.delivery import MASK_SAMPLE_KEY
 from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
@@ -1099,7 +1102,10 @@ class TestConfigYaml:
         assert config.model_server.name == "policy_model"
         assert config.opencode_config["permission"]["bash"]["*"] == "allow"
         assert config.opencode_config["permission"]["bash"]["*git submodule update*"] == "deny"
-        assert config.opencode_config["tools"]["webfetch"] is False
+        permission = config.opencode_config["permission"]
+        assert [permission[tool] for tool in ("webfetch", "websearch", "skill")] == ["deny"] * 3
+        assert list(permission).index("*") < list(permission).index("webfetch")
+        assert "tools" not in config.opencode_config
 
         assert config.token_id_capture is (training_capture is True)
         client = MagicMock(spec=ServerClient)
@@ -1343,3 +1349,90 @@ async def test_task_timeout_reaches_local_subprocess_wait(tmp_path: Path, budget
     assert wait.await_args.kwargs["timeout"] == expected
     assert episode.response.metadata == {"agent_timeout_sec": str(float(expected))}
     assert agent.config.timeout == 1800
+
+
+def _token_entry(
+    call_id: str,
+    prompt: list[int],
+    gen: list[int],
+    item: dict,
+    *,
+    parent_call_id: str | None = None,
+    response_id: str | None = None,
+) -> TokenEntry:
+    entry = TokenEntry(
+        capture_key="r",
+        model_call_id=call_id,
+        prompt_token_ids=prompt,
+        generation_token_ids=gen,
+        generation_log_probs=[-0.1] * len(gen),
+        output_items=[item],
+        token_item_index=0,
+        response_id=response_id,
+    )
+    status = ParentResolutionStatus.RESOLVED if parent_call_id else ParentResolutionStatus.ROOT
+    stamp_lineage(entry, parent_call_id, parent_resolution=status)
+    return entry
+
+
+@pytest.mark.parametrize(("placeholder_tool", "attributed"), [("exec_command", True), ("apply_patch", False)])
+def test_session_ending_on_an_unavailable_tool_attributes_the_served_call(
+    placeholder_tool: str, attributed: bool
+) -> None:
+    """OpenCode exports a final call to a tool it does not offer as its `invalid` tool followed by the error.
+
+    Token capture still names the served call as the rollout's terminal call when the placeholder names the served
+    tool, so an auxiliary root does not mask the rollout.
+    """
+    unavailable = {"tool": placeholder_tool, "error": "unavailable"}
+    export = {
+        "messages": [
+            {"info": {"role": "user"}, "parts": [{"type": "text", "text": "do it"}]},
+            {"info": {"role": "assistant"}, "parts": [{"type": "step-start"}, {"type": "text", "text": "plan"}]},
+            {
+                "info": {"role": "assistant"},
+                "parts": [
+                    {"type": "step-start"},
+                    {
+                        "type": "tool",
+                        "callID": "chatcmpl-tool-b",
+                        "tool": "invalid",
+                        "state": {"status": "error", "input": unavailable, "error": "unavailable"},
+                    },
+                ],
+            },
+        ]
+    }
+    output = _make_agent()._session_output(export, AgentObservationBundle(source="opencode"))
+    response = {"id": "resp_minted_by_the_agent", "output": [item.model_dump() for item in output]}
+    assert [item["type"] for item in response["output"]] == ["message", "function_call", "function_call_output"]
+
+    plan = {
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": "plan", "annotations": []}],
+    }
+    served = {
+        "type": "function_call",
+        "call_id": "chatcmpl-tool-b",
+        "name": "exec_command",
+        "arguments": '{"cmd": "ls"}',
+    }
+    title = {
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": "Title", "annotations": []}],
+    }
+    entries = [
+        _token_entry("a", [1, 2], [3], plan),
+        _token_entry("b", [1, 2, 3, 4], [5], served, parent_call_id="a"),
+        _token_entry("aux", [90, 91], [92], title, response_id="resp_aux"),
+    ]
+    verdict = resolve_terminal(entries, response)
+    built = _assemble("r", entries, "prefix_merging", "m", verified_response=response)
+    if attributed:
+        assert (verdict.model_call_id, verdict.method) == ("b", "item_id")
+        assert built[MASK_SAMPLE_KEY] is False
+    else:
+        assert not verdict.attributed and "item_id_content_mismatch" in verdict.reason
+        assert built[MASK_SAMPLE_KEY] is True
