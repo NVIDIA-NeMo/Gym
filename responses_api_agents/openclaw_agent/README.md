@@ -254,6 +254,11 @@ output, usage, and `ng_agent_outcome`. HTTP errors retain their upstream status 
 `model_request_error`; unrecognized causes remain `unknown`. The environment decides whether
 to verify, retry, or fail using its outcome policy. Runtime, cancellation, and cleanup failures
 still raise errors, with transcript evidence retained by close.
+A context overflow, which the CLI reports as an error of kind `context_overflow` in its JSON output after its own
+precheck or a provider refusal, is a limit rather than a failure: whatever the CLI's exit code, the response is
+`incomplete` with `incomplete_details.reason` `max_output_tokens` (the reason Gym's `vllm_model` gives a
+context-length refusal), keeps its partial output and carries no `ng_agent_outcome`, so it is verified. A failed
+cleanup still fails the activation.
 Usage sums observed assistant model calls, including cache reads/writes and failed final calls.
 Transcript rewrites retaining the same response ID and message count once; synthetic CLI summary
 messages carrying cumulative usage do not count again or override the model's terminal status.

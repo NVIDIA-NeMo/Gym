@@ -2690,47 +2690,24 @@ def test_terminal_model_error_retains_response_and_cause(setup, partial, message
 
 
 @pytest.mark.parametrize(
-    "stop_reason,message,envelope_error,expected",
+    "stop_reason,message",
     [
-        ("error", "Connection error.", None, {"failure_kind": "model_transport_error"}),
-        ("error", "terminated", None, {"failure_kind": "model_transport_error"}),
-        (
-            "aborted",
-            "LLM idle timeout (2s): no response from model",
-            None,
-            {"failure_kind": "model_transport_error"},
-        ),
-        (
-            None,
-            "Context overflow: prompt too large for the model (precheck).",
-            "context_overflow",
-            {"failure_kind": "model_context_limit"},
-        ),
-        (
-            "error",
-            "400 maximum context length exceeded",
-            "context_overflow",
-            {"failure_kind": "model_context_limit"},
-        ),
+        ("error", "Connection error."),
+        ("error", "terminated"),
+        ("aborted", "LLM idle timeout (2s): no response from model"),
     ],
 )
 @pytest.mark.parametrize("partial", [False, True])
-def test_model_transport_and_context_errors_reach_environment(
-    setup, stop_reason, message, envelope_error, expected, partial
-):
-    from nemo_gym.agents import AgentOutcomePolicyConfig, agent_outcome_policy
+def test_model_transport_errors_reach_environment(setup, stop_reason, message, partial):
+    from nemo_gym.agents import agent_outcome_policy
     from nemo_gym.core import NeMoGymResponse
 
     agent, sandbox = setup
     transcript = [json.loads(line) for line in events(stop_reason=stop_reason).splitlines()]
     transcript[2]["message"].update(errorMessage=message, content=[], usage={"input": 0, "output": 0})
-    if stop_reason is None:
-        transcript = transcript[:2] if partial else []
-    elif not partial:
+    if not partial:
         transcript = [transcript[2]]
     sandbox.events = "\n".join(json.dumps(event) for event in transcript)
-    if envelope_error:
-        sandbox.stdout = json.dumps({"meta": {"error": {"kind": envelope_error, "message": message}}})
     with TestClient(agent.setup_webserver()) as client:
         session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
         response = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
@@ -2738,18 +2715,78 @@ def test_model_transport_and_context_errors_reach_environment(
         body = response.json()
         assert body["status"] == "failed"
         assert body["error"]["message"] == message
-        assert json.loads(body["metadata"]["ng_agent_outcome"]) == expected
+        assert json.loads(body["metadata"]["ng_agent_outcome"]) == {"failure_kind": "model_transport_error"}
         assert any(item["type"] == "function_call_output" for item in body["output"]) == partial
-        # Context prechecks have no HTTP status: the environment can explicitly
-        # choose verification, rather than inheriting a fabricated HTTP 400.
-        assert agent_outcome_policy(NeMoGymResponse.model_validate(body)).value == (
-            "fail" if envelope_error else "retry"
-        )
-        policy = AgentOutcomePolicyConfig(by_failure_kind={"model_context_limit": "verify"})
-        assert agent_outcome_policy(NeMoGymResponse.model_validate(body), config=policy).value == (
-            "verify" if envelope_error else "retry"
-        )
+        assert agent_outcome_policy(NeMoGymResponse.model_validate(body)).value == "retry"
         assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
+
+
+@pytest.mark.parametrize(
+    "stop_reason,message",
+    [
+        # The CLI's own precheck: no model call is made.
+        (None, "Context overflow: prompt too large for the model (precheck)."),
+        # The provider refused the prompt; the CLI's envelope types the refusal.
+        ("error", "400 maximum context length exceeded"),
+    ],
+)
+@pytest.mark.parametrize("partial", [False, True])
+# 1 with FailoverError is how 2026.6.11 surfaces a provider refusal; the others show the exit code is not consulted.
+@pytest.mark.parametrize("exit_code,stderr", [(0, ""), (1, "FailoverError: context"), (1, "diagnostics"), (2, "")])
+def test_context_overflow_is_an_incomplete_graded_response(setup, stop_reason, message, partial, exit_code, stderr):
+    from nemo_gym.agents import AgentOutcomePolicyConfig, OutcomeAction, agent_outcome_policy
+    from nemo_gym.core import NeMoGymResponse
+
+    agent, sandbox = setup
+    sandbox.result["return_code"] = exit_code
+    sandbox.stderr = stderr
+    transcript = [json.loads(line) for line in events(stop_reason=stop_reason).splitlines()]
+    transcript[2]["message"].update(errorMessage=message, content=[], usage={"input": 0, "output": 0})
+    if stop_reason is None:
+        transcript = transcript[:2] if partial else []
+    elif not partial:
+        transcript = [transcript[2]]
+    sandbox.events = "\n".join(json.dumps(event) for event in transcript)
+    sandbox.stdout = json.dumps({"meta": {"error": {"kind": "context_overflow", "message": message}}})
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        path = "/ng-rollout/openclaw-smoke-a2/v1/responses"
+        response = client.post(path, json={"input": "task"})
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["status"] == "incomplete"
+        assert body["incomplete_details"] == {"reason": "max_output_tokens"}
+        assert body["error"] is None
+        # Only a failed response carries an outcome; this one is graded like any other limit.
+        assert "ng_agent_outcome" not in body["metadata"]
+        # The partial work is kept for the verifier.
+        assert [item["type"] for item in body["output"]] == (
+            ["reasoning", "function_call", "function_call_output"] if partial else []
+        )
+        assert body["usage"]["total_tokens"] == (15 if partial else 0)
+        typed = NeMoGymResponse.model_validate(body)
+        assert agent_outcome_policy(typed) == OutcomeAction.VERIFY
+        # The Environment Server's failure policy applies to failed responses only, so it cannot fail this one.
+        fail_context = AgentOutcomePolicyConfig(by_failure_kind={"model_context_limit": "fail"}, default_action="fail")
+        assert agent_outcome_policy(typed, config=fail_context) == OutcomeAction.VERIFY
+        assert client.post(path, json={"input": "task"}).json() == body
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id)).json()
+        assert closed["agent_observations"]["records"][0]["status"] == "incomplete"
+    sandbox.launch.assert_awaited_once()
+
+
+def test_context_overflow_does_not_hide_a_failed_cleanup(setup):
+    agent, sandbox = setup
+    sandbox.result["error"] = "cleanup failed"
+    sandbox.events = ""
+    sandbox.stdout = json.dumps({"meta": {"error": {"kind": "context_overflow", "message": "Context overflow"}}})
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        response = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
+        assert response.status_code == 502, response.text
+        assert response.json()["detail"] == "cleanup failed"
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        assert closed.json()["agent_observations"]["records"][0]["status"] == "failed"
 
 
 @pytest.mark.parametrize("failure", ["abort", "worker_exit", "cleanup", "untyped_envelope"])

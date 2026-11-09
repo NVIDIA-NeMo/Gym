@@ -26,7 +26,8 @@ from scripts.harness_conformance.runner import run_process
 from scripts.harness_conformance.scenarios import SCENARIOS, Scenario
 
 
-CASES = ("http-429", "http-500", "http-503", "reset", "stream-reset", "idle", "context-http", "context-precheck")
+CASES = ("http-429", "http-500", "http-503", "reset", "stream-reset", "idle")
+CONTEXT_CASES = ("context-http", "context-precheck")
 CONTEXT_ERROR = "This model's maximum context length is 32768 tokens. However, you requested 40000 tokens."
 
 
@@ -60,14 +61,6 @@ def test_openclaw_failure_reaches_environment(case: str, tmp_path: Path) -> None
         assert outcome == {"failure_kind": "model_request_error", "status_code": status}
         assert len(witness["attempts"]) == 3
         assert all(attempt["status_code"] == status for attempt in witness["attempts"])
-    elif case.startswith("context-"):
-        assert outcome == {"failure_kind": "model_context_limit"}
-        assert "context" in response["error"]["message"].lower()
-        if case == "context-precheck":
-            assert witness["attempts"] == []
-        else:
-            assert witness["attempts"]
-            assert all(attempt["status_code"] == 400 for attempt in witness["attempts"])
     else:
         assert outcome == {"failure_kind": "model_transport_error"}
         expected = {"reset": "Connection error.", "stream-reset": "terminated", "idle": "LLM idle timeout"}
@@ -80,10 +73,44 @@ def test_openclaw_failure_reaches_environment(case: str, tmp_path: Path) -> None
     retained = failure["_ng_failure_partial_response"]
     assert json.loads(retained["metadata"]["ng_agent_outcome"]) == outcome
     assert retained["error"] == response["error"]
-    # Context limits default to fail; transport / exhausted HTTP errors default
-    # to retry. Neither becomes a verified, rewarded rollout by accident.
-    assert failure["_ng_failure_terminal"] == case.startswith("context-")
+    # Transport and exhausted HTTP errors default to retry; neither becomes a verified, rewarded rollout.
+    assert failure["_ng_failure_terminal"] is False
     assert failure["ng_agent_observations"]["records"][0]["status"] == "failed"
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux" or os.environ.get("HARNESS") != "openclaw",
+    reason="Run the pinned Linux CLI in the OpenClaw conformance job (HARNESS=openclaw)",
+)
+@pytest.mark.parametrize("case", CONTEXT_CASES)
+def test_openclaw_context_overflow_reaches_verifier(case: str, tmp_path: Path) -> None:
+    """A context overflow is a limit: the partial work is graded as an incomplete response, not failed."""
+    output = (
+        Path(os.environ["PROBE_OUTPUT"]).parent / "error-regressions" / case
+        if "PROBE_OUTPUT" in os.environ
+        else tmp_path
+    )
+    output.mkdir(parents=True, exist_ok=True)
+    result = run_process(
+        [sys.executable, __file__, "--case", case, "--output", str(output)], directory=output, timeout=180
+    )
+    assert result == {"returncode": 0, "timed_out": False}, (output / "episode.log").read_text()[-12000:]
+    witness = json.loads((output / "witness.json").read_text())
+    assert not witness["violations"]
+    assert witness["seeded"] == witness["closed"] == 1
+    if case == "context-precheck":
+        assert witness["attempts"] == []
+    else:
+        assert witness["attempts"]
+        assert all(attempt["status_code"] == 400 for attempt in witness["attempts"])
+    (response,) = witness["agent_responses"]
+    assert response["status"] == "incomplete"
+    assert response["error"] is None
+    assert "ng_agent_outcome" not in response["metadata"]
+    assert witness["verifications"] == [{"reward": 0.0, "answer_seen": False}]
+    assert not (output / "rollouts_failures.jsonl").read_text().strip()
+    (rollout,) = [json.loads(line) for line in (output / "rollouts.jsonl").read_text().splitlines()]
+    assert rollout["reward"] == 0.0
 
 
 @pytest.mark.skipif(
@@ -283,7 +310,7 @@ async def run_case(case: str, output: Path) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--case", choices=(*CASES, "startup-timeout"), required=True)
+    parser.add_argument("--case", choices=(*CASES, *CONTEXT_CASES, "startup-timeout"), required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     asyncio.run(run_case(args.case, args.output))
