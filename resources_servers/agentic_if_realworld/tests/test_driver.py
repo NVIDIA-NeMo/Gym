@@ -520,20 +520,49 @@ def test_adaptive_capture_selected_parameters_and_resume(
         assert len(calls) == last_stage + 1 and len(judge_calls) == 1
 
 
-def test_runtime_fingerprint_covers_active_agent_and_core(monkeypatch):
+def test_runtime_fingerprint_covers_active_agent_and_core(tmp_path, monkeypatch):
     from nemo_gym.orchestration import jobs
 
+    checkout = tmp_path / ".workspace" / "Gym"
+    benchmark = checkout / "resources_servers/agentic_if_realworld/benchmark"
+    agent_source = "responses_api_agents/simple_agent/app.py"
+    core_source = "nemo_gym/rollouts/rollout_collection.py"
+    sources = [
+        "resources_servers/agentic_if_realworld/benchmark/core.py",
+        agent_source,
+        core_source,
+        "benchmarks/example/prepare.py",
+        "responses_api_models/example/app.py",
+    ]
+    generated = [
+        benchmark / ".cache/generated.py",
+        checkout / "responses_api_agents/simple_agent/.venv/dependency.py",
+        checkout / "responses_api_agents/pi_agent/.pi_node/dependency.py",
+    ]
+    for source in sources:
+        path = checkout / source
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("SOURCE = 1\n")
+    for path in generated:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("GENERATED = 1\n")
+    (benchmark / "source_manifest.json").write_text(json.dumps({"gym_commit": "historical-revision"}))
+    monkeypatch.setattr(core, "ROOT", benchmark)
     monkeypatch.setattr(jobs, "installed_gym_commit", lambda: "runtime-revision")
     before = core.runtime_identity()
     assert before["gym_commit"] == "runtime-revision"
-    assert before["source_gym_commit"] == core.read(core.ROOT / "source_manifest.json")["gym_commit"]
-    collection_path = Path(rollout_collection.__file__).resolve().relative_to(core.ROOT.parents[2])
-    paths = ["gym/responses_api_agents/simple_agent/app.py", f"gym/{collection_path}"]
-    assert all(path in before["sources"] for path in paths)
-    digest = core.digest
-    monkeypatch.setattr(
-        core,
-        "digest",
-        lambda path: "modified-agent" if path.as_posix().endswith("simple_agent/app.py") else digest(path),
-    )
-    assert core.runtime_identity() != before
+    assert before["source_gym_commit"] == "historical-revision"
+    assert "core.py" in before["sources"]
+    assert all(f"gym/{source}" in before["sources"] for source in sources)
+    for path in generated:
+        path.write_text("GENERATED = 2\n")
+    assert core.runtime_identity() == before
+    for path in generated:
+        path.unlink()
+    assert core.runtime_identity() == before
+    for source in (agent_source, core_source):
+        (checkout / source).write_text("SOURCE = 2\n")
+        after = core.runtime_identity()
+        assert after != before
+        assert after["sources"][f"gym/{source}"] != before["sources"][f"gym/{source}"]
+        before = after
