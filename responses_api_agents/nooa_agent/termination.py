@@ -7,7 +7,7 @@ from enum import StrEnum
 from types import FrameType
 
 from aiohttp import ClientResponseError
-from nooa.errors import GenerationError, IterationLimitExceeded, LoopDetectedError
+from nooa.errors import GenerationError, IterationLimitExceeded, LoopDetectedError, RetryLimitExceeded
 from nooa.strategies.codeact import CodeActStrategy
 from nooa.strategies.predict import PredictStrategy
 
@@ -26,6 +26,8 @@ class NOOATerminationReason(StrEnum):
     MAX_OUTPUT_TOKENS_EXCEEDED = "max_output_tokens_exceeded"
     LOOP_DETECTED = "loop_detected"
     INVALID_POLICY_OUTPUT = "invalid_policy_output"
+    CODE_RETRIES_EXHAUSTED = "code_retries_exhausted"
+    RESULT_VALIDATION_EXHAUSTED = "result_validation_exhausted"
     MODEL_REJECTED = "model_rejected"
     TIMEOUT_EXCEEDED = "timeout_exceeded"
     CANCELLED = "cancelled"
@@ -91,6 +93,22 @@ def policy_termination(
             return NOOATerminationReason.MAX_ITERATIONS_EXCEEDED, str(error)
         if _is_codeact_loop_stop(error):
             return NOOATerminationReason.LOOP_DETECTED, str(error)
+        frame = _raising_frame(error)
+        if (
+            type(error) is RetryLimitExceeded
+            and frame is not None
+            and frame.f_code is CodeActStrategy._run_generation.__code__
+        ):
+            return NOOATerminationReason.CODE_RETRIES_EXHAUSTED, str(error)
+        if (
+            type(error) is GenerationError
+            and frame is not None
+            and frame.f_code is CodeActStrategy._handle_return_result.__code__
+            and error.__cause__ is not None
+        ):
+            # This pinned SDK raise site exhausts model-correctable result
+            # validation retries. Generic generation/transport errors stay failures.
+            return NOOATerminationReason.RESULT_VALIDATION_EXHAUSTED, str(error)
         frame = _generation_error_frame(error)
         if frame is None or frame.f_code not in (
             CodeActStrategy._run_generation.__code__,

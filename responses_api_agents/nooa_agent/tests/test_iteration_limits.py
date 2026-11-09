@@ -12,7 +12,7 @@ import pytest
 from fastapi import HTTPException
 from nooa import Agent, CodeActStrategy, strategy
 from nooa.config import CodeActConfig
-from nooa.errors import GenerationError, IterationLimitExceeded
+from nooa.errors import GenerationError, IterationLimitExceeded, RetryLimitExceeded
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import (
@@ -117,8 +117,8 @@ def iteration_agent(*, scenario: str = "iterations", sentinel: Path | None = Non
                 NeMoGymResponseFunctionToolCall(
                     id="function-1",
                     call_id="call-1",
-                    name="execute_python",
-                    arguments=arguments,
+                    name="return_result" if scenario == "result_validation" else "execute_python",
+                    arguments='{"result": {"wrong": "type"}}' if scenario == "result_validation" else arguments,
                 )
             )
         response = model_response(*output)
@@ -254,7 +254,7 @@ async def test_real_codeact_environment_verifies_partial_response_once(
     assert _paths(client)[-3:] == ["/v1/agent_sessions/close", "/verify", "/close_session"]
 
 
-@pytest.mark.parametrize("scenario", ["retries", "text_only", "model_outage"])
+@pytest.mark.parametrize("scenario", ["text_only", "model_outage"])
 async def test_other_codeact_limits_and_unrecovered_outage_fail_agent_activation(scenario: str) -> None:
     instance, model_calls = iteration_agent(scenario=scenario)
     req = await open_session(instance)
@@ -271,7 +271,7 @@ async def test_other_codeact_limits_and_unrecovered_outage_fail_agent_activation
     assert NOOATerminationReason.MAX_ITERATIONS_EXCEEDED not in gaps
 
 
-@pytest.mark.parametrize("error_type", [GenerationError, IterationLimitExceeded])
+@pytest.mark.parametrize("error_type", [GenerationError, IterationLimitExceeded, RetryLimitExceeded])
 async def test_matching_generation_error_message_is_not_a_gradable_execution_limit(
     error_type: type[GenerationError],
 ) -> None:
@@ -342,3 +342,25 @@ async def test_codeact_cleanup_failure_after_iteration_exhaustion_skips_verifica
     assert NOOATerminationReason.INFRASTRUCTURE_ERROR in gaps
     assert NOOATerminationReason.MAX_ITERATIONS_EXCEEDED not in gaps
     assert saved_reply.agent_observations.records
+
+
+@pytest.mark.parametrize(
+    "scenario,reason",
+    [
+        ("retries", NOOATerminationReason.CODE_RETRIES_EXHAUSTED),
+        ("result_validation", NOOATerminationReason.RESULT_VALIDATION_EXHAUSTED),
+    ],
+)
+async def test_pinned_model_retry_exhaustion_preserves_calls_and_reaches_verifier(scenario, reason):
+    instance, calls = iteration_agent(scenario=scenario)
+    environment, client = _environment(instance)
+    result = await environment.run_request(_request())
+    assert result.failure is None
+    assert result.result.response.status == "incomplete"
+    assert result.result.response.error is None
+    assert len(calls) == 1
+    assert result.result.response.output
+    assert _paths(client).count("/verify") == 1
+    record = _episode_record(result.model_dump(mode="json"))
+    assert reason.value in {gap["code"] for gap in record["ng_agent_observations"]["gaps"]}
+    assert record["ng_agent_observations"]["records"][0]["model_calls"]
