@@ -90,8 +90,8 @@ def verifier_unmeasurable(task: int = 0) -> dict:
 def ungraded(task: int = 0, **extra) -> dict:
     """A scored result whose verifier was observed but recorded no grading."""
     trajectory = {
-        "task_id": f"t{task}",
-        "rollout_id": f"r{task}",
+        "task_id": str(task),
+        "rollout_id": f"{task}-0",
         "verifier_invocations": [{"invocation_id": f"v{task}", "status": "completed", "model_calls": []}],
     }
     return ident(task, reward=1.0, response=ANSWER, ng_trajectory=trajectory, **extra)
