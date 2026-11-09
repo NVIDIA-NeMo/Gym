@@ -79,8 +79,8 @@ _KEYWORD = inspect.Parameter.KEYWORD_ONLY
 _REQUIRED = inspect.Parameter.empty
 
 # nemo_gym.environment.in_process: plan a benchmark in one call, then run single tasks against running servers.
-# Changes must be additive: a new parameter is optional and keyword-only. Removing or renaming a parameter,
-# or changing its default, needs a deprecation first; update this list in the same change.
+# The API is experimental and may change without a deprecation period. This list makes a change deliberate:
+# update it in the same change.
 EXPECTED_IN_PROCESS_TASK_SIGNATURES = {
     "plan_benchmark": [
         ("benchmark", _POSITIONAL, _REQUIRED),
@@ -111,14 +111,14 @@ EXPECTED_IN_PROCESS_TASK_SIGNATURES = {
     "PlannedBenchmark.from_json": [("text", _POSITIONAL, _REQUIRED)],
 }
 
-# The fields of the two result types. Adding a field with a default is additive; removing or renaming one needs a
-# deprecation first. Update this list in the same change.
+# The fields of the result types. The API is experimental, so a change is allowed; update this list in the same change.
 EXPECTED_IN_PROCESS_RESULT_FIELDS = {
     "PlannedBenchmark": ["plan", "rows"],
     "RolloutOutcome": ["reward", "failure", "masked", "prompt", "output", "raw"],
     "TaskFailure": [
         "kind",
         "source",
+        "delivery",
         "stage",
         "terminal",
         "reason",

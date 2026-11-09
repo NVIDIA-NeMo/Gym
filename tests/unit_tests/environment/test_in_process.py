@@ -119,14 +119,28 @@ class TestOutcomes:
             (
                 {"reward": 0.0, "failure_kind": "judge_failed", "failure_reason": "no verdict"},
                 RolloutOutcome(
-                    reward=0.0, failure=TaskFailure(kind="judge_failed", source="environment", reason="no verdict")
+                    reward=0.0,
+                    failure=TaskFailure(
+                        kind="judge_failed", source="environment", delivery="delivered", reason="no verdict"
+                    ),
                 ),
             ),
             (
                 {"reward": 0.0, "failure_kind": "session_lost"},
-                RolloutOutcome(reward=0.0, failure=TaskFailure(kind="session_lost", source="environment")),
+                RolloutOutcome(
+                    reward=0.0,
+                    failure=TaskFailure(kind="session_lost", source="environment", delivery="delivered"),
+                ),
             ),
             ({"reward": 0.0, "mask_sample": True}, RolloutOutcome(reward=0.0, masked=True)),
+            (
+                {"reward": 0.0, "mask_sample": True, "failure_kind": "session_lost"},
+                RolloutOutcome(
+                    reward=0.0,
+                    masked=True,
+                    failure=TaskFailure(kind="session_lost", source="environment", delivery="delivered"),
+                ),
+            ),
         ],
     )
     async def test_the_outcome_is_typed_and_the_raw_result_stays_beside_it(
@@ -177,7 +191,24 @@ class TestTaskFailure:
     def test_the_domain_is_the_part_of_the_kind_before_the_first_underscore_or_colon(
         self, kind: str, domain: str
     ) -> None:
-        assert TaskFailure(kind=kind, source="environment").domain == domain
+        assert TaskFailure(kind=kind, source="environment", delivery="delivered").domain == domain
+
+    @pytest.mark.parametrize(
+        "kind, evaluation_side",
+        [
+            ("model_request_error", False),
+            ("agent_timeout", False),
+            ("model_transport_error", True),
+            ("agent_run_error", True),
+            ("agent_request_failed", True),
+            ("myenv:bad_input", None),
+            ("not_a_kind", None),
+        ],
+    )
+    def test_evaluation_side_tells_a_model_outcome_from_an_evaluation_fault(
+        self, kind: str, evaluation_side: bool | None
+    ) -> None:
+        assert TaskFailure(kind=kind, source="environment", delivery="delivered").evaluation_side is evaluation_side
 
 
 class TestFailedRuns:
@@ -194,6 +225,7 @@ class TestFailedRuns:
             failure=TaskFailure(
                 kind="model_request_error",
                 source="collector",
+                delivery="delivered",
                 stage="agent",
                 terminal=True,
                 reason="boom",
@@ -221,7 +253,7 @@ class TestFailedRuns:
         failure = (await runner.run_task("a")).failure
 
         assert failure is not None
-        assert (failure.kind, failure.source) == (kind, source)
+        assert (failure.kind, failure.source, failure.delivery) == (kind, source, delivery)
         assert failure.http_status is None
         assert failure.exception_type is None
 
