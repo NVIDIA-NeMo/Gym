@@ -6,9 +6,9 @@
 # supply rows with an image, the prompt, `question` and `expected_answer`.
 #
 # opencode_agent runs each task in its own sandbox, through the Environment Server, as an agent session. The resources
-# server lends no sandbox, so each session creates one through the `sandbox` provider. The prompt image goes into the
-# sandbox and is attached with `opencode run --file`. Gym's token capture records the model calls, so the same config
-# serves evaluation and RL training.
+# server lends that sandbox: each episode's seed starts one through the `sandbox` provider, and the episode's close
+# stops it. The prompt image goes into the sandbox and is attached with `opencode run --file`. Gym's token capture
+# records the model calls, so the same config serves evaluation and RL training.
 #
 # Needs a sandbox image built from resources_servers/visual_coding_opencode/sandbox_image/Dockerfile
 # (VISUAL_CODING_OPENCODE_SANDBOX_IMAGE) and the OpenSandbox provider settings (OPENSANDBOX_DOMAIN,
@@ -34,6 +34,21 @@ visual_coding_opencode:
         type: responses_api_models
         name: visual_coding_opencode_judge_model
       judge_model: ${oc.select:visual_coding_opencode_judge_model_name,gpt-4o-mini}
+      sandbox_provider: sandbox
+      sandbox_config:
+        image: ${oc.env:VISUAL_CODING_OPENCODE_SANDBOX_IMAGE,null}
+        # Without ttl_s, OpenSandbox ends the sandbox after 10 minutes.
+        ttl_s: 7200
+        ready_timeout_s: 1200
+        resources: {cpu: 2, memory_mib: 8192}
+      # WORKDIR of the sandbox image.
+      sandbox_workdir: /workspace
+      # The lent sandbox reaches only the model server, so the model cannot look answers up. It cannot download
+      # OpenCode either, so the image carries the binary (sandbox_executable_path below).
+      sandbox_network_access: model_only
+      sandbox_model_server:
+        type: responses_api_models
+        name: policy_model
 
 visual_coding_opencode_agent:
   responses_api_agents:
@@ -56,18 +71,11 @@ visual_coding_opencode_agent:
       context_window: 131072
       max_output_tokens: 32768
       session_close_timeout_seconds: 90
-      sandbox_provider: sandbox
-      # The sandbox reaches only the model server, so the model cannot look answers up. It cannot download OpenCode
-      # either, so the image carries the binary, pinned by its SHA-256.
-      network_access: model_only
+      # The resources server lends the sandbox and sets its network, so the agent keeps network_access inherit and
+      # needs no sandbox_provider of its own. The lent sandbox cannot download OpenCode, so the image carries the
+      # binary, pinned by its SHA-256.
       sandbox_executable_path: /opt/opencode/bin/opencode
       sandbox_executable_sha256: 0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded  # pragma: allowlist secret
-      sandbox_config:
-        image: ${oc.env:VISUAL_CODING_OPENCODE_SANDBOX_IMAGE,null}
-        # Without ttl_s, OpenSandbox ends the sandbox after 10 minutes.
-        ttl_s: 7200
-        ready_timeout_s: 1200
-        resources: {cpu: 2, memory_mib: 8192}
       opencode_config:
         tools:
           webfetch: false

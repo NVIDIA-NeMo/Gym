@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""BabyVision's configs start opencode_agent in a sandbox session behind an Environment Server, with the manifest's rows."""
+"""BabyVision's configs start opencode_agent in a sandbox that the resources server lends, behind an Environment Server,
+with the manifest's rows."""
 
 from pathlib import Path
 
@@ -47,9 +48,16 @@ def test_benchmark_config_routes_the_rows_through_an_agent_session(benchmark):
     assert pairing["resources_server"]["name"] == "visual_coding_opencode"
     assert pairing["agent_server"]["name"] == "visual_coding_opencode_agent"
 
+    # The resources server lends each episode a sandbox that reaches only the policy model.
+    resources = config["visual_coding_opencode"]["resources_servers"]["visual_coding_opencode"]
+    assert resources["sandbox_provider"] in config
+    assert resources["sandbox_network_access"] == "model_only"
+    assert resources["sandbox_model_server"]["name"] == "policy_model"
+    assert resources["sandbox_config"]["resources"] == {"cpu": 2, "memory_mib": 8192}
+
+    # The agent borrows that sandbox, so it keeps the default network and starts no sandbox of its own.
     agent = config["visual_coding_opencode_agent"]["responses_api_agents"]["opencode_agent"]
-    assert agent["sandbox_provider"] in config
-    assert agent["network_access"] == "model_only"
+    assert "sandbox_provider" not in agent and "network_access" not in agent
     assert agent["opencode_config"]["compaction"]["auto"] is False
     assert "agent" not in agent["opencode_config"]  # no step limit, so token capture can join every call
 

@@ -19,8 +19,9 @@ Users of it:
 `responses_api_agents/opencode_agent` (OpenCode 1.17.11) runs each task in a sandbox session: the Environment
 Server opens an agent session, sends the task and closes the session.
 
-- Each task runs OpenCode in its own sandbox. The sandbox reaches only the model server, so the model cannot look
-  answers up.
+- Each task runs OpenCode in its own sandbox. The resources server lends it: the episode's seed starts the sandbox
+  and the episode's close stops it. The sandbox reaches only the model server (`sandbox_network_access: model_only`),
+  so the model cannot look answers up. The sandbox size (2 CPUs, 8 GiB) is in the resources server's `sandbox_config`.
 - The question image is uploaded into the sandbox and attached with `opencode run --file`. The model entry declares
   image input, so `read` also returns images to the model. This is how the model looks at the crops and plots that
   it makes.
@@ -44,7 +45,7 @@ The config needs the following:
    image has the Python toolkit and OpenCode under `/opt/opencode/bin`.
 2. Set `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY` for the OpenSandbox provider.
 3. Run on a host whose address the sandbox can reach. The config sets `use_absolute_ip`, and only the model servers
-   advertise that address.
+   advertise that address. The egress rule of the lent sandbox allows that host only.
 
 ```bash
 gym env start --config resources_servers/visual_coding_opencode/configs/visual_coding_opencode.yaml \
