@@ -535,58 +535,53 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
                     bridge.resources_cookies.clear()
                     bridge.resources_cookies.update(session.close_response.resources_cookies)
 
+        verification: UserSimVerification | None = None
         skipped_reward = self._skipped_verification_reward()
-        if skipped_reward is not None:
-            # The Resources session still closes below; only its scoring is skipped.
+        if skipped_reward is None:
             try:
-                await resources_cleanup.close()
-            except Exception as error:
-                raise self._failure("cleanup", error, terminal=True) from error
-            return UserSimEpisodeResponse(
-                episode_id=request.episode_id,
-                task_id=request.task.task_id,
-                result=UserSimEpisodeResult.skipped(
-                    reward=skipped_reward, usersim_result=result, invocations=bridge.invocations
-                ),
-            )
-
-        try:
-            verify_http_response = await self.server_client.post(
-                server_name=self.config.resources_server.name,
-                url_path="/verify",
-                json=UserSimVerifyRequest(
-                    episode_id=request.episode_id,
-                    task_id=request.task.task_id,
-                    verification_input=UserSimVerificationInput(
-                        resolved_row=task.resolved_row,
-                        usersim_result=result,
-                        invocations=bridge.invocations,
+                verify_http_response = await self.server_client.post(
+                    server_name=self.config.resources_server.name,
+                    url_path="/verify",
+                    json=UserSimVerifyRequest(
+                        episode_id=request.episode_id,
+                        task_id=request.task.task_id,
+                        verification_input=UserSimVerificationInput(
+                            resolved_row=task.resolved_row,
+                            usersim_result=result,
+                            invocations=bridge.invocations,
+                        ),
                     ),
-                ),
-                cookies=bridge.resources_cookies,
-                # The resources cleanup closes the session, so the Resources Server keeps tracking it until then.
-                headers={CHECKPOINT_CLOSE_FOLLOWS_HEADER: "1"},
-            )
-            await raise_for_status(verify_http_response)
-            verification = UserSimVerification.model_validate(await get_response_json(verify_http_response))
-            if verification.usersim_result is not None:
-                result = verification.usersim_result
-        except Exception as error:
-            raise self._failure("verification", error) from error
+                    cookies=bridge.resources_cookies,
+                    # The resources cleanup closes the session, so the Resources Server keeps tracking it until then.
+                    headers={CHECKPOINT_CLOSE_FOLLOWS_HEADER: "1"},
+                )
+                await raise_for_status(verify_http_response)
+                verification = UserSimVerification.model_validate(await get_response_json(verify_http_response))
+                if verification.usersim_result is not None:
+                    result = verification.usersim_result
+            except Exception as error:
+                raise self._failure("verification", error) from error
 
+        # The Resources session closes whether or not verification ran.
         try:
             await resources_cleanup.close()
         except Exception as error:
             raise self._failure("cleanup", error, terminal=True) from error
 
-        return UserSimEpisodeResponse(
-            episode_id=request.episode_id,
-            task_id=request.task.task_id,
-            result=UserSimEpisodeResult.from_verification(
+        if verification is None:
+            episode_result = UserSimEpisodeResult.skipped(
+                reward=skipped_reward, usersim_result=result, invocations=bridge.invocations
+            )
+        else:
+            episode_result = UserSimEpisodeResult.from_verification(
                 verification=verification,
                 usersim_result=result,
                 invocations=bridge.invocations,
-            ),
+            )
+        return UserSimEpisodeResponse(
+            episode_id=request.episode_id,
+            task_id=request.task.task_id,
+            result=episode_result,
         )
 
     async def _run_usersim(self, bridge: _ConversationBridge, resolved_row: dict[str, Any]) -> dict[str, Any]:

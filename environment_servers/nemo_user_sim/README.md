@@ -15,7 +15,9 @@ did not change during the episode.
 Set `skip_verification: true` to return `skip_verification_reward` (default `0.0`) without calling `/verify`,
 as `single_agent_turn` does, for example to generate conversations without scoring them. The result keeps its
 shape with `verification: null`, empty `reward_components`, the fixed `reward`, and `verification_skipped: true`,
-so anything reading the result can tell it from a measured reward. Every agent session and the Resources session
+so anything reading the result can tell it from a measured reward. A simulation that UserSim reports as failed
+does not earn the fixed reward: it scores `0.0` with the `failure_kind` and `failure_reason` that `/verify` would give,
+and it is masked unless the assistant model caused the failure. Every agent session and the Resources session
 are still closed, and `/aggregate_metrics` returns empty metrics. When the Environment Server leaves either field
 unset, it uses the assistant agent's value, which Gym fills from the global `skip_verification` and
 `skip_verification_reward` flags.

@@ -14,6 +14,7 @@ from resources_servers.nemo_user_sim.episode_contracts import (
     UserSimSimulationResult,
     UserSimTaskInput,
     UserSimVerification,
+    usersim_failure,
 )
 
 
@@ -38,6 +39,7 @@ class UserSimEpisodeResult(BaseModel):
 
     @model_validator(mode="after")
     def verified_or_skipped(self) -> Self:
+        """A result carries a verification exactly when /verify ran."""
         if (self.verification is None) != self.verification_skipped:
             raise ValueError("a UserSim episode result carries a verification exactly when it was not skipped")
         return self
@@ -56,9 +58,17 @@ class UserSimEpisodeResult(BaseModel):
         usersim_result: UserSimSimulationResult,
         invocations: list[UserSimInvocation],
     ) -> Self:
-        """The result of an episode whose verification skip_verification replaced with a fixed reward."""
+        """The result of an episode whose verification skip_verification replaced with a fixed reward.
+
+        A failed simulation does not earn the fixed reward. It scores 0.0 with the failure fields /verify gives it,
+        masked unless the assistant model caused the failure, so skipping never hides a failure.
+        """
+        failure = usersim_failure(usersim_result.simulation_outcome)
         return cls(
-            reward=reward,
+            reward=reward if failure is None else 0.0,
+            mask_sample=failure is not None and failure.mask_sample,
+            failure_kind=failure.failure_kind if failure is not None else None,
+            failure_reason=failure.failure_reason if failure is not None else None,
             reward_components={},
             verification=None,
             usersim_result=usersim_result,

@@ -17,7 +17,6 @@ from nemo_gym.server_runtime import ResourcesSeedSessionRequest, check_resources
 from resources_servers.nemo_user_sim import app as usersim_app
 from resources_servers.nemo_user_sim.app import (
     PROBE_SCORERS,
-    SIMULATION_FAILED,
     UserSimResourcesServer,
     UserSimResourcesServerConfig,
     _decode_provenance,
@@ -26,6 +25,7 @@ from resources_servers.nemo_user_sim.app import (
     _validate_resolved_row,
 )
 from resources_servers.nemo_user_sim.episode_contracts import (
+    SIMULATION_FAILED,
     UserSimSimulationResult,
     UserSimVerificationInput,
     UserSimVerifyRequest,
