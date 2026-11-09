@@ -154,7 +154,10 @@ images its tools return, such as task files it reads, and a text-only deployment
 OpenCode replaces such an image with an error text telling the model it cannot read images. Once an activation
 declares image input, later activations of the session keep declaring it, because OpenCode resends earlier images
 with the session history. Set `image_input: true` for a vision model whose tasks keep their images in the sandbox,
-where the prompt has none.
+where the prompt has none. A session that declares image input also lifts OpenCode's image limits, so the model
+gets each image's own bytes: by default OpenCode shrinks or re-encodes an image over 2000 px on a side or 5 MiB of
+base64. A run on an endpoint with image limits can restore them with `attachment` in `opencode_config`, which
+replaces the lifted limits; a limit it leaves out returns to OpenCode's default.
 In a single-activation session, the timeout budget starts once the activation holds a
 concurrency slot. Staging the activation's files, images included, spends it, OpenCode runs
 for the rest, and a budget that runs out before launch fails the activation.
@@ -172,7 +175,7 @@ also fails, because nothing confirms its required tools; a run that failed for a
 that cause. `context_window` and `max_output_tokens` are independent
 config settings; leave room for the prompt in the served model's context. Request-level overrides
 are not silently ignored.
-Session `opencode_config` permits only `permission` and `tools`, preserving Gym capture.
+Session `opencode_config` permits only `permission`, `tools` and `attachment`, preserving Gym capture.
 OpenCode turns a `tools` map into base permission rules and merges `permission` on top,
 so a later `permission` rule such as `"*": "allow"` re-enables tools that `tools`
 disabled. Set `tools: null` (or `{}`) to make `permission` the only rule source; the

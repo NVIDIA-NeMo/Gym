@@ -27,6 +27,14 @@ OBSERVABILITY_PATCH = ASSISTANT_MESSAGE_PLUGIN_SOURCE
 # Otherwise it replaces each image, including images its read tool returns, with an error text
 # telling the model it cannot read images. A text-only deployment rejects requests that carry an image.
 IMAGE_INPUT_MODEL_OPTIONS = {"modalities": {"input": ["text", "image"], "output": ["text"]}}
+# OpenCode 1.17.11 (packages/opencode/src/image/image.ts) shrinks and re-encodes any image over 2000 px on a side
+# or 5 MiB of base64, both for prompt images and for images its read tool returns. Raised to the largest value its
+# PositiveInt config schema accepts, the limits never apply, so the model receives the image as the environment sent
+# it, as on a direct image_url input. `auto_resize: false` is not the setting for this: it fails the turn instead.
+# opencode_sandboxed_agent sets the same limits (OPENCODE_IMAGE_LIMITS_UNRESTRICTED).
+UNRESTRICTED_IMAGE_ATTACHMENT = {
+    "image": {"max_width": 2**31 - 1, "max_height": 2**31 - 1, "max_base64_bytes": 2**31 - 1}
+}
 
 
 def apply_observability_patch(config: dict, *, plugin_path: Path = ASSISTANT_MESSAGE_PLUGIN_SOURCE) -> None:

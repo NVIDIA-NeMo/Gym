@@ -43,6 +43,7 @@ from nemo_gym.data.tasks.harbor import load_task, materialize_task
 from nemo_gym.sandbox import SandboxHandle
 from nemo_gym.trajectory import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
 from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgentConfig, _sandbox_prepare_command
+from responses_api_agents.opencode_agent.runtime import UNRESTRICTED_IMAGE_ATTACHMENT
 
 
 def sandbox_oom(reason: str, *, sandbox_id: str = "task-5") -> NgFailureEvent:
@@ -418,8 +419,10 @@ def test_session_attaches_prompt_images_and_declares_image_input(setup, monkeypa
         ]
         assert [sandbox.files[path] for path in paths] == [PNG, JPEG]
         assert not [path for path in sandbox.files if path.endswith(".partial")]
-        model = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])["provider"]["nemo_gym"]["models"]["dummy_model"]
+        config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
+        model = config["provider"]["nemo_gym"]["models"]["dummy_model"]
         assert model["modalities"] == {"input": ["text", "image"], "output": ["text"]}
+        assert config["attachment"] == UNRESTRICTED_IMAGE_ATTACHMENT
         closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
         assert closed.status_code == 200, closed.text
 
@@ -433,9 +436,26 @@ def test_text_prompt_declares_image_input_only_when_configured(setup, image_inpu
         assert created.status_code == 200, created.text
         result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
         assert result.status_code == 200, result.text
-        model = json.loads(sandbox.params()["env"]["OPENCODE_CONFIG_CONTENT"])["provider"]["nemo_gym"]["models"]
+        config = json.loads(sandbox.params()["env"]["OPENCODE_CONFIG_CONTENT"])
         # Without the declaration OpenCode replaces tool images with an error text, which a text-only model accepts.
-        assert ("modalities" in model["dummy_model"]) is image_input
+        assert ("modalities" in config["provider"]["nemo_gym"]["models"]["dummy_model"]) is image_input
+        # Image limits are lifted only with the declaration, so the model gets each image's own bytes.
+        assert config.get("attachment") == (UNRESTRICTED_IMAGE_ATTACHMENT if image_input else None)
+        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+
+
+def test_session_attachment_config_restores_image_limits(setup):
+    agent, sandbox = setup
+    agent.config.image_input = True
+    agent.config.opencode_config = {"attachment": {"image": {"max_width": 4096}}}
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == 200, result.text
+        config = json.loads(sandbox.params()["env"]["OPENCODE_CONFIG_CONTENT"])
+        # The session's setting replaces the lifted limits; OpenCode applies its defaults to the rest.
+        assert config["attachment"] == {"image": {"max_width": 4096}}
         client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
 
 

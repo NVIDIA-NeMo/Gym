@@ -128,6 +128,7 @@ from responses_api_agents.opencode_agent.runtime import (
     RUNTIME_INSTALLER_SOURCE,
     TASK_ENVIRONMENT_PLUGIN_FILE,
     TASK_ENVIRONMENT_PLUGIN_SOURCE,
+    UNRESTRICTED_IMAGE_ATTACHMENT,
     apply_observability_patch,
     command_failure_reason,
 )
@@ -951,10 +952,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise HTTPException(
                 422, "OpenCode sandbox max_output_tokens must be positive and not exceed context_window"
             )
-        unsupported = self.config.opencode_config.keys() - {"permission", "tools"}
+        unsupported = self.config.opencode_config.keys() - {"permission", "tools", "attachment"}
         if unsupported:
             raise HTTPException(
-                422, f"OpenCode sandbox config supports permission/tools only; unsupported: {sorted(unsupported)}"
+                422,
+                f"OpenCode sandbox config supports permission/tools/attachment only; unsupported: {sorted(unsupported)}",
             )
         if self.config.env or self.config.extra_args or self.config.command != "opencode":
             raise HTTPException(422, "env, extra_args and command overrides are supported only by local OpenCode")
@@ -1631,6 +1633,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             "enabled_providers": ["nemo_gym"],
             "autoupdate": False,
             "share": "disabled",
+            # A session's opencode_config "attachment" replaces this, so a run on an endpoint with image limits can
+            # restore one.
+            **({"attachment": copy.deepcopy(UNRESTRICTED_IMAGE_ATTACHMENT)} if state.declares_image_input else {}),
             "provider": {
                 "nemo_gym": {
                     "npm": "@ai-sdk/openai-compatible",
