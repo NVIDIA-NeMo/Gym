@@ -342,7 +342,7 @@ def test_image_and_reasoning_recency_compose_in_one_decision():
     assert _image_urls(view.items) == ["A", "D"]
     assert _reasoning_texts(view.items) == ["reasoning 1", "reasoning 3"]
     assert plan.decision.policy_name == "recency"
-    assert plan.decision.policy_version == "2"
+    assert plan.decision.policy_version == "3"
 
 
 def test_reasoning_items_from_one_turn_form_one_atomic_block():

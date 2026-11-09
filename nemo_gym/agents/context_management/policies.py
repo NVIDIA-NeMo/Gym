@@ -108,7 +108,7 @@ class IdentityHistoryPolicy:
 
 class RecencyHistoryPolicy:
     name = "recency"
-    version = "2"
+    version = "3"
 
     def __init__(self, config: RecencyHistoryPolicyConfig):
         self.config = config
@@ -200,23 +200,20 @@ class RecencyHistoryPolicy:
         artifacts: list[OmissionArtifact] = []
         artifact_by_source_part: dict[str, OmissionArtifact] = {}
         marker = self.config.images.omission_marker if self.config.images.enabled else None
-        omitted_group_runs: list[list[tuple[str, list[tuple[SemanticEvent, SemanticPart]]]]] = []
-        current_run: list[tuple[str, list[tuple[SemanticEvent, SemanticPart]]]] = []
-        for group in image_groups:
-            group_id, _ = group
-            if group_id not in retained_image_group_ids:
-                current_run.append(group)
-            elif current_run:
-                omitted_group_runs.append(current_run)
-                current_run = []
-        if current_run:
-            omitted_group_runs.append(current_run)
-
         if marker:
-            for run in omitted_group_runs:
-                source_parts = tuple(part.part_id for _, members in run for _, part in members)
+            # An image-only observation is also a turn boundary. Sharing one
+            # marker across observations erases later user messages and lets
+            # the Responses converter merge actions from different turns.
+            for event in history.events:
+                source_parts = tuple(
+                    part.part_id
+                    for part in event.parts
+                    if part.kind == "image" and part.observation_group_id not in retained_image_group_ids
+                )
+                if not source_parts:
+                    continue
                 artifact = OmissionArtifact(
-                    artifact_id=(f"omission-{self._digest[:12]}-{source_parts[0]}"),
+                    artifact_id=(f"omission-v{self.version}-{self._digest[:12]}-{source_parts[0]}"),
                     source_first_part_id=source_parts[0],
                     source_last_part_id=source_parts[-1],
                     source_part_count=len(source_parts),
