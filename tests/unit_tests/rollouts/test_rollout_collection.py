@@ -14136,6 +14136,8 @@ class TestCompletionCountsFinalZeros:
             pytest.param({**_FINAL_ZERO, NG_TERMINAL_KEY: False}, [], "2/3", id="marked-not-final-stays-missing"),
         ],
     )
+    @pytest.mark.parametrize("retain_results_in_memory", [False, True])
+    @pytest.mark.parametrize("disable_aggregation", [False, True])
     async def test_require_complete_with_a_third_rollout_that_failed(
         self,
         tmp_path: Path,
@@ -14144,6 +14146,8 @@ class TestCompletionCountsFinalZeros:
         third,
         count_classes,
         outcome,
+        retain_results_in_memory: bool,
+        disable_aggregation: bool,
     ) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"
         input_jsonl_fpath.write_text(
@@ -14154,9 +14158,11 @@ class TestCompletionCountsFinalZeros:
             )
         )
         aggregated: dict = {}
+        dispatched = []
 
         async def post(server_name: str, url_path: str, json: dict, **kwargs):
             if url_path == "/run":
+                dispatched.append(json["x"])
                 return FakeResponse(200, dict(third) if json["x"] == 2 else {"reward": 1.0, "response": {"usage": {}}})
             aggregated["rows"] = [dict(r) for r in json.verify_responses]
             return FakeResponse(200, compute_aggregate_metrics(aggregated["rows"]).model_dump())
@@ -14168,6 +14174,8 @@ class TestCompletionCountsFinalZeros:
             disable_health_check=True,
             require_complete=True,
             count_failure_classes_as_zero=count_classes,
+            retain_results_in_memory=retain_results_in_memory,
+            disable_aggregation=disable_aggregation,
         )
 
         if outcome is None:
@@ -14176,16 +14184,17 @@ class TestCompletionCountsFinalZeros:
             with pytest.raises(RuntimeError, match=f"EVAL FAILED: {outcome} samples completed"):
                 await RolloutCollectionHelper().run_from_config(config)
 
-        if outcome is None:
+        if outcome is None and not disable_aggregation:
             # The final zero and the metrics-only count enter the score, a judge failure does not.
             counted_zero = (
                 third.get(NG_FAILURE_COUNTS_AS_ZERO_KEY) is True or third[NG_FAILURE_CLASS_KEY] in count_classes
             )
             assert len(aggregated["rows"]) == (3 if counted_zero else 2)
         else:
-            # A rejected strict run publishes no score.
+            # A rejected strict run or disabled aggregation publishes no score.
             assert "rows" not in aggregated
             assert not (tmp_path / "output_aggregate_metrics.json").exists()
+
         [failure] = [
             orjson.loads(line)
             for line in _failures_path_for(Path(config.output_jsonl_fpath)).read_bytes().splitlines()
@@ -14197,6 +14206,15 @@ class TestCompletionCountsFinalZeros:
         assert matches_failure_class(failure, {third[NG_FAILURE_CLASS_KEY]}) and failure[TASK_INDEX_KEY_NAME] == 2
         assert failure.get(NG_FAILURE_COUNTS_AS_ZERO_KEY) is third.get(NG_FAILURE_COUNTS_AS_ZERO_KEY)
         assert bool(failure.get(NG_TERMINAL_KEY)) is bool(third.get(NG_TERMINAL_KEY))
+
+        if outcome is None:
+            # Final zeros complete fresh and resumed collection without spending another attempt.
+            persisted_path = Path(config.output_jsonl_fpath)
+            failures_path = _failures_path_for(persisted_path)
+            before = (persisted_path.read_bytes(), failures_path.read_bytes())
+            await RolloutCollectionHelper().run_from_config(config.model_copy(update={"resume_from_cache": True}))
+            assert sorted(dispatched) == [0, 1, 2]
+            assert (persisted_path.read_bytes(), failures_path.read_bytes()) == before
 
 
 class TestUnroutedRunFailure:

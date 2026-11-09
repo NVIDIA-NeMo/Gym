@@ -30,7 +30,7 @@ import shutil
 import sys
 from functools import partial
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import ClassVar, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 from scicode_integration.runner import (
@@ -48,6 +48,7 @@ from nemo_gym.server_runtime import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 
@@ -64,6 +65,9 @@ class ScicodeGradingInterpreter(BaseModel):
 
 
 class ScicodeResourcesServerConfig(BaseResourcesServerConfig):
+    # Grading is a pure function of the request, so the same saved answer can be graded again.
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
+
     num_processes: int = Field(default=20, ge=1)
     # Optional remote execution; interpreter and test-data paths then refer to the image.
     sandbox: Optional[ScicodeSandboxConfig] = None

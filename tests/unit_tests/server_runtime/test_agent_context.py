@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
-from nemo_gym.server_runtime.agent_context import AGENT_CONTEXT_MAX_VALUES_BYTES, AgentContext, AgentContextArtifact
+from nemo_gym.server_runtime._checkpoint.environment import task_digest
+from nemo_gym.server_runtime.agent_context import AGENT_CONTEXT_MAX_BYTES, AgentContext, AgentContextArtifact
 from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnTaskInput
 
 
@@ -31,17 +32,45 @@ def test_a_key_is_either_a_value_or_an_artifact() -> None:
 
 
 def test_inline_values_stay_small_and_large_content_goes_by_reference() -> None:
-    AgentContext(values={"prompt": "x" * (AGENT_CONTEXT_MAX_VALUES_BYTES - 20)})
+    # The complete context JSON contributes 39 bytes around this string.
+    AgentContext(values={"prompt": "x" * (AGENT_CONTEXT_MAX_BYTES - 39)})
     with pytest.raises(ValidationError, match="pass large content as an artifact"):
-        AgentContext(values={"image": "x" * AGENT_CONTEXT_MAX_VALUES_BYTES})
+        AgentContext(values={"prompt": "x" * (AGENT_CONTEXT_MAX_BYTES - 38)})
 
 
-def test_the_values_limit_counts_utf8_bytes_not_escaped_json() -> None:
-    # '{"prompt":"..."}' is 13 bytes around the text, and each CJK character is 3 bytes as UTF-8 (6 when escaped).
-    fits = (AGENT_CONTEXT_MAX_VALUES_BYTES - 13) // 3
+def test_the_context_limit_counts_utf8_bytes_not_escaped_json() -> None:
+    # The complete context adds 39 bytes, and each CJK character is 3 bytes as UTF-8 (6 when escaped).
+    fits = (AGENT_CONTEXT_MAX_BYTES - 39) // 3
     AgentContext(values={"prompt": "\u4e2d" * fits})
-    with pytest.raises(ValidationError, match=f"take {13 + 3 * (fits + 1)} bytes as UTF-8 JSON"):
+    with pytest.raises(ValidationError, match=f"takes {39 + 3 * (fits + 1)} bytes as UTF-8 JSON"):
         AgentContext(values={"prompt": "\u4e2d" * (fits + 1)})
+
+
+def test_the_context_limit_includes_artifact_references() -> None:
+    AgentContext(artifacts={"media": {"path": "x" * (AGENT_CONTEXT_MAX_BYTES - 47)}})
+    with pytest.raises(ValidationError, match="over the 65536-byte limit"):
+        AgentContext(artifacts={"media": {"path": "x" * (AGENT_CONTEXT_MAX_BYTES - 46)}})
+    with pytest.raises(ValidationError, match="over the 65536-byte limit"):
+        AgentContext(artifacts={str(index): {"path": "x" * 1000} for index in range(1000)})
+
+
+def test_the_context_limit_counts_values_and_artifacts_together() -> None:
+    with pytest.raises(ValidationError, match="over the 65536-byte limit"):
+        AgentContext(values={"prompt": "x" * 32768}, artifacts={"media": {"path": "x" * 32768}})
+
+
+def test_an_agents_parsed_artifact_cannot_rewrite_the_stored_context() -> None:
+    class MediaContext(BaseModel):
+        media: AgentContextArtifact
+
+    context = AgentContext(artifacts={"media": {"path": "figs/1"}})
+    parsed = MediaContext.model_validate(context.fields())
+
+    with pytest.raises(ValidationError, match="frozen"):
+        parsed.media.path = "figs/2"
+
+    assert context.artifacts["media"].path == "figs/1"
+    assert parsed.media.path == "figs/1"
 
 
 def test_fields_put_values_and_artifacts_in_one_namespace() -> None:
@@ -71,6 +100,30 @@ def test_a_row_without_agent_context_dumps_as_before() -> None:
 
     assert task_input.agent_context is None
     assert "agent_context" not in task_input.model_dump(mode="json")
+
+
+@pytest.mark.parametrize(
+    ("row", "digest"),
+    [
+        (
+            {"responses_create_params": {"input": "Hi"}, "verifier_metadata": {"answer": "a"}, "id": "1"},
+            "071fa6aff13c98228af9549d8ca4f1e8f803be48875cd3e578f5b8b811ec9291",
+        ),
+        (
+            {"responses_create_params": {"input": "Hi"}, "task_data": {"id": "1", "answer": "a"}},
+            "7a1bc8b4b123e2a362911dfed752d30838e14515467c5bbb917c423775523de2",
+        ),
+    ],
+)
+@pytest.mark.parametrize("agent_context", ["absent", None, {}, {"values": {}, "artifacts": {}}])
+def test_a_task_without_agent_context_keeps_its_checkpoint_digest(
+    row: dict, digest: str, agent_context: str | dict | None
+) -> None:
+    """Pin the digests from before agent_context so a resumed checkpoint still matches."""
+    if agent_context != "absent":
+        row = {**row, "agent_context": agent_context}
+
+    assert task_digest(SingleAgentTurnTaskInput.model_validate(row).model_dump(mode="json")) == digest
 
 
 @pytest.mark.parametrize("agent_context", [{}, {"values": {}, "artifacts": {}}, None])

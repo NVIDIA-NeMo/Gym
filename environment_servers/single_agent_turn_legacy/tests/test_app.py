@@ -198,6 +198,8 @@ def test_legacy_adapter_preserves_task_identity_and_data():
             cleanup_timeout_seconds=10,
             resources_server={"type": "resources_servers", "name": "resources"},
             agent_server={"type": "responses_api_agents", "name": "agent"},
+            # Explicit, like resources_server, so the server never reads the agent's config from this bare client.
+            tool_servers=[],
         ),
         server_client=MagicMock(spec=ServerClient),
     )
@@ -239,6 +241,28 @@ def test_a_malformed_agent_context_gets_the_typed_runs_final_422() -> None:
     path_loc = ["task", "task_input", "agent_context", "artifacts", "media", "path"]
     assert typed.json()["detail"][0]["loc"] == ["body", *path_loc]
     assert flat.json()["detail"][0]["loc"] == episode.json()["detail"][0]["loc"] == path_loc
+    assert client.calls == []
+
+
+@pytest.mark.parametrize(
+    "invalid_fields, detail",
+    [
+        ({"task_source": ""}, "task_source must be a non-empty string"),
+        ({"task_source": "unbound"}, "names none of this Environment Server's instances"),
+        ({"agent_ref": {"name": "other"}}, "does not match configured agent server"),
+        ({"_ng_attempt_index": -1}, "Invalid episode attempt"),
+        ({"_ng_attempt_index": True}, "Invalid episode attempt"),
+    ],
+)
+def test_invalid_flat_row_identity_returns_terminal_422(invalid_fields: dict, detail: str) -> None:
+    environment_server, client = _environment_server()
+    adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
+    row = {"task_id": "task", "_ng_rollout_id": "rollout", "responses_create_params": {"input": "task"}}
+
+    response = TestClient(adapter.setup_webserver()).post("/run", json={**row, **invalid_fields})
+
+    assert response.status_code == 422
+    assert detail in response.json()["detail"]
     assert client.calls == []
 
 

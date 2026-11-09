@@ -12,18 +12,18 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, m
 # Reserved dataset-row key, a sibling of verifier_metadata: what the agent receives, as verifier_metadata is what
 # the verifier receives.
 AGENT_CONTEXT_KEY_NAME = "agent_context"
-# Inline values stay small: the seed is kept for the whole session and compared on every retry.
-AGENT_CONTEXT_MAX_VALUES_BYTES = 64 * 1024
+# The whole context stays small: the seed is kept for the whole session and compared on every retry.
+AGENT_CONTEXT_MAX_BYTES = 64 * 1024
 
 
 class AgentContextArtifact(BaseModel):
     """A file or directory the agent reads, named by a path relative to a root the agent configures.
 
     The content never travels in the seed. The agent resolves the path when it seeds the session, reads or stages the
-    content when its turn runs, and releases anything it staged when the session closes.
+    content when its turn runs, and releases anything it staged when the session closes or retires for a checkpoint.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     path: str = Field(min_length=1)
 
@@ -54,10 +54,10 @@ class AgentContext(BaseModel):
     def check_keys_and_size(self) -> "AgentContext":
         if shared := sorted(self.values.keys() & self.artifacts.keys()):
             raise ValueError(f"agent_context keys must appear in values or artifacts, not both: {shared}")
-        size = len(json.dumps(self.values, separators=(",", ":"), ensure_ascii=False).encode())
-        if size > AGENT_CONTEXT_MAX_VALUES_BYTES:
+        size = len(json.dumps(self.model_dump(mode="json"), separators=(",", ":"), ensure_ascii=False).encode())
+        if size > AGENT_CONTEXT_MAX_BYTES:
             raise ValueError(
-                f"agent_context values take {size} bytes as UTF-8 JSON, over the {AGENT_CONTEXT_MAX_VALUES_BYTES}-byte "
+                f"agent_context takes {size} bytes as UTF-8 JSON, over the {AGENT_CONTEXT_MAX_BYTES}-byte "
                 "limit; pass large content as an artifact"
             )
         return self

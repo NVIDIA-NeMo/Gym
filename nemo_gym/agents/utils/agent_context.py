@@ -30,10 +30,14 @@ def resolve_agent_context_artifact(
     agent that reads them resolves each one and checks that it stays under the returned directory.
     """
     try:
-        base = root.resolve()
-        path = (base / artifact.path).resolve()
+        base = root.resolve(strict=True)
+        path = (base / artifact.path).resolve(strict=True)
         inside = path.is_relative_to(base)
         is_kind = inside and (path.is_file() if kind == "file" else path.is_dir())
+    except (FileNotFoundError, NotADirectoryError):
+        raise AgentSeedRejectedError(
+            f"agent_context artifact {artifact.path!r} is not a {kind} under {root}"
+        ) from None
     except ValueError as error:
         # An embedded NUL byte, in an artifact built without validation.
         raise AgentSeedRejectedError(f"agent_context artifact {artifact.path!r} cannot be resolved: {error}") from None
