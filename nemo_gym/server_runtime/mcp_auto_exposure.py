@@ -127,7 +127,7 @@ _MCP_TOOL_NAME_RE = re.compile(r"[A-Za-z0-9_-]+")
 # Path-template params from the public route.path string ("/{tool_name}", "/items/{id:int}").
 _PATH_PARAM_RE = re.compile(r"{([^}:]+)(?::[^}]*)?}")
 
-# Set to True on Gym middleware, a class or a function, that direct MCP dispatch may skip.
+# Set to True on a Gym middleware class that direct MCP dispatch may skip.
 # Matching by attribute rather than by module name keeps the check right when the middleware moves to another module.
 # A server's own middleware must not set it.
 SKIPPED_ON_DIRECT_MCP_DISPATCH = "skipped_on_direct_mcp_dispatch"
@@ -306,7 +306,7 @@ async def call_direct(
 ) -> Any:
     """Invoke the handler resolved at startup once and return its JSON-able payload.
 
-    Replicates what skipping Gym's own stack would otherwise lose: SessionMiddleware + add_session_id
+    Replicates what skipping Gym's own stack would otherwise lose: SessionMiddleware + SessionIDMiddleware
     become ``scope["session"] = {SESSION_ID_KEY: sid}`` (handlers only read request.session); the
     exception middleware's status-carrying text is reproduced by pre-formatting HTTPException /
     ValidationError / ClientResponseError into DirectDispatchError.
@@ -461,12 +461,9 @@ def harvest_tools(app: FastAPI, server: Any) -> dict[str, MCPTool]:
             continue  # Gym's SessionMiddleware — replaced by a materialized session on direct dispatch
         # Only the class's own marker counts: a subclass that overrides __call__ adds behaviour dispatch would skip.
         if vars(cls).get(SKIPPED_ON_DIRECT_MCP_DISPATCH, False):
-            continue  # Gym's rollout prefix and client disconnect middleware; see their definitions.
+            continue  # Gym's session ID, exception, rollout prefix and client disconnect middleware.
         if getattr(cls, "applies_to_mcp_requests", False):
             continue  # It does its job on the /mcp request as a whole (for example, checkpoint admission).
-        dispatch = m.kwargs.get("dispatch")
-        if dispatch is not None and getattr(dispatch, SKIPPED_ON_DIRECT_MCP_DISPATCH, False):
-            continue  # Gym's add_session_id / exception middleware
         custom_middleware.append(f"{cls.__module__}.{cls.__name__}")
     if custom_middleware:
         raise ValueError(

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Shared sandbox failure-event construction from facts classified by each provider."""
 
-from nemo_gym.core.failure_records import FailureBoundary, SandboxFailureDetails
+from nemo_gym.core.failure_records import FailureBoundary, SandboxFailureDetails, SdkErrorDetails
 from nemo_gym.core.typed_exceptions import NgFailureEvent, sdk_error_details
 from nemo_gym.utils.exception_inspection import bounded_text
 
@@ -19,6 +19,7 @@ def sandbox_failure(
     provider_status_reason: str | None = None,
     exit_code: int | None = None,
     http_status: int | None = None,
+    foreign_error: SdkErrorDetails | None = None,
 ) -> NgFailureEvent:
     """Build a sandbox event from explicit facts; callers raise it ``from cause``.
 
@@ -27,8 +28,8 @@ def sandbox_failure(
     it (for example, ``opensandbox_failure``). HTTP status must describe this
     operation, not a child failure; causes retain their own evidence.
     """
-    foreign_error = None
-    if cause is not None and not isinstance(cause, NgFailureEvent):
+    # A caller-selected foreign_error replaces the default, which stores str(cause).
+    if foreign_error is None and cause is not None and not isinstance(cause, NgFailureEvent):
         try:
             message = str(cause)
         except Exception:
