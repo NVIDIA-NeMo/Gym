@@ -14,14 +14,22 @@
 # limitations under the License.
 
 import asyncio
+import importlib.util
 import json
+import os
+import re
+import shutil
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
+import anyio
 import pytest
+from fastapi import HTTPException
 from omegaconf import OmegaConf
 
+from nemo_gym.agents import DEFAULT_CLEANUP_TIMEOUT, SUPERVISOR_SCRIPT
 from nemo_gym.client import ServerClient
 from nemo_gym.config import GlobalConfigDictParser, ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
@@ -31,6 +39,7 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
+    NgFailureEvent,
 )
 from nemo_gym.models.token_capture import ParentResolutionStatus, TokenEntry, resolve_terminal, stamp_lineage
 from nemo_gym.models.token_capture.consumer import _assemble
@@ -46,13 +55,15 @@ from responses_api_agents.opencode_agent.app import (
     OpenCodeAgent,
     OpenCodeAgentConfig,
     OpenCodeAgentRunRequest,
+    _extract_images,
     _extract_instruction,
     _parse_opencode_session,
+    _tmp_roots,
     parse_opencode_session,
 )
 from responses_api_agents.opencode_agent.artifacts import parse_opencode_export
 from responses_api_agents.opencode_agent.observability import split_gym_reasoning
-from responses_api_agents.opencode_agent.runtime import OBSERVABILITY_PATCH
+from responses_api_agents.opencode_agent.runtime import ASSISTANT_MESSAGE_PLUGIN_FILE, OBSERVABILITY_PATCH
 
 
 def _config(**kwargs) -> OpenCodeAgentConfig:
@@ -746,6 +757,20 @@ class TestEnv:
         assert provider["options"]["baseURL"] == "http://model/v1"
         assert provider["models"]["Qwen3.6-35B-A3B"]["limit"]["output"] == 131072
 
+    def test_model_server_provider_id(self) -> None:
+        agent = _make_agent(
+            model="nemotron_super_sft",
+            provider_id="sv35sft",
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+        )
+        with patch.object(agent, "_resolve_model_base_url", return_value="http://model/v1"):
+            config = agent._build_opencode_config()
+
+        assert agent._effective_model() == "sv35sft/nemotron_super_sft"
+        assert set(config["provider"]) == {"sv35sft"}
+        assert config["provider"]["sv35sft"]["options"]["baseURL"] == "http://model/v1"
+        assert "nemotron_super_sft" in config["provider"]["sv35sft"]["models"]
+
     def test_model_server_replayed_reasoning_is_accepted_by_gym_chat_completions(self) -> None:
         agent = _make_agent(model="m", model_server=ModelServerRef(type="responses_api_models", name="policy_model"))
         with patch.object(agent, "_resolve_model_base_url", return_value="http://model/v1"):
@@ -945,7 +970,7 @@ class TestRepoDir:
         assert output == scored
         assert usage == {"input_tokens": 1, "output_tokens": 2}
         command = create_process.await_args.args
-        assert "--title" not in command
+        assert command[command.index("--title") + 1] == "NeMo Gym"
         assert "agent_artifact_unavailable" in {gap.code for gap in observations.gaps}
         assert "turns_unavailable" in {gap.code for gap in trajectory.gaps}
         assert repo_dir.is_dir()
@@ -1436,3 +1461,861 @@ def test_session_ending_on_an_unavailable_tool_attributes_the_served_call(
     else:
         assert not verdict.attributed and "item_id_content_mismatch" in verdict.reason
         assert built[MASK_SAMPLE_KEY] is True
+
+
+PNG = b"\x89PNG\r\n\x1a\nfake"
+
+
+def _image_input() -> list:
+    return [
+        NeMoGymEasyInputMessage(
+            role="user",
+            content=[
+                {"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgpmYWtl", "detail": "auto"},
+                {"type": "input_image", "image_url": "https://example.com/not-a-data-url.png", "detail": "auto"},
+                {"type": "input_text", "text": "What is shown?"},
+            ],
+        ),
+    ]
+
+
+class TestMultimodal:
+    def test_data_url_images_extracted(self) -> None:
+        assert _extract_images(_image_input()) == [(".png", PNG)]
+        assert _extract_instruction(_image_input()) == ("What is shown?", None)
+
+    def test_vision_marks_generated_model_entry(self) -> None:
+        agent = _make_agent(model="m", vision=True, model_server=ModelServerRef(type="responses_api_models", name="p"))
+        with patch.object(OpenCodeAgent, "_resolve_model_base_url", return_value="http://model/v1"):
+            entry = agent._build_opencode_config()["provider"]["nemo"]["models"]["m"]
+        assert entry["attachment"] is True and "image" in entry["modalities"]["input"]
+
+    def test_no_vision_entry_by_default(self) -> None:
+        agent = _make_agent(model="m", model_server=ModelServerRef(type="responses_api_models", name="p"))
+        with patch.object(OpenCodeAgent, "_resolve_model_base_url", return_value="http://model/v1"):
+            entry = agent._build_opencode_config()["provider"]["nemo"]["models"]["m"]
+        assert "attachment" not in entry and "modalities" not in entry
+
+    def test_xdg_dirs_stay_in_run_dir(self, tmp_path: Path) -> None:
+        env = _make_agent()._env(str(tmp_path / ".opencode-data"))
+        for name in ("XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"):
+            assert Path(env[name]).parent == tmp_path
+
+    async def test_images_written_to_project_dir_and_attached(self, tmp_path: Path) -> None:
+        agent = _make_agent()
+        seen = {}
+
+        async def spawn(*cmd, **kwargs):
+            files = [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "-f"]
+            seen["files"] = {f: Path(f).read_bytes() for f in files}
+            seen["prompt_before_files"] = cmd.index("-f") > cmd.index("look")
+            process = MagicMock(returncode=0)
+            process.communicate = AsyncMock(return_value=(b"", b""))
+            return process
+
+        with (
+            patch.object(agent, "_workspace_root", return_value=tmp_path / "work"),
+            patch("responses_api_agents.opencode_agent.app.asyncio.create_subprocess_exec", side_effect=spawn),
+            patch("responses_api_agents.opencode_agent.app.parse_opencode_session", return_value=([], {})),
+        ):
+            (tmp_path / "work").mkdir()
+            await agent._run_opencode("look", None, collect_observations=False, images=[(".png", PNG)])
+
+        ((path, data),) = seen["files"].items()
+        assert path == str((tmp_path / "work" / "image_0.png").resolve()) and data == PNG
+        assert seen["prompt_before_files"]
+
+    async def test_concurrent_runs_in_a_shared_repo_keep_their_own_images(self, tmp_path: Path) -> None:
+        """repo_dir is shared by every run: each run's attachments get their own directory inside it."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "image_0.png").write_bytes(b"repository file")
+        agent = _make_agent(repo_dir=str(repo), workspace_root=str(tmp_path / "ws"))
+        launched, seen = [], {}
+        both_launched = asyncio.Event()
+
+        async def spawn(*cmd, **kwargs):
+            files = [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "-f"]
+            launched.append(files)
+            if len(launched) == 2:
+                both_launched.set()
+            await both_launched.wait()  # read only after both runs staged their images
+            seen[cmd[cmd.index("-f") - 1]] = {f: Path(f).read_bytes() for f in files}
+            process = MagicMock(returncode=0)
+            process.communicate = AsyncMock(return_value=(b"", b""))
+            return process
+
+        with (
+            patch("responses_api_agents.opencode_agent.app.asyncio.create_subprocess_exec", side_effect=spawn),
+            patch("responses_api_agents.opencode_agent.app.parse_opencode_session", return_value=([], {})),
+        ):
+            await asyncio.gather(
+                agent._run_opencode("a", None, collect_observations=False, images=[(".png", b"A")]),
+                agent._run_opencode("b", None, collect_observations=False, images=[(".png", b"B")]),
+            )
+        assert [list(seen[prompt].values()) for prompt in ("a", "b")] == [[b"A"], [b"B"]]
+        paths = [Path(path) for files in launched for path in files]
+        assert len(set(paths)) == 2 and all(path.parent.parent == repo.resolve() for path in paths)
+        assert (repo / "image_0.png").read_bytes() == b"repository file"
+        assert not list(repo.glob(".ng-images-*"))  # removed with the run
+
+    async def test_attach_images_off_by_default(self, tmp_path: Path) -> None:
+        agent = _make_agent()
+        body = NeMoGymResponseCreateParamsNonStreaming(input=_image_input())
+        with patch.object(
+            agent, "_run_opencode", AsyncMock(return_value=([], {}, "m", AgentObservationBundle(source="opencode")))
+        ) as run:
+            await agent._create_episode(body, collect_observations=False)
+        assert run.call_args.kwargs["images"] == []
+
+
+class TestPrivateTmp:
+    def test_tmp_roots(self) -> None:
+        assert _tmp_roots(["/tmp/gym-1/gym/a", "/tmp/gym-1/b", "/usr/bin/x", None, "/tmp/uv/py"]) == [
+            "/tmp/gym-1",
+            "/tmp/uv",
+        ]
+
+    async def test_command_wrapped_in_namespace(self, tmp_path: Path) -> None:
+        agent = _make_agent(private_tmp=True)
+        seen = {}
+
+        async def spawn(*cmd, **kwargs):
+            seen["cmd"] = cmd
+            process = MagicMock(returncode=0)
+            process.communicate = AsyncMock(return_value=(b"", b""))
+            return process
+
+        with (
+            patch.object(agent, "_workspace_root", return_value=tmp_path / "work"),
+            patch("responses_api_agents.opencode_agent.app.asyncio.create_subprocess_exec", side_effect=spawn),
+            patch("responses_api_agents.opencode_agent.app.parse_opencode_session", return_value=([], {})),
+        ):
+            (tmp_path / "work").mkdir()
+            await agent._run_opencode("look", None, collect_observations=False)
+
+        cmd = seen["cmd"]
+        assert cmd[:4] == ("unshare", "--user", "--map-current-user", "--mount")
+        assert cmd[8] == str((tmp_path / "work").resolve())
+        assert cmd[10:12] == ("opencode", "run") and cmd[-1] == "look"
+
+
+class TestProcessGroupCleanup:
+    def test_kills_children_left_running(self, tmp_path: Path) -> None:
+        import asyncio
+        import os
+        import time
+
+        from responses_api_agents.opencode_agent.app import _kill_process_group
+
+        pidfile = tmp_path / "child.pid"
+
+        async def run() -> int:
+            proc = await asyncio.create_subprocess_exec(
+                "sh", "-c", f"sleep 1000 & echo $! > {pidfile}; exit 0", start_new_session=True
+            )
+            await proc.wait()
+            _kill_process_group(proc.pid)
+            return int(pidfile.read_text())
+
+        child = asyncio.run(run())
+        for _ in range(50):
+            try:
+                os.kill(child, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+        else:
+            raise AssertionError("background child survived the run")
+
+    def test_never_kills_own_group(self) -> None:
+        import os
+
+        from responses_api_agents.opencode_agent.app import _kill_process_group
+
+        _kill_process_group(0)
+        _kill_process_group(os.getpgrp())
+
+
+# session_nodes runs sessions as Ray tasks; Ray is the optional `ray` extra, absent from this agent's venv.
+needs_ray = pytest.mark.skipif(importlib.util.find_spec("ray") is None, reason="needs the ray extra")
+
+
+# The node runs sessions under Gym's process supervisor (bash and a readable /proc).
+needs_proc = pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="the process supervisor needs /proc")
+
+
+@needs_ray
+@needs_proc
+class TestRemoteSessionTask:
+    @staticmethod
+    def _run_on_node(cmd: list[str], work: Path, timeout: float, inputs: dict | None = None):
+        from responses_api_agents.opencode_agent.app import _remote_session_task
+
+        run_session = _remote_session_task()._function
+        env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "XDG_DATA_HOME": str(work / ".opencode-data")}
+        receipt, stderr, outputs = run_session(
+            cmd, str(work), str(work), env, inputs or {}, timeout, SUPERVISOR_SCRIPT.read_text(), 1.0
+        )
+        return (json.loads(receipt) if receipt is not None else None), stderr, outputs
+
+    def test_runs_session_and_returns_database(self, tmp_path: Path) -> None:
+        work = tmp_path / "opencode_x"
+        data_home = work / ".opencode-data"
+        inputs = {str(work / "image_0.png"): b"png", str(work / "opencode.json"): b"{}"}
+        cmd = [
+            "sh",
+            "-c",
+            'test -f image_0.png && mkdir -p "$XDG_DATA_HOME/opencode" && echo db > "$XDG_DATA_HOME/opencode/opencode.db"',
+        ]
+        receipt, stderr, outputs = self._run_on_node(cmd, work, 30.0, inputs)
+        assert receipt["cleanup_confirmed"] and (receipt["return_code"], receipt["timed_out"]) == (0, False), stderr
+        assert outputs == {str(data_home / "opencode" / "opencode.db"): b"db\n"}
+        assert not work.exists()
+
+    def test_timeout_kills_session(self, tmp_path: Path) -> None:
+        receipt, _, outputs = self._run_on_node(["sh", "-c", "sleep 30"], tmp_path / "opencode_y", 1.0)
+        assert receipt["cleanup_confirmed"] and receipt["timed_out"] and outputs == {}
+
+    @pytest.mark.skipif(shutil.which("setsid") is None, reason="needs setsid")
+    def test_timeout_stops_a_child_in_another_process_group_within_the_cleanup_bound(self, tmp_path: Path) -> None:
+        """A child that left OpenCode's process group (and inherited its stderr) cannot hold the task open."""
+        pidfile = tmp_path / "child.pid"
+        started = time.monotonic()
+        receipt, _, _ = self._run_on_node(
+            ["sh", "-c", f"setsid sleep 1000 & echo $! > {pidfile}; wait"], tmp_path / "opencode_z", 1.0
+        )
+        assert time.monotonic() - started < 1.0 + 3 * 1.0 + 30  # the task plus its cleanup bound
+        assert receipt["cleanup_confirmed"] and receipt["timed_out"]
+        child = int(pidfile.read_text())
+        for _ in range(50):
+            try:
+                os.kill(child, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+        else:
+            raise AssertionError("the child in its own session survived the timed-out run")
+
+
+@needs_ray
+class TestRemoteSessionReceipt:
+    """The agent side of a remote session: only a confirmed cleanup receipt reaches grading."""
+
+    CONFIRMED = '{"cleanup_confirmed": true, "return_code": 0, "error": null, "timed_out": false}'
+
+    def _run(self, tmp_path: Path, receipt: str | None):
+        agent = _make_agent(session_nodes=2)
+        work = tmp_path / "opencode_x"
+        data_home = work / ".opencode-data"
+        data_home.mkdir(parents=True)
+        db = str(data_home / "opencode" / "opencode.db")
+        calls = []
+
+        async def remote(*args):
+            calls.append(args)
+            return receipt, b"tail", {db: b"db"}
+
+        task = MagicMock()
+        task.options.return_value.remote = remote
+        with (
+            patch("responses_api_agents.opencode_agent.app._remote_session_task", return_value=task),
+            patch.object(OpenCodeAgent, "_join_ray_cluster") as join,
+            # NodeAffinitySchedulingStrategy accepts only a well-formed, non-nil hex node ID.
+            patch.object(OpenCodeAgent, "_session_node_ids", return_value=["a1" * 28]),
+        ):
+            result = asyncio.run(
+                agent._run_remote_session(["opencode"], work, work, {"XDG_DATA_HOME": str(data_home)}, 5.0)
+            )
+        return result, calls, join, Path(db)
+
+    def test_confirmed_run_returns_the_harness_status(self, tmp_path: Path) -> None:
+        (rc, stderr, timed_out), calls, join, db = self._run(tmp_path, self.CONFIRMED)
+        assert (rc, stderr, timed_out) == (0, b"tail", False) and db.read_bytes() == b"db"
+        assert calls[0][6] == SUPERVISOR_SCRIPT.read_text() and calls[0][7] == DEFAULT_CLEANUP_TIMEOUT
+        join.assert_called_once()
+
+    def test_confirmed_timeout_keeps_the_timeout_policy(self, tmp_path: Path) -> None:
+        receipt = '{"cleanup_confirmed": true, "return_code": 143, "error": null, "timed_out": true}'
+        (rc, _, timed_out), _, _, _ = self._run(tmp_path, receipt)
+        assert (rc, timed_out) == (143, True)
+
+    @pytest.mark.parametrize(
+        "receipt",
+        [
+            '{"cleanup_confirmed": false, "return_code": null, "error": "a process it started still runs", '
+            '"timed_out": true}',
+            None,
+            "{not json",
+        ],
+    )
+    def test_unconfirmed_termination_fails_the_episode(self, tmp_path: Path, receipt: str | None) -> None:
+        with pytest.raises(NgFailureEvent) as raised:
+            self._run(tmp_path, receipt)
+        assert raised.value.failure_kind == "harness_termination_unconfirmed"
+        assert not (tmp_path / "opencode_x" / ".opencode-data" / "opencode" / "opencode.db").exists()
+
+
+@needs_ray
+class TestJoinRayCluster:
+    def _join(self, address: str | None, initialized: bool = False):
+        agent = _make_agent(session_nodes=2)
+        config = {"ray_head_node_address": address} if address else {}
+        with (
+            patch("ray.is_initialized", return_value=initialized),
+            patch("ray.init") as init,
+            patch("responses_api_agents.opencode_agent.app.get_global_config_dict", return_value=config),
+        ):
+            agent._join_ray_cluster()
+        return init
+
+    def test_joins_the_configured_cluster(self) -> None:
+        self._join("10.0.0.1:6379").assert_called_once_with(address="10.0.0.1:6379", ignore_reinit_error=True)
+
+    def test_reuses_a_connected_runtime(self) -> None:
+        self._join("10.0.0.1:6379", initialized=True).assert_not_called()
+
+    def test_without_a_cluster_address_fails_instead_of_starting_a_private_cluster(self) -> None:
+        with pytest.raises(RuntimeError, match="ray_head_node_address"):
+            self._join(None)
+
+
+@needs_ray
+class TestSessionNodes:
+    NODES = [
+        {"NodeID": "own", "Alive": True, "NodeManagerAddress": "10.0.0.5"},
+        {"NodeID": "train", "Alive": True, "NodeManagerAddress": "10.0.0.1"},
+        {"NodeID": "a", "Alive": True, "NodeManagerAddress": "10.0.0.2"},
+        {"NodeID": "dead", "Alive": False, "NodeManagerAddress": "10.0.0.3"},
+        {"NodeID": "b", "Alive": True, "NodeManagerAddress": "10.0.0.4"},
+    ]
+
+    def _nodes(self, excluded: set[str], **kwargs) -> list[str]:
+        agent = _make_agent(**kwargs)
+        agent._session_nodes = None
+        context = MagicMock()
+        context.get_node_id.return_value = "own"
+        with (
+            patch("ray.get_runtime_context", return_value=context),
+            patch("ray.nodes", return_value=self.NODES),
+            patch.object(OpenCodeAgent, "_excluded_session_node_ids", return_value=excluded),
+        ):
+            return agent._session_node_ids()
+
+    def test_own_node_first_then_by_ip(self) -> None:
+        assert self._nodes(set(), session_nodes=3) == ["own", "train", "a"]
+
+    def test_skips_excluded_nodes(self) -> None:
+        assert self._nodes({"train"}, session_nodes=10) == ["own", "a", "b"]
+
+    def test_skips_excluded_own_node(self) -> None:
+        assert self._nodes({"own", "train"}, session_nodes=10) == ["a", "b"]
+
+    def test_lookup_uses_alive_actors_of_listed_classes(self) -> None:
+        agent = _make_agent(session_exclude_actor_classes=["MegatronPolicyWorker"])
+        actors = [MagicMock(node_id="train"), MagicMock(node_id="train"), MagicMock(node_id=None)]
+        with patch("ray.util.state.list_actors", return_value=actors) as list_actors:
+            assert agent._excluded_session_node_ids() == {"train"}
+        assert list_actors.call_args.kwargs["filters"] == [
+            ("class_name", "=", "MegatronPolicyWorker"),
+            ("state", "=", "ALIVE"),
+        ]
+        assert list_actors.call_args.kwargs["limit"] <= 10_000  # Ray's state API maximum
+
+    def test_no_classes_no_lookup(self) -> None:
+        with patch("ray.util.state.list_actors") as list_actors:
+            assert _make_agent()._excluded_session_node_ids() == set()
+        list_actors.assert_not_called()
+
+
+class _FakeSandboxProvider:
+    """Records sandbox calls; plays a session that writes a database and exits with `rc`.
+
+    `fail_on` raises at "create" or "run", fails "setup", or leaves the run "unconfirmed" (no markers).
+    `databases` are the database paths the run reports (default: the run's own opencode.db), and
+    `stderr` is the model-writable stderr tail printed after the markers.
+    """
+
+    def __init__(
+        self, rc: int = 0, fail_on: str | None = None, databases: list[str] | None = None, stderr: str = "boom\n"
+    ) -> None:
+        self.rc, self.fail_on, self.databases, self.stderr = rc, fail_on, databases, stderr
+        self.specs, self.execs, self.uploads, self.closed, self.downloads = [], [], {}, [], []
+
+    async def create(self, spec):
+        from nemo_gym.sandbox import SandboxHandle
+
+        if self.fail_on == "create":
+            raise RuntimeError("no capacity")
+        self.specs.append(spec)
+        return SandboxHandle(sandbox_id="sbx-1", provider_name="fake", raw=None)
+
+    async def exec(self, handle, command, *, cwd=None, env=None, timeout_s=None, user=None):
+        from nemo_gym.sandbox import SandboxExecResult
+
+        self.execs.append({"command": command, "env": env, "timeout_s": timeout_s, "user": user})
+        if command.startswith("mkdir"):
+            if self.fail_on == "setup":
+                return SandboxExecResult(stdout="", stderr="setup.sh: not found", return_code=127)
+            return SandboxExecResult(stdout="", stderr=None, return_code=0)
+        if self.fail_on == "run":
+            raise RuntimeError("proxy 502")
+        if self.fail_on == "unconfirmed":
+            return SandboxExecResult(stdout="", stderr=None, return_code=-1, error_type="timeout")
+        mark = re.search(r"@@ng-opencode@@[0-9a-f]{32}@@", command).group(0)
+        databases = self.databases or [f"{env['XDG_DATA_HOME']}/opencode/opencode.db"]
+        stdout = f"{mark}rc={self.rc}\n" + "".join(f"{mark}db={db}\n" for db in databases) + f"{mark}end\n"
+        return SandboxExecResult(stdout=stdout + self.stderr, stderr=None, return_code=0)
+
+    async def upload_file(self, handle, source_path, target_path):
+        self.uploads[target_path] = source_path.read_bytes()
+
+    async def download_file(self, handle, source_path, target_path):
+        self.downloads.append((source_path, str(target_path)))
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_bytes(b"db")
+
+    async def close(self, handle):
+        self.closed.append(handle.sandbox_id)
+
+
+class TestSessionSandbox:
+    SANDBOX = {"provider": {"opensandbox": {}}, "spec": {"image": "python:3.12-slim"}, "env": {"EXTRA": "1"}}
+
+    def _run(
+        self,
+        tmp_path: Path,
+        provider: _FakeSandboxProvider,
+        url: str = "http://10.0.0.1:5000/ng-rollout/1-2/v1",
+        agent: OpenCodeAgent | None = None,
+        **sandbox,
+    ):
+        if agent is None:
+            agent = _make_agent(session_sandbox={**self.SANDBOX, **sandbox}, env={"OMP_NUM_THREADS": "1"}, timeout=60)
+        agent._sandbox_provider = provider
+        work = tmp_path / "opencode_x"
+        (work / ".opencode-data").mkdir(parents=True)
+        (work / "image_0.png").write_bytes(b"png")
+        (work / "opencode.json").write_text("{}")
+        env = {
+            "XDG_DATA_HOME": str(work / ".opencode-data"),
+            "OPENAI_BASE_URL": url,
+            "OPENAI_API_KEY": "EMPTY",  # pragma: allowlist secret
+            "WANDB_API_KEY": "secret",  # pragma: allowlist secret
+            "OPENSANDBOX_API_KEY": "secret",  # pragma: allowlist secret
+        }
+        result = asyncio.run(
+            agent._run_sandbox_session(["run", "-m", "nemo/m", "--dir", str(work), "q"], work, work, env, 60)
+        )
+        return result, work
+
+    def test_runs_session_in_sandbox_and_fetches_database(self, tmp_path: Path) -> None:
+        provider = _FakeSandboxProvider(rc=0)
+        (rc, stderr, timed_out), work = self._run(tmp_path, provider)
+        assert (rc, timed_out) == (0, False) and b"boom" in stderr
+        assert set(provider.uploads) == {str(work / "image_0.png"), str(work / "opencode.json")}
+        assert (work / ".opencode-data" / "opencode" / "opencode.db").read_bytes() == b"db"
+        assert provider.specs[0].image == "python:3.12-slim" and provider.specs[0].ttl_s == 60 + 900 + 600
+        run = provider.execs[-1]
+        assert "timeout -k 10 60 opencode run -m nemo/m" in run["command"] and run["timeout_s"] == 180
+        assert provider.closed == ["sbx-1"]
+
+    def test_sandbox_env_carries_no_agent_credentials(self, tmp_path: Path) -> None:
+        provider = _FakeSandboxProvider()
+        self._run(tmp_path, provider)
+        env = provider.execs[-1]["env"]
+        assert "WANDB_API_KEY" not in env and "OPENSANDBOX_API_KEY" not in env
+        assert env["OPENAI_BASE_URL"].endswith("/ng-rollout/1-2/v1") and env["OPENAI_API_KEY"] == "EMPTY"
+        assert env["OMP_NUM_THREADS"] == "1" and env["EXTRA"] == "1" and env["HOME"] == "/root"
+
+    def test_timeout_exit_codes_mark_timed_out(self, tmp_path: Path) -> None:
+        for rc in (124, 137):
+            (returncode, _, timed_out), _ = self._run(tmp_path / str(rc), _FakeSandboxProvider(rc=rc))
+            assert (returncode, timed_out) == (rc, True)
+
+    def test_setup_command_runs_before_opencode(self, tmp_path: Path) -> None:
+        provider = _FakeSandboxProvider()
+        self._run(tmp_path, provider, setup_command="sh /opt/setup.sh")
+        assert provider.execs[0]["command"].startswith("mkdir -p ") and provider.execs[0]["command"].endswith(
+            "&& sh /opt/setup.sh"
+        )
+
+    @pytest.mark.parametrize(
+        ("fail_on", "kind", "closed"),
+        [
+            ("create", "provider_request_failed", []),
+            ("setup", "provider_setup_failed", ["sbx-1"]),
+            ("run", "provider_request_failed", ["sbx-1"]),
+            ("unconfirmed", "provider_command_outcome_unknown", ["sbx-1"]),
+        ],
+    )
+    def test_infrastructure_failure_fails_the_episode_instead_of_scoring(
+        self, tmp_path: Path, fail_on: str, kind: str, closed: list[str]
+    ) -> None:
+        """A provider failure or an unconfirmed run must not reach grading as an empty answer."""
+        provider = _FakeSandboxProvider(fail_on=fail_on)
+        with pytest.raises(NgFailureEvent) as raised:
+            self._run(tmp_path, provider)
+        assert raised.value.failure_kind == kind and str(raised.value.boundary) == "sandbox"
+        assert provider.closed == closed and provider.downloads == []
+
+    def test_database_sidecars_download_into_the_run_database_directory(self, tmp_path: Path) -> None:
+        db_dir = tmp_path / "opencode_x" / ".opencode-data" / "opencode"
+        databases = [f"{db_dir}/opencode.db", f"{db_dir}/opencode.db-wal", f"{db_dir}/opencode.db-shm"]
+        provider = _FakeSandboxProvider(databases=databases)
+        (rc, _, _), _ = self._run(tmp_path, provider)
+        assert rc == 0
+        assert [target for _, target in provider.downloads] == databases
+
+    def test_forged_marker_in_stderr_cannot_write_a_host_file(self, tmp_path: Path) -> None:
+        """The model controls the stderr tail; markers there carry no nonce and are only stderr text."""
+        sentinel = tmp_path / "host_launcher"
+        sentinel.write_bytes(b"original")
+        provider = _FakeSandboxProvider(stderr=f"@@ng-opencode@@db={sentinel}\n@@ng-opencode@@rc=0\n")
+        (rc, stderr, _), work = self._run(tmp_path, provider)
+        assert sentinel.read_bytes() == b"original"
+        assert [target for _, target in provider.downloads] == [str(work / ".opencode-data/opencode/opencode.db")]
+        assert str(sentinel).encode() in stderr and rc == 0
+
+    @pytest.mark.parametrize("name", ["host_launcher", "opencode/other.db", "opencode/../../host_launcher"])
+    def test_database_outside_the_run_database_directory_is_a_protocol_failure(
+        self, tmp_path: Path, name: str
+    ) -> None:
+        """Even a marker carrying the nonce may only name OpenCode's database files in the run's data dir."""
+        sentinel = tmp_path / "host_launcher"
+        sentinel.write_bytes(b"original")
+        data_home = tmp_path / "opencode_x" / ".opencode-data"
+        forged = str(sentinel) if name == "host_launcher" else f"{data_home}/{name}"
+        provider = _FakeSandboxProvider(databases=[forged])
+        with pytest.raises(NgFailureEvent) as raised:
+            self._run(tmp_path, provider)
+        assert raised.value.failure_kind == "provider_protocol_error"
+        assert sentinel.read_bytes() == b"original" and provider.downloads == []
+
+    @pytest.mark.parametrize("placement", [{"session_sandbox": SANDBOX}, {"session_nodes": 2}])
+    def test_repo_dir_is_rejected_for_sessions_that_copy_only_the_run_directory(
+        self, tmp_path: Path, placement: dict
+    ) -> None:
+        """The generated config and images land in repo_dir, which sandbox and remote sessions do not copy."""
+        with pytest.raises(ValueError, match="repo_dir"):
+            _make_agent(repo_dir=str(tmp_path / "repo"), **placement)
+
+    @pytest.mark.parametrize("sandboxed", [True, False])
+    def test_only_host_sessions_install_opencode_on_the_host(self, tmp_path: Path, sandboxed: bool) -> None:
+        agent = _make_agent(**({"session_sandbox": self.SANDBOX} if sandboxed else {}))
+        run_sandbox = AsyncMock(return_value=(0, b"", False))
+        run_local = AsyncMock(return_value=(0, b"", False))
+        with (
+            patch.object(agent, "_workspace_root", return_value=tmp_path / "work"),
+            patch.object(agent, "_run_sandbox_session", run_sandbox),
+            patch.object(agent, "_run_local_session", run_local),
+            patch("responses_api_agents.opencode_agent.app.parse_opencode_session", return_value=([], {})),
+        ):
+            (tmp_path / "work").mkdir()
+            asyncio.run(agent._run_opencode("look", None, collect_observations=False))
+        assert agent._ensure_local_runtime.await_count == (0 if sandboxed else 1)
+        assert (run_sandbox.await_count, run_local.await_count) == ((1, 0) if sandboxed else (0, 1))
+
+    def test_fractional_task_budget_keeps_the_inner_watchdog(self, tmp_path: Path) -> None:
+        provider = _FakeSandboxProvider()
+        agent = _make_agent(session_sandbox=self.SANDBOX, timeout=60)
+        agent._sandbox_provider = provider
+        work = tmp_path / "opencode_x"
+        (work / ".opencode-data").mkdir(parents=True)
+        env = {"XDG_DATA_HOME": str(work / ".opencode-data")}
+        asyncio.run(agent._run_sandbox_session(["run", "q"], work, work, env, 0.5))
+        assert "timeout -k 10 0.5 opencode run" in provider.execs[-1]["command"]
+
+    def test_provider_secrets_come_from_environment(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setenv("OSB_DOMAIN_FOR_TEST", "sandbox.example")
+        agent = _make_agent(
+            session_sandbox={
+                "provider": {"opensandbox": {"connection": {"protocol": "https"}}},
+                "provider_secret_env": {"domain": "OSB_DOMAIN_FOR_TEST"},
+            },
+            workspace_root=str(tmp_path),
+        )
+        agent._sandbox_provider = None
+        with patch("responses_api_agents.opencode_agent.app.create_provider") as create_provider:
+            agent._session_sandbox_provider()
+        assert create_provider.call_args.args[0] == {
+            "opensandbox": {"connection": {"protocol": "https", "domain": "sandbox.example"}}
+        }
+        assert agent.config.session_sandbox.provider == {"opensandbox": {"connection": {"protocol": "https"}}}
+
+    def test_missing_secret_env_fails_loudly(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.delenv("OSB_MISSING_FOR_TEST", raising=False)
+        agent = _make_agent(
+            session_sandbox={
+                "provider": {"opensandbox": {}},
+                "provider_secret_env": {"api_key": "OSB_MISSING_FOR_TEST"},
+            }
+        )
+        agent._sandbox_provider = None
+        try:
+            agent._session_sandbox_provider()
+        except RuntimeError as e:
+            assert "OSB_MISSING_FOR_TEST" in str(e)
+        else:
+            raise AssertionError("expected RuntimeError")
+
+    def test_ca_file_is_added_to_trusted_bundle(self, tmp_path: Path, monkeypatch) -> None:
+        ca = tmp_path / "server.pem"
+        ca.write_text("-----BEGIN CERTIFICATE-----\nPINNED\n-----END CERTIFICATE-----\n")
+        monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+        agent = _make_agent(workspace_root=str(tmp_path / "ws"))
+        agent._trust_ca_file(str(ca))
+        bundle = Path(os.environ["SSL_CERT_FILE"]).read_text()
+        monkeypatch.delenv("SSL_CERT_FILE")
+        assert "PINNED" in bundle and bundle.count("BEGIN CERTIFICATE") > 1
+
+    def test_sandbox_starts_are_capped_but_sessions_overlap(self, tmp_path: Path) -> None:
+        class _SlowProvider(_FakeSandboxProvider):
+            starting = running = max_starting = max_running = 0
+
+            async def create(self, spec):
+                type(self).starting += 1
+                type(self).max_starting = max(self.max_starting, self.starting)
+                await asyncio.sleep(0.01)
+                return await super().create(spec)
+
+            async def exec(self, handle, command, **kwargs):
+                if command.startswith("mkdir"):
+                    type(self).starting -= 1
+                    return await super().exec(handle, command, **kwargs)
+                type(self).running += 1
+                type(self).max_running = max(self.max_running, self.running)
+                await asyncio.sleep(0.05)
+                type(self).running -= 1
+                return await super().exec(handle, command, **kwargs)
+
+        agent = _make_agent(session_sandbox={**self.SANDBOX, "max_concurrent_starts": 2}, timeout=60)
+        agent._sandbox_provider = _SlowProvider()
+
+        async def session(i: int):
+            work = tmp_path / f"opencode_{i}"
+            (work / ".opencode-data").mkdir(parents=True)
+            env = {"XDG_DATA_HOME": str(work / ".opencode-data"), "OPENAI_BASE_URL": "http://h/v1"}
+            return await agent._run_sandbox_session(["run", "q"], work, work, env, 60)
+
+        async def main():
+            return await asyncio.gather(*(session(i) for i in range(6)))
+
+        results = asyncio.run(main())
+        assert [rc for rc, _, _ in results] == [0] * 6
+        assert _SlowProvider.max_starting == 2 and _SlowProvider.max_running > 2
+
+    def test_sandbox_and_session_nodes_are_exclusive(self) -> None:
+        try:
+            OpenCodeAgent(
+                config=_config(session_sandbox=self.SANDBOX, session_nodes=4),
+                server_client=MagicMock(spec=ServerClient),
+            )
+        except ValueError as e:
+            assert "session_sandbox" in str(e)
+        else:
+            raise AssertionError("expected ValueError")
+
+    @pytest.mark.parametrize("provider_kwargs", [{}, None])
+    def test_providers_without_secret_injection_get_no_connection_argument(self, provider_kwargs) -> None:
+        """docker and local take no `connection`; only configured secret injection adds one."""
+        agent = _make_agent(session_sandbox={"provider": {"docker": provider_kwargs}})
+        agent._sandbox_provider = None
+        with patch("responses_api_agents.opencode_agent.app.create_provider") as create_provider:
+            agent._session_sandbox_provider()
+        assert create_provider.call_args.args[0] == {"docker": {}}
+
+    def test_loopback_model_url_is_rejected_before_any_sandbox_exists(self, tmp_path: Path) -> None:
+        provider = _FakeSandboxProvider()
+        with pytest.raises(HTTPException) as raised:
+            self._run(tmp_path, provider, url="http://127.0.0.1:5000/ng-rollout/1-2/v1")
+        assert raised.value.status_code == 422 and "loopback" in raised.value.detail
+        assert provider.specs == [] and provider.execs == [] and provider.closed == []
+
+    def test_an_env_override_cannot_hide_the_generated_loopback_url(self, tmp_path: Path) -> None:
+        """opencode.json embeds the agent's own model URL, so a reachable OPENAI_BASE_URL override is not enough."""
+        provider = _FakeSandboxProvider()
+        with pytest.raises(HTTPException):
+            self._run(
+                tmp_path, provider, url="http://localhost:5000/v1", env={"OPENAI_BASE_URL": "http://10.0.0.1:5000/v1"}
+            )
+        assert provider.specs == []
+
+    @pytest.mark.parametrize("provider_name", ["local", "docker"])
+    def test_host_network_providers_keep_loopback_urls(self, tmp_path: Path, provider_name: str) -> None:
+        provider = _FakeSandboxProvider()
+        agent = _make_agent(session_sandbox={**self.SANDBOX, "provider": {provider_name: {}}}, timeout=60)
+        (rc, _, _), _ = self._run(tmp_path, provider, url="http://127.0.0.1:5000/v1", agent=agent)
+        assert rc == 0 and provider.closed == ["sbx-1"]
+
+    @pytest.mark.parametrize("user", [None, 1000])
+    def test_setup_and_run_execute_as_the_spec_user(self, tmp_path: Path, user: int | None) -> None:
+        provider = _FakeSandboxProvider()
+        spec = {"image": "python:3.12-slim", **({"user": user} if user is not None else {})}
+        self._run(tmp_path, provider, spec=spec)
+        assert [call["user"] for call in provider.execs] == [user, user]
+
+    @pytest.mark.parametrize("capture", [True, False])
+    def test_correlation_plugin_is_delivered_with_the_run_directory(self, tmp_path: Path, capture: bool) -> None:
+        """The sandbox gets only the run dir, so a Gym-generated plugin entry must name a file inside it."""
+        agent = _make_agent(
+            session_sandbox=self.SANDBOX,
+            model="m",
+            model_server=ModelServerRef(type="responses_api_models", name="p"),
+            opencode_config={"plugin": ["user-plugin"]},
+        )
+        agent.server_client.global_config_dict = {"observability_enabled": capture}
+        seen = {}
+
+        def run(opencode_args, work_dir, project_dir, env, timeout):
+            seen["config"] = json.loads((project_dir / "opencode.json").read_text())
+            seen["files"] = {path: path.read_bytes() for path in work_dir.rglob("*") if path.is_file()}
+            seen["work"] = work_dir
+            return 0, b"", False
+
+        with (
+            patch.object(agent, "_workspace_root", return_value=tmp_path / "work"),
+            patch.object(OpenCodeAgent, "_resolve_model_base_url", return_value="http://10.0.0.1:5000/v1"),
+            patch.object(agent, "_run_sandbox_session", AsyncMock(side_effect=run)),
+            patch("responses_api_agents.opencode_agent.app.parse_opencode_session", return_value=([], {})),
+        ):
+            (tmp_path / "work").mkdir()
+            asyncio.run(agent._run_opencode("look", None, collect_observations=False))
+        plugin = seen["work"] / ".opencode-plugins" / ASSISTANT_MESSAGE_PLUGIN_FILE
+        if capture:
+            assert seen["config"]["plugin"] == ["user-plugin", plugin.as_uri()]
+            assert seen["files"][plugin] == OBSERVABILITY_PATCH.read_bytes()
+        else:
+            assert seen["config"]["plugin"] == ["user-plugin"] and plugin not in seen["files"]
+
+    @pytest.mark.parametrize("stage", ["setup", "upload", "run"])
+    def test_a_cancelled_request_still_deletes_its_sandbox(self, tmp_path: Path, stage: str) -> None:
+        """The disconnect middleware cancels the request's AnyIO scope; the close must run outside it."""
+
+        class _Blocking(_FakeSandboxProvider):
+            entered = None
+
+            async def _block(self, at: str) -> None:
+                if at == stage:
+                    self.entered.set()
+                    await asyncio.sleep(3600)
+
+            async def exec(self, handle, command, **kwargs):
+                await self._block("setup" if command.startswith("mkdir") else "run")
+                return await super().exec(handle, command, **kwargs)
+
+            async def upload_file(self, handle, source_path, target_path):
+                await self._block("upload")
+                await super().upload_file(handle, source_path, target_path)
+
+            async def close(self, handle):
+                await asyncio.sleep(0.01)  # a checkpoint: a close inside the cancelled scope stops here
+                await super().close(handle)
+
+        provider = _Blocking()
+        agent = _make_agent(session_sandbox=self.SANDBOX, timeout=60)
+        agent._sandbox_provider = provider
+        work = tmp_path / "opencode_x"
+        (work / ".opencode-data").mkdir(parents=True)
+        (work / "image_0.png").write_bytes(b"png")
+        env = {"XDG_DATA_HOME": str(work / ".opencode-data"), "OPENAI_BASE_URL": "http://10.0.0.1/v1"}
+
+        async def main() -> None:
+            provider.entered = asyncio.Event()
+            async with anyio.create_task_group() as group:
+                group.start_soon(agent._run_sandbox_session, ["run", "q"], work, work, env, 60)
+                await provider.entered.wait()
+                group.cancel_scope.cancel()
+            for _ in range(100):  # the close finishes on its own, outside the cancelled scope
+                if provider.closed:
+                    break
+                await asyncio.sleep(0.01)
+            assert provider.closed == ["sbx-1"]
+
+        asyncio.run(main())
+
+    def test_a_create_that_completes_after_cancellation_is_closed(self, tmp_path: Path) -> None:
+        class _SlowCreate(_FakeSandboxProvider):
+            async def create(self, spec):
+                started.set()
+                await asyncio.sleep(0.05)
+                return await super().create(spec)
+
+        started = None
+        provider = _SlowCreate()
+        agent = _make_agent(session_sandbox=self.SANDBOX, timeout=60)
+        agent._sandbox_provider = provider
+        work = tmp_path / "opencode_x"
+        (work / ".opencode-data").mkdir(parents=True)
+        env = {"XDG_DATA_HOME": str(work / ".opencode-data")}
+
+        async def main() -> None:
+            nonlocal started
+            started = asyncio.Event()
+            async with anyio.create_task_group() as group:
+                group.start_soon(agent._run_sandbox_session, ["run", "q"], work, work, env, 60)
+                await started.wait()
+                group.cancel_scope.cancel()
+            await asyncio.sleep(0.2)
+
+        asyncio.run(main())
+        assert len(provider.specs) == 1 and provider.closed == ["sbx-1"] and provider.execs == []
+
+    def test_cancellation_while_waiting_to_start_creates_no_sandbox(self, tmp_path: Path) -> None:
+        class _HeldCreate(_FakeSandboxProvider):
+            async def create(self, spec):
+                held.set()
+                await release.wait()
+                return await super().create(spec)
+
+        held = release = None
+        provider = _HeldCreate()
+        agent = _make_agent(session_sandbox={**self.SANDBOX, "max_concurrent_starts": 1}, timeout=60)
+        agent._sandbox_provider = provider
+
+        def session(i: int):
+            work = tmp_path / f"opencode_{i}"
+            (work / ".opencode-data").mkdir(parents=True)
+            return agent._run_sandbox_session(
+                ["run", "q"], work, work, {"XDG_DATA_HOME": str(work / ".opencode-data")}, 60
+            )
+
+        async def main() -> None:
+            nonlocal held, release
+            held, release = asyncio.Event(), asyncio.Event()
+            first = asyncio.create_task(session(0))
+            await held.wait()
+            async with anyio.create_task_group() as group:
+                group.start_soon(lambda: session(1))
+                await asyncio.sleep(0.01)  # the second session now waits for the start slot
+                group.cancel_scope.cancel()
+            release.set()
+            await first
+
+        asyncio.run(main())
+        assert len(provider.specs) == 1 and provider.closed == ["sbx-1"]
+
+    @pytest.mark.parametrize("failure", ["error", "hang"])
+    def test_a_failed_close_is_retried_at_shutdown(self, tmp_path: Path, failure: str) -> None:
+        class _FlakyClose(_FakeSandboxProvider):
+            attempts = 0
+
+            async def close(self, handle):
+                self.attempts += 1
+                if self.attempts == 1:
+                    if failure == "hang":
+                        await asyncio.sleep(3600)
+                    raise RuntimeError("503 from the provider")
+                await super().close(handle)
+
+        provider = _FlakyClose()
+        agent = _make_agent(session_sandbox=self.SANDBOX, timeout=60, session_close_timeout_seconds=0.2)
+        (rc, _, _), _ = self._run(tmp_path, provider, agent=agent)
+        assert rc == 0 and provider.closed == [] and set(agent._unclosed_session_sandboxes) == {"sbx-1"}
+
+        async def shutdown() -> None:
+            async with agent._drain_sessions_on_shutdown(MagicMock()):
+                pass
+
+        asyncio.run(shutdown())
+        assert provider.closed == ["sbx-1"] and agent._unclosed_session_sandboxes == {}

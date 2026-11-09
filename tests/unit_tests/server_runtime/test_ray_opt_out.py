@@ -40,6 +40,7 @@ DIRECT_RAY_COMPONENTS = {
         "harbor_agent_general",
         "mini_swe_agent",
         "mini_swe_agent_2",
+        "opencode_agent",
         "osworld_agent",
         "swe_agents",
     },
@@ -52,6 +53,9 @@ INHERITED_RAY_DECLARATIONS = {
     ("resources_servers/code_gen/sandbox_app.py", "CompCodingSandboxResourcesServer"): False,
     ("resources_servers/legal_agent_bench/harbor_bridge.py", "LegalAgentBenchHarborBridge"): True,
     ("responses_api_models/genrm_model/app.py", "GenRMModel"): True,
+    # Ray only for opt-in session_nodes > 1, which joins the run's configured cluster itself; local and
+    # session-sandbox runs must start without Ray.
+    ("responses_api_agents/opencode_agent/app.py", "OpenCodeAgent"): False,
 }
 
 

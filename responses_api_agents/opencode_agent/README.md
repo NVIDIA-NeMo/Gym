@@ -208,13 +208,37 @@ stricter, single-activation contract described above. The intentional difference
 | Setting | Local CLI | Sandbox session |
 | --- | --- | --- |
 | System text | Prepended to the user prompt; request `instructions` is not applied | Config/system/developer text and request `instructions` form an instructions file |
-| Provider name | `nemo` | `nemo_gym` (internal alias for the same Gym model server) |
+| Provider name | `nemo` (`provider_id`) | `nemo_gym` (internal alias for the same Gym model server) |
 | `env`, `extra_args`, custom `command` | Applied | Rejected at seed, not silently ignored |
 | Request controls | Existing local compatibility behavior | `temperature` and `top_p` applied with OpenCode 1.17.11; other controls rejected explicitly |
 
 Both paths honor configured `thinking` and declare interleaved `reasoning_content`.
 Different prompt placement can affect results; this integration does not establish
 local/session score parity or migrate existing benchmark defaults.
+
+## Local runs: images and session placement
+
+These options apply to the local CLI path (`/run` and `/v1/responses` without a
+sandbox session). All default to off, which keeps the existing behavior.
+
+| Option | Effect |
+| --- | --- |
+| `attach_images` | Writes the data-URL images of the last user message into the run directory as `image_<i>.<ext>` and attaches them with `-f`. With `repo_dir`, each run writes them to its own `.ng-images-*` directory inside the repository, removed after the run, so concurrent runs never share an attachment. |
+| `vision` | Declares the generated `model_server` model entry image-capable (`attachment`, image input modality), so OpenCode sends attachments and `read` returns image files as images. |
+| `private_tmp` | Runs each session in a fresh user and mount namespace (`unshare`) whose `/tmp` is the run's own, so concurrent runs that write fixed `/tmp` names do not collide. Needs unprivileged user namespaces. |
+| `session_nodes` | Spreads sessions over this many Ray nodes (this server's node first, then other alive nodes by IP), each session a Ray task pinned to one node. Only the session database comes back. Needs the `ray` extra, identical paths on every node, and the run's Ray cluster: the agent joins `ray_head_node_address` before its first session and fails if none is set, rather than starting a private cluster. Each node runs its session under Gym's process supervisor (`bash` and `/proc`), which at the deadline stops OpenCode with every process it started, including ones in other process groups; a run whose termination the node cannot confirm fails the episode (`harness_termination_unconfirmed`). |
+| `session_exclude_actor_classes` | Ray actor class names (for example a training worker) whose nodes never host sessions. |
+| `session_sandbox` | Runs each session in its own sandbox from a `nemo_gym.sandbox` provider (for example OpenSandbox) instead of on a cluster node: the run directory is uploaded, OpenCode runs there, the session database is downloaded and the sandbox is deleted. Only OpenCode's database files in the run's data directory come back, each to the same path on the agent host. A provider failure, a failed setup or a run the sandbox does not confirm raises a sandbox failure for the episode instead of scoring an empty answer; a task timeout (exit 124/137) is still scored by the benchmark's timeout policy. A model URL the sandbox cannot reach (loopback, on a remote provider such as OpenSandbox) is rejected before a sandbox is created: run with `++use_absolute_ip=true` or a reachable model address. Setup and OpenCode run as `spec.user` when it is set. The sandbox is deleted by a task the agent owns, so a cancelled request still deletes it within `session_close_timeout_seconds`; a failed delete is retried at shutdown, and the sandbox TTL is the last resort. With observability on, Gym's correlation plugin is staged in the run directory, so it reaches the sandbox. Provider credentials come from environment variables named in `provider_secret_env`; without it, the provider config is passed unchanged (Docker and Local take no `connection`). Excludes `session_nodes > 1`. |
+| `provider_id` | OpenCode provider id of the generated model entry (default `nemo`). OpenCode's system prompt names the model as `<provider>/<model>`. |
+
+Every local session runs in its own process group, which is killed when the
+session ends, so commands the model left running do not outlive it. Local runs
+also pass `--title`, so OpenCode does not spend a policy call naming the session.
+
+`session_sandbox` and `session_nodes > 1` copy only the run directory to where
+the session runs, so they reject `repo_dir` (whose generated `opencode.json`
+and images would not arrive). With `session_sandbox`, the sandbox image or its
+`setup_command` provides OpenCode; the agent host does not install it.
 
 ## Multi-turn continuation
 
