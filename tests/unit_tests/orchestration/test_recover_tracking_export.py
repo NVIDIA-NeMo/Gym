@@ -51,6 +51,9 @@ class FakeExecutor:
     tracking_required: bool | None = None
     export_state = "succeeded"
 
+    walltime_plan = BaseExecutor.walltime_plan
+    gym_pin = BaseExecutor.gym_pin
+
     def recovery_evidence(self, record, benchmark, **kwargs):
         FakeExecutor.calls.append("decide")
         decision = RecoveryDecision(

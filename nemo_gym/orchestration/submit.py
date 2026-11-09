@@ -351,10 +351,9 @@ def _recover(
         else None
     )
     # A walltime raise the partition cannot take is refused at once, before the slow evidence read.
-    plan_walltime = getattr(executor, "walltime_plan", None)
     walltime_plan = (
-        plan_walltime(record, benchmark, max_walltime)
-        if max_walltime is not None and not inspect_only and plan_walltime is not None
+        executor.walltime_plan(record, benchmark, max_walltime)
+        if max_walltime is not None and not inspect_only
         else None
     )
     if walltime_plan is not None and walltime_plan.get("refused"):
@@ -431,7 +430,7 @@ def _recover(
         return decision, collected, gate_task, mlflow
 
     # A run pinned at another commit is planned with the installed Gym's rules; its pin moves only when it must.
-    pinned = executor.gym_pin(record) if repin is None and hasattr(executor, "gym_pin") else None
+    pinned = executor.gym_pin(record) if repin is None else None
     installed = executor.installed_commit() if pinned is not None else None
     pin_plan: dict[str, Any] | None = None
     if (

@@ -202,6 +202,9 @@ class FakeExecutor:
     live = False
     supports_reverify = True
 
+    walltime_plan = BaseExecutor.walltime_plan
+    gym_pin = BaseExecutor.gym_pin
+
     def recovery_evidence(
         self,
         record,
