@@ -22,6 +22,11 @@ REQUIRED_MCP_PLUGIN_SOURCE = Path(__file__).with_name("required_mcp.mjs")
 REQUIRED_MCP_PLUGIN_FILE = REQUIRED_MCP_PLUGIN_SOURCE.name
 # Retain the import used by the separate opencode_sandboxed_agent adapter.
 OBSERVABILITY_PATCH = ASSISTANT_MESSAGE_PLUGIN_SOURCE
+# Merged into the Gym model's entry in sandbox sessions.
+# Without it, OpenCode leaves images out of model requests, including images its read tool returns.
+# The read still reports success, so the model is told about an image it never receives.
+# A text-only deployment rejects requests that carry an image.
+IMAGE_INPUT_MODEL_OPTIONS = {"attachment": True, "modalities": {"input": ["text", "image"], "output": ["text"]}}
 
 
 def apply_observability_patch(config: dict, *, plugin_path: Path = ASSISTANT_MESSAGE_PLUGIN_SOURCE) -> None:
