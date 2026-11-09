@@ -27,7 +27,7 @@ from shlex import quote
 from tempfile import TemporaryDirectory
 from time import time
 from traceback import format_exc
-from typing import Annotated, Any, Literal, TypeVar
+from typing import Annotated, Any, ClassVar, Literal, TypeVar
 from uuid import uuid4
 
 import aiohttp
@@ -254,8 +254,6 @@ class SWEBenchProResourcesServerConfig(BaseResourcesServerConfig):
     environment_repairs: tuple[str, ...] = DEFAULT_ENVIRONMENT_REPAIRS
     image_repository: str = "docker.io/jefzda/sweap-images"
     image_template: str | None = None  # Local SIF path with a checked provenance manifest.
-    # Egress policy for the agent sandbox only; the grading sandbox keeps default network access.
-    agent_network_policy: dict[str, Any] | None = None
     sandbox_provider: str
     sandbox_config: dict[str, Any]
     task_network_policy: SWEBenchProTaskNetworkPolicy | None = None
@@ -297,6 +295,7 @@ class SWEBenchProSeedSessionRequest(SWEBenchProInstanceRequest, BaseSeedSessionR
 
 class SWEBenchProSeedSessionResponse(BaseSeedSessionResponse):
     sandbox_handle: str
+    workdir: str = "/app"
     sandbox_descriptor: dict[str, Any] | None = Field(default=None, exclude_if=lambda value: value is None)
     image_provenance: dict[str, Any] = Field(default_factory=dict)
 
@@ -328,7 +327,7 @@ class SWEBenchProVerifyResponse(BaseVerifyResponse):
 
 
 class SWEBenchProResourcesServer(SimpleResourcesServer):
-    instance_request_cls = SWEBenchProInstanceRequest
+    instance_request_cls: ClassVar[type[SWEBenchProInstanceRequest]] = SWEBenchProInstanceRequest
     config: SWEBenchProResourcesServerConfig
     # Subclasses (e.g. SWE-bench Pro v2) swap in their own verifier workspace.
     workspace_assembler = staticmethod(assemble_workspace_files)
@@ -448,8 +447,6 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             # Replace rather than extend any baseline allowlist. Grading keeps the original options.
             provider_options = dict(provider_options or {})
             provider_options["network_policy"] = restricted_network_policy(next(iter(provider_config)), [model_url])
-        elif files is None and self.config.agent_network_policy:
-            provider_options = provider_options | {"network_policy": self.config.agent_network_policy}
         image_info = await asyncio.to_thread(self._image_info, body)
         spec = SandboxSpec(
             image=image_info["image"],
@@ -569,6 +566,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             )
             response = SWEBenchProSeedSessionResponse(
                 sandbox_handle=sandbox._handle.sandbox_id,
+                workdir=await self._repository_dir(sandbox),
                 sandbox_descriptor=descriptor,
                 image_provenance=await asyncio.to_thread(self._image_info, body),
             )
@@ -716,12 +714,11 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                     eval_sandbox = await self._create_sandbox(body, files=sandbox_files)
                     eval_sandbox_start_time_taken = time() - start_time
                     verification_start = time()
-                    result = await run_verification(
+                    result = await self._run_verification(
                         sandbox=eval_sandbox,
                         inputs=inputs,
                         log_dir=run_log_dir,
                         timeout_s=self.config.evaluation_timeout,
-                        assemble=self.workspace_assembler,
                     )
                     patch_verification_time_taken = time() - verification_start
             except Exception as exc:
@@ -750,7 +747,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                 verifier_sandbox_observation = None
             verifier_sandbox_observations.append(verifier_sandbox_observation)
 
-            reason = inconclusive_reason(result)
+            reason = self._inconclusive_reason(result)
             if reason is not None:
                 # Record the actual failed attempt without selecting a retry or claiming a model failure.
                 # Only an exception before sandbox assignment identifies allocation as the failing operation.
@@ -837,6 +834,18 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         response_data.pop("_ng_failure_class", None)
         response_data.pop("_ng_failure_judge_error", None)
         return SWEBenchProVerifyResponse.model_validate(response_data)
+
+    async def _run_verification(
+        self,
+        sandbox: AsyncSandbox,
+        inputs: VerificationInputs,
+        log_dir: Path,
+        timeout_s: int | None,
+    ) -> VerificationResult:
+        return await run_verification(sandbox=sandbox, inputs=inputs, log_dir=log_dir, timeout_s=timeout_s)
+
+    def _inconclusive_reason(self, result: VerificationResult) -> str | None:
+        return inconclusive_reason(result)
 
 
 def _lost_session_response(body: SWEBenchProVerifyRequest, reason: str) -> SWEBenchProVerifyResponse:

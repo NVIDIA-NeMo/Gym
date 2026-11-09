@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Resources server for the SWE-bench Pro v2 split (scaleapi/SWE-bench_Pro-os, v2/).
 swebench_pro_v2_resources_server:
   resources_servers:
@@ -9,8 +12,9 @@ swebench_pro_v2_resources_server:
 
       # Upstream v2 gives the verifier a 3000s budget. The agent keeps the harness's 10800s default, as in v1.
       evaluation_timeout: 3000
-      verification_attempt_timeout: 3300
-      verification_total_timeout: 6600
+      # Each attempt covers allocation (1200s), the full test budget, execution margin and artifact reads.
+      verification_attempt_timeout: 4800
+      verification_total_timeout: 14400
       # v2 images ship a sanitised git history, and each task's test.sh does its own repairs.
       apply_anti_cheating: false
       is_verifying_golden_patch: false
@@ -19,13 +23,11 @@ swebench_pro_v2_resources_server:
       # in the verifier sandbox (e.g. NodeBB tasks).
       environment_repairs: [stale_database_state]
 
-      # Upstream runs the agent offline except for the model endpoint. Set this for the
-      # OpenSandbox provider to reproduce that, e.g.
-      #   agent_network_policy:
-      #     defaultAction: deny
-      #     egress: [{action: allow, target: <model server host>}]
-      # It applies to the agent sandbox only; the verifier sandbox keeps network access.
-      agent_network_policy: null
+      # The agent can reach the policy model only. Grading keeps network access.
+      task_network_policy:
+        model_server:
+          type: responses_api_models
+          name: policy_model
 
       sandbox_provider: sandbox
       sandbox_config:

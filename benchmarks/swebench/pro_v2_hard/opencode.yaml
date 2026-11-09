@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# SWE-bench Pro V2 HARD-51 subset, with the same locked protocol as benchmarks/swebench/pro_v2.
+# The V2 agent's dataset is replaced in place, so this config runs HARD-51 only.
+config_paths:
+- benchmarks/swebench/pro_v2/opencode.yaml
+
+swebench_pro_v2_opencode_sandboxed_agent:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      datasets:
+        - name: swebench_pro_v2_hard
+          type: benchmark
+          jsonl_fpath: benchmarks/swebench/data/swebench_pro_v2_hard_benchmark.jsonl
+          prepare_script: benchmarks/swebench/pro_v2_hard/prepare.py
+          num_repeats: 3
