@@ -81,6 +81,7 @@ from nemo_gym.models.responses_streaming import (
     validate_streaming_responses_params,
 )
 from nemo_gym.models.token_capture.config import NonGeneratingRequest, token_capture_config
+from nemo_gym.models.token_capture.harness_notes import trailing_harness_note
 from nemo_gym.models.token_capture.protocols import (
     CaptureAdmissionError,
     CaptureInputError,
@@ -247,6 +248,10 @@ class ModelCheckpointConfig(BaseModel):
 
 
 class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
+    forward_streaming_chat_provider_extensions: bool = Field(
+        default=False,
+        description="Preserve supported provider extensions from streaming chat requests; validate them strictly.",
+    )
     # Exact successful routes whose responses cannot contain policy-generated content.
     token_id_capture_non_generating_requests: list[NonGeneratingRequest] = Field(default_factory=list)
     drop_hosted_tools: bool = Field(
@@ -737,7 +742,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             await self._finalize_served_response(response)
             return dispatched
 
-        cleaned, include_usage = sanitize_streaming_chat_body(body)
+        cleaned, include_usage = sanitize_streaming_chat_body(
+            body, forward_provider_extensions=self.config.forward_streaming_chat_provider_extensions
+        )
         params = _validate_chat_params(cleaned)
 
         async def completed_stream(completion: Any) -> StreamingResponse:
@@ -847,7 +854,16 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # Exact prefix supply and capture share this decision.
         if current_capture_context() is not None:
             self._validate_capture_request(params)
-            request_messages = _request_messages(params)
+            note = trailing_harness_note(list(params.messages))
+            if note is not None:
+                # The harness, not the model, wrote this assistant message, and its next request drops it. The
+                # model reads it as a user message, and lineage leaves it out (see harness_notes).
+                params = params.model_copy(
+                    update={"messages": [*params.messages[:-1], {"role": "user", "content": note}]}
+                )
+                request_messages = _request_messages(params)[:-1]
+            else:
+                request_messages = _request_messages(params)
             try:
                 await resolve_parent(request_messages)
                 await register_call_intent()

@@ -15,6 +15,7 @@
 
 import asyncio
 import copy
+import importlib.resources
 import json
 import logging
 import math
@@ -24,7 +25,7 @@ import shlex
 import shutil
 import tempfile
 from asyncio import Semaphore
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from shlex import quote
@@ -43,6 +44,7 @@ from nemo_gym.agents import (
     HARNESS_RUNNER_FAILED,
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
+    HARNESS_STEP_LIMIT_METADATA_KEY,
     AgentCloseSessionResponse,
     AgentContinuationCapabilities,
     AgentOutcome,
@@ -66,6 +68,7 @@ from nemo_gym.core import (
     MODEL_CONTEXT_LIMIT,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
+    MediaFile,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -78,7 +81,9 @@ from nemo_gym.core import (
     NeMoGymResponseUsage,
     NgFailureEvent,
     SandboxFailureDetails,
+    UnsupportedContentError,
     observe_failure,
+    split_text_and_media,
 )
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -118,12 +123,14 @@ from responses_api_agents.opencode_agent.pinned import (
 from responses_api_agents.opencode_agent.runtime import (
     ASSISTANT_MESSAGE_PLUGIN_FILE,
     ASSISTANT_MESSAGE_PLUGIN_SOURCE,
+    IMAGE_INPUT_MODEL_OPTIONS,
     OPENCODE_VERSION,
     REQUIRED_MCP_PLUGIN_FILE,
     RUNTIME_INSTALLER_FILE,
     RUNTIME_INSTALLER_SOURCE,
     TASK_ENVIRONMENT_PLUGIN_FILE,
     TASK_ENVIRONMENT_PLUGIN_SOURCE,
+    UNRESTRICTED_IMAGE_ATTACHMENT,
     apply_observability_patch,
     command_failure_reason,
 )
@@ -316,6 +323,81 @@ def _serialize_replacement_config(config: dict[str, Any]) -> str:
     return _dump_with_serialized_member(config, "agent", agent_json)
 
 
+def _capture_joins_opencode_step_limit() -> bool:
+    """Whether Gym's token capture joins the calls that OpenCode's step-limit note follows.
+
+    The capture fix for OpenCode's step-limit note and renamed tool calls (Gym #5833) adds
+    ``nemo_gym/models/token_capture/harness_notes.py``. Without it, the note turns the next call into a poisoned
+    capture, so a seed with token capture refuses ``agent.build.steps``. The check reads the installed package's
+    files and imports nothing.
+
+    TODO: remove this check once #5833 is on main, and allow ``agent.build.steps`` with token capture always.
+    """
+    return importlib.resources.files("nemo_gym").joinpath("models", "token_capture", "harness_notes.py").is_file()
+
+
+def _session_opencode_config_error(opencode_config: Mapping[str, Any]) -> str | None:
+    """Return why a sandbox session cannot use ``opencode_config``, or ``None``.
+
+    The adapter owns the model, provider, prompt and plugins of a sandbox session, so it accepts only:
+
+    - ``permission`` and ``tools``, OpenCode's tool access.
+    - ``compaction.auto`` (a boolean). Automatic compaction summarizes the session and continues from the
+      summary, in model calls that do not extend the scored call's prefix. With it off, a run that fills the
+      context ends with OpenCode's context-overflow error, which the adapter reports as a context limit.
+    - ``agent.build.steps`` (a positive integer): the step limit of OpenCode's ``build`` agent, which the session
+      runs, for each prompt. From the call at the limit on, OpenCode adds an assistant message to each request that
+      asks for a text answer. It still offers the tools, so a model that keeps calling them runs past the limit.
+      Other agent fields would replace the adapter's prompt, model or sampling. With token capture on, the seed
+      refuses it unless Gym's capture fix for the step-limit note is installed (Gym #5833).
+    """
+    unsupported = sorted(opencode_config.keys() - {"permission", "tools", "compaction", "agent"})
+    if unsupported:
+        return f"supports permission, tools, compaction.auto and agent.build.steps only; unsupported: {unsupported}"
+    compaction = opencode_config.get("compaction", {})
+    if not isinstance(compaction, Mapping) or compaction.keys() - {"auto"}:
+        return "compaction supports only auto"
+    if "auto" in compaction and not isinstance(compaction["auto"], bool):
+        return "compaction.auto must be true or false"
+    agent = opencode_config.get("agent", {})
+    if not isinstance(agent, Mapping) or agent.keys() - {"build"}:
+        return "agent supports only build, the agent a session runs"
+    build = agent.get("build", {})
+    if not isinstance(build, Mapping) or build.keys() - {"steps"}:
+        return "agent.build supports only steps"
+    if "steps" in build and (type(build["steps"]) is not int or build["steps"] <= 0):
+        return "agent.build.steps must be a positive integer"
+    return None
+
+
+def _build_step_limit(opencode_config: Mapping[str, Any]) -> int | None:
+    """The configured ``agent.build.steps``, or None when OpenCode runs without a step limit."""
+    agent = opencode_config.get("agent")
+    build = agent.get("build") if isinstance(agent, Mapping) else None
+    steps = build.get("steps") if isinstance(build, Mapping) else None
+    return steps if type(steps) is int and steps > 0 else None
+
+
+def reached_step_limit(export: Mapping[str, Any], steps: int | None) -> bool:
+    """Whether the last prompt of an OpenCode export used every model call that ``steps`` allows.
+
+    OpenCode 1.17.11 saves one assistant message per model call of a prompt. ``opencode run`` runs the session loop in
+    packages/opencode/src/session/prompt.ts, which sets ``isLastStep = step >= maxSteps``: from call number ``steps`` on
+    it appends MAX_STEPS_PROMPT as an assistant message but still offers the tools and leaves toolChoice unset. So the
+    note asks for a final answer and does not force one, and the model may keep calling tools. ``steps`` or more
+    assistant messages after the last user message mean the prompt reached the limit, whatever the model did after
+    the note.
+    """
+    if steps is None:
+        return False
+    messages = export.get("messages") or []
+    last_user = max(
+        (index for index, message in enumerate(messages) if message["info"].get("role") == "user"), default=-1
+    )
+    calls = sum(1 for message in messages[last_user + 1 :] if message["info"].get("role") == "assistant")
+    return calls >= steps
+
+
 class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef | None = None
     model_server: Optional[ModelServerRef] = None
@@ -381,9 +463,11 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # exists at seed, it is imported and the first activation continues that session; its messages stay history.
     session_import_path: str | None = None
     # Sandbox sessions only. Close also returns an ordinary session's own turns (one per saved assistant reply,
-    # compaction summaries left out), as continuation sessions always do. Without them, rollout collection builds one
-    # turn per captured call, so the summary call of a compaction is counted as a step too.
-    return_session_trajectory: bool = False
+    # compaction summaries left out), as continuation sessions always do, so rollout collection joins each captured
+    # call to its step and the harness evidence checks can match them. Without them, collection builds one turn per
+    # captured call with no message ID, every call is reported as an unmatched assistant message, and the summary call
+    # of a compaction is counted as a step too.
+    return_session_trajectory: bool = True
 
     @model_validator(mode="after")
     def _validate_prompt_agent(self) -> Self:
@@ -784,11 +868,13 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 return response
             if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
                 raise HTTPException(409, "OpenCode activation does not match the seeded session and rollout")
-            prompt, system = self._session_input(body)
             if state.task is None:
+                # Parse only for a new activation: a retry is compared with the stored request instead,
+                # so its media are never decoded again.
+                prompt, system, media = self._session_input(body)
                 state.activation_request = body.model_copy(deep=True)
                 state.task = asyncio.create_task(
-                    self._session_response(state, state.activation_request, prompt=prompt, system=system)
+                    self._session_response(state, state.activation_request, prompt=prompt, system=system, media=media)
                 )
             elif body != state.activation_request:
                 raise HTTPException(409, "OpenCode sandbox sessions support one activation; retry the same request")
@@ -937,11 +1023,18 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise HTTPException(
                 422, "OpenCode sandbox max_output_tokens must be positive and not exceed context_window"
             )
-        unsupported = self.config.opencode_config.keys() - {"permission", "tools"}
-        if unsupported:
-            raise HTTPException(
-                422, f"OpenCode sandbox config supports permission/tools only; unsupported: {sorted(unsupported)}"
-            )
+        config_error = _session_opencode_config_error(self.config.opencode_config)
+        if (
+            config_error is None
+            and self._token_id_capture_enabled()
+            and "steps" in self.config.opencode_config.get("agent", {}).get("build", {})
+            and not _capture_joins_opencode_step_limit()
+        ):
+            # OpenCode sends its last-step prompt as an assistant message. Without Gym #5833, capture cannot join
+            # that call to the earlier calls of the rollout. TODO: remove this check once #5833 is on main.
+            config_error = "agent.build.steps cannot be used with token capture without Gym #5833's capture fix"
+        if config_error is not None:
+            raise HTTPException(422, f"OpenCode sandbox config: {config_error}")
         if self.config.env or self.config.extra_args or self.config.command != "opencode":
             raise HTTPException(422, "env, extra_args and command overrides are supported only by local OpenCode")
         if not all(_is_sandbox_path(path) for path in self.config.plugins):
@@ -1295,7 +1388,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             cleanup_confirmed=state.session.cleanup_confirmed if state.is_continuation else None,
         )
 
-    def _session_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
+    def _session_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str, list[MediaFile]]:
+        """Return the user prompt, the system instructions and the prompt's media files."""
         # Sampling is applied to every OpenCode agent (see _session_response); other controls are rejected.
         supported = {"input", "instructions", "model", "temperature", "top_p"}
         sampled = [name for name in ("temperature", "top_p") if getattr(body, name) is not None]
@@ -1316,6 +1410,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 continue
             if key == "metadata" and value and set(value) <= {AGENT_TIMEOUT_METADATA_KEY}:
                 continue
+            # NeMo RL sets max_output_tokens on every row. It changes nothing when OpenCode's own limit for each
+            # model call (config.max_output_tokens) already stays within it. A tighter limit is refused below.
+            if key == "max_output_tokens" and value is not None and value >= self.config.max_output_tokens:
+                continue
             if value != field.get_default(call_default_factory=True):
                 raise HTTPException(
                     422,
@@ -1329,22 +1427,23 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         roles = [getattr(item, "role", None) for item in items]
         if roles not in (["user"], ["system", "user"], ["developer", "user"]):
             raise HTTPException(
-                422, "OpenCode sandbox execution accepts one user text prompt and optional system/developer message"
+                422, "OpenCode sandbox execution accepts one user prompt and an optional system or developer message"
             )
         texts = []
+        media: list[MediaFile] = []
         for item in items:
-            if isinstance(item.content, str):
-                texts.append(item.content)
-            else:
-                parts = [part if isinstance(part, dict) else part.model_dump() for part in item.content]
-                if any(part.get("type") != "input_text" for part in parts):
-                    raise HTTPException(422, "OpenCode sandbox execution supports text input only")
-                texts.append("\n".join(part["text"] for part in parts))
+            try:
+                text, item_media = split_text_and_media(item.content)
+            except UnsupportedContentError as error:
+                raise HTTPException(422, f"OpenCode sandbox execution: {error}") from error
+            if item_media and item is not items[-1]:
+                raise HTTPException(422, "OpenCode sandbox execution accepts media only in the user prompt")
+            texts.append(text)
+            media = item_media
         if not texts[-1].strip():
             raise HTTPException(422, "OpenCode sandbox execution requires a nonempty user prompt")
-        return texts[-1], "\n\n".join(
-            text for text in [self.config.system_prompt, body.instructions, *texts[:-1]] if text
-        )
+        system = "\n\n".join(text for text in [self.config.system_prompt, body.instructions, *texts[:-1]] if text)
+        return texts[-1], system, media
 
     def _session_output(
         self, export: dict[str, Any], observations: AgentObservationBundle
@@ -1440,7 +1539,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         self, state: AgentSessionState, body: NeMoGymResponseCreateParamsNonStreaming
     ) -> None:
         assert isinstance(state, OpenCodeSandboxSession)
-        _, system = self._session_input(body)
+        prompt, system, media = self._session_input(body)
+        # The base class passes this same request object to _activate_agent_session_state,
+        # which reuses the result so the media are decoded once.
+        state.validated_input = (body, prompt, system, media)
         supplied_instructions = body.instructions is not None or (
             not isinstance(body.input, str)
             and any(getattr(item, "role", None) in {"system", "developer"} for item in body.input)
@@ -1453,7 +1555,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         """Run a delta under one budget, including preparation and the concurrency queue."""
         assert isinstance(state, OpenCodeSandboxSession)
-        prompt, system = self._session_input(body)
+        validated, state.validated_input = state.validated_input, None
+        if validated is not None and validated[0] is body:
+            _, prompt, system, media = validated
+        else:
+            # Another request validated after this one, so its result does not apply here.
+            prompt, system, media = self._session_input(body)
         if state.system_instructions is None:
             state.system_instructions = system
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
@@ -1470,6 +1577,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 body,
                 prompt=prompt,
                 system=state.system_instructions,
+                media=media,
                 timeout=timeout,
                 deadline=deadline,
             )
@@ -1588,6 +1696,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         *,
         prompt: str,
         system: str,
+        media: Sequence[MediaFile] = (),
         timeout: float | None = None,
         deadline: float | None = None,
     ) -> NeMoGymResponse:
@@ -1601,6 +1710,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             "enabled_providers": ["nemo_gym"],
             "autoupdate": False,
             "share": "disabled",
+            # Images reach the model unchanged; the environment decides their size. opencode_config cannot set
+            # attachment, so this always applies.
+            "attachment": copy.deepcopy(UNRESTRICTED_IMAGE_ATTACHMENT),
             "provider": {
                 "nemo_gym": {
                     "npm": "@ai-sdk/openai-compatible",
@@ -1622,15 +1734,21 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                                 "input": self.config.context_window,
                                 "output": self.config.max_output_tokens,
                             },
+                            **copy.deepcopy(IMAGE_INPUT_MODEL_OPTIONS),
                         }
                     },
                 }
             },
-            **_without_empty_tools(self.config.opencode_config),
+            # A copy: the replacement prompt and the request sampling below are per session and must not reach
+            # the shared configuration.
+            **copy.deepcopy(_without_empty_tools(self.config.opencode_config)),
         }
         sampling = {name: value for name in ("temperature", "top_p") if (value := getattr(body, name)) is not None}
         if sampling:
-            config["agent"] = {agent: dict(sampling) for agent in _OPENCODE_AGENTS[self.config.opencode_version]}
+            # Merged into each agent, so a configured agent.build.steps stays.
+            agents = config.setdefault("agent", {})
+            for agent in _OPENCODE_AGENTS[self.config.opencode_version]:
+                agents.setdefault(agent, {}).update(sampling)
             if "temperature" in sampling:
                 # OpenCode sends temperature only for models that declare the capability.
                 config["provider"]["nemo_gym"]["models"][self.config.sandbox_model_id]["temperature"] = True
@@ -1640,7 +1758,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         # System instructions are separate from the user's task and applied to every OpenCode model turn.
         if system:
             if self.config.system_prompt_mode == "replace":
-                # Added to the build agent, which keeps the request sampling set above.
+                # Added to the build agent, beside the request sampling and a configured agent.build.steps.
                 config.setdefault("agent", {}).setdefault("build", {})["prompt"] = system
             else:
                 config["instructions"] = [f"{state.session.session_dir}/instructions.md"]
@@ -1690,6 +1808,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             try:
                 await state.execute(
                     payload,
+                    media=media,
                     timeout=timeout,
                     close_timeout=self.config.session_close_timeout_seconds,
                     deadline=deadline,
@@ -1907,6 +2026,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             usage=usage,
             error_message=reported_message,
         )
+        if reached_step_limit(export, _build_step_limit(config)):
+            # The environment decides whether an answer given at or after the step limit is scored.
+            response = response.model_copy(
+                update={"metadata": {**(response.metadata or {}), HARNESS_STEP_LIMIT_METADATA_KEY: "true"}}
+            )
         return self.report_outcome(response, native_result)
 
 

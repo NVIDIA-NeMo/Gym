@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+claweval_episode:
+  environment_servers:
+    claweval:
+      entrypoint: app.py
+      resources_server: {type: resources_servers, name: claweval_resources}
+      agent_server: {type: responses_api_agents, name: opencode_agent}
+      tool_transport: mcp
+      turn_sessions: continue
+      cleanup_timeout_seconds: 180
+      default_episode_timeout_seconds: 3600
+      max_concurrent_episodes: 1
+      queue_timeout_seconds: 86400
