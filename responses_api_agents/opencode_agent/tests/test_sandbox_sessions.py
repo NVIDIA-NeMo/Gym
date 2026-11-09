@@ -1008,6 +1008,44 @@ def test_request_sampling_joins_the_configured_build_steps(setup):
     assert agent.config.opencode_config == {"agent": {"build": {"steps": 8}}}
 
 
+def step_events(model_calls: int) -> str:
+    """A prompt that made ``model_calls`` model calls: tool calls, then a final answer."""
+    export = json.loads(events())
+    answer = export["messages"][-1]
+    tool_call = {**answer, "info": {**answer["info"], "finish": "tool-calls"}, "parts": answer["parts"][:2]}
+    export["messages"] = [export["messages"][0], *[tool_call] * (model_calls - 1), answer]
+    return json.dumps(export)
+
+
+@pytest.mark.parametrize(
+    ("steps", "model_calls", "marked"),
+    [(3, 3, True), (3, 4, True), (3, 9, True), (4, 3, False), (None, 3, False)],
+)
+def test_step_limit_marks_the_response(setup, steps, model_calls, marked):
+    """A prompt that made at least agent.build.steps model calls reached OpenCode's step limit; the response says so."""
+    agent, sandbox = setup
+    agent.config.opencode_config = {"agent": {"build": {"steps": steps}}} if steps is not None else {}
+    sandbox.events = step_events(model_calls)
+    with TestClient(agent.setup_webserver()) as client:
+        client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+    assert result.status_code == 200, result.text
+    body = result.json()
+    assert body["status"] == "completed"
+    assert body["metadata"].get("harness_step_limit_reached") == ("true" if marked else None)
+
+
+def test_step_limit_counts_only_the_last_prompt():
+    from responses_api_agents.opencode_agent.app import reached_step_limit
+
+    user, assistant = {"info": {"role": "user"}}, {"info": {"role": "assistant"}}
+    export = {"messages": [user, assistant, assistant, assistant, user, assistant]}
+    assert not reached_step_limit(export, 2)
+    assert reached_step_limit(export, 1)
+    assert not reached_step_limit({"messages": []}, 1)
+    assert not reached_step_limit(export, None)
+
+
 @pytest.mark.parametrize(
     ("opencode_config", "detail"),
     [

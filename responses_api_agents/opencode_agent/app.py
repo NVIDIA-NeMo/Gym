@@ -43,6 +43,7 @@ from nemo_gym.agents import (
     HARNESS_RUNNER_FAILED,
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
+    HARNESS_STEP_LIMIT_METADATA_KEY,
     AgentCloseSessionResponse,
     AgentContinuationCapabilities,
     AgentOutcome,
@@ -354,6 +355,34 @@ def _session_opencode_config_error(opencode_config: Mapping[str, Any]) -> str | 
     if "steps" in build and (type(build["steps"]) is not int or build["steps"] <= 0):
         return "agent.build.steps must be a positive integer"
     return None
+
+
+def _build_step_limit(opencode_config: Mapping[str, Any]) -> int | None:
+    """The configured ``agent.build.steps``, or None when OpenCode runs without a step limit."""
+    agent = opencode_config.get("agent")
+    build = agent.get("build") if isinstance(agent, Mapping) else None
+    steps = build.get("steps") if isinstance(build, Mapping) else None
+    return steps if type(steps) is int and steps > 0 else None
+
+
+def reached_step_limit(export: Mapping[str, Any], steps: int | None) -> bool:
+    """Whether the last prompt of an OpenCode export used every model call that ``steps`` allows.
+
+    OpenCode 1.17.11 saves one assistant message per model call of a prompt. ``opencode run`` runs the session loop in
+    packages/opencode/src/session/prompt.ts, which sets ``isLastStep = step >= maxSteps``: from call number ``steps`` on
+    it appends MAX_STEPS_PROMPT as an assistant message but still offers the tools and leaves toolChoice unset. So the
+    note asks for a final answer and does not force one, and the model may keep calling tools. ``steps`` or more
+    assistant messages after the last user message mean the prompt reached the limit, whatever the model did after
+    the note.
+    """
+    if steps is None:
+        return False
+    messages = export.get("messages") or []
+    last_user = max(
+        (index for index, message in enumerate(messages) if message["info"].get("role") == "user"), default=-1
+    )
+    calls = sum(1 for message in messages[last_user + 1 :] if message["info"].get("role") == "assistant")
+    return calls >= steps
 
 
 class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
@@ -1988,6 +2017,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             usage=usage,
             error_message=reported_message,
         )
+        if reached_step_limit(export, _build_step_limit(config)):
+            # The environment decides whether an answer given at or after the step limit is scored.
+            response = response.model_copy(
+                update={"metadata": {**(response.metadata or {}), HARNESS_STEP_LIMIT_METADATA_KEY: "true"}}
+            )
         return self.report_outcome(response, native_result)
 
 
