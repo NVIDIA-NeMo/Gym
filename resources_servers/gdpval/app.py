@@ -74,6 +74,7 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
     lost_session_verification,
 )
+from nemo_gym.verification.judge import judge_call_failed
 from resources_servers.gdpval import persisted_layout
 from resources_servers.gdpval.judge_panel import (
     ResolvedJudge,
@@ -1756,9 +1757,13 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 return _permanent_judge_failure(
                     body, "comparison", {"error": "permanent_judge_error", "ref_errors": ref_errors}
                 )
-            raise RuntimeError(
-                f"all {attempted_matchups} judge matchup(s) failed for task {body.task_id}; last error: {last_error!r}"
-            )
+            # The judge could not grade this deliverable, which says nothing about the model. Raised as a judge
+            # failure, it leaves the score as a masked row that keeps the saved answer, and recovery grades that
+            # answer again. A bare error would end as an untyped HTTP 500 that reruns the whole episode.
+            raise judge_call_failed(
+                f"all {attempted_matchups} judge matchup(s) failed for task {body.task_id}; last error: {last_error!r}",
+                operation="gdpval.comparison",
+            ) from last_error
 
         total_judged = total_wins + total_losses + total_ties
         strict_failure = _strict_comparison_trial_failure(

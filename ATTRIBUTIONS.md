@@ -22553,3 +22553,11 @@ and NVIDIA copyright notice:
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 NVIDIA Corporation. All rights reserved.
 ```
+
+## OfficeQA reference scorer
+
+`resources_servers/officeqa/verifiers/officeqa_pro.py` adapts Databricks'
+[`reward.py`](https://github.com/databricks/officeqa/blob/7b9a3c154ef9fb40215bb67934afc43e6799de16/reward.py),
+revision `7b9a3c154ef9fb40215bb67934afc43e6799de16`, under Apache-2.0.
+The scorer header retains the Databricks copyright, applicable upstream notice,
+and modification record. The scoring behavior is unchanged.

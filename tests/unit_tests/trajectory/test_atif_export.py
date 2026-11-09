@@ -2119,3 +2119,72 @@ def test_transcript_to_atif_needs_identity_and_at_least_one_message() -> None:
         transcript_to_atif([], [], session_id=" ", agent_name="a", agent_version="1")
     with pytest.raises(AtifExportError, match="contains no messages"):
         _transcript([], [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timing_source", ["executor", "artifact", "harness", None])
+async def test_default_enrichment_preserves_strict_v1_exportability(timing_source):
+    from nemo_gym.rollouts.rollout_collection import enrich_run_result
+
+    original = _canonical_rollout()
+    for tool in original["ng_trajectory"]["tool_calls"]:
+        tool["timing_source"] = timing_source
+    expected = gym_rollout_to_atif(original, session_id="legacy", agent_version="test")
+    row = {
+        "trajectory_identity": {
+            "task_id": original["ng_trajectory"]["task_id"],
+            "rollout_id": original["ng_trajectory"]["rollout_id"],
+        }
+    }
+    result = copy.deepcopy(original)
+    for _ in range(2):
+        await enrich_run_result(row, result, capture_dirs=[], observability_enabled=False)
+        actual = gym_rollout_to_atif(result, session_id="legacy", agent_version="test")
+        assert actual == expected
+        assert result["ng_trajectory"]["gaps"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timing_source", ["artifact", None])
+async def test_explicit_v2_preserves_legacy_boundary_diagnostic(timing_source):
+    from nemo_gym.rollouts.rollout_collection import enrich_run_result
+
+    result = _canonical_rollout()
+    for tool in result["ng_trajectory"]["tool_calls"]:
+        tool["timing_source"] = timing_source
+    original_tools = copy.deepcopy(result["ng_trajectory"]["tool_calls"])
+    row = {
+        "trajectory_identity": {
+            "task_id": result["ng_trajectory"]["task_id"],
+            "rollout_id": result["ng_trajectory"]["rollout_id"],
+        }
+    }
+    await enrich_run_result(row, result, capture_dirs=[], observability_enabled=False, trajectory_schema_version="2.0")
+    trajectory = result["ng_trajectory"]
+    gaps = [gap for gap in trajectory["gaps"] if gap["code"] == "tool_legacy_boundary_unavailable"]
+    assert len(gaps) == len(original_tools)
+    for tool, original in zip(trajectory["tool_calls"], original_tools):
+        assert tool["timings"] == []
+        [gap] = [gap for gap in gaps if gap["span_id"] == tool["span_id"]]
+        assert json.loads(gap["detail"]) == {
+            key: original[key] for key in ("started_at", "completed_at", "duration_ms", "timing_source")
+        }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "report", [{"_ng_failure_events_omitted": True}, {"_ng_failure_events": {"invalid": {"boundary": "invalid"}}}]
+)
+async def test_omitted_failure_report_preserves_v1_export(report):
+    from nemo_gym.rollouts.rollout_collection import enrich_run_result
+
+    original = _canonical_rollout()
+    expected = gym_rollout_to_atif(original, session_id="legacy", agent_version="test")
+    row = {"trajectory_identity": {key: original["ng_trajectory"][key] for key in ("task_id", "rollout_id")}}
+    result = {**copy.deepcopy(original), **report}
+    await enrich_run_result(row, result, capture_dirs=[], observability_enabled=False, trajectory_schema_version="2.0")
+    assert "failure_report_unavailable" in {gap["code"] for gap in result["ng_trajectory"]["gaps"]}
+    for _ in range(2):
+        await enrich_run_result(row, result, capture_dirs=[], observability_enabled=False)
+        assert result["ng_trajectory"]["gaps"] == []
+        assert gym_rollout_to_atif(result, session_id="legacy", agent_version="test") == expected
