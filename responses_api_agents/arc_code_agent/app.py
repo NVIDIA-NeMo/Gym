@@ -68,6 +68,7 @@ from responses_api_agents.arc_code_agent.arc_sandbox import (
     full_check_pass,
     tool_response_text,
 )
+from responses_api_agents.arc_code_agent.arc_sandbox_api import DEFAULT_SETUP_COMMAND, SandboxApiPool
 
 
 class ArcCodeAgentConfig(BaseResponsesAPIAgentConfig):
@@ -131,6 +132,14 @@ class ArcCodeAgentConfig(BaseResponsesAPIAgentConfig):
     num_sandbox_workers: int = 8
     sandbox_python: Optional[str] = None  # interpreter with numpy, scipy and networkx (default: the agent's own)
     sandbox_command_prefix: List[str] = []  # for example ["unshare", "-rn"] to run the sandbox without network
+    # Where code runs. "local": sandbox processes on the agent's host (above). "sandbox_api": remote sandboxes through
+    # Gym's sandbox API (nemo_gym.sandbox, for example OpenSandbox), num_sandbox_workers of them, configured by
+    # sandbox_provider (provider config, for example {"opensandbox": {"connection": {...}}}) and sandbox_spec
+    # (image, ttl_s, resources, metadata, ...); sandbox_setup_command installs numpy, scipy and networkx in each one.
+    sandbox_backend: Literal["local", "sandbox_api"] = "local"
+    sandbox_provider: Optional[Dict[str, Any]] = None
+    sandbox_spec: Dict[str, Any] = {}
+    sandbox_setup_command: Optional[str] = DEFAULT_SETUP_COMMAND
 
 
 class ArcCodeAgentRunRequest(BaseRunRequest):
@@ -247,16 +256,23 @@ class ArcCodeAgent(SimpleResponsesAPIAgent):
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
         cfg = self.config
-        self._pool = SandboxPool(
+        common = dict(
             num_workers=cfg.num_sandbox_workers,
             timeout_s=cfg.timeout_s,
             out_chars=cfg.out_chars,
             mem_mb=cfg.mem_mb,
             extra_imports=HYGIENE_IMPORTS if cfg.sandbox_hygiene else [],
             recursion_limit=HYGIENE_RECURSION if cfg.sandbox_hygiene else 0,
-            python=cfg.sandbox_python,
-            command_prefix=cfg.sandbox_command_prefix,
         )
+        if cfg.sandbox_backend == "sandbox_api":
+            self._pool = SandboxApiPool(
+                provider=cfg.sandbox_provider,
+                sandbox_spec=cfg.sandbox_spec,
+                setup_command=cfg.sandbox_setup_command,
+                **common,
+            )
+        else:
+            self._pool = SandboxPool(python=cfg.sandbox_python, command_prefix=cfg.sandbox_command_prefix, **common)
 
     # -- model calls ---------------------------------------------------------------------------------------------
 
@@ -615,7 +631,7 @@ def _call_code(call: Any) -> Any:
     try:
         args = json.loads(call.arguments)
     except (TypeError, ValueError):
-        return None, "the tool arguments are not valid JSON; pass an object like {\"code\": \"...\"}"
+        return None, 'the tool arguments are not valid JSON; pass an object like {"code": "..."}'
     code = args.get("code") if isinstance(args, dict) else None
     if not isinstance(code, str) or not code.strip():
         return None, "the tool arguments need a non-empty string field `code`"
