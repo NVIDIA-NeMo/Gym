@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.core.episode_context import current_rollout_id
 from nemo_gym.core.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeId, MaterializedTask, TaskId
 from nemo_gym.server_runtime.base_environment_server import (
     BaseEnvironmentServerConfig,
@@ -21,8 +22,9 @@ from nemo_gym.server_runtime.base_environment_server import (
     ServedTools,
 )
 from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
-from nemo_gym.server_runtime.episode_tokens import EPISODE_TOKEN_HEADER, EpisodeTokens
+from nemo_gym.server_runtime.episode_tokens import EPISODE_TOKEN_HEADER, EpisodeTokens, episode_token_secret
 from nemo_gym.server_runtime.episode_tools import ToolResult, ToolSpec, TypedToolset, episode_tool
+from nemo_gym.server_runtime.request_handling.request_context import install_request_context_isolation
 from nemo_gym.server_runtime.tool_access import DirectHTTPToolAccess
 
 
@@ -78,6 +80,16 @@ class _Counter:
         """Raise, as a broken tool does."""
         raise RuntimeError("broken")
 
+    @episode_tool
+    async def rollout(self, arguments: _Nothing) -> str | None:
+        """Return the rollout the call runs under, as a tool that calls a model would send it."""
+        return current_rollout_id()
+
+    @episode_tool
+    async def not_a_number(self, arguments: _Nothing) -> float:
+        """Return NaN, which JSON cannot carry."""
+        return float("nan")
+
 
 class _Specs:
     """A toolset that lists fixed specs, as a toolset built from the task does."""
@@ -129,7 +141,10 @@ def _server(agent: Agent | None = None, **overrides: Any) -> tuple[_Server, http
     client._resolve_base_url.return_value = BASE_URL
     server_type = type("_Agented", (_Server,), {"agent": staticmethod(agent)} if agent else {})
     server = server_type(config=config, server_client=client)
-    http = httpx.AsyncClient(transport=httpx.ASGITransport(app=server.setup_webserver()), base_url=BASE_URL)
+    app = server.setup_webserver()
+    # As in production: a request does not inherit the context of the task that sent it, here the episode's own.
+    install_request_context_isolation(app)
+    http = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE_URL)
     return server, http
 
 
@@ -205,16 +220,19 @@ def test_a_call_after_the_episode_ends_is_gone() -> None:
         pytest.param(EpisodeTokens("another-server").mint(EpisodeId(rollout_id="3-0"))[0], 401, id="other-server"),
         pytest.param("forged", 403, id="guessed-nonce"),
         pytest.param("other-episode", 410, id="other-episode"),
+        pytest.param("derivable-key", 401, id="session-middleware-key"),
     ],
 )
 def test_a_call_without_the_episodes_token_is_refused(token: str | None, status: int) -> None:
     replies: list[httpx.Response] = []
 
     async def agent(server: _Server, counter: _Counter, served: ServedTools) -> None:
-        key = server.get_session_middleware_key()
+        key = episode_token_secret()
         sent = {
             "forged": EpisodeTokens(key).mint(EpisodeId(rollout_id="3-0"))[0],
             "other-episode": EpisodeTokens(key).mint(EpisodeId(rollout_id="4-0"))[0],
+            # The session key is derived from the server's names; tokens are signed with a random secret instead.
+            "derivable-key": EpisodeTokens(server.get_session_middleware_key()).mint(EpisodeId(rollout_id="3-0"))[0],
         }.get(token, token)
         replies.append(
             await http.post("/add", json={"amount": 1}, headers={EPISODE_TOKEN_HEADER: sent} if sent else {})
@@ -234,21 +252,132 @@ def test_a_call_without_the_episodes_token_is_refused(token: str | None, status:
         pytest.param("/add", {"amount": "two"}, 422, "amount", id="invalid-arguments"),
         pytest.param("/add", [1], 422, "JSON object", id="not-an-object"),
         pytest.param("/fail", {}, 500, "RuntimeError", id="broken-tool"),
+        pytest.param("/not_a_number", {}, 500, "not JSON", id="non-finite-output"),
     ],
 )
 def test_a_call_the_tool_cannot_run_answers_with_an_error_the_agent_sees(
     path: str, body: Any, status: int, detail: str
 ) -> None:
+    """Each such call is also recorded as an error, so the calls the grader reads include it."""
     replies: list[httpx.Response] = []
+    recorded: list[Any] = []
 
     async def agent(server: _Server, counter: _Counter, served: ServedTools) -> None:
         replies.append(await http.post(path, json=body, headers=_headers(served)))
+        recorded.extend(served.calls)
 
     server, http = _server(agent)
     asyncio.run(server.run_request(_request()))
 
     assert replies[0].status_code == status
     assert detail in replies[0].json()["detail"]
+    assert [(call.name, call.arguments, call.is_error) for call in recorded] == [(path.strip("/"), body, True)]
+    assert detail in recorded[0].output["detail"]
+
+
+@pytest.mark.parametrize("path", ["/run", "/aggregate_metrics", "/ng-rollout/3-0/run", "/add/../run", "/a/b"])
+def test_an_episode_token_opens_only_the_episodes_tools(path: str) -> None:
+    """A model that names a tool ``run`` cannot start another episode on the server that serves its tools."""
+    replies: list[httpx.Response] = []
+
+    async def agent(server: _Server, counter: _Counter, served: ServedTools) -> None:
+        replies.append(await http.post(path, json=_request("4-0").model_dump(mode="json"), headers=_headers(served)))
+
+    server, http = _server(agent)
+    response = asyncio.run(server.run_request(_request()))
+
+    assert replies[0].status_code == 403
+    assert "only the episode's tools" in replies[0].json()["detail"]
+    assert response.result == "total=0 calls=0"
+
+
+@pytest.mark.parametrize(
+    "path, rollout_id",
+    [
+        pytest.param("/rollout", "3-0", id="bare"),
+        pytest.param("/ng-rollout/3-0/rollout", "3-0", id="own-prefix"),
+        pytest.param("/ng-rollout/4-0/rollout", "3-0", id="another-rollouts-prefix"),
+    ],
+)
+def test_a_tool_runs_under_the_rollout_its_token_names(path: str, rollout_id: str) -> None:
+    """A tool that calls a model or a Resources Server sends the call under the episode's rollout."""
+    replies: list[httpx.Response] = []
+
+    async def agent(server: _Server, counter: _Counter, served: ServedTools) -> None:
+        replies.append(await http.post(path, json={}, headers=_headers(served)))
+
+    server, http = _server(agent)
+    asyncio.run(server.run_request(_request(rollout_id)))
+
+    assert replies[0].json() == rollout_id
+
+
+def test_a_tool_keeps_the_attempt_of_its_episode() -> None:
+    replies: list[httpx.Response] = []
+
+    async def agent(server: _Server, counter: _Counter, served: ServedTools) -> None:
+        replies.append(await http.post("/rollout", json={}, headers=_headers(served)))
+
+    server, http = _server(agent)
+    request = _request().model_copy(update={"episode_id": EpisodeId(rollout_id="3-0", attempt=2)})
+    asyncio.run(server.run_request(request))
+
+    assert replies[0].json() == request.episode_id.capture_key
+
+
+def test_a_call_waiting_when_the_episode_ends_does_not_run() -> None:
+    """The episode's grant ends while a call waits for the one before it; the waiting call must not run."""
+    seen: dict[str, Any] = {}
+
+    async def agent(server: _Server, counter: _Counter, served: ServedTools) -> None:
+        seen["counter"], seen["calls"] = counter, served.calls
+        slow = asyncio.create_task(http.post("/slow_add", json={"amount": 1}, headers=_headers(served)))
+        while counter.running == 0:
+            await asyncio.sleep(0.01)
+        seen["queued"] = asyncio.create_task(http.post("/add", json={"amount": 10}, headers=_headers(served)))
+        seen["slow"] = slow
+        await asyncio.sleep(0.05)
+
+    server, http = _server(agent)
+
+    async def scenario() -> None:
+        await server.run_request(_request())
+        seen["slow_reply"] = await seen["slow"]
+        seen["queued_reply"] = await seen["queued"]
+
+    asyncio.run(scenario())
+
+    assert seen["slow_reply"].status_code == 410 and "ended while the call ran" in seen["slow_reply"].json()["detail"]
+    assert seen["queued_reply"].status_code == 410
+    assert seen["counter"].total == 0
+    assert [(call.name, call.output) for call in seen["calls"]] == [
+        ("slow_add", {"detail": "Tool 'slow_add' was cancelled"})
+    ]
+
+
+def test_a_call_cancelled_by_its_client_is_recorded_and_frees_the_episode() -> None:
+    """A tool can change state before its client disconnects, so the record must not lose the call."""
+    seen: dict[str, Any] = {}
+
+    async def agent(server: _Server, counter: _Counter, served: ServedTools) -> None:
+        slow = asyncio.create_task(http.post("/slow_add", json={"amount": 1}, headers=_headers(served)))
+        while counter.running == 0:
+            await asyncio.sleep(0.01)
+        slow.cancel()
+        await asyncio.gather(slow, return_exceptions=True)
+        seen["next"] = await http.post("/add", json={"amount": 2}, headers=_headers(served))
+        seen["calls"] = list(served.calls)
+
+    server, http = _server(agent)
+    asyncio.run(server.run_request(_request()))
+
+    assert seen["next"].json() == {"total": 2}
+    assert [(call.name, call.is_error) for call in seen["calls"]] == [("slow_add", True), ("add", False)]
+
+
+def test_a_server_that_exports_checkpoints_is_refused() -> None:
+    with pytest.raises(TypeError, match="checkpoint_mode='exported'"):
+        type("_Exported", (_Server,), {"checkpoint_mode": "exported"})
 
 
 def test_a_call_under_a_rollout_prefix_reaches_the_tool() -> None:
