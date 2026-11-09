@@ -34,6 +34,7 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from nemo_gym.models.token_capture import diagnostics
 from nemo_gym.models.token_capture.fingerprint import assistant_fingerprint
 from nemo_gym.models.token_capture.lineage import stamp_continuation
 from nemo_gym.models.token_capture.protocols import (
@@ -141,6 +142,10 @@ class CaptureContext:
     # ``capture_engine_refusal`` recorded that the engine refused this call. The call has no
     # entry, and the worker-custody sweep must not record it a second time as uncommitted.
     engine_refusal_recorded: bool = False
+
+    diagnostic_resolution: dict[str, object] | None = None
+    diagnostic_response: dict[str, object] | None = None
+    diagnostic_previous_response_id: str | None = None
 
     @property
     def parent_call_id(self) -> str | None:
@@ -345,6 +350,7 @@ async def resolve_parent(request_messages: list | None) -> None:
         context.model_call_id,
         UNRESOLVED_PARENT_REASON,
     )
+    diagnostics.emit(context, event="rejection")
 
 
 async def _admit_candidate(context: CaptureContext, request_items: list[dict]) -> None:

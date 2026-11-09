@@ -9,6 +9,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any, Protocol
 
+from nemo_gym.models.token_capture import diagnostics
 from nemo_gym.models.token_capture.completion import (
     completion_items,
     completion_metadata,
@@ -366,10 +367,12 @@ class _BaseExternalCaptureHandler(ABC):
             request_items=list(context.request_items or []),
             response_items=response_items,
         )
+        diagnostics.remember_response(context, served_payload, response_items)
         if context.publish_on_delivery:
             context.deferred_commit = commit
             return
         await ledger.record(commit)
+        diagnostics.emit(context, event="commit")
         mark_external_staging_committed(
             rollout_id=coords.capture_key,
             model_call_id=coords.model_call_id,
@@ -400,6 +403,7 @@ async def publish_deferred_commit(context: CaptureContext) -> None:
         raise
     # The capture context variable may already be reset here, so the context is marked directly.
     context.committed = True
+    diagnostics.emit(context, event="commit")
 
 
 class VLLMWorkerCaptureHandler(_BaseExternalCaptureHandler):

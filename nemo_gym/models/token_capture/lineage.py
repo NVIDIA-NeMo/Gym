@@ -53,6 +53,7 @@ from typing import TYPE_CHECKING, Any
 import orjson
 
 from nemo_gym.core.episode_types import EpisodeId
+from nemo_gym.models.token_capture import diagnostics
 from nemo_gym.models.token_capture.fingerprint import (
     FINGERPRINT_VERSION,
     assistant_fingerprint,
@@ -314,6 +315,7 @@ class RolloutLineage:
             # context must belong to the captured output turn.
             candidates = self._candidates_by_tool_call_turn(messages)
             reason = "tool_call_turn"
+        diagnostics.remember_resolution(candidates=candidates, branch=reason or "fingerprint", fingerprint=fingerprint)
         if len(candidates) > 1:
             # Calls with identical cumulative tokens are interchangeable on either path.
             digests = {(node.digest, node.cum_len) for node in candidates}

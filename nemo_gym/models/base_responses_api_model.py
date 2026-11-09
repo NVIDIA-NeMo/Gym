@@ -921,6 +921,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         if context is not None:
             self._validate_capture_request(params)
             request_messages = _request_messages(params)
+            context.diagnostic_previous_response_id = params.previous_response_id
             try:
                 await resolve_parent(request_messages)
                 await register_call_intent()
