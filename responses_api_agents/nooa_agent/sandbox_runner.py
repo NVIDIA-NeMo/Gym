@@ -127,8 +127,14 @@ class SandboxNOOARunner:
             ):
                 await self._collect_diagnostics()
             if cleanup["timed_out"]:
-                # Exhausting the worker budget is not a retryable dependency outage.
-                raise RuntimeError("NOOA sandbox worker exceeded its execution deadline")
+                detail = "NOOA sandbox worker exceeded its execution deadline"
+                if self.artifact is None or self.artifact.response is None:
+                    raise RuntimeError(detail)
+                # The worker wrote its partial result when the deadline stopped it: a timed-out run, which the
+                # outcome ladder decides. A recovered checkpoint alone stays an activation failure.
+                request.model_cookies.update(self.artifact.model_cookies)
+                request.resource_cookies.update(self.artifact.resource_cookies)
+                return self._ended_result(self.artifact, NOOATerminationReason.TIMEOUT_EXCEEDED, detail)
             if cleanup["error"]:
                 raise RuntimeError(f"NOOA sandbox supervisor failed: {cleanup['error']}")
             if cleanup["return_code"] != 0:
@@ -139,6 +145,14 @@ class SandboxNOOARunner:
                 raise RuntimeError(f"NOOA sandbox result is missing or malformed: {self.diagnostics}")
             request.model_cookies.update(self.artifact.model_cookies)
             request.resource_cookies.update(self.artifact.resource_cookies)
+            if (
+                self.artifact.error is not None
+                and self.artifact.error.kind != "cancelled"
+                and self.artifact.response is not None
+            ):
+                # The worker's run failed and reported its partial evidence (termination infrastructure_error): the
+                # run's own failure, which the outcome ladder decides.
+                return self.artifact.run_result()
             if self.artifact.error is not None:
                 detail = self.artifact.error.message
                 error = ConnectionError(detail) if self.artifact.error.kind == "transient" else RuntimeError(detail)
@@ -151,26 +165,30 @@ class SandboxNOOARunner:
                 request.model_cookies.update(evidence.model_cookies)
                 request.resource_cookies.update(evidence.resource_cookies)
                 if evidence.response is not None:
-                    result = evidence.run_result()
                     reason = (
                         NOOATerminationReason.CANCELLED
                         if isinstance(error, asyncio.CancelledError)
                         else NOOATerminationReason.INFRASTRUCTURE_ERROR
                     )
-                    detail = str(error) or "NOOA execution was cancelled"
-                    result.termination_reason = reason
-                    result.termination_error = detail
-                    result.episode = replace(
-                        result.episode,
-                        response=set_response_lifecycle(result.episode.response, reason, detail),
-                        observations=self.observations or result.episode.observations,
-                    )
-                    self.observations = result.episode.observations
+                    result = self._ended_result(evidence, reason, str(error) or "NOOA execution was cancelled")
                     if isinstance(error, asyncio.CancelledError):
                         error.nooa_result = result
                     else:
                         raise NOOARunFailure(error, result) from error
             raise
+
+    def _ended_result(self, evidence: SandboxResult, reason: NOOATerminationReason, detail: str) -> NOOARunResult:
+        """The run result ``evidence`` holds, ended for ``reason``, with the observations captured so far."""
+        result = evidence.run_result()
+        result.termination_reason = reason
+        result.termination_error = detail
+        result.episode = replace(
+            result.episode,
+            response=set_response_lifecycle(result.episode.response, reason, detail),
+            observations=self.observations or result.episode.observations,
+        )
+        self.observations = result.episode.observations
+        return result
 
     async def _collect_diagnostics(self) -> None:
         """Retain a bounded log tail only after the important evidence is captured."""

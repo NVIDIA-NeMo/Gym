@@ -131,16 +131,13 @@ class HermesSandboxSession(AgentSessionState):
     async def execute(
         self, payload: dict[str, JsonValue], *, timeout: float, close_timeout: float
     ) -> dict[str, JsonValue]:
-        """Use the common lifecycle, then check the Hermes-specific result."""
-        output = await self.session.execute(
+        """Use the common lifecycle; the output's ``error`` names an exception that ended the runner."""
+        return await self.session.execute(
             stage_activation=lambda: self.stage_activation(payload),
             collect=self.collect_artifacts,
             timeout=timeout,
             close_timeout=close_timeout,
         )
-        if output.get("error") is not None:
-            raise RuntimeError(f"Hermes sandbox runner failed: {output['error']}\n{output.get('traceback', '')}")
-        return output
 
     async def stage_activation(self, payload: dict[str, JsonValue]) -> SandboxCommand:
         """Stage this activation's input and describe its harness process."""

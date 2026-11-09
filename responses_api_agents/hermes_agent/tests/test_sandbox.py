@@ -286,7 +286,10 @@ async def test_activation_replay_survives_disconnected_waiter(agent, state):
         *[
             (
                 f"{prefix}{status} controlled model failure",
-                {"failure_kind": "model_request_error", "status_code": status},
+                # No model reply came before the error: a 4xx other than 408/425/429 is a rejected request.
+                {"failure_kind": "model_request_rejected"}
+                if status < 429
+                else {"failure_kind": "model_request_error", "status_code": status},
                 status in {429, 500},
             )
             for status in (400, 401, 422, 429, 500)
@@ -899,7 +902,8 @@ async def test_invalid_runtime_preserves_response_and_cleanup(agent, state, runt
     state.session.sandbox.stop.assert_not_awaited()
 
 
-async def test_close_preserves_runtime_gap_after_runner_error(agent, state):
+async def test_runner_error_is_a_run_without_a_result_and_close_keeps_its_evidence(agent, state):
+    """A runner that caught the exception ending Hermes answers 200 failed ``agent_run_error`` (retried), not a 500."""
     state.upload_json = AsyncMock()
     mock_json_download(
         state.session.sandbox,
@@ -912,10 +916,13 @@ async def test_close_preserves_runtime_gap_after_runner_error(agent, state):
             },
         ],
     )
-    with pytest.raises(RuntimeError, match="Hermes sandbox runner failed: runner failed"):
-        await agent._run_sandbox_episode(
-            body=NeMoGymResponseCreateParamsNonStreaming(input="task"), agent_session_id="session", state=state
-        )
+    episode = await agent._run_sandbox_episode(
+        body=NeMoGymResponseCreateParamsNonStreaming(input="task"), agent_session_id="session", state=state
+    )
+    assert episode.response.status == "failed"
+    assert json.loads(episode.response.metadata["ng_agent_outcome"]) == {"failure_kind": "agent_run_error"}
+    assert episode.response.error.message == "Hermes sandbox runner failed: runner failed"
+    assert agent_outcome_policy(episode.response) == OutcomeAction.RETRY
     close = await agent._close_agent_session_state(state)
     assert close.agent_observations.records[0].model_calls[0].response_id == "completion"
     assert [gap.code for gap in close.agent_observations.gaps] == ["runtime_info_unavailable"]
@@ -1273,14 +1280,100 @@ async def test_context_limit_keeps_partial_work_verifiable(agent, state, capture
         body=NeMoGymResponseCreateParamsNonStreaming(input="task"), agent_session_id="session", state=state
     )
 
+    # The ladder reports a context limit as incomplete without a failure kind; main left a stale model_context_limit.
     assert episode.response.status == "incomplete"
-    assert episode.response.error is None
+    assert episode.response.error.message.startswith("Context length exceeded")
     assert episode.response.output[-1].content[0].text == "Partial answer"
-    assert json.loads(episode.response.metadata["ng_agent_outcome"])["failure_kind"] == "model_context_limit"
+    assert "ng_agent_outcome" not in episode.response.metadata
+    assert episode.response.metadata["ng_agent_stop_reason"] == "context_limit"
     assert agent_outcome_policy(episode.response) == OutcomeAction.VERIFY
     root = episode.observations.records[0]
     assert root.status == "incomplete"
     assert root.stop_reason == "context_limit"
+
+
+_ASKED = [{"role": "user", "content": "task"}]
+_REPLIED = [*_ASKED, {"role": "assistant", "content": "Partial answer"}]
+
+
+@pytest.mark.parametrize(
+    "result,status,outcome,stop_reason",
+    [
+        ({"completed": True, "messages": _REPLIED}, "completed", None, "completed"),
+        (
+            {
+                "partial": True,
+                "error": "Context length exceeded: max compression attempts (3) reached.",
+                "messages": _REPLIED,
+            },
+            "incomplete",
+            None,
+            "context_limit",
+        ),
+        # Hermes grades a deadline before any reply today; it keeps doing so until capture evidence lands.
+        (
+            {"completed": False, "interrupted": True, "stop_reason": "wall_time", "messages": _ASKED},
+            "incomplete",
+            None,
+            "timeout",
+        ),
+        (
+            {"completed": False, "interrupted": True, "stop_reason": "wall_time", "messages": _REPLIED},
+            "incomplete",
+            None,
+            "timeout",
+        ),
+        (
+            {"completed": False, "stop_reason": "max_iterations", "messages": _REPLIED},
+            "incomplete",
+            None,
+            "agent_limit",
+        ),
+        (
+            {"failed": True, "error": "First response truncated due to output length limit", "messages": _ASKED},
+            "incomplete",
+            None,
+            "output_limit",
+        ),
+        (
+            {"failed": True, "error": "HTTP 503: upstream unavailable", "messages": _REPLIED},
+            "failed",
+            {"failure_kind": "model_request_error", "status_code": 503},
+            "error",
+        ),
+        (
+            {"failed": True, "error": "Error code: 400 - bad request", "messages": _REPLIED},
+            "failed",
+            {"failure_kind": "model_request_error", "status_code": 400},
+            "error",
+        ),
+        (
+            {"failed": True, "error": "Error code: 401 - unauthorized", "messages": _ASKED},
+            "failed",
+            {"failure_kind": "model_request_rejected"},
+            "error",
+        ),
+        (
+            {"partial": True, "error": "Model generated invalid tool call: nonexistent", "messages": _REPLIED},
+            "failed",
+            {"failure_kind": "agent_invalid_output"},
+            "error",
+        ),
+    ],
+)
+async def test_each_hermes_result_reaches_its_outcome_ladder_row(agent, state, result, status, outcome, stop_reason):
+    state.execute = AsyncMock(return_value={"result": result})
+
+    episode = await agent._run_sandbox_episode(
+        body=NeMoGymResponseCreateParamsNonStreaming(input="task"), agent_session_id="session", state=state
+    )
+
+    assert episode.response.status == status
+    assert episode.response.metadata["ng_agent_stop_reason"] == stop_reason
+    raw = episode.response.metadata.get("ng_agent_outcome")
+    assert (json.loads(raw) if raw else None) == outcome
+    if stop_reason == "output_limit":
+        assert episode.response.incomplete_details.reason == "max_output_tokens"
 
 
 async def test_runner_stopped_at_the_deadline_is_a_partial_response(agent, state):

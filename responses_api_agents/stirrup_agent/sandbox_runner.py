@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import httpx  # noqa: E402
-from openai import APIStatusError  # noqa: E402
+from openai import APIConnectionError, APIStatusError  # noqa: E402
 from openai.types.responses import FunctionToolParam  # noqa: E402
 from pydantic import BaseModel, ConfigDict, create_model  # noqa: E402
 from stirrup.core.models import (  # noqa: E402
@@ -50,9 +50,6 @@ _TOOL_TIMEOUT_S = 900
 # Connection attempts before a task tool call fails. httpx retries only before the request is sent, so a call that
 # reached the route is never repeated.
 _TOOL_CONNECT_RETRIES = 3
-
-# Statuses with which a Model Server says the request itself is invalid. Other errors are infrastructure failures.
-_REJECTION_STATUSES = frozenset({400, 413, 422})
 
 
 class LocalShell(CodeExecToolProvider):
@@ -418,6 +415,7 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
         stop_reason = None
         model_error = None
         model_error_status = None
+        model_transport_error = False
         invalid_output = None
         async with agent.session(cache_on_interrupt=False) as session:
             try:
@@ -428,12 +426,15 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
                 finish_params, history = None, _completed_turns(session, messages)
                 stop_reason = _stop_reason(payload)
             except APIStatusError as error:
-                if not _rejected_by_model(error):
-                    raise
-                # The episode ends here and is graded on the turns completed so far.
+                # The model answered the client's last attempt with an HTTP error; the episode ends on it, keeping
+                # the turns completed so far, and the agent server classifies it by its status.
                 finish_params, history = None, _completed_turns(session, messages)
                 stop_reason, model_error = "model_error", str(error)
                 model_error_status = error.status_code
+            except APIConnectionError as error:
+                # No reply after the client's retries (refused, reset or timed out): a transport error, with no status.
+                finish_params, history = None, _completed_turns(session, messages)
+                stop_reason, model_error, model_transport_error = "model_error", str(error), True
             except CompactionSummaryError as error:
                 # The policy model's own summaries were unusable; the episode is graded on the turns so far.
                 finish_params, history = None, [*_completed_turns(session, messages)[:-1], error.messages]
@@ -451,6 +452,7 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
             "stop_reason": stop_reason,
             "model_error": model_error,
             "model_error_status": model_error_status,
+            "model_transport_error": model_transport_error,
             "invalid_output": invalid_output,
             **observer.report(status, history, output_items),
         }
@@ -460,11 +462,6 @@ def _completed_turns(session: Any, messages: list[Any]) -> list[list[Any]]:
     """The message history as of the start of the turn that was running, from Stirrup's per-turn snapshot."""
     state = session._current_run_state
     return [list(messages)] if state is None else [*state.full_msg_history, state.msgs]
-
-
-def _rejected_by_model(error: APIStatusError) -> bool:
-    """Whether the Model Server refused the request itself (such as a context overflow), which no retry can fix."""
-    return error.status_code in _REJECTION_STATUSES
 
 
 def _stop_reason(payload: dict[str, Any]) -> str:

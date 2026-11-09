@@ -75,6 +75,7 @@ class SandboxResult(BaseModel):
     termination_reason: NOOATerminationReason | None = None
     termination_error: str | None = None
     model_status_code: int | None = Field(default=None, ge=400, le=599, strict=True)
+    model_transport_error: bool = False
     error: RunnerError | None = None
 
     def run_result(self) -> NOOARunResult:
@@ -89,6 +90,7 @@ class SandboxResult(BaseModel):
             termination_reason=self.termination_reason,
             termination_error=self.termination_error,
             model_status_code=self.model_status_code,
+            model_transport_error=self.model_transport_error,
             trajectory=self.trajectory,
         )
 
@@ -253,6 +255,7 @@ async def execute(
         termination_reason=result.termination_reason if result else None,
         termination_error=result.termination_error if result else None,
         model_status_code=result.model_status_code if result else None,
+        model_transport_error=result.model_transport_error if result else False,
         error=error,
     )
 

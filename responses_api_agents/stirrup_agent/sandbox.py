@@ -57,7 +57,7 @@ class StirrupSessionState(AgentSessionState):
             await upload_text(sandbox, path=f"{package}/__init__.py", text="")
 
     async def execute(self, payload: dict[str, Any], *, timeout: float, close_timeout: float) -> dict[str, Any]:
-        """Run the harness once and return its output, raising the runner's error."""
+        """Run the harness once and return its output; its ``error`` names an exception that ended the runner."""
         input_path = f"{self.session.session_dir}/input.json"
         output_path = f"{self.session.session_dir}/output.json"
 
@@ -78,9 +78,8 @@ class StirrupSessionState(AgentSessionState):
         output = await self.session.execute(
             stage_activation=stage, collect=collect, timeout=timeout, close_timeout=close_timeout
         )
-        if output.get("error") is not None:
-            raise RuntimeError(f"Stirrup sandbox runner failed: {output['error']}\n{output.get('traceback', '')}")
-        self.resources_cookies = output["resources_cookies"]
+        # A runner that failed reports no cookies; the session keeps the ones it has.
+        self.resources_cookies = output.get("resources_cookies", self.resources_cookies)
         return output
 
     async def close(self, timeout: float) -> None:

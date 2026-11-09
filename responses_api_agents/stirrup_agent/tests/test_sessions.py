@@ -241,16 +241,21 @@ def test_a_failed_episode_still_closes_with_its_evidence(agent, client, root, mo
     tool_access = _TOOL_ACCESS.model_copy(update={"base_url": resources.base_url})
     try:
         _seed(client, sandbox_access=_sandbox_access(str(root)), tool_accesses=[tool_access])
-        with raises_agent_failure(RuntimeError, match="500"):
-            client.post(
-                f"/ng-rollout/{_EPISODE.capture_key}/v1/responses",
-                json={"input": "Write the report.", "model": "policy", "tools": _TOOLS},
-            )
+        response = client.post(
+            f"/ng-rollout/{_EPISODE.capture_key}/v1/responses",
+            json={"input": "Write the report.", "model": "policy", "tools": _TOOLS},
+        )
         closed = _close(client)
     finally:
         model.close()
         resources.close()
 
+    # A task tool's server failing ends the run without a result: 200 failed agent_run_error (main answered 500).
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "failed"
+    assert json.loads(body["metadata"]["ng_agent_outcome"]) == {"failure_kind": "agent_run_error"}
+    assert "500" in body["error"]["message"]
     bundle = closed.json()["agent_observations"]
     (invocation,) = bundle["records"]
     assert invocation["status"] == "failed"

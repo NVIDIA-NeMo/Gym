@@ -197,7 +197,6 @@ async def test_limit_result_survives_worker_boundary_and_cleanup(reason: NOOATer
     [
         cleanup_receipt(return_code=7),
         cleanup_receipt(return_code=None),
-        cleanup_receipt(timed_out=True),
         cleanup_receipt(error="supervisor failed"),
     ],
 )
@@ -237,15 +236,48 @@ async def test_missing_or_malformed_result_records_gap_not_success(contents: str
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind,exception", [("transient", ConnectionError), ("fatal", RuntimeError)])
-async def test_child_error_preserves_evidence_and_failure_class(kind: str, exception: type[Exception]) -> None:
+@pytest.mark.parametrize("kind", ["transient", "fatal"])
+async def test_child_error_is_the_runs_own_failure_with_its_evidence(kind: str) -> None:
+    """The worker's failed run is returned for the outcome ladder; main raised it, answered 503 or 500."""
     r, s = runner()
-    complete_files(r, s, RunnerError(kind=kind, message="dependency failure"))
-    with pytest.raises(NOOARunFailure) as caught:
+    failed = artifact(RunnerError(kind=kind, message="dependency failure")).model_copy(
+        update={"termination_reason": NOOATerminationReason.INFRASTRUCTURE_ERROR, "model_transport_error": True}
+    )
+    complete_files(r, s)
+    s.files[r.directory + "/result.json"] = failed.model_dump_json()
+    result = await r.run(payload().request)
+    assert result.episode.observations.gaps[0].code == "test"
+    assert result.termination_reason is NOOATerminationReason.INFRASTRUCTURE_ERROR
+    assert result.model_transport_error is True
+    await r.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind,exception", [("transient", ConnectionError), ("fatal", RuntimeError)])
+async def test_child_error_without_a_response_keeps_its_failure_class(kind: str, exception: type[Exception]) -> None:
+    r, s = runner()
+    complete_files(r, s)
+    s.files[r.directory + "/result.json"] = (
+        artifact(RunnerError(kind=kind, message="dependency failure")).model_copy(update={"response": None})
+    ).model_dump_json()
+    with pytest.raises(exception, match="dependency failure"):
         await r.run(payload().request)
-    assert isinstance(caught.value.__cause__, exception)
-    assert caught.value.result.episode.observations.gaps[0].code == "test"
-    assert caught.value.result.termination_reason is NOOATerminationReason.INFRASTRUCTURE_ERROR
+    await r.close()
+
+
+@pytest.mark.asyncio
+async def test_worker_deadline_with_its_partial_result_is_a_timed_out_run() -> None:
+    """main raised at the deadline (a retried 500, partial lost); the worker's partial result is now returned."""
+    r, s = runner()
+    complete_files(r, s, RunnerError(kind="cancelled", message="CancelledError: "))
+    s.files[r.directory + "/cleanup.json"] = json.dumps(cleanup_receipt(timed_out=True, return_code=-15))
+    request = payload().request
+    result = await r.run(request)
+    assert result.termination_reason is NOOATerminationReason.TIMEOUT_EXCEEDED
+    assert result.episode.response.status == "incomplete"
+    assert result.episode.response.output == artifact().response.output
+    assert request.resource_cookies == {"resource": "new"}
+    await r.close()
 
 
 @pytest.mark.asyncio

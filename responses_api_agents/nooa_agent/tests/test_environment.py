@@ -207,7 +207,11 @@ async def test_swallowed_resource_failure_still_skips_verification_and_closes_wi
     response = await environment.run_request(request)
 
     assert response.failure.stage == "agent"
-    assert "503: NOOA dependency request failed" in response.failure.failure_reason
+    # The run failed on a resource tool's server: 200 failed agent_run_error, retried (main answered 503).
+    assert orjson.loads(response.failure.partial_response.metadata["ng_agent_outcome"]) == {
+        "failure_kind": "agent_run_error"
+    }
+    assert response.failure.terminal is False
     assert response.result is None
     assert [call.kwargs["json"]["city"] for call in outbound.await_args_list] == ["unknown", "Paris"]
     assert outbound.await_args_list[0].kwargs["cookies"] == {"resource": "seed"}

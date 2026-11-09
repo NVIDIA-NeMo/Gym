@@ -14,7 +14,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from aiohttp import web
 
-from nemo_gym.core import NeMoGymResponse, NgFailureEvent
+from nemo_gym.agents import OutcomeAction, agent_outcome_policy
+from nemo_gym.core import NeMoGymResponse
 from responses_api_agents.browsecomp_agent.sandbox import BrowsecompSandboxSession, _write_sources
 from responses_api_agents.browsecomp_agent.tests.test_agent_sessions import (
     EPISODE,
@@ -590,6 +591,14 @@ async def test_an_endpoint_lost_mid_episode_fails_the_activation_instead_of_timi
         for runner in runners.values():
             await runner.cleanup()
     receipt = json.loads(output_path.read_text())
+    if lost == "model":
+        # The model's outage ends the run on a transport error, retried by default, with the trajectory so far.
+        assert "error" not in receipt
+        response = NeMoGymResponse.model_validate(receipt["response"])
+        assert response.status == "failed"
+        assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "model_transport_error"}
+        assert [item.type for item in response.output] == ["function_call", "function_call_output"]
+        return
     assert "response" not in receipt
     assert receipt["error"].startswith(("ClientConnectorError", "ServerDisconnectedError")), receipt["error"]
 
@@ -631,9 +640,14 @@ def test_the_sandbox_activation_clamps_its_deadline_and_fails_on_an_error_receip
     assert payloads[0]["token_count_url"] is None
     assert payloads[0]["seed"]["tool_accesses"] == [] and payloads[0]["seed"]["sandbox_access"] is None
 
-    with pytest.raises(NgFailureEvent) as failed:  # The served app answers it with 500.
-        activate()
-    assert "BrowseComp sandbox failed: ConnectionError" in str(failed.value.__cause__)
+    # An error receipt is a run without a usable result: 200 failed agent_run_error, retried by default (main: 500).
+    reply = activate()
+    assert reply.status_code == 200, reply.text
+    failed = NeMoGymResponse.model_validate(reply.json())
+    assert failed.status == "failed" and failed.output == []
+    assert json.loads(failed.metadata["ng_agent_outcome"]) == {"failure_kind": "agent_run_error"}
+    assert failed.error.message.startswith("BrowseComp sandbox failed: ConnectionError")
+    assert agent_outcome_policy(failed) == OutcomeAction.RETRY
 
 
 def test_missing_process_isolation_refuses_the_seed_after_stopping_the_sandbox(

@@ -27,10 +27,13 @@ from nemo_gym.agents import (
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     AgentSessionState,
+    RunEvidence,
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.core import (
+    AGENT_INVALID_OUTPUT,
     MODEL_REQUEST_ERROR,
+    MODEL_TRANSPORT_ERROR,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     rollout_context,
@@ -39,7 +42,7 @@ from nemo_gym.sandbox import AsyncSandbox, create_provider, resolve_provider_con
 from nemo_gym.server_runtime import DirectHTTPToolAccess
 from nemo_gym.trajectory import AgentInvocation
 from responses_api_agents.nooa_agent.config import NOOAAgentConfig
-from responses_api_agents.nooa_agent.result import finalize_run_result, is_transient_infrastructure_error
+from responses_api_agents.nooa_agent.result import finalize_run_result
 from responses_api_agents.nooa_agent.runner import (
     InProcessNOOARunner,
     NOOARunFailure,
@@ -50,6 +53,16 @@ from responses_api_agents.nooa_agent.runner import (
 from responses_api_agents.nooa_agent.sandbox_runner import SandboxNOOARunner
 from responses_api_agents.nooa_agent.sandbox_runtime import prepare_nooa_runtime
 from responses_api_agents.nooa_agent.termination import NOOATerminationReason
+
+
+# NOOA's own stops at a configured budget or its loop guard: the model's partial work is graded.
+_TURN_LIMITS = frozenset(
+    {
+        NOOATerminationReason.POLICY_BUDGET_EXCEEDED,
+        NOOATerminationReason.MAX_ITERATIONS_EXCEEDED,
+        NOOATerminationReason.LOOP_DETECTED,
+    }
+)
 
 
 @dataclass
@@ -201,20 +214,51 @@ class NOOAAgent(SimpleResponsesAPIAgent):
             if state.result is not None:
                 state.result.termination_reason = NOOATerminationReason.CANCELLED
             raise
-        except Exception as error:
-            if isinstance(error, NOOARunFailure):
-                state.result = error.result
-                state.result.termination_reason = NOOATerminationReason.INFRASTRUCTURE_ERROR
-                state.result.termination_error = str(error)
-            if is_transient_infrastructure_error(error):
-                raise HTTPException(503, "NOOA dependency request failed") from error
-            raise
-        return self.report_outcome(
-            finalize_run_result(state.result)[0],
-            {
-                "termination_reason": state.result.termination_reason,
-                "model_status_code": state.result.model_status_code,
-            },
+        except NOOARunFailure as error:
+            state.result = error.result
+            state.result.termination_reason = NOOATerminationReason.INFRASTRUCTURE_ERROR
+            state.result.termination_error = str(error)
+            if isinstance(state.runner, SandboxNOOARunner):
+                # The sandbox runner returns its worker's failed run and raises only for a failed activation step
+                # (supervisor, worker exit, capture): a lifecycle failure, kept apart from the run's own result.
+                raise
+            # The embedded run itself failed; its partial evidence goes to the outcome ladder.
+        session = state.runner.session if isinstance(state.runner, SandboxNOOARunner) else None
+        return self.finish_response(
+            finalize_run_result(state.result)[0], self._run_evidence(state.result), session=session
+        )
+
+    def _run_evidence(self, result: NOOARunResult) -> RunEvidence:
+        """Read a NOOA run's termination into the outcome ladder's evidence.
+
+        A model reply is a model call the run's observations reference. Only a sandboxed run has a deadline; its
+        deadline before any reply stays retried, as before (``retry_deadline_before_reply``).
+        """
+        reason = result.termination_reason
+        if reason is NOOATerminationReason.MODEL_REJECTED:
+            error = self.classify_outcome(
+                {"termination_reason": reason, "model_status_code": result.model_status_code}
+            )
+        elif reason is NOOATerminationReason.INVALID_POLICY_OUTPUT:
+            error = AgentOutcome(failure_kind=AGENT_INVALID_OUTPUT)
+        elif reason is NOOATerminationReason.INFRASTRUCTURE_ERROR and result.model_transport_error:
+            error = AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
+        else:
+            error = None
+        return RunEvidence(
+            has_result=reason is None,
+            timed_out=reason is NOOATerminationReason.TIMEOUT_EXCEEDED,
+            model_replied=any(
+                isinstance(record, AgentInvocation) and record.model_calls
+                for record in result.episode.observations.records
+            ),
+            model_limit="output"
+            if reason is NOOATerminationReason.MAX_OUTPUT_TOKENS_EXCEEDED
+            else "turns"
+            if reason in _TURN_LIMITS
+            else None,
+            error=error,
+            retry_deadline_before_reply=True,
         )
 
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
@@ -9,8 +10,16 @@ import pytest
 from fastapi import HTTPException
 from starlette.requests import Request
 
-from nemo_gym.agents import AGENT_SESSION_COOKIE_KEY, AgentCloseSessionRequest, AgentSeedSessionRequest
+from nemo_gym.agents import (
+    AGENT_OUTCOME_METADATA_KEY,
+    AGENT_SESSION_COOKIE_KEY,
+    AgentCloseSessionRequest,
+    AgentSeedSessionRequest,
+    OutcomeAction,
+    agent_outcome_policy,
+)
 from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -18,7 +27,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputText,
     current_rollout_id,
 )
-from nemo_gym.trajectory import AgentEpisode, AgentObservationBundle, TrajectoryRecord
+from nemo_gym.trajectory import AgentEpisode, AgentInvocation, AgentObservationBundle, ModelCallRef, TrajectoryRecord
 from responses_api_agents.nooa_agent import app as app_module
 from responses_api_agents.nooa_agent.app import NOOAAgent
 from responses_api_agents.nooa_agent.runner import InProcessNOOARunner, NOOARunFailure, NOOARunResult
@@ -219,24 +228,62 @@ async def test_close_cancels_execution_and_keeps_partial_evidence(monkeypatch: p
         await instance.responses(req, NeMoGymResponseCreateParamsNonStreaming(input="task"))
 
 
-@pytest.mark.parametrize("transient", [False, True])
-async def test_failed_activation_replays_error_and_returns_evidence_on_close(
-    monkeypatch: pytest.MonkeyPatch, transient: bool
+@pytest.mark.parametrize("model_transport", [False, True])
+async def test_failed_activation_replays_its_response_and_returns_evidence_on_close(
+    monkeypatch: pytest.MonkeyPatch, model_transport: bool
 ) -> None:
+    """A failed embedded run answers 200 failed for the outcome ladder; main answered 503 or 500."""
     instance, runner_run = agent(monkeypatch)
     req = await open_session(instance)
-    cause = aiohttp.ClientConnectionError("connection failed") if transient else ValueError("adapter defect")
-    failure = NOOARunFailure(cause, result())
+    cause = aiohttp.ClientConnectionError("connection failed") if model_transport else ValueError("adapter defect")
+    partial = result()
+    partial.model_transport_error = model_transport
+    failure = NOOARunFailure(cause, partial)
     failure.__cause__ = cause
     runner_run.side_effect = failure
     for _ in range(2):
-        with pytest.raises(HTTPException if transient else NOOARunFailure) as caught:
-            await instance.responses(req, NeMoGymResponseCreateParamsNonStreaming(input="task"))
-        if transient:
-            assert caught.value.status_code == 503
+        response = await instance.responses(req, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+        assert response.status == "failed"
+        assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == {
+            "failure_kind": "model_transport_error" if model_transport else "agent_run_error"
+        }
+        assert agent_outcome_policy(response) == OutcomeAction.RETRY
     assert runner_run.call_count == 1
     receipt = await close(instance)
     assert NOOATerminationReason.INFRASTRUCTURE_ERROR in {gap.code for gap in receipt.agent_observations.gaps}
+
+
+@pytest.mark.parametrize(
+    ("replied", "status", "outcome", "action"),
+    [
+        # A deadline after a reply is graded (main: a retried 500 that lost the partial response).
+        (True, "incomplete", None, OutcomeAction.VERIFY),
+        # A deadline before any reply keeps main's retry until capture evidence lands.
+        (False, "failed", {"failure_kind": "unknown"}, OutcomeAction.RETRY),
+    ],
+)
+async def test_a_timed_out_sandboxed_run_follows_the_outcome_ladder(
+    monkeypatch: pytest.MonkeyPatch, replied: bool, status: str, outcome: dict | None, action: OutcomeAction
+) -> None:
+    instance, runner_run = agent(monkeypatch)
+    partial = result(reason=NOOATerminationReason.TIMEOUT_EXCEEDED)
+    root = AgentInvocation(invocation_id="root", status="incomplete")
+    if replied:
+        root.model_calls = [
+            ModelCallRef(model_ref=ModelServerRef(type="responses_api_models", name="policy"), response_id="r1")
+        ]
+    partial.episode.observations.records = [root]
+    runner_run.return_value = partial
+    req = await open_session(instance)
+
+    response = await instance.responses(req, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+
+    assert response.status == status
+    raw = response.metadata.get(AGENT_OUTCOME_METADATA_KEY)
+    assert (json.loads(raw) if raw else None) == outcome
+    assert response.metadata["ng_agent_stop_reason"] == "timeout"
+    assert agent_outcome_policy(response) == action
+    await close(instance)
 
 
 @pytest.mark.parametrize(
@@ -264,8 +311,14 @@ async def test_policy_termination_remains_a_gradable_response(
     runner_run.return_value = partial
     req = await open_session(instance)
     response = await instance.responses(req, NeMoGymResponseCreateParamsNonStreaming(input="task"))
-    assert response.status == "incomplete"
-    assert response.error is None
+    if reason is NOOATerminationReason.INVALID_POLICY_OUTPUT:
+        # The model's invalid output is a failed run graded as the model's result (main: incomplete, also graded).
+        assert response.status == "failed"
+        assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == {"failure_kind": "agent_invalid_output"}
+    else:
+        assert response.status == "incomplete"
+        assert response.error is None
+    assert agent_outcome_policy(response) == OutcomeAction.VERIFY
     assert response.output == partial.episode.response.output
     assert "_ng_failure_class" not in response.model_dump(mode="json")
     assert reason in {gap.code for gap in (await close(instance)).agent_observations.gaps}

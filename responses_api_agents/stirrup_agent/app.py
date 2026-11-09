@@ -18,6 +18,7 @@ supervisor. Shell commands run in the sandbox; task tools are the resources serv
 """
 
 import asyncio
+import logging
 import time
 from asyncio import Semaphore
 from typing import Any, Dict, List, Mapping, Optional
@@ -35,6 +36,7 @@ from nemo_gym.agents import (
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    RunEvidence,
     SandboxSession,
     SimpleResponsesAPIAgent,
     sandbox_server_url,
@@ -43,6 +45,7 @@ from nemo_gym.config import ModelServerRef, get_global_config_dict
 from nemo_gym.core import (
     AGENT_INVALID_OUTPUT,
     MODEL_REQUEST_ERROR,
+    MODEL_TRANSPORT_ERROR,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseInputTokensDetails,
@@ -68,6 +71,9 @@ from nemo_gym.trajectory import (
 )
 from responses_api_agents.stirrup_agent.sandbox import StirrupSessionState
 from responses_api_agents.stirrup_agent.stirrup_utils import messages_from_input
+
+
+LOG = logging.getLogger(__name__)
 
 
 def _usage(usages: list[dict[str, Any]]) -> Optional[NeMoGymResponseUsage]:
@@ -361,10 +367,12 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
         )
 
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
-        """Use the SDK HTTP status retained by the sandbox runner; never infer it from error text."""
+        """Use the SDK HTTP status or transport error the sandbox runner retained; never infer from error text."""
         status = native_result.get("model_error_status")
         if native_result.get("model_error") and type(status) is int and 400 <= status <= 599:
             return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
+        if native_result.get("model_error") and native_result.get("model_transport_error") is True:
+            return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
         if native_result.get("invalid_output"):
             # Output of the policy model the harness cannot use: graded as the model's result, never retried.
             return AgentOutcome(failure_kind=AGENT_INVALID_OUTPUT)
@@ -431,29 +439,55 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 raise
             state.resources_cookies = artifacts["resources_cookies"]
             output = artifacts
+        model_replied = bool(output["observations"]["model_response_ids"])
         usage = _usage(output["usages"])
-        if usage is None and output.get("model_error") and not output["observations"]["model_response_ids"]:
-            # The only request was rejected before any processing: a known zero. A request killed in flight may
-            # have used tokens, so that case stays unknown.
+        status = output.get("model_error_status")
+        if usage is None and type(status) is int and status < 500 and not model_replied:
+            # The only request was refused before any processing: a known zero. A request that failed in flight
+            # (a 5xx or a transport error) may have used tokens, so that case stays unknown.
             usage = _zero_usage()
+        if output.get("error") is not None:
+            # The runner caught the exception that ended Stirrup (for example a task tool's server failing), so
+            # the run left no usable result.
+            message = f"Stirrup sandbox runner failed: {output['error']}"
+            LOG.warning("%s\n%s", message, output.get("traceback", ""))
+        else:
+            message = output.get("model_error") or output.get("invalid_output")
         response = NeMoGymResponse(
             id=f"stirrup-{state.request.episode_id.capture_key}",
             created_at=int(time.time()),
             model=model_name,
             object="response",
-            output=output["input_items"] + output["output_items"],
+            output=output.get("input_items", []) + output.get("output_items", []),
             parallel_tool_calls=False,
             tool_choice="auto",
             tools=[],
             metadata={
-                "elapsed_seconds": str(output["elapsed_seconds"]),
-                **({"stop_reason": output["stop_reason"]} if output["stop_reason"] else {}),
+                **({"elapsed_seconds": str(output["elapsed_seconds"])} if "elapsed_seconds" in output else {}),
+                **({"stop_reason": output["stop_reason"]} if output.get("stop_reason") else {}),
             },
             status=output["observations"]["status"],
-            error={"code": "server_error", "message": output["model_error"]} if output.get("model_error") else None,
+            error={"code": "server_error", "message": message} if message else None,
             usage=usage,
         )
-        return self.report_outcome(response, output)
+        return self.finish_response(response, self._run_evidence(output), session=state.session)
+
+    def _run_evidence(self, output: Mapping[str, Any]) -> RunEvidence:
+        """Read the sandbox runner's report into the outcome ladder's evidence.
+
+        The runner records ``stop_reason="wall_time"`` when the supervisor's deadline signal stopped Stirrup, and
+        ends the invocation ``incomplete`` without a stop reason when Stirrup ran out of turns. A run that ended on
+        the model's error or on unusable compaction summaries is ``failed``; ``classify_outcome`` names the error.
+        """
+        status = output["observations"]["status"]
+        ended_on_error = bool(output.get("model_error") or output.get("invalid_output"))
+        return RunEvidence(
+            has_result=status == "completed" and output.get("error") is None,
+            timed_out=output.get("stop_reason") == "wall_time",
+            model_replied=bool(output["observations"]["model_response_ids"]),
+            model_limit="turns" if status == "incomplete" and output.get("stop_reason") is None else None,
+            error=self.classify_outcome(output) if ended_on_error else None,
+        )
 
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()

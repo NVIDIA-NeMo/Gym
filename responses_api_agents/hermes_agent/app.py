@@ -41,6 +41,7 @@ from nemo_gym.agents import (
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    RunEvidence,
     SandboxNetworkAccess,
     SandboxSession,
     SimpleResponsesAPIAgent,
@@ -97,6 +98,8 @@ from responses_api_agents.hermes_agent.sandbox import HarnessProcessInfo, Hermes
 MODEL_REJECTION_STATUSES = frozenset({400, 413, 422})
 _HTTP_STATUS = re.compile(r"\b(?:HTTP |Error code: )([45]\d{2})\b")
 _TRUNCATION_ERROR = "First response truncated due to output length limit"
+# Hermes errors for a run its model's output limit stopped.
+_OUTPUT_LIMIT_ERRORS = frozenset({_TRUNCATION_ERROR, "Response truncated due to output length limit"})
 
 
 def _is_limit_result(result: Mapping[str, Any]) -> bool:
@@ -358,6 +361,35 @@ class HermesAgent(SimpleResponsesAPIAgent):
         if native_result.get("partial"):
             return AgentOutcome(failure_kind=AGENT_INVALID_OUTPUT)
         return AgentOutcome(failure_kind="unknown")
+
+    def _run_evidence(self, result: Mapping[str, Any], *, n_input: int) -> RunEvidence:
+        """Read a Hermes 26bb847a result into the outcome ladder's evidence.
+
+        The runner records ``stop_reason="wall_time"`` when the supervisor's deadline signal stops Hermes, and
+        ``max_iterations`` at the turn limit. Hermes marks the error a run ended on with ``error`` or ``failed``;
+        ``classify_outcome`` names it. A reply is an assistant message after the request's own messages.
+        """
+        outcome = self.classify_outcome(result)
+        stop_reason = result.get("stop_reason")
+        model_limit = (
+            "turns"
+            if stop_reason == "max_iterations"
+            else "output"
+            if result.get("error") in _OUTPUT_LIMIT_ERRORS
+            else None
+        )
+        ended_on_error = bool(result.get("error") or result.get("failed"))
+        messages = result.get("messages") or []
+        return RunEvidence(
+            has_result=not ended_on_error,
+            timed_out=stop_reason == "wall_time",
+            model_replied=any(
+                isinstance(item, dict) and item.get("role") == "assistant" for item in messages[n_input:]
+            ),
+            context_limit=outcome.failure_kind == MODEL_CONTEXT_LIMIT,
+            model_limit=model_limit,
+            error=outcome if ended_on_error and model_limit is None else None,
+        )
 
     config: HermesAgentConfig
     # The harness runs inside the task sandbox and calls the model server from there.
@@ -757,22 +789,31 @@ class HermesAgent(SimpleResponsesAPIAgent):
             )
             timed_out = True
             output = artifacts
+        runner_error = output.get("error")
         result = output.get("result")
-        if not isinstance(result, dict):
+        if runner_error is not None:
+            # The runner caught the exception that ended Hermes, so the run left no usable result.
+            LOG.warning("Hermes sandbox runner failed: %s\n%s", runner_error, output.get("traceback", ""))
+            result = {"completed": False, "error": f"Hermes sandbox runner failed: {runner_error}", "messages": []}
+        elif not isinstance(result, dict):
             raise RuntimeError("Hermes sandbox runner returned an invalid output")
         if timed_out:
             result = {**result, "completed": False, "interrupted": True, "stop_reason": "wall_time"}
         runtime = state.runtime_info
+        n_input = len(params["history"]) + 1
         response = self._response_from_result(
             body=body,
             result=result,
             model_name=self._model_name(),
-            n_input=len(params["history"]) + 1,
+            n_input=n_input,
             retain_provider_failure=True,
         )
-        response = self.report_outcome(response, result)
-        if self.classify_outcome(result).failure_kind == MODEL_CONTEXT_LIMIT:
-            response = response.model_copy(update={"status": "incomplete", "error": None})
+        evidence = (
+            RunEvidence(has_result=False, timed_out=False, model_replied=None)
+            if runner_error is not None
+            else self._run_evidence(result, n_input=n_input)
+        )
+        response = self.finish_response(response, evidence, session=state.session)
         # Verifiers see Gym's MCP naming; the model's own names stay in the captured model calls.
         server_names = [access.name for access in mcp_accesses]
         for item in response.output:
