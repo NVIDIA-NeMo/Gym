@@ -14,7 +14,9 @@ from nemo_gym.core.episode_context import VERIFIER_INVOCATION_HEADER, current_ro
 from nemo_gym.core.responses_api_types import NeMoGymResponse
 from nemo_gym.models.model_call_capture import CaptureStore
 from nemo_gym.orchestration.recovery import (
+    _bound_artifact,
     decide_from_collected,
+    grading_artifact,
     select_managed_evidence,
     trial_counts,
     trial_verdict,
@@ -25,6 +27,7 @@ from nemo_gym.server_runtime.verifier_observability import observe_llm_judge_gra
 from nemo_gym.verification.judge import call_judge, record_parsed_judge_verdict
 from tests.helpers.single_agent_turn import _agent_response, _Client, _environment_server, _request, _Response
 from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect_with_score
+from tests.unit_tests.orchestration.test_grading_artifacts import _ungraded
 from tests.unit_tests.orchestration.test_recovery_health_binding import row as raw_trial
 from tests.unit_tests.orchestration.test_verifier_recorded_trial_coverage import _in_process, _judge_row
 from tests.unit_tests.rollouts.test_model_calls import _capture_exchange
@@ -37,19 +40,89 @@ def _gate(collected):
     return passed, reason, report, trial_counts(decision, collected)
 
 
-def _session_case(*, judged=False):
+def _session_case(*, judged=False, case="healthy"):
     """Consumer-boundary controls, using the existing observed grading fixtures."""
-    collected = _judge_row(captured=True, recorded=False) if judged else _in_process("healthy")
-    row = collected.results[0]
-    row.pop("agent_ref")
-    row["_ng_result_type"] = "single_agent_turn"
+    collected = _judge_row(captured=True, recorded=False) if judged else _in_process(case)
     servers = collected.quality["provenance"]["servers"]
-    servers[row["_ng_environment_server"]] |= {
-        "implementation": "single_agent_turn",
-        "agent_server": "simple",
-        "resources_server": "mcqa",
-    }
+    for row in collected.results:
+        row.pop("agent_ref")
+        row["_ng_result_type"] = "single_agent_turn"
+        servers[row["_ng_environment_server"]] |= {
+            "implementation": "single_agent_turn",
+            "agent_server": "simple",
+            "resources_server": "mcqa",
+        }
     return collected
+
+
+def _artifact_case(case="healthy"):
+    """One registered metric artifact, with any remaining trials deliberately ungraded."""
+    collected = _session_case(case=case)
+    for row in collected.results:
+        row["ng_trial_observations"]["verifier_invocations"][0].pop("grading_record")
+        _ungraded(row)
+    _ungraded(collected.results[0], sentence_metrics=["sentence_chrf"])
+    return collected
+
+
+@pytest.mark.parametrize("case", ["healthy", "repeats"])
+def test_a_bound_public_artifact_keeps_its_count_when_another_trial_is_unobserved(case):
+    collected = _artifact_case(case)
+    assert grading_artifact(collected.results[0]) == "metric_record"
+    passed, reason, report, counts = _gate(collected)
+    if case == "healthy":
+        assert passed is True and report["exact"] is True, reason
+    else:
+        assert passed is None and report["status"] == "UNVERIFIED", reason
+    assert (counts["observed_healthy"], counts["unhealthy"], counts["unobserved"], counts["verifier_recorded"]) == (
+        1,
+        0,
+        len(collected.results) - 1,
+        0,
+    )
+
+
+@pytest.mark.parametrize(
+    "change", ["malformed", "row_conflict", "missing_resources", "missing_agent", "missing_environment"]
+)
+def test_a_public_artifact_with_unresolved_ownership_is_not_counted_as_observed(change):
+    collected = _artifact_case()
+    row = collected.results[0]
+    assert grading_artifact(row) == "metric_record"
+    servers = collected.quality["provenance"]["servers"]
+    environment = servers[row["_ng_environment_server"]]
+    if change == "malformed":
+        environment["bindings_malformed"] = True
+    elif change == "row_conflict":
+        servers["other_agent"] = dict(servers["simple"])
+        row["agent_ref"] = {"name": "other_agent"}
+    elif change == "missing_resources":
+        del environment["resources_server"]
+    elif change == "missing_agent":
+        del environment["agent_server"]
+    else:
+        del servers[row["_ng_environment_server"]]
+    passed, reason, report, counts = _gate(collected)
+    assert passed is None and report["status"] == "UNVERIFIED", reason
+    assert (counts["observed_healthy"], counts["unhealthy"], counts["unobserved"], counts["verifier_recorded"]) == (
+        0,
+        0,
+        1,
+        0,
+    )
+
+
+@pytest.mark.parametrize("artifact", [False, True])
+def test_the_model_failure_fallback_applies_only_when_no_grading_artifact_exists(artifact):
+    collected = _artifact_case()
+    row = collected.results[0]
+    if not artifact:
+        _ungraded(row)
+    row["reward"] = 0.0
+    row["response"].update(status="incomplete", output=[{"type": "reasoning"}])
+    collected.quality["provenance"]["servers"][row["_ng_environment_server"]]["bindings_malformed"] = True
+    assert grading_artifact(row) == ("metric_record" if artifact else None)
+    assert _bound_artifact(row, collected) is (not artifact)
 
 
 def test_an_explicit_agent_ref_keeps_its_owner_when_fresh_provenance_has_no_primary_agent():

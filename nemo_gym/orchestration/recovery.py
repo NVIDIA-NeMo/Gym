@@ -4490,12 +4490,14 @@ def _bound_grading(row: Mapping[str, Any], collected: CollectedEvidence) -> bool
     )
 
 
-def _bound_artifact(row: Mapping[str, Any]) -> bool:
+def _bound_artifact(row: Mapping[str, Any], collected: CollectedEvidence) -> bool:
     """Whether a saved grading artifact or the model's own failed answer resolves the row, as the gate requires: an
-    artifact other than the model's failed answer must bind the saved answer and score."""
-    if grading_artifact(row) is not None and _bound_answer(row):
-        return True
-    return grading_artifact(row) is None and _model_failure(row)
+    artifact other than the model's failed answer must bind the saved answer and score to its verification owner."""
+    if grading_artifact(row) is None:
+        return _model_failure(row)
+    provenance = (collected.quality or {}).get("provenance")
+    servers = provenance.get("servers") if isinstance(provenance, dict) else None
+    return _bound_answer(row) and isinstance(servers, dict) and _verification_owner(row, servers) is not None
 
 
 def _verification_owner(row: Mapping[str, Any], servers: Mapping[str, Any]) -> str | None:
@@ -4665,7 +4667,9 @@ def trial_counts(decision: RecoveryDecision, collected: CollectedEvidence | None
     artifacts = sum(
         1
         for row in rows
-        if not _bound_grading(row, collected) and not _recorded_by_verifier(row, collected) and _bound_artifact(row)
+        if not _bound_grading(row, collected)
+        and not _recorded_by_verifier(row, collected)
+        and _bound_artifact(row, collected)
     )
     unobserved = sum(1 for row in rows if not _bound_grading(row, collected)) - recorded - artifacts
     counts: dict[str, Any] = {
