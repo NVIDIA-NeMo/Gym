@@ -188,10 +188,11 @@ so the sandbox reaches only the model server; a search preset overrides it with 
 sandbox cannot download OpenCode, so supply `sandbox_executable_path` and `sandbox_executable_sha256` for a binary
 in the image.
 
-`configs/profiles/offline_science.yaml` is the complete profile of the offline scientific presets
+`configs/profiles/offline_science.yaml` builds on `benchmark.yaml` for the offline scientific presets
 (`benchmarks/hle/opencode.yaml`, `opencode_search.yaml`, `benchmarks/apex_shortlist/opencode.yaml`). It runs the
 offline science image's pinned OpenCode binary with a 32,768-token output cap in a 229,376-token context, the
-scientific-tools system prompt and subagents denied. The HLE README lists how it differs from the deprecated preset.
+scientific-tools system prompt and subagents denied, and binds only the model server to the address sandboxes reach
+(`absolute_ip_server_types`). The HLE README lists how it differs from the deprecated preset.
 
 HLE, HLE Diamond, GPQA and APEX Shortlist need no Environment Server setting: their judges serve no tools, so their
 Environment Servers grant the agent none. This agent rejects a required `direct_http` grant with a 422, so a
