@@ -214,3 +214,48 @@ class TestApp:
         )
         assert response.status_code == 200
         assert expected_response.model_dump() == response.json()
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("keepalive", [None, 0.01])
+def test_max_reasoning_is_a_client_error(stream, keepalive):
+    server = TestApp()._setup_server()
+    server.config.stream_keepalive_s = keepalive
+    upstream = AsyncMock()
+    server._client.chat.completions.create = upstream
+    with TestClient(server.setup_webserver()) as client:
+        response = client.post("/v1/responses", json={"input": "hi", "reasoning": {"effort": "max"}, "stream": stream})
+    assert response.status_code == 422
+    assert "not supported" in response.json()["detail"]
+    upstream.assert_not_called()
+
+
+@pytest.mark.parametrize("reasoning", [None, {}, {"effort": None}, {"effort": "high"}])
+@pytest.mark.parametrize("stream", [False, True])
+def test_supported_reasoning_still_reaches_chat_provider(reasoning, stream):
+    server = TestApp()._setup_server()
+    completion = NeMoGymChatCompletion(
+        id="chat-test",
+        created=0,
+        model="test",
+        object="chat.completion",
+        choices=[
+            NeMoGymChoice(
+                index=0, finish_reason="stop", message=NeMoGymChatCompletionMessage(role="assistant", content="hi")
+            )
+        ],
+    )
+    upstream = AsyncMock(return_value=completion)
+    server._client.chat.completions.create = upstream
+    body = {"input": "hi", "stream": stream}
+    if reasoning is not None:
+        body["reasoning"] = reasoning
+    with TestClient(server.setup_webserver()) as client:
+        response = client.post("/v1/responses", json=body)
+    assert response.status_code == 200
+    upstream.assert_awaited_once()
+    sent = upstream.call_args.kwargs
+    if reasoning and reasoning.get("effort"):
+        assert sent["reasoning_effort"] == reasoning["effort"]
+    else:
+        assert "reasoning_effort" not in sent
