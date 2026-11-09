@@ -1589,7 +1589,7 @@ def test_messages_replay_keeps_continuations_and_roots_edited_history(monkeypatc
                 message={
                     **reasoning_fields,
                     "role": "assistant",
-                    "content": "delegating",
+                    "content": " \n",
                     "tool_calls": [
                         {
                             "id": f"call-{len(harness.worker_calls)}",
@@ -1632,6 +1632,8 @@ def test_messages_replay_keeps_continuations_and_roots_edited_history(monkeypatc
     }
     post(continued)
     manifest = harness.manifest("attempt")
+    if tool:
+        assert not any(block["type"] == "text" and not block["text"].strip() for block in first["content"])
     if reasoning:
         assert any(block["type"] == "thinking" for block in first["content"])
     assert harness.worker_calls[1][0].mode == "candidate"
