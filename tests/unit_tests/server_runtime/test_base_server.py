@@ -991,22 +991,13 @@ class TestServerUtils:
         assert actual.body == expected.body
         assert actual.headers == expected.headers
 
-    async def test_exception_middleware_logs_upstream_error_without_debug(
+    def test_exception_middleware_logs_upstream_error_without_debug(
         self, monkeypatch: MonkeyPatch, capsys: CaptureFixture[str]
     ) -> None:
-        callbacks = []
-        app = MagicMock()
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
 
-        def register_middleware(middleware_type):
-            assert middleware_type == "http"
-
-            def register(callback):
-                callbacks.append(callback)
-                return callback
-
-            return register
-
-        app.middleware.side_effect = register_middleware
+        app = FastAPI()
         server = MagicMock()
         server.get_session_middleware_key.return_value = "TestSimpleServer___my_server"
         SimpleServer.setup_exception_middleware(server, app)
@@ -1020,11 +1011,12 @@ class TestServerUtils:
         error = ClientResponseError(request_info=request_info, history=(), status=500, message="policy failed")
         error.response_content = b"ValueError: actionable inner failure"
 
-        async def fail(_request):
+        @app.post("/fail")
+        async def fail():
             raise error
 
         monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
-        response = await callbacks[0](MagicMock(), fail)
+        response = TestClient(app).post("/fail")
 
         assert response.status_code == 500
         captured = capsys.readouterr().out

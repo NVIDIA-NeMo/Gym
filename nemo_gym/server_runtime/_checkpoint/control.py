@@ -951,6 +951,18 @@ class ParticipantControlPlane:
                     self._results[(request.checkpoint_id, "export_failed")] = (None, {"detail": detail})
                     raise ExportFailedError(detail) from error
                 span.set(records=len(write.records))
+        # An expired retire can mark attempts without reaching their cleanup. Never
+        # publish those attempts, even if a participant still considers them exportable.
+        for record in write.records:
+            try:
+                self.participant.retired.check(record.episode_id)
+            except StaleAttemptError as error:
+                detail = (
+                    f"checkpoint {request.checkpoint_id!r} exported a retired attempt "
+                    f"({error}); resume, retry the retire, then prepare again under a new checkpoint ID"
+                )
+                self._results[(request.checkpoint_id, "export_failed")] = (None, {"detail": detail})
+                raise ExportFailedError(detail) from error
         if write.task is None or _failed(write.task):
             write.task = asyncio.create_task(
                 asyncio.to_thread(
