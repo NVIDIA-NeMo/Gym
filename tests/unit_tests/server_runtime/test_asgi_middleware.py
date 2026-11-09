@@ -245,10 +245,11 @@ async def test_a_cancelled_request_gets_the_failure_reply_and_the_cancellation_p
 
     request = asyncio.create_task(app(_http_scope("/slow"), receive, send))
     try:
-        async with asyncio.timeout(10):
-            await entered.wait()
-            request.cancel()
-            with pytest.raises(asyncio.CancelledError):
+        # An expired deadline raises TimeoutError here, so it cannot pass for the request's own cancellation.
+        with pytest.raises(asyncio.CancelledError):
+            async with asyncio.timeout(10):
+                await entered.wait()
+                request.cancel()
                 await request
     finally:
         request.cancel()
@@ -273,8 +274,8 @@ def test_a_route_whose_task_other_code_cancels_gets_the_failure_reply() -> None:
     assert response.json() == "Request was cancelled"
 
 
-def _app_with_session_claim(claimed: bool, claims: list[str], streamed: list[str] | None = None) -> FastAPI:
-    """Gym's session middleware behind a session router whose claim succeeds or fails, recording each claim."""
+def _app_with_session_owner(acquired: bool, acquires: list[str], streamed: list[str] | None = None) -> FastAPI:
+    """Gym's session middleware behind a session router that takes ownership or finds another owner, recording each attempt."""
     streamed = [] if streamed is None else streamed
     app = _app_with_gym_middleware()
 
@@ -303,72 +304,72 @@ def _app_with_session_claim(claimed: bool, claims: list[str], streamed: list[str
 
     gym_app = app.build_middleware_stack()
 
-    def claim() -> bool:
-        claims.append("claim")
-        return claimed
+    def acquire() -> bool:
+        acquires.append("acquire")
+        return acquired
 
     async def routed(scope, receive, send):
-        await gym_app({**scope, SESSION_ACQUIRE_SCOPE_KEY: claim}, receive, send)
+        await gym_app({**scope, SESSION_ACQUIRE_SCOPE_KEY: acquire}, receive, send)
 
     return routed
 
 
-def test_a_session_whose_claim_another_worker_won_is_refused_with_a_409() -> None:
-    claims = []
-    response = TestClient(_app_with_session_claim(False, claims)).get("/uses-session")
+def test_a_session_another_worker_owns_is_refused_with_a_409() -> None:
+    acquires = []
+    response = TestClient(_app_with_session_owner(False, acquires)).get("/uses-session")
 
     assert response.status_code == 409
     assert response.json() == {"detail": "This session's ID is already owned by another worker. Retry it."}
-    assert claims == ["claim"]
+    assert acquires == ["acquire"]
 
 
-def test_a_route_whose_reply_a_lost_claim_replaced_stops_before_streaming() -> None:
-    claims = []
+def test_a_route_whose_reply_the_ownership_409_replaced_stops_before_streaming() -> None:
+    acquires = []
     streamed = []
-    response = TestClient(_app_with_session_claim(False, claims, streamed)).get("/streams-session")
+    response = TestClient(_app_with_session_owner(False, acquires, streamed)).get("/streams-session")
 
     assert response.status_code == 409
     assert streamed == []
 
 
-def test_a_claimed_new_session_whose_route_replied_with_an_error_hands_out_no_cookie() -> None:
-    claims = []
-    response = TestClient(_app_with_session_claim(True, claims)).get("/refuses-session")
+def test_an_owned_new_session_whose_route_replied_with_an_error_hands_out_no_cookie() -> None:
+    acquires = []
+    response = TestClient(_app_with_session_owner(True, acquires)).get("/refuses-session")
 
     assert response.status_code == 404
     assert "set-cookie" not in response.headers
 
 
-def test_a_claimed_session_the_route_used_hands_out_its_cookie() -> None:
-    claims = []
-    response = TestClient(_app_with_session_claim(True, claims)).get("/uses-session")
+def test_an_owned_session_the_route_used_hands_out_its_cookie() -> None:
+    acquires = []
+    response = TestClient(_app_with_session_owner(True, acquires)).get("/uses-session")
 
     assert response.status_code == 200
     assert "set-cookie" in response.headers
-    assert claims == ["claim"]
+    assert acquires == ["acquire"]
 
 
-def test_a_new_session_the_route_never_used_is_neither_claimed_nor_handed_out() -> None:
-    claims = []
-    response = TestClient(_app_with_session_claim(True, claims)).get("/ignores-session")
+def test_a_new_session_the_route_never_used_is_neither_owned_nor_handed_out() -> None:
+    acquires = []
+    response = TestClient(_app_with_session_owner(True, acquires)).get("/ignores-session")
 
     assert response.status_code == 200
     assert "set-cookie" not in response.headers
     assert response.headers["vary"] == "Cookie"
-    assert claims == []
+    assert acquires == []
 
 
 def test_a_named_session_the_route_never_used_keeps_its_vary_header() -> None:
-    claims = []
-    client = TestClient(_app_with_session_claim(True, claims))
+    acquires = []
+    client = TestClient(_app_with_session_owner(True, acquires))
     client.get("/uses-session")
-    claims.clear()
+    acquires.clear()
 
     response = client.get("/ignores-session")
 
     assert response.status_code == 200
     assert response.headers["vary"] == "Cookie"
-    assert claims == []
+    assert acquires == []
 
 
 _LEFT_BEHIND: ContextVar[str] = ContextVar("left_behind", default="unset")

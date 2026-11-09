@@ -24,7 +24,7 @@ from nemo_gym.server_runtime.request_handling.session_routing import SESSION_ACQ
 
 
 class _ReplyReplaced(Exception):
-    """Stops a route whose reply a lost claim's 409 replaced, so it streams nothing to a reply that has ended."""
+    """Stops a route whose reply the 409 for another worker's session replaced, so it streams nothing more."""
 
 
 class SessionIDMiddleware:
