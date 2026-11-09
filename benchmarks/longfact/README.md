@@ -38,9 +38,14 @@ Use this dataset when a stable 200-prompt stress test is desired.
 
 ## Measurement contract and onboarding
 
-`manifest.yaml` declares this benchmark's existing `gymnasium_agent` pairing
-and prepared prompts. Its `full-objects-and-concepts` split names the union of
-all 2,280 upstream Objects and Concepts prompts. The default is one repeat
+`manifest.yaml` declares the primary `simple_agent` and
+`single_agent_turn_legacy` environment pairing, with prepared prompts. The
+environment runs one policy turn and calls the native resources `/verify`
+endpoint. `benchmarks/longfact/gymnasium.yaml` separately preserves the original
+`gymnasium_agent` pairing and `/reset` plus `/step` protocol; select one pairing
+per run, and do not mix their rollout files. The manifest's
+`full-objects-and-concepts` split names the union of all 2,280 upstream Objects
+and Concepts prompts. The default is one repeat
 and one policy answer per prompt; the model sees the source prompt and has
 no retrieval tools. Search belongs to the verifier. The hard-200 stress set
 and any sampled run are distinct protocols and must be identified separately.
@@ -50,8 +55,9 @@ Precision counts supported claims against all relevant judged claims;
 recall is the supported count divided by 100, capped at 1. The primary
 aggregate averages per-prompt F1; pooled claim metrics are reported
 separately. Contradicted and unsure claims both count as unsupported in
-F1. Judge/search failures fail the rollout for recovery. The default
-configuration uses `legacy_v1` extraction,
+F1. Judge/search failures fail the rollout for recovery; a failed judge masks
+the row and retains its original policy answer rather than assigning a model
+zero. The default configuration uses `legacy_v1` extraction,
 three-way per-claim verdicts and Tantivy; the card overlay below changes
 this protocol and is not interchangeable with that default.
 
@@ -61,6 +67,19 @@ retrieval settings and repeat count. LongFact imposes no episode deadline.
 Its evaluator HTTP calls default to 180 seconds, and Tavily calls to 90
 seconds, with their configured bounded retries. The agent's 60-second
 environment-cleanup timeout is a separate bound.
+
+Grading follows path A of the benchmark onboarding contract: the resources
+server wraps the complete native verification in `observe_llm_judge_grading`,
+calls the judge through `call_judge`, and accepts a reply only after parsing
+and, for card batches, exact claim-ID validation. The returned observation
+binds the original policy response and F1 reward to the judge dependencies.
+Rejected or malformed received replies remain unaccepted even when a later
+retry succeeds, so that attempt has unknown grading coverage; it is not
+reported as complete evidence. Native verification uses only its request and
+configuration (`ReverifyMode.STATELESS`), without legacy reset state. A
+re-judge must preserve the saved answer, task provenance and scoring settings.
+The offline fixture exercises this production native scorer with scripted
+external judge/search transports. It does not certify a live runtime run.
 
 Complete the manifest-backed local checks after preparation:
 
@@ -196,7 +215,7 @@ gym env start --benchmark longfact --model-type vllm_model \
   --model-api-key "$POLICY_API_KEY"
 
 # After the servers are ready, in another terminal:
-gym eval run --no-serve --agent longfact_longfact_gymnasium_agent \
+gym eval run --no-serve --agent longfact_longfact_simple_agent \
   --input benchmarks/longfact/data/hard200.jsonl \
   --output results/longfact-hard200/rollouts.jsonl
 ```

@@ -12,15 +12,24 @@ from __future__ import annotations
 
 import asyncio
 from collections import Counter
-from typing import Any, Callable, Literal, Optional
+from collections.abc import Coroutine
+from typing import Any, Callable, ClassVar, Literal, Optional
 
 from fastapi import FastAPI, Request
 from pydantic import BaseModel, Field, PrivateAttr, RootModel, field_validator
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import ModelServerRef
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_runtime import BaseResourcesServerConfig
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent
+from nemo_gym.server_runtime import (
+    BaseResourcesServerConfig,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    ReverifyMode,
+    SimpleResourcesServer,
+    observe_llm_judge_grading,
+)
+from nemo_gym.verification import JudgeError, record_parsed_judge_verdict
 from resources_servers.gymnasium import GymnasiumServer, extract_text
 from resources_servers.longfact.card_fact_check import (
     CARD_LABELS,
@@ -37,12 +46,25 @@ from resources_servers.longfact.evaluator import (
 )
 from resources_servers.longfact.milvus_provider import MilvusProvider
 from resources_servers.longfact.tantivy_provider import TantivyProvider
+from resources_servers.longfact.task_data import TaskData
 from resources_servers.longfact.tavily_provider import TavilyProvider
 from resources_servers.longfact.verifier_fixture import VERIFIER_FIXTURE as VERIFIER_FIXTURE
 
 
 BENCHMARK_VARIANT = "longfact-safe-v1"
 F1_MAX_CLAIMS = 100
+
+
+async def _gather_checked[T](*awaitables: Coroutine[Any, Any, T]) -> list[T]:
+    tasks = [asyncio.create_task(awaitable) for awaitable in awaitables]
+    try:
+        return await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        # Finish sibling cleanup before reporting the original failure or cancellation.
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
 
 
 class AtomicFacts(RootModel[list[str]]):
@@ -84,7 +106,7 @@ class ThreeWayClaimJudgment(BaseModel):
 ClaimJudgment = BinaryClaimJudgment | ThreeWayClaimJudgment
 
 
-class CardBatchMismatchError(ValueError):
+class CardBatchMismatchError(JudgeError, ValueError):
     """A card search plan or verdict list did not name every claim of its batch exactly once."""
 
 
@@ -93,6 +115,8 @@ class LongFactClaimCheckError(RuntimeError):
 
 
 class LongFactConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
+
     evaluator_model_server: ModelServerRef
     evaluator_model_identity: str = "unknown"
     evaluator_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
@@ -139,11 +163,41 @@ class LongFactConfig(BaseResourcesServerConfig):
     tavily_cache_dir: str | None = "/tmp/longfact-safe-tavily-cache"
 
 
+class LongFactVerifyRequest(TaskData, BaseVerifyRequest):
+    """Saved policy response and the immutable prepared task needed for stateless verification."""
+
+
+class LongFactVerifyResponse(BaseVerifyResponse):
+    info: dict[str, Any]
+
+
 class LongFactSafeServer(GymnasiumServer):
     config: LongFactConfig
+    checkpoint_session_starts: ClassVar[tuple[str, ...]] = ("/reset", "/seed_session")
 
     _evaluator: JsonEvaluator = PrivateAttr()
     _search_provider: TantivyProvider | TavilyProvider | MilvusProvider = PrivateAttr()
+
+    def register_protocol_routes(self, app: FastAPI) -> None:
+        SimpleResourcesServer.register_protocol_routes(self, app)
+        GymnasiumServer.register_protocol_routes(self, app)
+
+    async def verify(self, body: LongFactVerifyRequest) -> LongFactVerifyResponse:
+        async def calculate() -> LongFactVerifyResponse:
+            evaluation = await self._evaluate(body.prompt, extract_text(body.response))
+            self._require_checked_claims(evaluation)
+            state = {
+                "task_id": body.id or body.task_id or "unknown",
+                "subset": body.subset or "unknown",
+                "topic": body.topic or "unknown",
+                "source_provenance": dict(body.source_provenance),
+                **evaluation,
+            }
+            return LongFactVerifyResponse.model_validate(
+                body.model_dump() | {"reward": float(evaluation["f1_at_k"]), "info": self._info(state)}
+            )
+
+        return await observe_llm_judge_grading(calculate)
 
     def model_post_init(self, context: Any) -> None:
         if self.config.fact_check_mode == "gpt5_card_batch" and self.config.claim_verdict_mode != "three_way":
@@ -248,6 +302,13 @@ class LongFactSafeServer(GymnasiumServer):
         response = extract_text(action)
         # Judge and search failures propagate and fail the rollout, so resume runs it again.
         evaluation = await self._evaluate(state["prompt"], response)
+        self._require_checked_claims(evaluation)
+        state["response"] = response
+        state.update(evaluation)
+        return None, float(evaluation["f1_at_k"]), True, False, self._info(state)
+
+    @staticmethod
+    def _require_checked_claims(evaluation: dict[str, Any]) -> None:
         if evaluation["error_claims"]:
             # An unchecked claim counts in neither precision nor recall, so the score is not a measurement.
             first_error = next(trace["fact_error"] for trace in evaluation["traces"] if trace.get("label") == "ERROR")
@@ -255,9 +316,6 @@ class LongFactSafeServer(GymnasiumServer):
                 f"{evaluation['error_claims']} of {evaluation['num_extracted_claims']} claim(s) could not be "
                 f"checked; first: {first_error}"
             )
-        state["response"] = response
-        state.update(evaluation)
-        return None, float(evaluation["f1_at_k"]), True, False, self._info(state)
 
     async def _evaluate(self, prompt: str, response: str) -> dict[str, Any]:
         extracted = await self._generate_json(
@@ -271,7 +329,7 @@ class LongFactSafeServer(GymnasiumServer):
         async def evaluate_fact_safely(fact: str) -> dict[str, Any]:
             try:
                 return await self._evaluate_fact(prompt, response, fact)
-            except EvaluatorIdentityError:
+            except (EvaluatorIdentityError, JudgeError, NgFailureEvent):
                 raise
             except Exception as exc:  # noqa: BLE001 - retain per-claim failure provenance.
                 return {
@@ -284,10 +342,10 @@ class LongFactSafeServer(GymnasiumServer):
         if self.config.fact_check_mode == "gpt5_card_batch":
             size = self.config.fact_check_batch_size
             batches = [facts[start : start + size] for start in range(0, len(facts), size)]
-            checked = await asyncio.gather(*(self._check_batch_safely(prompt, response, batch) for batch in batches))
+            checked = await _gather_checked(*(self._check_batch_safely(prompt, response, batch) for batch in batches))
             results = [trace for batch_traces in checked for trace in batch_traces]
         else:
-            results = await asyncio.gather(*(evaluate_fact_safely(fact) for fact in facts))
+            results = await _gather_checked(*(evaluate_fact_safely(fact) for fact in facts))
         labels = Counter(result["label"] for result in results)
         supported = labels["SUPPORTED"]
         contradicted = labels["CONTRADICTED"]
@@ -336,7 +394,7 @@ class LongFactSafeServer(GymnasiumServer):
     async def _check_batch_safely(self, prompt: str, response: str, claims: list[str]) -> list[dict[str, Any]]:
         try:
             return await self._check_batch(prompt, response, claims)
-        except EvaluatorIdentityError:
+        except (EvaluatorIdentityError, JudgeError, NgFailureEvent):
             raise
         except Exception as exc:  # noqa: BLE001 - every claim in the batch keeps the failure provenance.
             return [
@@ -364,7 +422,7 @@ class LongFactSafeServer(GymnasiumServer):
             for claim_id in by_id
         }
         ordered = [(claim_id, query) for claim_id in by_id for query in queries[claim_id]]
-        searched = await asyncio.gather(*(self._search_provider.search(query) for _claim_id, query in ordered))
+        searched = await _gather_checked(*(self._search_provider.search(query) for _claim_id, query in ordered))
         evidence: dict[str, list[dict[str, Any]]] = {claim_id: [] for claim_id in by_id}
         for (claim_id, query), sources in zip(ordered, searched, strict=True):
             evidence[claim_id].extend(
@@ -410,6 +468,8 @@ class LongFactSafeServer(GymnasiumServer):
             ids = [item.claim_id for item in items]
             problem = self._claim_id_problem(ids, by_id)
             if not problem:
+                # No await between the received reply and acceptance, so concurrent batches mark their own reply.
+                record_parsed_judge_verdict()
                 return {item.claim_id: item for item in items}
         raise CardBatchMismatchError(
             f"The {what} did not cover the batch after {self.config.evaluator_max_attempts} attempts: {problem}"
@@ -442,7 +502,7 @@ class LongFactSafeServer(GymnasiumServer):
             return trace
 
         queries = prepared.queries or [prepared.self_contained_fact]
-        query_results = await asyncio.gather(*(self._search_provider.search(query) for query in queries))
+        query_results = await _gather_checked(*(self._search_provider.search(query) for query in queries))
         evidence: list[dict[str, Any]] = []
         for query, sources in zip(queries, query_results, strict=True):
             evidence = [
@@ -531,13 +591,19 @@ RETRIEVED EVIDENCE:
         last_error: ValueError | None = None
         for _ in range(self.config.evaluator_max_attempts):
             try:
-                return await self._evaluator.generate_json(
+                result = await self._evaluator.generate_json(
                     schema,
                     prompt,
                     constrain_json_schema=(
                         self.config.evaluator_constrain_json_schema if constrain is None else constrain
                     ),
                 )
+                # Keep this acceptance synchronous with the evaluator return; card replies also need exact IDs.
+                if schema not in {BatchSearchPlan, CardBatchVerdicts} and (
+                    schema is not AtomicFacts or all(fact.strip() for fact in result.root)
+                ):
+                    record_parsed_judge_verdict()
+                return result
             except ValueError as exc:
                 last_error = exc
         # Preserve a distinct failure type so verdict callers can map an

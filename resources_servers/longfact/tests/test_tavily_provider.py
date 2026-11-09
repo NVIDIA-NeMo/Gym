@@ -5,7 +5,9 @@ import asyncio
 import json
 
 import pytest
+from aiohttp import ClientTimeout
 
+import resources_servers.tavily_search.app as tavily_search_module
 from resources_servers.longfact.tavily_provider import (
     CACHE_ADAPTER_ID,
     CACHE_FORMAT_VERSION,
@@ -44,12 +46,13 @@ def _provider(
     cache_mode="read_write",
     max_concurrency=4,
     search_max_attempts=4,
+    timeout_seconds=5,
 ):
     return TavilyProvider(
         api_key="unused",
         search_depth="advanced",
         max_results=5,
-        timeout_seconds=5,
+        timeout_seconds=timeout_seconds,
         max_concurrency=max_concurrency,
         search_max_attempts=search_max_attempts,
         cache_mode=cache_mode,
@@ -116,6 +119,56 @@ async def test_search_passes_configured_timeout_to_tavily_sdk(tmp_path):
             "timeout": 5,
         }
     ]
+
+
+@pytest.mark.parametrize("timeout_seconds", [90, 5])
+@pytest.mark.asyncio
+async def test_configured_timeout_reaches_the_constructed_http_transport(tmp_path, monkeypatch, timeout_seconds):
+    requested_timeouts = []
+
+    class Response:
+        status = 200
+
+        async def json(self):
+            return {"results": []}
+
+        def release(self):
+            pass
+
+    async def request(method, **kwargs):
+        assert method == "POST"
+        requested_timeouts.append(kwargs["timeout"])
+        return Response()
+
+    monkeypatch.setattr(tavily_search_module, "request", request)
+    provider = _provider(tmp_path, cache_mode="live", timeout_seconds=timeout_seconds)
+
+    assert await provider.search("transport timeout") == []
+
+    assert len(requested_timeouts) == 1
+    assert isinstance(requested_timeouts[0], ClientTimeout)
+    assert requested_timeouts[0].total == timeout_seconds
+
+
+@pytest.mark.asyncio
+async def test_provider_operation_deadline_cancels_the_search(tmp_path):
+    class BlockedClient:
+        cancelled = False
+
+        async def search(self, **_kwargs):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self.cancelled = True
+
+    client = BlockedClient()
+    provider = _provider(tmp_path, client, cache_mode="live", timeout_seconds=0.01, search_max_attempts=1)
+
+    with pytest.raises(TavilyProviderError, match="failed after 1 attempts") as failure:
+        await provider.search("blocked operation")
+
+    assert isinstance(failure.value.__cause__, TimeoutError)
+    assert client.cancelled
 
 
 @pytest.mark.parametrize(
@@ -473,6 +526,39 @@ async def test_read_write_quarantines_and_repairs_checksum_mismatch(tmp_path):
     assert repair_client.search_calls == 1
     assert repaired[0].snippet == "Relevant snippet"
     assert len(list((tmp_path / ".corrupt").glob("search-*.corrupt"))) == 1
+
+
+@pytest.mark.parametrize("nonfinite_literal", ["NaN", "Infinity", "-Infinity"])
+@pytest.mark.parametrize("cache_mode", ["replay", "read_write"])
+@pytest.mark.asyncio
+async def test_nonfinite_cache_response_is_rejected_or_preserved_and_repaired(tmp_path, nonfinite_literal, cache_mode):
+    provider = _provider(tmp_path, FakeTavilyClient())
+    await provider.search("nonfinite cached response")
+    cache_path = next(tmp_path.glob("search-*.json"))
+    document = json.loads(cache_path.read_text(encoding="utf-8"))
+    document[CACHE_RESPONSE_KEY]["response_time"] = "NONFINITE_LITERAL"
+    corrupt_bytes = json.dumps(document).replace('"NONFINITE_LITERAL"', nonfinite_literal).encode()
+    cache_path.write_bytes(corrupt_bytes)
+    client = FakeTavilyClient()
+    reader = _provider(tmp_path, client, cache_mode=cache_mode)
+
+    if cache_mode == "replay":
+        with pytest.raises(TavilyCacheCorruptionError, match="Malformed Tavily cache response") as failure:
+            await reader.search("nonfinite cached response")
+        assert isinstance(failure.value.__cause__, ValueError)
+        assert client.search_calls == 0
+        assert cache_path.read_bytes() == corrupt_bytes
+        assert not (tmp_path / ".corrupt").exists()
+    else:
+        repaired = await reader.search("nonfinite cached response")
+
+        assert client.search_calls == 1
+        assert repaired[0].snippet == "Relevant snippet"
+        assert reader.cache_stats["corruptions"] == 1
+        quarantined = list((tmp_path / ".corrupt").glob("search-*.corrupt"))
+        assert len(quarantined) == 1
+        assert quarantined[0].read_bytes() == corrupt_bytes
+        assert await _provider(tmp_path, cache_mode="replay").search("nonfinite cached response") == repaired
 
 
 @pytest.mark.parametrize("format_version", [[], {}, True, 2.0, "2", None])

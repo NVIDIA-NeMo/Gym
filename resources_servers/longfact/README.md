@@ -11,6 +11,12 @@ default provider is local Tantivy retrieval backed by `TANTIVY_INDEX_DIR` and
 or `LONGFACT_SEARCH_BACKEND=milvus` for retrieval from a compatible vector
 collection. Backend endpoints and credentials must be supplied at runtime.
 
+The primary benchmark pairs `simple_agent` with the standard one-turn
+environment server and stateless `/verify` endpoint. Verification returns the
+saved policy response, reward and claim diagnostics together with the native
+grading observations. `benchmarks/longfact/gymnasium.yaml` retains the original
+`gymnasium_agent` pairing and `/reset` plus `/step` protocol.
+
 Its reward and aggregate metric use LongFact SAFE's F1@100 calculation. This
 is not the official SAFE implementation: SAFE used Serper/Google Search and
 free-form parsing, while this resource uses Tantivy, Tavily, or Milvus and
@@ -22,9 +28,10 @@ Three-way mode retains the existing strict precision and F1@100 metrics by
 collapsing contradicted and unsure claims into the legacy not-supported count.
 It additionally reports contradicted and unsure counts, mean contradiction and
 unsure rates, and decisive precision over only supported plus contradicted
-claims. Retrieval/evaluator errors, including a judge that gives no parseable
-verdict, remain `ERROR`, not `UNSURE`, and an episode with an `ERROR` claim
-fails its rollout so that resume runs it again.
+claims. Unusable judge replies, including incomplete or filtered responses and
+exhausted malformed verdicts, fail verification through the judge-failure path.
+Retrieval errors also fail verification rather than becoming `UNSURE`. These
+failures preserve the saved answer and provenance for recovery.
 
 Tavily `read_write` mode uses a persistent, request-addressed cache. Entries
 are atomically published with response checksums and cross-process file locks.

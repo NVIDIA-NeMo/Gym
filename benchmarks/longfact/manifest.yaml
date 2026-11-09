@@ -2,7 +2,7 @@ name: longfact
 version: 0.1.0
 experimental: true
 kind: benchmark
-integration_profile: custom-gym-agent-loop
+integration_profile: custom-gym-verifier
 domain: knowledge
 description: Long-form factuality over the complete LongFact Objects and Concepts prompts, scored with SAFE-style F1@100 and claim-level diagnostics.
 modality: text
@@ -13,9 +13,9 @@ reward:
   range: [0.0, 1.0]
   higher_is_better: true
 determinism: stochastic
-dataset_owner: longfact_longfact_gymnasium_agent
+dataset_owner: longfact_longfact_simple_agent
 resources_server: longfact
-agent_server: gymnasium_agent
+agent_server: simple_agent
 model_server: policy_model
 datasets:
   - name: longfact
@@ -24,7 +24,7 @@ datasets:
     prepare_script: benchmarks/longfact/prepare.py
     num_repeats: 1
 session_model: episode
-state: per_session
+state: none
 canonical_split: full-objects-and-concepts
 prompt_source: prepared
 lifecycle: active

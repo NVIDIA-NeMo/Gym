@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from nemo_gym.client import ServerClient
-from resources_servers.longfact.app import AtomicFacts, LongFactConfig, LongFactSafeServer
+from resources_servers.longfact.app import AtomicFacts, CardBatchMismatchError, LongFactConfig, LongFactSafeServer
 from resources_servers.longfact.card_fact_check import (
     BROWSE_OFF_CLAIM_LISTING,
     BROWSE_OFF_FACT_CHECK,
@@ -164,14 +164,16 @@ def test_a_malformed_verdict_list_is_retried_then_accepted(edit, problem):
     )
 
 
-def test_a_verdict_list_still_malformed_after_every_attempt_is_an_error():
+def test_a_verdict_list_still_malformed_after_every_attempt_fails_verification():
     answers = {"claim a": "true", "claim b": "false"}
-    server, _ = _card_server(answers, verdict_edits=[_duplicate_last] * 3, max_attempts=3)
+    server, searched = _card_server(answers, verdict_edits=[_duplicate_last] * 3, max_attempts=3)
 
-    traces = asyncio.run(LongFactSafeServer._check_batch_safely(server, "Q", "R", list(answers)))
+    with pytest.raises(CardBatchMismatchError) as error:
+        asyncio.run(LongFactSafeServer._check_batch_safely(server, "Q", "R", list(answers)))
 
-    assert [trace["label"] for trace in traces] == ["ERROR", "ERROR"]
-    assert "fact-check did not cover the batch after 3 attempts: duplicated ['C2']" in traces[0]["fact_error"]
+    assert "fact-check did not cover the batch after 3 attempts: duplicated ['C2']" in str(error.value)
+    assert server.calls == {"plan": 1, "verdicts": 3}
+    assert len(searched) == 6
 
 
 def test_a_search_plan_missing_a_claim_is_retried_before_searching():
@@ -185,15 +187,16 @@ def test_a_search_plan_missing_a_claim_is_retried_before_searching():
     assert len(searched) == 6
 
 
-def test_a_search_plan_malformed_after_every_attempt_is_an_error():
+def test_a_search_plan_malformed_after_every_attempt_fails_verification():
     server, searched = _card_server(
         {"claim a": "true", "claim b": "true"}, plan_edits=[_drop_first] * 2, max_attempts=2
     )
 
-    traces = asyncio.run(LongFactSafeServer._check_batch_safely(server, "Q", "R", ["claim a", "claim b"]))
+    with pytest.raises(CardBatchMismatchError) as error:
+        asyncio.run(LongFactSafeServer._check_batch_safely(server, "Q", "R", ["claim a", "claim b"]))
 
-    assert [trace["label"] for trace in traces] == ["ERROR", "ERROR"]
-    assert "search plan did not cover the batch after 2 attempts: missing ['C1']" in traces[0]["fact_error"]
+    assert "search plan did not cover the batch after 2 attempts: missing ['C1']" in str(error.value)
+    assert server.calls == {"plan": 2, "verdicts": 0}
     assert searched == []
 
 

@@ -20,8 +20,7 @@ from urllib.request import Request, urlopen
 UPSTREAM_REPOSITORY = "https://github.com/google-deepmind/long-form-factuality"
 UPSTREAM_COMMIT = "9d27158d198ced0a9d8271a80147cae580614601"
 BENCHMARK_VARIANT = "longfact-safe-v1"
-BENCHMARK_DIR = Path(__file__).parent
-OUTPUT_FPATH = BENCHMARK_DIR / "data" / "longfact_benchmark.jsonl"
+OUTPUT_FPATH = Path("benchmarks/longfact/data/longfact_benchmark.jsonl")
 
 TOPICS = (
     # Keep case-sensitive filename order. The proven runner builds its prompt

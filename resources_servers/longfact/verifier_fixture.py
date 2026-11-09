@@ -33,6 +33,7 @@ def _response(text: str) -> NeMoGymResponse:
         created_at=0,
         model="offline-fixture",
         object="response",
+        status="completed",
         parallel_tool_calls=False,
         tool_choice="auto",
         tools=[],
@@ -60,8 +61,10 @@ class _JudgeResponse:
 class _JudgeTransport:
     def __init__(self) -> None:
         self.label: Literal["SUPPORTED", "CONTRADICTED"] | None = None
+        self.requests: list[dict[str, object]] = []
+        self.global_config_dict = {"observability_enabled": True}
 
-    async def post(self, *, json: NeMoGymResponseCreateParamsNonStreaming, **_kwargs: object) -> _JudgeResponse:
+    async def post(self, *, json: NeMoGymResponseCreateParamsNonStreaming, **kwargs: object) -> _JudgeResponse:
         if self.label is None:
             raise RuntimeError("Offline judge case must be configured before verification")
         schema_name = json.text["format"]["name"]
@@ -75,6 +78,8 @@ class _JudgeTransport:
         else:
             raise ValueError(f"Unexpected offline judge schema: {schema_name}")
         response = _response(jsonlib.dumps(payload))
+        self.requests.append({"schema": schema_name, **kwargs})
+        response.id = f"offline-judge-{len(self.requests)}"
         return _JudgeResponse(response.model_dump_json().encode())
 
 
@@ -96,7 +101,7 @@ def _server_factory() -> LongFactSafeServer:
 
     class OfflineLongFactServer(LongFactSafeServer):
         def model_post_init(self, context: object) -> None:
-            # Only external I/O setup changes; reset, step, parsing and scoring use the production methods.
+            # Only external I/O setup changes; verification, parsing and scoring use the production methods.
             self._evaluator = JsonEvaluator(
                 server_client=self.server_client,
                 model_server=self.config.evaluator_model_server,
@@ -129,7 +134,7 @@ def _server_factory() -> LongFactSafeServer:
 
 
 async def invoke_fixture(server: object, body: BaseModel) -> dict[str, object]:
-    from resources_servers.longfact.app import BENCHMARK_VARIANT, LongFactSafeServer
+    from resources_servers.longfact.app import BENCHMARK_VARIANT, LongFactSafeServer, LongFactVerifyRequest
 
     if not isinstance(server, LongFactSafeServer) or not isinstance(body, LongFactFixtureRequest):
         raise TypeError("LongFact fixture requires its resources server and typed request")
@@ -137,23 +142,17 @@ async def invoke_fixture(server: object, body: BaseModel) -> dict[str, object]:
     if not isinstance(transport, _JudgeTransport):
         raise TypeError("LongFact fixture requires the offline judge transport")
     transport.label = body.judge_label
-    session_id = "longfact-offline-fixture"
-    try:
-        await server.reset(
-            {
-                "id": session_id,
-                "benchmark_variant": BENCHMARK_VARIANT,
-                "prompt": body.prompt,
-                "source_provenance": {"source": "offline-verifier-fixture"},
-            },
-            session_id,
+    result = await server.verify(
+        LongFactVerifyRequest(
+            responses_create_params={"input": []},
+            response=_response(body.response_text),
+            id="longfact-offline-fixture",
+            benchmark_variant=BENCHMARK_VARIANT,
+            prompt=body.prompt,
+            source_provenance={"source": "offline-verifier-fixture"},
         )
-        _, reward, terminated, truncated, info = await server.step(_response(body.response_text), {}, session_id)
-        if not terminated or truncated:
-            raise RuntimeError("LongFact offline verifier did not complete its single policy turn")
-        return {"reward": reward, "info": info}
-    finally:
-        await server.close_session(session_id)
+    )
+    return result.model_dump(mode="json")
 
 
 VERIFIER_FIXTURE = VerifierFixture(

@@ -81,6 +81,10 @@ def test_free_form_json_parser_rejects_unfenced_commentary():
         'Here are the claims: "The notation [] means an empty array.',
         'Here are the claims: ["The notation [] means an empty array.',
         '{"claims": ["The notation [] means an empty array.',
+        '["The notation ```[]``` denotes an empty array.',
+        '"The notation ```[]``` denotes an empty array.',
+        'Here are the claims: ["The notation ```[]``` denotes an empty array.',
+        'Here are the claims: "The notation ```[]``` denotes an empty array.',
     ],
 )
 def test_embedded_json_recovery_rejects_a_malformed_outer_payload(response):
@@ -94,6 +98,19 @@ def test_embedded_json_recovery_rejects_a_malformed_outer_payload(response):
         ("[]", []),
         ('["The notation [] means an empty array."]', ["The notation [] means an empty array."]),
         ('Claims: ["The notation [] means an empty array."] Done.', ["The notation [] means an empty array."]),
+        (
+            '["The Markdown notation ```[]``` denotes an empty array."]',
+            ["The Markdown notation ```[]``` denotes an empty array."],
+        ),
+        (
+            '```json\n["The Markdown notation ```[]``` denotes an empty array."]\n```',
+            ["The Markdown notation ```[]``` denotes an empty array."],
+        ),
+        (
+            '```\n["The Markdown notation ```[]``` denotes an empty array."]\n```',
+            ["The Markdown notation ```[]``` denotes an empty array."],
+        ),
+        ('```json\n["A complete claim."]', ["A complete claim."]),
         (
             'Here is the verdict: {"label":"SUPPORTED","explanation":"Evidence agrees."} Thanks.',
             {"label": "SUPPORTED", "explanation": "Evidence agrees."},
@@ -139,6 +156,7 @@ def _wire_response(text, model="judge-snapshot"):
         "created_at": 0,
         "model": model,
         "object": "response",
+        "status": "completed",
         "parallel_tool_calls": False,
         "tool_choice": "auto",
         "tools": [],
@@ -219,6 +237,42 @@ def test_generate_json_does_not_resample_a_malformed_completed_response():
         asyncio.run(_evaluator(client, attempts=3).generate_json(SearchDecision, "Judge this claim"))
 
     assert len(client.requests) == 1
+
+
+@pytest.mark.parametrize(
+    ("status", "reason"), [("incomplete", "content_filter"), ("incomplete", "max_output_tokens"), (None, None)]
+)
+def test_unusable_judge_response_cannot_supply_a_parseable_grade(status, reason):
+    from resources_servers.longfact.app import AtomicFacts, LongFactSafeServer
+
+    response = _wire_response('["A complete-looking partial claim."]')
+    response.update(status=status, incomplete_details={"reason": reason} if reason else None)
+    client = _CapturingClient([response])
+    server = SimpleNamespace(
+        config=SimpleNamespace(evaluator_max_attempts=3, evaluator_constrain_json_schema=False),
+        _evaluator=_evaluator(client, attempts=3),
+    )
+
+    with pytest.raises(EvaluatorResponseError, match=f"fixture-response.*{status}.*{reason}"):
+        asyncio.run(LongFactSafeServer._generate_json(server, AtomicFacts, "Extract the claims."))
+
+    assert len(client.requests) == 1
+
+
+def test_malformed_claim_with_backticks_exhausts_extraction_instead_of_scoring_zero_claims():
+    from resources_servers.longfact.app import AtomicFacts, EvaluatorParseError, LongFactSafeServer
+
+    malformed = '["The notation ```[]``` denotes an empty array.'
+    client = _CapturingClient([_wire_response(malformed), _wire_response(malformed)])
+    server = SimpleNamespace(
+        config=SimpleNamespace(evaluator_max_attempts=2, evaluator_constrain_json_schema=False),
+        _evaluator=_evaluator(client),
+    )
+
+    with pytest.raises(EvaluatorParseError, match="malformed JSON 2 times"):
+        asyncio.run(LongFactSafeServer._generate_json(server, AtomicFacts, "Extract the claims."))
+
+    assert len(client.requests) == 2
 
 
 @pytest.mark.parametrize("model", ["judge-snapshot", "other-judge"])

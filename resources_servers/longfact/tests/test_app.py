@@ -50,7 +50,7 @@ def test_zero_judged_claims_have_perfect_precision_and_zero_f1():
     assert evaluation["traces"] == []
 
 
-def test_onboarding_fixture_exercises_real_scoring_and_cleans_up_sessions():
+def test_onboarding_fixture_exercises_stateless_native_f1_at_100_scoring():
     from nemo_gym.verification import exercise_verifier_fixture, load_verifier_fixture
     from resources_servers.longfact.app import VERIFIER_FIXTURE
     from resources_servers.longfact.verifier_fixture import invoke_fixture
@@ -222,7 +222,7 @@ def test_judge_without_a_verdict_raises_instead_of_unsure(mode):
         asyncio.run(LongFactSafeServer._judge_fact(server, "A sensitive quote.", []))
 
 
-def test_unverdicted_claim_becomes_an_error_claim():
+def test_unverdicted_claim_propagates_its_typed_judge_failure():
     async def extract(*_args, **_kwargs):
         return AtomicFacts(["A factual claim."])
 
@@ -243,10 +243,8 @@ def test_unverdicted_claim_becomes_an_error_claim():
         _f1_at_k=LongFactSafeServer._f1_at_k,
     )
 
-    evaluation = asyncio.run(LongFactSafeServer._evaluate(server, "Question", "Response"))
-
-    assert evaluation["error_claims"] == 1
-    assert evaluation["traces"][0]["label"] == "ERROR"
+    with pytest.raises(EvaluatorParseError, match="malformed JSON 6 times"):
+        asyncio.run(LongFactSafeServer._evaluate(server, "Question", "Response"))
 
 
 @pytest.mark.parametrize("constrain", [True, False])
@@ -360,6 +358,7 @@ def _step_server(evaluate):
     server = SimpleNamespace(session_state={"s": state}, _evaluate=evaluate)
     server._session_key = LongFactSafeServer._session_key
     server._info = lambda state: {"f1_at_k": state.get("f1_at_k")}
+    server._require_checked_claims = LongFactSafeServer._require_checked_claims
     return server
 
 
@@ -499,3 +498,386 @@ def test_failed_step_session_is_released_by_close():
     assert open_sessions == 1
     assert close.status_code == 200
     assert server.session_state == {}
+
+
+@pytest.mark.parametrize(("label", "reward", "supported"), [("SUPPORTED", 1.0, 100), ("CONTRADICTED", 0.0, 0)])
+def test_native_verify_binds_the_original_answer_reward_and_task_metadata(label, reward, supported):
+    from nemo_gym.trajectory import grading_result_binding
+    from resources_servers.longfact.verifier_fixture import _response, _server_factory
+
+    async def run():
+        import httpx
+
+        server = _server_factory()
+        server.server_client.label = label
+        server.server_client.global_config_dict = {"observability_enabled": True}
+        body = {
+            "responses_create_params": {"input": [{"role": "user", "content": "Question"}]},
+            "response": _response("The saved policy answer.").model_dump(mode="json"),
+            "id": "source-task",
+            "task_id": "source-task",
+            "benchmark_variant": BENCHMARK_VARIANT,
+            "prompt": "Question",
+            "subset": "objects",
+            "topic": "history",
+            "source_provenance": {"source_path": "published-source.jsonl", "row": 7},
+        }
+        transport = httpx.ASGITransport(app=server.setup_webserver())
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/ng-rollout/longfact-native-test/verify", json=body)
+        return server, body, response
+
+    server, body, response = asyncio.run(run())
+
+    assert response.status_code == 200
+    row = response.json()
+    assert row["response"] == body["response"]
+    assert row["reward"] == reward
+    assert row["info"]["task_id"] == "source-task"
+    assert row["info"]["source_provenance"] == body["source_provenance"]
+    assert row["info"]["num_extracted_claims"] == 100
+    assert row["info"]["supported_claims"] == supported
+    assert row["info"]["safe_variant"]["f1_max_claims"] == 100
+    assert not row["mask_sample"]
+    (invocation,) = row["ng_verifier_invocations"]
+    assert invocation["status"] == "completed"
+    (operation,) = invocation["grading_operations"]
+    assert (operation["kind"], operation["outcome"]) == ("llm_judge", "completed")
+    assert len(operation["dependencies"]) == 201
+    assert operation["result_binding_sha256"] == grading_result_binding(row)
+    assert grading_result_binding(row | {"reward": 0.5}) != operation["result_binding_sha256"]
+    changed_response = body["response"] | {"output": []}
+    assert grading_result_binding(row | {"response": changed_response}) != operation["result_binding_sha256"]
+    assert all(
+        dependency["model_ref"] == {"type": "responses_api_models", "name": "offline_judge"}
+        for dependency in operation["dependencies"]
+    )
+    assert server.session_state == {}
+
+
+class _CardJudgeTransport:
+    """Script the external judge replies while the real scorer owns concurrency and validation."""
+
+    global_config_dict = {"observability_enabled": True}
+
+    def __init__(self, fault=None):
+        self.fault = fault
+        self.counts = {}
+        self.received_ids = []
+        self.invocation_ids = []
+        self.second_plan_received = asyncio.Event()
+        self.completed_plans = []
+        self.sibling_started = asyncio.Event()
+        self.sibling_finished = asyncio.Event()
+
+    async def post(self, *, json, **kwargs):
+        import json as jsonlib
+
+        from resources_servers.longfact.verifier_fixture import _JudgeResponse, _response
+
+        schema = json.text["format"]["name"]
+        prompt = json.input[-1].content
+        self.counts[schema] = self.counts.get(schema, 0) + 1
+        count = self.counts[schema]
+        if schema == "AtomicFacts":
+            payload = ["First factual claim.", "Second factual claim."]
+            if self.fault == "exhausted_malformed" or (self.fault == "malformed_extraction" and count == 1):
+                text = '{"claims": []'
+            elif self.fault == "filtered_extraction":
+                payload.append("   ")
+                text = jsonlib.dumps(payload)
+            else:
+                text = jsonlib.dumps(payload)
+        else:
+            claims = jsonlib.loads(prompt.rsplit("Claims:\n", 1)[1].split("\n\nSearch results:", 1)[0])
+            if schema == "BatchSearchPlan":
+                # Reverse batch completion so the scorer must bind concurrent accepted replies correctly.
+                if claims[0]["claim"].startswith("First"):
+                    await self.second_plan_received.wait()
+                else:
+                    self.second_plan_received.set()
+                self.completed_plans.append(claims[0]["claim"])
+                payload = {"claims": [{"claim_id": item["claim_id"], "queries": [item["claim"]]} for item in claims]}
+                if self.fault == "invalid_id" and count == 1:
+                    payload["claims"][0]["claim_id"] = "UNKNOWN"
+            elif schema == "CardBatchVerdicts":
+                if self.fault == "failed_batch":
+                    if claims[0]["claim"].startswith("First"):
+                        self.sibling_started.set()
+                        try:
+                            await asyncio.Event().wait()
+                        finally:
+                            self.sibling_finished.set()
+                    await self.sibling_started.wait()
+                    response = _response('{"verdicts": []')
+                    response.id = f"malformed-verdict-{count}"
+                    self.received_ids.append(response.id)
+                    return _JudgeResponse(response.model_dump_json().encode())
+                payload = {
+                    "verdicts": [
+                        {
+                            "claim_id": item["claim_id"],
+                            "claim": item["claim"],
+                            "answer": "true",
+                            "reasoning": "Scripted external verdict.",
+                            "supporting_evidence": [],
+                        }
+                        for item in claims
+                    ]
+                }
+            else:
+                raise AssertionError(f"Unexpected schema {schema}")
+            text = jsonlib.dumps(payload)
+        response = _response(text)
+        response.id = f"external-{schema}-{count}"
+        self.received_ids.append(response.id)
+        self.invocation_ids.append(kwargs["headers"]["x-ng-verifier-invocation-id"])
+        return _JudgeResponse(response.model_dump_json().encode())
+
+
+def _card_http_verification(fault=None):
+    from resources_servers.longfact.evaluator import JsonEvaluator
+    from resources_servers.longfact.verifier_fixture import _response, _server_factory
+
+    async def run():
+        import httpx
+
+        server = _server_factory()
+        transport = _CardJudgeTransport(fault)
+        server.server_client = transport
+        server.config.fact_check_mode = "gpt5_card_batch"
+        server.config.fact_check_batch_size = 1
+        server.config.evaluator_max_attempts = 2
+        server._evaluator = JsonEvaluator(
+            server_client=transport,
+            model_server=server.config.evaluator_model_server,
+            create_params=server.config.evaluator_responses_create_params,
+            max_concurrency=16,
+            max_attempts=1,
+            timeout_seconds=1,
+        )
+        body = {
+            "responses_create_params": {"input": [{"role": "user", "content": "Question"}]},
+            "response": _response("The saved policy answer.").model_dump(mode="json"),
+            "id": "card-task",
+            "benchmark_variant": BENCHMARK_VARIANT,
+            "prompt": "Question",
+            "source_provenance": {"source_path": "published-source.jsonl"},
+        }
+        http_transport = httpx.ASGITransport(app=server.setup_webserver())
+        async with httpx.AsyncClient(transport=http_transport, base_url="http://test") as client:
+            response = await client.post("/ng-rollout/longfact-card-test/verify", json=body)
+            transport.sibling_finished_at_route_return = transport.sibling_finished.is_set()
+        assert response.status_code == 200
+        return body, response.json(), transport
+
+    return asyncio.run(run())
+
+
+def test_concurrent_card_batches_bind_every_accepted_judge_dependency():
+    from nemo_gym.trajectory import grading_result_binding
+
+    body, row, transport = _card_http_verification()
+
+    assert row["reward"] == pytest.approx(4 / 102)
+    assert row["response"] == body["response"]
+    assert [trace["atomic_fact"] for trace in row["info"]["traces"]] == [
+        "First factual claim.",
+        "Second factual claim.",
+    ]
+    (invocation,) = row["ng_verifier_invocations"]
+    (operation,) = invocation["grading_operations"]
+    assert operation["outcome"] == "completed"
+    assert operation["result_binding_sha256"] == grading_result_binding(row)
+    assert [dependency["response_id"] for dependency in operation["dependencies"]] == transport.received_ids
+    assert len(operation["dependencies"]) == len(set(transport.received_ids)) == 5
+    assert set(transport.invocation_ids) == {invocation["invocation_id"]}
+    assert transport.completed_plans == ["Second factual claim.", "First factual claim."]
+
+
+@pytest.mark.parametrize("fault", ["invalid_id", "malformed_extraction", "filtered_extraction"])
+def test_rejected_or_filtered_judge_reply_keeps_retry_grading_unknown(fault):
+    body, row, transport = _card_http_verification(fault)
+
+    assert row["reward"] == pytest.approx(4 / 102)
+    assert row["response"] == body["response"]
+    assert row["info"]["supported_claims"] == 2
+    assert not row["mask_sample"]
+    (invocation,) = row["ng_verifier_invocations"]
+    (operation,) = invocation["grading_operations"]
+    assert operation["outcome"] == "unknown"
+    assert len(operation["dependencies"]) == len(transport.received_ids)
+    assert [dependency["response_id"] for dependency in operation["dependencies"]] == transport.received_ids
+    if fault == "invalid_id":
+        assert transport.counts["BatchSearchPlan"] == 3
+    elif fault == "malformed_extraction":
+        assert transport.counts["AtomicFacts"] == 2
+
+
+def test_native_unparseable_judge_masks_the_row_and_preserves_the_saved_answer():
+    body, row, transport = _card_http_verification("exhausted_malformed")
+
+    assert row["response"] == body["response"]
+    assert row["mask_sample"] is True
+    assert row["failure_kind"] == row["_ng_failure_class"] == "judge_failed"
+    assert transport.counts == {"AtomicFacts": 2}
+    (invocation,) = row["ng_verifier_invocations"]
+    assert invocation["status"] == "failed"
+    (operation,) = invocation["grading_operations"]
+    assert operation["outcome"] == "failed"
+    assert len(operation["dependencies"]) == 2
+
+
+def test_failed_card_batch_joins_cancelled_judge_siblings_before_verify_returns():
+    body, row, transport = _card_http_verification("failed_batch")
+
+    assert row["response"] == body["response"]
+    assert row["mask_sample"] is True
+    assert row["failure_kind"] == "judge_failed"
+    assert transport.sibling_started.is_set()
+    assert transport.sibling_finished_at_route_return is True
+    (invocation,) = row["ng_verifier_invocations"]
+    assert invocation["grading_operations"][0]["outcome"] == "failed"
+
+
+def test_native_pairing_sends_one_unchanged_policy_prompt_without_tool_grants():
+    import httpx
+    from omegaconf import OmegaConf
+    from pydantic import BaseModel, Field
+
+    from environment_servers.single_agent_turn_legacy.app import (
+        SingleAgentTurnLegacyEnvironmentServer,
+        SingleAgentTurnLegacyEnvironmentServerConfig,
+    )
+    from nemo_gym.client import ServerClient
+    from nemo_gym.core import current_rollout_id
+    from resources_servers.longfact.verifier_fixture import _response, _server_factory
+    from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig
+
+    class Reply:
+        def __init__(self, payload, *, status=200, cookies=None, headers=None):
+            self.payload = payload
+            self.status = status
+            self.ok = status < 400
+            self.cookies = cookies or {}
+            self.headers = headers or {}
+
+        async def read(self):
+            return self.payload
+
+    class RoutingClient(ServerClient):
+        apps: dict[str, object] = Field(default_factory=dict)
+        calls: list[tuple[str, str, dict]] = Field(default_factory=list)
+        policy_requests: list[dict] = Field(default_factory=list)
+
+        def _resolve_base_url(self, server_name):
+            return f"http://{server_name}"
+
+        async def post(self, *, server_name, url_path, json, **kwargs):
+            payload = json.model_dump(mode="json", exclude_unset=True) if isinstance(json, BaseModel) else json
+            self.calls.append((server_name, url_path, payload))
+            if server_name == "policy_model":
+                self.policy_requests.append(payload)
+                return Reply(_response("The saved policy answer.").model_dump_json().encode())
+            rollout_id = current_rollout_id()
+            if rollout_id and server_name == "longfact" and not url_path.startswith("/ng-rollout/"):
+                url_path = f"/ng-rollout/{rollout_id}{url_path}"
+            transport = httpx.ASGITransport(app=self.apps[server_name])
+            async with httpx.AsyncClient(transport=transport, base_url=f"http://{server_name}") as client:
+                response = await client.post(
+                    url_path, json=payload, cookies=kwargs.get("cookies"), headers=kwargs.get("headers")
+                )
+            assert response.status_code == 200, response.text
+            return Reply(
+                response.content,
+                status=response.status_code,
+                cookies={key: SimpleNamespace(value=value) for key, value in response.cookies.items()},
+                headers=response.headers,
+            )
+
+    async def run():
+        client = RoutingClient(
+            head_server_config={"host": "head", "port": 1},
+            global_config_dict=OmegaConf.create(
+                {
+                    "observability_enabled": True,
+                    "longfact": {"resources_servers": {"longfact": {"entrypoint": "app.py"}}},
+                    "agent": {
+                        "responses_api_agents": {
+                            "simple_agent": {
+                                "entrypoint": "app.py",
+                                "model_server": {"type": "responses_api_models", "name": "policy_model"},
+                            }
+                        }
+                    },
+                }
+            ),
+        )
+        resources = _server_factory()
+        resources.server_client.label = "SUPPORTED"
+        resources.server_client = client
+        agent = SimpleAgent(
+            config=SimpleAgentConfig(
+                name="agent",
+                host="agent",
+                port=8001,
+                entrypoint="app.py",
+                max_steps=1,
+                execute_tools=False,
+                model_server={"type": "responses_api_models", "name": "policy_model"},
+                resources_server={"type": "resources_servers", "name": "longfact"},
+            ),
+            server_client=client,
+        )
+        client.apps = {"longfact": resources.setup_webserver(), "agent": agent.setup_webserver()}
+        environment = SingleAgentTurnLegacyEnvironmentServer(
+            config=SingleAgentTurnLegacyEnvironmentServerConfig(
+                name="environment",
+                host="environment",
+                port=8002,
+                entrypoint="app.py",
+                resources_server={"type": "resources_servers", "name": "longfact"},
+                agent_server={"type": "responses_api_agents", "name": "agent"},
+                resources_tool_transports=[],
+                tool_servers=[],
+                default_episode_timeout_seconds=None,
+            ),
+            server_client=client,
+        )
+        params = {
+            "input": [{"role": "user", "content": "Tell me about the Eiffel Tower."}],
+            "temperature": 0.25,
+            "max_output_tokens": 1234,
+        }
+        row = {
+            "responses_create_params": params,
+            "id": "published-task",
+            "task_id": "published-task",
+            "_ng_rollout_id": "longfact-policy-test",
+            "benchmark_variant": BENCHMARK_VARIANT,
+            "prompt": params["input"][0]["content"],
+            "source_provenance": {"source_path": "published-source.jsonl", "row": 7},
+        }
+        result = await environment.run_legacy(row)
+        return client, params, result
+
+    client, params, result = asyncio.run(run())
+
+    assert result["reward"] == 1.0
+    assert len(client.policy_requests) == 1
+    policy_request = client.policy_requests[0]
+    assert policy_request["input"] == params["input"]
+    assert policy_request["temperature"] == params["temperature"]
+    assert policy_request["max_output_tokens"] == params["max_output_tokens"]
+    assert policy_request.get("tools", []) == []
+    agent_seeds = [body for name, path, body in client.calls if name == "agent" and path == "/v1/agent_sessions"]
+    assert len(agent_seeds) == 1
+    assert agent_seeds[0]["tool_accesses"] == []
+    assert [path for name, path, _body in client.calls if name == "longfact"] == [
+        "/seed_session",
+        "/verify",
+        "/close_session",
+    ]
+    assert result["info"]["source_provenance"] == {"source_path": "published-source.jsonl", "row": 7}
+    (invocation,) = result["ng_verifier_invocations"]
+    assert invocation["grading_operations"][0]["outcome"] == "completed"

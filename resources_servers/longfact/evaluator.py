@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Retrying JSON and text Responses API calls used by LongFact."""
+"""Retrying typed JSON Responses API calls used by LongFact."""
 
 from __future__ import annotations
 
@@ -15,9 +15,14 @@ from typing import TypeVar
 from aiohttp import ClientResponseError
 from pydantic import BaseModel, ValidationError
 
-from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef
-from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import (
+    NeMoGymEasyInputMessage,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
+)
+from nemo_gym.verification import JudgeError, call_judge
 from resources_servers.gymnasium import extract_text
 
 
@@ -26,7 +31,7 @@ SchemaT = TypeVar("SchemaT", bound=BaseModel)
 INTERNAL_MODEL_TRANSPORT_MAX_ATTEMPTS = 1
 
 
-class EvaluatorResponseError(RuntimeError):
+class EvaluatorResponseError(JudgeError, RuntimeError):
     """Raised after an evaluator request exhausts its parse/request retries."""
 
 
@@ -36,6 +41,14 @@ class EvaluatorParseError(EvaluatorResponseError):
 
 class EvaluatorIdentityError(EvaluatorResponseError):
     """Raised when a response came from a different model than the pinned one."""
+
+
+class _SingleAttemptJudgeClient:
+    def __init__(self, client) -> None:
+        self._client = client
+
+    async def post(self, **kwargs):
+        return await self._client.post(**kwargs, _max_num_tries=INTERNAL_MODEL_TRANSPORT_MAX_ATTEMPTS)
 
 
 class JsonEvaluator:
@@ -50,7 +63,7 @@ class JsonEvaluator:
         timeout_seconds: float,
         expected_model_identity: str | None = None,
     ) -> None:
-        self._server_client = server_client
+        self._server_client = _SingleAttemptJudgeClient(server_client)
         self._model_server = model_server
         self._create_params = create_params
         self._semaphore = asyncio.Semaphore(max_concurrency)
@@ -99,24 +112,28 @@ class JsonEvaluator:
                 attempt += 1
                 try:
                     await asyncio.sleep(random.uniform(0, 0.2))
-                    response = await self._server_client.post(
+                    parsed = await call_judge(
+                        self._server_client,
                         server_name=self._model_server.name,
                         url_path="/v1/responses",
                         json=params,
+                        response_model=NeMoGymResponse,
                         timeout=self._timeout_seconds,
-                        _max_num_tries=INTERNAL_MODEL_TRANSPORT_MAX_ATTEMPTS,
+                        max_attempts=1,
                     )
-                    await raise_for_status(response)
-                    parsed = NeMoGymResponse.model_validate(await get_response_json(response))
                     self._validate_model_identity(parsed)
+                    if parsed.status != "completed" or parsed.incomplete_details is not None:
+                        reason = parsed.incomplete_details.reason if parsed.incomplete_details is not None else None
+                        raise EvaluatorResponseError(
+                            f"Evaluator response {parsed.id} has status={parsed.status}, incomplete_reason={reason}"
+                        )
                     response_text = extract_text(parsed)
-                except EvaluatorIdentityError:
-                    # A successful response from an unexpected model is a
-                    # provenance failure, not a transient transport failure.
+                except EvaluatorResponseError:
+                    # Unexpected model identity and incomplete judge output cannot supply a usable grade.
                     raise
                 except Exception as exc:
                     if self._is_bad_request(exc):
-                        raise EvaluatorResponseError(f"Evaluator request rejected with HTTP {exc.status}") from exc
+                        raise EvaluatorResponseError("Evaluator request rejected with HTTP 400") from exc
                     last_error = exc
                     LOG.warning(
                         "Free-form JSON evaluator request failed (%d/%d, schema=%s): %s",
@@ -143,6 +160,8 @@ class JsonEvaluator:
     def _is_bad_request(exc: Exception) -> bool:
         """Match upstream's immediate ``openai.BadRequestError`` handling."""
 
+        if isinstance(exc, NgFailureEvent) and isinstance(exc.__cause__, Exception):
+            exc = exc.__cause__
         return isinstance(exc, ClientResponseError) and exc.status == 400
 
     def _validate_model_identity(self, response: NeMoGymResponse) -> None:
@@ -184,28 +203,29 @@ class JsonEvaluator:
         sanitize_json: bool = True,
         salvage_embedded_json: bool = False,
     ):
-        # Match upstream extract_json_from_response exactly: strip the whole
-        # response, prefer the first fenced payload when present, and otherwise
-        # require the complete response to be JSON. Do not salvage an unfenced
-        # object embedded in commentary.
         candidate = text.strip()
-        if "```json" in candidate:
-            candidate = candidate.split("```json", 1)[1].split("```", 1)[0].strip()
-        elif "```" in candidate:
-            candidate = candidate.split("```", 1)[1].split("```", 1)[0].strip()
         if sanitize_json:
             candidate = cls._sanitize_json_string(candidate)
         try:
             return json.loads(candidate)
         except json.JSONDecodeError as exc:
-            if salvage_embedded_json:
-                payload_start = re.search(r'[\[{"]', candidate)
-                if payload_start is not None:
+            # The first JSON opener owns recovery; backticks inside a claim cannot replace its outer payload.
+            payload_start = re.search(r'```|[\[{"]', candidate)
+            if payload_start is not None:
+                fenced = payload_start.group() == "```"
+                if fenced or salvage_embedded_json:
+                    embedded = candidate[payload_start.end() if fenced else payload_start.start() :]
+                    if fenced and embedded.startswith("json"):
+                        embedded = embedded[4:]
+                    embedded = embedded.lstrip()
                     try:
-                        payload, _ = json.JSONDecoder().raw_decode(candidate[payload_start.start() :])
-                        return payload
+                        payload, end = json.JSONDecoder().raw_decode(embedded)
                     except json.JSONDecodeError as embedded_exc:
                         raise ValueError("Evaluator did not return parseable JSON") from embedded_exc
+                    suffix = embedded[end:].lstrip()
+                    if fenced and suffix and not suffix.startswith("```"):
+                        raise ValueError("Evaluator did not return parseable JSON") from exc
+                    return payload
             raise ValueError("Evaluator did not return parseable JSON") from exc
 
     @staticmethod

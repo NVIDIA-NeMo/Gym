@@ -68,7 +68,9 @@ class TavilyProvider:
             from tavily import AsyncTavilyClient
 
             client = AsyncTavilyClient(api_key=api_key)
-            client._client = TavilySearchAIOHTTPClient.from_httpx_AsyncClient(client._client, debug=False)
+            client._client = TavilySearchAIOHTTPClient.from_httpx_AsyncClient(
+                client._client, debug=False, timeout_s=timeout_seconds
+            )
         self._client = client
         self._search_depth = search_depth
         self._max_results = max_results
@@ -421,7 +423,10 @@ class TavilyProvider:
             raise TavilyCacheCorruptionError(f"Malformed Tavily cache entry {path}: {exc}") from exc
         if format_version == CACHE_FORMAT_VERSION:
             expected_response_digest = metadata.get("response_sha256")
-            actual_response_digest = cls._response_digest(response)
+            try:
+                actual_response_digest = cls._response_digest(response)
+            except (TypeError, ValueError) as exc:
+                raise TavilyCacheCorruptionError(f"Malformed Tavily cache response {path}: {exc}") from exc
             if expected_response_digest != actual_response_digest:
                 raise TavilyCacheCorruptionError(
                     f"Tavily cache response checksum mismatch for {path}: "

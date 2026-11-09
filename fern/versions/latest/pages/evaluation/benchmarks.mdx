@@ -112,7 +112,7 @@ gym env start --benchmark longfact --model-type vllm_model \
   --model "$POLICY_MODEL" --model-url "$POLICY_BASE_URL" \
   --model-api-key "$POLICY_API_KEY"
 # In another terminal, after the servers are ready:
-gym eval run --no-serve --agent longfact_longfact_gymnasium_agent \
+gym eval run --no-serve --agent longfact_longfact_simple_agent \
   --input benchmarks/longfact/data/hard200.jsonl \
   --output results/longfact-hard200/rollouts.jsonl
 ```
