@@ -63,6 +63,10 @@ installation is needed. The default is `null`, preserving existing behavior.
 
 ## Offline scientific evaluation with OpenCode or Pi
 
+The plain-named HLE and APEX Shortlist OpenCode presets (`hle/opencode`, `hle/opencode_search`,
+`apex_shortlist/opencode`) run `opencode_agent` sessions instead; this section describes their
+`*_legacy_agent` presets, and the benchmark READMEs list what differs.
+
 The dedicated `opencode_sandboxed_agent` and `pi_sandboxed_agent` run their native
 CLIs inside a provider-managed sandbox. Gym stays on the host: it provisions the
 sandbox, routes model requests, seeds authenticated MCP tools, collects transcripts,

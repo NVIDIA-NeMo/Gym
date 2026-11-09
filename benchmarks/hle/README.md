@@ -142,6 +142,8 @@ measurement:
   as 0 (`execution_failure_reward_zero`).
 - Commands: `opencode_agent`'s default rules (destructive commands, Git network and history mining) apply, and
   subagents stay denied.
+- Requests: `opencode_agent` accepts the input, `instructions`, `model`, `temperature` and `top_p`, and refuses
+  other request fields, such as `reasoning` or `max_output_tokens`, with 422; the deprecated agent ignored them.
 - Artifacts: there is no host export directory (`OPENCODE_ARTIFACTS_DIR`); the rollout rows carry the agent's
   observations.
 - The image ships no plugin-dependency bundle for `opencode_agent`'s private config directory, so each offline
@@ -150,7 +152,8 @@ measurement:
   describes and set `sandbox_plugin_dependencies_path` and `sandbox_plugin_dependencies_sha256` to remove the wait.
 
 See the shared [OpenCode and Pi setup guide](../../responses_api_agents/opencode_sandboxed_agent/README.md#offline-scientific-evaluation-with-opencode-or-pi)
-for images, credentials, network policies and token limits.
+for images, credentials and network policies. Its token limits, step cap and artifact directories describe the
+`*_legacy_agent` presets.
 
 The search presets supply the public HLE [exclusion list](search_exclusions.json).
 Deployments requiring an additional policy must supply their combined policy file
