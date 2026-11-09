@@ -1,6 +1,7 @@
 responses_create_params:
   temperature: 1.0
   top_p: 0.95
+  max_output_tokens: 32768
 
 genrm_eval:
   resources_servers:

@@ -15,6 +15,7 @@ from resources_servers.genrm_eval.app import GenRMEvalConfig, GenRMEvalResources
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("incomplete_reason", [None, "max_output_tokens", "content_filter"])
 @pytest.mark.parametrize(
     ("text", "expected", "ranking"),
     [
@@ -28,7 +29,7 @@ from resources_servers.genrm_eval.app import GenRMEvalConfig, GenRMEvalResources
         ('{"ranking":3.5}', 0, None),
     ],
 )
-async def test_verify(text: str, expected: float, ranking: float | None) -> None:
+async def test_verify(text: str, expected: float, ranking: float | None, incomplete_reason: str | None) -> None:
     server = GenRMEvalResourcesServer(
         config=GenRMEvalConfig(
             host="localhost",
@@ -53,6 +54,7 @@ async def test_verify(text: str, expected: float, ranking: float | None) -> None
                 "created_at": 0,
                 "model": "test",
                 "object": "response",
+                "incomplete_details": {"reason": incomplete_reason} if incomplete_reason else None,
                 "output": [
                     {
                         "type": "reasoning",
@@ -82,9 +84,11 @@ async def test_verify(text: str, expected: float, ranking: float | None) -> None
     assert result.reasoning_tokens == len(encoding.encode('```json\n{"ranking":6}\n```', disallowed_special=()))
     # Gym drops response.output before aggregation; per-row counts survive that.
     stripped = result.model_dump(exclude={"response", "responses_create_params"})
+    stripped["response"] = {"incomplete_details": result.response.model_dump()["incomplete_details"]}
     aggregate = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[stripped]))
     assert aggregate.key_metrics == {
         "overall/accuracy": expected,
+        "max_token_reached_rate": float(incomplete_reason == "max_output_tokens"),
         "median/response_tokens": result.response_tokens,
         "median/reasoning_tokens": result.reasoning_tokens,
     }

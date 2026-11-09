@@ -75,7 +75,7 @@ def test_prepare_and_config(tmp_path, monkeypatch, benchmark, cached):
     assert str(dataset.jsonl_fpath).endswith("_llm_as_a_judge_validation.jsonl")
     assert config.responses_create_params.temperature == 1.0
     assert config.responses_create_params.top_p == 0.95
-    assert config.responses_create_params.max_output_tokens == 16384
+    assert config.responses_create_params.max_output_tokens == 32768
 
 
 def test_reject_overwrite_and_bad_input(tmp_path):
