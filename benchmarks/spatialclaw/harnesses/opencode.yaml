@@ -27,7 +27,7 @@ opencode_agent:
       sandbox_provider: null
       network_access: inherit
       sandbox_executable_path: ${oc.env:SPATIALCLAW_OPENCODE_BIN}
-      sandbox_executable_sha256: 9ca0b9953d49997601655e54f846a3efa464f237e47c6f1b04716d0f2e64c4c2
+      sandbox_executable_sha256: 9ca0b9953d49997601655e54f846a3efa464f237e47c6f1b04716d0f2e64c4c2  # pragma: allowlist secret
       sandbox_model_id: ${policy_model_name}
       system_prompt: >-
         Solve the provided SpatialClaw question using the benchmark's granted

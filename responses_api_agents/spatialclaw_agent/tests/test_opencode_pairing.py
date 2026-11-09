@@ -33,7 +33,7 @@ from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgent
 
 
 PINNED_VERSION = "1.18.34"
-PINNED_SHA256 = "9ca0b9953d49997601655e54f846a3efa464f237e47c6f1b04716d0f2e64c4c2"
+PINNED_SHA256 = "9ca0b9953d49997601655e54f846a3efa464f237e47c6f1b04716d0f2e64c4c2"  # pragma: allowlist secret
 
 
 @contextmanager
