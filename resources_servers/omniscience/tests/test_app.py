@@ -535,7 +535,9 @@ class TestExtractTextNoStrip:
     "text, expected, parsed",
     [
         ("A", "A", True),
+        ("A\n", "A", True),
         ("B", "B", True),
+        ("B\nA", "A", True),
         ("explanation\nD", "D", True),
         ("reasoning\n\u00a0A", "A", True),
         ("reasoning\n\u00a0B", "B", True),
@@ -546,11 +548,49 @@ class TestExtractTextNoStrip:
         ("Grade: **B**", "B", True),
         ("ANSWER: B", "B", True),
         ("Answer is D", "D", True),
+        ("Verdict: D", "D", True),
+        ("Reasoning...\nFinal grade: C", "C", True),
         ("NOT_ATTEMPTED", "D", True),
         ("CORRECT", "A", True),
+        ("INCORRECT", "B", True),
+        ("C: PARTIAL_ANSWER", "C", True),
+        ("Grade: INCORRECT", "B", True),
+        ("Grade: B: INCORRECT", "B", True),
+        ("Grade: C: PARTIAL_ANSWER", "C", True),
+        ("Grade: B; Verdict: B", "B", True),
+        ("NOT CORRECT", "B", False),
+        ("It is not CORRECT", "B", False),
+        ("The predicted answer is NOT CORRECT.", "B", False),
+        ("PARTIALLY CORRECT", "B", False),
+        ("Grade: NOT CORRECT", "B", False),
+        ("Grade: PARTIALLY CORRECT", "B", False),
+        ("<think>Is it CORRECT? No.</think>B", "B", False),
+        ("<think>\nCORRECT\n</think>B", "B", False),
+        ("A\n\nExplanation: the answer is B-level", "B", False),
+        ("The gold answer is C and the predicted answer is C++, which is different.", "B", False),
+        ("<your_message>A</your_message>", "B", False),
+        ("b", "B", False),
+        ("Predicted answer: Berlin", "B", False),
+        ("The predicted answer is a city in France.", "B", False),
+        ("Answer: Berlin", "B", False),
+        ("Grade: Athens", "B", False),
+        ("Answer: C++", "B", False),
+        ("Grade: A+", "B", False),
+        ("Grade: A/B-level", "B", False),
+        ("Grade: A/B+", "B", False),
+        ("Grade: A/E", "B", False),
+        ("Grade:\nA reasonable attempt", "B", False),
+        ("Reasoning; Grade: A", "B", False),
+        ("C: CORRECT", "B", False),
+        ("Grade: A: INCORRECT", "B", False),
         ("Grade: A/B", "B", False),
+        ("Grade: A & B", "B", False),
+        ("Grade: A | C", "B", False),
+        ("Grade: CORRECT or INCORRECT", "B", False),
         ("The grade is A or B", "B", False),
         ("Grade: A/B; Grade: A", "B", False),
+        ("Grade: A; Grade: B", "B", False),
+        ("Grade: A; Grade: B+", "B", False),
         ("Grade: **A**/**B**", "B", False),
         ("Grade: **A** and **B**", "B", False),
         ("Grade: **A**, **B**", "B", False),
@@ -560,7 +600,7 @@ class TestExtractTextNoStrip:
         ("It is CORRECT in part but also INCORRECT in part", "B", False),
     ],
 )
-def test_only_explicit_judge_verdict_marks_grading(text, expected, parsed):
+def test_only_explicit_judge_verdict_marks_grading(text: str, expected: str, parsed: bool) -> None:
     from nemo_gym.trajectory import ModelCallRef
     from nemo_gym.verification import JudgeGrading
     from nemo_gym.verification.judge import _judge_grading
@@ -569,6 +609,6 @@ def test_only_explicit_judge_verdict_marks_grading(text, expected, parsed):
     token = _judge_grading.set(grading)
     try:
         assert parse_judge_grade(text) == expected
-        assert bool(grading.parsed_dependencies) is parsed
+        assert grading.parsed_dependencies == ({0} if parsed else set())
     finally:
         _judge_grading.reset(token)
