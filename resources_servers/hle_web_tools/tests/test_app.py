@@ -411,6 +411,8 @@ async def test_archive_and_proxy_wrappers_are_decoded_before_the_url_check(serve
 
 
 OVERFLOW_DECOYS = "&".join(f"u{i}=https://example.org/{i}" for i in range(63))
+# Four timestamped Wayback layers around a percent-encoded page: the deepest nesting MAX_URL_DECODE_ROUNDS allows.
+NESTED_WAYBACK = "".join(f"https://web.archive.org/web/2024010100000{i}/" for i in range(4)) + "https://example.org/x%20y"
 
 
 @pytest.mark.parametrize(
@@ -453,6 +455,7 @@ OVERFLOW_DECOYS = "&".join(f"u{i}=https://example.org/{i}" for i in range(63))
         ("https://duckduckgo.com/l/?uddg=https%3A%2F%2Fen.wikipedia.org%2Fwiki%2FSpin_structure&rut=ab", None),
         ("https://example.org/a/./b/../c?next=%2Fhome%3Fq%3Da%2520b&utm_source=x#top", None),
         ("https://web.archive.org/web/2024/https://en.wikipedia.org/wiki/Spin_structure", None),
+        (NESTED_WAYBACK, None),  # a timestamp is read as one only, so it spends no candidates or decode rounds
         ("https://medium.com/@someone/notes-on-spin-structures-123", None),
         ("http://example.org:8080/path?x=1", None),
     ],

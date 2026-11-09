@@ -154,6 +154,9 @@ _SLASH_RUN_RE = re.compile(r"/{2,}")
 _SITE_HOST_RE = re.compile(r"^(?:\*\.)?[a-z0-9_-]+(?:\.[a-z0-9_-]+)*$")
 _TRAILING_NON_HOST_RE = re.compile(r"[^a-z0-9]+$")
 _WAYBACK_PATH_RE = re.compile(r"^/web/(?:[^/]*/)?(.+)$", re.IGNORECASE | re.DOTALL)
+# A Wayback timestamp with an optional modifier or star: ``20240101000000``, ``2024id_``, ``20240101000000if_``,
+# ``2024*``, ``*``. No hostname has this shape.
+_WAYBACK_TIMESTAMP_RE = re.compile(r"^(?:\d{1,14}(?:[a-z]{2}_)?\*?|\*)$", re.IGNORECASE)
 _GOOGLE_CACHE_RE = re.compile(r"cache:(?:[A-Za-z0-9_-]+:)?(.+)$", re.DOTALL)
 # Word characters without the underscore: ``odd_spin_structures`` is three words, as search engines read it.
 _WORD_RE = re.compile(r"[^\W_]+")
@@ -537,8 +540,14 @@ def _wrapped_urls(url: str) -> List[str]:
     if _is_wrapper_host(host):
         wayback = _WAYBACK_PATH_RE.match(parts.path)
         # ``/web/<timestamp>/<url>``, or ``/web/<url>`` with no timestamp, which archive.org redirects to a snapshot
-        # of ``<url>``: the first segment is read both ways.
-        remainders = dict.fromkeys((wayback.group(1), parts.path[len("/web/") :])) if wayback else [parts.path]
+        # of ``<url>``: a first segment that is not timestamp-shaped is read both ways. A timestamp is read as one
+        # only, since ``https://20240101000000/...`` names no page and would only spend candidates and rounds.
+        if wayback is None:
+            remainders = [parts.path]
+        elif _WAYBACK_TIMESTAMP_RE.match(parts.path[len("/web/") :].split("/", 1)[0]):
+            remainders = [wayback.group(1)]
+        else:
+            remainders = list(dict.fromkeys((wayback.group(1), parts.path[len("/web/") :])))
         for remainder in remainders:
             if not _LOOSE_SCHEME_RE.match(remainder):
                 remainder = remainder.lstrip("/")

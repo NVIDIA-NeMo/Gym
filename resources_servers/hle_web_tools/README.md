@@ -126,9 +126,10 @@ Beyond the families, the protocol's own refusals:
   `blocked.example` to a browser). Anything else is refused as `malformed_url`. The URL, its
   percent-decoded forms and every URL wrapped inside any of them are then expanded breadth first and
   each is checked against the URL-shaped families and the text families: the path remainder of the
-  Wayback Machine and every other `*.archive.org` host (`web.archive.org/web/[<timestamp>/]<url>`, the
-  first segment after `/web/` read both as a timestamp and as the start of the URL, since archive.org
-  redirects `/web/scale.com/x` to a snapshot of `scale.com/x`; `wayback.archive.org/...`), of `r.jina.ai`
+  Wayback Machine and every other `*.archive.org` host (`web.archive.org/web/[<timestamp>/]<url>`, where
+  a first segment after `/web/` that is not shaped like a timestamp (`20240101000000`, `2024id_`, `2024*`,
+  `*`) is read both as a timestamp and as the start of the URL, since archive.org redirects
+  `/web/scale.com/x` to a snapshot of `scale.com/x`; `wayback.archive.org/...`), of `r.jina.ai`
   and of Google's cache (`webcache.googleusercontent.com/search?q=cache:<url>`), each read as a URL with
   or without a scheme
   and whatever the spelling of its host (`scale.com./x`, `x@scale.com/x` and full-width letters all name
