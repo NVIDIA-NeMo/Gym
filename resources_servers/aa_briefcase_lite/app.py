@@ -420,7 +420,8 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
         already spent.
         """
 
-        if not self.config.preconvert_office_to_pdf:
+        if not self.config.preconvert_office_to_pdf or self.config.libreoffice_command is not None:
+            # GDPval's own startup check probes the configured command.
             return
         from resources_servers.gdpval.setup_libreoffice import ensure_libreoffice
 
@@ -457,7 +458,9 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
     async def _preconvert(self, stage: Path) -> None:
         if not self.config.preconvert_office_to_pdf:
             return
-        _ok, failed, errors = await preconvert_dir_async(stage, self.config.preconvert_max_concurrent)
+        _ok, failed, errors = await preconvert_dir_async(
+            stage, self.config.preconvert_max_concurrent, libreoffice_command=self.config.libreoffice_command
+        )
         if failed:
             raise AAEvaluationFault(f"AA artifact Office-to-PDF conversion failed: {errors}")
 

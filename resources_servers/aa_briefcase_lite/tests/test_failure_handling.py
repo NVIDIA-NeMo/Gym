@@ -273,3 +273,20 @@ async def test_a_skipped_reference_is_logged_and_counted(make_server, tmp_path: 
     ]
     metrics = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[row]))
     assert metrics.key_metrics["aa_lite/pairwise_references_skipped"] == 1
+
+
+async def test_conversion_uses_the_configured_libreoffice_command(make_server, tmp_path: Path, monkeypatch) -> None:
+    # The host has no LibreOffice of its own: only the configured command works.
+    monkeypatch.setattr(
+        "resources_servers.gdpval.setup_libreoffice.ensure_libreoffice", lambda command=None, **kwargs: bool(command)
+    )
+    server = make_server(reward_mode="binary", libreoffice_command=["wrapper", "soffice"])
+    server.config = server.config.model_copy(update={"preconvert_office_to_pdf": True})
+    convert = AsyncMock(return_value=(1, 0, []))
+    monkeypatch.setattr("resources_servers.aa_briefcase_lite.app.preconvert_dir_async", convert)
+    monkeypatch.setattr(server, "_binary_call", AsyncMock(return_value=PASSED))
+
+    server._require_office_rendering()
+    await _verify(server, tmp_path, {"report.md": "x"})
+
+    assert convert.await_args.kwargs["libreoffice_command"] == ["wrapper", "soffice"]
