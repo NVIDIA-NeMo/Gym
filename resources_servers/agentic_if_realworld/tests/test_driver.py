@@ -45,6 +45,11 @@ from responses_api_agents.simple_agent.tests.test_app import _make_agent, _mock_
 def test_adaptive_capture_selected_parameters_and_resume(
     tmp_path, monkeypatch, complete_stage, fail_last_dispatch, interrupted, fresh_resume, multiple, reasoning_effort
 ):
+    from nemo_gym.orchestration import jobs
+
+    runtime_commit = jobs.installed_gym_commit()
+    # Untracked artifacts from other CI components are outside this synthetic fixture.
+    monkeypatch.setattr(jobs, "installed_gym_commit", lambda: runtime_commit)
     create(tmp_path / "data", examples=interrupted or multiple)
     dataset = core.Dataset(tmp_path / "data", synthetic=True)
     prepared = tmp_path / "prepared.jsonl"
@@ -470,6 +475,13 @@ def test_adaptive_capture_selected_parameters_and_resume(
     assert all(core.digest(path) == digest for path, digest in before.items())
     assert core.read(tmp_path / "out.jsonl").get("response") == record.get("response")
     artifacts = {path: path.read_bytes() for path in artifacts}
+    with monkeypatch.context() as context:
+        context.setattr(jobs, "installed_gym_commit", lambda: f"{runtime_commit}-changed")
+        with pytest.raises(ValueError, match="fingerprint mismatch"):
+            asyncio.run(rollout_driver.run_rollout_collection(config, settings))
+    assert all(path.read_bytes() == saved for path, saved in artifacts.items())
+    assert len(calls) == last_stage + 1 and len(judge_calls) == int(complete_stage is not None)
+    assert all(core.digest(path) == digest for path, digest in before.items())
     model_settings = settings["policy_model"]["responses_api_models"]["agentic_if_text"]
     model_settings["reasoning_effort"] = "max" if reasoning_effort is None else None
     with pytest.raises(ValueError, match="fingerprint mismatch"):
