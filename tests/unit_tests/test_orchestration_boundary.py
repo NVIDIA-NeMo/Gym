@@ -49,7 +49,6 @@ ALLOWED_IMPORTERS = {CORE / "cli" / "main.py"}
 
 KNOWN_VIOLATIONS = {
     ("nemo_gym/cli/eval.py", "nemo_gym.orchestration.recovery"),
-    ("nemo_gym/cli/utils.py", "nemo_gym.orchestration.executors.resume_script"),
     ("nemo_gym/eval/rollout_reverification.py", "nemo_gym.orchestration.recovery"),
     ("resources_servers/deepswe/tests/test_app.py", "nemo_gym.orchestration.recovery"),
     ("resources_servers/math_with_autograder/tests/test_app.py", "nemo_gym.orchestration.recovery"),
