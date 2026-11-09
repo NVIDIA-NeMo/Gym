@@ -8,8 +8,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.server_runtime.base_server import ServerClient
 from responses_api_agents.spatialclaw_agent.app import (
     SpatialClawAgent,
     SpatialClawAgentConfig,
@@ -135,9 +135,18 @@ def test_native_execution_failure_and_partial_evidence_survive(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "failure_kind", ["agent_timeout", "agent_run_error", "verifier_error", "spatialclaw:model_request_rejected"]
+    "failure_kind",
+    [
+        "agent_timeout",
+        "agent_run_error",
+        "verifier_error",
+        "spatialclaw:model_request_rejected",
+        "spatialclaw:model_transport_error",
+        "spatialclaw:media_error",
+    ],
 )
-async def test_infrastructure_failure_is_masked_and_preserves_observations(monkeypatch, failure_kind):
+async def test_failure_masking_and_observations(monkeypatch, failure_kind):
+    masked = failure_kind in {"verifier_error", "spatialclaw:model_transport_error", "spatialclaw:media_error"}
     client = MagicMock(spec=ServerClient)
     client.post = AsyncMock(return_value=MagicMock(cookies={}))
     response = {
@@ -160,7 +169,7 @@ async def test_infrastructure_failure_is_masked_and_preserves_observations(monke
         response["_ng_agent_failure"] = {
             "failure_kind": failure_kind,
             "failure_reason": "injected outage",
-            "mask_sample": failure_kind != "spatialclaw:model_request_rejected",
+            "mask_sample": masked,
         }
     monkeypatch.setattr("responses_api_agents.spatialclaw_agent.app.raise_for_status", AsyncMock())
     monkeypatch.setattr(
@@ -174,7 +183,7 @@ async def test_infrastructure_failure_is_masked_and_preserves_observations(monke
                     "reward": 0.0,
                     "evaluation_completed": True,
                 }
-                if failure_kind == "spatialclaw:model_request_rejected"
+                if not masked
                 else RuntimeError("scorer unavailable"),
             ]
         ),
@@ -182,13 +191,11 @@ async def test_infrastructure_failure_is_masked_and_preserves_observations(monke
     result = await SpatialClawAgent(config=agent_config(), server_client=client).run(
         SimpleNamespace(cookies={}), SpatialClawAgentRunRequest(responses_create_params={"input": "question"})
     )
-    assert result.mask_sample == (failure_kind != "spatialclaw:model_request_rejected")
+    assert result.mask_sample == masked
     assert result.reward == 0
     assert result.failure_kind == failure_kind
     assert result.ng_agent_observations.records[0].invocation_id == "session"
-    assert client.post.await_count == (
-        3 if failure_kind in {"verifier_error", "spatialclaw:model_request_rejected"} else 2
-    )
+    assert client.post.await_count == (3 if failure_kind == "verifier_error" or not masked else 2)
 
 
 def test_native_conversation_and_unknown_response_identity_are_retained(tmp_path):

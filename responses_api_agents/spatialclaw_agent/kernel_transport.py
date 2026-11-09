@@ -6,7 +6,7 @@ import asyncio
 import atexit
 from threading import Lock, Thread
 
-from nemo_gym import server_utils
+from nemo_gym.client import http_client as server_utils
 
 
 _kernel_loop: asyncio.AbstractEventLoop | None = None

@@ -10,9 +10,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from omegaconf import OmegaConf
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client.openai_client import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.server_runtime.base_server import ServerClient
 from responses_api_agents.spatialclaw_agent.app import (
     SpatialClawAgent,
     SpatialClawAgentConfig,
@@ -214,7 +214,7 @@ async def test_aiohttp_adapter_encodes_openai_extra_body(monkeypatch, tmp_path) 
     assert json.loads(journal.read_text()) == {"response_id": "chat-1", "usage": None}
 
 
-@pytest.mark.parametrize("model_status", [None, 400, 503, "timeout"])
+@pytest.mark.parametrize("model_status", [None, 400, 401, 422, 429, 503, "timeout", "agent_error", "media400"])
 async def test_responses_runs_spatialclaw_and_returns_gym_response(monkeypatch, tmp_path, model_status) -> None:
     close = AsyncMock()
     shutdown_all = AsyncMock()
@@ -231,15 +231,18 @@ async def test_responses_runs_spatialclaw_and_returns_gym_response(monkeypatch, 
         async def arun(self, **kwargs):
             if model_status == "timeout":
                 raise TimeoutError("deadline")
+            if model_status == "agent_error":
+                raise ValueError("invalid policy-generated code")
             if model_status is not None:
-                from aiohttp import ClientResponseError
-
-                raise ClientResponseError(
-                    SimpleNamespace(real_url="http://model/v1/chat/completions"),
-                    (),
-                    status=model_status,
-                    message="injected model failure",
-                )
+                # Native nodes swallow model exceptions and retry. Exercise the
+                # transport rather than raising directly from arun.
+                client = self.llm_client._get_client("http://model/v1")
+                for _ in range(3):
+                    try:
+                        await client.chat.completions.create(model="model", messages=[])
+                    except Exception:
+                        pass
+                return {"termination_reason": "max_steps", "final_answer": {"text": "B"}}
             assert kwargs["instruction"] == "Which option is correct?"
             assert kwargs["video_source"] == "/videos/clip.mp4"
             return {
@@ -254,6 +257,21 @@ async def test_responses_runs_spatialclaw_and_returns_gym_response(monkeypatch, 
                 },
             }
 
+    from aiohttp import ClientResponseError
+
+    model_request = AsyncMock(return_value=SimpleNamespace(cookies={}))
+    monkeypatch.setattr("responses_api_agents.spatialclaw_agent.app.http_request", model_request)
+    monkeypatch.setattr(
+        "responses_api_agents.spatialclaw_agent.app.raise_for_status",
+        AsyncMock(
+            side_effect=ClientResponseError(
+                SimpleNamespace(real_url="http://model/v1/chat/completions"),
+                (),
+                status=model_status if isinstance(model_status, int) else 500,
+                message="injected model failure",
+            )
+        ),
+    )
     config_module = ModuleType("spatial_agent.config")
     config_module.set_config = MagicMock()
     workflow_module = ModuleType("spatial_agent.workflow")
@@ -305,25 +323,48 @@ async def test_responses_runs_spatialclaw_and_returns_gym_response(monkeypatch, 
         input="Which option is correct?",
         metadata={"video_path": "clip.mp4", "spatialclaw_session_id": "sample-1"},
     )
+    if model_status == "media400":
+        monkeypatch.setattr(
+            SpatialClawAgent,
+            "_materialize_inputs",
+            AsyncMock(
+                side_effect=ClientResponseError(
+                    SimpleNamespace(real_url="http://media/image.png"), (), status=400, message="media unavailable"
+                )
+            ),
+        )
     response = await agent.responses(MagicMock(), body)
     if model_status is None:
         assert response.output_text == "B"
         assert response.metadata["spatialclaw_turns"] == "3"
     else:
         failure = response.model_dump()["_ng_agent_failure"]
-        assert failure.get("mask_sample", True) == (model_status != 400)
+        assert failure["mask_sample"] == (model_status in {401, 429, 503, "media400"})
         assert failure["failure_kind"] == (
             "spatialclaw:model_request_rejected"
-            if model_status == 400
+            if model_status in {400, 422}
             else "agent_timeout"
             if model_status == "timeout"
             else "agent_run_error"
+            if model_status == "agent_error"
+            else "spatialclaw:media_error"
+            if model_status == "media400"
+            else "spatialclaw:model_transport_error"
         )
+        assert response.output_text == ""
+        if isinstance(model_status, int):
+            model_request.assert_awaited_once()
+            assert failure["http_status"] == model_status
     # A native accumulator is not authoritative evidence of provider usage.
     assert response.usage is None
     assert response.model_dump()["_ng_agent_observations"]["source"] == "spatialclaw"
-    close.assert_awaited_once()
-    shutdown_all.assert_awaited_once()
+    if model_status == "media400":
+        model_request.assert_not_awaited()
+        close.assert_not_awaited()
+        shutdown_all.assert_not_awaited()
+    else:
+        close.assert_awaited_once()
+        shutdown_all.assert_awaited_once()
     assert not (tmp_path / "workspaces" / "sample-1").exists()
 
 

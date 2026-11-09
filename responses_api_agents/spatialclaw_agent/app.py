@@ -26,24 +26,16 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
-from aiohttp import ClientResponseError
+from aiohttp import ClientError, ClientResponseError
 from fastapi import Request
 from pydantic import ConfigDict, Field
 
-from nemo_gym.base_resources_server import (
-    AggregateMetrics,
-    AggregateMetricsRequest,
-    BaseRunRequest,
-    BaseVerifyResponse,
-)
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import get_first_server_config_dict
-from nemo_gym.openai_utils import (
+from nemo_gym.client.openai_client import (
     NeMoGymChatCompletion,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -51,9 +43,17 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.rollout_observability import AgentObservationBundle
-from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
-from nemo_gym.server_utils import request as http_request
+from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.config.global_config import get_first_server_config_dict
+from nemo_gym.server_runtime.base_resources_server import (
+    AggregateMetrics,
+    AggregateMetricsRequest,
+    BaseRunRequest,
+    BaseVerifyResponse,
+)
+from nemo_gym.server_runtime.base_server import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
+from nemo_gym.server_runtime.base_server import request as http_request
+from nemo_gym.trajectory.trajectory_record import AgentObservationBundle
 from responses_api_agents.spatialclaw_agent.kernel_transport import _kernel_transport_loop
 from responses_api_agents.spatialclaw_agent.observability import read_observations, response_usage
 
@@ -369,6 +369,35 @@ class _AiohttpChatCompletions:
         return await self._create(payload)
 
     async def _create(self, payload: dict[str, Any]) -> NeMoGymChatCompletion:
+        # Native nodes catch model exceptions and retry. Keep terminal failures
+        # across processes so retries cannot hide or repeatedly send a rejected call.
+        if self.journal and (failure := _model_transport_failure(Path(self.journal))):
+            raise RuntimeError(failure["failure_reason"])
+        try:
+            return await self._request(payload)
+        except (ClientError, TimeoutError) as exc:
+            status = exc.status if isinstance(exc, ClientResponseError) else None
+            infrastructure = status is None or status in {401, 403, 404, 408, 429} or status >= 500
+            self._record(
+                {
+                    "failure_kind": (
+                        "spatialclaw:model_transport_error" if infrastructure else "spatialclaw:model_request_rejected"
+                    ),
+                    "failure_reason": f"{type(exc).__name__}: {exc}",
+                    "http_status": status,
+                    "mask_sample": infrastructure,
+                }
+            )
+            raise
+
+    def _record(self, record: dict[str, Any]) -> None:
+        if self.journal:
+            # The client is serialized into Jupyter kernels; the journal is shared.
+            with _checkout_lock(Path(f"{self.journal}.lock")):
+                with Path(self.journal).open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps(record) + "\n")
+
+    async def _request(self, payload: dict[str, Any]) -> NeMoGymChatCompletion:
         response = await http_request(
             method="POST",
             url=f"{self.endpoint}/chat/completions",
@@ -378,22 +407,23 @@ class _AiohttpChatCompletions:
                 **({"x-session-id": Path(self.journal).parent.name} if self.journal else {}),
             },  # pragma: allowlist secret
             cookies=self.cookies,
+            _max_num_tries=1,
         )
         await raise_for_status(response)
         self.cookies = response.cookies
         result = NeMoGymChatCompletion.model_validate(await get_response_json(response))
-        if self.journal:
-            # The client is serialized into Jupyter kernels. A file retains observations
-            # across those processes; no in-memory accumulator can do that reliably.
-            with _checkout_lock(Path(f"{self.journal}.lock")):
-                with Path(self.journal).open("a", encoding="utf-8") as stream:
-                    stream.write(
-                        json.dumps(
-                            {"response_id": result.id, "usage": result.usage.model_dump() if result.usage else None}
-                        )
-                        + "\n"
-                    )
+        self._record({"response_id": result.id, "usage": result.usage.model_dump() if result.usage else None})
         return result
+
+
+def _model_transport_failure(journal: Path) -> dict[str, Any] | None:
+    if journal.is_file():
+        with _checkout_lock(Path(f"{journal}.lock")):
+            for line in journal.read_text().splitlines():
+                record = json.loads(line)
+                if record.get("failure_kind"):
+                    return record
+    return None
 
 
 class _AiohttpOpenAIClient:
@@ -732,6 +762,7 @@ class SpatialClawAgent(SimpleResponsesAPIAgent):
                     failure = {
                         "failure_kind": "agent_timeout",
                         "failure_reason": f"SpatialClaw exceeded {self.config.timeout}s",
+                        "mask_sample": False,
                     }
                     result = {"termination_reason": "timeout"}
             except Exception as exc:
@@ -740,16 +771,21 @@ class SpatialClawAgent(SimpleResponsesAPIAgent):
                     f"[spatialclaw_agent] session {session_id} failed:\n{error_traceback}", file=sys.stderr, flush=True
                 )
                 (session_dir / "error.traceback.txt").write_text(error_traceback, encoding="utf-8")
-                model_rejected = isinstance(exc, ClientResponseError) and exc.status in {400, 422}
                 failure = {
-                    "failure_kind": "spatialclaw:model_request_rejected" if model_rejected else "agent_run_error",
+                    "failure_kind": "spatialclaw:media_error" if workflow is None else "agent_run_error",
                     "failure_reason": f"{type(exc).__name__}: {exc}",
-                    "mask_sample": not model_rejected,
+                    "mask_sample": workflow is None,
                 }
                 result = {"termination_reason": "error"}
             finally:
                 if workflow is not None:
                     await _shutdown_workflow(workflow)
+                transport_failure = _model_transport_failure(journal)
+                if transport_failure:
+                    failure = transport_failure
+                    result = {**result, "final_answer": {"text": ""}, "termination_reason": "model_error"}
+                elif failure:
+                    result = {**result, "final_answer": {"text": ""}}
                 observations = read_observations(
                     session_dir,
                     session_id,
@@ -817,7 +853,7 @@ class SpatialClawAgent(SimpleResponsesAPIAgent):
         agent_json = await get_response_json(agent_response)
         observations = agent_json.pop("_ng_agent_observations", None)
         failure = agent_json.pop("_ng_agent_failure", None)
-        if failure and failure.get("mask_sample", True):
+        if failure and failure.get("mask_sample", False):
             return SpatialClawAgentVerifyResponse.model_validate(
                 body.model_dump()
                 | {

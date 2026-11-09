@@ -11,8 +11,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client.openai_client import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_runtime.base_server import ServerClient
 from responses_api_agents.spatialclaw_agent import app
 from responses_api_agents.spatialclaw_agent.tests.test_observability import agent_config
 

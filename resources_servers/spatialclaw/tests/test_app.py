@@ -5,8 +5,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client.openai_client import NeMoGymResponse
+from nemo_gym.server_runtime.base_server import ServerClient
 from resources_servers.spatialclaw.app import (
     SpatialClawResourcesServer,
     SpatialClawResourcesServerConfig,
@@ -224,3 +224,34 @@ def test_dataset_metrics_handle_empty_unknown_rows_and_select_native_headlines()
         "pass@1[avg-of-1]/native_score": 50,
     }
     assert _flatten_numeric({"evaluated": True, "label": "ignored"}) == {"evaluated": 1}
+
+
+async def test_empty_extraction_is_counted_as_no_answer():
+    server, _, _ = _server()
+    result = await server.verify(
+        SpatialClawVerifyRequest(responses_create_params={"input": "q"}, response=_response(""), sample_id="one")
+    )
+    assert result.extracted_answer is None
+    metrics = server.compute_metrics([[result.model_dump()]])
+    assert metrics["pass@1/no_answer"] == 100
+
+
+def test_native_metrics_reject_multiple_repeats_even_after_mask_filtering():
+    server, _, _ = _server()
+    with pytest.raises(ValueError, match="num_repeats=1"):
+        server.compute_metrics([[{"sample_id": "one"}, {"sample_id": "one"}]])
+    with pytest.raises(ValueError, match="num_repeats=1"):
+        server.compute_metrics([[{"sample_id": "one", "_ng_rollout_index": 1}]])
+
+
+def test_task_schema_is_reused_by_run_request():
+    from pydantic import ValidationError
+
+    from resources_servers.spatialclaw.app import SpatialClawRunRequest
+    from resources_servers.spatialclaw.task_data import TaskData
+
+    assert issubclass(SpatialClawRunRequest, TaskData)
+    with pytest.raises(ValidationError):
+        TaskData.model_validate({"answer": "A"})
+    task = TaskData.model_validate({"sample_id": "one", "question_type": "mc", "extra_native_field": 1})
+    assert task.model_dump()["extra_native_field"] == 1

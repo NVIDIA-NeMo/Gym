@@ -1,5 +1,12 @@
 # SpatialClaw evaluation harness
 
+**Internal-only experimental integration.** The pinned SpatialClaw source is hosted
+on NVIDIA GitLab and requires authorized repository access. Its `LICENSE` §3.3
+restricts use to non-commercial scientific research. Gym's Apache-2.0 license
+does not change those external terms. No native source is vendored here. Public
+availability and compatible licensing require a maintainer/licensor decision;
+this integration is not a publicly reproducible or certified benchmark.
+
 SpatialClaw is a reusable evaluation harness for spatial reasoning, not a
 Video-MME variant. The NeMo Gym integration runs the pinned SpatialClaw agent
 and perception-tool loop while Gym owns serving, row scheduling, retry/resume,

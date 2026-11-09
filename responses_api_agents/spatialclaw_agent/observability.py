@@ -10,14 +10,14 @@ from typing import Any
 
 from pydantic import TypeAdapter, ValidationError
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client.openai_client import (
     NeMoGymResponseInputItem,
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.rollout_observability import (
+from nemo_gym.config.config_types import ModelServerRef
+from nemo_gym.trajectory.trajectory_record import (
     AgentInvocation,
     AgentObservationBundle,
     ModelCallRef,

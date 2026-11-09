@@ -11,7 +11,8 @@ from typing import Any, ClassVar
 
 from pydantic import ConfigDict, PrivateAttr
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.metrics.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.server_runtime.base_resources_server import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
@@ -19,7 +20,7 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+from resources_servers.spatialclaw.task_data import TaskData
 from responses_api_agents.spatialclaw_agent.app import (
     SPATIALCLAW_COMMIT,
     SPATIALCLAW_URL,
@@ -40,11 +41,8 @@ class SpatialClawResourcesServerConfig(BaseResourcesServerConfig):
     data_root: str | None = None
 
 
-class SpatialClawRunRequest(BaseRunRequest):
-    model_config = ConfigDict(extra="allow")
-
-    sample_id: str
-    answer: Any = None
+class SpatialClawRunRequest(TaskData, BaseRunRequest):
+    pass
 
 
 class SpatialClawVerifyRequest(SpatialClawRunRequest, BaseVerifyRequest):
@@ -56,7 +54,7 @@ class SpatialClawVerifyResponse(BaseVerifyResponse):
 
     sample_id: str
     prediction: str
-    extracted_answer: str
+    extracted_answer: str | None
     native_score: float | None
     scored: bool
     evaluation_completed: bool
@@ -149,7 +147,7 @@ class SpatialClawResourcesServer(SimpleResourcesServer):
         prediction = (body.response.output_text or "").strip()
         score = benchmark.evaluate_single(sample, prediction)
         native_score = None if score is None else float(score)
-        extracted = benchmark.extract_answer(prediction)
+        extracted = benchmark.extract_answer(prediction) or None
         return SpatialClawVerifyResponse(
             **body.model_dump(),
             reward=0.0 if native_score is None else native_score,
@@ -165,6 +163,8 @@ class SpatialClawResourcesServer(SimpleResourcesServer):
         selected_samples = []
         predictions: dict[Any, str] = {}
         for rollouts in tasks:
+            if len(rollouts) > 1 or any(rollout.get("_ng_rollout_index", 0) != 0 for rollout in rollouts):
+                raise ValueError("SpatialClaw native metrics require num_repeats=1")
             if not rollouts:
                 continue
             rollout = rollouts[0]
@@ -173,10 +173,21 @@ class SpatialClawResourcesServer(SimpleResourcesServer):
             sample = self._sample_by_id.get(str(rollout.get("sample_id", "")))
             if sample is None:
                 continue
-            selected_samples.append(sample)
             predictions[sample.sample_id] = str(rollout.get("prediction", ""))
 
         original_data = benchmark.data
+        dropped_groups = 0
+        if type(benchmark).__name__ == "VideoMMEv2Bench":
+            # Native v2 scores consecutive blocks of four. Gym filters masked rows
+            # before this method, so reconstruct groups from the native dataset.
+            for offset in range(0, len(original_data), 4):
+                group = original_data[offset : offset + 4]
+                if len(group) == 4 and all(sample.sample_id in predictions for sample in group):
+                    selected_samples.extend(group)
+                else:
+                    dropped_groups += 1
+        else:
+            selected_samples = [sample for sample in original_data if sample.sample_id in predictions]
         benchmark.data = selected_samples
         try:
             native_results = benchmark.evaluate(predictions, output_dir=None) if selected_samples else {}
@@ -194,6 +205,9 @@ class SpatialClawResourcesServer(SimpleResourcesServer):
         )
         metrics.update({f"spatialclaw/{key}": value for key, value in _flatten_numeric(native_results).items()})
         metrics["spatialclaw/num_evaluated_tasks"] = len(selected_samples)
+        if type(benchmark).__name__ == "VideoMMEv2Bench":
+            metrics["spatialclaw/num_evaluated_groups"] = len(selected_samples) // 4
+            metrics["spatialclaw/num_dropped_groups"] = dropped_groups
         return metrics
 
     def get_key_metrics(self, agent_metrics: dict[str, Any]) -> dict[str, Any]:
@@ -206,6 +220,7 @@ class SpatialClawResourcesServer(SimpleResourcesServer):
                 "spatialclaw/overall_accuracy_pct",
                 "spatialclaw/overall_score",
                 "spatialclaw/overall_score_pct",
+                "spatialclaw/final_rating/total",
             }
         }
         key.update(

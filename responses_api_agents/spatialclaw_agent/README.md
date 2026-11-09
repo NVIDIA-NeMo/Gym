@@ -1,5 +1,12 @@
 # SpatialClaw agent
 
+**Internal-only experimental integration.** The pinned SpatialClaw source is hosted
+on NVIDIA GitLab and requires authorized repository access. Its `LICENSE` §3.3
+restricts use to non-commercial scientific research. Gym's Apache-2.0 license
+does not change those external terms. No native source is vendored here. Public
+availability and compatible licensing require a maintainer/licensor decision;
+this integration is not a publicly reproducible or certified benchmark.
+
 This is an evaluation-only NeMo Gym adapter for the multi-step SpatialClaw visual-spatial agent. It keeps Gym's standard rollout and verifier contract while SpatialClaw owns the planning, persistent Jupyter kernel, visual queries, and Reconstruct/SAM3 tool loop.
 
 The adapter pins SpatialClaw commit `946ac114dfcabf9df997629bfa8b6f2f66da1425`, the same commit used by `third_party/spatial_claw` on the SpatialClaw VLMEvalKit branch. It clones that revision into an ignored source cache on first use. To reuse an existing checkout instead, set `SPATIALCLAW_ROOT`; startup verifies that its `HEAD` is exactly the pinned commit.
