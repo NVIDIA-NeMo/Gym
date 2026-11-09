@@ -11,11 +11,11 @@ import tarfile
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
-from pydantic import ConfigDict, Field
+from pydantic import BeforeValidator, ConfigDict, Field
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
@@ -38,6 +38,7 @@ from nemo_gym.server_runtime import (
     ResourcesSeedSessionResponse,
     ResourcesSessionConflictError,
     lost_session_verification,
+    reject_partial_typed_seed,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import JudgeError
@@ -108,7 +109,9 @@ class JobBenchResourcesServer(SandboxSessionResourcesServer):
     config: JobBenchConfig
 
     async def seed_session(
-        self, request: Request, body: JobBenchRequest | ResourcesSeedSessionRequest
+        self,
+        request: Request,
+        body: ResourcesSeedSessionRequest | Annotated[JobBenchRequest, BeforeValidator(reject_partial_typed_seed)],
     ) -> JobBenchSeedResponse | ResourcesSeedSessionResponse:
         """Start the task sandbox with the task folder in ``/workspace/task`` and an empty ``/workspace/output``."""
         if isinstance(body, ResourcesSeedSessionRequest):
@@ -157,8 +160,12 @@ class JobBenchResourcesServer(SandboxSessionResourcesServer):
         await sandbox.start(spec)
         with tempfile.TemporaryDirectory() as temporary_dir:
             archive = Path(temporary_dir) / "task.tar.gz"
-            with tarfile.open(archive, "w:gz", dereference=True) as tar:
-                tar.add(task_dir / "task_folder", arcname="task")
+
+            def build_archive() -> None:
+                with tarfile.open(archive, "w:gz", dereference=True) as tar:
+                    tar.add(task_dir / "task_folder", arcname="task")
+
+            await asyncio.to_thread(build_archive)
             await sandbox.upload(archive, "/tmp/task.tar.gz")
         result = await sandbox.exec(
             f"mkdir -p {WORKDIR}/output && tar -xzf /tmp/task.tar.gz -C {WORKDIR}",
@@ -176,8 +183,17 @@ class JobBenchResourcesServer(SandboxSessionResourcesServer):
 
         async def collect() -> bytes:
             sandbox = self._session_id_to_sandbox[session_id]
-            result = await sandbox.exec(f"tar -czf /tmp/output.tar.gz -C {WORKDIR}/output .")
-            if result.return_code != 0 or result.error_type is not None:
+            # The agent may have removed output/; that is graded as no output, not failed as a collection error.
+            result = await sandbox.exec(
+                f"rm -f /tmp/output.tar.gz && mkdir -p {WORKDIR}/output && tar -czf /tmp/output.tar.gz -C {WORKDIR}/output ."
+            )
+            # GNU tar exits 1 when a file changed while it was read (a process the agent left running) and still
+            # writes the archive; that output is the agent's result. Exit 2 is a fatal tar error.
+            if result.return_code == 1 and result.error_type is None:
+                LOG.warning(
+                    "Job-Bench output of session %s changed while it was archived: %s", session_id, result.stderr
+                )
+            elif result.return_code != 0 or result.error_type is not None:
                 raise RuntimeError(
                     f"Failed to collect Job-Bench output ({result.error_type}): {result.stderr}; "
                     f"output={(result.stdout or '')[-4000:]}"
@@ -198,6 +214,19 @@ class JobBenchResourcesServer(SandboxSessionResourcesServer):
             raise
         await self.stop_task_sandbox_after_capture(session_id)
         return archive
+
+    async def _stop_agent_run_sandbox(self, session_id: str) -> None:
+        """Stop the task sandbox of a session an agent's ``/run`` seeded, whose verify failed before collection.
+
+        Such a session gets no close, so nothing else would stop the sandbox before shutdown. An episode session
+        keeps its sandbox for the retried verify or the close.
+        """
+        record = self._task_sessions.get(session_id)
+        if record is None or record.seed is None:
+            try:
+                await self._stop_task_sandbox(session_id)
+            except Exception:
+                LOG.exception("Failed to stop the Job-Bench task sandbox of session %s", session_id)
 
     def _judge(self, output_dir: Path, rubrics_file: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         rubrics_data = json.loads(rubrics_file.read_text(encoding="utf-8"))
@@ -319,32 +348,44 @@ class JobBenchResourcesServer(SandboxSessionResourcesServer):
             archive = (saved or local_dir) / "output.tar.gz"
             if not replay:
                 if saved is not None:
-                    rubrics_source = await asyncio.to_thread(resolve_task_path, body.rubrics_file)
-                    shutil.copyfile(rubrics_source, saved / "rubrics.json")
-                    pending = saved / "request.partial"
-                    pending.write_text(body.model_dump_json())
-                    pending.replace(saved / "request.json")
+                    try:
+                        rubrics_source = await asyncio.to_thread(resolve_task_path, body.rubrics_file)
+                        await asyncio.to_thread(shutil.copyfile, rubrics_source, saved / "rubrics.json")
+                        pending = saved / "request.partial"
+                        pending.write_text(body.model_dump_json())
+                        pending.replace(saved / "request.json")
+                    except BaseException:
+                        await self._stop_agent_run_sandbox(session_id)
+                        raise
                 output = await self._collect_output(session_id)
-                partial = archive.with_suffix(".partial")
-                with partial.open("wb") as stream:
-                    stream.write(output)
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                partial.replace(archive)
+
+                def write_archive() -> None:
+                    partial = archive.with_suffix(".partial")
+                    with partial.open("wb") as stream:
+                        stream.write(output)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    partial.replace(archive)
+
+                await asyncio.to_thread(write_archive)
             output_dir = local_dir / "output"
             output_dir.mkdir()
-            with tarfile.open(archive, "r:gz") as tar:
-                # Agent-created environments may contain links outside the output tree.
-                runtime_dirs = {"venv", ".venv", "node_modules", ".git", ".cache", "__pycache__"}
-                members = (
-                    member
-                    for member in tar
-                    if (member.isfile() or member.isdir())
-                    and not runtime_dirs.intersection(
-                        Path(member.name).parts if member.isdir() else Path(member.name).parts[:-1]
+
+            def extract_output() -> None:
+                with tarfile.open(archive, "r:gz") as tar:
+                    # Agent-created environments may contain links outside the output tree.
+                    runtime_dirs = {"venv", ".venv", "node_modules", ".git", ".cache", "__pycache__"}
+                    members = (
+                        member
+                        for member in tar
+                        if (member.isfile() or member.isdir())
+                        and not runtime_dirs.intersection(
+                            Path(member.name).parts if member.isdir() else Path(member.name).parts[:-1]
+                        )
                     )
-                )
-                tar.extractall(output_dir, members=members, filter="data")
+                    tar.extractall(output_dir, members=members, filter="data")
+
+            await asyncio.to_thread(extract_output)
             rubrics_file = (
                 saved / "rubrics.json"
                 if saved is not None

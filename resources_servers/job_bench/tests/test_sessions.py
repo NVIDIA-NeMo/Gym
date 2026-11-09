@@ -3,6 +3,7 @@
 """Episode sessions and the agent-run seed, through the server's HTTP routes with a fake sandbox."""
 
 import io
+import json
 import tarfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -14,6 +15,7 @@ from nemo_gym.client import ServerClient
 from nemo_gym.core import SESSION_LOST, EpisodeId, TaskId
 from nemo_gym.sandbox import SandboxExecResult
 from nemo_gym.server_runtime import ResourcesSeedSessionRequest, check_resources_session_contract
+from nemo_gym.verification import JudgeError
 from resources_servers.job_bench import app
 
 
@@ -191,6 +193,109 @@ def test_failed_output_collection_stops_the_sandbox_and_a_retry_is_masked(
         assert retried.json()["mask_sample"] is True and retried.json()["failure_kind"] == SESSION_LOST
         assert client.post("/close_session", json=_CLOSE).status_code == 200
     sandboxes[0].stop.assert_awaited_once()
+
+
+def test_judge_failure_is_masked_and_a_retry_regrades_the_saved_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    server, sandboxes = _server(monkeypatch, tmp_path)
+    server.config.artifact_root = tmp_path / "artifacts"
+    judge_calls = 0
+    passing_judge = app.JobBenchResourcesServer._judge
+
+    def judge_fails_once(self, output_dir: Path, rubrics_file: Path) -> tuple[dict, list]:
+        nonlocal judge_calls
+        judge_calls += 1
+        if judge_calls == 1:
+            raise JudgeError("judge rate-limited")
+        return passing_judge(self, output_dir, rubrics_file)
+
+    monkeypatch.setattr(app.JobBenchResourcesServer, "_judge", judge_fails_once)
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        assert client.post("/seed_session", json=_seed().model_dump(mode="json")).status_code == 200
+        failed = client.post("/verify", json=_VERIFY)
+        assert failed.status_code == 200, failed.text
+        assert failed.json()["mask_sample"] is True and failed.json()["failure_kind"] == "judge_failed"
+        sandboxes[0].stop.assert_awaited_once()
+        other = _VERIFY | {"response": _RESPONSE | {"id": "other"}}
+        assert client.post("/verify", json=other).status_code == 409
+        retried = client.post("/verify", json=_VERIFY)
+        assert retried.status_code == 200, retried.text
+        assert retried.json()["reward"] == 1.0 and retried.json()["mask_sample"] is False
+        sandboxes[0].download.assert_awaited_once()
+        assert client.post("/verify", json=_VERIFY).json() == retried.json()
+        assert client.post("/close_session", json=_CLOSE).status_code == 200
+    (saved,) = (tmp_path / "artifacts").iterdir()
+    assert json.loads((saved / "result.json").read_text())["reward"] == 1.0
+    assert judge_calls == 2
+
+
+def test_failed_stop_after_collection_keeps_the_sandbox_and_a_retry_grades_the_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    server, sandboxes = _server(monkeypatch, tmp_path)
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        assert client.post("/seed_session", json=_seed().model_dump(mode="json")).status_code == 200
+        sandboxes[0].stop.side_effect = [RuntimeError("provider unavailable"), None]
+        assert client.post("/verify", json=_VERIFY).status_code == 500
+        assert server._session_id_to_sandbox == {"resources-session": sandboxes[0]}
+        retried = client.post("/verify", json=_VERIFY)
+        assert retried.status_code == 200, retried.text
+        assert retried.json()["reward"] == 1.0
+        sandboxes[0].download.assert_awaited_once()
+        assert client.post("/close_session", json=_CLOSE).status_code == 200
+    assert sandboxes[0].stop.await_count == 2
+    assert server._session_id_to_sandbox == {}
+
+
+@pytest.mark.parametrize(("return_code", "graded"), [(1, True), (2, False)])
+def test_output_the_agent_left_changing_is_graded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, return_code: int, graded: bool
+) -> None:
+    """tar exits 1 when the agent's own process changed a file mid-archive; that output is the agent's result."""
+    server, sandboxes = _server(monkeypatch, tmp_path)
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        assert client.post("/seed_session", json=_seed().model_dump(mode="json")).status_code == 200
+        sandboxes[0].exec.return_value = SandboxExecResult(return_code=return_code, stdout="", stderr="file changed")
+        verified = client.post("/verify", json=_VERIFY)
+        assert client.post("/close_session", json=_CLOSE).status_code == 200
+    collect = sandboxes[0].exec.await_args.args[0]
+    assert "mkdir -p /workspace/output" in collect, "an output/ the agent removed is graded as empty"
+    if graded:
+        assert verified.status_code == 200, verified.text
+        assert verified.json()["reward"] == 1.0 and verified.json()["mask_sample"] is False
+    else:
+        assert verified.status_code == 500
+        sandboxes[0].download.assert_not_awaited()
+
+
+def test_agent_run_verify_that_fails_before_collection_stops_the_sandbox(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An agent-run session gets no close, so a verify that fails while saving its request still stops the sandbox."""
+    server, sandboxes = _server(monkeypatch, tmp_path)
+    server.config.artifact_root = tmp_path / "artifacts"
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        assert client.post("/seed_session", json=_ROW | {"responses_create_params": _PARAMS}).status_code == 200
+
+        def unreachable_snapshot(path: str) -> Path:
+            raise ConnectionError("snapshot unavailable")
+
+        monkeypatch.setattr(app, "resolve_task_path", unreachable_snapshot)
+        assert client.post("/verify", json=_VERIFY).status_code == 500
+        sandboxes[0].stop.assert_awaited_once()
+        assert server._session_id_to_sandbox == {}
+    sandboxes[0].download.assert_not_awaited()
+
+
+def test_malformed_typed_seed_is_not_taken_for_an_agent_run_seed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    server, sandboxes = _server(monkeypatch, tmp_path)
+    malformed = _ROW | {"responses_create_params": _PARAMS, "resources_session_id": "resources-session"}
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        assert client.post("/seed_session", json=malformed).status_code == 422
+    assert sandboxes == []
 
 
 @pytest.mark.parametrize(

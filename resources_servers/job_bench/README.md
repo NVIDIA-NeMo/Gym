@@ -12,12 +12,16 @@ An Environment Server (`single_agent_turn_legacy` for the flat benchmark rows) s
 
 - `/verify` archives `/workspace/output`, stops the task sandbox, and grades the archive. An identical retried verify
   gets the first verdict back, or a regrade of the saved archive when grading did not finish. A verify for a closed
-  or expired session is masked (`mask_sample: true`) instead of scoring 0.
+  or expired session is masked (`mask_sample: true`) instead of scoring 0. What the agent did to `/workspace/output`
+  is its result: a removed folder grades as no output, and a file still changing while it is archived is graded as
+  archived. Only a failure of the sandbox or of the archive fails the verify.
 - `/close_session` stops the sandbox if verify did not, and fences the session ID, so a late seed gets 409. A failed
   stop raises and keeps the sandbox for the retried close.
 - A session that is never closed expires after the sandbox's `ttl_s`, and shutdown stops every sandbox still open.
 
-`harness_agent`'s `/run` still seeds with the row and gets the sandbox descriptor back; its verify stops the sandbox.
+`harness_agent`'s `/run` still seeds with the row and gets the sandbox descriptor back; its verify stops the sandbox,
+even when it fails before collecting the output. Two answers differ from before: a verify with no live sandbox is
+masked instead of answering 400, and a task folder without `TASK_INSTRUCTIONS.txt` gets 422 instead of 500.
 The session behavior comes from `SandboxSessionResourcesServer` in `resources_servers/swebench/sandbox_sessions.py`.
 
 ## Differences from upstream
