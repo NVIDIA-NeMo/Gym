@@ -90,7 +90,6 @@ from nemo_gym.sandbox import (
     SandboxSpec,
     create_provider,
     resolve_provider_config,
-    upload_media,
     upload_text,
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse, MCPToolAccess
@@ -1695,14 +1694,6 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             command.append("--thinking")
         if state.harness_session_id:
             command.extend(["--session", state.harness_session_id])
-        if media:
-            # A continuation activation's upload spends its budget, and an expiry here is a pre-launch timeout.
-            # The first activation has no deadline, so its upload is unbounded, like MCP staging.
-            async with asyncio.timeout_at(deadline):
-                # session_dir is already one directory per continuation activation.
-                media_dir = f"{state.session.session_dir}/input-media"
-                for path in await upload_media(state.session.sandbox, files=media, directory=media_dir):
-                    command.extend(["--file", path])
         payload = {
             "instructions": system if self.config.system_prompt_mode == "append" else "",
             "path_prefix": self.config.sandbox_path_prefix,
@@ -1730,6 +1721,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             try:
                 await state.execute(
                     payload,
+                    media=media,
                     timeout=timeout,
                     close_timeout=self.config.session_close_timeout_seconds,
                     deadline=deadline,

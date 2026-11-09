@@ -3,6 +3,7 @@
 """Multi-turn continuation uses ordinary Responses requests and per-activation evidence."""
 
 import asyncio
+import hashlib
 import json
 import shlex
 import sqlite3
@@ -1171,7 +1172,7 @@ def test_media_staging_spends_the_activation_budget(setup, tmp_path):
     stalled = SimpleNamespace(cancelled=False)
 
     async def stall_media(source, destination):
-        if "/input-media/" not in destination:
+        if "/nemo-gym-media/" not in destination:
             return await upload(source, destination)
         try:
             await asyncio.sleep(5)
@@ -1182,7 +1183,7 @@ def test_media_staging_spends_the_activation_budget(setup, tmp_path):
     sandbox.upload = stall_media
     prompt = [
         {"type": "input_text", "text": "What is shown?"},
-        {"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgoA/w==", "detail": "auto"},
+        {"type": "input_image", "image_url": PNG_URI, "detail": "auto"},
     ]
     with TestClient(agent.setup_webserver()) as client:
         request = start(client)
@@ -1217,7 +1218,6 @@ def test_continuation_decodes_each_activation_image_once(setup, tmp_path, monkey
         assert decodes == [PNG_URI]
         command = payloads[0]["command"]
         path = command[command.index("--file") + 1]
-        assert path == f"{payloads[0]['directory']}/input-media/media-0.png"
-        assert payloads[0]["directory"].endswith("/activation-1")
+        assert path == f"/tmp/nemo-gym-media/{hashlib.sha256(PNG).hexdigest()}.png"
         assert sandbox.files[path] == PNG
         close(client, request)
