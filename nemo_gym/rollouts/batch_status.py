@@ -446,12 +446,14 @@ def _merge_aggregate_bindings(
                     or binding.unresolved
                     or bool(previous.environments) != bool(binding.environments),
                 )
+    # An unresolved route may have contributed to any merged entry, whichever member labelled that entry.
+    unknown_ownership = any(binding is None or binding.unresolved for binding in merged.values())
     owners: Dict[str, set[str]] = defaultdict(set)
     for member, binding in merged.items():
         if binding is None:
             continue
         environments = binding.environments
-        if not environments and not binding.unresolved:
+        if not environments:
             # An exact-label legacy member may select the same aggregate as an environment-routed member.
             environment = entries.get(member, {}).get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)
             environments = frozenset([environment]) if isinstance(environment, str) and environment else frozenset()
@@ -459,7 +461,9 @@ def _merge_aggregate_bindings(
             owners[environment].add(member)
     ambiguous = {member for members in owners.values() if len(members) > 1 for member in members}
     return {
-        member: replace(binding, unresolved=True) if member in ambiguous and binding is not None else binding
+        member: replace(binding, unresolved=True)
+        if binding is not None and (unknown_ownership or member in ambiguous)
+        else binding
         for member, binding in merged.items()
     }
 

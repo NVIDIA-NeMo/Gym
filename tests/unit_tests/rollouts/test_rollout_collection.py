@@ -12910,9 +12910,16 @@ class TestEnvironmentServerRouting:
             assert all(AGENT_REF_KEY_NAME not in row for row in rows)
             assert all(row[NG_ENVIRONMENT_SERVER_KEY] == "environment" for row in rows)
 
-    @pytest.mark.parametrize("second_status_present", [False, True])
+    @pytest.mark.parametrize("all_statuses_present", [False, True])
+    @pytest.mark.parametrize("first_route", ["environment", None])
+    @pytest.mark.parametrize("reverse_input_order", [False, True])
     async def test_offline_status_rejects_distinct_members_sharing_a_route_across_shards(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, second_status_present: bool
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        all_statuses_present: bool,
+        first_route: str | None,
+        reverse_input_order: bool,
     ) -> None:
         async def post(server_name, url_path, json, **kwargs):
             assert server_name == "environment"
@@ -12933,27 +12940,53 @@ class TestEnvironmentServerRouting:
         for index, (shard, agent) in enumerate((("a", "hermes"), ("b", "other"))):
             row = {
                 AGENT_REF_KEY_NAME: {"name": agent},
-                NG_ENVIRONMENT_SERVER_KEY: "environment",
-                TASK_INDEX_KEY_NAME: index,
+                NG_ENVIRONMENT_SERVER_KEY: first_route if index == 0 else "environment",
+                TASK_INDEX_KEY_NAME: 1 - index if reverse_input_order else index,
                 ROLLOUT_INDEX_KEY_NAME: 0,
                 "responses_create_params": {"input": []},
             }
-            for future in helper.run_examples([row], record_output_dir=tmp_path, record_shard=shard):
-                await future
-            outputs.append(tmp_path / f"rollouts-{shard}.jsonl")
-        second_status = outputs[1].with_name(outputs[1].stem + "_batch_status.json")
-        if not second_status_present:
-            second_status.unlink()
+            output = tmp_path / f"rollouts-{shard}.jsonl"
+            if first_route is None:
+                # Historical raw shards may retain a null route. Offline scoring falls back to the agent's server;
+                # that does not turn the saved null into verified route evidence for status.
+                output.write_bytes(orjson.dumps(row | {"response": {}, "reward": float(agent == "hermes")}) + b"\n")
+                output.with_name(output.stem + "_batch_status.json").write_bytes(
+                    orjson.dumps(
+                        {
+                            "tracking": "enabled",
+                            "members": {
+                                agent: {
+                                    "expected_rollout_count": 1,
+                                    "completed_rollout_count": 1,
+                                    "aggregation_status": "deferred",
+                                }
+                            },
+                        }
+                    )
+                )
+            else:
+                for future in helper.run_examples([row], record_output_dir=tmp_path, record_shard=shard):
+                    await future
+            outputs.append(output)
+        optional_output = outputs[0] if first_route is None else outputs[1]
+        optional_status = optional_output.with_name(optional_output.stem + "_batch_status.json")
+        if not all_statuses_present:
+            optional_status.unlink()
         source_files = [
             path
             for output in outputs
             for path in (
-                output,
-                materialized_path_for(output),
-                failures_path_for(output),
-                nemo_gym.rollouts.rollout_collection.manifest_path_for(output),
+                (output,)
+                if first_route is None
+                else (
+                    output,
+                    materialized_path_for(output),
+                    failures_path_for(output),
+                    nemo_gym.rollouts.rollout_collection.manifest_path_for(output),
+                )
             )
         ]
+        assert all(path.is_file() for path in source_files)
         before = {path: path.read_bytes() for path in source_files}
         merged = tmp_path / "merged.jsonl"
 
@@ -12966,17 +12999,18 @@ class TestEnvironmentServerRouting:
         )
 
         [entry] = orjson.loads(merged.with_name("merged_aggregate_metrics.json").read_bytes())
-        assert entry[AGENT_REF_KEY_NAME] == {"name": "hermes"}
+        assert entry[AGENT_REF_KEY_NAME] == {"name": "other" if reverse_input_order else "hermes"}
         assert entry[NG_ENVIRONMENT_SERVER_KEY] == "environment"
         assert entry["key_metrics"]["mean/reward"] == 0.5
-        assert outputs[0].with_name(outputs[0].stem + "_batch_status.json").is_file()
+        mandatory_output = outputs[1] if first_route is None else outputs[0]
+        assert mandatory_output.with_name(mandatory_output.stem + "_batch_status.json").is_file()
         for output, agent in zip(outputs, ("hermes", "other")):
             status_path = output.with_name(output.stem + "_batch_status.json")
             if status_path.exists():
                 member = orjson.loads(status_path.read_bytes())["members"][agent]
                 assert member["completed_rollout_count"] == member["expected_rollout_count"] == 1
                 assert member["aggregation_status"] == "error"
-        assert second_status.exists() is second_status_present
+        assert optional_status.exists() is all_statuses_present
         assert {path: path.read_bytes() for path in source_files} == before
 
     async def test_call_aggregate_metrics_groups_by_environment_server(
