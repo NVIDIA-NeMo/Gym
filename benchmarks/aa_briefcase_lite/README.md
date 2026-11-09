@@ -27,7 +27,7 @@ gym eval prepare --benchmark aa_briefcase_lite
 ```
 
 The generated JSONL contains task execution metadata only. It deliberately excludes checks, rubrics, traceability records, source graphs, and judge prompts so grader-only information cannot enter the agent request.
-It also records the checkout's absolute path, so
+It also records the checkout's revision, and
 `data/aa_briefcase_lite.jsonl` is intentionally ignored and must be regenerated
 for each installation. The preparation script rejects a different dataset
 revision or missing referenced source files.
@@ -112,8 +112,9 @@ The 49,152-token Claude budget is a local setting, not an AA-prescribed limit.
 
 For long judge requests, set `GDPVAL_JUDGE_REQUEST_TIMEOUT_SECONDS=600` before
 starting Gym. This controls the client timeout, not upstream service deadlines.
-Binary requests permit two transport retries with SDK backoff. Pairwise requests
-retain the shared sender's existing transport retry policy. Both paths
+Binary and pairwise requests each permit two transport retries with SDK backoff; the
+shared sender's own retry loop is off for pairwise requests, so attempts are not
+multiplied. Both paths
 separately allow two retries for invalid answers;
 pairwise formatting repair adds a short boxed-verdict reminder while preserving
 the judge and submission positions. Valid judgments are not retried, and
