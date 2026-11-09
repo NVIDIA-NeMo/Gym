@@ -236,6 +236,8 @@ def test_the_step_a_stop_cuts_is_interrupted_not_missing(tmp_path, interrupted):
     if interrupted:
         [gap] = trajectory.gaps
         assert gap.code == "turn_interrupted"
+        # It names the invocation, so the harness check can excuse that invocation's last call.
+        assert gap.invocation_id == trajectory.turns[-1].invocation_id
         # The cut message keeps the structural diagnostics a missing step gets.
         assert gap.detail.startswith("m1; native_capture_diagnostics=")
         assert '"id":"m1"' in gap.detail
@@ -252,9 +254,12 @@ def test_only_the_last_step_can_be_interrupted(tmp_path):
     _parse_opencode_session(db, "fallback", trajectory, require_terminal_finish=True, interrupted=True)
     # An earlier step without a finish is still missing evidence; an empty cut step is no turn.
     assert len(trajectory.turns) == 2
-    gaps = {gap.code: gap.detail for gap in trajectory.gaps}
-    assert gaps["turn_interrupted"].startswith("m2;")
-    assert gaps["turns_unavailable"].startswith("m0;")
+    gaps = {gap.code: gap for gap in trajectory.gaps}
+    # The empty cut step has no turn, but its gap still names the session's invocation.
+    assert gaps["turn_interrupted"].detail.startswith("m2;")
+    assert gaps["turn_interrupted"].invocation_id == trajectory.turns[-1].invocation_id
+    assert gaps["turns_unavailable"].invocation_id is None
+    assert gaps["turns_unavailable"].detail.startswith("m0;")
 
 
 def test_invalid_json_and_tool_state_are_partial_evidence(tmp_path, parse):

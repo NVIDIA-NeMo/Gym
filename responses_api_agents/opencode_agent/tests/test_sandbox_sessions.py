@@ -749,6 +749,7 @@ async def test_rollout_stop_ends_opencode_as_a_timeout(setup, tmp_path):
     # The cut step is interrupted evidence, not missing evidence, and its tool ended with the stop.
     [gap] = closed.trajectory.gaps
     assert gap.code == "turn_interrupted"
+    assert gap.invocation_id == closed.trajectory.turns[-1].invocation_id
     # It keeps the capture receipt a missing step gets, which shows that the run timed out.
     lifecycle = json.loads(gap.detail.split("; capture_lifecycle=", 1)[1])
     assert lifecycle["cleanup"]["timed_out"] is True

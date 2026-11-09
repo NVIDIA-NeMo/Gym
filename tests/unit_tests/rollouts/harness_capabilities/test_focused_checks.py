@@ -136,6 +136,49 @@ def test_retry_attempt_and_compaction_helper_accounting():
     assert checks(record)["steps.accounting_gap"]["status"] == "fail"
 
 
+def stop_cut_record(*, extra_stepless=False, first=False, status=200, gap=None):
+    """A row whose harness a rollout stop ended after the reply of call "cut" returned but before any of it was saved.
+
+    The invocation owns "cut", but no step names it; the trajectory carries the stop's turn_interrupted gap.
+    """
+    record = evidence_record()
+    trajectory = record["ng_trajectory"]
+    invocation = trajectory["invocations"][0]
+    for name in ("cut", "cut-2") if extra_stepless else ("cut",):
+        call = deepcopy(trajectory["model_calls"][-1])
+        call["model_call_id"] = name
+        call["response_metadata"].update(response_id=f"{name}-response", status_code=status)
+        trajectory["model_calls"].append(call)
+        reference = {"model_call_id": name}
+        invocation["model_calls"].insert(0, reference) if first else invocation["model_calls"].append(reference)
+    trajectory["gaps"].append({"code": "turn_interrupted", "invocation_id": "invocation"} if gap is None else gap)
+    return record
+
+
+def test_the_last_call_a_stop_cut_before_it_was_saved_needs_no_step():
+    record = stop_cut_record()
+    assert checks(record)["steps.attempt_accounting"]["status"] == "pass"
+    assert inspect_record(record)["evidence"]["TE-9"]["verdict"] == "fulfilled"
+    # Without the stop's gap, the same call is a policy response with no step.
+    record["ng_trajectory"]["gaps"].clear()
+    assert checks(record)["steps.attempt_accounting"]["status"] == "fail"
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        {"extra_stepless": True},  # two calls without a step
+        {"first": True},  # not the invocation's last call
+        {"status": None},  # not a returned HTTP 200 reply
+        {"gap": {"code": "turn_interrupted"}},  # the gap does not name the invocation
+        {"gap": {"code": "turn_interrupted", "invocation_id": "other"}},
+        {"gap": {"code": "turns_unavailable", "invocation_id": "invocation"}},  # no stop cut the step
+    ],
+)
+def test_only_the_one_call_a_stop_cut_is_excused(case):
+    assert checks(stop_cut_record(**case))["steps.attempt_accounting"]["status"] == "fail"
+
+
 def test_ambiguous_reference_is_a_relationship_failure_not_a_global_schema_failure():
     record = evidence_record()
     record["ng_trajectory"]["model_calls"].append(deepcopy(record["ng_trajectory"]["model_calls"][0]))
