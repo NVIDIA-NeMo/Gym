@@ -870,10 +870,11 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             "nemo_gym.orchestration.jobs",
             "0.8.0",
             """
-            BenchmarkJob installed_gym_commit new_gym_job_id RESOLVED_CONFIG_NAME SubmissionRecord utc_now
+            BenchmarkJob new_gym_job_id RESOLVED_CONFIG_NAME SubmissionRecord utc_now
             utc_timestamp
             """,
         ),
+        **_names("nemo_gym.utils.gym_commit", "0.8.0", "installed_gym_commit"),
     },
     "nemo_gym.orchestration.recovery": {
         # Split by the question each part answers when the module moved to nemo_gym.eval.recovery.planner;

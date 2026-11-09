@@ -17,9 +17,11 @@
 import pytest
 
 from nemo_gym.core import failure_kinds
+from nemo_gym.eval.recovery import evidence
 from nemo_gym.eval.recovery import trials as recovery
 from nemo_gym.eval.recovery.gate import (
     GateCriteria,
+    failure_facts,
     gate_summary_from_collected,
     trial_verdict,
 )
@@ -166,7 +168,7 @@ def test_policy_counted_zero_stays_measured_incomplete_without_reinspecting_evid
         assert report["evaluation"]["kinds"] == {kind: 1}
         assert passed is False and report["status"] == "FAIL", reason
     assert recovery._scored_kind(row) == kind
-    facts = recovery.failure_facts(decision, collected)
+    facts = failure_facts(decision, collected)
     assert facts["response_failures"]["count"] == 0
     assert facts["trial_failures"]["count"] == 1
     assert task["failures"]["metric_coverage"]["trials"] == 1
@@ -306,7 +308,7 @@ def test_explicit_unknown_attribution_does_not_fall_back_to_model_kind():
 
 
 def test_bad_judge_verdict_preserves_other_trials_saved_attribution():
-    from tests.unit_tests.orchestration.test_llm_judge_trial_coverage import _dep, _judge_call, _own
+    from tests.unit_tests.eval.recovery.test_llm_judge_trial_coverage import _dep, _judge_call, _own
 
     collected = _run(100)
     collected.results[0].update(
@@ -363,7 +365,7 @@ def test_unfinished_run_health_preserves_saved_policy_attribution(tmp_path, monk
     artifacts.aggregate_metrics_json_fpath.write_text(
         json.dumps([{"agent_ref": {"type": "responses_api_agents", "name": "agent"}, "agent_metrics": {"score": 0.0}}])
     )
-    monkeypatch.setattr(recovery, "select_managed_evidence", lambda *_: collected)
+    monkeypatch.setattr(evidence, "select_managed_evidence", lambda *_: collected)
     values = _prepare_run_health_metrics(output)
     assert values["health/trial/expected"] == 2
     assert values["health/trial/failed_lower_bound"] == 0
@@ -559,7 +561,7 @@ def test_cli_health_uses_saved_launcher_classification_and_exports_unknown(
             }
         )
     )
-    monkeypatch.setattr(recovery, "select_managed_evidence", lambda *_: collected)
+    monkeypatch.setattr(evidence, "select_managed_evidence", lambda *_: collected)
     metrics = _prepare_run_health_metrics(output)
     assert metrics["health/trial/unclassified"] == int(saved_class == "unknown")
     assert metrics["health/trial/failed_lower_bound"] == expected
