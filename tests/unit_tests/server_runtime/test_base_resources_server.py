@@ -26,6 +26,8 @@ from nemo_gym.core.failure_kinds import JUDGE_FAILED, SESSION_EXPIRED, SESSION_L
 from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.metrics.reward_profile import select_measured
 from nemo_gym.server_runtime.base_resources_server import (
+    EPISODE_STATUS_PATH,
+    RESERVED_MCP_TOOL_NAMES,
     BaseMultiRewardVerifyResponse,
     BaseResourcesServerConfig,
     BaseRunRequest,
@@ -33,6 +35,8 @@ from nemo_gym.server_runtime.base_resources_server import (
     BaseVerifyResponse,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
+    ResourcesEpisodeStatusRequest,
+    ResourcesEpisodeStatusResponse,
     ResourcesSeedRejectedError,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
@@ -135,6 +139,44 @@ class TestBaseResourcesServer:
             ),
             keeps_state=False,
         )
+
+
+class TestEpisodeStatus:
+    """The optional route a live world uses to say that its rules ended the episode."""
+
+    def test_a_server_that_does_not_report_episode_status_answers_404(self) -> None:
+        client = TestClient(_resources_server().setup_webserver())
+        assert client.post(EPISODE_STATUS_PATH, json={}).status_code == 404
+
+    def test_a_live_world_reports_the_end_of_its_episode(self) -> None:
+        config = BaseResourcesServerConfig(host="", port=0, entrypoint="", name="")
+
+        class LiveWorld(SimpleResourcesServer):
+            ended_sessions: set[str] = set()
+            asked_sessions: list[str] = []
+
+            async def verify(self, body):
+                pass
+
+            async def episode_status(
+                self, request: Request, body: ResourcesEpisodeStatusRequest
+            ) -> ResourcesEpisodeStatusResponse:
+                session_id = request.session[SESSION_ID_KEY]
+                self.asked_sessions.append(session_id)
+                done = session_id in self.ended_sessions
+                return ResourcesEpisodeStatusResponse(done=done, reason="DONE" if done else None)
+
+        server = LiveWorld(config=config, server_client=MagicMock(spec=ServerClient))
+        client = TestClient(server.setup_webserver())
+        assert client.post(EPISODE_STATUS_PATH, json={}).json() == {"done": False, "reason": None}
+        # The session cookie names the episode.
+        server.ended_sessions.add(server.asked_sessions[-1])
+        assert client.post(EPISODE_STATUS_PATH, json={}).json() == {"done": True, "reason": "DONE"}
+        # The body is typed: an unknown field is refused.
+        assert client.post(EPISODE_STATUS_PATH, json={"unexpected": 1}).status_code == 422
+
+    def test_episode_status_is_never_an_mcp_tool(self) -> None:
+        assert EPISODE_STATUS_PATH.lstrip("/") in RESERVED_MCP_TOOL_NAMES
 
 
 class TestVerifyResponseFailureReporting:

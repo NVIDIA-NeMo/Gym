@@ -816,7 +816,16 @@ class Inspector:
                 location="$.ng_trajectory.tool_calls",
                 reason="required evidence does not match its schema",
                 value=self.trajectory.get("tool_calls"),
-                schema={"type": "array", "items": required_object(output={"type": ["string", "array", "object"]})},
+                schema={
+                    "type": "array",
+                    "items": {
+                        "anyOf": [
+                            required_object(output={"type": ["string", "array", "object"]}),
+                            # A tool that the invocation's timeout or a rollout stop ended has no output to save.
+                            required_object(status={"const": "timeout"}, error_type={"const": "invocation_timeout"}),
+                        ]
+                    },
+                },
                 depends_on=("tool_calls.present",),
                 applies=self.scope.tools,
                 available=self.available,

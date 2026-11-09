@@ -104,6 +104,23 @@ def test_tool_output_must_be_saved_at_its_designated_field(value):
     assert "tools.output" in ids(inspect(record))
 
 
+@pytest.mark.parametrize(
+    "status,error_type,accepted",
+    [
+        ("timeout", "invocation_timeout", True),  # the invocation's timeout or a rollout stop cut the tool
+        ("timeout", "tool_timeout", False),  # the tool's own timeout still owes its output
+        ("completed", "invocation_timeout", False),
+        ("cancelled", "invocation_cancelled", False),
+    ],
+)
+def test_a_tool_the_invocation_stop_cut_needs_no_output(status, error_type, accepted):
+    record = evidence_record()
+    tool = record["ng_trajectory"]["tool_calls"][0]
+    tool.pop("output")
+    tool.update(status=status, error_type=error_type)
+    assert ("tools.output" not in ids(inspect(record))) is accepted
+
+
 @pytest.mark.parametrize("value", ["", [], {}])
 def test_empty_tool_content_is_valid_json_evidence(value):
     assert Draft202012Validator(item_schema("tools.output")).is_valid({"output": value})

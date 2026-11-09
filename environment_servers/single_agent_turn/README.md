@@ -41,6 +41,14 @@ environment_servers:
         name: tavily
 ```
 
+Some harnesses, such as Codex and OpenCode, end their turn only when the model replies without a tool call. In a live world that can end the task on its own, for example a desktop where the model reports the task done or runs out of actions, such a harness keeps acting after the episode is over. Set `episode_status_poll_seconds` to stop it. During the agent's turn, the Environment Server then calls the Resources Server's optional `POST /episode_status` at that interval. When the answer is `done: true`, it calls `POST /rollouts/{rollout_id}/stop` on the Agent Server with the reason, and the turn ends like one that reached its time limit. Verification still runs as usual. A Resources Server that does not answer that route returns 404, and polling stops for that episode. See [Episode Status for a Live World](../../fern/versions/latest/pages/environment-tutorials/resources-server-apis.mdx#episode-status-for-a-live-world).
+
+```yaml
+environment_servers:
+  single_agent_turn:
+    episode_status_poll_seconds: 5
+```
+
 With partial-rollout checkpointing on, an episode that grants `mcp` access or any tool server restarts from its input after a crash instead of continuing from a checkpoint. Its agent holds an MCP session token that names the episode's attempt, and the Resources Server refuses that token once a restore replaces the attempt.
 
 The server supports `num_workers > 1`. Episode state and cleanup remain local to the worker handling that request. `max_concurrent_episodes` and queue admission are also enforced independently by each worker, so the deployment-wide concurrency limit is approximately `num_workers * max_concurrent_episodes`.

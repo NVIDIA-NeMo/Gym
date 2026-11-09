@@ -107,8 +107,12 @@ def _parse_opencode_session(
     model_ref: ModelServerRef | None = None,
     require_terminal_finish: bool = False,
     message_ids: set[str] | None = None,
+    interrupted: bool = False,
 ) -> AgentObservationBundle:
-    """Read OpenCode's persisted session tree before its workspace is removed."""
+    """Read OpenCode's persisted session tree before its workspace is removed.
+
+    ``interrupted`` says that a timeout or a rollout stop ended the run, so the step it cut is not missing evidence.
+    """
     if not db_path.is_file():
         return AgentObservationBundle(
             source="opencode",
@@ -464,7 +468,13 @@ def _parse_opencode_session(
 
     if trajectory is not None:
         append_opencode_turns(
-            trajectory, session_ids, message_rows, part_rows, model_ref=model_ref, gym_reasoning=model_ref is not None
+            trajectory,
+            session_ids,
+            message_rows,
+            part_rows,
+            model_ref=model_ref,
+            gym_reasoning=model_ref is not None,
+            interrupted=interrupted,
         )
 
     return AgentObservationBundle(
