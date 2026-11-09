@@ -22,6 +22,8 @@ from collections.abc import Iterable
 from pathlib import Path
 from shlex import quote
 
+import anyio
+
 from nemo_gym.core.media import MediaFile
 from nemo_gym.sandbox.api import AsyncSandbox
 
@@ -138,13 +140,28 @@ async def stage_media(sandbox: AsyncSandbox, files: Iterable[MediaFile]) -> list
             if path not in partials:
                 partials[path] = f"{MEDIA_DIRECTORY}/.{uuid.uuid4().hex}.partial"
                 await _upload(sandbox, path=partials[path], data=file.data, readable_by_all=True)
-        # -T fails on a directory at the target path, which mv would otherwise move the file into.
-        renames = " && ".join(f"mv -fT -- {quote(partial)} {quote(path)}" for path, partial in partials.items())
+        renames = " && ".join(_rename_command(partial, path) for path, partial in partials.items())
         await _run_media_command(sandbox, renames, action="rename the staged media files")
     except BaseException:
-        await _remove_partial_media(sandbox, partials.values())
+        # Shielded because an anyio cancel scope, such as the one that cancels a request on client disconnect, stays
+        # cancelled and would cancel the cleanup at once. The deadline keeps an unresponsive sandbox from holding a
+        # cancelled caller.
+        with anyio.move_on_after(_CLEANUP_TIMEOUT_S, shield=True) as cleanup:
+            await _remove_partial_media(sandbox, partials.values())
+        if cleanup.cancelled_caught:
+            LOGGER.warning("Gave up removing partial media uploads from the sandbox after %s s", _CLEANUP_TIMEOUT_S)
         raise
     return paths
+
+
+def _rename_command(partial: str, path: str) -> str:
+    # mv would move the file into a directory at the target path. GNU mv -T refuses that, but BSD mv, as on macOS,
+    # has no -T, so test for the directory first. Only something creating a directory at a content-hash path between
+    # the test and the rename could get past it.
+    return (
+        f"{{ [ ! -d {quote(path)} ] || {{ echo {quote(path + ' is a directory')} >&2; false; }}; }}"
+        f" && mv -f -- {quote(partial)} {quote(path)}"
+    )
 
 
 async def _run_media_command(sandbox: AsyncSandbox, command: str, *, action: str) -> None:

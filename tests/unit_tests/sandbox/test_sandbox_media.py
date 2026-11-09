@@ -20,10 +20,12 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import anyio
 import pytest
 
 import nemo_gym.core
 import nemo_gym.sandbox
+import nemo_gym.sandbox.utils
 from nemo_gym.core.media import MediaFile
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.sandbox.transfer import SandboxTransferError, SandboxUnavailableError
@@ -43,10 +45,13 @@ class DirectorySandbox:
     so staging must create it before uploading.
     """
 
-    def __init__(self, root: Path, *, fail_upload_after: int | None = None, fail_rename_to: str = "") -> None:
+    def __init__(
+        self, root: Path, *, fail_upload_after: int | None = None, fail_rename_to: str = "", bsd_mv: bool = False
+    ) -> None:
         self.root = root
         self.fail_upload_after = fail_upload_after
         self.fail_rename_to = fail_rename_to
+        self.bsd_mv = bsd_mv
         self.uploads = 0
         self.commands: list[tuple[str, float | None]] = []
 
@@ -68,11 +73,19 @@ class DirectorySandbox:
 
     async def exec(self, command: str, *, cwd: str, timeout_s: float | None = None) -> SandboxExecResult:
         self.commands.append((command, timeout_s))
+        # A real exec awaits the provider, so a cancellation can reach it here.
+        await asyncio.sleep(0)
         local_command = command.replace(MEDIA_DIRECTORY, str(self.local(MEDIA_DIRECTORY)))
         if self.fail_rename_to:
             # Fail the rename onto one target, as a full disk or a permission error would.
             local_command = (
                 f'mv() {{ case "$4" in *{self.fail_rename_to}) return 1;; esac; command mv "$@"; }}; {local_command}'
+            )
+        if self.bsd_mv:
+            # BSD mv, as on macOS, has no -T and rejects it.
+            local_command = (
+                'mv() { case "$1" in -*T*) echo "mv: illegal option -- T" >&2; return 64;; esac; command mv "$@"; }; '
+                + local_command
             )
         completed = subprocess.run(["bash", "-c", local_command], capture_output=True, text=True)
         return SandboxExecResult(stdout=completed.stdout, stderr=completed.stderr, return_code=completed.returncode)
@@ -82,6 +95,10 @@ class DirectorySandbox:
 
     def partial_files(self) -> list[str]:
         return [name for name in self.media_files() if name.endswith(".partial")]
+
+
+def is_rename(command: str) -> bool:
+    return " mv -f -- " in command
 
 
 def test_stage_names_each_file_by_its_content_and_returns_the_paths_in_order(tmp_path: Path) -> None:
@@ -149,10 +166,17 @@ def test_a_failed_rename_anywhere_in_the_chain_removes_the_partial_files(tmp_pat
 def test_a_directory_at_the_target_path_fails_the_staging(tmp_path: Path) -> None:
     sandbox = DirectorySandbox(tmp_path)
     sandbox.local(media_path(PNG)).mkdir(parents=True)
-    with pytest.raises(SandboxTransferError):
+    with pytest.raises(SandboxTransferError, match="is a directory"):
         asyncio.run(stage_media(sandbox, [PNG]))
     assert sandbox.partial_files() == []
     assert list(sandbox.local(media_path(PNG)).iterdir()) == []
+
+
+def test_staging_works_with_an_mv_that_has_no_target_directory_option(tmp_path: Path) -> None:
+    sandbox = DirectorySandbox(tmp_path, bsd_mv=True)
+    paths = asyncio.run(stage_media(sandbox, [PNG, JPEG]))
+    assert [sandbox.local(path).read_bytes() for path in paths] == [PNG.data, JPEG.data]
+    assert sandbox.partial_files() == []
 
 
 @pytest.mark.parametrize("fail_upload", ["before writing", "partway"])
@@ -179,7 +203,7 @@ class RenameSandbox(DirectorySandbox):
         self.rename = rename
 
     async def exec(self, command: str, *, cwd: str, timeout_s: float | None = None) -> SandboxExecResult:
-        if not command.startswith("mv "):
+        if not is_rename(command):
             return await super().exec(command, cwd=cwd, timeout_s=timeout_s)
         self.commands.append((command, timeout_s))
         if isinstance(self.rename, asyncio.Event):
@@ -219,7 +243,7 @@ def test_a_cancelled_staging_removes_the_partial_files(tmp_path: Path) -> None:
     async def run() -> RenameSandbox:
         sandbox = RenameSandbox(tmp_path, asyncio.Event())
         task = asyncio.create_task(stage_media(sandbox, [PNG]))
-        while not task.done() and not any(command.startswith("mv ") for command, _ in sandbox.commands):
+        while not task.done() and not any(is_rename(command) for command, _ in sandbox.commands):
             await asyncio.sleep(0)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -227,6 +251,39 @@ def test_a_cancelled_staging_removes_the_partial_files(tmp_path: Path) -> None:
         return sandbox
 
     assert asyncio.run(run()).partial_files() == []
+
+
+def test_a_staging_cancelled_by_an_anyio_scope_removes_the_partial_files(tmp_path: Path) -> None:
+    # An anyio scope stays cancelled, as when a request is cancelled on client disconnect, so the cleanup must be
+    # shielded to run at all.
+    async def run() -> RenameSandbox:
+        sandbox = RenameSandbox(tmp_path, asyncio.Event())
+        async with anyio.create_task_group() as group:
+            group.start_soon(stage_media, sandbox, [PNG])
+            with anyio.fail_after(5):
+                while not any(is_rename(command) for command, _ in sandbox.commands):
+                    await asyncio.sleep(0)
+            group.cancel_scope.cancel()
+        return sandbox
+
+    assert asyncio.run(run()).partial_files() == []
+
+
+def test_a_cleanup_that_does_not_finish_is_abandoned_after_the_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(nemo_gym.sandbox.utils, "_CLEANUP_TIMEOUT_S", 0.05)
+
+    class Sandbox(RenameSandbox):
+        async def exec(self, command: str, *, cwd: str, timeout_s: float | None = None) -> SandboxExecResult:
+            if command.startswith("rm "):
+                await asyncio.Event().wait()
+            return await super().exec(command, cwd=cwd, timeout_s=timeout_s)
+
+    sandbox = Sandbox(tmp_path, SandboxExecResult(stdout=None, stderr="denied", return_code=1))
+    with pytest.raises(SandboxTransferError):
+        asyncio.run(asyncio.wait_for(stage_media(sandbox, [PNG]), timeout=5))
+    assert "Gave up removing partial media uploads" in caplog.text
 
 
 def test_a_failing_cleanup_keeps_the_original_error_and_logs(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
