@@ -11,6 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# `oracle_solubility_eval` below is adapted from Future-House/ether0, file `src/ether0/rewards.py`
+# at commit b77e0d8eb06f62c8528da72bff22d4c7fee11371
+# (https://github.com/Future-House/ether0/blob/b77e0d8eb06f62c8528da72bff22d4c7fee11371/src/ether0/rewards.py),
+# licensed under the Apache License 2.0 (upstream `LICENSE`; the upstream file carries no per-file
+# copyright notice). The adaptation requires every listed functional group instead of any one,
+# looks helpers up on `ether0.rewards` at call time, and reformats comments; the scaffold,
+# tanimoto, admissibility and numerical-tolerance branches are unchanged. `str_eval` and
+# `get_largest_mol` replace the upstream functions of the same name and signature with independent
+# implementations. Modifications Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES, licensed
+# under the Apache License 2.0 (header above).
 
 """The reward functions the ether0 verifier grades with.
 

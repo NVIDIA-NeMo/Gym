@@ -16,14 +16,15 @@ from unittest.mock import MagicMock
 
 import pytest
 from app import (
+    EVAL_FUNCTIONS,
     Ether0ResourcesServer,
     Ether0VerifyRequest,
 )
-from graders import EVAL_FUNCTIONS
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponse
 from nemo_gym.server_runtime import BaseResourcesServerConfig
+from resources_servers.ether0 import graders
 
 
 def _make_server() -> Ether0ResourcesServer:
@@ -83,8 +84,8 @@ class TestVerify:
         assert result.reward == 1.0
 
     def test_fixed_graders_registered(self) -> None:
-        assert EVAL_FUNCTIONS["str_eval"].__module__ == "graders"
-        assert EVAL_FUNCTIONS["sol_eval"].__module__ == "graders"
+        assert EVAL_FUNCTIONS["str_eval"] is graders.str_eval
+        assert EVAL_FUNCTIONS["sol_eval"] is graders.oracle_solubility_eval
 
     @pytest.mark.parametrize(
         ("prediction", "expected"),

@@ -16,9 +16,10 @@
 
 from unittest.mock import patch
 
-import graders
 import pytest
 from ether0 import rewards
+
+from resources_servers.ether0 import graders
 
 
 class TestSolubilityGroups:
