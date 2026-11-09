@@ -21,16 +21,22 @@ Per-sub-step counts are also returned so sub-step accuracy can be computed downs
 
 Each sub-step runs in a subprocess using the configured grading interpreter. Optional
 sandbox execution moves that subprocess and its scientific dependencies off the server host.
+
+The agent's solutions, ``step_usage`` and ``token_usage_version`` arrive as top-level fields from the
+agent's ``/run``, or under the response's ``scicode`` field from an agent session. This server also
+owns the SciCode benchmark metrics: sub-step-weighted accuracy, its across-run variability, and the
+whole-problem token accounting built from ``step_usage``.
 """
 
 import asyncio
 import hashlib
 import os
 import shutil
+import statistics
 import sys
 from functools import partial
 from pathlib import Path
-from typing import ClassVar, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 from scicode_integration.runner import (
@@ -43,6 +49,8 @@ from scicode_integration.runner import (
 from scicode_integration.sandbox_runner import ScicodeSandboxConfig, run_sandbox_substep
 
 from nemo_gym import PARENT_DIR
+from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.metrics import Stat
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
@@ -55,6 +63,9 @@ from nemo_gym.server_runtime import (
 
 # Agent sentinel for a sub-step it could not generate (ran out of context); always fails.
 _OUT_OF_CONTEXT = "_ran_out_of_context_"
+TOKEN_USAGE_VERSION = 1
+# The response field in which scicode_agent's session activation reports its solutions and step usage.
+SCICODE_RESPONSE_KEY = "scicode"
 
 
 class ScicodeGradingInterpreter(BaseModel):
@@ -91,7 +102,7 @@ class ScicodeResourcesServerConfig(BaseResourcesServerConfig):
     output_tail_chars: int = Field(default=2000, ge=0)
     # Opt-in on top of record_step_outputs: each record also carries `code`, the accumulated solution the
     # sub-step's tests ran against (the agent's solutions[step_id]); None for a sentinel step that never ran.
-    # Off by default: the code is model-generated and grows a row by the size of every scored program.
+    # Off by default: the row's `solutions` already hold the code, and this copies it into every record.
     record_step_code: bool = False
 
 
@@ -113,8 +124,10 @@ class ScicodeVerifyResponse(BaseVerifyResponse):
     token_usage_version: Optional[int] = None
     step_usage: Optional[List[dict]] = None
     # Declared so it survives into the rollout output (identifies the problem); the request's
-    # sub_steps/solutions are intentionally not carried through to keep rollout rows small.
+    # sub_steps are intentionally not carried through to keep rollout rows small.
     problem_id: str = ""
+    # The graded answer: kept on every row so a stateless re-verify (REVERIFY_MODE) grades the same solutions.
+    solutions: Optional[Dict[str, str]] = None
     step_results: List[bool] = []
     num_steps_passed: int = 0
     num_steps_total: int = 0
@@ -137,6 +150,124 @@ class ScicodeVerifyResponse(BaseVerifyResponse):
     # ended, {returncode, timed_out, exit}, `exit` typed by process_exit (`killed:<SIGNAL>` for a negative return
     # code; `not_run` for an out-of-context or empty step). Unlike step_outputs it carries no model output.
     step_exits: List[dict] = Field(default_factory=list)
+
+
+def _lift_session_results(body: ScicodeVerifyRequest) -> ScicodeVerifyRequest:
+    """Read the solutions and step usage that an agent session's response carries, as /run sends them.
+
+    The field leaves the response either way, so the rollout row keeps one copy of the solutions, ``step_usage``
+    and ``token_usage_version``, as a ``/run`` row does. A field without a solutions dict breaks the contract
+    between the agent and this server, not the model's answer, so it fails verification instead of grading nothing.
+    """
+    data = body.model_dump()
+    results = data["response"].pop(SCICODE_RESPONSE_KEY, None)
+    if results is None:
+        return body
+    if not isinstance(results, dict) or not isinstance(results.get("solutions"), dict):
+        raise ValueError(f"The response's {SCICODE_RESPONSE_KEY!r} field carries no solutions dict")
+    if data.get("solutions") is None:
+        data |= {key: results.get(key) for key in ("solutions", "step_usage", "token_usage_version")}
+    return ScicodeVerifyRequest.model_validate(data)
+
+
+def _check_solved_steps(body: ScicodeVerifyRequest) -> None:
+    """Refuse an answer that is not for this row's sub-steps.
+
+    The agent sends a solutions dict, empty when it generated nothing. A request without one (a rollout row saved
+    before rows kept their solutions, say) or one whose solutions or step usage name other sub-steps (an agent
+    session whose agent_context disagrees with the row) would grade nothing or the wrong steps as the model's 0.
+    """
+    if body.solutions is None:
+        raise ValueError("The request carries no solutions: nothing to grade")
+    expected = {f"{body.problem_id}.{i + 1}" for i in range(len(body.sub_steps))}
+    if unknown := sorted(set(body.solutions) - expected):
+        raise ValueError(f"Solutions for sub-steps the row does not have: {unknown}")
+    step_usage = (body.model_extra or {}).get("step_usage")
+    if step_usage is not None:
+        solved = [step.get("step_number") for step in step_usage]
+        row = [step["step_number"] for step in body.sub_steps]
+        if solved != row:
+            raise ValueError(f"The agent worked on sub-steps {solved}, the row has {row}")
+
+
+def _across_run_stats(tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+    """Across-run (repeat-to-repeat) variability of the two headline metrics.
+
+    Run i is "take repeat i of every problem" (repeats aligned by their rollout
+    index, run count = minimum repeat count so the matrix stays rectangular).
+    Per run, problem accuracy is the mean of problem_accuracy over problems and
+    subtask accuracy is the sub-step-weighted pool - the same definitions as
+    the headline mean/problem_accuracy and subtask_accuracy, so the std-dev
+    over the per-run values (sample std, ddof=1) is the run-to-run variability
+    of exactly those metrics. Single-repeat collections emit nothing.
+    """
+    max_k = min((len(t) for t in tasks if t), default=0)
+    if max_k < 2:
+        return {}
+
+    rows = [sorted(t, key=lambda r: r.get(ROLLOUT_INDEX_KEY_NAME, 0))[:max_k] for t in tasks if len(t) >= max_k]
+
+    problem_runs: List[float] = []
+    subtask_runs: List[float] = []
+    for i in range(max_k):
+        acc = [float(r[i]["problem_accuracy"]) for r in rows if r[i].get("problem_accuracy") is not None]
+        if acc:
+            problem_runs.append(sum(acc) / len(acc))
+        passed = sum(r[i].get("num_steps_passed", 0) for r in rows)
+        total = sum(r[i].get("num_steps_total", 0) for r in rows)
+        if total:
+            subtask_runs.append(passed / total)
+
+    metrics: Dict[str, Any] = {}
+    for key, runs in (("mean/problem_accuracy", problem_runs), ("subtask_accuracy", subtask_runs)):
+        if len(runs) < 2:
+            continue
+        std_dev = 0.0 if all(v == runs[0] for v in runs) else statistics.stdev(runs)
+        metrics[f"{key}/std_dev_across_runs"] = std_dev
+    return metrics
+
+
+def _usage_recorded(row: Dict[str, Any]) -> bool:
+    """Whether a row reports its rollout's usage: a counted failure row carries no response and no accounting."""
+    return row.get("token_usage_version") is not None or row.get("response") is not None
+
+
+def _token_metrics(tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+    """Pool generated steps across attempts, rather than averaging per-problem ratios.
+
+    A failed rollout that ``count_failure_classes_as_zero`` adds to the metrics carries neither a response nor
+    ``token_usage_version``: its usage is unknown, so the token totals are reported as incomplete.
+    """
+    rows = [r for task in tasks for r in task]
+    recorded = [r for r in rows if _usage_recorded(r)]
+    unrecorded = len(rows) - len(recorded)
+    versions = {r.get("token_usage_version") for r in recorded}
+    if not recorded or versions == {None}:
+        # Historical rollouts contain only the last step's usage.
+        return {}
+    if versions != {TOKEN_USAGE_VERSION}:
+        raise ValueError("Cannot aggregate SciCode rollouts with different token accounting versions")
+
+    steps = [step for r in recorded for step in r["step_usage"] if step["status"] != "prefilled"]
+    generated = [step for step in steps if step["status"] == "generated"]
+    metrics = {
+        # Aggregate values are exported as numeric scores by NeMo Evaluator.
+        "token_usage_version": TOKEN_USAGE_VERSION,
+        "num_subproblems": len(steps),
+        "num_generated_steps": len(generated),
+        "num_steps_with_usage": sum(step["usage"] is not None for step in generated),
+        "generation_coverage": len(generated) / len(steps) if steps else None,
+    }
+    complete = metrics["num_steps_with_usage"] == len(generated) and not unrecorded
+    metrics["token_usage_complete"] = complete
+    # Override the generic means too: pandas would otherwise silently average only
+    # the rollouts with known usage, presenting a partial measurement as a full one.
+    for name in ("input_tokens", "output_tokens", "total_tokens"):
+        total = sum(step["usage"][name] for step in steps) if complete else None
+        metrics[f"mean/{name}"] = total / len(rows) if total is not None else None
+        metrics[f"mean/{name}_per_problem"] = metrics[f"mean/{name}"]
+        metrics[f"mean/{name}_per_subproblem"] = total / len(steps) if complete and steps else None
+    return metrics
 
 
 class ScicodeResourcesServer(SimpleResourcesServer):
@@ -242,7 +373,9 @@ class ScicodeResourcesServer(SimpleResourcesServer):
         return self._resolved_grading_interpreters
 
     async def verify(self, body: ScicodeVerifyRequest) -> ScicodeVerifyResponse:
-        solutions = body.solutions or {}
+        body = _lift_session_results(body)
+        _check_solved_steps(body)
+        solutions = body.solutions
         record = self.config.record_step_outputs
         record_code = record and self.config.record_step_code
         # Score only sub-steps the agent produced a solution for. Sub-steps absent from solutions
@@ -384,6 +517,58 @@ class ScicodeResourcesServer(SimpleResourcesServer):
             step_outputs=step_outputs,
             step_exits=[step_exit for _, _, _, _, step_exit in evaluated_steps],
         )
+
+    async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
+        if any(
+            step["status"] == "generated" and step["usage"] is None
+            for row in body.verify_responses
+            for step in (row.get("step_usage") or [])
+        ) or any(not _usage_recorded(row) for row in body.verify_responses):
+            # Suppress generic token statistics at every level (including per-task
+            # and per-repeat). Keep the caller's raw rollout records unchanged.
+            body = body.model_copy(
+                update={
+                    "verify_responses": [
+                        {**row, "response": {**row["response"], "usage": None}} if row.get("response") else row
+                        for row in body.verify_responses
+                    ]
+                }
+            )
+        metrics = await super().aggregate_metrics(body)
+        # Custom repeat estimates are added after the shared headline selection.
+        metrics.key_metrics.update(self.get_key_metrics(metrics.agent_metrics))
+        # NeMo Evaluator requires numeric scores. Omit unavailable values rather
+        # than exporting nulls or inventing zero consumption.
+        metrics.agent_metrics = {k: v for k, v in metrics.agent_metrics.items() if v is not None}
+        metrics.key_metrics = {k: v for k, v in metrics.key_metrics.items() if v is not None}
+        return metrics
+
+    def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        """Headline SciCode metric: sub-step-weighted accuracy = total passed / total over all rollouts."""
+        passed = sum(r.get("num_steps_passed", 0) for task in tasks for r in task)
+        total = sum(r.get("num_steps_total", 0) for task in tasks for r in task)
+        metrics = {"subtask_accuracy": passed / total if total else 0.0}
+        metrics.update(_across_run_stats(tasks))
+        metrics.update(_token_metrics(tasks))
+        return metrics
+
+    def compute_repeat_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        return self.compute_metrics(tasks)
+
+    def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            k: v
+            for k, v in agent_metrics.items()
+            if k.startswith("mean/")
+            or k.startswith("subtask_accuracy")
+            or k
+            in {
+                f"{stat.across_repeats_prefix}{metric}"
+                for stat in (Stat.MEAN, Stat.CI_LOW_95, Stat.CI_HIGH_95)
+                for metric in ("subtask_accuracy", "mean/problem_accuracy")
+            }
+            or k in {"generation_coverage", "token_usage_complete"}
+        }
 
 
 if __name__ == "__main__":

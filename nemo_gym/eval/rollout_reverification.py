@@ -86,6 +86,7 @@ from nemo_gym.rollouts.rollout_records import (
 )
 from nemo_gym.rollouts.rollout_recovery import RunManifest, manifest_path_for, run_lock
 from nemo_gym.rollouts.rollout_store import RolloutStore, raw_outcomes_are_selected
+from nemo_gym.server_runtime.agent_context import AGENT_CONTEXT_KEY_NAME
 from nemo_gym.server_runtime.base_resources_server import AggregateMetrics, AggregateMetricsRequest, ReverifyMode
 from nemo_gym.trajectory.atif_json import strict_json_loads
 from nemo_gym.trajectory.atif_reverification import (
@@ -769,6 +770,8 @@ def _build_verify_payload(pair: InputRolloutPair) -> Dict:
             if fields[key] != task_data[key]:
                 raise ConfigError(f"reverify: conflicting task field {key!r} inside and outside task_data")
         payload = row_keys | task_data | fields | {"response": response}
+    # The task's agent_context is the agent's input, not a verifier field.
+    payload.pop(AGENT_CONTEXT_KEY_NAME, None)
     # File-backed verifiers need the artifact path produced by the rollout, and
     # adaptive comparison needs the exact reference subset used for that row.
     # Preserve only verifier inputs, not rewards or failure bookkeeping. SciCode's /verify grades the accumulated

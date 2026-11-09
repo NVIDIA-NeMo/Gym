@@ -12,33 +12,42 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import statistics
+import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import orjson
 import pytest
 from aiohttp import ClientResponseError
 from fastapi import Response
+from fastapi.testclient import TestClient
 
 import responses_api_agents.scicode_agent.app as app
+from nemo_gym.agents import AgentSeedSessionRequest, check_agent_seed_rejected
 from nemo_gym.client import ServerClient
 from nemo_gym.client import raise_for_status as real_raise_for_status
 from nemo_gym.config import AggregateMetricsRequest
 from nemo_gym.core import (
+    EpisodeId,
     FailureBoundary,
     FailureHeader,
+    NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NgFailureEvent,
     RequestFailureLog,
+    TaskId,
     failure_report_for,
 )
-from nemo_gym.metrics import compute_aggregate_metrics
+from nemo_gym.server_runtime import MCPStreamableHTTPConnection, MCPToolAccess
 from responses_api_agents.scicode_agent.app import (
+    SCICODE_RESPONSE_KEY,
     TOKEN_USAGE_VERSION,
     ModelServerRef,
     ResourcesServerRef,
     ScicodeAgent,
     ScicodeAgentConfig,
+    ScicodeAgentContext,
     ScicodeAgentRunRequest,
 )
 from responses_api_agents.scicode_agent.step_utils import (
@@ -99,6 +108,9 @@ class _Resp:
     async def json(self):
         return self._payload
 
+    async def read(self):
+        return orjson.dumps(self._payload)
+
 
 class _FakeRequest:
     cookies: dict = {}
@@ -116,8 +128,8 @@ def _run_request(problem_id="1", n_steps=2, **extra):
         }
         for i in range(n_steps)
     ]
+    extra.setdefault("responses_create_params", {"input": []})
     return ScicodeAgentRunRequest(
-        responses_create_params={"input": []},
         problem_id=problem_id,
         sub_steps=sub_steps,
         required_dependencies="import numpy as np",
@@ -311,10 +323,7 @@ class TestApp:
         assert "self.operator_dict = operator_dict" not in prompt
         assert set(captured["verify"]["solutions"]) == {"62.2"}
         assert [step["status"] for step in captured["verify"]["step_usage"]] == ["prefilled", "generated"]
-        metrics = _aggregate([{**captured["verify"], "reward": 1.0}])
-        assert metrics.agent_metrics["num_subproblems"] == 1
-        assert metrics.key_metrics["generation_coverage"] == 1.0
-        assert metrics.key_metrics["mean/output_tokens_per_subproblem"] == 100
+        assert captured["verify"]["step_usage"][1]["usage"] == _usage(100)
 
     @pytest.mark.asyncio
     async def test_run_context_window_sentinels_remaining_steps(self):
@@ -344,100 +353,6 @@ class TestApp:
         agent.server_client.post = AsyncMock(side_effect=_post)
         with patch.object(app, "raise_for_status", AsyncMock()), pytest.raises(RuntimeError, match="boom"):
             await agent.run(_FakeRequest(), _run_request(problem_id="1", n_steps=1))
-
-    def test_compute_metrics_subtask_accuracy_is_substep_weighted(self):
-        # Two problems: 1/2 and 3/4 passed -> 4/6, NOT the mean of ratios (0.5, 0.75).
-        tasks = [
-            [{"num_steps_passed": 1, "num_steps_total": 2}],
-            [{"num_steps_passed": 3, "num_steps_total": 4}],
-        ]
-        assert _agent().compute_metrics(tasks) == {"subtask_accuracy": 4 / 6}
-
-    def test_compute_metrics_no_steps(self):
-        assert _agent().compute_metrics([]) == {"subtask_accuracy": 0.0}
-
-    def test_get_key_metrics_includes_subtask_accuracy(self):
-        agent_metrics = {"mean/reward": 0.1875, "max/reward": 1.0, "subtask_accuracy": 0.414}
-        key = _agent().get_key_metrics(agent_metrics)
-        assert key["subtask_accuracy"] == 0.414
-        assert key["mean/reward"] == 0.1875
-        assert "max/reward" not in key  # only mean/* + subtask_accuracy are headline
-
-
-# ---------------------------------------------------------------------------
-# Across-run variability (_across_run_stats via compute_metrics)
-# ---------------------------------------------------------------------------
-
-
-def _repeat(idx, passed, total):
-    return {
-        "_ng_rollout_index": idx,
-        "num_steps_passed": passed,
-        "num_steps_total": total,
-        "problem_accuracy": passed == total,
-    }
-
-
-class TestAcrossRunStats:
-    def test_three_runs_hand_computed(self):
-        # Two problems x three repeats. Per-run problem accuracy is the mean of
-        # problem_accuracy over problems; per-run subtask accuracy is the
-        # sub-step-weighted pool - the same definitions as the headline metrics.
-        tasks = [
-            [_repeat(0, 2, 2), _repeat(1, 1, 2), _repeat(2, 0, 2)],
-            [_repeat(0, 3, 4), _repeat(1, 4, 4), _repeat(2, 3, 4)],
-        ]
-        m = _agent().compute_metrics(tasks)
-        # Pooled headline is unchanged: (2+1+0+3+4+3) / (3*2 + 3*4) = 13/18.
-        assert m["subtask_accuracy"] == pytest.approx(13 / 18)
-        problem_runs = [1 / 2, 1 / 2, 0.0]  # run means of problem_accuracy
-        subtask_runs = [5 / 6, 5 / 6, 3 / 6]  # per-run pooled sub-step fractions
-        assert m["mean/problem_accuracy/std_dev_across_runs"] == pytest.approx(statistics.stdev(problem_runs))
-        assert m["subtask_accuracy/std_dev_across_runs"] == pytest.approx(statistics.stdev(subtask_runs))
-        assert not any(k.endswith("std_err_across_runs") for k in m)
-
-    def test_single_repeat_emits_only_pooled_metric(self):
-        tasks = [[_repeat(0, 1, 2)], [_repeat(0, 3, 4)]]
-        assert _agent().compute_metrics(tasks) == {"subtask_accuracy": 4 / 6}
-
-    def test_rollout_index_alignment_not_arrival_order(self):
-        ordered = [
-            [_repeat(0, 2, 2), _repeat(1, 0, 2)],
-            [_repeat(0, 4, 4), _repeat(1, 1, 4)],
-        ]
-        shuffled = [list(reversed(task)) for task in ordered]
-        assert _agent().compute_metrics(shuffled) == _agent().compute_metrics(ordered)
-
-    def test_uneven_repeat_counts_use_min_k(self):
-        tasks = [
-            [_repeat(0, 2, 2), _repeat(1, 0, 2), _repeat(2, 1, 2)],
-            [_repeat(0, 4, 4), _repeat(1, 0, 4)],
-        ]
-        m = _agent().compute_metrics(tasks)
-        # k = 2: subtask runs (2+4)/6 = 1.0 and (0+0)/6 = 0.0.
-        assert m["subtask_accuracy/std_dev_across_runs"] == pytest.approx(statistics.stdev([1.0, 0.0]))
-
-    def test_identical_runs_zero_std(self):
-        tasks = [
-            [_repeat(0, 1, 2), _repeat(1, 1, 2)],
-            [_repeat(0, 4, 4), _repeat(1, 4, 4)],
-        ]
-        m = _agent().compute_metrics(tasks)
-        assert m["mean/problem_accuracy/std_dev_across_runs"] == 0.0
-        assert m["subtask_accuracy/std_dev_across_runs"] == 0.0
-
-    def test_get_key_metrics_includes_across_run_stats(self):
-        agent_metrics = {
-            "mean/problem_accuracy": 0.19,
-            "mean/problem_accuracy/std_dev_across_runs": 0.02,
-            "subtask_accuracy": 0.41,
-            "subtask_accuracy/std_dev_across_runs": 0.015,
-            "std/reward": 0.4,
-        }
-        key = _agent().get_key_metrics(agent_metrics)
-        assert "mean/problem_accuracy/std_dev_across_runs" in key
-        assert "subtask_accuracy/std_dev_across_runs" in key
-        assert "std/reward" not in key
 
 
 def _usage(output_tokens, input_tokens=10, cached_tokens=2, reasoning_tokens=3):
@@ -472,12 +387,6 @@ async def _collect_usage(usages, problem_id="1", n_steps=None, response_override
         )
 
 
-def _aggregate(rows):
-    agent = _agent()
-    rows = [{"_ng_task_index": i, "_ng_rollout_index": 0, **row} for i, row in enumerate(rows)]
-    return compute_aggregate_metrics(rows, agent.compute_metrics, agent.get_key_metrics)
-
-
 class TestTokenAccounting:
     @pytest.mark.asyncio
     async def test_usage_sent_to_verifier_sums_all_steps_and_details(self):
@@ -489,29 +398,6 @@ class TestTokenAccounting:
             {"step_number": "1.2", "status": "generated", "usage": _usage(300, input_tokens=20)},
         ]
         assert row["response"]["output"][0]["content"][0]["text"] == "```python\nx = 1\n```"
-
-    @pytest.mark.asyncio
-    async def test_unequal_step_counts_and_repeats_are_pooled(self):
-        # Two attempts each: one-step problem (100, 200), three-step problem
-        # (300+400+500, 600+700+800). Total 3600 / 4 problems / 8 steps.
-        rows = []
-        for task_idx, attempts in enumerate(([[100], [200]], [[300, 400, 500], [600, 700, 800]])):
-            for repeat_idx, tokens in enumerate(attempts):
-                row = await _collect_usage([_usage(t) for t in tokens])
-                rows.append({**row, "_ng_task_index": task_idx, "_ng_rollout_index": repeat_idx})
-        result = _aggregate(rows)
-        for name, per_problem, per_subproblem in (("input", 20, 10), ("output", 900, 450), ("total", 920, 460)):
-            assert result.key_metrics[f"mean/{name}_tokens_per_problem"] == per_problem
-            assert result.key_metrics[f"mean/{name}_tokens_per_subproblem"] == per_subproblem
-            assert result.key_metrics[f"mean/{name}_tokens"] == per_problem
-        assert result.agent_metrics["num_generated_steps"] == 8
-        assert result.agent_metrics["num_subproblems"] == 8
-        assert result.agent_metrics["num_steps_with_usage"] == 8
-        assert result.key_metrics["generation_coverage"] == 1.0
-        assert result.key_metrics["token_usage_complete"] is True
-        assert result.agent_metrics["token_usage_version"] == 1
-        assert all(isinstance(value, (int, float)) for value in result.agent_metrics.values())
-        assert [g["mean/output_tokens"] for g in result.group_level_metrics] == [150, 1650]
 
     @pytest.mark.asyncio
     async def test_prefilled_and_context_skipped_steps_are_not_generated(self):
@@ -527,13 +413,6 @@ class TestTokenAccounting:
         assert row["response"]["usage"]["output_tokens"] == 100
         for i in (0, 2, 3):
             assert row["step_usage"][i]["usage"] == _usage(0, input_tokens=0, cached_tokens=0, reasoning_tokens=0)
-        result = _aggregate([row])
-        metrics = result.key_metrics
-        assert metrics["mean/output_tokens_per_problem"] == 100
-        assert metrics["mean/output_tokens_per_subproblem"] == pytest.approx(100 / 3)
-        assert metrics["generation_coverage"] == 1 / 3
-        assert metrics["token_usage_complete"] is True
-        assert result.agent_metrics["num_subproblems"] == 3
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("context_rejected", [False, True])
@@ -561,58 +440,38 @@ class TestTokenAccounting:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("missing_index", [0, 1])
-    async def test_missing_usage_stays_unknown_in_rollout_and_collection(self, missing_index):
+    async def test_missing_usage_stays_unknown_in_rollout(self, missing_index):
         usages = [_usage(100), _usage(300)]
         usages[missing_index] = None
         unknown = await _collect_usage(usages)
-        known = await _collect_usage([_usage(200)])
         assert unknown["response"]["usage"] is None
         assert unknown["step_usage"][missing_index]["usage"] is None
-        result = _aggregate([unknown, {**known, "_ng_task_index": 1}])
-        for name in ("input", "output", "total"):
-            for suffix in ("", "_per_problem", "_per_subproblem"):
-                assert result.key_metrics[f"mean/{name}_tokens{suffix}"] is None
-        assert result.agent_metrics["num_generated_steps"] == 3
-        assert result.agent_metrics["num_steps_with_usage"] == 2
-        assert result.key_metrics["token_usage_complete"] is False
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("missing_usage", [False, True])
-    async def test_aggregate_endpoint_suppresses_all_partial_token_statistics(self, missing_usage):
-        rows = []
-        for task_idx in range(2):
-            for repeat_idx in range(2):
-                usage = None if missing_usage and task_idx == repeat_idx == 0 else _usage(100)
-                row = await _collect_usage([usage])
-                rows.append({**row, "_ng_task_index": task_idx, "_ng_rollout_index": repeat_idx})
-        body = AggregateMetricsRequest(verify_responses=rows)
-        original = body.model_dump()
-        result = await _agent().aggregate_metrics(body)
-        assert body.model_dump() == original
-        assert result.key_metrics["token_usage_complete"] is not missing_usage
-        assert result.key_metrics["generation_coverage"] == 1.0
-        assert all("subtask_accuracy" in repeat for repeat in result.repeat_level_metrics)
-        assert "mean_across_repeats/subtask_accuracy" in result.agent_metrics
-        for section in (result.agent_metrics, result.key_metrics):
-            assert all(value is not None and not isinstance(value, str) for value in section.values())
-        if missing_usage:
-            assert "mean/output_tokens_per_problem" not in result.key_metrics
+    async def test_aggregate_metrics_come_from_the_resources_server(self):
+        # The resources server owns the SciCode metrics, so the relay path reports what an environment server does.
+        agent = _agent()
+        metrics = {"agent_metrics": {"subtask_accuracy": 0.5}, "key_metrics": {"subtask_accuracy": 0.5}}
+        agent.server_client.post = AsyncMock(return_value=_Resp(metrics))
+        body = AggregateMetricsRequest(verify_responses=[{"reward": 0.0, "num_steps_passed": 1, "num_steps_total": 2}])
+        with patch.object(app, "raise_for_status", AsyncMock()):
+            result = await agent.aggregate_metrics(body)
+        assert result.key_metrics == {"subtask_accuracy": 0.5}
+        call = agent.server_client.post.await_args
+        assert (call.kwargs["server_name"], call.kwargs["url_path"]) == ("scicode", "/aggregate_metrics")
+        assert call.kwargs["json"] == body
 
-            def check_no_numeric_tokens(value):
-                if isinstance(value, dict):
-                    for key, item in value.items():
-                        if "tokens" in key:
-                            assert not isinstance(item, (int, float)), (key, item)
-                        check_no_numeric_tokens(item)
-                elif isinstance(value, list):
-                    for item in value:
-                        check_no_numeric_tokens(item)
-
-            check_no_numeric_tokens(result.model_dump())
-        else:
-            assert result.key_metrics["mean/output_tokens_per_problem"] == 100
-            assert result.agent_metrics["max/output_tokens"] == 100
-            assert all(group["mean/output_tokens"] == 100 for group in result.group_level_metrics)
+    @pytest.mark.asyncio
+    async def test_skip_verification_reports_no_metrics_and_does_not_call_the_resources_server(self):
+        # No /verify ran, so the rows carry no graded fields for the resources server to score.
+        agent = _agent()
+        agent.config.skip_verification = True
+        agent.server_client.post = AsyncMock()
+        body = AggregateMetricsRequest(verify_responses=[{"reward": 0.0}])
+        with pytest.warns(RuntimeWarning, match="skip_verification"):
+            result = await agent.aggregate_metrics(body)
+        assert (result.agent_metrics, result.key_metrics) == ({}, {})
+        agent.server_client.post.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_unknown_reasoning_details_do_not_poison_known_output_count(self):
@@ -631,11 +490,6 @@ class TestTokenAccounting:
             row = await _collect_usage([])
         assert row["response"]["usage"]["output_tokens"] == 0
         assert all(step["usage"]["total_tokens"] == 0 for step in row["step_usage"])
-        metrics = _aggregate([row]).key_metrics
-        for name in ("input", "output", "total"):
-            assert metrics[f"mean/{name}_tokens_per_problem"] == 0
-            assert metrics[f"mean/{name}_tokens_per_subproblem"] == (0 if kind == "context" else None)
-        assert metrics["generation_coverage"] == (0 if kind == "context" else None)
 
     @pytest.mark.asyncio
     async def test_truncated_generation_counts_all_usage(self):
@@ -645,23 +499,7 @@ class TestTokenAccounting:
         )
         assert row["response"]["incomplete_details"] == {"reason": "max_output_tokens"}
         assert row["step_usage"][0]["status"] == "generated"
-        metrics = _aggregate([row]).key_metrics
-        for scope in ("problem", "subproblem"):
-            assert metrics[f"mean/input_tokens_per_{scope}"] == 144
-            assert metrics[f"mean/output_tokens_per_{scope}"] == 262000
-            assert metrics[f"mean/total_tokens_per_{scope}"] == 262144
-
-    @pytest.mark.asyncio
-    async def test_correctness_does_not_filter_token_usage(self):
-        row = await _collect_usage([_usage(1000)] * 3)
-        one_correct = {**row, "step_results": [True, False, False], "num_steps_passed": 1, "num_steps_total": 3}
-        two_correct = {**row, "step_results": [True, True, False], "num_steps_passed": 2, "num_steps_total": 3}
-        first = _aggregate([one_correct]).key_metrics
-        second = _aggregate([two_correct]).key_metrics
-        assert first["subtask_accuracy"] == 1 / 3
-        assert second["subtask_accuracy"] == 2 / 3
-        assert first["mean/output_tokens_per_problem"] == second["mean/output_tokens_per_problem"] == 3000
-        assert first["mean/output_tokens_per_subproblem"] == second["mean/output_tokens_per_subproblem"] == 1000
+        assert row["response"]["usage"] == _usage(262000, input_tokens=144)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("text", ["not Python code", "```python\nthis is ! invalid\n```", "```python\n", ""])
@@ -672,23 +510,6 @@ class TestTokenAccounting:
         assert set(row["solutions"]) == {"1.1", "1.2"}
         assert [step["status"] for step in row["step_usage"]] == ["generated", "generated"]
         assert row["response"]["usage"]["output_tokens"] == 300
-        metrics = _aggregate([row]).key_metrics
-        assert metrics["mean/output_tokens_per_problem"] == 300
-        assert metrics["mean/output_tokens_per_subproblem"] == 150
-
-    def test_legacy_rollouts_do_not_gain_whole_problem_metrics(self):
-        row = {"reward": 0.0, "response": {"usage": _usage(100)}}
-        metrics = _aggregate([row]).key_metrics
-        assert metrics["mean/output_tokens"] == 100
-        assert "mean/output_tokens_per_problem" not in metrics
-        assert "mean/output_tokens_per_subproblem" not in metrics
-
-    @pytest.mark.asyncio
-    async def test_mixed_accounting_versions_rejected(self):
-        row = await _collect_usage([_usage(100)])
-        old_row = {"reward": 0.0, "response": {"usage": _usage(200)}}
-        with pytest.raises(ValueError, match="different token accounting versions"):
-            _aggregate([row, old_row])
 
 
 @pytest.mark.asyncio
@@ -738,66 +559,6 @@ async def test_collector_builds_perf_from_generated_substeps(prefilled):
     _attach_ng_perf(result, observability_enabled=True)
     assert result["ng_perf"]["token_observability_coverage"] == (expected - 1) / expected
     assert result["ng_perf"]["completion_tokens"] == (expected - 1) * 20
-
-
-class TestHeadlineRepeatIntervals:
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("agent_name", ["scicode", "scicode_verified_with_background_agent"])
-    async def test_endpoint_exports_weighted_subtask_and_problem_intervals(self, agent_name):
-        rows = [
-            {
-                **_repeat(repeat, passed, total),
-                "_ng_task_index": task,
-                "agent_ref": {"name": agent_name},
-                "reward": float(passed == total),
-            }
-            for task, total, values in [(0, 2, [2, 1, 0]), (1, 4, [3, 4, 3])]
-            for repeat, passed in enumerate(values)
-        ]
-        result = await _agent().aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))
-        for metric, mean, sem in [("subtask_accuracy", 13 / 18, 1 / 9), ("mean/problem_accuracy", 1 / 3, 1 / 6)]:
-            assert result.key_metrics[f"mean_across_repeats/{metric}"] == pytest.approx(mean)
-            assert result.key_metrics[f"ci_low_95_across_repeats/{metric}"] == pytest.approx(
-                mean - 4.30265272975 * sem
-            )
-            assert result.key_metrics[f"ci_high_95_across_repeats/{metric}"] == pytest.approx(
-                mean + 4.30265272975 * sem
-            )
-        assert result.key_metrics["subtask_accuracy"] == pytest.approx(13 / 18)
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("agent_name", ["scicode", "scicode_verified_with_background_agent"])
-    async def test_single_repeat_has_no_headline_interval(self, agent_name):
-        rows = [{**_repeat(0, 1, 2), "_ng_task_index": 0, "agent_ref": {"name": agent_name}, "reward": 0.0}]
-        result = await _agent().aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))
-        assert not any(key.startswith("ci_low_95_across_repeats/") for key in result.key_metrics)
-
-    @pytest.mark.asyncio
-    async def test_verified_eight_repeat_intervals_match_independent_estimates(self):
-        passed_by_problem = [(2, [2, 1, 0, 2, 0, 1, 2, 1]), (4, [4, 4, 3, 2, 4, 0, 4, 3])]
-        rows = [
-            {
-                **_repeat(repeat, passed, total),
-                "_ng_task_index": task,
-                "agent_ref": {"name": "scicode_verified_with_background_agent"},
-                "reward": float(passed == total),
-            }
-            for task, (total, passed_values) in enumerate(passed_by_problem)
-            for repeat, passed in enumerate(passed_values)
-        ]
-        result = await _agent().aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))
-        subtask_means = [(left + right) / 6 for left, right in zip(*[values for _, values in passed_by_problem])]
-        problem_means = [
-            (float(left == 2) + float(right == 4)) / 2
-            for left, right in zip(*[values for _, values in passed_by_problem])
-        ]
-        # Student-t critical value for seven degrees of freedom, independent of Gym's helper.
-        for metric, values in (("subtask_accuracy", subtask_means), ("mean/problem_accuracy", problem_means)):
-            mean = statistics.mean(values)
-            half_width = 2.3646242515927844 * statistics.stdev(values) / 8**0.5
-            assert result.key_metrics[f"mean_across_repeats/{metric}"] == pytest.approx(mean)
-            assert result.key_metrics[f"ci_low_95_across_repeats/{metric}"] == pytest.approx(mean - half_width)
-            assert result.key_metrics[f"ci_high_95_across_repeats/{metric}"] == pytest.approx(mean + half_width)
 
 
 class TestStepStopMetadata:
@@ -888,3 +649,258 @@ async def test_run_masks_the_row_when_verify_fails_and_keeps_the_answer():
     assert (result["reward"], result["mask_sample"], result["failure_kind"]) == (0.0, True, "judge_failed")
     assert set(result["solutions"]) == {"1.1"}
     assert "verifier_error" in {event.failure_kind for event in log.report.events.values()}
+
+
+# ---------------------------------------------------------------------------
+# Agent sessions: the same step loop inside one /v1/responses activation
+# ---------------------------------------------------------------------------
+
+_PROMPT_KEYS = ("step_number", "step_description_prompt", "step_background", "function_header", "return_line")
+
+
+def _agent_context(body: ScicodeAgentRunRequest) -> dict:
+    """The row's agent_context values: the prompt material of the problem, without its tests."""
+    return {
+        "problem_id": body.problem_id,
+        "sub_steps": [{key: step[key] for key in _PROMPT_KEYS} for step in body.sub_steps],
+        "required_dependencies": body.required_dependencies,
+        "prefilled_steps_code": body.prefilled_steps_code,
+    }
+
+
+def _seed(context: dict | None) -> AgentSeedSessionRequest:
+    return AgentSeedSessionRequest(
+        agent_session_id="scicode-session",
+        episode_id=EpisodeId(rollout_id="scicode-rollout", attempt=0),
+        task_id=TaskId(taskset="scicode", task_id="1"),
+        agent_context={"values": context} if context is not None else None,
+    )
+
+
+def _wire(value):
+    """A request body as it crosses HTTP."""
+    return orjson.loads(orjson.dumps(value, default=lambda item: item.model_dump(mode="json")))
+
+
+class _ScriptedPolicy:
+    """Answers the n-th model call with `x = n`; a prompt that holds `overflow` gets a context-window error."""
+
+    def __init__(self):
+        self.requests = []
+
+    def reply(self, body: dict) -> _Resp:
+        self.requests.append(body)
+        index = len(self.requests) - 1
+        if "overflow" in body["input"][0]["content"]:
+            raise RuntimeError("exceeds maximum input length")
+        return _Resp({**_model_json(f"x = {index}"), "id": f"r{index}", "usage": _usage(10 * (index + 1))})
+
+
+class TestAgentSessions:
+    @pytest.mark.parametrize("problem", ["missing", "with_tests", "sandbox", "required_tool"])
+    def test_seed_refuses_a_session_it_cannot_run(self, problem):
+        context = _agent_context(_run_request(n_steps=1))
+        seed = _seed(None if problem == "missing" else context)
+        if problem == "with_tests":
+            # Test cases are the verifier's; they never reach the agent.
+            seed = _seed(context | {"sub_steps": [context["sub_steps"][0] | {"test_cases": ["assert True"]}]})
+        elif problem == "required_tool":
+            seed = seed.model_copy(
+                update={
+                    "tool_accesses": [
+                        MCPToolAccess(
+                            name="search",
+                            required=True,
+                            connection=MCPStreamableHTTPConnection(url="http://resources:8000/mcp"),
+                        )
+                    ]
+                }
+            )
+        elif problem == "sandbox":
+            seed = AgentSeedSessionRequest.model_validate(
+                seed.model_dump(mode="json")
+                | {
+                    "sandbox_access": {
+                        "connection": {"kind": "direct", "provider_config_ref": "sandbox", "descriptor": {}},
+                        "workdir": "/workspace",
+                    }
+                }
+            )
+        agent = _agent()
+        detail = check_agent_seed_rejected(agent.setup_webserver(), seed)
+        assert detail
+        assert not agent._session_records
+
+    @pytest.mark.parametrize(
+        ("problem_id", "n_steps", "overflow_step"),
+        [("1", 3, None), ("62", 3, None), ("1", 4, 2)],
+        ids=["three_steps", "prefilled_first_step", "context_window_exceeded"],
+    )
+    def test_session_sends_the_run_requests_and_verify_payload(self, problem_id, n_steps, overflow_step):
+        # The task's sampling settings ride on every sub-step's model call on both paths.
+        settings = {"input": [], "temperature": 0.6, "top_p": 0.95, "max_output_tokens": 4096, "model": "policy-x"}
+        body = _run_request(problem_id=problem_id, n_steps=n_steps, responses_create_params=settings)
+        if overflow_step is not None:
+            body.sub_steps[overflow_step]["step_description_prompt"] = "overflow"
+        run_policy, session_policy = _ScriptedPolicy(), _ScriptedPolicy()
+
+        # /run calls this agent's own /v1/responses for each sub-step, then /verify.
+        run_agent = _agent()
+        captured = {}
+
+        async def run_post(server_name, url_path, json, cookies=None):
+            if server_name == "policy_model":
+                return run_policy.reply(_wire(json))
+            if server_name == "scicode_agent":
+                params = NeMoGymResponseCreateParamsNonStreaming.model_validate(_wire(json))
+                reply = await run_agent.responses(_FakeRequest(), Response(), params)
+                return _Resp(reply.model_dump(mode="json"))
+            captured["verify"] = _wire(json)
+            return _Resp({**captured["verify"], "reward": 0.0})
+
+        run_agent.server_client.post = AsyncMock(side_effect=run_post)
+
+        # The session: seeded with the row's agent_context, then one activation under the rollout path.
+        session_agent = _agent()
+
+        async def session_post(server_name, url_path, json, cookies=None):
+            assert server_name == "policy_model", url_path
+            return session_policy.reply(_wire(json))
+
+        session_agent.server_client.post = AsyncMock(side_effect=session_post)
+        seed = _seed(_agent_context(body))
+        path = f"/ng-rollout/{seed.episode_id.capture_key}/v1/responses"
+        params = body.responses_create_params.model_dump(mode="json", exclude_unset=True)
+        with patch.object(app, "raise_for_status", AsyncMock()):
+            import asyncio
+
+            asyncio.run(run_agent.run(_FakeRequest(), body))
+            with TestClient(session_agent.setup_webserver()) as client:
+                assert client.post("/v1/agent_sessions", json=seed.model_dump(mode="json")).status_code == 200
+                assert client.post("/ng-rollout/wrong/v1/responses", json=params).status_code == 409
+                activation = client.post(path, json=params)
+                assert activation.status_code == 200, activation.text
+                # The same activation again joins the first: the loop does not run twice.
+                assert client.post(path, json=params).json() == activation.json()
+                capture_path = path.replace("/v1/responses", "/training-token-capture/v1/responses")
+                assert client.post(capture_path, json=params).status_code == 409
+                close = {"agent_session_id": seed.agent_session_id, "episode_id": seed.episode_id.model_dump()}
+                closed = client.post("/v1/agent_sessions/close", json=close)
+
+        assert session_policy.requests == run_policy.requests
+        assert session_policy.requests
+        for request in session_policy.requests:
+            assert {key: request[key] for key in settings if key != "input"} == {
+                "temperature": 0.6,
+                "top_p": 0.95,
+                "max_output_tokens": 4096,
+                "model": "policy-x",
+            }
+        response = activation.json()
+        accounting = response.pop(SCICODE_RESPONSE_KEY)
+        verify = captured["verify"]
+        assert accounting == {
+            "solutions": verify["solutions"],
+            "step_usage": verify["step_usage"],
+            "token_usage_version": verify["token_usage_version"],
+        }
+        same = NeMoGymResponse.model_validate
+        assert same(response).model_dump(mode="json") == same(verify["response"]).model_dump(mode="json")
+        # The activation's model calls are the session's observations, as /run's trajectory records them.
+        observed = closed.json()["agent_observations"]
+        generated = [step["response_id"] for step in verify["step_usage"] if step["status"] == "generated"]
+        assert [call["response_id"] for call in observed["records"][0]["model_calls"]] == generated
+        assert observed["records"][0]["status"] == ("incomplete" if overflow_step is not None else "completed")
+
+    def test_failed_activation_keeps_the_model_calls_it_made(self):
+        # The third sub-step's model call fails; the two before it were made and captured.
+        body = _run_request(n_steps=4)
+        policy = _ScriptedPolicy()
+
+        async def post(server_name, url_path, json, cookies=None):
+            if len(policy.requests) == 2:
+                raise RuntimeError("model server unavailable")
+            return policy.reply(_wire(json))
+
+        agent = _agent()
+        agent.server_client.post = AsyncMock(side_effect=post)
+        seed = _seed(_agent_context(body))
+        path = f"/ng-rollout/{seed.episode_id.capture_key}/v1/responses"
+        with (
+            patch.object(app, "raise_for_status", AsyncMock()),
+            TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client,
+        ):
+            assert client.post("/v1/agent_sessions", json=seed.model_dump(mode="json")).status_code == 200
+            assert client.post(path, json={"input": []}).status_code == 500
+            close = {"agent_session_id": seed.agent_session_id, "episode_id": seed.episode_id.model_dump()}
+            closed = client.post("/v1/agent_sessions/close", json=close)
+
+        (invocation,) = closed.json()["agent_observations"]["records"]
+        assert (invocation["status"], invocation["error_type"]) == ("failed", "RuntimeError")
+        assert [call["response_id"] for call in invocation["model_calls"]] == ["r0", "r1"]
+
+    def test_replay_with_other_settings_is_refused_without_running_the_loop_again(self):
+        policy = _ScriptedPolicy()
+
+        async def post(server_name, url_path, json, cookies=None):
+            return policy.reply(_wire(json))
+
+        agent = _agent()
+        agent.server_client.post = AsyncMock(side_effect=post)
+        seed = _seed(_agent_context(_run_request(n_steps=2)))
+        path = f"/ng-rollout/{seed.episode_id.capture_key}/v1/responses"
+        with patch.object(app, "raise_for_status", AsyncMock()), TestClient(agent.setup_webserver()) as client:
+            assert client.post("/v1/agent_sessions", json=seed.model_dump(mode="json")).status_code == 200
+            assert client.post(path, json={"input": []}).status_code == 200
+            assert client.post(path, json={"input": [], "temperature": 0.5}).status_code == 409
+        assert len(policy.requests) == 2
+
+    def test_a_problem_with_no_generated_step_closes_with_no_invocation(self):
+        # Problem 62's first step is prefilled, so a one-step problem makes no model call, as on /run.
+        agent = _agent()
+        agent.server_client.post = AsyncMock(side_effect=AssertionError("no model call expected"))
+        seed = _seed(_agent_context(_run_request(problem_id="62", n_steps=1)))
+        path = f"/ng-rollout/{seed.episode_id.capture_key}/v1/responses"
+        with TestClient(agent.setup_webserver()) as client:
+            assert client.post("/v1/agent_sessions", json=seed.model_dump(mode="json")).status_code == 200
+            activation = client.post(path, json={"input": []})
+            close = {"agent_session_id": seed.agent_session_id, "episode_id": seed.episode_id.model_dump()}
+            closed = client.post("/v1/agent_sessions/close", json=close)
+        assert activation.status_code == 200, activation.text
+        accounting = activation.json()[SCICODE_RESPONSE_KEY]
+        assert accounting["solutions"] == {}
+        assert [step["status"] for step in accounting["step_usage"]] == ["prefilled"]
+        assert closed.json()["agent_observations"]["records"] == []
+
+
+def test_committed_example_rows_carry_the_agents_context():
+    # benchmarks/scicode/prepare.py writes these rows; the agent's extra="forbid" model must accept what it writes.
+    rows_path = Path(app.__file__).resolve().parents[2] / "resources_servers/scicode/data/example.jsonl"
+    rows = [json.loads(line) for line in rows_path.read_text().splitlines() if line.strip()]
+    assert rows
+    for row in rows:
+        context = ScicodeAgentContext.model_validate(row["agent_context"]["values"])
+        assert context.problem_id == row["problem_id"]
+        assert [step.step_number for step in context.sub_steps] == [step["step_number"] for step in row["sub_steps"]]
+
+
+@pytest.mark.asyncio
+async def test_run_does_not_send_the_rows_agent_context_to_verify():
+    agent = _agent()
+    captured = {}
+
+    def _post(server_name, url_path, json, cookies):
+        if url_path == "/v1/responses":
+            return _Resp(_model_json("x = 1"))
+        captured["verify"] = json
+        return _Resp({"reward": 0.0})
+
+    agent.server_client.post = AsyncMock(side_effect=_post)
+    body = _run_request(n_steps=1)
+    body = ScicodeAgentRunRequest.model_validate(
+        body.model_dump() | {"agent_context": {"values": _agent_context(body)}}
+    )
+    with patch.object(app, "raise_for_status", AsyncMock()):
+        await agent.run(_FakeRequest(), body)
+    assert "agent_context" not in captured["verify"]
+    assert captured["verify"]["uuid"] == "1"

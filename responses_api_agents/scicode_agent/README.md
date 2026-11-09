@@ -5,9 +5,20 @@ generating Python code one sub-step at a time and accumulating it (each sub-step
 the model's own code from previous sub-steps), then submits the accumulated per-step solutions to
 the SciCode resources server's `/verify` for execution.
 
-It also reports the headline `subtask_accuracy` metric (total sub-steps passed / total, over all
-rollouts) via `compute_metrics` / `get_key_metrics` — these live on the agent because
-`/aggregate_metrics` runs on the agent server.
+The loop runs in one of two places, with the same model requests:
+
+- `/run`, behind a `legacy_agent` relay, reads the problem from the row and sends `solutions`,
+  `step_usage` and `token_usage_version` to `/verify`.
+- An agent session, seeded by `single_agent_turn_legacy`, reads the problem from the row's
+  `agent_context` (`problem_id`, `sub_steps` prompt fields, `required_dependencies`, and optional
+  `prefilled_steps_code`) and runs the loop in one `/v1/responses` activation. The response carries the
+  same three fields under `scicode`. A seed without that context, with any other key, with sub-step fields
+  beyond the prompt material, or with sandbox access or required tools is refused with 422. The session's
+  model calls are returned as agent observations at close; a crash restarts the episode from its input.
+
+The headline `subtask_accuracy` metric (total sub-steps passed / total, over all rollouts) and the
+token metrics below are computed by the SciCode resources server. This agent's `/aggregate_metrics`
+forwards there, so a relay and an Environment Server report the same metrics.
 
 ## Token statistics
 
@@ -35,8 +46,10 @@ steps / non-prefilled steps. With no eligible sub-steps, the subproblem mean is 
   backend rejects a request for exceeding context before generation. This keeps
   earlier sub-step token totals available; it does not replace unknown usage on
   actual generated responses. Older saved records are not repaired automatically.
-- If any generated response lacks usage, suppress all aggregate token statistics,
-  omit the token means, and report `token_usage_complete: false`.
+- If any generated response lacks usage, or a failed rollout that
+  `count_failure_classes_as_zero` adds carries no usage record, suppress all
+  aggregate token statistics, omit the token means, and report
+  `token_usage_complete: false`.
   Accuracy, coverage, and raw rollout records remain available. Missing optional
   reasoning/cache breakdowns do not invalidate known input/output/total usage.
 

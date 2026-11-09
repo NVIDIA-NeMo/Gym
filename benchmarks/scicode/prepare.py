@@ -27,7 +27,10 @@ must be staged manually at the path the resources server is configured to read.
 
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from nemo_gym.config import HF_TOKEN_KEY_NAME, get_global_config_dict
+from nemo_gym.server_runtime import AgentContext
 
 
 BENCHMARK_DIR = Path(__file__).parent
@@ -36,6 +39,29 @@ OUTPUT_FPATH = DATA_DIR / "scicode_benchmark.jsonl"
 
 # Keep this aligned with the current AA SciCode problem set.
 SPLITS = ["test"]
+# The prompt material of a sub-step. Its test cases and reference code stay with the resources server.
+AGENT_CONTEXT_STEP_KEYS = (
+    "step_number",
+    "step_description_prompt",
+    "step_background",
+    "function_header",
+    "return_line",
+)
+
+
+def scicode_agent_context(row: dict) -> dict:
+    """The row's ``agent_context``: what scicode_agent needs to build every sub-step's prompt in an agent session.
+
+    An agent's ``/run`` reads the same fields from the row itself.
+    """
+    values = {
+        "problem_id": row["problem_id"],
+        "sub_steps": [{key: step[key] for key in AGENT_CONTEXT_STEP_KEYS} for step in row["sub_steps"]],
+        "required_dependencies": row["required_dependencies"],
+    }
+    if row.get("prefilled_steps_code"):
+        values["prefilled_steps_code"] = row["prefilled_steps_code"]
+    return {"values": values}
 
 
 def prepare() -> Path:
@@ -51,6 +77,7 @@ def prepare() -> Path:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     rows = []
+    without_context: list[str] = []
     for split in SPLITS:
         for entry in ds[split]:
             row = {
@@ -64,12 +91,26 @@ def prepare() -> Path:
                 # problem_id is unique across both splits, so it doubles as the rollout uuid.
                 "uuid": entry["problem_id"],
             }
+            agent_context = scicode_agent_context(row)
+            try:
+                AgentContext.model_validate(agent_context)
+            except ValidationError as error:
+                # Its /run still works; an agent session refuses the row with 422 for lack of context.
+                print(f"Problem {row['problem_id']} gets no agent_context: {error}")
+                without_context.append(row["problem_id"])
+            else:
+                row["agent_context"] = agent_context
             rows.append(json.dumps(row) + "\n")
 
     with open(OUTPUT_FPATH, "w") as f:
         f.writelines(rows)
 
     print(f"Wrote {len(rows)} problems to {OUTPUT_FPATH}")
+    if without_context:
+        print(
+            f"{len(without_context)} problems have no agent_context and run only through /run: "
+            + ", ".join(without_context)
+        )
     return OUTPUT_FPATH
 
 

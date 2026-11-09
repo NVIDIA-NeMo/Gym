@@ -7,7 +7,7 @@ sub-steps. Generated code is executed against the problem's test cases.
 
 - **Tasks**: 65 problems / 288 evaluated sub-steps (`test` only, matching the current AA Intelligence Index setup)
 - **Reward**: binary per problem — `1.0` only if every sub-step passes its tests
-- **Metrics** (reported by the agent): `subtask_accuracy` — the headline SciCode number,
+- **Metrics** (computed by the resources server): `subtask_accuracy` — the headline SciCode number,
   total sub-steps passed divided by total sub-steps across all rollouts — and `problem_accuracy`
   (= `mean/reward`, the whole problem passing)
 
@@ -50,8 +50,10 @@ gym eval prepare --benchmark scicode
 ```
 
 Downloads `SciCode1/SciCode` and writes `benchmarks/scicode/data/scicode_benchmark.jsonl`
-(one row per problem from the HuggingFace `test` split, carrying the full `sub_steps` list). This
-does not fetch `test_data.h5` — see above.
+(one row per problem from the HuggingFace `test` split, carrying the full `sub_steps` list). Each row
+also carries `agent_context`, the prompt material an agent session needs
+(`resources_servers/scicode/configs/scicode_single_agent_turn.yaml`). This does not fetch `test_data.h5` — see
+above.
 
 The agent uses the current AA SciCode prompt in `benchmarks/scicode/prompts/background.yaml`.
 The scientist-authored background in each sub-step is included in the prompt; the model is asked
@@ -119,7 +121,7 @@ AA-aligned problem set and prompt.
 The rollout rows carry one pass/fail bit per sub-step (`step_results`). To also keep each sub-step's
 exit code, timeout flag, duration, exception class and bounded stdout/stderr tails, turn on the
 resources server's opt-in record (see `resources_servers/scicode/README.md`); add `record_step_code`
-to keep the accumulated code each sub-step's tests ran against as well:
+to copy into each record the accumulated code its tests ran against (the row's `solutions` already keep it):
 
 ```bash
 gym eval run ... --benchmark scicode \

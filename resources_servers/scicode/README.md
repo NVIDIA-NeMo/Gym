@@ -24,6 +24,27 @@ SciCode uses a **custom multi-step agent** — `simple_agent` will not work:
 The full wiring lives in `benchmarks/scicode/config.yaml`, which chains all three plus the dataset.
 The agent + its `example` dataset are defined in this server's own `configs/scicode.yaml`.
 
+Two configs run the same pairing:
+
+- `configs/scicode.yaml` (and the benchmark configs) put the agent's `/run` behind a `legacy_agent` relay. The
+  agent reads the problem from the row and sends `solutions`, `step_usage` and `token_usage_version` to `/verify`.
+- `configs/scicode_single_agent_turn.yaml` runs the agent as an agent session under `single_agent_turn_legacy`.
+  The agent reads the problem's prompt material from the row's `agent_context` and runs the whole sub-step loop in
+  one `/v1/responses` activation. Its response carries the same three fields under `scicode`, and `/verify` reads them
+  from there. Rows need `agent_context`, which `benchmarks/scicode/prepare.py` writes and the example rows carry.
+
+Both send the model the same requests, so the reward and the metrics are the same whenever verification runs and
+succeeds. The paths differ in two cases, both set by the Environment Server rather than by SciCode:
+
+- When `/verify` fails, `/run` masks the row as `judge_failed` and keeps its `solutions` for a regrade; an agent session
+  ends as the Environment Server's verification failure.
+- `/run` always verifies; `single_agent_turn_legacy` honors `skip_verification`.
+
+Every row keeps the `solutions` it was graded on, from either path, so `REVERIFY_MODE = stateless` holds: a re-verify
+grades the saved solutions again. `/verify` refuses, as a verification failure rather than a score, a request that
+carries no `solutions` (a row saved before rows kept them cannot be graded again) and an answer whose solution keys or
+`step_usage` step numbers are not the row's sub-steps (an agent session whose `agent_context` disagrees with the row).
+
 ## Execution (no Docker sandbox)
 
 The agent sends a `solutions` dict — `{"<problem_id>.<step>": accumulated_code}` — to `/verify`. For
@@ -41,8 +62,10 @@ and `networkx`); `uv.lock` records the exact versions installed by `uv sync --lo
 - Sub-steps absent from `solutions` (prefilled reference steps) are excluded from the denominator.
 - Out-of-context sentinels (`_ran_out_of_context_`) are counted as failed sub-steps.
 - `verify()` returns `reward` + `step_results`, `num_steps_passed`, `num_steps_total`,
-  `problem_accuracy`. The headline `subtask_accuracy` (total passed / total over all rollouts) is
-  computed on the **agent** (`/aggregate_metrics` runs there), not this server.
+  `problem_accuracy`. This server's `compute_metrics` / `get_key_metrics` add the headline `subtask_accuracy`
+  (total passed / total over all rollouts), its across-run variability, and the whole-problem token metrics built
+  from `step_usage` (see the agent's README). An Environment Server forwards `/aggregate_metrics` here, and so does
+  the agent's own `/aggregate_metrics`, so both configs report the same metrics.
 
 **How each sub-step's grading process ended (always recorded).** `step_exits` holds one record per
 scored sub-step, aligned with `step_results`: `returncode` (`null` when no process exit code exists),
@@ -68,8 +91,8 @@ default and the rows grow by up to `2 * output_tail_chars` per sub-step when it 
 `record_step_code: true` as well, each record also carries `code`: the accumulated program the
 sub-step's tests ran against (the agent's `solutions[step_id]`: the problem's dependency header and any
 prefilled reference steps from the dataset, then the model's code for the previous sub-steps and this
-one; `null` for a sentinel step that never ran). That mixes dataset text with model-generated code and
-grows a row by the size of every scored program, so it is a second opt-in. The agent's raw per-step
+one; `null` for a sentinel step that never ran). The row's `solutions` already hold these programs; the opt-in
+copies each one into its record, beside the step's outputs, so it stays off by default. The agent's raw per-step
 generations are a separate concern: enable model-call observability to keep them.
 
 ```yaml
@@ -93,7 +116,10 @@ fails fast with a clear error rather than scoring everything as wrong.
 Two JSONL files coexist with different shapes:
 
 - **`benchmarks/scicode/data/scicode_benchmark.jsonl`** (65-row test split, gitignored; produced by
-  `prepare.py`). Flat-field: each row has `problem_id`, `sub_steps`, `required_dependencies`, `uuid`.
+  `prepare.py`). Flat-field: each row has `problem_id`, `sub_steps`, `required_dependencies`, `uuid`, and
+  `agent_context`: the same problem's prompt material (each sub-step's number, description, background, function
+  header and return line) for an agent session. Test cases and reference code stay out of it. A problem whose context
+  would exceed the 64 KiB `agent_context` limit gets none; `prepare.py` names it and counts it in its summary line.
 - **`resources_servers/scicode/data/example.jsonl`** (5-row fixture, committed).
 
 Unlike most benchmarks, SciCode's prompts are **not** materialized at rollout time — the agent builds
@@ -129,7 +155,8 @@ gym env test +entrypoint=resources_servers/scicode
 
 Covers test sanitization, the program builder, subprocess pass/fail/timeout and the execution
 details it reports (exit code, timeout, duration, bounded output tails, exception class), and the
-`verify()` paths (no solutions, missing/unconfigured test data, all-pass, all-fail, prefilled-excluded,
+`verify()` paths (empty solutions, a request without solutions or with other sub-steps, a saved row graded
+again, missing/unconfigured test data, all-pass, all-fail, prefilled-excluded,
 out-of-context, `step_outputs` on and off, `code` on and off).
 
 ## Licensing
