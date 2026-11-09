@@ -169,6 +169,18 @@ and local execution combine the configured system prompt, request `instructions`
 system message in that order. Sampling and chat-template settings belong on the Gym Model Server.
 Sandbox sessions reject unsupported request controls before execution.
 
+Pi decides how to send each attached file:
+
+- Pi adds a `<file name="<sandbox path>">` tag to the end of the prompt text for each file, and sends the
+  images after all the text, so the order of text and images in the request is not kept.
+- Pi recognizes an image from its leading bytes, not from the declared media type. Pi inlines a file it
+  does not recognize as an image, such as an animated PNG, into the prompt as text.
+- Pi resizes an image larger than 2000 by 2000 pixels or 4.5 MB once base64-encoded, and replaces one it
+  cannot resize with a note saying the image was omitted.
+- The `detail` field of an `input_image` part has no effect.
+
+Saved trajectories record the user prompt's text but not its images.
+
 Set the agent configuration's `max_output_tokens` for a per-model-call output cap, including
 reasoning tokens. An adapter-owned Pi extension applies it as `max_tokens`, preserving any
 smaller upstream cap. Limits must be positive JavaScript-safe integers. Request-level

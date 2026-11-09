@@ -11,9 +11,11 @@ import shlex
 import shutil
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import threading
+import zlib
 from contextlib import asynccontextmanager, contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -234,51 +236,107 @@ def seed_with_tools(*accesses):
     return AgentSeedSessionRequest.model_validate({**seed().model_dump(mode="json"), "tool_accesses": list(accesses)})
 
 
-PNG = b"\x89PNG\r\n\x1a\n\x00\xff"
-PNG_URI = "data:image/png;base64," + base64.b64encode(PNG).decode()
+def png(gray: int) -> bytes:
+    """A valid one-pixel grayscale PNG, which Pi recognizes as an image by its signature and IHDR chunk."""
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+    header = struct.pack(">IIBBBBB", 1, 1, 8, 0, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(bytes([0, gray])))
+        + chunk(b"IEND", b"")
+    )
+
+
+def image_part(data: bytes) -> dict:
+    return {
+        "type": "input_image",
+        "image_url": "data:image/png;base64," + base64.b64encode(data).decode(),
+        "detail": "auto",
+    }
+
+
+def activate_over_http(sandbox, client, items) -> dict:
+    """Seed a session, activate it with `items`, close it, and return the staged activation."""
+    created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+    assert created.status_code == 200, created.text
+    result = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": items})
+    assert result.status_code == 200, result.text
+    closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+    assert closed.status_code == 200, closed.text
+    return staged(sandbox)
+
+
+def staged_attachments(sandbox, payload) -> list[bytes]:
+    return [sandbox.files[arg[1:]] for arg in payload["command"] if arg.startswith("@")]
 
 
 def test_session_attaches_prompt_images_and_declares_image_input(setup):
     agent, sandbox = setup
-    prompt = [
-        {"type": "input_text", "text": "What is shown?"},
-        {"type": "input_image", "image_url": PNG_URI, "detail": "auto"},
+    with TestClient(agent.setup_webserver()) as client:
+        payload = activate_over_http(
+            sandbox,
+            client,
+            [{"role": "user", "content": [{"type": "input_text", "text": "What is shown?"}, image_part(png(0))]}],
+        )
+    assert payload["prompt"] == "What is shown?"
+    assert [arg for arg in payload["command"] if arg.startswith("@")][0].endswith(".png")
+    assert staged_attachments(sandbox, payload) == [png(0)]
+    models = json.loads(sandbox.files[f"{sandbox.directory}/home/.pi/agent/models.json"])
+    assert models["providers"]["nemo"]["models"][0]["input"] == ["text", "image"]
+
+
+def test_session_attaches_user_images_in_order_after_a_system_message(setup):
+    agent, sandbox = setup
+    items = [
+        {"role": "system", "content": "Be brief."},
+        {"role": "user", "content": [image_part(png(0)), image_part(png(255))]},
     ]
     with TestClient(agent.setup_webserver()) as client:
-        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
-        assert created.status_code == 200, created.text
-        result = client.post(
-            "/ng-rollout/pi-smoke-a2/v1/responses", json={"input": [{"role": "user", "content": prompt}]}
-        )
-        assert result.status_code == 200, result.text
-        payload = staged(sandbox)
-        assert payload["prompt"] == "What is shown?"
-        attachments = [arg for arg in payload["command"] if arg.startswith("@")]
-        assert len(attachments) == 1 and attachments[0].endswith(".png")
-        assert sandbox.files[attachments[0][1:]] == PNG
-        models = json.loads(sandbox.files[f"{sandbox.directory}/home/.pi/agent/models.json"])
-        assert models["providers"]["nemo"]["models"][0]["input"] == ["text", "image"]
-        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
-        assert closed.status_code == 200, closed.text
+        payload = activate_over_http(sandbox, client, items)
+    assert payload["prompt"] == ""
+    assert "Be brief." in payload["command"]
+    assert staged_attachments(sandbox, payload) == [png(0), png(255)]
+
+
+def test_text_prompt_has_no_attachments_and_declares_image_input(setup):
+    agent, sandbox = setup
+    with TestClient(agent.setup_webserver()) as client:
+        payload = activate_over_http(sandbox, client, "task")
+    assert staged_attachments(sandbox, payload) == []
+    models = json.loads(sandbox.files[f"{sandbox.directory}/home/.pi/agent/models.json"])
+    assert models["providers"]["nemo"]["models"][0]["input"] == ["text", "image"]
 
 
 @pytest.mark.parametrize(
-    "items",
+    ("items", "detail"),
     [
-        [{"role": "user", "content": [{"type": "input_image", "image_url": "https://example.com/a.png"}]}],
-        [
-            {"role": "system", "content": [{"type": "input_image", "image_url": PNG_URI}]},
-            {"role": "user", "content": "task"},
-        ],
+        (
+            [{"role": "user", "content": [{**image_part(png(0)), "image_url": "https://example.com/a.png"}]}],
+            "Pi: Media must be a base64 data URI; URLs and file IDs are not fetched",
+        ),
+        (
+            [{"role": "user", "content": [{**image_part(png(0)), "image_url": "data:image/bmp;base64,Qk0="}]}],
+            "Pi: Unsupported media type 'image/bmp'",
+        ),
+        (
+            [{"role": "system", "content": [image_part(png(0))]}, {"role": "user", "content": "task"}],
+            "Pi accepts media only in the user prompt",
+        ),
     ],
+    ids=["image-url", "unsupported-media-type", "system-image"],
 )
-def test_session_rejects_images_it_cannot_attach(setup, items):
+def test_session_rejects_images_it_cannot_attach(setup, items, detail):
     agent, sandbox = setup
     with TestClient(agent.setup_webserver()) as client:
         created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
         assert created.status_code == 200, created.text
         result = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": items})
         assert result.status_code == 422, result.text
+        assert result.json()["detail"].startswith(detail), result.text
         closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
         assert closed.status_code == 200, closed.text
     assert not sandbox.launch.called

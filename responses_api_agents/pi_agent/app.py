@@ -898,8 +898,11 @@ class PiAgent(SimpleResponsesAPIAgent):
 
     def _validate_request(
         self, body: NeMoGymResponseCreateParamsNonStreaming
-    ) -> NeMoGymResponseCreateParamsNonStreaming:
-        """Validate the supported controls for a sandbox session activation."""
+    ) -> tuple[NeMoGymResponseCreateParamsNonStreaming, list[MediaFile]]:
+        """Validate the supported controls for a sandbox session activation.
+
+        Returns a copy of the request with ``input`` as a list, and the user prompt's decoded media in order.
+        """
         if body.model is not None and body.model != self.config.model:
             raise HTTPException(422, "Pi model must match the configured model")
         if body.max_output_tokens is not None:
@@ -934,7 +937,8 @@ class PiAgent(SimpleResponsesAPIAgent):
                 raise HTTPException(422, f"Pi: {error}") from error
             if media and item.role != "user":
                 raise HTTPException(422, "Pi accepts media only in the user prompt")
-        return body.model_copy(update={"input": items}).model_copy(deep=True)
+        # The loop ends on the user prompt, so `media` holds its media.
+        return body.model_copy(update={"input": items}).model_copy(deep=True), media
 
     def _conversation_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
         """Build identical instructions for local and sandbox Pi."""
@@ -1536,7 +1540,7 @@ class PiAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         session_id = self._agent_session_id_from_request(request)
         if session_id is not None:
-            body = self._validate_request(body)
+            body, media = self._validate_request(body)
             state = self._require_agent_session(session_id)
             assert isinstance(state, PiSandboxSession)
             rollout_id = request.path_params.get("rollout_id")
@@ -1545,7 +1549,6 @@ class PiAgent(SimpleResponsesAPIAgent):
             if state.session.closing:
                 raise HTTPException(409, "Pi session is closing")
             prompt, system = self._conversation_input(body)
-            _, media = split_text_and_media(body.input[-1].content)
             if state.task is None:
                 # Bind the request before the first await so retries join one invocation.
                 state.activation_request = body.model_copy(deep=True)
