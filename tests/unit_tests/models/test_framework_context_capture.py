@@ -629,3 +629,10 @@ async def test_framework_ack_cannot_change_the_admitted_parent(ledger, continuat
         assert [record["model_call_id"] for record in manifest["records"]] == ["a"]
     finally:
         reset_token_sink(token)
+
+
+def test_system_suffix_opt_in_requires_source_history():
+    from nemo_gym.models.token_capture.config import TokenCaptureConfig
+
+    with pytest.raises(ValueError, match="allow_system_suffix requires"):
+        TokenCaptureConfig(token_id_capture={"allow_system_suffix": True})
