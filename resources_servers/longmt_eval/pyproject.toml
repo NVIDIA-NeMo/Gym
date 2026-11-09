@@ -10,13 +10,13 @@ dependencies = ["nemo-gym[dev,ray]"]
 [tool.uv]
 package = false
 constraint-dependencies = [
-    # The Gym/Ray wrapper uses Python 3.13; keep NumPy 1.x in the 3.12 scorer only.
-    "numpy>=2.1",
     "grpcio>=1.84.1,!=1.85.0rc1",
     "certifi>=2026.10.19",
     "msgpack>=1.2.1",
     "pyarrow>=25.0.1",
     "transformers>=5.17.0",
+    # The Gym/Ray wrapper uses Python 3.13; keep NumPy 1.x in the 3.12 scorer only.
+    "numpy>=2.1",
 ]
 override-dependencies = [
     "spacy>=3.8.13",

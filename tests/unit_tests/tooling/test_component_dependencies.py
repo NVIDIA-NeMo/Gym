@@ -78,7 +78,7 @@ def test_locks_satisfy_shared_security_floors() -> None:
     assert not failures, "Locked versions below shared floors:\n" + "\n".join(failures)
 
 
-@pytest.mark.parametrize("component", ["wmt_translation", "longmt_eval"])
+@pytest.mark.parametrize("component", ["wmt_translation", "longmt_eval/scoring"])
 def test_comet_locks_respect_encoder_dependency_limits(component: str) -> None:
     """Keep COMET 2.2.7 within the supported Transformers and Hub API ranges."""
     lock = tomllib.loads((ROOT / "resources_servers" / component / "uv.lock").read_text())
@@ -122,3 +122,21 @@ def test_managed_git_requirements_pin_full_revisions() -> None:
             if requirement.url and requirement.url.startswith("git+"):
                 revision = requirement.url.partition("#")[0].rpartition("@")[2]
                 assert re.fullmatch("[0-9a-f]{40}", revision), f"{project}: {requirement}"
+
+
+def test_longmt_scoring_dependencies_are_isolated() -> None:
+    wrapper = ROOT / "resources_servers/longmt_eval"
+    scorer = wrapper / "scoring"
+    assert uses_gym(wrapper)
+    assert not uses_gym(scorer)
+    assert scorer in managed_projects()
+    wrapper_lock = tomllib.loads((wrapper / "uv.lock").read_text())
+    scorer_lock = tomllib.loads((scorer / "uv.lock").read_text())
+    assert wrapper_lock["requires-python"] == ">=3.13.14"
+    assert scorer_lock["requires-python"] == "==3.12.*"
+    wrapper_names = {package["name"] for package in wrapper_lock["package"]}
+    scorer_names = {package["name"] for package in scorer_lock["package"]}
+    assert {"nemo-gym", "ray"} <= wrapper_names
+    assert {"segale", "laser-encoders", "ersatz", "unbabel-comet"}.isdisjoint(wrapper_names)
+    assert {"segale", "laser-encoders", "ersatz", "unbabel-comet"} <= scorer_names
+    assert {"nemo-gym", "ray"}.isdisjoint(scorer_names)
