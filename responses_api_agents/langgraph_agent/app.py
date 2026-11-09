@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 from abc import abstractmethod
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
@@ -40,6 +41,7 @@ from nemo_gym.agents import (
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
+    MODEL_CONTEXT_LIMIT,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
     FailureHeader,
@@ -94,6 +96,33 @@ def _model_call_error(error: BaseException) -> ClientResponseError | ClientConne
     if isinstance(error, ClientResponseError):
         return None if confirmed_policy_response_timeout(FailureHeader.decode(error.headers)) else error
     return error if isinstance(error, ClientConnectionError) else None
+
+
+def _model_error_outcome(error: ClientResponseError | ClientConnectionError) -> AgentOutcome:
+    """The outcome ladder's error for the failed model call a graph ended on.
+
+    With ``propagate_context_overflow_errors`` on, Gym's model server answers a context overflow with HTTP 400 and
+    OpenAI's error envelope, code ``context_length_exceeded``; ``raise_for_status`` keeps that body on the error as
+    ``response_content``. That is a context limit. Another HTTP error keeps its status; no reply is a transport error.
+    """
+    if not isinstance(error, ClientResponseError):
+        return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
+    if (
+        error.status == 400
+        and _openai_error_code(getattr(error, "response_content", None)) == "context_length_exceeded"
+    ):
+        return AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT)
+    return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=error.status)
+
+
+def _openai_error_code(body: bytes | str | None) -> str | None:
+    """The ``error.code`` of an OpenAI error envelope, or ``None`` for any other body."""
+    try:
+        error = json.loads(body or b"").get("error")
+    except (TypeError, ValueError, AttributeError):
+        return None
+    code = error.get("code") if isinstance(error, dict) else None
+    return code if isinstance(code, str) else None
 
 
 class LangGraphAgentConfig(BaseResponsesAPIAgentConfig):
@@ -188,13 +217,12 @@ class LangGraphAgentAdapter(SimpleResponsesAPIAgent):
                 tool_choice=body.tool_choice,
                 parallel_tool_calls=body.parallel_tool_calls,
             )
-            outcome = (
-                AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=model_error.status)
-                if isinstance(model_error, ClientResponseError)
-                else AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
+            evidence = RunEvidence(
+                has_result=False, timed_out=False, model_replied=replied, error=_model_error_outcome(model_error)
             )
-            evidence = RunEvidence(has_result=False, timed_out=False, model_replied=replied, error=outcome)
-            return self.finish_response(failed, evidence)
+            response = self.finish_response(failed, evidence)
+            # A context limit is graded as incomplete; only a failed response reports the model call's error.
+            return response if response.status == "failed" else response.model_copy(update={"error": None})
 
         model_response = self.extract_model_response(state)
         outputs = self.extract_outputs(state)

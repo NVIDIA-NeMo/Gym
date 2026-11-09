@@ -357,9 +357,14 @@ def test_in_process_calls_preserve_unset_sampling_fields(agent_class, config_cla
         assert set(call.kwargs["json"].model_dump(exclude_unset=True)) == {"input"}
 
 
-def _http_error(status: int) -> ClientResponseError:
+def _http_error(status: int, code: str | None = None) -> ClientResponseError:
     info = SimpleNamespace(url="http://model", method="POST", headers={}, real_url="http://model")
-    return ClientResponseError(info, (), status=status, message="model failed")
+    error = ClientResponseError(info, (), status=status, message="model failed")
+    if code is not None:
+        # The model server's OpenAI error envelope, which Gym's raise_for_status keeps on the error.
+        envelope = {"message": "maximum context length", "type": "invalid_request_error", "param": None, "code": code}
+        error.response_content = json.dumps({"error": envelope}).encode()
+    return error
 
 
 def _activate(agent, answers) -> NeMoGymResponse:
@@ -407,6 +412,30 @@ def test_a_model_error_ends_the_graph_with_a_classified_failed_response(answers,
     # The steps that finished keep their outputs.
     assert len([item for item in response.output if item.type == "message"]) == replies
     assert response.error.message.startswith("Model call failed")
+
+
+@pytest.mark.parametrize(
+    "answers,status,outcome",
+    [
+        # A context overflow is graded as incomplete, before or after the first reply (decision 1).
+        ([_http_error(400, "context_length_exceeded")], "incomplete", None),
+        (["draft", _http_error(400, "context_length_exceeded")], "incomplete", None),
+        # A 400 with another code stays a model request error.
+        (
+            ["draft", _http_error(400, "invalid_request")],
+            "failed",
+            {"failure_kind": "model_request_error", "status_code": 400},
+        ),
+    ],
+)
+def test_a_propagated_context_overflow_is_a_graded_incomplete_response(answers, status, outcome):
+    response = _activate(_agent(ReflectionAgent, ReflectionAgentConfig, {}), answers)
+    assert response.status == status
+    assert json.loads(response.metadata.get("ng_agent_outcome", "null")) == outcome
+    assert agent_outcome_policy(response) == OutcomeAction.VERIFY
+    if status == "incomplete":
+        assert response.metadata["ng_agent_stop_reason"] == "context_limit"
+        assert response.error is None
 
 
 def test_parallel_paths_that_all_fail_on_the_model_report_its_error():
