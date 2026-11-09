@@ -514,7 +514,7 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
         return result
 
     def _trajectory(self, task_id: str, rollout_id: str, solved: _SolvedProblem) -> TrajectoryRecord:
-        """The legacy /run's trajectory: one invocation, and one turn per generated sub-step."""
+        """/run's trajectory: one invocation, and one turn per generated sub-step."""
         trajectory = TrajectoryRecord(task_id=task_id, rollout_id=rollout_id)
         invocation = AgentInvocation(invocation_id="root")
         for turn in solved.turns:

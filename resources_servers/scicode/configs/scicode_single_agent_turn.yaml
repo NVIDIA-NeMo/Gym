@@ -4,7 +4,8 @@
 # SciCode run by the single_agent_turn_legacy Environment Server. scicode_agent reads each problem from the row's
 # agent_context and runs the sub-step loop inside one /v1/responses activation; /verify grades the solutions its
 # response carries. scicode.yaml runs the same loop in the agent's /run behind a legacy_agent relay, with the same
-# model requests and the same reward. This file uses its instance names, so either one can be loaded.
+# model requests and the same reward whenever verification runs and succeeds (see the README for the two paths'
+# differences). This file uses its instance names, so either one can be loaded.
 # Rows need agent_context: benchmarks/scicode/prepare.py writes it (scicode_agent_context).
 config_paths:
   - responses_api_agents/scicode_agent/configs/scicode_agent.yaml

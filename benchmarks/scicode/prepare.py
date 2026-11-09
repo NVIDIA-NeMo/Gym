@@ -77,6 +77,7 @@ def prepare() -> Path:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     rows = []
+    without_context: list[str] = []
     for split in SPLITS:
         for entry in ds[split]:
             row = {
@@ -96,6 +97,7 @@ def prepare() -> Path:
             except ValidationError as error:
                 # Its /run still works; an agent session refuses the row with 422 for lack of context.
                 print(f"Problem {row['problem_id']} gets no agent_context: {error}")
+                without_context.append(row["problem_id"])
             else:
                 row["agent_context"] = agent_context
             rows.append(json.dumps(row) + "\n")
@@ -104,6 +106,11 @@ def prepare() -> Path:
         f.writelines(rows)
 
     print(f"Wrote {len(rows)} problems to {OUTPUT_FPATH}")
+    if without_context:
+        print(
+            f"{len(without_context)} problems have no agent_context and run only through /run: "
+            + ", ".join(without_context)
+        )
     return OUTPUT_FPATH
 
 

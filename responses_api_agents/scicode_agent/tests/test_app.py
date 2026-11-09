@@ -12,6 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -37,6 +39,7 @@ from nemo_gym.core import (
     TaskId,
     failure_report_for,
 )
+from nemo_gym.server_runtime import MCPStreamableHTTPConnection, MCPToolAccess
 from responses_api_agents.scicode_agent.app import (
     SCICODE_RESPONSE_KEY,
     TOKEN_USAGE_VERSION,
@@ -44,6 +47,7 @@ from responses_api_agents.scicode_agent.app import (
     ResourcesServerRef,
     ScicodeAgent,
     ScicodeAgentConfig,
+    ScicodeAgentContext,
     ScicodeAgentRunRequest,
 )
 from responses_api_agents.scicode_agent.step_utils import (
@@ -124,8 +128,8 @@ def _run_request(problem_id="1", n_steps=2, **extra):
         }
         for i in range(n_steps)
     ]
+    extra.setdefault("responses_create_params", {"input": []})
     return ScicodeAgentRunRequest(
-        responses_create_params={"input": []},
         problem_id=problem_id,
         sub_steps=sub_steps,
         required_dependencies="import numpy as np",
@@ -681,13 +685,25 @@ class _ScriptedPolicy:
 
 
 class TestAgentSessions:
-    @pytest.mark.parametrize("problem", ["missing", "with_tests", "sandbox"])
+    @pytest.mark.parametrize("problem", ["missing", "with_tests", "sandbox", "required_tool"])
     def test_seed_refuses_a_session_it_cannot_run(self, problem):
         context = _agent_context(_run_request(n_steps=1))
         seed = _seed(None if problem == "missing" else context)
         if problem == "with_tests":
             # Test cases are the verifier's; they never reach the agent.
             seed = _seed(context | {"sub_steps": [context["sub_steps"][0] | {"test_cases": ["assert True"]}]})
+        elif problem == "required_tool":
+            seed = seed.model_copy(
+                update={
+                    "tool_accesses": [
+                        MCPToolAccess(
+                            name="search",
+                            required=True,
+                            connection=MCPStreamableHTTPConnection(url="http://resources:8000/mcp"),
+                        )
+                    ]
+                }
+            )
         elif problem == "sandbox":
             seed = AgentSeedSessionRequest.model_validate(
                 seed.model_dump(mode="json")
@@ -709,7 +725,9 @@ class TestAgentSessions:
         ids=["three_steps", "prefilled_first_step", "context_window_exceeded"],
     )
     def test_session_sends_the_run_requests_and_verify_payload(self, problem_id, n_steps, overflow_step):
-        body = _run_request(problem_id=problem_id, n_steps=n_steps)
+        # The task's sampling settings ride on every sub-step's model call on both paths.
+        settings = {"input": [], "temperature": 0.6, "top_p": 0.95, "max_output_tokens": 4096, "model": "policy-x"}
+        body = _run_request(problem_id=problem_id, n_steps=n_steps, responses_create_params=settings)
         if overflow_step is not None:
             body.sub_steps[overflow_step]["step_description_prompt"] = "overflow"
         run_policy, session_policy = _ScriptedPolicy(), _ScriptedPolicy()
@@ -758,6 +776,14 @@ class TestAgentSessions:
                 closed = client.post("/v1/agent_sessions/close", json=close)
 
         assert session_policy.requests == run_policy.requests
+        assert session_policy.requests
+        for request in session_policy.requests:
+            assert {key: request[key] for key in settings if key != "input"} == {
+                "temperature": 0.6,
+                "top_p": 0.95,
+                "max_output_tokens": 4096,
+                "model": "policy-x",
+            }
         response = activation.json()
         accounting = response.pop(SCICODE_RESPONSE_KEY)
         verify = captured["verify"]
@@ -800,6 +826,50 @@ class TestAgentSessions:
         (invocation,) = closed.json()["agent_observations"]["records"]
         assert (invocation["status"], invocation["error_type"]) == ("failed", "RuntimeError")
         assert [call["response_id"] for call in invocation["model_calls"]] == ["r0", "r1"]
+
+    def test_replay_with_other_settings_is_refused_without_running_the_loop_again(self):
+        policy = _ScriptedPolicy()
+
+        async def post(server_name, url_path, json, cookies=None):
+            return policy.reply(_wire(json))
+
+        agent = _agent()
+        agent.server_client.post = AsyncMock(side_effect=post)
+        seed = _seed(_agent_context(_run_request(n_steps=2)))
+        path = f"/ng-rollout/{seed.episode_id.capture_key}/v1/responses"
+        with patch.object(app, "raise_for_status", AsyncMock()), TestClient(agent.setup_webserver()) as client:
+            assert client.post("/v1/agent_sessions", json=seed.model_dump(mode="json")).status_code == 200
+            assert client.post(path, json={"input": []}).status_code == 200
+            assert client.post(path, json={"input": [], "temperature": 0.5}).status_code == 409
+        assert len(policy.requests) == 2
+
+    def test_a_problem_with_no_generated_step_closes_with_no_invocation(self):
+        # Problem 62's first step is prefilled, so a one-step problem makes no model call, as on /run.
+        agent = _agent()
+        agent.server_client.post = AsyncMock(side_effect=AssertionError("no model call expected"))
+        seed = _seed(_agent_context(_run_request(problem_id="62", n_steps=1)))
+        path = f"/ng-rollout/{seed.episode_id.capture_key}/v1/responses"
+        with TestClient(agent.setup_webserver()) as client:
+            assert client.post("/v1/agent_sessions", json=seed.model_dump(mode="json")).status_code == 200
+            activation = client.post(path, json={"input": []})
+            close = {"agent_session_id": seed.agent_session_id, "episode_id": seed.episode_id.model_dump()}
+            closed = client.post("/v1/agent_sessions/close", json=close)
+        assert activation.status_code == 200, activation.text
+        accounting = activation.json()[SCICODE_RESPONSE_KEY]
+        assert accounting["solutions"] == {}
+        assert [step["status"] for step in accounting["step_usage"]] == ["prefilled"]
+        assert closed.json()["agent_observations"]["records"] == []
+
+
+def test_committed_example_rows_carry_the_agents_context():
+    # benchmarks/scicode/prepare.py writes these rows; the agent's extra="forbid" model must accept what it writes.
+    rows_path = Path(app.__file__).resolve().parents[2] / "resources_servers/scicode/data/example.jsonl"
+    rows = [json.loads(line) for line in rows_path.read_text().splitlines() if line.strip()]
+    assert rows
+    for row in rows:
+        context = ScicodeAgentContext.model_validate(row["agent_context"]["values"])
+        assert context.problem_id == row["problem_id"]
+        assert [step.step_number for step in context.sub_steps] == [step["step_number"] for step in row["sub_steps"]]
 
 
 @pytest.mark.asyncio

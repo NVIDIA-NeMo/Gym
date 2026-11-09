@@ -153,13 +153,18 @@ class ScicodeVerifyResponse(BaseVerifyResponse):
 def _lift_session_results(body: ScicodeVerifyRequest) -> ScicodeVerifyRequest:
     """Read the solutions and step usage that an agent session's response carries, as /run sends them.
 
-    The field leaves the response either way, so the rollout row keeps one copy of the agent's accounting.
+    The field leaves the response either way, so the rollout row keeps one copy of ``step_usage`` and
+    ``token_usage_version``. Like a ``/run`` row, it keeps no solutions. A field without a solutions dict breaks
+    the contract between the agent and this server, not the model's answer, so it fails verification instead of
+    grading nothing.
     """
     data = body.model_dump()
     results = data["response"].pop(SCICODE_RESPONSE_KEY, None)
     if results is None:
         return body
-    if data.get("solutions") is None and isinstance(results, dict):
+    if not isinstance(results, dict) or not isinstance(results.get("solutions"), dict):
+        raise ValueError(f"The response's {SCICODE_RESPONSE_KEY!r} field carries no solutions dict")
+    if data.get("solutions") is None:
         data |= {key: results.get(key) for key in ("solutions", "step_usage", "token_usage_version")}
     return ScicodeVerifyRequest.model_validate(data)
 

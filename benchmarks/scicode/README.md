@@ -7,7 +7,7 @@ sub-steps. Generated code is executed against the problem's test cases.
 
 - **Tasks**: 65 problems / 288 evaluated sub-steps (`test` only, matching the current AA Intelligence Index setup)
 - **Reward**: binary per problem — `1.0` only if every sub-step passes its tests
-- **Metrics** (reported by the agent): `subtask_accuracy` — the headline SciCode number,
+- **Metrics** (computed by the resources server): `subtask_accuracy` — the headline SciCode number,
   total sub-steps passed divided by total sub-steps across all rollouts — and `problem_accuracy`
   (= `mean/reward`, the whole problem passing)
 
@@ -50,8 +50,10 @@ gym eval prepare --benchmark scicode
 ```
 
 Downloads `SciCode1/SciCode` and writes `benchmarks/scicode/data/scicode_benchmark.jsonl`
-(one row per problem from the HuggingFace `test` split, carrying the full `sub_steps` list). This
-does not fetch `test_data.h5` — see above.
+(one row per problem from the HuggingFace `test` split, carrying the full `sub_steps` list). Each row
+also carries `agent_context`, the prompt material an agent session needs
+(`resources_servers/scicode/configs/scicode_single_agent_turn.yaml`). This does not fetch `test_data.h5` — see
+above.
 
 The agent uses the current AA SciCode prompt in `benchmarks/scicode/prompts/background.yaml`.
 The scientist-authored background in each sub-step is included in the prompt; the model is asked

@@ -483,6 +483,33 @@ class TestApp:
         # The rollout row keeps one copy of the agent's accounting.
         assert app.SCICODE_RESPONSE_KEY not in from_session["response"]
 
+    @pytest.mark.asyncio
+    async def test_top_level_solutions_win_over_the_response_field(self):
+        body = _request(solutions={"1.1": "PASS", "1.2": "PASS"}).model_dump()
+        body["token_usage_version"] = 1
+        body["step_usage"] = [{"step_number": "1.1", "status": "generated", "usage": None}]
+        body["response"][app.SCICODE_RESPONSE_KEY] = {
+            "solutions": {"1.1": "FAIL", "1.2": "FAIL"},
+            "step_usage": [],
+            "token_usage_version": 99,
+        }
+        passed = {"passed": True, "error": "", "returncode": 0, "timed_out": False}
+        failed = {"passed": False, "error": "", "returncode": 1, "timed_out": False}
+        with tempfile.NamedTemporaryFile(suffix=".h5") as h5, _mock_substep_details({"PASS": passed, "FAIL": failed}):
+            result = (await _server(h5.name).verify(ScicodeVerifyRequest.model_validate(body))).model_dump()
+        assert (result["reward"], result["num_steps_passed"], result["num_steps_total"]) == (1.0, 2, 2)
+        assert (result["token_usage_version"], result["step_usage"]) == (1, body["step_usage"])
+        assert app.SCICODE_RESPONSE_KEY not in result["response"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("field", ["garbage", ["x"], {}, {"solutions": None}, {"step_usage": []}])
+    async def test_a_response_field_without_a_solutions_dict_fails_verification(self, field):
+        # Only a broken agent sends this: grading it would score an empty answer and drop the row's sub-steps.
+        body = _request(solutions=None).model_dump()
+        body["response"][app.SCICODE_RESPONSE_KEY] = field
+        with tempfile.NamedTemporaryFile(suffix=".h5") as h5, pytest.raises(ValueError, match="no solutions dict"):
+            await _server(h5.name).verify(ScicodeVerifyRequest.model_validate(body))
+
     def test_sanity(self):
         _server()
 

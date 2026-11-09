@@ -33,7 +33,12 @@ Two configs run the same pairing:
   one `/v1/responses` activation. Its response carries the same three fields under `scicode`, and `/verify` reads them
   from there. Rows need `agent_context`, which `benchmarks/scicode/prepare.py` writes and the example rows carry.
 
-Both send the model the same requests, so the reward and the metrics are the same.
+Both send the model the same requests, so the reward and the metrics are the same whenever verification runs and
+succeeds. The paths differ in two cases, both set by the Environment Server rather than by SciCode:
+
+- When `/verify` fails, `/run` masks the row as `judge_failed` and keeps its `solutions` for a regrade; an agent session
+  ends as the Environment Server's verification failure.
+- `/run` always verifies; `single_agent_turn_legacy` honors `skip_verification`.
 
 ## Execution (no Docker sandbox)
 
@@ -108,7 +113,8 @@ Two JSONL files coexist with different shapes:
 - **`benchmarks/scicode/data/scicode_benchmark.jsonl`** (65-row test split, gitignored; produced by
   `prepare.py`). Flat-field: each row has `problem_id`, `sub_steps`, `required_dependencies`, `uuid`, and
   `agent_context`: the same problem's prompt material (each sub-step's number, description, background, function
-  header and return line) for an agent session. Test cases and reference code stay out of it.
+  header and return line) for an agent session. Test cases and reference code stay out of it. A problem whose context
+  would exceed the 64 KiB `agent_context` limit gets none; `prepare.py` names it and counts it in its summary line.
 - **`resources_servers/scicode/data/example.jsonl`** (5-row fixture, committed).
 
 Unlike most benchmarks, SciCode's prompts are **not** materialized at rollout time — the agent builds
