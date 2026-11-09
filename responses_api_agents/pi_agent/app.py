@@ -651,6 +651,14 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
     max_output_tokens: int = 131072
     output_token_policy: Literal["fixed", "remaining_context"] = "fixed"
     auto_compaction: bool = True
+    image_input: bool = Field(
+        default=False,
+        description=(
+            "Declare image input on the Gym model in sandbox sessions even when the prompt has no images, so that Pi "
+            "sends the model images its tools return, such as task files it reads. A prompt with images always "
+            "declares it."
+        ),
+    )
     pi_version: Optional[str] = None
     mcp_servers: dict[str, PiMCPServerConfig] = Field(default_factory=dict)
     sandbox_provider: str | None = None
@@ -986,11 +994,12 @@ class PiAgent(SimpleResponsesAPIAgent):
         models = {
             "providers": {"nemo": self._build_models_config(state.request.episode_id.capture_key)["providers"]["nemo"]}
         }
-        # Without image input on the model, Pi leaves images out of model requests.
-        # That includes images its read tool returns, which Pi replaces with an "omitted" note.
-        # A text-only deployment rejects requests that carry an image.
-        for model in models["providers"]["nemo"]["models"]:
-            model["input"] = ["text", "image"]
+        # Without image input on the model, Pi leaves images out of model requests, including images its read tool
+        # returns, which it replaces with an "omitted" note. A text-only deployment rejects requests that carry an
+        # image, so image input is declared only for a prompt with images or when the configuration asks for it.
+        if media or self.config.image_input:
+            for model in models["providers"]["nemo"]["models"]:
+                model["input"] = ["text", "image"]
         # Staged inside the session's execute, so that close cancels the uploads before it releases the sandbox.
         files: dict[str, str | Path] = {
             "home/.pi/agent/models.json": json.dumps(models),

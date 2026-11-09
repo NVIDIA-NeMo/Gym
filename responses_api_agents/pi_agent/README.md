@@ -165,8 +165,11 @@ may include images as base64 data-URI `input_image` parts. The adapter stages ea
 `/tmp/nemo-gym-media/<sha256>.<extension>`, a path named by the image's content, and passes it to Pi as an
 `@file` argument, so the same task gives Pi the same prompt in every sandbox. Staging is part of the
 activation: it spends the agent timeout, and closing the session stops it. Staged images stay in a
-borrowed sandbox after the session ends. Sessions always declare image input on the Gym
-model, so Pi also passes on images its read tool returns; a text-only deployment rejects such requests.
+borrowed sandbox after the session ends. A session declares image input on the Gym model when the prompt
+has images or when the agent configuration sets `image_input: true`. With image input declared, Pi also sends the
+model images its tools return, such as task files it reads, and a text-only deployment rejects those requests.
+Without it, Pi replaces such an image with a note saying it was omitted. Set `image_input: true` for a vision model
+whose tasks keep their images in the sandbox, where the prompt has none.
 Images in the system message and image URLs are rejected. Both sandbox
 and local execution combine the configured system prompt, request `instructions`, and input
 system message in that order. Sampling and chat-template settings belong on the Gym Model Server.

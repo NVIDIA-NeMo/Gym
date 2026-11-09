@@ -432,13 +432,16 @@ def test_session_attaches_user_images_in_order_after_a_system_message(setup):
     assert staged_attachments(sandbox, payload) == [png(0), png(255)]
 
 
-def test_text_prompt_has_no_attachments_and_declares_image_input(setup):
+@pytest.mark.parametrize(("image_input", "declared"), [(False, ["text"]), (True, ["text", "image"])])
+def test_text_prompt_declares_image_input_only_when_configured(setup, image_input, declared):
     agent, sandbox = setup
+    agent.config.image_input = image_input
     with TestClient(agent.setup_webserver()) as client:
         payload = activate_over_http(sandbox, client, "task")
     assert staged_attachments(sandbox, payload) == []
     models = json.loads(sandbox.files[f"{sandbox.directory}/home/.pi/agent/models.json"])
-    assert models["providers"]["nemo"]["models"][0]["input"] == ["text", "image"]
+    # Without image input, Pi replaces images its tools return with a note, so a text-only deployment keeps working.
+    assert models["providers"]["nemo"]["models"][0]["input"] == declared
 
 
 @pytest.mark.parametrize(
