@@ -6,6 +6,7 @@ import asyncio
 import copy
 import json
 import shutil
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -531,6 +532,7 @@ def test_runtime_fingerprint_covers_active_agent_and_core(tmp_path, monkeypatch)
         "resources_servers/agentic_if_realworld/benchmark/core.py",
         agent_source,
         core_source,
+        "nemo_gym/__init__.py",
         "benchmarks/example/prepare.py",
         "responses_api_models/example/app.py",
     ]
@@ -538,31 +540,85 @@ def test_runtime_fingerprint_covers_active_agent_and_core(tmp_path, monkeypatch)
         benchmark / ".cache/generated.py",
         checkout / "responses_api_agents/simple_agent/.venv/dependency.py",
         checkout / "responses_api_agents/pi_agent/.pi_node/dependency.py",
+        checkout / "responses_api_agents/prime_agent/.prime_agent_node/dependency.py",
+        checkout / "responses_api_agents/opencode_agent/.opencode_node/dependency.py",
+        checkout / "responses_api_agents/cline_agent/.cline_node/dependency.py",
+        checkout / "responses_api_agents/openclaw_agent/.openclaw_node/dependency.py",
+        checkout / "responses_api_agents/kilocode_agent/.kilo_node/dependency.py",
+        checkout / "responses_api_agents/rna_design_agent/.eternafold/dependency.py",
     ]
     for source in sources:
         path = checkout / source
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("SOURCE = 1\n")
-    for path in generated:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("GENERATED = 1\n")
     (benchmark / "source_manifest.json").write_text(json.dumps({"gym_commit": "historical-revision"}))
+    shutil.copyfile(Path(__file__).resolve().parents[3] / ".gitignore", checkout / ".gitignore")
+    readme = checkout / "README.md"
+    readme.write_text("Tracked non-Python source contract.\n")
+
+    def git(*arguments):
+        return subprocess.run(
+            ["git", "-C", str(checkout), *arguments],
+            check=True,
+            capture_output=True,
+            text=True,
+            errors="replace",
+        ).stdout.strip()
+
+    git("init", "--quiet")
+    git("add", ".")
+    git(
+        "-c",
+        "user.name=Runtime fingerprint test",
+        "-c",
+        "user.email=test@example.invalid",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "--quiet",
+        "-m",
+        "Record source fixture",
+    )
+    revision = git("rev-parse", "HEAD")
     monkeypatch.setattr(core, "ROOT", benchmark)
-    monkeypatch.setattr(jobs, "installed_gym_commit", lambda: "runtime-revision")
+    monkeypatch.setattr(jobs, "installed_gym_commit", lambda: jobs._source_checkout_commit(checkout / "nemo_gym"))
     before = core.runtime_identity()
-    assert before["gym_commit"] == "runtime-revision"
+    assert before["gym_commit"] == revision
     assert before["source_gym_commit"] == "historical-revision"
     assert "core.py" in before["sources"]
     assert all(f"gym/{source}" in before["sources"] for source in sources)
+    for path in generated:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("GENERATED = 1\n")
+    assert core.runtime_identity() == before
+    assert git("status", "--porcelain") == ""
     for path in generated:
         path.write_text("GENERATED = 2\n")
     assert core.runtime_identity() == before
     for path in generated:
         path.unlink()
     assert core.runtime_identity() == before
+
+    untracked = checkout / "responses_api_agents/simple_agent/untracked.py"
+    untracked.write_text("LOCAL_SOURCE = 1\n")
+    after = core.runtime_identity()
+    assert after["gym_commit"] == revision + "-dirty"
+    assert "gym/responses_api_agents/simple_agent/untracked.py" in after["sources"]
+    untracked.unlink()
+    assert core.runtime_identity() == before
+    readme.write_text("Changed tracked non-Python source contract.\n")
+    after = core.runtime_identity()
+    assert after["sources"] == before["sources"]
+    assert after["gym_commit"] == revision + "-dirty"
+    assert after != before
+    readme.write_text("Tracked non-Python source contract.\n")
+    assert core.runtime_identity() == before
     for source in (agent_source, core_source):
         (checkout / source).write_text("SOURCE = 2\n")
         after = core.runtime_identity()
         assert after != before
+        assert after["gym_commit"] == revision + "-dirty"
         assert after["sources"][f"gym/{source}"] != before["sources"][f"gym/{source}"]
         before = after

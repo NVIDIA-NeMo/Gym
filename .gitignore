@@ -243,6 +243,15 @@ resources_servers/cvdp/data/gym_cvdp_nonagentic_code_generation_no_commercial.js
 # Node.js that codex_agent/setup_codex.py installs for local Codex and the launcher tests
 responses_api_agents/codex_agent/.codex_node/
 
+# Agent-local generated tool installations (setup_<tool>.py).
+responses_api_agents/pi_agent/.pi_node/
+responses_api_agents/prime_agent/.prime_agent_node/
+responses_api_agents/opencode_agent/.opencode_node/
+responses_api_agents/cline_agent/.cline_node/
+responses_api_agents/openclaw_agent/.openclaw_node/
+responses_api_agents/kilocode_agent/.kilo_node/
+responses_api_agents/rna_design_agent/.eternafold/
+
 # Generated Terminal-Bench 4 dataset
 /benchmarks/terminal_bench_4/data/
 
