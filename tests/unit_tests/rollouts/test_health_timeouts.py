@@ -850,3 +850,11 @@ def test_timeout_selection_respects_omitted_retry_state(tmp_path: Path, never_st
     # A newer interruption supersedes the timeout; an undispatched retry is not a new execution.
     assert timeouts["timed_out"] == expected_timeouts
     assert output.read_bytes() == b""
+
+
+@pytest.mark.parametrize("status", ["timeout", "cancelled", "incomplete"])
+def test_interrupted_tool_label_does_not_change_timeout_health(status):
+    baseline = timed_out_row(tools=[{"status": "timeout", "started_at": T0}])
+    actual = timed_out_row(tools=[{"status": status, "started_at": T0}])
+    assert section(actual) == section(baseline)
+    assert read_rollout_timing(actual).timed_out
