@@ -1,7 +1,7 @@
 # Omniscience Benchmark
 # Evaluates factual knowledge using an LLM judge that grades answers on a
 # four-tier scale: CORRECT, INCORRECT, PARTIAL_ANSWER, NOT_ATTEMPTED.
-# Based on: https://huggingface.co/datasets/ArtificialAnalysis/AA-Omniscience-Public
+# Based on: https://huggingface.co/datasets/ArtificialAnalysis/AA-Omniscience-Public-v1.1
 
 omniscience:
   resources_servers:
