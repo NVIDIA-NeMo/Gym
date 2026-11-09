@@ -870,6 +870,45 @@ class TestRun:
         assert (verify_call["url_path"], verify_call["cookies"]) == ("/verify", {"session": "after-turn"})
         assert result.reward == 1.0 and result.response.metadata["stop_reason"] == "final_message"
 
+    async def _run_with_stop_reason(self, stop_reason: str, **config: Any) -> Any:
+        agent, _ = _agent(**config)
+        model_json = json.loads(_model(_msg("done")).read.return_value)
+        model_json["metadata"] = {"stop_reason": stop_reason, "steps": "3", "elapsed_seconds": "7300"}
+
+        async def post(*, server_name: str, url_path: str, json: Any, cookies: Any = None, **kw: Any) -> MagicMock:
+            if url_path == "/seed_session":
+                return _http({}, cookies={"session": "seeded"})
+            if url_path == MODEL_PATH:
+                return _http(model_json, cookies={"session": "after-turn"})
+            # The resources server masks a time-capped turn, as it does by default.
+            return _http(
+                {**json, "reward": 0.0, "mask_sample": True, "failure_kind": "agentic_turn_simulation:time_cap"}
+            )
+
+        agent.server_client.post = AsyncMock(side_effect=post)
+        result = await agent.run(SimpleNamespace(cookies={}), SimpleAgentRunRequest(responses_create_params=_body()))
+        return result, agent
+
+    async def test_a_time_capped_turn_is_a_retryable_typed_failure_not_a_masked_row(self) -> None:
+        result, agent = await self._run_with_stop_reason("time_cap")
+        row = json.loads(result.body)
+        assert row["failure_kind"] == "agent_time_cap" and row["_ng_failure_class"] == "agent_run_error"
+        assert row["_ng_failure_terminal"] is False and row["_ng_failure_counts_as_zero"] is False
+        assert "7300s" in row["failure_reason"] and "3 steps" in row["failure_reason"]
+        assert "reward" not in row and "mask_sample" not in row and "response" not in row
+        # /verify still ran, so the resources server's session is closed.
+        assert agent.server_client.post.await_args_list[-1].kwargs["url_path"] == "/verify"
+
+    async def test_a_time_capped_turn_follows_the_configured_outcome_action(self) -> None:
+        result, _ = await self._run_with_stop_reason(
+            "time_cap", outcome_policy={"by_failure_kind": {"agent_time_cap": "fail"}}
+        )
+        assert json.loads(result.body)["_ng_failure_terminal"] is True
+
+    async def test_a_turn_that_ended_otherwise_keeps_its_verified_result(self) -> None:
+        result, _ = await self._run_with_stop_reason("max_steps")
+        assert result.reward == 0.0 and result.response.metadata["stop_reason"] == "max_steps"
+
 
 class TestUnsupportedEpisodes:
     """Agent-session episodes are refused, and /run without executing tools, before any call."""
@@ -1085,3 +1124,44 @@ class TestClineXml:
         assert reply.status_code == 200 and reply.json()["output"][1]["role"] == "user"
         assert reply.json()["metadata"]["stop_reason"] == "attempt_completion"
         assert [c["json"]["name"] for c in script.tool_calls] == ["read_file"]
+
+
+class TestTimeCapRecovery:
+    """The row of a time-capped turn, read by the real Store and recovery decision as a saved run is."""
+
+    @staticmethod
+    async def _saved_row(**config: Any) -> dict[str, Any]:
+        result, _ = await TestRun()._run_with_stop_reason("time_cap", **config)
+        return json.loads(result.body)
+
+    async def test_a_time_capped_turn_is_retried_and_exhausts_to_an_unscored_failure(self, tmp_path: Path) -> None:
+        from tests.unit_tests.orchestration.test_allocation_cut_recovery import _decide
+        from tests.unit_tests.orchestration.test_masked_infrastructure_recovery import _run
+
+        row = await self._saved_row()
+        _run(tmp_path / "one", [[row]])
+        _, decision = _decide(tmp_path / "one", allocation_cut=False)
+        assert decision.counts == {"scored": 1, "retryable": 1}, decision.reason
+        assert next(i for i in decision.evidence if i.identity == (1, 0)).failure_kind == "agent_time_cap"
+
+        _run(tmp_path / "spent", [[row] * 3])
+        _, decision = _decide(tmp_path / "spent", allocation_cut=False)
+        assert decision.counts == {"scored": 1, "exhausted": 1}, decision.reason
+
+    async def test_the_masked_row_it_replaces_was_final(self, tmp_path: Path) -> None:
+        from tests.unit_tests.orchestration.test_allocation_cut_recovery import _decide
+        from tests.unit_tests.orchestration.test_masked_infrastructure_recovery import _ANSWER, _run
+
+        masked = {"reward": 0.0, "mask_sample": True, "failure_kind": "agentic_turn_simulation:time_cap"} | _ANSWER
+        _run(tmp_path, [[masked]])
+        _, decision = _decide(tmp_path, allocation_cut=False)
+        assert decision.counts == {"scored": 1, "masked": 1}
+
+    async def test_a_policy_that_fails_the_time_cap_leaves_it_final(self, tmp_path: Path) -> None:
+        from tests.unit_tests.orchestration.test_allocation_cut_recovery import _decide
+        from tests.unit_tests.orchestration.test_masked_infrastructure_recovery import _run
+
+        row = await self._saved_row(outcome_policy={"by_failure_kind": {"agent_time_cap": "fail"}})
+        _run(tmp_path, [[row]])
+        _, decision = _decide(tmp_path, allocation_cut=False)
+        assert decision.counts == {"scored": 1, "terminal": 1}, decision.reason

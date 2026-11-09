@@ -111,7 +111,7 @@ otherwise more turns hit the cap and are masked, and the score leaves out the sl
 
 | Step | When | Result |
 |---|---|---|
-| Masked | The agent stopped on `time_cap`, the context overflowed before its first step (`context_overflow` at `steps` 0: the row does not fit; only when the policy server reports the overflow), or a tool result in the turn is a simulator failure. | `mask_sample: true`, no judge call |
+| Masked | The agent stopped on `time_cap` and the turn was not already returned as an `agent_time_cap` failure by the agent's `/run` (which retries it; see the agent's README), the context overflowed before its first step (`context_overflow` at `steps` 0: the row does not fit; only when the policy server reports the overflow), or a tool result in the turn is a simulator failure. | `mask_sample: true`, no judge call |
 | Code gate | A call in the turn fails a code gate (below), or the turn is unfinished: it ended on `max_steps`, `max_output_tokens`, a later `context_overflow`, or `empty_output` from the policy (`unfinished_turn`; a failed request's empty reply is judged, see [design](docs/design.md#masking)). | `reward: 0.0`, `code_gate` set, no judge call |
 | Judged | Otherwise: each judge in `judges` returns its verdicts. | `reward: 1.0` if the turn is correct, else `0.0` |
 | Masked | No judge returned a usable verdict: one with every field the verdict schema (`prompts/evaluation_schema.json`) requires, each a string and one of the values the schema lists. Unusable ones are retried (`judge_max_attempts`). A judge that cannot be reached (a transport or HTTP failure on every attempt, or a context-length rejection) fails the row as a `judge_failed` event, whatever the other judges said. | `mask_sample: true`, `failure_kind: judge_failed` |

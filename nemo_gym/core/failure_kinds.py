@@ -83,6 +83,10 @@ AGENT_ROUTE_FAILED = "agent_route_failed"
 HARNESS_TERMINATION_UNCONFIRMED = "harness_termination_unconfirmed"
 # An environment server handled an episode failure that names no more specific kind.
 EPISODE_FAILED = "environment_episode_failed"
+# An episode stopped on the harness's wall-clock cap, which tracks serving speed, not the policy's behaviour. The
+# attempt is not a model result: it is retried within the attempt budget and, once that is spent, stays an unscored
+# failure (never a scored zero by default).
+AGENT_TIME_CAP = "agent_time_cap"
 # Collection could not dispatch an episode; routing metadata remains separate.
 COLLECTION_DISPATCH_FAILED = "collection_dispatch_failed"
 AGENT_REQUEST_FAILED = "agent_request_failed"
@@ -257,6 +261,7 @@ FAILURE_KINDS: frozenset[str] = frozenset(
         AGENT_ROUTE_FAILED,
         HARNESS_TERMINATION_UNCONFIRMED,
         EPISODE_FAILED,
+        AGENT_TIME_CAP,
         COLLECTION_DISPATCH_FAILED,
         HARBOR_FAILED,
         INFRASTRUCTURE_ERROR,

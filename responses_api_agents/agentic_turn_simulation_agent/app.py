@@ -29,17 +29,26 @@ from dataclasses import dataclass, field
 from time import monotonic, perf_counter, time
 from typing import Any, NamedTuple, TypedDict
 
+from fastapi import Request
+from fastapi.responses import JSONResponse
 from pydantic import Field, ValidationError
 
+from nemo_gym.agents import OutcomeAction, failure_outcome_policy
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
+    AGENT_RUN_ERROR,
+    AGENT_TIME_CAP,
+    FailureBoundary,
+    FailureReportRow,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseUsage,
+    NgFailureEvent,
     accumulate_response_usage,
+    report_for_current_request,
 )
 from nemo_gym.server_runtime import Activation, DirectHTTPToolAccess
 from nemo_gym.trajectory import (
@@ -52,7 +61,13 @@ from nemo_gym.trajectory import (
 )
 from resources_servers.agentic_turn_simulation import cline_xml
 from resources_servers.agentic_turn_simulation.simulator import simulator_failure
-from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig, _cookies
+from responses_api_agents.simple_agent.app import (
+    SimpleAgent,
+    SimpleAgentConfig,
+    SimpleAgentRunRequest,
+    SimpleAgentVerifyResponse,
+    _cookies,
+)
 
 
 LOG = logging.getLogger(__name__)
@@ -287,6 +302,48 @@ class _Episode:
 
 class AgenticTurnSimulationAgent(SimpleAgent):
     config: AgenticTurnSimulationAgentConfig
+
+    async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
+        """/run, except that a turn the wall-clock cap cut off is an error, not a result.
+
+        The cap tracks serving speed, so the cut-off turn says nothing about the policy: it is neither scored (not
+        even as a masked row that would leave the run looking healthy) nor kept as an answer. It is returned as a
+        typed ``agent_time_cap`` failure, which the collector retries within the attempt budget and, once that is
+        spent, keeps as an unscored failed row. ``outcome_policy`` selects the action by that kind (default: retry).
+        The resources server's /verify still ran, so its session is closed.
+        """
+        result = await super().run(request, body)
+        if not isinstance(result, SimpleAgentVerifyResponse):
+            return result  # already a failure row
+        metadata = result.response.metadata or {}
+        if metadata.get("stop_reason") != "time_cap":
+            return result
+        return JSONResponse(self._time_cap_row(metadata), status_code=200)  # type: ignore[return-value]
+
+    def _time_cap_row(self, metadata: dict[str, str]) -> dict[str, Any]:
+        """The failure row of a time-capped turn, in the fields Collection reads (see ``_model_timeout_row``)."""
+        reason = (
+            f"The turn hit the {self.config.max_time_seconds:g}s wall-clock cap after "
+            f"{metadata.get('elapsed_seconds', '?')}s and {metadata.get('steps', '?')} steps"
+        )
+        failure = NgFailureEvent(
+            boundary=FailureBoundary.AGENT,
+            failure_kind=AGENT_TIME_CAP,
+            failure_reason=reason,
+            operation="agent.agent_time_cap",
+        )
+        action = failure_outcome_policy(
+            failure, config=self.config.outcome_policy, classification=self.config.outcome_policy.classification
+        )
+        return {
+            "_ng_failure_class": AGENT_RUN_ERROR,
+            "_ng_failure_terminal": action != OutcomeAction.RETRY,
+            "_ng_failure_counts_as_zero": action == OutcomeAction.COUNT_AS_ZERO,
+            "failure_kind": AGENT_TIME_CAP,
+            "failure_reason": reason,
+            "_ng_failure_message": reason,
+            **FailureReportRow.fields(report_for_current_request(failure)),
+        }
 
     async def _create_episode(
         self,

@@ -249,7 +249,7 @@ so shell failures are a metric (`shell_failures`), not a gate.
 
 **What is masked.** A rollout is returned with `mask_sample: true` and a `failure_kind`, so that scores leave it out
 rather than count it as a 0, only when its outcome says nothing about the policy: the turn hit the wall-clock cap
-(`time_cap`), the row does not fit the policy's context (the context overflowed before the first step), the
+(`time_cap`; behind the shipped agent's `/run` it is an `agent_time_cap` failure that is retried instead), the row does not fit the policy's context (the context overflowed before the first step), the
 simulator could not answer, or no judge returned a usable verdict.
 
 **Why time caps and too-long rows.** A time cap measures serving speed more than behavior: a turn it cuts off is

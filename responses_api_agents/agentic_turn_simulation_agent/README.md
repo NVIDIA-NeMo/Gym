@@ -28,7 +28,7 @@ episode loop.
   | the stop tool's name | A call to one of the row's stop tools. It never runs; the reply's other calls run first and their results are kept (Cline rows: only the calls before it, as Cline runs them in order) | judged |
   | `mistake_limit` | Cline rows: `cline_max_consecutive_mistakes` replies in a row without a tool call | judged |
   | `max_steps` | The step cap, checked before each model call | 0 (`unfinished_turn`) |
-  | `time_cap` | The wall-clock cap, checked before each model call | masked |
+  | `time_cap` | The wall-clock cap, checked before each model call | not scored: `/run` returns an `agent_time_cap` failure, retried within the attempt budget and, once that is spent, left an unscored failed row (below) |
   | `context_overflow` | The history no longer fits the policy's context | masked at `steps` 0 (the row does not fit), else 0 |
   | `max_output_tokens` | A cut-off reply with a tool call or nothing visible, once the budget cannot grow | 0 (`unfinished_turn`) |
 
@@ -80,7 +80,7 @@ Cline sends them. A reply without a tool call gets Cline's own "no tools used" m
 | `resources_server` | required | The `agentic_turn_simulation` resources server. |
 | `model_server` | required | The policy model server. |
 | `max_steps` | `50` | Model steps per turn. `0` disables. |
-| `max_time_seconds` | `7200` | Wall-clock cap per turn. `null` or `0` disables. Lower it for training. |
+| `max_time_seconds` | `7200` | Wall-clock cap per turn. `null` or `0` disables. Lower it for training. A turn it cuts off is an `agent_time_cap` failure, not a result: `outcome_policy` selects what happens to it (`by_failure_kind: {agent_time_cap: ...}`; default `retry`, `fail` leaves it final and unscored, `count_as_zero` scores it 0). |
 | `stop_tools` | `[ask_user]` | Stop tools when the resources server has no session for the request. |
 | `max_output_tokens_cap` | `65536` | Ceiling for doubling the output budget. `0` disables doubling. |
 | `min_output_tokens` | `2048` | Smallest shrunk budget worth retrying with. |
