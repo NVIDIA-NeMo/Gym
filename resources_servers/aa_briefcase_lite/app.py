@@ -883,7 +883,12 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
         return session.deliverables_dir
 
     async def verify(self, request: Request, body: AABriefcaseLiteVerifyRequest) -> AABriefcaseLiteVerifyResponse:
+        requested = body
         body, masked = await resolve_deliverables(self, request, body)
+        # A judge failure leaves verify through ``judge_failsafe``, which builds its masked row from the request's own
+        # body. That row must name the persisted deliverable of a live session, or ``gym eval reverify`` has nothing
+        # to judge again.
+        requested.deliverables_dir = body.deliverables_dir
         if masked is not None:
             return AABriefcaseLiteVerifyResponse(**body.model_dump(), verify_mode=self.config.reward_mode, **masked)
         try:

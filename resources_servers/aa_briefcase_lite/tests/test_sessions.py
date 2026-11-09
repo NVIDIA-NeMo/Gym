@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """The task sandbox of an AA-Briefcase-Lite episode, run on the local sandbox provider in a temporary directory."""
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -12,10 +13,12 @@ from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core import EpisodeId, TaskId
 from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.server_runtime import ResourcesSeedSessionRequest
+from nemo_gym.verification import JudgeError, judge_failsafe
 from resources_servers.aa_briefcase_lite.app import (
     AABriefcaseLiteResourcesServer,
     AABriefcaseLiteResourcesServerConfig,
 )
+from resources_servers.aa_briefcase_lite.tests.conftest import verify_body
 from resources_servers.gdpval import persisted_layout, task_sandbox
 from resources_servers.gdpval.app import FinishRequest
 
@@ -97,3 +100,29 @@ async def test_web_tools_are_refused(server) -> None:
     assert refused.value.status_code == 404
     with pytest.raises(HTTPException):
         await server.fetch_web_page(SimpleNamespace(url="https://example.invalid"))
+
+
+async def test_a_judge_failure_of_a_live_session_names_the_persisted_deliverable(
+    server, home, tmp_path, monkeypatch
+) -> None:
+    request = SimpleNamespace(session={})
+    seed = ResourcesSeedSessionRequest(
+        resources_session_id="session",
+        episode_id=EpisodeId(rollout_id="0-0"),
+        task_id=TaskId(taskset="aa_briefcase_lite:benchmark", task_id="w1_t1"),
+        task_data={"task_id": "w1_t1"},
+    )
+    await server.seed_session(request, seed)
+    (home / "report.md").write_text("the deliverable")
+    await server.finish(request, FinishRequest(reason="done", paths=[str(home / "report.md")]))
+    monkeypatch.setattr(server, "_grade", AsyncMock(side_effect=JudgeError("judge unreachable")))
+
+    # The request of a live session carries no deliverables_dir: the server collected the files itself.
+    row = json.loads((await judge_failsafe(server.verify)(request, verify_body(None))).body)
+
+    assert row["mask_sample"] is True
+    assert row["failure_kind"] == "judge_failed"
+    persisted = persisted_layout.repeat_dir(str(tmp_path / "persist"), "w1_t1", 0)
+    assert row["deliverables_dir"] == str(persisted)
+    assert (persisted / "report.md").read_text() == "the deliverable"
+    await server.shutdown()
