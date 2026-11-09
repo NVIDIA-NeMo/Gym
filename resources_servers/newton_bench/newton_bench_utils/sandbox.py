@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import ast
+import asyncio
 import io
 import logging
 import math
@@ -161,6 +162,47 @@ class SessionHandle:
                 self._proc.close()
             except Exception:
                 logging.exception("Error during final Process object cleanup")
+
+    async def aclose(self) -> None:
+        """Stop the worker without waiting on the executor used by running Python calls.
+
+        The synchronous error path and async lifecycle share the close lock. Cancellation releases the lock but
+        leaves this handle retryable until process death has been observed.
+        """
+        while not self._close_lock.acquire(blocking=False):
+            await asyncio.sleep(0.01)
+        try:
+            if self.is_closed:
+                return
+            # A running exec may be writing a pipe frame. Do not interleave a close command with it, or block
+            # behind that exec's reply; terminate the worker below if it cannot accept a graceful close.
+            if self._exec_lock.acquire(blocking=False):
+                try:
+                    self._conn.send({"cmd": "close"})
+                except (BrokenPipeError, EOFError, OSError):
+                    pass
+                finally:
+                    self._exec_lock.release()
+            await self._wait_for_exit(1)
+            if self._proc.is_alive():
+                self._proc.terminate()
+                await self._wait_for_exit(1)
+            if self._proc.is_alive():
+                self._proc.kill()
+                await self._wait_for_exit(1)
+            if self._proc.is_alive():
+                raise RuntimeError(f"Python worker {self._proc.pid} is still alive; retry session cleanup")
+            self._proc.join(timeout=0)
+            self._conn.close()
+            self._proc.close()
+            self.is_closed = True
+        finally:
+            self._close_lock.release()
+
+    async def _wait_for_exit(self, timeout: float) -> None:
+        deadline = asyncio.get_running_loop().time() + timeout
+        while self._proc.is_alive() and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.01)
 
 
 def _get_last_expr_value(code: str, globals_dict: dict, locals_dict: dict):

@@ -13,15 +13,16 @@
 # limitations under the License.
 
 import asyncio
+import functools
 import hashlib
 import importlib
 import inspect
 import logging
 import math
-import os
 import sys
 import time
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from time import monotonic
 from typing import Annotated, Any, ClassVar, Dict, Optional, Union, cast
 
@@ -46,6 +47,7 @@ from nemo_gym.server_runtime import (
     lost_session_verification,
     reject_partial_typed_seed,
 )
+from nemo_gym.verification import JudgeError
 from resources_servers.newton_bench.newton_bench_utils.sandbox import (
     SessionHandle,
     validate_python_code,
@@ -58,6 +60,79 @@ if str(NEWTON_BENCH_PATH) not in sys.path:
     sys.path.insert(0, str(NEWTON_BENCH_PATH))
 
 _loaded_modules: dict = {}
+
+# NewtonBench's name for the model that judges symbolic equivalence in every module's evaluate_law.
+JUDGE_MODEL_NAME = "gpt41"
+
+# Each judge API attempt of the verification in progress: None for a reply, else the error the attempt raised.
+# evaluate_law must run in the verification's context (directly or through asyncio.to_thread) to record them.
+_judge_attempts: ContextVar[Optional[list[Optional[Exception]]]] = ContextVar(
+    "newton_bench_judge_attempts", default=None
+)
+
+
+def _require_judge_key() -> None:
+    """Refuse to serve when NewtonBench has no API key for its symbolic judge.
+
+    Every module's evaluate_law runs the judge, so without a key no verification can be scored. NewtonBench reads
+    the keys once, from the environment and its ``.env`` file, when ``utils.call_llm_api`` is first imported.
+    """
+    llm_api = importlib.import_module("utils.call_llm_api")
+    try:
+        llm_api.resolve_model_and_source(JUDGE_MODEL_NAME, llm_api.keys)
+    except ValueError as error:
+        raise ValueError(
+            f"NewtonBench's symbolic judge ({JUDGE_MODEL_NAME}) has no API key. Set OPENAI_API_KEY or "
+            f"OPENROUTER_API_KEY in the environment or in {NEWTON_BENCH_PATH / '.env'}, then restart the server."
+        ) from error
+
+
+def _record_judge_attempts() -> None:
+    """Report each API attempt of NewtonBench's symbolic judge to the verification in progress.
+
+    The judge catches the error of every failed API call and, out of attempts, returns False: the same value as a
+    "not equivalent" verdict. Wrapping the call it makes is how verify tells the two apart.
+    """
+    evaluation = importlib.import_module("modules.common.evaluation")
+    call_llm_api = evaluation.call_llm_api
+    if getattr(call_llm_api, "records_judge_attempts", False):
+        return
+
+    @functools.wraps(call_llm_api)
+    def recorded_call_llm_api(*args, **kwargs):
+        attempts = _judge_attempts.get()
+        try:
+            reply = call_llm_api(*args, **kwargs)
+        except Exception as error:
+            if attempts is not None:
+                attempts.append(error)
+            raise
+        if attempts is not None:
+            attempts.append(None)
+        return reply
+
+    recorded_call_llm_api.records_judge_attempts = True
+    evaluation.call_llm_api = recorded_call_llm_api
+
+
+def _evaluate_law(core: Any, **kwargs: Any) -> dict:
+    """Run a module's evaluate_law, raising a JudgeError when its symbolic judge gave no verdict for an API failure."""
+    attempts: list[Optional[Exception]] = []
+    token = _judge_attempts.set(attempts)
+    try:
+        eval_result = core.evaluate_law(**kwargs)
+    finally:
+        _judge_attempts.reset(token)
+    # The judge returns as soon as a reply carries a verdict, so when its last attempt raised, the False it returned
+    # means it ran out of attempts, not that the laws differ.
+    if attempts and attempts[-1] is not None:
+        error = attempts[-1]
+        failed = sum(attempt is not None for attempt in attempts)
+        raise JudgeError(
+            f"NewtonBench symbolic judge ({JUDGE_MODEL_NAME}) gave no verdict: {failed} of {len(attempts)} API "
+            f"attempts failed, the last with {type(error).__name__}: {error}"
+        ) from error
+    return eval_result
 
 
 def _json_safe_result(x: Any) -> Any:
@@ -82,6 +157,7 @@ def _load_module(module_name: str):
         core = importlib.import_module(f"modules.{module_name}.core")
     except Exception as e:
         raise ImportError(f"Unable to import core for NewtonBench module '{module_name}': {e}") from e
+    _record_judge_attempts()
     param_description = None
     try:
         prompts_mod = importlib.import_module(f"modules.{module_name}.prompts")
@@ -169,34 +245,30 @@ class NewtonBenchResourcesServer(SimpleResourcesServer):
         @asynccontextmanager
         async def lifespan(app: FastAPI):
             cleanup_task = asyncio.create_task(self._background_cleanup_task())
-
-            async with parent_lifespan(app):
-                yield
-
-            cleanup_task.cancel()
             try:
-                await cleanup_task
-            except asyncio.CancelledError:
-                pass
-
-            failures = []
-            for sid in set(self.session_metadata) | set(self._sessions) | set(self._starting_sessions):
+                async with parent_lifespan(app):
+                    yield
+            finally:
+                cleanup_task.cancel()
                 try:
-                    async with self.session_lock(sid):
-                        await self.release_session_state(sid)
-                except Exception as error:
-                    failures.append(error)
-            if failures:
-                raise ExceptionGroup("NewtonBench shutdown could not release all sessions", failures)
+                    await cleanup_task
+                except asyncio.CancelledError:
+                    pass
+
+                failures = []
+                for sid in set(self.session_metadata) | set(self._sessions) | set(self._starting_sessions):
+                    try:
+                        async with self.session_lock(sid):
+                            await self.release_session_state(sid)
+                    except Exception as error:
+                        failures.append(error)
+                if failures:
+                    raise ExceptionGroup("NewtonBench shutdown could not release all sessions", failures)
 
         app.router.lifespan_context = lifespan
 
         ensure_newton_bench()
-        key_found = os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")
-        if not key_found:
-            logging.warning(
-                "No API key found for evaluation. Please set OPENROUTER_API_KEY or OPENAI_API_KEY in the environment variables and restart the server."
-            )
+        _require_judge_key()
 
         modules_dir = NEWTON_BENCH_PATH / "modules"
         try:
@@ -415,12 +487,6 @@ class NewtonBenchResourcesServer(SimpleResourcesServer):
         law_version = metadata.get("law_version")
 
         try:
-            key_found = os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")
-            if not key_found:
-                logging.warning(
-                    "No API key found for evaluation. Please set OPENROUTER_API_KEY or OPENAI_API_KEY in the environment variables and restart the server."
-                )
-
             extracted_law = self._extract_law_from_response(body.response)
 
             if extracted_law is None:
@@ -453,12 +519,13 @@ class NewtonBenchResourcesServer(SimpleResourcesServer):
             core = _mod["core"]
             param_description = _mod.get("param_description", None)
 
-            eval_result = core.evaluate_law(
+            eval_result = _evaluate_law(
+                core,
                 llm_function_str=extracted_law,
                 param_description=param_description,
                 difficulty=difficulty,
                 law_version=law_version,
-                judge_model_name="gpt41",
+                judge_model_name=JUDGE_MODEL_NAME,
             )
 
             # Symbolic equivalence uses LLM judge
@@ -511,6 +578,9 @@ class NewtonBenchResourcesServer(SimpleResourcesServer):
                 evaluation_error=eval_result.get("error"),
             )
 
+        except JudgeError:
+            # An unreachable judge is not a wrong answer: judge_failsafe masks the sample instead of scoring it.
+            raise
         except Exception as e:
             return NewtonBenchVerifyResponse(
                 **body.model_dump(),
@@ -548,7 +618,9 @@ class NewtonBenchResourcesServer(SimpleResourcesServer):
                 self._starting_sessions.pop(sid, None)
         handle = self._sessions.get(sid)
         if handle is not None:
-            handle.close()
+            # close waits for the process and may contend with an executor thread already closing it.
+            # Keep the handle owned if this await is cancelled; a retry's close serializes on the handle's lock.
+            await handle.aclose()
             self._sessions.pop(sid, None)
 
     def _create_module_handler(self, module_name: str):

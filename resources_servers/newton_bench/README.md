@@ -7,7 +7,7 @@ NeMo Gym environment for [NewtonBench](https://github.com/HKUST-KnowComp/NewtonB
 ### Automatic Setup
 The resources server automatically clones the [NewtonBench](https://github.com/HKUST-KnowComp/NewtonBench) repository into the NeMo Gym repository root on the first launch or test run. You do not need to clone it manually.
 
-> Note: After the first launch, you should set up the required API keys (see below) and restart the resources server to enable the `verify` functionality.
+> Note: The resources server refuses to start until an API key for the symbolic judge is set (see below). The first launch still clones NewtonBench before it stops, so you can put the key in NewtonBench's `.env` file and start the server again.
 
 ### API Keys for Symbolic Judge
 The `verify` process uses NewtonBench's internal LLM judge (defaulting to `gpt41`) to compare the agent's proposed law with the ground truth symbolically. 
@@ -20,6 +20,8 @@ This requires an API key for either OpenAI or OpenRouter. Providing either one o
 You should set this in your shell or in a `.env` file inside the cloned `NewtonBench` directory. Remember to restart the resources server after setting the environment variable so that it can be accessed by the process.
 
 > Note: These are separate from the agent's model keys and must be accessible to the resources server process.
+
+If the judge still gives no verdict because its API calls fail (for example a rate limit or an outage), `verify` masks the sample (`mask_sample: true`, `failure_kind: judge_failed`) instead of scoring the law as not equivalent.
 
 ## Dataset Generation
 
@@ -135,6 +137,9 @@ that worker and its Python variables. If the request is cancelled during startup
 worker so verify, close, retirement, and the idle sweep can wait for it and release it. Failed termination retains
 the handle and ownership for retry; cleanup still attempts the other sessions.
 
+Worker cleanup waits asynchronously and does not depend on the executor used by Python calls. It can stop workers
+even when that executor is full. Shutdown also attempts cleanup when the parent application's lifespan fails.
+
 The typed seed reads the row's `module_name`, `difficulty`, `system`, `noise_level` and `law_version` from
 `task_data`; a row that fails validation or names an unknown module is refused with 422. A seed that reuses a session
 ID for another episode, or arrives after the session was verified or closed, is refused with 409. `/verify` releases
@@ -142,6 +147,8 @@ metadata and the Python worker before checkpoint tracking ends. A compact result
 to that verification payload remains for `session_close_retry_window_seconds`; retries return the same evaluation
 without invoking the judge again, and a changed payload is masked. `/close_session` releases
 any still-active session, drops the record and fences the episode, so a later `/verify` is masked. Checkpoint retirement also releases live workers and metadata.
+If the judge fails, verification releases the live resources without retaining a measured result. The first response
+is masked as `judge_failed`; a retry is masked as `session_lost` instead of replaying an outage score.
 The idle sweep (`session_ttl`) also releases state; a later seed retry for that session fails with 404 instead of
 confirming a session that no longer exists. A tool call for a session the server no longer holds fails with 404, and
 `/verify` for it returns a masked sample (`failure_kind` `session_lost`, or `session_expired` for the longer of

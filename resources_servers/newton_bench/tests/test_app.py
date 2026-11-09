@@ -13,16 +13,22 @@
 # limitations under the License.
 
 import asyncio
+import importlib
+import json
 import math
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from unittest.mock import MagicMock, patch
 
-from fastapi import HTTPException, Request
+import requests
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
-from pytest import fixture, mark, raises
+from pytest import MonkeyPatch, fixture, mark, raises
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core import EpisodeId, NeMoGymResponse, TaskId
@@ -33,6 +39,7 @@ from nemo_gym.server_runtime import (
     check_resources_session_contract,
     maybe_auto_expose,
 )
+from nemo_gym.verification import judge_failsafe
 from resources_servers.newton_bench.app import (
     BaseSeedSessionResponse,
     ExecutePythonRequest,
@@ -46,6 +53,7 @@ from resources_servers.newton_bench.app import (
     NewtonBenchVerifyResponse,
     RunExperimentResponse,
 )
+from resources_servers.newton_bench.newton_bench_utils.sandbox import SessionHandle
 
 
 class TestApp:
@@ -256,8 +264,8 @@ class TestApp:
         )
         server.session_metadata["session_1"]["last_used"] = time.time() - 2000
         server.session_metadata["session_2"]["last_used"] = time.time() - 100
-        server._sessions["session_1"] = MagicMock()
-        server._sessions["session_2"] = MagicMock()
+        server._sessions["session_1"] = MagicMock(spec=SessionHandle)
+        server._sessions["session_2"] = MagicMock(spec=SessionHandle)
         await server._cleanup_sessions()
         assert "session_1" not in server.session_metadata
         assert "session_1" not in server._sessions
@@ -279,11 +287,11 @@ class TestApp:
                 law_version="v0",
             ),
         )
-        mock_handle = MagicMock()
+        mock_handle = MagicMock(spec=SessionHandle)
         server._sessions["session_1"] = mock_handle
         server.session_metadata["session_1"]["last_used"] = time.time() - 2000
         await server._cleanup_sessions()
-        mock_handle.close.assert_called_once()
+        mock_handle.aclose.assert_called_once()
 
     @mark.asyncio
     async def test_last_used_updated_on_activity(
@@ -1014,7 +1022,7 @@ result
                 law_version="v0",
             ),
         )
-        worker = MagicMock(is_closed=False)
+        worker = MagicMock(spec=SessionHandle, is_closed=False)
         worker.exec.return_value = ("", "", "1")
         started, release, start = self._blocking_worker_start(worker)
 
@@ -1045,7 +1053,7 @@ result
                 law_version="v0",
             ),
         )
-        worker = MagicMock(is_closed=False)
+        worker = MagicMock(spec=SessionHandle, is_closed=False)
         started, release, start = self._blocking_worker_start(worker)
 
         with patch("resources_servers.newton_bench.app.SessionHandle", side_effect=start):
@@ -1057,7 +1065,7 @@ result
             response = await call
 
         assert response.success is False
-        worker.close.assert_called_once()
+        worker.aclose.assert_called_once()
         assert server._sessions == {}
 
     # ============================================================================
@@ -1325,6 +1333,100 @@ result
         mock_response = self._make_response_with_law("<final_law></final_law>")
         extracted = server._extract_law_from_response(mock_response)
         assert extracted == ""
+
+    # The m0_gravity easy v0 ground truth itself, so its RMSLE is 0 and only the judge can lower the reward.
+    EXACT_GRAVITY_LAW = (
+        "def discovered_law(mass1, mass2, distance):\n    return 6.674e-5 * mass1 * mass2 / distance ** 1.5"
+    )
+
+    @fixture
+    def judge_keys(self, monkeypatch: MonkeyPatch) -> dict:
+        """NewtonBench's judge API keys, cleared; the judge resolves its provider from this dict on every call."""
+        keys = importlib.import_module("utils.call_llm_api").keys
+        monkeypatch.setitem(keys, "oa", None)
+        monkeypatch.setitem(keys, "or", None)
+        return keys
+
+    def _judge_reply(self, status_code: int, content: str = "") -> requests.Response:
+        reply = requests.Response()
+        reply.status_code = status_code
+        reply.reason = "Too Many Requests" if status_code == 429 else "OK"
+        reply.url = "https://openrouter.ai/api/v1/chat/completions"
+        reply._content = json.dumps({"choices": [{"message": {"content": content}}]}).encode()
+        return reply
+
+    async def _verify_exact_law(self, server: NewtonBenchResourcesServer, mock_request: Request):
+        """Verify the exact law with NewtonBench's real evaluate_law, wrapped in judge_failsafe as /verify is."""
+        await server.seed_session(
+            mock_request,
+            NewtonBenchSeedSessionRequest(
+                module_name="m0_gravity",
+                difficulty="easy",
+                system="vanilla_equation",
+                noise_level=0.0,
+                law_version="v0",
+            ),
+        )
+        verify_request = NewtonBenchVerifyRequest(
+            responses_create_params={"input": [{"role": "user", "content": "test", "type": "message"}]},
+            response=self._make_response_with_law(f"<final_law>\n{self.EXACT_GRAVITY_LAW}\n</final_law>"),
+        )
+        return await judge_failsafe(server.verify)(mock_request, verify_request)
+
+    def test_setup_webserver_refuses_to_start_without_judge_key(
+        self, server: NewtonBenchResourcesServer, judge_keys: dict
+    ) -> None:
+        with raises(ValueError, match="OPENAI_API_KEY or OPENROUTER_API_KEY"):
+            server.setup_webserver()
+
+    def test_setup_webserver_starts_with_judge_key(
+        self, server: NewtonBenchResourcesServer, judge_keys: dict, monkeypatch: MonkeyPatch
+    ) -> None:
+        monkeypatch.setitem(judge_keys, "oa", "test-key")
+        app = server.setup_webserver()
+        assert "/run_experiment_m0_gravity" in {route.path for route in app.routes}
+
+    @mark.asyncio
+    async def test_verify_masks_judge_without_key(
+        self, server: NewtonBenchResourcesServer, mock_request: Request, judge_keys: dict
+    ) -> None:
+        """Every judge attempt fails without a key; the exact law is masked, not scored 0.4 as "not equivalent"."""
+        response = await self._verify_exact_law(server, mock_request)
+        assert isinstance(response, JSONResponse)
+        row = json.loads(response.body)
+        assert row["mask_sample"] is True
+        assert row["failure_kind"] == "judge_failed"
+        assert row["reward"] == 0.0
+        assert "No available API key" in row["failure_reason"]
+
+    @mark.asyncio
+    async def test_verify_masks_judge_rate_limited_on_every_attempt(
+        self, server: NewtonBenchResourcesServer, mock_request: Request, judge_keys: dict, monkeypatch: MonkeyPatch
+    ) -> None:
+        monkeypatch.setitem(judge_keys, "or", "test-key")
+        post = MagicMock(return_value=self._judge_reply(429))
+        monkeypatch.setattr("requests.post", post)
+        response = await self._verify_exact_law(server, mock_request)
+        assert post.call_count == 3
+        assert isinstance(response, JSONResponse)
+        row = json.loads(response.body)
+        assert row["mask_sample"] is True
+        assert row["failure_kind"] == "judge_failed"
+        assert "429" in row["failure_reason"]
+
+    @mark.asyncio
+    async def test_verify_scores_judge_verdict_after_rate_limit(
+        self, server: NewtonBenchResourcesServer, mock_request: Request, judge_keys: dict, monkeypatch: MonkeyPatch
+    ) -> None:
+        """A failed attempt the judge recovers from still yields its verdict and the full reward."""
+        monkeypatch.setitem(judge_keys, "or", "test-key")
+        post = MagicMock(side_effect=[self._judge_reply(429), self._judge_reply(200, "Answer: YES")])
+        monkeypatch.setattr("requests.post", post)
+        response = await self._verify_exact_law(server, mock_request)
+        assert isinstance(response, NewtonBenchVerifyResponse)
+        assert response.symbolic_equivalent is True
+        assert response.rmsle == 0.0
+        assert math.isclose(response.reward, 1.0)
 
 
 TASK_DATA = {
@@ -1624,7 +1726,7 @@ def test_checkpoint_verify_releases_state_but_retry_survives_until_expiry(typed:
         assert client.post(prefix + "/seed_session", json=_typed_seed() if typed else TASK_DATA).status_code == 200
         sid = next(iter(server.session_metadata))
         assert server._checkpoint.is_open(sid)
-        handle = MagicMock()
+        handle = MagicMock(spec=SessionHandle)
         server._sessions[sid] = handle
         first = client.post(prefix + "/verify", json=VERIFY_BODY).json()
         assert not first["mask_sample"]
@@ -1632,7 +1734,7 @@ def test_checkpoint_verify_releases_state_but_retry_survives_until_expiry(typed:
         assert server.session_metadata == {}
         assert server._session_episodes == {}
         assert server._sessions == {}
-        handle.close.assert_called_once()
+        handle.aclose.assert_called_once()
         retry = client.post(prefix + "/verify", json=VERIFY_BODY).json()
         assert retry["reward"] == first["reward"] and retry["mask_sample"] is False
         if typed:
@@ -1714,10 +1816,10 @@ def test_failed_verify_cleanup_preserves_grade_and_cached_evaluation_until_close
     body = _final_law_verify_body()
     evaluator = MagicMock()
     evaluator.evaluate_law.return_value = {"symbolic_equivalent": True, "rmsle": 0.0}
-    handle = MagicMock()
+    handle = MagicMock(spec=SessionHandle)
     handle.is_closed = False
     handle.exec.return_value = ("", "", "1")
-    handle.close.side_effect = RuntimeError("worker still alive")
+    handle.aclose.side_effect = RuntimeError("worker still alive")
     with (
         TestClient(server.setup_webserver(), raise_server_exceptions=False) as client,
         patch("resources_servers.newton_bench.app._load_module", return_value={"core": evaluator}),
@@ -1729,7 +1831,7 @@ def test_failed_verify_cleanup_preserves_grade_and_cached_evaluation_until_close
             assert verified.status_code == 200
             assert verified.json()["reward"] == 1.0 and not verified.json()["mask_sample"]
         evaluator.evaluate_law.assert_called_once()
-        assert handle.close.call_count == 2
+        assert handle.aclose.call_count == 2
         assert server._sessions["resources-session"] is handle
         assert server.session_is_verified("resources-session")
         python = client.post("/execute_python", json={"code": "1"})
@@ -1742,9 +1844,9 @@ def test_failed_verify_cleanup_preserves_grade_and_cached_evaluation_until_close
         assert server._sessions["resources-session"] is handle
         assert client.post("/close_session", json=_typed_close()).status_code == 500
         assert server._sessions["resources-session"] is handle
-        handle.close.side_effect = None
+        handle.aclose.side_effect = None
         assert client.post("/close_session", json=_typed_close()).status_code == 200
-        assert handle.close.call_count == 4
+        assert handle.aclose.call_count == 4
         assert server._sessions == {} and server.session_metadata == {}
         assert server._session_episodes == {} and server.session_is_closed("resources-session")
 
@@ -1763,12 +1865,12 @@ def test_checkpoint_retire_releases_live_session(typed: bool) -> None:
             == 200
         )
         sid = next(iter(server.session_metadata))
-        handle = MagicMock()
+        handle = MagicMock(spec=SessionHandle)
         server._sessions[sid] = handle
         client.portal.call(server._checkpoint.retire, EpisodeId(rollout_id="rollout", attempt=0))
         assert server.session_metadata == {}
         assert server._session_episodes == {}
-        handle.close.assert_called_once()
+        handle.aclose.assert_called_once()
         assert server._sessions == {}
 
 
@@ -1817,8 +1919,6 @@ def test_failed_cookie_reseed_preserves_the_completed_evaluation() -> None:
 
 @mark.asyncio
 async def test_cancelled_worker_start_remains_owned_until_close() -> None:
-    from resources_servers.newton_bench.newton_bench_utils.sandbox import SessionHandle
-
     server = _session_server()
     sid = "cancelled-start"
     request = MagicMock(spec=Request)
@@ -1901,10 +2001,10 @@ async def test_verify_queued_before_tool_refuses_execution_when_worker_cleanup_f
     request.session = {SESSION_ID_KEY: sid}
     seed = ResourcesSeedSessionRequest.model_validate(_typed_seed(sid))
     await server.seed_session(request, seed)
-    handle = MagicMock()
+    handle = MagicMock(spec=SessionHandle)
     handle.is_closed = False
     handle.exec.return_value = ("", "", "1")
-    handle.close.side_effect = RuntimeError("worker still alive")
+    handle.aclose.side_effect = RuntimeError("worker still alive")
     server._sessions[sid] = handle
     try:
         async with server.session_lock(sid):
@@ -1922,7 +2022,7 @@ async def test_verify_queued_before_tool_refuses_execution_when_worker_cleanup_f
         assert server._sessions[sid] is handle
         assert server.session_is_verified(sid)
     finally:
-        handle.close.side_effect = None
+        handle.aclose.side_effect = None
         await server.close_resources_session(
             ResourcesCloseSessionRequest(resources_session_id=sid, episode_id=seed.episode_id)
         )
@@ -1937,14 +2037,14 @@ async def test_idle_sweep_retries_failed_worker_and_still_releases_other_session
         request.session = {SESSION_ID_KEY: sid}
         await server.seed_session(request, ResourcesSeedSessionRequest.model_validate(_typed_seed(sid)))
         server.session_metadata[sid]["last_used"] = time.time() - server.config.session_ttl - 1
-    failed, other = MagicMock(), MagicMock()
-    failed.close.side_effect = RuntimeError("worker still alive")
+    failed, other = MagicMock(spec=SessionHandle), MagicMock(spec=SessionHandle)
+    failed.aclose.side_effect = RuntimeError("worker still alive")
     server._sessions.update(failed=failed, other=other)
     with raises(ExceptionGroup, match="idle sweep"):
         await server._cleanup_sessions()
-    other.close.assert_called_once()
+    other.aclose.assert_called_once()
     assert set(server._sessions) == set(server.session_metadata) == {"failed"}
-    failed.close.side_effect = None
+    failed.aclose.side_effect = None
     await server._cleanup_sessions()
     assert server._sessions == {} and server.session_metadata == {}
 
@@ -1957,13 +2057,143 @@ async def test_shutdown_releases_the_other_sessions_when_one_worker_will_not_sto
         request = MagicMock(spec=Request)
         request.session = {SESSION_ID_KEY: sid}
         await server.seed_session(request, ResourcesSeedSessionRequest.model_validate(_typed_seed(sid)))
-    failed, other = MagicMock(), MagicMock()
-    failed.close.side_effect = RuntimeError("worker still alive")
+    failed, other = MagicMock(spec=SessionHandle), MagicMock(spec=SessionHandle)
+    failed.aclose.side_effect = RuntimeError("worker still alive")
     server._sessions.update(failed=failed, other=other)
 
     with raises(ExceptionGroup, match="shutdown could not release"):
         async with app.router.lifespan_context(app):
             pass
 
-    other.close.assert_called_once()
+    other.aclose.assert_called_once()
     assert set(server._sessions) == set(server.session_metadata) == {"failed"}
+
+
+@mark.asyncio
+@mark.parametrize("typed", [False, True])
+async def test_cancelled_close_keeps_worker_owned_and_retry_waits_without_blocking_loop(typed: bool) -> None:
+    server = _session_server()
+    sid = "cancelled-close"
+    request = MagicMock(spec=Request)
+    request.session = {SESSION_ID_KEY: sid}
+    seed = ResourcesSeedSessionRequest.model_validate(_typed_seed(sid))
+    await server.seed_session(request, seed if typed else NewtonBenchSeedSessionRequest(**TASK_DATA))
+    original_metadata = server.session_metadata[sid]
+    # Exercise the real async close lock/idempotence while controlling process exit.
+    handle = SessionHandle.__new__(SessionHandle)
+    handle._close_lock = threading.Lock()
+    handle._exec_lock = threading.Lock()
+    handle._conn = MagicMock()
+    handle._proc = MagicMock()
+    handle.is_closed = False
+    started, finish = asyncio.Event(), asyncio.Event()
+    handle._conn.send.side_effect = lambda message: started.set()
+    handle._proc.is_alive.side_effect = lambda: not finish.is_set()
+    server._sessions[sid] = handle
+    body = ResourcesCloseSessionRequest(resources_session_id=sid, episode_id=seed.episode_id)
+    closing = retry = None
+    try:
+        closing = asyncio.create_task(server.close_resources_session(body))
+        await asyncio.wait_for(started.wait(), 2)
+        # Reaching here while the process join is blocked proves another session can use the event loop.
+        assert not closing.done()
+        closing.cancel()
+        with raises(asyncio.CancelledError):
+            await closing
+        assert server._sessions[sid] is handle
+        assert server.session_metadata[sid] is original_metadata
+        assert not server.session_is_closed(sid)
+        retry = asyncio.create_task(
+            server.close_resources_session(body)
+            if typed
+            else server.seed_session(request, NewtonBenchSeedSessionRequest(**TASK_DATA))
+        )
+        await asyncio.sleep(0)
+        assert not retry.done()
+        assert server.session_metadata[sid] is original_metadata
+        finish.set()
+        await asyncio.wait_for(retry, 5)
+        handle._proc.join.assert_called_once()
+        handle._proc.close.assert_called_once()
+        assert handle.is_closed and server._sessions == {}
+        if typed:
+            assert server.session_metadata == {} and server.session_is_closed(sid)
+        else:
+            assert server.session_metadata[sid] is not original_metadata
+    finally:
+        finish.set()
+        await asyncio.gather(*(task for task in (closing, retry) if task is not None), return_exceptions=True)
+        await handle.aclose()
+
+
+@mark.asyncio
+@mark.parametrize("stage", ["startup", "shutdown"])
+async def test_parent_lifespan_failure_still_releases_workers(stage: str) -> None:
+    server = _session_server()
+    request = MagicMock(spec=Request)
+    request.session = {SESSION_ID_KEY: "parent-failure"}
+    await server.seed_session(request, ResourcesSeedSessionRequest.model_validate(_typed_seed("parent-failure")))
+    handle = MagicMock(spec=SessionHandle)
+    server._sessions["parent-failure"] = handle
+
+    @asynccontextmanager
+    async def failing_parent(app: FastAPI):
+        if stage == "startup":
+            raise RuntimeError("parent failed")
+        yield
+        raise RuntimeError("parent failed")
+
+    with patch(
+        "resources_servers.newton_bench.app.SimpleResourcesServer.setup_webserver",
+        return_value=FastAPI(lifespan=failing_parent),
+    ):
+        app = server.setup_webserver()
+    with raises(RuntimeError, match="parent failed"):
+        async with app.router.lifespan_context(app):
+            pass
+    handle.aclose.assert_called_once()
+    assert server._sessions == {} and server.session_metadata == {}
+
+
+def test_close_can_stop_worker_with_a_saturated_default_executor() -> None:
+    handle = SessionHandle(max_execution_time=60)
+    release_executor = threading.Event()
+
+    async def close_with_busy_executor() -> None:
+        server = _session_server()
+        sid = "saturated-executor"
+        request = MagicMock(spec=Request)
+        request.session = {SESSION_ID_KEY: sid}
+        seed = ResourcesSeedSessionRequest.model_validate(_typed_seed(sid))
+        await server.seed_session(request, seed)
+        server._sessions[sid] = handle
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
+        started = asyncio.Event()
+
+        def occupy_executor() -> None:
+            loop.call_soon_threadsafe(started.set)
+            release_executor.wait(10)
+
+        busy = loop.run_in_executor(None, occupy_executor)
+        await started.wait()
+        try:
+            await asyncio.wait_for(
+                server.close_resources_session(
+                    ResourcesCloseSessionRequest(resources_session_id=sid, episode_id=seed.episode_id)
+                ),
+                timeout=4,
+            )
+            assert not busy.done()
+            assert handle.is_closed
+            assert server._sessions == {} and server.session_metadata == {}
+        finally:
+            release_executor.set()
+            await busy
+
+    try:
+        assert handle.exec("1")[2] == "1"
+        asyncio.run(close_with_busy_executor())
+    finally:
+        release_executor.set()
+        handle.close()
