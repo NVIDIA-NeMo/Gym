@@ -305,17 +305,22 @@ async def test_success_body_interruption_keeps_usage_unknown_after_recovery(monk
         async def __aexit__(self, *args):
             return False
 
-    replies = iter([
-        Reply(AsyncMock(side_effect=aiohttp.ClientPayloadError("truncated"))),
-        Reply(AsyncMock(return_value={"usage": USAGE})),
-        Reply(AsyncMock(return_value={"usage": USAGE})),
-    ])
+    replies = iter(
+        [
+            Reply(AsyncMock(side_effect=aiohttp.ClientPayloadError("truncated"))),
+            Reply(AsyncMock(return_value={"usage": USAGE})),
+            Reply(AsyncMock(return_value={"usage": USAGE})),
+        ]
+    )
     model = sandbox_runner.SandboxResponsesChatModel(
         http=SimpleNamespace(post=lambda *args, **kwargs: next(replies)), url="http://model/responses"
     )
     monkeypatch.setattr(sandbox_runner, "_retry_delay", lambda *args: 0)
     for _ in range(2):
         await model.create_response({})
-        assert _usage({"model_calls": model.calls, "usages": model.usages, "usage_incomplete": model.usage_incomplete}) is None
+        assert (
+            _usage({"model_calls": model.calls, "usages": model.usages, "usage_incomplete": model.usage_incomplete})
+            is None
+        )
     assert model.calls == 2
     assert model.usages == [USAGE, USAGE]

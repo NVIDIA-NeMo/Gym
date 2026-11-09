@@ -521,9 +521,13 @@ async def test_rejected_tools_do_not_bind_the_session(lent_sandbox, runtime, mon
     await agent.seed_agent_session(request, _seed(sandbox_access=access))
     try:
         with pytest.raises(HTTPException) as refused:
-            await agent.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(
-                input="hi", tools=[{"type": "function", "name": "lookup", "parameters": {}, "strict": False}]
-            ))
+            await agent.responses(
+                request,
+                Response(),
+                NeMoGymResponseCreateParamsNonStreaming(
+                    input="hi", tools=[{"type": "function", "name": "lookup", "parameters": {}, "strict": False}]
+                ),
+            )
         assert refused.value.status_code == 422
         assert agent._require_agent_session("agent-session").activation is None
         assert model.requests == []
@@ -556,16 +560,23 @@ async def test_owned_start_failure_retains_cleanup_handle_and_metadata(monkeypat
     from nemo_gym.agents import AgentSessionSetupError
 
     provider = SimpleNamespace(name="fake", aclose=AsyncMock())
-    fake = SimpleNamespace(provider_name="fake", sandbox_id="created", start=AsyncMock(side_effect=RuntimeError("upload failed")))
-    monkeypatch.setattr(app, "get_global_config_dict", lambda: {
-        "sandbox": {"default_metadata": {"team": "eval", "priority": "default"}, "local": {}}
-    })
+    fake = SimpleNamespace(
+        provider_name="fake", sandbox_id="created", start=AsyncMock(side_effect=RuntimeError("upload failed"))
+    )
+    monkeypatch.setattr(
+        app,
+        "get_global_config_dict",
+        lambda: {"sandbox": {"default_metadata": {"team": "eval", "priority": "default"}, "local": {}}},
+    )
     monkeypatch.setattr(app, "create_provider", lambda config: provider)
     monkeypatch.setattr(app, "AsyncSandbox", lambda provider: fake)
     monkeypatch.setattr(app, "assert_model_url_reachable_from_sandbox", lambda *args, **kwargs: None)
+    monkeypatch.setattr(DeepAgentsAgent, "resolve_model_base_url", lambda *args, **kwargs: "http://model:8000/v1")
     close = AsyncMock(side_effect=RuntimeError("stop failed"))
     monkeypatch.setattr(sandbox.DeepAgentsSandboxSession, "close", close)
-    agent = _agent(sandbox_provider="sandbox", sandbox_config={"workdir": "/app", "metadata": {"priority": "explicit"}})
+    agent = _agent(
+        sandbox_provider="sandbox", sandbox_config={"workdir": "/app", "metadata": {"priority": "explicit"}}
+    )
     with pytest.raises(AgentSessionSetupError) as failed:
         await agent._seed_agent_session_state(_seed())
     assert "upload failed" in str(failed.value.__cause__)
