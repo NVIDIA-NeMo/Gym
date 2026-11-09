@@ -264,13 +264,21 @@ def dependency_failure(
 
 
 class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeResponseT]):
-    """Expose a typed episode protocol with shared limits and cleanup."""
+    """Expose a typed episode protocol with shared limits and cleanup.
+
+    A subclass implements ``run`` and registers the release of each resource it holds, such as a sandbox, in the
+    episode's ``CleanupContext``. When the server shuts down, it finishes the cleanups of every episode still
+    running (see ``finish_running_cleanups``).
+    """
 
     config: BaseEnvironmentServerConfig
     request_model: ClassVar[type[EpisodeRequestT]]
     response_model: ClassVar[type[EpisodeResponseT]]
     _admission: asyncio.Semaphore | None = None
     _checkpoint: EnvironmentParticipant | None = None
+    # Each episode's cleanups until all of them have finished, for the shutdown sweep. Keyed by id(): two attempts
+    # of one episode can run at once without checkpointing.
+    _running_cleanups: dict[int, CleanupContext] | None = None
     # How this server's episodes take part in partial-rollout checkpoints.
     # A protocol whose ``run`` records checkpoint boundaries declares "exported".
     # Its episodes continue after a restore.
@@ -296,10 +304,12 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
             if self.config.max_concurrent_episodes is not None
             else None
         )
+        self._running_cleanups = {}
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
         self.setup_environment_checkpoint(app)
+        self.setup_shutdown_sweep(app)
 
         async def run_endpoint(body: Any) -> Any:
             return await self.run_request(body)
@@ -373,6 +383,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
             episode_id=request.episode_id,
             cleanup_timeout_seconds=float(self.config.cleanup_timeout_seconds),
         )
+        self._running_cleanups[id(cleanup)] = cleanup
         response: EpisodeResponseT
         handled: NgFailureEvent | None = None
         cancelled: asyncio.CancelledError | None = None
@@ -400,6 +411,9 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
                             )
                             begun = True
                         response = await self.run(request, cleanup)
+                        failure = self._recorded_episode_failure(request)
+                        if failure is not None:
+                            raise failure
                 except TimeoutError as error:
                     if deadline is not None and deadline.expired():
                         response = self.failure_response(
@@ -432,6 +446,10 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
                     with CancelScope(shield=True):
                         try:
                             await cleanup.aclose()
+                            # A cleanup that failed, such as a sandbox stop that got a provider error, or that a
+                            # cancellation interrupted, stays tracked, so the shutdown sweep tries it again.
+                            if not any(entry.active for entry in cleanup._cleanups):
+                                self._running_cleanups.pop(id(cleanup), None)
                         finally:
                             # Even a native cancel landing in cleanup must not leave the episode tracked.
                             if begun:
@@ -480,9 +498,65 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
             instance_name=self.config.name,
         )
 
+    def setup_shutdown_sweep(self, app: FastAPI) -> None:
+        """Finish the cleanups of every episode still running when ``app`` shuts down.
+
+        Call this from any ``setup_webserver`` that builds its own app.
+        """
+        parent_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def lifespan(app: FastAPI) -> AsyncIterator[Any]:
+            try:
+                async with parent_lifespan(app) as state:
+                    yield state
+            finally:
+                await self.finish_running_cleanups()
+
+        app.router.lifespan_context = lifespan
+
+    async def finish_running_cleanups(self) -> None:
+        """Finish the cleanups of every episode still running; the server runs this when it shuts down.
+
+        Shutdown cancels the running ``/run`` requests and does not wait for them, so a second cancellation can
+        interrupt an episode's cleanup partway. Cleanups are idempotent, so this runs each one that has not
+        finished, under its episode's rollout. They all start at once, so a sandbox stop does not wait behind a
+        call to a Gym server that is shutting down too. The sweep waits ``cleanup_timeout_seconds`` in all, and
+        logs each episode whose cleanup it could not confirm.
+        """
+
+        async def finish(cleanup: CleanupContext, entry: _CleanupEntry) -> None:
+            with rollout_context(cleanup.episode_id.capture_key):
+                await entry.close()
+
+        tasks = {
+            asyncio.ensure_future(finish(cleanup, entry)): cleanup.episode_id
+            for cleanup in list(self._running_cleanups.values())
+            for entry in cleanup._cleanups
+            if entry.active
+        }
+        if not tasks:
+            return
+        await asyncio.wait(tasks, timeout=self.config.cleanup_timeout_seconds)
+        unconfirmed: set[EpisodeId] = set()
+        for task, episode_id in tasks.items():
+            if not task.done():
+                task.cancel()
+                unconfirmed.add(episode_id)
+            elif task.cancelled() or task.exception() is not None:
+                unconfirmed.add(episode_id)
+            # Consume a failure that lands after the sweep stops waiting.
+            task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+        for episode_id in sorted(unconfirmed, key=lambda episode_id: episode_id.capture_key):
+            LOGGER.error(f"Episode cleanup unconfirmed at shutdown: episode_id={episode_id.capture_key}")
+
     @abstractmethod
     async def run(self, request: EpisodeRequestT, cleanup: CleanupContext) -> EpisodeResponseT:
         """Run one concrete environment protocol."""
+
+    def _recorded_episode_failure(self, request: EpisodeRequestT) -> NgFailureEvent | None:
+        """A handled failure that this episode met outside ``run``; the episode fails with it when ``run`` returns."""
+        return None
 
     def checkpoint_continuation(self, request: EpisodeRequestT) -> dict[str, JsonValue] | None:
         """Return the protocol state this attempt continues from a checkpoint, once, or ``None``."""
@@ -639,12 +713,12 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
     Other Environment Servers grant the agent a Resources Server's tools; this one owns the tools, their state and
     verification.
 
-    ``run_episode`` holds the episode's state, and ``serve_tools`` grants the agent the episode's tools until the
-    episode ends. A tool call is a separate request to ``POST /<tool name>`` at the server's root, as on a
-    Resources Server, with the episode token in the ``X-NeMo-Gym-Episode-Token`` header. A request with an episode
-    token reaches only the tools. Calls to one episode run one at a time, each under the episode's rollout, and
-    each is recorded in ``ServedTools.calls``. When the episode ends, a call still running is cancelled. A call
-    that runs longer than ``tool_call_timeout_seconds`` is cancelled and answered 504. A client that disconnects
+    ``run`` holds the episode's state, and ``serve_tools`` grants the agent the episode's tools until the episode
+    ends. A tool call is a separate request to ``POST /<tool name>`` at the server's root, as on a Resources
+    Server, with the episode token in the ``X-NeMo-Gym-Episode-Token`` header. A request with an episode token
+    reaches only the tools. Calls to one episode run one at a time, each under the episode's rollout, and each is
+    recorded in ``ServedTools.calls``. When the episode ends, a call still running is cancelled. A call that runs
+    longer than ``tool_call_timeout_seconds`` is cancelled and answered 504. A client that disconnects
     cancels its call, which is recorded.
 
     The tool route takes every one-segment ``POST`` path that the server does not route when ``setup_webserver``
@@ -658,26 +732,16 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
     grant still names the old one.
 
     A tool that raises a handled episode failure (``handled_episode_failure``), such as for a crashed sandbox,
-    fails the episode with it when ``run_episode`` returns; the agent sees that call fail meanwhile.
-
-    A subclass implements ``run_episode``, not ``run``, so the base tracks the episode's cleanups. When the server
-    shuts down, it finishes the cleanups of every episode still running, such as stopping its sandbox.
+    fails the episode with it when ``run`` returns; the agent sees that call fail meanwhile.
     """
 
     config: BaseEnvironmentServerWithToolsConfig
     _episode_tokens: Optional[EpisodeTokens] = None
     _open_episodes: Optional[dict[EpisodeId, _OpenEpisode]] = None
-    # Keyed by id(): two attempts of one episode can run at once without checkpointing.
-    _running_cleanups: Optional[dict[int, CleanupContext]] = None
     _reserved_tool_names: frozenset[str] = frozenset()
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
-        if "run" in cls.__dict__:
-            raise TypeError(
-                f"{cls.__name__} overrides run; a BaseEnvironmentServerWithTools implements run_episode, so the base "
-                "can track the episode's cleanups for the shutdown sweep"
-            )
         if cls.checkpoint_mode == "exported":
             raise TypeError(
                 f"{cls.__name__} sets checkpoint_mode='exported', which BaseEnvironmentServerWithTools does not "
@@ -688,7 +752,6 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
         super().model_post_init(context)
         self._episode_tokens = EpisodeTokens(episode_token_secret())
         self._open_episodes = {}
-        self._running_cleanups = {}
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -701,81 +764,16 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
             route.path.strip("/").split("/")[0] for route in app.routes if getattr(route, "path", "/") != "/"
         )
         app.post("/{tool_name}")(self._tool_call_endpoint)
-
-        parent_lifespan = app.router.lifespan_context
-
-        @asynccontextmanager
-        async def lifespan(app: FastAPI) -> AsyncIterator[Any]:
-            try:
-                async with parent_lifespan(app) as state:
-                    yield state
-            finally:
-                await self.finish_running_cleanups()
-
-        app.router.lifespan_context = lifespan
         return app
 
     def _is_tool_path(self, path: str) -> bool:
         segments = path.strip("/").split("/")
         return len(segments) == 1 and segments[0] not in self._reserved_tool_names
 
-    async def run(self, request: EpisodeRequestT, cleanup: CleanupContext) -> EpisodeResponseT:
-        key = id(cleanup)
-        self._running_cleanups[key] = cleanup
-
-        async def forget() -> None:
-            # A cleanup that failed, such as a sandbox stop that got a provider error, stays tracked, so the shutdown
-            # sweep tries it again.
-            if not any(entry.active for entry in cleanup._cleanups if entry is not tracking.entry):
-                self._running_cleanups.pop(key, None)
-
-        # Registered first, so it runs last: the episode stays tracked until each of its cleanups has finished.
-        tracking = cleanup.register_cleanup("shutdown tracking", forget)
-        response = await self.run_episode(request, cleanup)
+    def _recorded_episode_failure(self, request: EpisodeRequestT) -> NgFailureEvent | None:
+        # A tool met a failure the episode cannot recover from; the agent saw the call fail.
         episode = self._open_episodes.get(request.episode_id)
-        if episode is not None and episode.failure is not None:
-            # A tool met a failure the episode cannot recover from; the agent saw the call fail.
-            raise episode.failure
-        return response
-
-    @abstractmethod
-    async def run_episode(self, request: EpisodeRequestT, cleanup: CleanupContext) -> EpisodeResponseT:
-        """Run one episode, as ``BaseEnvironmentServer.run`` does. Register each resource's release in ``cleanup``."""
-
-    async def finish_running_cleanups(self) -> None:
-        """Finish the cleanups of every episode still running; the server runs this when it shuts down.
-
-        Shutdown cancels the running ``/run`` requests and does not wait for them, so a second cancellation can
-        interrupt an episode's cleanup partway. Cleanups are idempotent, so this runs each one that has not
-        finished, under its episode's rollout. They all start at once, so a sandbox stop does not wait behind a
-        call to a Gym server that is shutting down too. The sweep waits ``cleanup_timeout_seconds`` in all, and
-        logs each episode whose cleanup it could not confirm.
-        """
-
-        async def finish(cleanup: CleanupContext, entry: _CleanupEntry) -> None:
-            with rollout_context(cleanup.episode_id.capture_key):
-                await entry.close()
-
-        tasks = {
-            asyncio.ensure_future(finish(cleanup, entry)): cleanup.episode_id
-            for cleanup in list(self._running_cleanups.values())
-            for entry in cleanup._cleanups
-            if entry.active
-        }
-        if not tasks:
-            return
-        await asyncio.wait(tasks, timeout=self.config.cleanup_timeout_seconds)
-        unconfirmed: set[EpisodeId] = set()
-        for task, episode_id in tasks.items():
-            if not task.done():
-                task.cancel()
-                unconfirmed.add(episode_id)
-            elif task.cancelled() or task.exception() is not None:
-                unconfirmed.add(episode_id)
-            # Consume a failure that lands after the sweep stops waiting.
-            task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
-        for episode_id in sorted(unconfirmed, key=lambda episode_id: episode_id.capture_key):
-            LOGGER.error(f"Episode cleanup unconfirmed at shutdown: episode_id={episode_id.capture_key}")
+        return episode.failure if episode is not None else None
 
     def multiple_workers_unsupported_reason(self) -> Optional[str]:
         return "a tool call reaches whichever worker accepts it, and only the worker that runs the episode holds it"
