@@ -402,6 +402,15 @@ for candidate in python3 python /opt/conda/bin/python3 /usr/local/bin/python3 /e
     exec "$candidate" /tests/nemo_gym/grade.py
   fi
 done
+if [ -f /tests/nemo_gym/python.tar.gz ]; then
+  runtime=$(mktemp -d /tmp/nemo-gym-swe-grader-XXXXXXXX) || exit 1
+  trap 'rm -rf -- "$runtime"' EXIT
+  tar -xzf /tests/nemo_gym/python.tar.gz -C "$runtime" || exit 1
+  "$runtime/python/bin/python3" -E -s -c 'import sys; sys.exit(sys.version_info < ({major}, {minor}))' || exit 1
+  echo '[nemo_gym] grading with the supplied private Python runtime' >&2
+  "$runtime/python/bin/python3" -E -s /tests/nemo_gym/grade.py
+  exit $?
+fi
 echo "[nemo_gym] no Python {major}.{minor}+ in this image; the task cannot be graded" >&2
 exit 1
 """
@@ -493,7 +502,15 @@ def _task_toml(plan: TaskPlan, agent_timeout_sec: int, metadata: dict[str, Any])
     )
 
 
-def write_task(plan: TaskPlan, task_dir: Path, *, agent_timeout_sec: int, metadata: dict[str, Any]) -> None:
+def write_task(
+    plan: TaskPlan,
+    task_dir: Path,
+    *,
+    agent_timeout_sec: int,
+    metadata: dict[str, Any],
+    grader_python_archive: Path | None = None,
+) -> None:
+    """Write a task, optionally delivering a private grader interpreter with its hidden tests."""
     files = {
         "task.toml": _task_toml(plan, agent_timeout_sec, metadata),
         "instruction.md": plan.prompt,
@@ -520,6 +537,8 @@ def write_task(plan: TaskPlan, task_dir: Path, *, agent_timeout_sec: int, metada
         if relative.endswith(".sh"):
             path.chmod(0o755)
     shutil.copyfile(GRADER_SOURCE, task_dir / "tests/nemo_gym/grade.py")
+    if grader_python_archive is not None:
+        shutil.copyfile(grader_python_archive, task_dir / "tests/nemo_gym/python.tar.gz")
     for relative, source_path in plan.vendored.items():
         target = task_dir / "tests/nemo_gym" / relative
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -555,6 +574,7 @@ def convert(
     default_source: str | None = None,
     skip_unsupported: bool = False,
     parser_cache_dir: Path | None = None,
+    grader_python_archive: Path | None = None,
 ) -> dict[str, Any]:
     if output_dir.exists() and any(output_dir.iterdir()):
         raise FileExistsError(f"{output_dir} is not empty")
@@ -579,13 +599,19 @@ def convert(
         metadata = {"source_server": source, "instance_id": plan.instance_id, "source_line": number}
         if task_id:
             metadata["source_task_id"] = dict(task_id)
-        write_task(plan, output_dir / name, agent_timeout_sec=agent_timeout_sec, metadata=metadata)
+        write_task(
+            plan,
+            output_dir / name,
+            agent_timeout_sec=agent_timeout_sec,
+            metadata=metadata,
+            grader_python_archive=grader_python_archive,
+        )
         entry = {"task": name, "line": number, "source": source, "instance_id": plan.instance_id}
         entry["prompt_sha256"] = hashlib.sha256(plan.prompt.encode("utf-8")).hexdigest()
         entry["verifier_file_sha256"] = {
             path.relative_to(output_dir / name).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
             for path in sorted((output_dir / name / "tests").rglob("*"))
-            if path.is_file()
+            if path.is_file() and path.name != "python.tar.gz"
         }
         converted.append(entry)
 
@@ -617,6 +643,7 @@ def convert(
         "agent_timeout_sec": agent_timeout_sec,
         # None: each task keeps its server's own evaluation_timeout.
         "evaluation_timeout_sec": evaluation_timeout_sec,
+        "grader_python_archive": str(grader_python_archive) if grader_python_archive is not None else None,
         "converted": converted,
         "skipped": skipped,
     }
@@ -642,6 +669,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--skip-unsupported", action="store_true", help="Leave out rows of other sources")
     parser.add_argument("--parser-cache-dir", type=Path, help="Where SWE-rebench's log parsers are cloned")
+    parser.add_argument(
+        "--grader-python-archive",
+        type=Path,
+        help="Supplied python-build-standalone archive for the task platform, used only if its image lacks Python 3.10+",
+    )
     args = parser.parse_args(argv)
     manifest = convert(
         args.input,
@@ -654,6 +686,7 @@ def main(argv: list[str] | None = None) -> int:
         default_source=args.default_source,
         skip_unsupported=args.skip_unsupported,
         parser_cache_dir=args.parser_cache_dir,
+        grader_python_archive=args.grader_python_archive,
     )
     print(f"converted {len(manifest['converted'])} tasks into {args.output_dir}; skipped {len(manifest['skipped'])}")
     for entry in manifest["skipped"]:

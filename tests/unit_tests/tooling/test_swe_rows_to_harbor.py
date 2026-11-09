@@ -10,6 +10,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tarfile
 import time
 import tomllib
 from pathlib import Path
@@ -60,6 +61,48 @@ def test_grader_uses_task_venv_only_when_it_meets_python_requirement(tmp_path: P
         assert "no Python 3.10+" in result.stderr
 
 
+@pytest.mark.parametrize("grader_exit,compatible", [(0, True), (7, True), (0, False)])
+def test_private_grader_runtime_runs_and_cleans_up(tmp_path: Path, grader_exit: int, compatible: bool) -> None:
+    binaries = tmp_path / "bin"
+    binaries.mkdir()
+    for name in ("python", "python3"):
+        path = binaries / name
+        path.write_text("#!/bin/sh\nexit 1\n")
+        path.chmod(0o755)
+    for name, source in (
+        ("mkdir", "/bin/mkdir"),
+        ("mktemp", "/usr/bin/mktemp"),
+        ("tar", "/usr/bin/tar"),
+        ("rm", "/bin/rm"),
+    ):
+        (binaries / name).symlink_to(source)
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    executable = tmp_path / "python3"
+    executable.write_text(
+        f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n' if compatible else "#!/bin/sh\nexit 9\n"
+    )
+    executable.chmod(0o755)
+    with tarfile.open(tests / "python.tar.gz", "w:gz") as archive:
+        archive.add(executable, arcname="python/bin/python3")
+    marker = tmp_path / "graded"
+    (tests / "grade.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('graded')\nraise SystemExit({grader_exit})\n"
+    )
+    script = convert._test_script()
+    for candidate in ("/opt/conda/bin/python3", "/usr/local/bin/python3", "/env/.venv/bin/python"):
+        script = script.replace(candidate, str(tmp_path / "absent"))
+    script = script.replace("/tests/nemo_gym", str(tests)).replace("/logs/verifier", str(tmp_path / "logs"))
+    script = script.replace("/tmp/nemo-gym-swe-grader-XXXXXXXX", str(tmp_path / "runtime-XXXXXXXX"))
+    result = subprocess.run(
+        ["/bin/bash", "-c", script], env={"PATH": str(binaries)}, capture_output=True, text=True, timeout=10
+    )
+    assert result.returncode == (grader_exit if compatible else 1), result.stderr
+    assert marker.exists() is compatible
+    assert not list(tmp_path.glob("runtime-*"))
+    assert (tests / "python.tar.gz").is_file()
+
+
 GOLDEN_PATCH = (
     "diff --git a/widget/core.py b/widget/core.py\n--- a/widget/core.py\n+++ b/widget/core.py\n"
     "@@ -1 +1 @@\n-VALUE = 1\n+VALUE = 2\n"
@@ -96,6 +139,23 @@ REBENCH_ROW = {
     "source_server": "swe_rebench",
 }
 UNSUPPORTED_ROW = {"instance_id": "delivery__iceberg-1", "source_server": "swemer_v1"}
+
+
+def test_conversion_delivers_supplied_grader_archive_only_with_hidden_tests(tmp_path: Path) -> None:
+    source = tmp_path / "rows.jsonl"
+    source.write_text(json.dumps(SCALE_ROW) + "\n")
+    archive = tmp_path / "supplied-python.tar.gz"
+    archive.write_bytes(b"supplied runtime archive")
+    output = tmp_path / "tasks"
+    manifest = convert.convert(source, output, dataset_name="test/private-grader", grader_python_archive=archive)
+    task = output / manifest["converted"][0]["task"]
+    assert (task / "tests/nemo_gym/python.tar.gz").read_bytes() == archive.read_bytes()
+    assert not list((task / "environment").glob("*.tar.gz"))
+    assert (task / "instruction.md").read_bytes() == SCALE_ROW["responses_create_params"]["input"][0][
+        "content"
+    ].encode()
+    assert manifest["grader_python_archive"] == str(archive)
+
 
 FAKE_PARSERS = """from lib.agent.swe_constants import TestStatus
 
