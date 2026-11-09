@@ -5,6 +5,10 @@ config_paths:
 - resources_servers/workspace_bench/configs/workspace_bench.yaml
 - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
+# The agent calls the model server from inside a remote sandbox, so the servers advertise this host's address
+# instead of loopback. Pass +default_host=<address the sandbox reaches> when the hostname does not resolve.
+use_absolute_ip: true
+
 workspace_bench_codex_agent:
   responses_api_agents:
     codex_agent:
@@ -14,8 +18,11 @@ workspace_bench_codex_agent:
         type: responses_api_models
         name: policy_model
       model: ${policy_model_name}
-      openai_api_key: ${policy_api_key}
       timeout: 7200
+      # As harness_agent did: a run whose CLI exits with an error is still graded, and Codex's shell sees the
+      # task image's environment.
+      verify_after_agent_error: true
+      inherit_sandbox_environment: true
       codex_version: 0.144.4
       system_prompt: Complete the task using its specified input paths. Save every requested deliverable in /workspace/output.
       # Keep it at least max_concurrent_episodes: an episode beyond it waits with its sandbox started.

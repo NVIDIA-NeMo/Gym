@@ -44,6 +44,10 @@ def _workspace_archive() -> bytes:
     return stream.getvalue()
 
 
+# Built once: gzip stamps the time into the header, so two builds a second apart differ.
+_WORKSPACE_ARCHIVE = _workspace_archive()
+
+
 def _server(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> tuple[app.WorkspaceBenchResourcesServer, list[MagicMock], list[Path]]:
@@ -69,7 +73,7 @@ def _server(
             return {"sandbox_id": sandbox_id, "scope": scope}
 
         async def download(remote: str, local: Path) -> None:
-            Path(local).write_bytes(_workspace_archive())
+            Path(local).write_bytes(_WORKSPACE_ARCHIVE)
 
         sandbox = MagicMock()
         sandbox.start = AsyncMock()
@@ -85,7 +89,7 @@ def _server(
 
     judged: list[Path] = []
 
-    async def judge(self, directory: Path) -> tuple[list, dict]:
+    async def judge(self, directory: Path, session_id: str) -> tuple[list, dict]:
         judged.append(directory)
         passed = (directory / "output" / "answer.txt").is_file() and (
             directory / "data" / "task.txt"
@@ -162,12 +166,12 @@ def test_retried_verify_grades_the_capture_against_the_inputs_frozen_at_seed(
     original_judge = app.WorkspaceBenchResourcesServer._judge
     calls = 0
 
-    async def judge_sandbox_fails_once(self, directory: Path) -> tuple[list, dict]:
+    async def judge_sandbox_fails_once(self, directory: Path, session_id: str) -> tuple[list, dict]:
         nonlocal calls
         calls += 1
         if calls == 1:
             raise RuntimeError("Workspace-Bench judge failed: judge sandbox lost")
-        return await original_judge(self, directory)
+        return await original_judge(self, directory, session_id)
 
     monkeypatch.setattr(app.WorkspaceBenchResourcesServer, "_judge", judge_sandbox_fails_once)
     with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
@@ -189,12 +193,12 @@ def test_artifact_retention_survives_a_retried_verify(monkeypatch: pytest.Monkey
     original_judge = app.WorkspaceBenchResourcesServer._judge
     calls = 0
 
-    async def judge_sandbox_fails_once(self, directory: Path) -> tuple[list, dict]:
+    async def judge_sandbox_fails_once(self, directory: Path, session_id: str) -> tuple[list, dict]:
         nonlocal calls
         calls += 1
         if calls == 1:
             raise RuntimeError("Workspace-Bench judge failed: judge sandbox lost")
-        return await original_judge(self, directory)
+        return await original_judge(self, directory, session_id)
 
     monkeypatch.setattr(app.WorkspaceBenchResourcesServer, "_judge", judge_sandbox_fails_once)
     with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
@@ -206,7 +210,7 @@ def test_artifact_retention_survives_a_retried_verify(monkeypatch: pytest.Monkey
     assert json.loads((saved / "result.json").read_text())["reward"] == 1.0
     with tarfile.open(saved / "input.tar.gz", "r:gz") as archive:
         assert archive.extractfile("task.txt").read() == b"original input"
-    assert (saved / "workspace.tar.gz").read_bytes() == _workspace_archive()
+    assert (saved / "workspace.tar.gz").read_bytes() == _WORKSPACE_ARCHIVE
 
 
 def test_failed_collection_stops_the_sandbox_and_a_retry_is_masked(
@@ -225,6 +229,95 @@ def test_failed_collection_stops_the_sandbox_and_a_retry_is_masked(
         assert retried.json()["mask_sample"] is True and retried.json()["failure_kind"] == SESSION_LOST
         assert client.post("/close_session", json=_CLOSE).status_code == 200
     assert judged == []
+
+
+def test_failed_collection_whose_stop_fails_keeps_the_inputs_for_the_retried_collection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    server, sandboxes, judged = _server(monkeypatch, tmp_path)
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        assert client.post("/seed_session", json=_seed().model_dump(mode="json")).status_code == 200
+        sandboxes[0].exec.return_value = SandboxExecResult(
+            return_code=None, stdout="", stderr="", error_type="timeout"
+        )
+        sandboxes[0].stop.side_effect = [RuntimeError("provider unavailable"), None]
+        assert client.post("/verify", json=_VERIFY).status_code == 500
+        assert server._session_id_to_sandbox == {"resources-session": sandboxes[0]}
+        assert set(server._reference_dirs) == {"resources-session"}
+        sandboxes[0].exec.return_value = SandboxExecResult(return_code=0, stdout="", stderr="")
+        retried = client.post("/verify", json=_VERIFY)
+        assert retried.status_code == 200, retried.text
+        assert retried.json()["reward"] == 1.0
+        assert server._reference_dirs == {}
+        assert client.post("/close_session", json=_CLOSE).status_code == 200
+    assert sandboxes[0].stop.await_count == 2
+    assert len(judged) == 1
+
+
+@pytest.mark.parametrize(("return_code", "graded"), [(1, True), (2, False)])
+def test_files_the_agent_left_changing_are_graded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, return_code: int, graded: bool
+) -> None:
+    """tar exits 1 when the agent's own process changed a file mid-archive; those files are the agent's result."""
+    server, sandboxes, judged = _server(monkeypatch, tmp_path)
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        assert client.post("/seed_session", json=_seed().model_dump(mode="json")).status_code == 200
+        sandboxes[0].exec.return_value = SandboxExecResult(return_code=return_code, stdout="", stderr="file changed")
+        verified = client.post("/verify", json=_VERIFY)
+        assert client.post("/close_session", json=_CLOSE).status_code == 200
+    collect = sandboxes[0].exec.await_args.args[0]
+    assert "mkdir -p /workspace/input /workspace/output" in collect, "folders the agent removed are graded as empty"
+    if graded:
+        assert verified.status_code == 200, verified.text
+        assert verified.json()["reward"] == 1.0 and verified.json()["mask_sample"] is False
+    else:
+        assert verified.status_code == 500
+        assert judged == []
+
+
+def test_agent_run_verify_that_fails_before_collection_stops_the_sandbox(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An agent-run session gets no close, so a verify that fails while saving its inputs still stops the sandbox."""
+    server, sandboxes, _ = _server(monkeypatch, tmp_path)
+    server.config.artifact_root = tmp_path / "artifacts"
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        assert client.post("/seed_session", json=_ROW | {"responses_create_params": _PARAMS}).status_code == 200
+
+        def full_disk(source: Path, destination: Path) -> None:
+            raise OSError("no space left on device")
+
+        monkeypatch.setattr(app.shutil, "copyfile", full_disk)
+        assert client.post("/verify", json=_VERIFY).status_code == 500
+        sandboxes[0].stop.assert_awaited_once()
+        assert server._session_id_to_sandbox == {} and server._reference_dirs == {}
+    sandboxes[0].download.assert_not_awaited()
+
+
+def test_malformed_typed_seed_is_not_taken_for_an_agent_run_seed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    server, sandboxes, _ = _server(monkeypatch, tmp_path)
+    malformed = _ROW | {"responses_create_params": _PARAMS, "resources_session_id": "resources-session"}
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        assert client.post("/seed_session", json=malformed).status_code == 422
+    assert sandboxes == [] and server._reference_dirs == {}
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    ["{not json", json.dumps({"data_manifest": [{"stored_relpath": "source/original.txt"}]}), "[]"],
+    ids=["invalid-json", "manifest-entry-without-filename", "not-an-object"],
+)
+def test_task_with_broken_metadata_is_refused_without_a_sandbox(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, metadata: str
+) -> None:
+    server, sandboxes, _ = _server(monkeypatch, tmp_path)
+    (tmp_path / "task_lite_clean_en" / "3" / "metadata.json").write_text(metadata)
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        response = client.post("/seed_session", json=_seed().model_dump(mode="json"))
+    assert response.status_code == 422, response.text
+    assert sandboxes == [] and server._reference_dirs == {}
 
 
 def test_close_before_verify_stops_the_sandbox_and_drops_the_inputs(
