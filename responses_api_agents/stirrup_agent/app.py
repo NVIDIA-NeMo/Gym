@@ -20,7 +20,7 @@ supervisor. Shell commands run in the sandbox; task tools are the resources serv
 import asyncio
 import time
 from asyncio import Semaphore
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, ClassVar, Dict, List, Mapping, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
@@ -281,6 +281,8 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
 
 class StirrupAgentWrapper(SimpleResponsesAPIAgent):
     config: StirrupAgentWrapperConfig
+    # The runner runs inside the sandbox and calls the model server from there.
+    calls_model_from_sandbox: ClassVar[bool] = True
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
