@@ -335,6 +335,8 @@ def _stage_submission(
         if candidate is None or not candidate.is_file():
             missing.append(name)
             continue
+        if _is_lfs_pointer(candidate):
+            raise AAEvaluationFault(f"{candidate} is an unhydrated Git LFS pointer, not the file it stands for")
         (stage / name).symlink_to(candidate.resolve())
         staged.append(candidate)
     if not carry_renders:
@@ -947,6 +949,9 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
             )
 
     async def _grade(self, body: AABriefcaseLiteVerifyRequest) -> AABriefcaseLiteVerifyResponse:
+        if not (body.deliverables_dir and Path(body.deliverables_dir).is_dir()):
+            # Every file would read as one the model did not submit, and each check would score as its zero.
+            raise AAEvaluationFault(f"deliverables_dir {body.deliverables_dir!r} is not a directory")
         task_markdown = self._task_markdown(body.task_id)
         binary_checks = self._checks_for_task(body.task_id, "binary")
         pairwise_checks = self._checks_for_task(body.task_id, "pairwise")

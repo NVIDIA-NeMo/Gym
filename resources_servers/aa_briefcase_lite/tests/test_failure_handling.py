@@ -303,3 +303,31 @@ async def test_the_rate_of_a_path_that_did_not_run_is_absent_not_zero(
 
     assert metrics.key_metrics["aa_lite/binary_pass_rate"] == 1.0
     assert "aa_lite/pairwise_win_rate" not in metrics.key_metrics
+
+
+async def test_a_missing_deliverables_directory_masks_the_row_instead_of_scoring_every_check_as_missing(
+    make_server, tmp_path: Path, monkeypatch
+) -> None:
+    server = make_server(reward_mode="all")
+    binary = AsyncMock(return_value=PASSED)
+    monkeypatch.setattr(server, "_binary_call", binary)
+
+    # A reverify on a host that cannot see the persisted deliverables, or a row whose directory was moved.
+    row = _row(await judge_failsafe(server.verify)(NO_SESSION, verify_body(str(tmp_path / "gone"))))
+
+    assert row["mask_sample"] is True
+    assert row["failure_kind"] == "verifier_error"
+    assert "is not a directory" in row["failure_reason"]
+    assert binary.await_count == 0
+
+
+async def test_an_unhydrated_lfs_pointer_masks_the_row_as_a_verifier_error(make_server, tmp_path: Path) -> None:
+    server = make_server(reward_mode="pairwise")
+    pointer = tmp_path / "ref_a" / "task_w1_t1" / "repeat_0" / "report.md"
+    pointer.write_text("version https://git-lfs.github.com/spec/v1\noid sha256:0\nsize 123456\n")
+
+    row = await _verify(server, tmp_path, {"report.md": "x"})
+
+    assert row["mask_sample"] is True
+    assert row["failure_kind"] == "verifier_error"
+    assert "unhydrated Git LFS pointer" in row["failure_reason"]
