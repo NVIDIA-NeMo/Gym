@@ -5666,6 +5666,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         record_output_dir: Optional[Path | str] = None,
         record_shard: Optional[str] = None,
         record_omitted_rollouts: bool = False,
+        scope_rollout_ids: bool = True,
     ) -> _RowResultIterator:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
@@ -5753,7 +5754,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         shard's run, and the Store, the run health check and ``gym eval aggregate`` read the shard like an eval run.
         Each copy's rollout id is the row's own id (its ``_ng_rollout_id``, or ``<task>-<rollout>``) prefixed with the
         shard's run id, so the shard's model calls are captured under keys of its own; a caller that looks a capture up
-        reads its key from the returned row (``maybe_rollout_id_from_run_body``). ``gym eval run`` with
+        reads its key from the returned row (``maybe_rollout_id_from_run_body``). ``scope_rollout_ids=False`` keeps each
+        row's own id instead, for a caller whose ids are already unique across calls (a trainer that tracks rollouts and
+        token capture by the id it dispatched); rows that would share an id in one call are still refused. It only applies
+        with ``record_output_dir``: a call that records no shard already dispatches each row under its own id. ``gym eval run`` with
         ``+input_jsonl_fpath=<dir>/rollouts-<shard>_materialized_inputs.jsonl +output_jsonl_fpath=<dir>/rollouts-<shard>.jsonl
         +resume_from_cache=true`` resumes a shard and runs only what it still lacks.
         """
@@ -5859,7 +5863,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 # and one manifest identity: refused before dispatch and before the shard is replaced.
                 sources: Dict[str, Tuple[int, str]] = {}
                 for index, (row, copy) in enumerate(zip(examples, dispatched)):
-                    scoped = copy[ROLLOUT_ID_KEY_NAME] = _shard_rollout_id(row, run_id)
+                    scoped = copy[ROLLOUT_ID_KEY_NAME] = (
+                        _shard_rollout_id(row, run_id) if scope_rollout_ids else logical_rollout_id(dict(row))
+                    )
                     check_rollout_id_length(scoped)  # the run-id prefix makes a long id longer
                     if scoped in sources:
                         first, source = sources[scoped]

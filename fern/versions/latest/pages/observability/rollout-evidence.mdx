@@ -61,7 +61,9 @@ evidence with two opt-in options:
   omitted-rollout row for an interrupted or never-started try. A shard dispatches each row under the row's own
   rollout id (its `_ng_rollout_id`, or `<task>-<rollout>`) prefixed with the shard's run id, so its model calls are
   captured under keys of its own even when a later shard dispatches the same task and rollout; read a capture's key
-  from the returned row. A shard whose rollouts did not all succeed resumes like a run:
+  from the returned row. A caller whose ids are already unique across calls, such as a trainer that tracks rollouts
+  and token capture by the id it dispatched, passes `scope_rollout_ids=False` to keep them unchanged; rows that would
+  share an id in one call are still refused. (Without a shard, rows always keep their own ids.) A shard whose rollouts did not all succeed resumes like a run:
   `gym eval run +input_jsonl_fpath=runs/policy/rollouts-<shard>_materialized_inputs.jsonl
   +output_jsonl_fpath=runs/policy/rollouts-<shard>.jsonl +resume_from_cache=true`, with the same servers, runs only
   what the shard still lacks.
