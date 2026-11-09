@@ -369,6 +369,7 @@ class GymResponsesLLM(UnifiedLLM):
         self._cookies = cookies
         self._calls = 0
         self._lock = asyncio.Lock()
+        self._output_limit: OutputTokenLimitExceeded | None = None
         # The SDK's cached renderer regenerates its trailing live-context message
         # instead of keeping it in history. Retain the exact context that preceded
         # each response so replay does not detach generated tokens from their prompt.
@@ -437,6 +438,11 @@ class GymResponsesLLM(UnifiedLLM):
         output_model: type[BaseModel] | None = None,
         **kwargs: Any,
     ) -> LLMResponse:
+        # CodeAct retries LLM exceptions with rewritten history. A captured truncated
+        # response has no replayable SDK response, so end this invocation before
+        # preparing or charging another request. Optional summary forks stay isolated.
+        if self._output_limit is not None and not summary_fork_active():
+            raise self._output_limit
         try:
             limits = self.get_context_limits(kwargs)
             input_items, instructions = _responses_input(
@@ -530,9 +536,12 @@ class GymResponsesLLM(UnifiedLLM):
             self._on_response()
 
         # Capture the upstream response first, but never hand a truncated tool
-        # call to NOOA for execution. Its retry loop may recover with a later call.
+        # call to NOOA for execution or permit a retry with rewritten history.
         if response.incomplete_details is not None and response.incomplete_details.reason == "max_output_tokens":
-            raise OutputTokenLimitExceeded("Gym model response exhausted max_output_tokens before completion")
+            error = OutputTokenLimitExceeded("Gym model response exhausted max_output_tokens before completion")
+            if not summary_fork_active():
+                self._output_limit = error
+            raise error
 
         parts = _assistant_parts(response)
         function_calls = [item for item in response.output if isinstance(item, NeMoGymResponseFunctionToolCall)]

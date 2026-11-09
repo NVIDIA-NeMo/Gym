@@ -141,9 +141,10 @@ async def test_response_progress_fires_after_capture_and_cookies_before_output_v
     assert captured[0][0]["incomplete_details"]["reason"] == "max_output_tokens"
     assert captured[0][1] == {"model_state": "updated"}
     client.post.side_effect = ConnectionError("unavailable")
-    with pytest.raises(ConnectionError):
+    with pytest.raises(OutputTokenLimitExceeded):
         await llm.acall([{"role": "user", "content": "task"}])
     assert len(captured) == 1
+    client.post.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -861,27 +862,44 @@ async def test_output_limit_records_exact_response_before_interpreting_output(ar
 
 
 @pytest.mark.asyncio
-async def test_successful_response_after_output_limit_recovers_normally() -> None:
-    final = NeMoGymResponseOutputMessageForTraining(
-        id="final",
-        content=[NeMoGymResponseOutputText(annotations=[], text="done", logprobs=[])],
-        prompt_token_ids=[1],
-        generation_token_ids=[2],
-        generation_log_probs=[-0.1],
-    )
-    llm, client, state = make_llm(output_limit_response())
-    client.post.side_effect = [FakeHTTPResponse(output_limit_response()), FakeHTTPResponse(model_response(final))]
-    with pytest.raises(OutputTokenLimitExceeded):
+@pytest.mark.parametrize("retry_messages", [[{"role": "user", "content": "changed context"}], [{"role": "tool"}]])
+async def test_output_limit_stops_retries_before_preparation_or_charge(retry_messages: list[dict]) -> None:
+    payload = output_limit_response()
+    llm, client, state = make_llm(payload)
+    with pytest.raises(OutputTokenLimitExceeded) as first:
         await llm.acall([{"role": "user", "content": "task"}])
-
-    result = await llm.acall([{"role": "user", "content": "retry"}])
-
-    assert result.content == "done"
-    assert result.finish_reason == "stop"
+    for _ in range(3):
+        with pytest.raises(OutputTokenLimitExceeded) as retry:
+            await llm.acall(retry_messages)
+        assert retry.value is first.value
     assert state.fatal_error is None
-    assert state.used == len(state.calls) == 2
-    assert state.calls[0].response.incomplete_details.reason == "max_output_tokens"
-    assert state.calls[1].response.incomplete_details is None
+    assert state.used == llm.calls == len(state.calls) == client.post.await_count == 1
+    assert state.calls[0].response.model_dump(mode="json") == payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("summary_first", [False, True])
+async def test_output_limit_isolated_from_summary_fork(summary_first: bool) -> None:
+    from nooa.agents.summarization import _in_summary_fork
+
+    llm, client, state = make_llm(output_limit_response())
+    client.post.side_effect = [FakeHTTPResponse(output_limit_response()), FakeHTTPResponse(model_response())]
+    token = _in_summary_fork.set(summary_first)
+    try:
+        with pytest.raises(OutputTokenLimitExceeded):
+            await llm.acall([{"role": "user", "content": "first"}])
+    finally:
+        _in_summary_fork.reset(token)
+    token = _in_summary_fork.set(not summary_first)
+    try:
+        await llm.acall([{"role": "user", "content": "other scope"}])
+    finally:
+        _in_summary_fork.reset(token)
+    if not summary_first:
+        with pytest.raises(OutputTokenLimitExceeded):
+            await llm.acall([{"role": "user", "content": "main retry"}])
+    assert state.fatal_error is None
+    assert state.used == llm.calls == len(state.calls) == client.post.await_count == 2
 
 
 class RejectedHTTPResponse(FakeHTTPResponse):

@@ -200,7 +200,12 @@ async def test_real_codeact_response_retains_partial_evidence_without_verificati
 
 @pytest.mark.parametrize(
     ("scenario", "reason"),
-    [*LIMIT_SCENARIOS, ("output_then_success", None), ("output_then_outage", None), ("model_outage", None)],
+    [
+        *LIMIT_SCENARIOS,
+        ("output_then_success", NOOATerminationReason.MAX_OUTPUT_TOKENS_EXCEEDED),
+        ("output_then_outage", NOOATerminationReason.MAX_OUTPUT_TOKENS_EXCEEDED),
+        ("model_outage", None),
+    ],
 )
 async def test_real_codeact_environment_verifies_partial_response_once(
     scenario: str, reason: NOOATerminationReason | None, tmp_path: Path
@@ -221,7 +226,7 @@ async def test_real_codeact_environment_verifies_partial_response_once(
     client.post.side_effect = post
     result = await environment.run_request(_request())
     assert not sentinel.exists()
-    if scenario in {"output_then_outage", "model_outage"}:
+    if scenario == "model_outage":
         assert result.failure.stage == "agent"
         assert result.result is None
         assert len(model_calls) == 2
@@ -232,15 +237,8 @@ async def test_real_codeact_environment_verifies_partial_response_once(
         return
     assert result.failure is None
     assert result.result.reward == 0.75
-    if scenario == "output_then_success":
-        assert result.result.response.status == "completed"
-        assert result.result.response.error is None
-        assert result.result.response.incomplete_details is None
-        assert result.result.response.output[-1].content[0].text == "recovered"
-        assert len(model_calls) == 2
-    else:
-        assert_partial_evidence(result.result.response, scenario=scenario)
-        assert len(model_calls) == 1
+    assert_partial_evidence(result.result.response, scenario=scenario)
+    assert len(model_calls) == 1
     assert len(verified) == _paths(client).count("/verify") == 1
     assert verified[0]["response"] == result.result.response.model_dump(mode="json")
     record = _episode_record(result.model_dump(mode="json"))
