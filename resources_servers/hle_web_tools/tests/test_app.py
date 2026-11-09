@@ -255,9 +255,9 @@ async def test_query_repeating_a_verbatim_question_span_is_refused_per_session(s
         # A zero-width space between words and a soft hyphen inside one, read as word segmentation reads them.
         ("How\u200bmany odd spin structures admit a no\u00adnvanishing", "question_span"),
         ("H\u00adLE\u200bleaderboard", "patterns_case_sensitive"),
-        # A Hangul filler (default-ignorable, category Lo) inside a word.
+        # A Hangul filler (default-ignorable, category Lo) inside a word; the pattern path folds the same way
+        # (soft-hyphen-pattern), so one row pins the set membership.
         ("How many odd spin structures admit a no\u3164nvanishing", "question_span"),
-        ("Hum\u3164anity's Last Exam", "url_patterns"),
     ],
     ids=[
         "full-width",
@@ -269,7 +269,6 @@ async def test_query_repeating_a_verbatim_question_span_is_refused_per_session(s
         "mixed-format-characters",
         "mixed-format-pattern",
         "hangul-filler",
-        "hangul-filler-pattern",
     ],
 )
 async def test_presentation_variants_of_a_blocked_query_are_refused(server, caplog, query, family):
@@ -507,7 +506,7 @@ async def test_url_spellings_of_a_blocked_page_are_refused_before_the_fetch(serv
         ("site:huggingface.co! puzzles", "domains"),  # trailing punctuation dropped
         ("site:exa_mple!.org puzzles", "malformed_url"),  # a character no hostname has
         ("site:“scale.com” leaderboard", "domains"),  # typographic quotes read like ASCII ones
-        ("site:scale.com” leaderboard", "domains"),
+        ("site:scale.com” leaderboard", "domains"),  # a stray closer with no opener is dropped too
         ("site:((scale.com)) leaderboard", "domains"),  # stacked openers
     ],
 )
