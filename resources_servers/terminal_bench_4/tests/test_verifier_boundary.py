@@ -338,33 +338,42 @@ def test_local_cleanup_failure_keeps_grade(tmp_path, monkeypatch):
             item.cleanup()
 
 
-def test_preparation_consumes_the_common_verifier_deadline(tmp_path):
+def test_preparation_consumes_the_common_verifier_deadline(tmp_path, monkeypatch):
     async def check():
         budget = 0.2
+        preparation_elapsed = 0.12
+        loop = asyncio.get_running_loop()
+        # A small simulated epoch avoids host uptime precision loss and scheduler delays.
+        start = now = 0.0
+        monkeypatch.setattr(loop, "time", lambda: now)
 
         class SlowPreparation(Sandbox):
             async def exec(self, command, **kwargs):
+                nonlocal now
                 self.commands.append((command, kwargs))
                 if command.startswith("chmod"):
-                    await asyncio.sleep(0.12)
+                    now += preparation_elapsed
                     return SandboxExecResult("", "", 0)
                 if command.startswith("/tests/test.sh"):
                     self.tests += 1
-                    await asyncio.sleep(0.5)
+                    now = start + budget
+                    # Execution becomes ready at the deadline, but the real timeout
+                    # must cancel it before it can return a command outcome.
+                    finished = loop.create_future()
+                    loop.call_soon(finished.set_result, None)
+                    await finished
                 raise AssertionError("No reward or optional transfer after unknown execution")
 
         sdk = SlowPreparation("elapsed", 1)
         env = environment(sdk, budget)
         env.task = NS(config=NS(verifier=NS(timeout_sec=budget, env={}, user="root")))
         diagnostics = []
-        start = asyncio.get_running_loop().time()
         with pytest.raises(verifier.VerifierTimeoutError):
             await verifier.run_verifier(env, tmp_path, diagnostics)
-        elapsed = asyncio.get_running_loop().time() - start
         execution = [kwargs for command, kwargs in sdk.commands if command.startswith("/tests/test.sh")]
         assert len(execution) == 1
-        assert 0 < execution[0]["timeout_s"] < 0.1
-        assert 0.18 <= elapsed < 0.45
+        assert sdk.commands[0][1]["timeout_s"] == pytest.approx(budget)
+        assert execution[0]["timeout_s"] == pytest.approx(budget - preparation_elapsed)
         assert diagnostics[-1]["operation"] == "verifier_execution"
         assert [cause["exception_type"] for cause in diagnostics[-1]["causes"]] == ["TimeoutError", "CancelledError"]
 
