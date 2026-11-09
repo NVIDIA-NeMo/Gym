@@ -10,6 +10,7 @@ import sqlite3
 import subprocess
 import threading
 from pathlib import Path
+from time import monotonic
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -463,6 +464,42 @@ def test_session_close_stops_media_staging_before_releasing_the_sandbox(setup):
         assert not activation.is_alive()
     # Staging belongs to the activation, so close stops it before giving the sandbox back.
     assert events[:2] == ["upload cancelled", "sandbox released"], events
+    assert not sandbox.launch.called
+
+
+def test_first_activation_budget_bounds_media_staging(setup):
+    agent, sandbox = setup
+    upload = sandbox.upload
+    stalled = SimpleNamespace(cancelled=False)
+
+    async def stall_media(source, destination):
+        if "/nemo-gym-media/" not in destination:
+            return await upload(source, destination)
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            stalled.cancelled = True
+            raise
+
+    sandbox.upload = stall_media
+    prompt = [
+        {"type": "input_text", "text": "What is shown?"},
+        {"type": "input_image", "image_url": PNG_URI, "detail": "auto"},
+    ]
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        started = monotonic()
+        result = client.post(
+            "/ng-rollout/opencode-smoke-a2/v1/responses",
+            json={"input": [{"role": "user", "content": prompt}], "metadata": {"agent_timeout_sec": "0.5"}},
+        )
+        # The budget, not the stalled upload, ends the activation, and its slot is free for the next one.
+        assert monotonic() - started < 10
+        assert result.status_code == 500, result.text
+        assert stalled.cancelled
+        assert agent.sem._value == agent.config.concurrency
+        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
     assert not sandbox.launch.called
 
 
@@ -2154,7 +2191,8 @@ def test_task_timeout_metadata_reaches_sandbox_supervisor(
         )
         assert response.status_code == 200, response.text
         command = shlex.split(sandbox.launch.await_args.kwargs["command"])
-        assert float(command[command.index("--timeout") + 1]) == expected
+        # Staging spends the budget, and OpenCode runs for what remains.
+        assert expected - 1 < float(command[command.index("--timeout") + 1]) <= expected
         assert agent.config.timeout == 1800
         assert response.json()["metadata"]["agent_timeout_sec"] == str(float(expected))
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))

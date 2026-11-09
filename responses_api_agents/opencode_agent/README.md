@@ -150,6 +150,9 @@ that path to the model, so naming the file by its content keeps the prompt the s
 rollouts of a task. In a borrowed sandbox these files remain after the session closes. OpenCode places the images, in order, before the task text and does
 not use the `detail` setting. Sessions always declare image input on the Gym model, so OpenCode
 also passes on images its read tool returns; a text-only deployment rejects such requests.
+In a single-activation session, the timeout budget starts once the activation holds a
+concurrency slot. Staging the activation's files, images included, spends it, OpenCode runs
+for the rest, and a budget that runs out before launch fails the activation.
 Images outside the user task and image URLs are rejected. Saved trajectories keep only the
 text of each message, so they do not contain the images. Request `temperature` and `top_p` are applied to every OpenCode agent
 (see [Owner extensions](#owner-extensions)). Other controls, history replay and

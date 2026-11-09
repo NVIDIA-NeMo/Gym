@@ -1707,6 +1707,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             async with asyncio.timeout_at(deadline):
                 await self.sem.acquire()
             try:
+                if deadline is None:
+                    # A first activation's budget starts once it holds a slot, as Pi's does: staging spends it,
+                    # and OpenCode runs for what remains.
+                    deadline = monotonic() + timeout
                 await state.execute(
                     payload,
                     media=media,
