@@ -38,6 +38,7 @@ def retarget(
     wandb_entity: str,
     harness: str | None = None,
     harness_assets_from: Path | None = None,
+    parser_cache_dir: Path | None = None,
 ) -> dict:
     """Keep the existing arm's science while replacing its tasks and resources binding.
 
@@ -46,6 +47,12 @@ def retarget(
     """
     prepared, output = prepared.resolve(), output.resolve()
     original = json.loads((prepared / "provenance.json").read_text())
+    parser_cache = parser_cache_dir or prepared
+    if source_server == "swe_rebench" and parser_cache_dir is None:
+        parser_path = (original.get("parser") or {}).get("path")
+        if not parser_path:
+            raise ValueError("SWE-rebench needs --parser-cache-dir or a template with recorded parser.path")
+        parser_cache = Path(parser_path).parent
     source_bytes = task_rows.read_bytes()
     rows = [json.loads(line) for line in source_bytes.splitlines() if line.strip()]
     if not rows:
@@ -96,6 +103,7 @@ def retarget(
             output / "harbor",
             dataset_name=source_server,
             default_source=source_server,
+            parser_cache_dir=parser_cache if source_server == "swe_rebench" else None,
             agent_timeout_sec=480,
             evaluation_timeout_sec=180,
         )
@@ -119,7 +127,7 @@ def retarget(
         harnesses=harnesses,
         route=route,
         output=output,
-        parser_cache=prepared,
+        parser_cache=parser_cache,
         prepared=harbor,
         source_server=source_server,
     )
@@ -166,6 +174,10 @@ def retarget(
         ordering="task-major, harness-minor, no shuffle; repeat complete epochs",
         qualification="New selected data; training and learning not yet measured",
     )
+    if source_server == "swe_rebench":
+        result["parser"] = {"path": str(parser_cache / "SWE-rebench-V2")}
+        if parser_cache_dir is None and original.get("parser", {}).get("commit"):
+            result["parser"]["commit"] = original["parser"]["commit"]
     names = ["source.jsonl", "train.jsonl", "config.yaml", "dataset-manifest.json", *copied]
     result["files_sha256"] = {name: hashlib.sha256((output / name).read_bytes()).hexdigest() for name in names}
     (output / "provenance.json").write_text(json.dumps(result, indent=2) + "\n")
@@ -185,6 +197,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("prepared", "output", "task-rows", "dataset-manifest"):
         parser.add_argument("--" + name, type=Path, required=True)
+    parser.add_argument("--parser-cache-dir", type=Path, help="Existing cache parent containing SWE-rebench-V2")
     parser.add_argument("--source-server", choices=("swe_next", "swe_rebench"), required=True)
     parser.add_argument("--wandb-project", required=True)
     parser.add_argument("--wandb-entity", required=True)
