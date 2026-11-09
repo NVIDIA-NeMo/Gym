@@ -39,6 +39,9 @@ _ENTRYPOINT = textwrap.dedent(
         )
         worker.start()
         worker.join(timeout=60)
+        if worker.is_alive():
+            worker.kill()
+            raise SystemExit("the spawned worker did not finish within 60 seconds")
         raise SystemExit(worker.exitcode)
     elif is_nemo_gym_fastapi_entrypoint(__file__):
         build_server()
