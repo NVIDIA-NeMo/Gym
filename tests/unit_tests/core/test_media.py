@@ -12,15 +12,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import base64
 from types import SimpleNamespace
 
 import pytest
 
-from nemo_gym.core.media import MediaFile, UnsupportedContentError, media_type_for_path, split_text_and_media
+from nemo_gym.core.media import MediaFile, UnsupportedContentError, split_text_and_media
 
 
 PNG = MediaFile("image/png", b"\x89PNG\r\n\x1a\n\x00\xff")
 JPEG = MediaFile("image/jpeg", b"\xff\xd8\xff\xe0\x00")
+PAYLOAD = PNG.to_data_uri().partition(",")[2]
 
 
 def test_data_uri_round_trip() -> None:
@@ -38,8 +40,49 @@ def test_data_uri_round_trip() -> None:
     ],
 )
 def test_data_uri_accepts_other_spellings_of_a_supported_type(header: str, media_type: str) -> None:
-    payload = PNG.to_data_uri().partition(",")[2]
-    assert MediaFile.from_data_uri(f"data:{header},{payload}") == MediaFile(media_type, PNG.data)
+    payload = JPEG.to_data_uri().partition(",")[2] if media_type == "image/jpeg" else PAYLOAD
+    assert MediaFile.from_data_uri(f"data:{header},{payload}").media_type == media_type
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [f"image/png;base64,{PAYLOAD}", f"data:image/png;base64;charset=utf-8,{PAYLOAD}"],
+)
+def test_data_uri_must_start_with_data_and_end_its_header_with_base64(uri: str) -> None:
+    with pytest.raises(UnsupportedContentError, match="base64 data URI"):
+        MediaFile.from_data_uri(uri)
+
+
+@pytest.mark.parametrize(
+    ("data", "media_type"),
+    [
+        (PNG.data, "image/png"),
+        (JPEG.data, "image/jpeg"),
+        (b"GIF89a\x01\x00", "image/gif"),
+        (b"RIFF\x10\x00\x00\x00WEBPVP8 ", "image/webp"),
+    ],
+)
+def test_the_content_decides_the_media_type_of_a_mislabeled_file(data: bytes, media_type: str) -> None:
+    # Gym's own data labels raw images as image/png whatever their format, and harnesses such as Pi
+    # read the type from the bytes, so the file must be named for what it holds.
+    uri = f"data:image/jpeg;base64,{base64.b64encode(data).decode()}"
+    assert MediaFile.from_data_uri(uri) == MediaFile(media_type, data)
+
+
+@pytest.mark.parametrize("data", [b"", b"plain text, not an image"])
+def test_data_uri_must_hold_data_of_a_supported_media_type(data: bytes) -> None:
+    # Pi skips an empty file and reads one it does not recognize as text, so neither reaches the model as media.
+    with pytest.raises(UnsupportedContentError, match="no data of a supported media type"):
+        MediaFile.from_data_uri(f"data:image/png;base64,{base64.b64encode(data).decode()}")
+
+
+def test_media_file_holds_data_of_its_own_type() -> None:
+    with pytest.raises(UnsupportedContentError, match="not image/jpeg"):
+        MediaFile("image/jpeg", PNG.data)
+
+
+def test_repr_leaves_out_the_data() -> None:
+    assert repr(PNG) == "MediaFile(media_type='image/png')"
 
 
 def test_split_keeps_text_and_decodes_media_in_order() -> None:
@@ -51,6 +94,11 @@ def test_split_keeps_text_and_decodes_media_in_order() -> None:
     ]
     assert split_text_and_media(content) == ("first\nsecond", [PNG, JPEG])
     assert split_text_and_media("just text") == ("just text", [])
+
+
+def test_split_accepts_text_parts_and_reads_a_missing_text_as_empty() -> None:
+    content = [{"type": "text", "text": "first"}, {"type": "input_text"}, {"type": "input_text", "text": "last"}]
+    assert split_text_and_media(content) == ("first\n\nlast", [])
 
 
 @pytest.mark.parametrize(
@@ -68,16 +116,3 @@ def test_split_keeps_text_and_decodes_media_in_order() -> None:
 def test_split_rejects_content_it_cannot_pass_on(part: dict, message: str) -> None:
     with pytest.raises(UnsupportedContentError, match=message):
         split_text_and_media([{"type": "input_text", "text": "look"}, part])
-
-
-@pytest.mark.parametrize(
-    ("path", "media_type"),
-    [("/a/b.png", "image/png"), ("x.JPG", "image/jpeg"), ("x.jpeg", "image/jpeg"), ("x.webp", "image/webp")],
-)
-def test_media_type_comes_from_the_extension(path: str, media_type: str) -> None:
-    assert media_type_for_path(path) == media_type
-
-
-def test_an_unknown_extension_names_no_media_type() -> None:
-    with pytest.raises(UnsupportedContentError, match="notes.txt"):
-        media_type_for_path("/notes.txt")

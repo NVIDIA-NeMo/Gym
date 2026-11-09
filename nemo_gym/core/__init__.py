@@ -86,7 +86,7 @@ if TYPE_CHECKING:
         reply_failure_report,
         report_for_current_request,
     )
-    from nemo_gym.core.media import MediaFile, UnsupportedContentError, media_type_for_path, split_text_and_media
+    from nemo_gym.core.media import MediaFile, UnsupportedContentError, split_text_and_media
     from nemo_gym.core.operation_timing import OperationTiming, TimingBoundary
     from nemo_gym.core.outcome_policy import (
         OutcomeAction,
@@ -161,7 +161,6 @@ if TYPE_CHECKING:
 _PUBLIC_API = {
     "MediaFile": "media",
     "UnsupportedContentError": "media",
-    "media_type_for_path": "media",
     "split_text_and_media": "media",
     "OperationTiming": "operation_timing",
     "TimingBoundary": "operation_timing",

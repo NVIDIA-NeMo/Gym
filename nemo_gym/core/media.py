@@ -16,24 +16,30 @@
 
 ``split_text_and_media`` decodes a message into its text and its media files,
 and ``MediaFile`` converts between bytes and data URIs.
-``nemo_gym.agents`` writes the decoded files into a sandbox for a harness CLI to read.
+``nemo_gym.sandbox.upload_media`` writes the decoded files into a sandbox for a harness CLI to read.
 
 Images are the supported media today.
-Supporting another kind means adding its media types to ``MEDIA_TYPE_EXTENSIONS``
+Supporting another kind means adding its media types to ``_MEDIA_TYPE_EXTENSIONS`` and ``_MEDIA_TYPE_SIGNATURES``
 and its Responses part type to ``_PART_URL_FIELDS``, or a decoder for a part that does not hold a data URI.
 """
 
 import base64
 import binascii
-import posixpath
-from dataclasses import dataclass
-from typing import Any, Iterable
+import re
+from collections.abc import Iterable
+from dataclasses import dataclass, field
 
 
 # Supported media types and the file extension each is written with.
-MEDIA_TYPE_EXTENSIONS = {"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp"}
-_EXTENSION_MEDIA_TYPES = {extension: media_type for media_type, extension in MEDIA_TYPE_EXTENSIONS.items()}
-_EXTENSION_MEDIA_TYPES["jpeg"] = "image/jpeg"
+_MEDIA_TYPE_EXTENSIONS = {"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp"}
+# The leading bytes of each supported media type.
+# Harnesses such as Pi tell an image's type from these bytes, not from its label or file extension.
+_MEDIA_TYPE_SIGNATURES = {
+    "image/png": re.compile(rb"\x89PNG\r\n\x1a\n"),
+    "image/jpeg": re.compile(rb"\xff\xd8\xff"),
+    "image/gif": re.compile(rb"GIF8[79]a"),
+    "image/webp": re.compile(rb"RIFF.{4}WEBP", re.DOTALL),
+}
 # Other spellings of a supported media type, such as the common misspelling image/jpg.
 _MEDIA_TYPE_ALIASES = {"image/jpg": "image/jpeg"}
 # Responses content part types that carry media, and the field that holds the data URI.
@@ -48,57 +54,80 @@ class UnsupportedContentError(ValueError):
     """
 
 
+def _media_type_of(data: bytes) -> str | None:
+    return next(
+        (media_type for media_type, signature in _MEDIA_TYPE_SIGNATURES.items() if signature.match(data)), None
+    )
+
+
 @dataclass(frozen=True)
 class MediaFile:
-    """Decoded media content and its media type, such as ``image/png``."""
+    """Decoded media content and its media type, such as ``image/png``.
+
+    The content always starts with the bytes that identify its media type.
+    """
 
     media_type: str
-    data: bytes
+    # Left out of the repr so logs and assertion messages do not print the whole file.
+    data: bytes = field(repr=False)
 
     def __post_init__(self) -> None:
-        if self.media_type not in MEDIA_TYPE_EXTENSIONS:
+        if self.media_type not in _MEDIA_TYPE_EXTENSIONS:
             raise UnsupportedContentError(
-                f"Unsupported media type {self.media_type!r}; supported: {sorted(MEDIA_TYPE_EXTENSIONS)}"
+                f"Unsupported media type {self.media_type!r}; supported: {sorted(_MEDIA_TYPE_EXTENSIONS)}"
             )
+        if _media_type_of(self.data) != self.media_type:
+            raise UnsupportedContentError(f"Media data is not {self.media_type}")
 
     @property
     def extension(self) -> str:
-        return MEDIA_TYPE_EXTENSIONS[self.media_type]
+        """The file extension, without the dot, that files of this media type are written with."""
+        return _MEDIA_TYPE_EXTENSIONS[self.media_type]
 
     @classmethod
     def from_data_uri(cls, uri: str) -> "MediaFile":
-        """Decode a ``data:<media type>[;<parameter>]...;base64,<payload>`` URI."""
+        """Decode a ``data:<media type>[;<parameter>]...;base64,<payload>`` URI.
+
+        The URI must name a supported media type, and the payload must hold data of a supported media type.
+        When the two differ, as for a PNG labeled ``image/jpeg``, the payload's own type wins,
+        so the file gets the extension its content needs.
+        """
         header, separator, payload = uri.partition(",")
         media_type, *parameters = header.removeprefix("data:").split(";")
         if not uri.startswith("data:") or not separator or parameters[-1:] != ["base64"]:
             raise UnsupportedContentError("Media must be a base64 data URI; URLs and file IDs are not fetched")
+        # Media types are case-insensitive.
+        media_type = media_type.strip().lower()
+        media_type = _MEDIA_TYPE_ALIASES.get(media_type, media_type)
+        if media_type not in _MEDIA_TYPE_EXTENSIONS:
+            raise UnsupportedContentError(
+                f"Unsupported media type {media_type!r}; supported: {sorted(_MEDIA_TYPE_EXTENSIONS)}"
+            )
         try:
             data = base64.b64decode(payload, validate=True)
         except binascii.Error as error:
             raise UnsupportedContentError("Media data URI holds invalid base64") from error
-        # Media types are case-insensitive.
-        media_type = media_type.strip().lower()
-        return cls(media_type=_MEDIA_TYPE_ALIASES.get(media_type, media_type), data=data)
+        content_type = _media_type_of(data)
+        if content_type is None:
+            raise UnsupportedContentError(
+                f"Media data URI labeled {media_type!r} holds no data of a supported media type; "
+                f"supported: {sorted(_MEDIA_TYPE_EXTENSIONS)}"
+            )
+        return cls(media_type=content_type, data=data)
 
     def to_data_uri(self) -> str:
+        """Encode as a ``data:<media type>;base64,<payload>`` URI."""
         return f"data:{self.media_type};base64,{base64.b64encode(self.data).decode()}"
 
 
-def media_type_for_path(path: str) -> str:
-    """Return the supported media type a file's extension names, such as ``image/png`` for ``a.PNG``."""
-    extension = posixpath.splitext(path)[1].removeprefix(".").lower()
-    if extension not in _EXTENSION_MEDIA_TYPES:
-        raise UnsupportedContentError(f"Cannot tell the media type of {path!r} from its extension")
-    return _EXTENSION_MEDIA_TYPES[extension]
-
-
-def _part_field(part: Any, name: str) -> Any:
+def _part_field(part: object, name: str) -> object:
     return part.get(name) if isinstance(part, dict) else getattr(part, name, None)
 
 
-def split_text_and_media(content: str | Iterable[Any]) -> tuple[str, list[MediaFile]]:
+def split_text_and_media(content: str | Iterable[object]) -> tuple[str, list[MediaFile]]:
     """Return a message's text, joined across text parts, and its decoded media in order.
 
+    Each part may be a mapping or a Responses content part model.
     Raises ``UnsupportedContentError`` for a part that is neither text nor supported media.
     """
     if isinstance(content, str):

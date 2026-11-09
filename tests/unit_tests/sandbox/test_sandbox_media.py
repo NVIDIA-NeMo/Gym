@@ -16,10 +16,8 @@ import asyncio
 import shutil
 from pathlib import Path
 
-import pytest
-
-from nemo_gym.core.media import MediaFile, UnsupportedContentError
-from nemo_gym.sandbox.utils import download_media, upload_media
+from nemo_gym.core.media import MediaFile
+from nemo_gym.sandbox.utils import upload_media
 
 
 PNG = MediaFile("image/png", b"\x89PNG\r\n\x1a\n\x00\xff")
@@ -31,7 +29,6 @@ class DirectorySandbox:
 
     def __init__(self, root: Path) -> None:
         self.root = root
-        self.downloads: list[str] = []
 
     def local(self, path: str) -> Path:
         return self.root / path.lstrip("/")
@@ -40,22 +37,9 @@ class DirectorySandbox:
         self.local(destination).parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, self.local(destination))
 
-    async def download(self, source: str, destination: Path) -> None:
-        self.downloads.append(source)
-        shutil.copyfile(self.local(source), destination)
 
-
-def test_upload_and_download_round_trip(tmp_path: Path) -> None:
+def test_upload_writes_each_file_with_its_extension_in_order(tmp_path: Path) -> None:
     sandbox = DirectorySandbox(tmp_path)
     paths = asyncio.run(upload_media(sandbox, files=[PNG, JPEG], directory="/session/media"))
     assert paths == ["/session/media/media-0.png", "/session/media/media-1.jpg"]
-    assert sandbox.local(paths[0]).read_bytes() == PNG.data
-    assert [asyncio.run(download_media(sandbox, path=path)) for path in paths] == [PNG, JPEG]
-
-
-def test_download_of_an_unknown_type_is_refused_before_transfer(tmp_path: Path) -> None:
-    sandbox = DirectorySandbox(tmp_path)
-    (tmp_path / "notes.txt").write_text("not media")
-    with pytest.raises(UnsupportedContentError, match="notes.txt"):
-        asyncio.run(download_media(sandbox, path="/notes.txt"))
-    assert sandbox.downloads == []
+    assert [sandbox.local(path).read_bytes() for path in paths] == [PNG.data, JPEG.data]
