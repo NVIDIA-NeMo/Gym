@@ -47,6 +47,7 @@ import logging
 from time import perf_counter, time
 from typing import List
 
+from aiohttp import ClientResponseError
 from fastapi import Request, Response
 from pydantic import ConfigDict, JsonValue, ValidationError
 
@@ -282,30 +283,8 @@ class SpeedBenchAgent(SimpleResponsesAPIAgent):
         return last_response
 
     async def run(self, request: Request, body: SpeedBenchAgentRunRequest) -> SpeedBenchAgentVerifyResponse:
-        cookies = request.cookies
-
-        seed_session_response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/seed_session",
-            json=body.model_dump(),
-            cookies=cookies,
-        )
-        await raise_for_status(seed_session_response)
-        cookies = seed_session_response.cookies
-
-        api_response = await self.server_client.post(
-            server_name=self.config.name,
-            url_path=self.url_path_for_run("/v1/responses", body),
-            json=body.responses_create_params,
-            cookies=cookies,
-        )
-        await raise_for_status(api_response)
-        cookies = api_response.cookies
-        model_response_json = await get_response_json(api_response)
-        raw_trajectory = model_response_json.pop(_INTERNAL_TRAJECTORY_KEY, None)
-        trajectory = None
-        if raw_trajectory is not None:
-            trajectory = TrajectoryRecord.model_validate(raw_trajectory)
+        def bind_trajectory(raw: object) -> TrajectoryRecord:
+            trajectory = TrajectoryRecord.model_validate(raw)
             task = body.model_extra or {}
             task_id = next(
                 (
@@ -325,6 +304,40 @@ class SpeedBenchAgent(SimpleResponsesAPIAgent):
                 }
             )
             request.state.nemo_gym_agent_trajectory = trajectory
+            return trajectory
+
+        cookies = request.cookies
+
+        seed_session_response = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path="/seed_session",
+            json=body.model_dump(),
+            cookies=cookies,
+        )
+        await raise_for_status(seed_session_response)
+        cookies = seed_session_response.cookies
+
+        api_response = await self.server_client.post(
+            server_name=self.config.name,
+            url_path=self.url_path_for_run("/v1/responses", body),
+            json=body.responses_create_params,
+            cookies=cookies,
+        )
+        try:
+            await raise_for_status(api_response)
+        except ClientResponseError as error:
+            try:
+                failure_body = json.loads(error.response_content)
+                raw = failure_body.get("ng_trajectory") if isinstance(failure_body, dict) else None
+                if raw is not None:
+                    bind_trajectory(raw)
+            except (TypeError, ValueError) as attachment_error:
+                LOG.warning("Could not bind SPEED-Bench failure trajectory (%s)", type(attachment_error).__name__)
+            raise
+        cookies = api_response.cookies
+        model_response_json = await get_response_json(api_response)
+        raw_trajectory = model_response_json.pop(_INTERNAL_TRAJECTORY_KEY, None)
+        trajectory = bind_trajectory(raw_trajectory) if raw_trajectory is not None else None
 
         verify_request = SpeedBenchAgentVerifyRequest.model_validate(
             body.model_dump() | {"response": model_response_json}

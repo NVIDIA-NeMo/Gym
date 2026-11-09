@@ -194,7 +194,11 @@ def test_run_preserves_evidence_through_self_dispatch(fail_second: bool) -> None
     assert self_replies[0].status_code == reply.status_code
     result = reply.json()
     trajectory = TrajectoryRecord.model_validate(result["ng_trajectory"])
+    assert trajectory.task_id == "source-task"
     assert trajectory.rollout_id == "task-0"
+    assert [(turn.task_id, turn.rollout_id) for turn in trajectory.turns] == [("source-task", "task-0")] * (
+        1 if fail_second else 2
+    )
     invocation = trajectory.invocations[0]
     if fail_second:
         assert not verify_payloads
@@ -204,8 +208,6 @@ def test_run_preserves_evidence_through_self_dispatch(fail_second: bool) -> None
         assert [turn.turn_no for turn in trajectory.turns] == [1]
         assert "ng_trajectory" in self_replies[0].json()
     else:
-        assert trajectory.task_id == "source-task"
-        assert [(turn.task_id, turn.rollout_id) for turn in trajectory.turns] == [("source-task", "task-0")] * 2
         assert invocation.verification_skipped is False
         assert [ref.response_id for ref in invocation.model_calls] == ["response-1", "response-2"]
         assert result["reward"] == 0.0
