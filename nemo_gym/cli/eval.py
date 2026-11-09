@@ -1175,12 +1175,25 @@ def collect_rollouts():  # pragma: no cover
 @exit_cleanly_on_config_error
 def aggregate_rollouts():  # pragma: no cover
     from nemo_gym.rollouts.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
+    from nemo_gym.telemetry.setup import (
+        configure_telemetry_env,
+        init_telemetry,
+        shutdown_telemetry,
+        telemetry_config_from_global_config,
+    )
 
     global_config = get_global_config_dict()
     config = RolloutAggregationConfig.model_validate(global_config)
     rah = RolloutAggregationHelper()
 
-    asyncio.run(rah.run_from_config(config))
+    # Like a standalone collection, a standalone aggregation sets up its own telemetry, so the merged run's summary
+    # reaches OpenTelemetry as well as an experiment tracker.
+    configure_telemetry_env(telemetry_config_from_global_config(global_config))
+    init_telemetry(server_name="driver", server_type="driver")
+    try:
+        asyncio.run(rah.run_from_config(config))
+    finally:
+        shutdown_telemetry()
 
 
 def health_check_rollouts(
