@@ -148,8 +148,13 @@ alongside nonempty text. The adapter writes each image to `/tmp/nemo-gym-media/<
 with `nemo_gym.sandbox.stage_media` and attaches it with `opencode run --file`. OpenCode shows
 that path to the model, so naming the file by its content keeps the prompt the same across
 rollouts of a task. In a borrowed sandbox these files remain after the session closes. OpenCode places the images, in order, before the task text and does
-not use the `detail` setting. Sessions always declare image input on the Gym model, so OpenCode
-also passes on images its read tool returns; a text-only deployment rejects such requests.
+not use the `detail` setting. A session declares image input on the Gym model when the prompt has images or
+when the agent configuration sets `image_input: true`. With image input declared, OpenCode also sends the model
+images its tools return, such as task files it reads, and a text-only deployment rejects those requests. Without it,
+OpenCode replaces such an image with an error text telling the model it cannot read images. Once an activation
+declares image input, later activations of the session keep declaring it, because OpenCode resends earlier images
+with the session history. Set `image_input: true` for a vision model whose tasks keep their images in the sandbox,
+where the prompt has none.
 In a single-activation session, the timeout budget starts once the activation holds a
 concurrency slot. Staging the activation's files, images included, spends it, OpenCode runs
 for the rest, and a budget that runs out before launch fails the activation.

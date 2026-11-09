@@ -181,6 +181,8 @@ class OpenCodeSandboxSession(AgentSessionState):
         default=None, repr=False
     )
     conversation_directory: str | None = None
+    # Whether an activation of this session has declared image input; later activations keep declaring it.
+    declares_image_input: bool = False
     harness_session_id: str | None = None
     message_ids: list[str] = field(default_factory=list)
     system_instructions: str | None = None

@@ -333,6 +333,14 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     workspace_root: str = "outputs/opencode_agent/workspaces"
     repo_dir: Optional[str] = None
     thinking: bool = True
+    image_input: bool = Field(
+        default=False,
+        description=(
+            "Declare image input on the Gym model in sandbox sessions even when the prompt has no images, so that "
+            "OpenCode sends the model images its tools return, such as task files it reads. A prompt with images "
+            "always declares it, for that activation and every later one in the session."
+        ),
+    )
     system_prompt: Optional[str] = None
     system_prompt_mode: Literal["append", "replace"] = "append"
     timeout: int = 900
@@ -1611,6 +1619,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         timeout = timeout if timeout is not None else resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         started = monotonic()
+        # A text-only deployment rejects a request that carries an image, so image input is declared only for prompt
+        # images or when the configuration asks for it. A resumed session keeps declaring it, because OpenCode resends
+        # earlier images with the history and would otherwise replace them with its error text.
+        state.declares_image_input = state.declares_image_input or bool(media) or self.config.image_input
         previous_session_id = state.harness_session_id
         base_url = self.resolve_model_base_url(self.config.model_server.name, state.request.episode_id.capture_key)
         config = {
@@ -1640,7 +1652,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                                 "input": self.config.context_window,
                                 "output": self.config.max_output_tokens,
                             },
-                            **copy.deepcopy(IMAGE_INPUT_MODEL_OPTIONS),
+                            **(copy.deepcopy(IMAGE_INPUT_MODEL_OPTIONS) if state.declares_image_input else {}),
                         }
                     },
                 }

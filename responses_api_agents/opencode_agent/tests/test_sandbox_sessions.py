@@ -424,6 +424,21 @@ def test_session_attaches_prompt_images_and_declares_image_input(setup, monkeypa
         assert closed.status_code == 200, closed.text
 
 
+@pytest.mark.parametrize("image_input", [False, True])
+def test_text_prompt_declares_image_input_only_when_configured(setup, image_input):
+    agent, sandbox = setup
+    agent.config.image_input = image_input
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == 200, result.text
+        model = json.loads(sandbox.params()["env"]["OPENCODE_CONFIG_CONTENT"])["provider"]["nemo_gym"]["models"]
+        # Without the declaration OpenCode replaces tool images with an error text, which a text-only model accepts.
+        assert ("modalities" in model["dummy_model"]) is image_input
+        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+
+
 def test_session_close_stops_media_staging_before_releasing_the_sandbox(setup):
     agent, sandbox = setup
     events = []

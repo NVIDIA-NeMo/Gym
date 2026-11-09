@@ -1242,6 +1242,32 @@ def test_media_staging_error_fails_the_activation(setup, tmp_path, failing, resu
     sandbox.launch.assert_not_awaited()
 
 
+@pytest.mark.parametrize(
+    "first, declared",
+    [
+        ("text", [False, False]),
+        # OpenCode resends the first prompt's image with the history, so the next activation keeps the declaration.
+        ("image", [True, True]),
+    ],
+)
+def test_continuation_keeps_declaring_image_input_once_a_prompt_has_images(setup, tmp_path, first, declared):
+    agent, sandbox = setup
+    payloads = install_artifact_runner(sandbox, tmp_path)
+    content = [{"type": "input_text", "text": "What is shown?"}]
+    if first == "image":
+        content.append({"type": "input_image", "image_url": PNG_URI, "detail": "auto"})
+    with TestClient(agent.setup_webserver()) as client:
+        request = start(client)
+        assert activate(client, 1, [{"role": "user", "content": content}]).status_code == 200
+        assert activate(client, 2, "Describe it again").status_code == 200
+        close(client, request)
+    models = [
+        json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])["provider"]["nemo_gym"]["models"]["dummy_model"]
+        for payload in payloads
+    ]
+    assert ["modalities" in model for model in models] == declared
+
+
 def test_continuation_decodes_each_activation_image_once(setup, tmp_path, monkeypatch):
     agent, sandbox = setup
     payloads = install_artifact_runner(sandbox, tmp_path)
