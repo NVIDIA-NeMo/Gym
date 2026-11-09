@@ -9,6 +9,22 @@
         {
           "type": "domain",
           "value": "hf.co"
+        },
+        {
+          "type": "url_substring",
+          "value": "kaggle.com/benchmarks/google/dsqa"
+        },
+        {
+          "type": "url_substring",
+          "value": "deepsearchqa"
+        },
+        {
+          "type": "url_substring",
+          "value": "deep-search-qa"
+        },
+        {
+          "type": "url_substring",
+          "value": "deep_search_qa"
         }
       ]
     }

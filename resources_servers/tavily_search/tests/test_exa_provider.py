@@ -10,6 +10,8 @@ import pytest
 from aiohttp import ClientConnectionError
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
+from nemo_gym.core import EpisodeId
+from nemo_gym.server_runtime import ResourcesCloseSessionRequest
 from resources_servers.tavily_search import app as module
 from resources_servers.tavily_search.app import (
     FindInPageRequest,
@@ -170,6 +172,42 @@ async def test_scroll_page_reads_and_caches_the_page_text(server, post):
     assert sent(call) == {"urls": ["https://ok.test/page"], "text": True}
 
 
+async def test_exa_fetches_no_more_page_text_than_the_cache_keeps(exclusions, post):
+    server = _server(exclusions, search_provider="exa", exa_api_key="exa-key", max_cached_page_chars=5)
+    post.return_value = http_response(200, {"results": [{"url": "https://ok.test/page", "text": "a b c d"}]})
+    await server.scroll_page(tool_request(), ScrollPageRequest(url="https://ok.test/page"))
+    await server.find_in_page(tool_request(), FindInPageRequest(url="https://ok.test/other", query="needle"))
+    assert [sent(call)["text"] for call in post.await_args_list] == [{"maxCharacters": 5}] * 2
+    assert server._page_cache["https://ok.test/page"] == "a b c"
+
+
+async def test_exa_fetches_whole_pages_when_caching_is_off(exclusions, post):
+    server = _server(
+        exclusions, search_provider="exa", exa_api_key="exa-key", max_cached_pages=0, max_cached_page_chars=5
+    )
+    post.return_value = http_response(200, {"results": [{"url": "https://ok.test/page", "text": "a b c d"}]})
+    result = await server.scroll_page(tool_request(), ScrollPageRequest(url="https://ok.test/page"))
+    assert sent(post.await_args)["text"] is True
+    assert result.total_words == 4
+
+
+@pytest.mark.parametrize("dump_on_exit", [False, True])
+async def test_closing_a_session_drops_its_metrics_unless_they_are_dumped_on_exit(exclusions, post, dump_on_exit):
+    server = _server(
+        exclusions,
+        search_provider="exa",
+        exa_api_key="exa-key",
+        dump_session_id_to_metrics_on_exit=dump_on_exit,
+    )
+    await server.web_search(tool_request(), TavilySearchRequest(query="q"))
+    await server.close_resources_session(
+        ResourcesCloseSessionRequest(
+            resources_session_id="test-session", episode_id=EpisodeId(rollout_id="rollout", attempt=0)
+        )
+    )
+    assert ("test-session" in server._session_id_to_metrics) is dump_on_exit
+
+
 async def test_scroll_page_does_not_cache_a_page_exa_failed_to_fetch(server, post):
     failed = {"results": [], "statuses": [{"id": "https://ok.test/page", "status": "error"}]}
     post.side_effect = [
@@ -177,7 +215,7 @@ async def test_scroll_page_does_not_cache_a_page_exa_failed_to_fetch(server, pos
         http_response(200, {"results": [{"url": "https://ok.test/page", "text": "a b c d"}]}),
     ]
     first = await server.scroll_page(tool_request(), ScrollPageRequest(url="https://ok.test/page"))
-    assert first.total_words == 0
+    assert (first.results_string, first.total_words) == ("No content found.", 0)
     assert "https://ok.test/page" not in server._page_cache
     second = await server.scroll_page(tool_request(), ScrollPageRequest(url="https://ok.test/page"))
     assert second.total_words == 4

@@ -38,7 +38,9 @@ a shared agent config. There are two kinds:
   [`tavily_search`](../../resources_servers/tavily_search/README.md) server with
   `search_provider: exa`. Its exclusion policy,
   [`search_exclusions.json`](search_exclusions.json), keeps the dataset's
-  Hugging Face pages out of the results and page reads of these three tools; it
+  Hugging Face and Kaggle pages, and any URL containing `deepsearchqa` (also with
+  `-` or `_` between the words), out of
+  the results and page reads of these three tools; it
   does not restrict the sandbox's own network access, so a shell or a harness's
   own fetch tool can still reach them. The sandbox calls the model
   server and `exa_search` on the Gym host, so these configs set

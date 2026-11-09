@@ -38,6 +38,8 @@ from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
+    ResourcesCloseSessionRequest,
+    ResourcesCloseSessionResponse,
     SimpleResourcesServer,
 )
 from nemo_gym.verification import JUDGE_FAILURES, call_judge, is_judge_failure
@@ -276,8 +278,11 @@ class ExaSearchClient(BaseModel):
             ]
         }
 
-    async def extract(self, url: str, *, query: Optional[str] = None) -> Dict[str, Any]:
-        body: Dict[str, Any] = {"urls": [url], "text": True}
+    async def extract(
+        self, url: str, *, query: Optional[str] = None, max_characters: Optional[int] = None
+    ) -> Dict[str, Any]:
+        # Without a cap Exa returns up to its own default of several million characters of page text.
+        body: Dict[str, Any] = {"urls": [url], "text": {"maxCharacters": max_characters} if max_characters else True}
         if query is not None:
             # Like Tavily's query-ranked extract: the passages that match the query, else the page text.
             body["highlights"] = {"query": query}
@@ -487,6 +492,14 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         return app
 
+    async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
+        response = await super().close_resources_session(body)
+        # A tool-server session is never verified here, so without this its metrics would stay for the server's
+        # lifetime. The cookie session ID of a seeded session is its resources_session_id.
+        if not self.config.dump_session_id_to_metrics_on_exit:
+            self._session_id_to_metrics.pop(body.resources_session_id, None)
+        return response
+
     def mcp_allowed_tools_for_session(self, seed_body: dict[str, Any]) -> list[str]:
         return ["web_search", "find_in_page", "scroll_page"]
 
@@ -520,7 +533,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
     async def _extract(self, url: str, query: Optional[str] = None) -> Dict[str, Any]:
         if self.config.search_provider == "exa":
-            return await self._select_exa_client().extract(url, query=query)
+            # With caching on, the cache keeps at most max_cached_page_chars of a page, so more would be discarded.
+            max_characters = self.config.max_cached_page_chars if self.config.max_cached_pages else None
+            return await self._select_exa_client().extract(url, query=query, max_characters=max_characters)
         if query is None:
             return await self._select_tavily_client().extract(urls=url)
         return await self._select_tavily_client().extract(urls=url, query=query)
@@ -644,6 +659,10 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 self._page_cache.move_to_end(body.url)
                 while len(self._page_cache) > self.config.max_cached_pages:
                     self._page_cache.popitem(last=False)
+
+        if not page_content:
+            # Say so, as find_in_page does, instead of an empty page of 0 words the model may read as a real page.
+            return ScrollPageResponse(results_string="No content found.", total_words=0)
 
         words = page_content.split()
         total_words = len(words)

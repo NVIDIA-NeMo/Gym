@@ -51,11 +51,14 @@ Set `search_provider: exa` and `exa_api_key` to serve the same three tools from
 [Exa](https://exa.ai) instead of Tavily; `tavily_api_key` is then not needed.
 `web_search` returns Exa's query-matched highlights as each result's summary,
 `find_in_page` returns the page passages that match its query (the page text
-when Exa returns none), and `scroll_page` reads the page text. The exclusion
+when Exa returns none), and `scroll_page` reads the page text. Both answer a page
+that could not be fetched with `No content found.` The exclusion
 policy, the provider-side domain subset (sent as Exa's `excludeDomains`), output
 limits, page cache, key pool and bounded retries work as they do for Tavily; a
 401 (invalid key) or 402 (credits or budget exhausted) tries the next Exa key.
 `search_depth` applies to Tavily only, and `tavily_exclude_domains_limit` also
-caps Exa's `excludeDomains`. `exa_base_url` defaults to `https://api.exa.ai`.
+caps Exa's `excludeDomains`. With caching on, Exa fetches at most
+`max_cached_page_chars` of a page's text when that is set. `exa_base_url` defaults to `https://api.exa.ai`.
 Tavily stays the default. The DeepSearchQA and WideSearch session configs run
-this as their `exa_search` tool server.
+this as their `exa_search` tool server. With either provider, closing a session drops
+its call metrics unless `dump_session_id_to_metrics_on_exit` is set.
