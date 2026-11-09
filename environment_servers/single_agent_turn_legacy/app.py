@@ -5,7 +5,7 @@
 
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
 from pydantic import ConfigDict, PositiveFloat, ValidationError
 
@@ -70,6 +70,8 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
             # A row that fails the episode request model, such as a malformed agent_context, gets a terminal 422, as on
             # the episode request route, instead of a 500 that a caller retries.
             raise RequestValidationError(error.errors(include_url=False)) from None
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from None
         response = await self.run_request(request)
         # An episode request is answered with the episode reply it asks for; only a flat row gets a flat result.
         return response.model_dump(mode="json") if is_episode_request else self._legacy_result(response)

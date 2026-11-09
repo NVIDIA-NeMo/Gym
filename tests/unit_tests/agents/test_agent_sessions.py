@@ -4,6 +4,7 @@
 import asyncio
 import logging
 from dataclasses import dataclass
+from typing import Any, Optional
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -360,9 +361,12 @@ def test_an_agent_reads_the_context_it_declares() -> None:
             "This agent does not accept agent_context keys ['dpi']",
         ),
         (
+            AgentContext(values={"tag": 123}, artifacts={"media": {"path": "figs/1"}}),
+            "agent_context does not satisfy _MediaContext: tag: Input should be a valid string",
+        ),
+        (
             AgentContext(values={"media": "figs/1"}),
-            "agent_context does not satisfy _MediaContext: media: Input should be a valid dictionary or instance of "
-            "AgentContextArtifact",
+            "agent_context field 'media' must be supplied through artifacts",
         ),
     ],
 )
@@ -370,6 +374,67 @@ def test_an_agent_refuses_missing_unknown_or_mistyped_context(context, detail) -
     agent = _context_agent(_MediaAgent)
 
     assert check_agent_seed_rejected(agent.setup_webserver(), _seed_request(agent_context=context)) == detail
+    assert agent._session_records == {}
+
+
+@pytest.mark.parametrize(
+    "annotation", [AgentContextArtifact, AgentContextArtifact | None, Optional[AgentContextArtifact]]
+)
+def test_artifact_fields_require_the_artifacts_channel(annotation) -> None:
+    class Context(BaseModel):
+        media: annotation = None
+
+    class Agent(_MediaAgent):
+        agent_context_model = Context
+
+    agent = _context_agent(Agent)
+    assert agent.parse_agent_context(_seed_request()).media is None
+    seed = _seed_request(agent_context=AgentContext(artifacts={"media": {"path": "figs/1"}}))
+    assert agent.parse_agent_context(seed).media == AgentContextArtifact(path="figs/1")
+    detail = check_agent_seed_rejected(
+        agent.setup_webserver(),
+        _seed_request(agent_context=AgentContext(values={"media": {"path": "figs/1"}})),
+    )
+    assert detail == "agent_context field 'media' must be supplied through artifacts"
+    assert agent._session_records == {}
+
+
+def test_inline_json_keeps_its_channel_and_cannot_mutate_the_saved_seed() -> None:
+    class Context(BaseModel):
+        payload: Any
+
+    class Agent(_MediaAgent):
+        agent_context_model = Context
+
+    agent = _context_agent(Agent)
+    client = TestClient(agent.setup_webserver())
+    seed = _seed_request(agent_context=AgentContext(values={"payload": {"path": "ordinary-json", "items": [1]}}))
+    assert client.post("/v1/agent_sessions", json=seed.model_dump(mode="json")).status_code == 200
+    state = agent._session_state("agent-session")
+    state.context.payload["items"].append(2)
+    assert state.request.agent_context == seed.agent_context
+    assert client.post("/v1/agent_sessions", json=seed.model_dump(mode="json")).status_code == 200
+
+    other = _context_agent(Agent)
+    detail = check_agent_seed_rejected(
+        other.setup_webserver(), _seed_request(agent_context=AgentContext(artifacts={"payload": {"path": "figs/1"}}))
+    )
+    assert detail == "agent_context field 'payload' must be supplied through values"
+    assert other._session_records == {}
+
+
+def test_mixed_artifact_value_unions_are_rejected() -> None:
+    class Context(BaseModel):
+        media: AgentContextArtifact | str
+
+    class Agent(_MediaAgent):
+        agent_context_model = Context
+
+    agent = _context_agent(Agent)
+    detail = check_agent_seed_rejected(
+        agent.setup_webserver(), _seed_request(agent_context=AgentContext(artifacts={"media": {"path": "figs/1"}}))
+    )
+    assert "cannot mix artifact and value types" in detail
     assert agent._session_records == {}
 
 

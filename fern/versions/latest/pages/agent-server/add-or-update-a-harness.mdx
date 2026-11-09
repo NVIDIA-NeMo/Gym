@@ -240,7 +240,7 @@ The adapter reaches the sandbox only through `AsyncSandbox`. The harness reaches
 A harness can get tools from two sources:
 
 1. **Built-in harness tools.** These run inside the task sandbox as part of the harness, such as a shell or a file editor. The adapter enables them through harness settings.
-2. **Tool grants from the Resources Server.** These arrive in `AgentSeedSessionRequest.tool_accesses`. The Environment Server's `resources_tool_transports` setting selects which grants it creates:
+2. **Tool grants from the Environment Server.** These arrive in `AgentSeedSessionRequest.tool_accesses`. The Environment Server's `resources_tool_transports` setting selects which grants it creates for the episode's Resources Server, and its `tool_servers` setting adds a required MCP grant for each other listed Resources server, such as a search server, falling back to the agent configuration's `tool_servers`:
 
 | Transport | Grant type | What the adapter receives |
 | --- | --- | --- |
@@ -301,7 +301,7 @@ Validate grant support with an authenticated MCP fixture and a real harness run:
 
 ### Agent context
 
-Some harnesses need task data beyond the initial model input, such as a document to render, images to embed, or the prompt for a later stage. The task row carries that data in `agent_context`, next to `verifier_metadata`, and the Environment Server passes it to the agent in `AgentSeedSessionRequest.agent_context`. Nothing else from the row reaches the agent. The initial conversation stays in `responses_create_params.input`, and verifier data stays with the Resources Server, which does not receive `agent_context`. Do not use `responses_create_params.metadata` to carry task data to the harness.
+Some harnesses need task data beyond the initial model input, such as a document to render, images to embed, or the prompt for a later stage. The task row carries that data in `agent_context`, next to `verifier_metadata`, and the `single_agent_turn` Environment Server passes it to the agent in `AgentSeedSessionRequest.agent_context`. Nothing else from the row reaches the agent. The initial conversation stays in `responses_create_params.input`, and verifier data stays with the Resources Server, which does not receive `agent_context`. Do not use `responses_create_params.metadata` to carry task data to the harness.
 
 ```json
 {
@@ -314,18 +314,18 @@ Some harnesses need task data beyond the initial model input, such as a document
 }
 ```
 
-- `values` holds small inline JSON fields, at most 64 KiB in all as UTF-8 JSON.
+- `values` holds small inline JSON fields. The complete `agent_context`, including artifact references, is limited to 64 KiB as UTF-8 JSON.
 - `artifacts` names files and directories by a path relative to a root the agent configures. The path cannot be absolute or contain `..` or a NUL byte. The content never travels in the seed.
 - A key appears in `values` or in `artifacts`, not both.
 - An empty `agent_context` counts as none: the seed then omits the key.
 
-An agent declares the keys it reads as a Pydantic model in `agent_context_model`. A field typed `AgentContextArtifact` takes an artifact; any other field takes a value. Before `_seed_agent_session_state()` runs, the base class checks the seed against that model and refuses it with HTTP 422 when:
+An agent declares the keys it reads as a Pydantic model in `agent_context_model`. A field typed `AgentContextArtifact` (or a subclass), optionally unioned with `None`, takes an artifact; any other field takes a value. Omit an optional artifact to use its default of `None`. Unions mixing artifact and value types are unsupported; declare separate fields instead. Before `_seed_agent_session_state()` runs, the base class checks the seed against that model and refuses it with HTTP 422 when:
 
 - the agent declares no model and the seed carries any context,
 - the seed carries a key the model does not declare,
-- a required key is missing or a value has the wrong type.
+- a required key is missing, a value has the wrong type, or a key is supplied through the wrong map.
 
-No agent declares a model by default, so a task with context fails on an agent that cannot use it instead of running without it. Where the agent builds its session state, read the typed context with `self.parse_agent_context(body)` and resolve each artifact with `resolve_agent_context_artifact(artifact, root, kind=...)` from `nemo_gym.agents`. It refuses with HTTP 422 a path that leaves `root`, also through a symlink, that is not a file or directory as `kind` says, or that cannot be looked up, such as a name that is too long. The check runs on resolved paths, so a directory under `root` that is a symlink to other storage counts as outside it: configure the real directory as the root. For a directory artifact, only the directory itself is checked; files under it can be symlinks to anywhere, so resolve each file you read and check that it stays under the directory. Read or stage the content when the activation runs, and remove anything you staged, such as a temporary directory or a sandbox upload, when the session closes.
+No agent declares a model by default, so a task with context fails on an agent that cannot use it instead of running without it. Where the agent builds its session state, read the typed context with `self.parse_agent_context(body)` and resolve each artifact with `resolve_agent_context_artifact(artifact, root, kind=...)` from `nemo_gym.agents`. It refuses with HTTP 422 a path that leaves `root`, also through a symlink, that is not a file or directory as `kind` says, or that cannot be looked up, such as a name that is too long. The check runs on resolved paths, so a directory under `root` that is a symlink to other storage counts as outside it: configure the real directory as the root. For a directory artifact, only the directory itself is checked; files under it can be symlinks to anywhere, so resolve each file you read and check that it stays under the directory. Read or stage the content when the activation runs, and remove anything you staged, such as a temporary directory or a sandbox upload, when the session closes and in `retire_agent_session` when a checkpoint retires the session instead. Retirement does not call the close hook.
 
 A `SimpleAgent` subclass resolves its context in `_new_session_state()`, which the seed and a checkpoint restore both call; context resolved only in `_seed_agent_session_state()` is lost when a restore rebuilds the session. It puts the context into the model request in `_create_session_episode()`, which creates each session activation's episode. Override `_create_session_episode()`, never `responses()`: environment validation infers `custom-gym-agent-loop` for any agent that overrides `responses()`, while the agent loop is still Simple Agent's.
 
@@ -358,7 +358,7 @@ class FigureAgent(SimpleAgent):
         return await super()._create_session_episode(state, body, **kwargs)
 ```
 
-On the legacy `/run` path, `agent_context` is one more field of the row the agent receives.
+On an agent's legacy `/run` path, `agent_context` is one more field of the row the agent receives and may forward to the Resources Server. The agent-only routing described above applies to `single_agent_turn`.
 
 ## Configure the adapter
 
@@ -380,9 +380,10 @@ Adapter configurations extend `BaseResponsesAPIAgentConfig`. Adapters that imple
 | Timeouts | Installation, execution, and per-phase close budgets, such as `sandbox_install_timeout_seconds` and `session_close_timeout_seconds`. Names differ by adapter; check its configuration class. |
 | `session_close_retry_window_seconds` | The close retry window: how long a closed session stays fenced and a retried close gets the saved reply. Cover the caller's retry horizon. |
 | `tool_accesses` | Static tool grants that are merged with each episode's grants. |
+| `tool_servers` | Resources servers whose MCP tools each episode grants, such as a search server. The Environment Server seeds them unless it sets its own list. |
 | `token_id_capture` | Enable for opaque external harnesses whose output has no token IDs, when collecting training data. |
 
-The Environment Server (`single_agent_turn`) binds the pair with `resources_server`, `agent_server`, and `resources_tool_transports`. Its base configuration also sets `max_concurrent_episodes`, `queue_timeout_seconds`, and the episode and cleanup timeouts.
+The Environment Server (`single_agent_turn`) binds the pair with `resources_server`, `agent_server`, `resources_tool_transports`, and `tool_servers`. Its base configuration also sets `max_concurrent_episodes`, `queue_timeout_seconds`, and the episode and cleanup timeouts.
 
 The episode timeout, `default_episode_timeout_seconds`, covers the whole episode: Resources Server seed, runtime installation, the harness run, agent close, and verification. Set it above the harness's own run timeout plus those budgets, or the deadline fires before verification. The task sandbox has its own lifetime: SWE-bench Pro and Terminal Bench 2.1 set `sandbox_config.ttl_s: 18000`, and OpenSandbox does not renew a sandbox by default. A harness that is still running when the sandbox expires fails the episode, so raise `ttl_s` in the benchmark declaration for runs that can last longer. Set `max_concurrent_episodes` and `queue_timeout_seconds` to admit episodes at the rate the agent can run them. Admission waits before the deadline starts; without it, every row starts its sandbox at once and waits inside its own deadline.
 

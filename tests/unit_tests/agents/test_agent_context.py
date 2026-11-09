@@ -39,7 +39,12 @@ def test_an_artifact_cannot_reach_outside_the_root_through_a_symlink(root: Path)
 
 @pytest.mark.parametrize(
     ("path", "kind"),
-    [("documents/x/missing.json", "file"), ("documents/x", "file"), ("documents/x/manifest.json", "directory")],
+    [
+        ("documents/x/missing.json", "file"),
+        ("documents/x", "file"),
+        ("documents/x/manifest.json", "directory"),
+        ("documents/x/manifest.json/child", "file"),
+    ],
 )
 def test_a_missing_or_wrong_kind_of_artifact_refuses_the_seed(root: Path, path: str, kind: str) -> None:
     with pytest.raises(AgentSeedRejectedError, match=f"is not a {kind} under") as raised:
@@ -82,3 +87,35 @@ def test_an_io_error_on_the_artifacts_storage_stays_retryable(root: Path) -> Non
         resolve_agent_context_artifact(AgentContextArtifact(path="documents/x/manifest.json"), root, kind="file")
 
     assert not isinstance(raised.value, AgentSeedRejectedError)
+
+
+def test_a_transient_symlink_lookup_error_cannot_return_a_path_outside_the_root(root: Path) -> None:
+    link = root / "link"
+    link.symlink_to(root.parent, target_is_directory=True)
+    real_lstat = os.lstat
+    failed = False
+
+    def fail_once_on_link(path: str, *args, **kwargs) -> os.stat_result:
+        nonlocal failed
+        if not failed and Path(path) == link:
+            failed = True
+            raise OSError(errno.EIO, "Input/output error")
+        return real_lstat(path, *args, **kwargs)
+
+    with patch("os.lstat", side_effect=fail_once_on_link), pytest.raises(OSError) as raised:
+        resolve_agent_context_artifact(AgentContextArtifact(path="link/secret.txt"), root, kind="file")
+
+    assert failed
+    assert raised.value.errno == errno.EIO
+    assert not isinstance(raised.value, AgentSeedRejectedError)
+    with pytest.raises(AgentSeedRejectedError, match="resolves outside"):
+        resolve_agent_context_artifact(AgentContextArtifact(path="link/secret.txt"), root, kind="file")
+
+
+def test_a_symlink_loop_refuses_the_seed(root: Path) -> None:
+    (root / "loop").symlink_to(root / "loop")
+
+    with pytest.raises(AgentSeedRejectedError, match="cannot be resolved") as raised:
+        resolve_agent_context_artifact(AgentContextArtifact(path="loop"), root, kind="file")
+
+    assert raised.value.status_code == 422

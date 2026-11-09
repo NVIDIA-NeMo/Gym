@@ -22,10 +22,12 @@ from abc import abstractmethod
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager, nullcontext
+from copy import deepcopy
 from dataclasses import dataclass, field
 from functools import wraps
 from time import monotonic
-from typing import Any, Awaitable, Callable, ClassVar, Optional
+from types import UnionType
+from typing import Any, Awaitable, Callable, ClassVar, Optional, Union, get_args, get_origin
 from urllib.parse import urlsplit
 from warnings import warn
 
@@ -51,7 +53,12 @@ from nemo_gym.agents.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutco
 from nemo_gym.agents.utils.ordered_operations import ActivationConflictError, OrderedOperationLedger
 from nemo_gym.agents.utils.sandbox_session import ExpiryUnsupportedError, SandboxSession
 from nemo_gym.client.server_client import apply_rollout_prefix, rollout_path_prefix
-from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT, ModelServerRef
+from nemo_gym.config.config_types import (
+    ROLLOUT_PATH_PREFIX,
+    TOKEN_CAPTURE_PATH_SEGMENT,
+    ModelServerRef,
+    ResourcesServerRef,
+)
 from nemo_gym.config.global_config import (
     OBSERVABILITY_ENABLED_KEY_NAME,
     TOKEN_CAPTURE_BLOCK,
@@ -80,7 +87,7 @@ from nemo_gym.server_runtime._checkpoint.errors import StaleAttemptError
 from nemo_gym.server_runtime._checkpoint.participant_workers import install_server_participant
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 from nemo_gym.server_runtime._checkpoint.steps import CHECKPOINT_RESTART_HEADER
-from nemo_gym.server_runtime.agent_context import AgentContext
+from nemo_gym.server_runtime.agent_context import AgentContext, AgentContextArtifact
 from nemo_gym.server_runtime.base_resources_server import (
     AggregateMetrics,
     AggregateMetricsRequest,
@@ -327,6 +334,9 @@ class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):
     )
     skip_verification: bool = False
     skip_verification_reward: float = 0.0
+    # Resources servers, such as a search server, whose MCP tools each episode grants this agent besides its own
+    # Resources server's. A single_agent_turn Environment Server seeds them; one may also set its own list.
+    tool_servers: list[ResourcesServerRef] = Field(default_factory=list)
     # Whether this agent's rollouts participate in training token capture.
     # Native agents already receive token ids inline and normally leave this disabled.
     # Opaque external harnesses enable it because their returned output has no token ids.
@@ -1142,8 +1152,25 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             return None
         if unknown := sorted(fields.keys() - model.model_fields.keys()):
             raise AgentSeedRejectedError(f"This agent does not accept agent_context keys {unknown}")
+        context = request.agent_context
+        for name in fields:
+            annotation = model.model_fields[name].annotation
+            variants = get_args(annotation) if get_origin(annotation) in (Union, UnionType) else (annotation,)
+            variants = tuple(variant for variant in variants if variant is not type(None))
+            artifact_variants = tuple(
+                isinstance(variant, type) and issubclass(variant, AgentContextArtifact) for variant in variants
+            )
+            is_artifact = any(artifact_variants)
+            if is_artifact and not all(artifact_variants):
+                raise AgentSeedRejectedError(
+                    f"agent_context field {name!r} cannot mix artifact and value types; declare separate fields"
+                )
+            if is_artifact != (name in context.artifacts):
+                channel = "artifacts" if is_artifact else "values"
+                raise AgentSeedRejectedError(f"agent_context field {name!r} must be supplied through {channel}")
         try:
-            return model.model_validate(fields)
+            # Any fields and custom validators can retain or mutate input objects. Keep the saved seed unchanged.
+            return model.model_validate(deepcopy(fields))
         except ValidationError as error:
             problems = "; ".join(
                 f"{'.'.join(map(str, problem['loc']))}: {problem['msg']}" for problem in error.errors()

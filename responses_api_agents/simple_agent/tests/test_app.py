@@ -16,6 +16,7 @@ import asyncio
 import json
 import time
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, fields
 from types import SimpleNamespace
 from typing import Any, ClassVar
 from unittest.mock import AsyncMock, MagicMock, call
@@ -30,6 +31,7 @@ from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from multidict import CIMultiDict, CIMultiDictProxy
 from omegaconf import OmegaConf
+from pydantic import BaseModel, ConfigDict
 from pytest import MonkeyPatch
 from yarl import URL
 
@@ -75,6 +77,8 @@ from nemo_gym.core import (
 from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
 from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess
 from nemo_gym.server_runtime import (
+    AgentContext,
+    AgentContextArtifact,
     AgentSessionParticipant,
     AgentSessionRecord,
     BaseResourcesServerConfig,
@@ -89,6 +93,7 @@ from nemo_gym.server_runtime import (
     MCPStreamableHTTPConnection,
     MCPToolAccess,
     ParticipantControlPlane,
+    RestoredAgentSession,
     RestoreRequest,
     RolloutIdRequiredError,
     SimpleResourcesServer,
@@ -103,6 +108,7 @@ from responses_api_agents.simple_agent.app import (
     SimpleAgentConfig,
     SimpleAgentLoopState,
     SimpleAgentRunRequest,
+    SimpleAgentSessionState,
     SimpleAgentVerifyRequest,
     _policy_request_timed_out,
 )
@@ -534,6 +540,50 @@ class TestApp:
         [state] = seen_states
         assert state is server._session_state("agent-session")
         assert server_client.post.await_count == 2
+
+    async def test_checkpoint_restore_rebuilds_typed_agent_context(self) -> None:
+        class FigureContext(BaseModel):
+            model_config = ConfigDict(extra="forbid")
+
+            media: AgentContextArtifact
+            tag: str
+
+        @dataclass
+        class FigureState(SimpleAgentSessionState):
+            context: FigureContext | None = None
+
+        class FigureAgent(SimpleAgent):
+            agent_context_model = FigureContext
+
+            def _new_session_state(self, body: AgentSeedSessionRequest) -> FigureState:
+                state = super()._new_session_state(body)
+                inherited = {field.name: getattr(state, field.name) for field in fields(state)}
+                return FigureState(**inherited, context=self.parse_agent_context(body))
+
+        server, _ = _make_agent(False, FigureAgent)
+        seed = AgentSeedSessionRequest(
+            agent_session_id="agent-session",
+            episode_id=EpisodeId(rollout_id="rollout"),
+            task_id=TaskId(taskset="example", task_id="0"),
+            agent_context=AgentContext(values={"tag": "figqa2"}, artifacts={"media": {"path": "figs/1"}}),
+        )
+        client = TestClient(server.setup_webserver())
+        assert client.post("/v1/agent_sessions", json=seed.model_dump(mode="json")).status_code == 200
+        exported = (await server.export_agent_sessions(["agent-session"]))["agent-session"]
+        restored, _ = _make_agent(False, FigureAgent)
+        replacement = EpisodeId(rollout_id="rollout", attempt=1)
+
+        await restored.restore_agent_sessions(
+            [RestoredAgentSession(session_key="agent-session", episode_id=replacement, session=exported)]
+        )
+
+        state = restored._session_state("agent-session")
+        assert isinstance(state, FigureState)
+        assert state.request.agent_context == seed.agent_context
+        assert state.context == FigureContext(media=AgentContextArtifact(path="figs/1"), tag="figqa2")
+        assert state.request.episode_id == replacement
+        assert exported["request"]["agent_context"] == seed.agent_context.model_dump(mode="json")
+        assert exported["request"]["episode_id"] == seed.episode_id.model_dump(mode="json")
 
     async def test_agent_session_can_return_unresolved_tool_calls(self) -> None:
         config = SimpleAgentConfig(

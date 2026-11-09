@@ -75,7 +75,11 @@ from nemo_gym.environment.registry import (
     resolve_catalog_entry,
 )
 from nemo_gym.environment.scaffold import scaffold_environment, scaffold_resources_server
-from nemo_gym.environment.validation import EnvironmentValidationReport, validate_environment
+from nemo_gym.environment.validation import (
+    EnvironmentValidationReport,
+    resolve_config_servers,
+    validate_environment,
+)
 from nemo_gym.orchestration.server_supervisor import (
     RunHelper,
     _configured_servers,
@@ -1161,10 +1165,11 @@ def _inspect_environment(
     ):
         if value:
             details[label] = value
-    if parsed["resources_servers"]:
-        details["resources servers"] = ", ".join(parsed["resources_servers"])
-    if parsed["agent"]:
-        details["agent"] = parsed["agent"]
+    resources_server, agent_server = _entry_servers(entry, parsed)
+    if resources_server:
+        details["resources servers"] = resources_server
+    if agent_server:
+        details["agent"] = agent_server
     if parsed["datasets"]:
         details["datasets"] = ", ".join(parsed["datasets"])
 
@@ -1187,7 +1192,32 @@ def _inspect_environment(
     )
 
 
+def _entry_servers(
+    entry: EnvironmentCatalogEntry, details: Optional[Dict[str, object]] = None
+) -> Tuple[Optional[str], Optional[str]]:
+    """The resources server and agent an entry runs with, as the catalog views show them.
+
+    The manifest says when there is one. Otherwise the config's runtime routes select the servers. A
+    config that needs values only a run supplies, such as a judge model server, or that is malformed does not
+    resolve; then the names written in the config file are used, each only when the file names exactly one, since a
+    file naming several does not say which one runs. ``details`` is the config's ``read_environment_details``
+    result when the caller has it.
+    """
+    if entry.manifest_path is not None:
+        return entry.resources_server, entry.agent_server
+    resolved = resolve_config_servers(entry.config_path)
+    if resolved is not None:
+        return resolved
+    details = details or read_environment_details(entry.config_path)
+    resources_servers, agents = set(details["resources_servers"]), set(details["agents"])
+    return (
+        next(iter(resources_servers)) if len(resources_servers) == 1 else None,
+        next(iter(agents)) if len(agents) == 1 else None,
+    )
+
+
 def _catalog_payload(entry: EnvironmentCatalogEntry) -> Dict[str, object]:
+    resources_server, agent_server = _entry_servers(entry)
     payload = {
         "name": entry.name,
         "kind": entry.kind,
@@ -1203,6 +1233,8 @@ def _catalog_payload(entry: EnvironmentCatalogEntry) -> Dict[str, object]:
         "path": str(entry.path.resolve()),
         "config_path": str(entry.config_path.resolve()),
         "manifest_path": str(entry.manifest_path.resolve()) if entry.manifest_path else None,
+        "resources_server": resources_server,
+        "agent_server": agent_server,
     }
     if entry.status is None:
         payload.pop("status")
