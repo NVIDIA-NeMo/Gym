@@ -29,7 +29,7 @@ import ssl
 import sys
 import tempfile
 from asyncio import Semaphore
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from shlex import quote
@@ -44,10 +44,12 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 from nemo_gym.agents import (
     AGENT_OUTCOME_METADATA_KEY,
     AGENT_TIMEOUT_METADATA_KEY,
+    DEFAULT_CLEANUP_TIMEOUT,
     HARNESS_COMMAND_NOT_STARTED,
     HARNESS_RUNNER_FAILED,
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
+    SUPERVISOR_SCRIPT,
     AgentCloseSessionResponse,
     AgentContinuationCapabilities,
     AgentOutcome,
@@ -60,6 +62,8 @@ from nemo_gym.agents import (
     SandboxNetworkAccess,
     SandboxSession,
     SimpleResponsesAPIAgent,
+    assert_model_url_reachable_from_sandbox,
+    harness_termination_failure,
     resolve_agent_timeout,
     restrict_sandbox_network,
     verification_failure_fields,
@@ -373,15 +377,21 @@ def _remote_session_task():
 
     The body is defined inside this function so Ray pickles it by value: workers on other
     nodes need not import this module. It recreates the run dir from `inputs` (the image and
-    OpenCode config), runs OpenCode in its own process group, returns the session database
-    files, and removes the run dir.
+    OpenCode config), runs OpenCode under Gym's process supervisor (`supervisor`, the text of
+    process_supervisor.sh), returns the supervisor's cleanup receipt, the stderr tail and the
+    session database files, and removes the run dir.
+
+    The supervisor gives OpenCode its own process group and, at the deadline, stops it together
+    with every process it reached: descendants in other process groups or sessions too. stderr goes
+    to a file rather than a pipe, so a process that escaped cannot hold this task open, and the wait
+    for the supervisor is bounded. A missing or negative receipt means termination is unconfirmed.
     """
     global _REMOTE_SESSION_TASK
     if _REMOTE_SESSION_TASK is not None:
         return _REMOTE_SESSION_TASK
     import ray
 
-    def run_session(cmd, work_dir, project_dir, env, inputs, timeout):
+    def run_session(cmd, work_dir, project_dir, env, inputs, timeout, supervisor, cleanup_timeout):
         import os
         import shutil
         import signal
@@ -394,33 +404,53 @@ def _remote_session_task():
         Path(project_dir).mkdir(parents=True, exist_ok=True)
         data_home = Path(env["XDG_DATA_HOME"])
         data_home.mkdir(parents=True, exist_ok=True)
-        timed_out = False
+        control = Path(work_dir) / ".ng-supervisor"
+        control.mkdir(parents=True, exist_ok=True)
+        script = control / "process_supervisor.sh"
+        script.write_text(supervisor)
+        receipt = control / "cleanup.json"
+        stderr_path = control / "stderr.log"
         try:
-            proc = subprocess.Popen(
-                cmd,
-                cwd=project_dir,
-                env=env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                start_new_session=True,
-            )
+            with open(stderr_path, "wb") as stderr_file:
+                proc = subprocess.Popen(
+                    [
+                        "bash",
+                        str(script),
+                        *("--timeout", f"{timeout:.2f}", "--cleanup-timeout", f"{cleanup_timeout:.2f}"),
+                        *("--receipt", str(receipt), "--stop-file", str(control / "stop.request"), "--"),
+                        *cmd,
+                    ],
+                    cwd=project_dir,
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=stderr_file,
+                    start_new_session=True,
+                )
             try:
-                _, stderr = proc.communicate(timeout=timeout)
+                # The supervisor's own bound: the task, then its three cleanup phases and receipt I/O.
+                proc.wait(timeout=timeout + 3 * cleanup_timeout + 30)
             except subprocess.TimeoutExpired:
-                timed_out = True
-                os.killpg(proc.pid, signal.SIGKILL)
-                _, stderr = proc.communicate()
-            finally:
+                # Not reaped yet, so its process group ID cannot have been reused. OpenCode has its own
+                # group; without a receipt the caller treats its termination as unconfirmed.
                 try:
                     os.killpg(proc.pid, signal.SIGKILL)
                 except (ProcessLookupError, PermissionError):
                     pass
+                try:
+                    proc.wait(timeout=cleanup_timeout)
+                except subprocess.TimeoutExpired:
+                    pass
+            receipt_text = receipt.read_text() if receipt.is_file() else None
+            with open(stderr_path, "rb") as stderr_file:
+                stderr_file.seek(max(0, stderr_path.stat().st_size - 4000))
+                stderr = stderr_file.read()
             outputs = {
                 str(path): path.read_bytes()
                 for path in (data_home / "opencode").glob("opencode.db*")
                 if path.is_file()
             }
-            return proc.returncode, stderr[-4000:], timed_out, outputs
+            return receipt_text, stderr, outputs
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
 
@@ -682,6 +712,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         self._session_nodes: Optional[list[str]] = None
         self._next_session_node = 0
         self._sandbox_provider: Any = None
+        # Session-sandbox closes run in tasks this agent owns, so a cancelled request cannot abandon them;
+        # sandboxes whose close failed are retried when the server shuts down.
+        self._session_sandbox_closes: set[asyncio.Task[None]] = set()
+        self._unclosed_session_sandboxes: dict[str, Any] = {}
         if self.config.session_sandbox is not None and self.config.session_nodes > 1:
             raise ValueError("session_sandbox and session_nodes > 1 are alternatives; set only one")
         if self.config.repo_dir and (self.config.session_sandbox is not None or self.config.session_nodes > 1):
@@ -752,7 +786,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
     def _effective_model(self) -> str:
         return f"{self.config.provider_id}/{self.config.model}" if self.config.model_server else self.config.model
 
-    def _build_opencode_config(self, rollout_id: Optional[str] = None) -> dict[str, Any]:
+    def _build_opencode_config(
+        self, rollout_id: Optional[str] = None, *, plugin_path: Path = ASSISTANT_MESSAGE_PLUGIN_SOURCE
+    ) -> dict[str, Any]:
+        """OpenCode's config; `plugin_path` is where the session's OpenCode finds the correlation plugin."""
         config = self._deep_merge({}, copy.deepcopy(_without_empty_tools(self.config.opencode_config)))
         if self.config.model_server:
             providers = config.setdefault("provider", {})
@@ -779,11 +816,13 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             )
             nemo["models"] = {self.config.model: model}
         if self._model_call_capture_enabled():
-            apply_observability_patch(config)
+            apply_observability_patch(config, plugin_path=plugin_path)
         return config
 
-    def _write_opencode_config(self, work_dir: Path, rollout_id: Optional[str] = None) -> None:
-        config = self._build_opencode_config(rollout_id)
+    def _write_opencode_config(
+        self, work_dir: Path, rollout_id: Optional[str] = None, *, plugin_path: Path = ASSISTANT_MESSAGE_PLUGIN_SOURCE
+    ) -> None:
+        config = self._build_opencode_config(rollout_id, plugin_path=plugin_path)
         if not config:
             return
         (work_dir / "opencode.json").write_text(json.dumps(config, indent=2))
@@ -831,47 +870,59 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         prompt = instruction if not system_prompt else f"{system_prompt}\n\n{instruction}"
         work_dir = self._workspace_root()
         project_dir = self._repo_dir(work_dir)
-        data_home = work_dir / ".opencode-data"
-        data_home.mkdir(parents=True, exist_ok=True)
-        self._write_opencode_config(project_dir, rollout_id)
-        env = self._env(str(data_home), rollout_id)
-        if system_prompt and self.config.system_prompt_mode == "replace":
-            # Keep request-specific instructions out of a persistent repo's config file.
-            overrides = json.loads(env.get("OPENCODE_CONFIG_CONTENT", "{}"))
-            self._deep_merge(overrides, {"agent": {"build": {"prompt": system_prompt}}})
-            env["OPENCODE_CONFIG_CONTENT"] = _serialize_replacement_config(overrides)
-            prompt = instruction
-        files = []
-        for index, (suffix, data) in enumerate(images or []):
-            path = project_dir / f"image_{index}{suffix}"
-            path.write_bytes(data)
-            files.append(str(path.resolve()))
-
-        # An explicit title, as in the sandbox path: otherwise OpenCode asks the policy for a session title
-        # under this session's id, a call its own session usage does not count.
-        opencode_args = ["run", "-m", self._effective_model(), "--dir", str(project_dir), "--title", "NeMo Gym"]
-        if self.config.system_prompt_mode == "replace":
-            opencode_args.extend(["--agent", "build"])
-        if self.config.thinking:
-            opencode_args.append("--thinking")
-        opencode_args.extend(self.config.extra_args)
-        opencode_args.append(prompt)
-        # Repeated -f (an array flag), after the positional prompt so it cannot absorb it.
-        opencode_args.extend(arg for path in files for arg in ("-f", path))
-        cmd = [*self.config.command_parts, *opencode_args]
-        if self.config.private_tmp and self.config.session_sandbox is None:
-            keep = _tmp_roots(
-                [str(work_dir), str(project_dir), str(Path(__file__)), sys.prefix, sys.base_prefix, sys.executable]
-                + [shutil.which(self.config.command_parts[0]) if self.config.command_parts else None]
-            )
-            cmd = [
-                *("unshare", "--user", "--map-current-user", "--mount", "sh", "-c", _PRIVATE_TMP_SCRIPT, "sh"),
-                str(work_dir.resolve()),
-                ":".join(keep),
-                *cmd,
-            ]
-
+        image_dir = project_dir
         try:
+            data_home = work_dir / ".opencode-data"
+            data_home.mkdir(parents=True, exist_ok=True)
+            plugin_path = ASSISTANT_MESSAGE_PLUGIN_SOURCE
+            if self.config.session_sandbox is not None and self._model_call_capture_enabled():
+                # A session sandbox receives only the run dir, at the same absolute paths, not this checkout:
+                # stage the correlation plugin there so the config's file:// entry names a delivered file.
+                plugin_path = work_dir / ".opencode-plugins" / ASSISTANT_MESSAGE_PLUGIN_FILE
+                plugin_path.parent.mkdir()
+                shutil.copyfile(ASSISTANT_MESSAGE_PLUGIN_SOURCE, plugin_path)
+            self._write_opencode_config(project_dir, rollout_id, plugin_path=plugin_path)
+            env = self._env(str(data_home), rollout_id)
+            if system_prompt and self.config.system_prompt_mode == "replace":
+                # Keep request-specific instructions out of a persistent repo's config file.
+                overrides = json.loads(env.get("OPENCODE_CONFIG_CONTENT", "{}"))
+                self._deep_merge(overrides, {"agent": {"build": {"prompt": system_prompt}}})
+                env["OPENCODE_CONFIG_CONTENT"] = _serialize_replacement_config(overrides)
+                prompt = instruction
+            if images and self.config.repo_dir:
+                # Concurrent runs share a persistent repo: give this run's attachments a directory of their own
+                # inside it (reads stay within the project) instead of overwriting image_<i> files there.
+                image_dir = Path(tempfile.mkdtemp(prefix=".ng-images-", dir=project_dir))
+            files = []
+            for index, (suffix, data) in enumerate(images or []):
+                path = image_dir / f"image_{index}{suffix}"
+                path.write_bytes(data)
+                files.append(str(path.resolve()))
+
+            # An explicit title, as in the sandbox path: otherwise OpenCode asks the policy for a session title
+            # under this session's id, a call its own session usage does not count.
+            opencode_args = ["run", "-m", self._effective_model(), "--dir", str(project_dir), "--title", "NeMo Gym"]
+            if self.config.system_prompt_mode == "replace":
+                opencode_args.extend(["--agent", "build"])
+            if self.config.thinking:
+                opencode_args.append("--thinking")
+            opencode_args.extend(self.config.extra_args)
+            opencode_args.append(prompt)
+            # Repeated -f (an array flag), after the positional prompt so it cannot absorb it.
+            opencode_args.extend(arg for path in files for arg in ("-f", path))
+            cmd = [*self.config.command_parts, *opencode_args]
+            if self.config.private_tmp and self.config.session_sandbox is None:
+                keep = _tmp_roots(
+                    [str(work_dir), str(project_dir), str(Path(__file__)), sys.prefix, sys.base_prefix, sys.executable]
+                    + [shutil.which(self.config.command_parts[0]) if self.config.command_parts else None]
+                )
+                cmd = [
+                    *("unshare", "--user", "--map-current-user", "--mount", "sh", "-c", _PRIVATE_TMP_SCRIPT, "sh"),
+                    str(work_dir.resolve()),
+                    ":".join(keep),
+                    *cmd,
+                ]
+
             if self.config.session_sandbox is not None:
                 returncode, stderr, timed_out = await self._run_sandbox_session(
                     opencode_args, work_dir, project_dir, env, timeout
@@ -923,6 +974,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 observations.gaps.append(ObservationGap(code="agent_run_timeout"))
             return output_items, usage, self.config.model, observations
         finally:
+            if image_dir != project_dir:
+                shutil.rmtree(image_dir, ignore_errors=True)
             shutil.rmtree(work_dir, ignore_errors=True)
 
     async def _run_local_session(
@@ -995,12 +1048,37 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             )
         return self._session_nodes
 
+    def _join_ray_cluster(self) -> None:
+        """Connect this server to the run's Ray cluster before the first remote session.
+
+        Gym joins only servers that declare `ray_enabled` to Ray at startup, and this agent does not, so that
+        local and session-sandbox runs need no Ray. session_nodes > 1 joins the configured cluster here; it
+        never starts a private one, which would hold no other node.
+        """
+        import ray
+
+        if ray.is_initialized():
+            return
+        address = get_global_config_dict().get("ray_head_node_address")
+        if not address:
+            raise RuntimeError(
+                "session_nodes > 1 runs OpenCode sessions as Ray tasks on the run's Ray cluster, but this run has "
+                "no Ray cluster address (ray_head_node_address). Pass the cluster's address, for example "
+                "++ray_head_node_address=<head-ip>:6379, or set session_nodes: 1."
+            )
+        ray.init(address=address, ignore_reinit_error=True)
+
     async def _run_remote_session(
         self, cmd: list[str], work_dir: Path, project_dir: Path, env: dict[str, str], timeout: float
     ) -> tuple[Optional[int], bytes, bool]:
-        """Run one OpenCode session on a session node; copy its session database back here."""
+        """Run one OpenCode session on a session node; copy its session database back here.
+
+        The node runs the session under Gym's process supervisor, whose cleanup receipt this checks: a run whose
+        termination the node cannot confirm raises the harness's termination failure instead of being graded.
+        """
         from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
+        self._join_ray_cluster()
         nodes = self._session_node_ids()
         node_id = nodes[self._next_session_node % len(nodes)]
         self._next_session_node += 1
@@ -1008,13 +1086,35 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         task = _remote_session_task().options(
             scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=node_id, soft=True)
         )
-        returncode, stderr, timed_out, outputs = await task.remote(
-            cmd, str(work_dir), str(project_dir), env, inputs, float(timeout)
+        receipt_text, stderr, outputs = await task.remote(
+            cmd,
+            str(work_dir),
+            str(project_dir),
+            env,
+            inputs,
+            float(timeout),
+            SUPERVISOR_SCRIPT.read_text(),
+            DEFAULT_CLEANUP_TIMEOUT,
         )
+        try:
+            receipt = json.loads(receipt_text) if receipt_text is not None else None
+        except ValueError:
+            receipt = None
+        if not isinstance(receipt, dict) or receipt.get("cleanup_confirmed") is not True:
+            error = receipt.get("error") if isinstance(receipt, dict) else None
+            raise harness_termination_failure(
+                harness="OpenCode",
+                receipt={
+                    "cleanup_confirmed": False,
+                    "return_code": receipt.get("return_code") if isinstance(receipt, dict) else None,
+                    "error": error or "the session node returned no cleanup receipt",
+                    "timed_out": isinstance(receipt, dict) and receipt.get("timed_out") is True,
+                },
+            )
         for path, data in outputs.items():
             Path(path).parent.mkdir(parents=True, exist_ok=True)
             Path(path).write_bytes(data)
-        return returncode, stderr, timed_out
+        return receipt.get("return_code"), stderr, receipt.get("timed_out") is True
 
     def _trust_ca_file(self, ca_file: str) -> None:
         """Make this process trust ``ca_file`` on top of its current CAs (SSL_CERT_FILE -> merged bundle)."""
@@ -1043,13 +1143,17 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             provider_config = copy.deepcopy(sandbox_config.provider)
             if len(provider_config) != 1:
                 raise ValueError("session_sandbox.provider must contain exactly one provider name")
-            provider_kwargs = next(iter(provider_config.values()))
-            connection = provider_kwargs.setdefault("connection", {})
-            for field_name, env_name in sandbox_config.provider_secret_env.items():
-                value = os.environ.get(env_name)
-                if not value:
-                    raise RuntimeError(f"session_sandbox: environment variable {env_name} is not set")
-                connection[field_name] = value
+            provider_name, provider_kwargs = next(iter(provider_config.items()))
+            if provider_kwargs is None:
+                provider_kwargs = provider_config[provider_name] = {}
+            if sandbox_config.provider_secret_env:
+                # Only providers with a `connection` block take secrets; others (docker, local) get no such argument.
+                connection = provider_kwargs.setdefault("connection", {})
+                for field_name, env_name in sandbox_config.provider_secret_env.items():
+                    value = os.environ.get(env_name)
+                    if not value:
+                        raise RuntimeError(f"session_sandbox: environment variable {env_name} is not set")
+                    connection[field_name] = value
             if sandbox_config.ca_file:
                 self._trust_ca_file(sandbox_config.ca_file)
             self._sandbox_provider = create_provider(provider_config)
@@ -1093,13 +1197,24 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         before the model-writable stderr tail. Database paths must name OpenCode's own database files in the
         run's data directory, and each is written to the matching local path, so nothing the sandbox prints
         can choose a destination on this host.
+
+        A model URL the sandbox cannot reach (loopback, on a remote provider) is rejected before any sandbox is
+        created. Setup and run execute as `spec.user` when it is set. The sandbox is closed by a task this agent
+        owns, so a cancelled request still deletes it; a sandbox whose close fails is retried at shutdown.
         """
         sandbox_config = self.config.session_sandbox
-        provider = self._session_sandbox_provider()
-        spec = SandboxSpec(**{"ttl_s": int(timeout) + sandbox_config.setup_timeout + 600, **sandbox_config.spec})
         sandbox_env = {**_SANDBOX_DEFAULT_ENV, **{key: env[key] for key in _SANDBOX_SESSION_ENV_KEYS if env.get(key)}}
         sandbox_env.update({key: value for key, value in self.config.env.items() if value})
         sandbox_env.update(sandbox_config.env)
+        provider_name = next(iter(sandbox_config.provider), None)
+        # The generated opencode.json embeds the agent's own model URL (env), which an env override cannot hide.
+        for url in dict.fromkeys(filter(None, (env.get("OPENAI_BASE_URL"), sandbox_env.get("OPENAI_BASE_URL")))):
+            try:
+                assert_model_url_reachable_from_sandbox(url, provider_name=provider_name)
+            except ValueError as error:
+                raise HTTPException(422, f"session_sandbox: {error}") from error
+        provider = self._session_sandbox_provider()
+        spec = SandboxSpec(**{"ttl_s": int(timeout) + sandbox_config.setup_timeout + 600, **sandbox_config.spec})
         data_home = sandbox_env["XDG_DATA_HOME"]
         remote_db_dir = PurePosixPath(data_home) / "opencode"
         local_db_dir = Path(data_home) / "opencode"
@@ -1110,11 +1225,17 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         handle = None
         try:
             async with self._sandbox_start_limit():
-                handle = await provider.create(spec)
+                create = asyncio.ensure_future(provider.create(spec))
+                try:
+                    handle = await asyncio.shield(create)
+                except asyncio.CancelledError:
+                    # The create keeps going; close whatever it creates instead of leaving it until its TTL.
+                    create.add_done_callback(lambda done: self._close_created_session_sandbox(provider, done))
+                    raise
                 prepare = "mkdir -p " + " ".join(shlex.quote(directory) for directory in sorted(directories))
                 if sandbox_config.setup_command:
                     prepare = f"{prepare} && {sandbox_config.setup_command}"
-                prepared = await provider.exec(handle, prepare, timeout_s=sandbox_config.setup_timeout)
+                prepared = await provider.exec(handle, prepare, timeout_s=sandbox_config.setup_timeout, user=spec.user)
                 if prepared.return_code != 0 or prepared.error_type:
                     detail = f"{prepared.stdout or ''}{prepared.stderr or ''}"[-1500:]
                     raise self._session_sandbox_failure(
@@ -1133,7 +1254,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 f'do [ -f "$f" ] && echo "{mark}db=$f"; done; '
                 f"echo {mark}end; tail -c 4000 {shlex.quote(stderr_path)}; exit 0"
             )
-            result = await provider.exec(handle, script, env=sandbox_env, timeout_s=timeout + 120)
+            result = await provider.exec(handle, script, env=sandbox_env, timeout_s=timeout + 120, user=spec.user)
             returncode = None
             databases = []
             stderr_lines = []
@@ -1171,10 +1292,57 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise self._session_sandbox_failure(_PROVIDER_REQUEST_FAILED, repr(e), handle) from e
         finally:
             if handle is not None:
-                try:
+                # Shielded: if this request is cancelled, the close task still runs to its own bound.
+                await asyncio.shield(self._close_session_sandbox(provider, handle))
+
+    def _close_session_sandbox(self, provider: Any, handle: Any) -> asyncio.Task[None]:
+        """Close a session sandbox in a task this agent owns, bounded by session_close_timeout_seconds.
+
+        A failed or timed-out close keeps the handle for the shutdown retry; the sandbox's TTL is the last resort.
+        """
+
+        async def close() -> None:
+            try:
+                async with asyncio.timeout(self.config.session_close_timeout_seconds):
                     await provider.close(handle)
-                except Exception as e:
-                    LOG.warning("failed to delete session sandbox %s: %r", handle.sandbox_id, e)
+            except Exception as e:
+                LOG.warning("failed to delete session sandbox %s: %r", handle.sandbox_id, e)
+                self._unclosed_session_sandboxes[handle.sandbox_id] = (provider, handle)
+            except BaseException:
+                self._unclosed_session_sandboxes[handle.sandbox_id] = (provider, handle)
+                raise
+            else:
+                self._unclosed_session_sandboxes.pop(handle.sandbox_id, None)
+
+        task = asyncio.create_task(close())
+        self._session_sandbox_closes.add(task)
+        task.add_done_callback(self._session_sandbox_closes.discard)
+        return task
+
+    def _close_created_session_sandbox(self, provider: Any, create: asyncio.Future) -> None:
+        """Done callback of a create whose request was cancelled: close the sandbox it created, if any."""
+        if create.cancelled() or create.exception() is not None:
+            return
+        self._close_session_sandbox(provider, create.result())
+
+    @contextlib.asynccontextmanager
+    async def _drain_sessions_on_shutdown(self, app: Any) -> AsyncIterator[None]:
+        """Also finish session-sandbox closes and retry the failed ones, within session_close_timeout_seconds."""
+        async with super()._drain_sessions_on_shutdown(app):
+            try:
+                yield
+            finally:
+                closes = set(self._session_sandbox_closes)
+                if closes:
+                    await asyncio.wait(closes, timeout=self.config.session_close_timeout_seconds)
+                retries = {
+                    self._close_session_sandbox(provider, handle)
+                    for provider, handle in list(self._unclosed_session_sandboxes.values())
+                }
+                if retries:
+                    await asyncio.wait(retries, timeout=self.config.session_close_timeout_seconds)
+                for sandbox_id in self._unclosed_session_sandboxes:
+                    LOG.error("session sandbox %s was not deleted at shutdown; its TTL removes it", sandbox_id)
 
     async def _create_episode(
         self,

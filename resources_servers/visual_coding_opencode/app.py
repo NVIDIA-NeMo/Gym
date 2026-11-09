@@ -6,8 +6,11 @@ Grading:
 - the response text is every assistant text part joined, and the judge sees its last
   `judge_max_text_chars` characters;
 - `extracted` is string_match's final_answer extraction (last "answer:", else last \\boxed{});
-- correct iff the verdict is "equivalent"; "different", "unsure" and judge errors score 0.
-string_match's grade of `extracted` is kept as a diagnostic, not the reward.
+- correct iff the verdict is "equivalent"; a received "different" or "unsure" verdict (including a reply
+  with no valid verdict) and an empty policy answer score 0.
+A failed judge call is not a score: the shared judge retry policy runs, then the row goes to the failures
+sidecar (masked, out of accuracy) until it is recovered. string_match's grade of `extracted` is kept as a
+diagnostic, not the reward.
 """
 
 import asyncio
@@ -27,7 +30,8 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.verification import JudgeError, VerifierFixture, call_judge
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import VerifierFixture, call_judge
 from resources_servers.string_match.app import (
     _extract_answer,
     _extract_last_assistant_text,
@@ -136,7 +140,9 @@ class VisualCodingOpenCodeServer(SimpleResourcesServer):
                 json=params,
                 response_model=NeMoGymChatCompletion,
             )
-        return parse_verdict(completion.choices[0].message.content or "")
+        # A received reply without choices has no verdict either: it reaches parse_verdict's "unsure".
+        content = completion.choices[0].message.content if completion.choices else ""
+        return parse_verdict(content or "")
 
     async def verify(self, body: VisualCodingOpenCodeVerifyRequest) -> VisualCodingOpenCodeVerifyResponse:
         result = VisualCodingOpenCodeVerifyResponse(**body.model_dump(), reward=0.0)
@@ -148,12 +154,8 @@ class VisualCodingOpenCodeServer(SimpleResourcesServer):
         result.extracted_answer = _extract_answer(text, "final_answer")
         if result.extracted_answer is not None:
             result.string_match_reward = _grade_string_match(body.expected_answer, result.extracted_answer)
-        try:
-            judged = await self.judge(body.question, body.expected_answer, result.extracted_answer, text)
-        except JudgeError as exc:
-            result.failure_reason = "judge_error"
-            result.judge_reason = str(exc)[:500]
-            return result
+        # A failed judge call raises the shared judge failure, which the /verify route's judge_failsafe masks.
+        judged = await self.judge(body.question, body.expected_answer, result.extracted_answer, text)
         result.judge_verdict = judged["verdict"]
         result.judge_reason = judged["reason"]
         result.reward = float(judged["verdict"] == "equivalent")
@@ -172,3 +174,6 @@ VERIFIER_FIXTURE = VerifierFixture(
 
 if __name__ == "__main__":
     VisualCodingOpenCodeServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # Uvicorn workers (num_workers > 1) import this module and serve its `app`.
+    app = VisualCodingOpenCodeServer.run_webserver()  # noqa: F401

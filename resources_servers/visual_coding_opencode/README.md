@@ -33,8 +33,10 @@ The reward is a GPT judge's verdict (`gpt-4o-mini` at temperature 0 by default; 
 OpenAI-compatible endpoint via `visual_coding_opencode_judge_base_url` and
 `visual_coding_opencode_judge_model_name`, with the key in `OPENAI_API_KEY`). The judge sees the question text, the gold answer, string_match's extraction
 (the last "answer:", else the last `\boxed{}`), and the last 4000 characters of the model's
-text. It cannot see the image. Only `"equivalent"` scores 1; `"different"`, `"unsure"`, a judge
-error and an empty response score 0. `string_match_reward` is kept as a diagnostic.
+text. It cannot see the image. Only `"equivalent"` scores 1. Received invalid or unsure verdicts and
+empty policy answers score zero. Failed judge calls use the shared retry policy, then enter the
+failures sidecar and are excluded from accuracy until recovered. `string_match_reward` is kept as a
+diagnostic.
 
 ## BabyVision data
 

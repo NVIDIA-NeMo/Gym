@@ -84,13 +84,15 @@ vLLM can send every message's `content` to the chat template as a list of parts.
 
 ## Read the Results
 
-Each rollout carries the judge's verdict and reason, the extracted answer, and `string_match_reward` as a diagnostic next to `reward`. The judge sees the question text, the gold answer, the extracted answer and the end of the model's text, but not the image. A response without a final answer scores `0`.
+Each rollout carries the judge's verdict and reason, the extracted answer, and `string_match_reward` as a diagnostic next to `reward`. The judge sees the question text, the gold answer, the extracted answer and the end of the model's text, but not the image. A response without a final answer scores `0`. A judge call that still fails after the shared retries is not scored: the row goes to the failures sidecar and is left out of accuracy until it is recovered.
 
 See [Aggregate Metrics](/evaluation/aggregate-metrics) for the summary files a run writes.
 
 ## Run Sessions in a Sandbox
 
-With `session_sandbox`, each OpenCode session runs in its own sandbox from a `nemo_gym.sandbox` provider, such as [OpenSandbox](/main/infrastructure/sandbox/opensandbox), instead of on the agent host. The run directory (OpenCode's config and the task image) is uploaded, OpenCode runs in the sandbox and calls the model through the agent as usual, and only OpenCode's session database comes back. The sandbox is deleted after the session.
+With `session_sandbox`, each OpenCode session runs in its own sandbox from a `nemo_gym.sandbox` provider, such as [OpenSandbox](/main/infrastructure/sandbox/opensandbox), instead of on the agent host. The run directory (OpenCode's config and the task image) is uploaded, OpenCode runs in the sandbox and calls the model through the agent as usual, and only OpenCode's session database comes back. The sandbox is deleted after the session, also when the request is cancelled.
+
+OpenCode in the sandbox calls the model at the address Gym generates, and by default that address is `127.0.0.1`, which inside a remote sandbox is the sandbox itself. Add `++use_absolute_ip=true` to the run so the agent advertises the host's network address, and make sure the sandbox can reach the agent's port on that host. The agent rejects a loopback model address before it creates any sandbox on a remote provider.
 
 Put the settings in a config file and add it to the run with `--config`:
 
@@ -111,6 +113,8 @@ visual_coding_opencode_agent:
         spec:
           # An image with OpenCode 1.17.11 and Python with pillow, numpy, scipy and opencv.
           image: registry.example.com/opencode-vision:1.17.11
+          # Optional: run setup and OpenCode as this user instead of the image's default.
+          # user: 1000
 ```
 
 Local and sandboxed runs differ in a few ways:
@@ -120,6 +124,7 @@ Local and sandboxed runs differ in a few ways:
 | Where the model's commands run | The agent host, as the agent server's user | The session's sandbox |
 | OpenCode install | Installed on the agent host on first use | Provided by the sandbox image or `setup_command` |
 | `private_tmp` and user namespaces | Required | Not used: the sandbox is private |
+| Model address | Loopback works | Must be reachable from the sandbox (`++use_absolute_ip=true`) |
 | A provider outage or unconfirmed run | Not applicable | Fails the episode; it is not scored as a wrong answer |
 
 `repo_dir` works only with local sessions: sandbox and multi-node sessions (`session_nodes > 1`) copy only the run directory, so the agent rejects that combination when it starts.

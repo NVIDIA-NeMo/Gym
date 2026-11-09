@@ -27,6 +27,11 @@ class TaskData(BaseModel):
         description="Question text shown to the judge (the prompt without the visual-reasoning instruction).",
         json_schema_extra={"consumed_by": ["verify"]},
     )
+    task_id: Optional[str] = Field(
+        default=None,
+        description="Stable task id for eval planning and task selection (BabyVision's TSV index as a string).",
+        json_schema_extra={"consumed_by": ["provenance"]},
+    )
     source_id: Optional[Union[str, int]] = Field(
         default=None,
         description="Row id in the source dataset (BabyVision's TSV index).",

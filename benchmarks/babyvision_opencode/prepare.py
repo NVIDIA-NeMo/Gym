@@ -63,6 +63,8 @@ def convert(row: dict, question_only: bool = False) -> dict:
         },
         "expected_answer": row["answer"],
         "question": question,
+        # The TSV index is the stable id `gym eval plan` and task selection need (row order is not).
+        "task_id": str(row["index"]),
         "source_id": row["index"],
         "category": row["category"],
         "l2_category": row["l2_category"],

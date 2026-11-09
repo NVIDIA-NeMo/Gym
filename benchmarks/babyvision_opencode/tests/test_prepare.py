@@ -84,6 +84,22 @@ def test_question_only_prepare_writes_bare_questions(tsv, tmp_path, monkeypatch)
     assert all(babyvision.INSTRUCTION not in _content(row)[1]["text"] for row in rows)
 
 
+@pytest.mark.parametrize("variant", ["default", "question_only"])
+def test_rows_carry_the_tsv_index_as_a_stable_task_id(tsv, tmp_path, monkeypatch, variant: str) -> None:
+    """`gym eval plan` and task selection key rows by task_id; the TSV index does not change with row order."""
+    from resources_servers.visual_coding_opencode.task_data import TaskData
+
+    if variant == "question_only":
+        monkeypatch.setattr(question_only, "OUTPUT_FPATH", tmp_path / "question_only.jsonl")
+        output = question_only.prepare()
+    else:
+        output = babyvision.prepare(tmp_path / "out.jsonl")
+    rows = [json.loads(line) for line in output.read_text().splitlines()]
+    assert [(row["task_id"], row["source_id"]) for row in rows] == [("0", "0"), ("1", "1")]
+    assert [TaskData.model_validate(row).task_id for row in rows] == ["0", "1"]
+    assert TaskData.model_validate({"expected_answer": "3"}).task_id is None  # rows without one stay valid
+
+
 def test_prepare_rejects_an_unknown_copy(tsv, tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(babyvision, "KNOWN_MD5", {"0" * 32})
     with pytest.raises(ValueError, match="md5"):
