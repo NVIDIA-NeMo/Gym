@@ -30,7 +30,7 @@ from nemo_gym.models.token_capture import (
     set_token_sink,
     trajectories_from_source,
 )
-from nemo_gym.models.token_capture.harness_notes import OPENCODE_MAX_STEPS_PROMPT
+from nemo_gym.models.token_capture.harness_notes.opencode import OPENCODE_MAX_STEPS_PROMPT
 from nemo_gym.models.token_capture.staging import CaptureAdmission, RolloutTokenCapture, StageResult
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 

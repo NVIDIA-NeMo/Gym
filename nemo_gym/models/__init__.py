@@ -63,7 +63,8 @@ if TYPE_CHECKING:
         make_external_capture_handler,
         validate_framework_context_options,
     )
-    from nemo_gym.models.token_capture.harness_notes import OPENCODE_MAX_STEPS_PROMPT_VERSIONS
+    from nemo_gym.models.token_capture.harness_notes import HARNESS_NOTES
+    from nemo_gym.models.token_capture.harness_notes.base import HarnessNote
 
 
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
@@ -75,8 +76,9 @@ _PUBLIC_API = {
     "CaptureStore": "model_call_capture",
     "ChatCompletionsConverter": "chat_completions_converter",
     "ExternalCaptureHandler": "token_capture.external_capture",
+    "HARNESS_NOTES": "token_capture.harness_notes",
+    "HarnessNote": "token_capture.harness_notes.base",
     "ModelCallCaptureConfig": "model_call_capture",
-    "OPENCODE_MAX_STEPS_PROMPT_VERSIONS": "token_capture.harness_notes",
     "PROPAGATED_REFUSAL_CODE_ATTRIBUTE": "base_responses_api_model",
     "PolicyModelParticipant": "_checkpoint",
     "SimpleResponsesAPIModel": "base_responses_api_model",
