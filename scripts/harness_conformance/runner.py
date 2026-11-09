@@ -33,7 +33,7 @@ from nemo_gym.rollouts.harness_capabilities import (
 )
 
 from .episode import HARNESSES
-from .scenarios import SCENARIOS, SUITE, Scenario, suite_manifest
+from .scenarios import SCENARIOS, SUITE, Scenario, scenarios_for, suite_manifest
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -118,8 +118,9 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
 
     bundle = rollouts_path
     records = list(json_rows(bundle)) if bundle.exists() else []
-    if not records and scenario.terminal_error and failures_path.is_file():
-        # A terminal model error fails the episode, so its evidence is retained in the failures file.
+    if not records and (scenario.terminal_error or scenario.outcomes) and failures_path.is_file():
+        # A terminal model error, or an outcome the Environment Server retries or fails, leaves the episode's
+        # evidence in the failures file.
         bundle = failures_path
         records = list(json_rows(bundle))
 
@@ -131,7 +132,11 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
     else:
         delivery = "missing"
 
-    scope = EvidenceScope(tools=scenario.tool_steps > 0, steps=scenario.steps, verifier=not scenario.terminal_error)
+    # Verification evidence applies to a run the Environment Server graded; an outcome scenario may go ungraded.
+    graded = delivery == "rollout" if scenario.outcomes else not scenario.terminal_error
+    scope = EvidenceScope(
+        tools=scenario.tool_steps > 0 and not scenario.kill_harness, steps=scenario.steps, verifier=graded
+    )
     artifact = inspect_record(record, scope=scope)
     checks = artifact["checks"] + inspect_behavior(
         witness,
@@ -142,6 +147,11 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
         expected_reward=scenario.expected_reward,
         judge_verifier=scenario.judge_verifier,
         fingerprint=_fingerprint,
+        final_answer=scenario.final_answer,
+        tool_results=not scenario.kill_harness,
+        outcomes=scenario.outcomes,
+        target_outcome=scenario.target_outcome,
+        retry_budget_seconds=scenario.retry_budget_seconds,
     )
     health_inputs = [path for path in [rollouts_path, failures_path] if path.is_file()]
     checks += inspect_health(
@@ -209,6 +219,9 @@ def run_suite(
         raise ValueError("at least one harness and one scenario are required")
     if not any(s.tier <= gate_tier for s in scenarios):
         raise ValueError("no selected scenarios are covered by --gate-tier; use --gate-tier P1 for compaction")
+    for harness in harnesses:
+        if not scenarios_for(harness, scenarios):
+            raise ValueError(f"{harness} runs none of the selected scenarios; see registry.LACKS")
     output = output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     manifest = suite_manifest(scenarios)
@@ -233,7 +246,8 @@ def run_suite(
     execution_error = False
     for harness in harnesses:
         results = []
-        for scenario in scenarios:
+        selected = scenarios_for(harness, scenarios)
+        for scenario in selected:
             directory = output / harness / scenario.name
             directory.mkdir(parents=True)
             print(f"{harness}: {scenario.name}", flush=True)
@@ -283,6 +297,8 @@ def run_suite(
             }
         rows[harness] = {
             "scenarios": results,
+            # Scenarios that need a capability this harness lacks (registry.LACKS) are not run.
+            "skipped_scenarios": [s.name for s in scenarios if s not in selected],
             "evidence": counts,
             "verdict": "fulfilled"
             if all(r["verdict"] == "fulfilled" for r in results if r["tier"] <= gate_tier)

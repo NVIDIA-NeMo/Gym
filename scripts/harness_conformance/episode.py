@@ -29,6 +29,20 @@ from .registry import HARNESSES
 from .scenarios import SCENARIOS
 
 
+# The configuration key of each adapter's run deadline, in seconds. ``timeout`` is an integer field. Simple Agent has
+# no run deadline (registry.LACKS).
+DEADLINE_KEYS = {
+    "opencode": "timeout",
+    "pi": "timeout",
+    "codex": "timeout",
+    "kilocode": "timeout",
+    "openclaw": "timeout",
+    "hermes": "sandbox_runner_timeout_seconds",
+    "stirrup": "sandbox_runner_timeout_seconds",
+    "nooa": "sandbox_runner_timeout_seconds",
+}
+
+
 class _Server(uvicorn.Server):
     # The episode process owns cancellation; the embedded servers must not
     # independently install competing signal handlers.
@@ -82,8 +96,16 @@ def _supports_agent_sessions(agent_cls: type[SimpleResponsesAPIAgent]) -> bool:
 
 
 def _config(
-    harness: str, directory: Path, ports: dict[str, int], timeout: float, *, use_agent_sessions: bool = False
+    harness: str,
+    directory: Path,
+    ports: dict[str, int],
+    timeout: float,
+    *,
+    use_agent_sessions: bool = False,
+    run_deadline: float | None = None,
 ) -> dict:
+    """Launch settings for one episode. The harness's run deadline is ``run_deadline``, or the probe ``timeout``."""
+
     def server(port: int) -> dict:
         return {"name": "unused", "host": "127.0.0.1", "port": port, "entrypoint": "app.py", "num_workers": 1}
 
@@ -115,20 +137,17 @@ def _config(
                 "invocation_adapter": f"{observer_module_name()}:invoke_with_witness",
             }
         )
-        agent["sandbox_runner_timeout_seconds"] = timeout
+    if harness in DEADLINE_KEYS:
+        key = DEADLINE_KEYS[harness]
+        deadline = timeout if run_deadline is None else run_deadline
+        agent[key] = math.ceil(deadline) if key == "timeout" else deadline
     if use_agent_sessions and harness not in ("simple", "nooa"):
         # The verifier only reads retained output, so the agent can own this local sandbox.
         agent.update(sandbox_provider="probe_sandbox", sandbox_config={"workdir": str(directory / "workspace")})
     if harness == "simple":
         agent["max_steps"] = 6
-    if harness in ("opencode", "pi"):
-        agent["timeout"] = timeout
-        if not use_agent_sessions:
-            agent["workspace_root"] = str(directory / "workspace")
-    if harness == "openclaw":
-        agent["timeout"] = math.ceil(timeout)
-        if not use_agent_sessions:
-            agent["workspace_root"] = str(directory / "workspace")
+    if harness in ("opencode", "pi", "openclaw") and not use_agent_sessions:
+        agent["workspace_root"] = str(directory / "workspace")
     if harness == "opencode":
         # Auxiliary title/summary requests would consume the scripted policy replies.
         agent["opencode_config"] = {"permission": {"bash": "allow"}}
@@ -139,7 +158,6 @@ def _config(
         workspace.mkdir()
         agent.update(
             cwd=str(workspace),
-            timeout=timeout,
             sandbox_mode="danger-full-access",
             extra_config={"features": {"shell_snapshot": False}, "web_search": "disabled"},
         )
@@ -226,6 +244,7 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
             {name: sock.getsockname()[1] for name, sock in sockets.items()},
             timeout,
             use_agent_sessions=use_agent_sessions,
+            run_deadline=scenario.run_deadline_seconds,
         )
         if scenario.compaction is not None:
             agent_config = config["probe_agent"]["responses_api_agents"][f"{harness}_agent"]
@@ -277,7 +296,7 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
             environment_cls = LegacyAgentEnvironmentServer
             environment_config_cls = LegacyAgentEnvironmentServerConfig
         from nemo_gym.client import get_global_aiohttp_client, setup_server_client
-        from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper
+        from nemo_gym.rollouts import IncompleteEvaluationError, RolloutCollectionConfig, RolloutCollectionHelper
 
         client = setup_server_client()
         agent = agent_cls(
@@ -301,7 +320,7 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
                     assistant_message_header=client.assistant_message_header("policy_model")
                 ),
                 "probe_resources": probe.resources_app(server_client=client),
-                "probe_agent": agent.setup_webserver(),
+                "probe_agent": probe.observe_agent(agent.setup_webserver()),
                 "probe_environment": environment.setup_webserver(),
             }
             if scenario.judge_verifier:
@@ -335,20 +354,28 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
                     }
                 ]
             inputs.write_text(json.dumps(task) + "\n")
-            async with asyncio.timeout(timeout + 10):
-                await RolloutCollectionHelper().run_from_config(
-                    RolloutCollectionConfig(
-                        agent_name="probe_agent",
-                        input_jsonl_fpath=str(inputs),
-                        output_jsonl_fpath=str(directory / "rollouts.jsonl"),
-                        num_samples_in_parallel=1,
-                        num_repeats=1,
-                        resume_from_cache=False,
-                        disable_aggregation=True,
-                        disable_health_check=True,
-                        route_failures_to_sidecar=True,
+            try:
+                async with asyncio.timeout(timeout + 10):
+                    await RolloutCollectionHelper().run_from_config(
+                        RolloutCollectionConfig(
+                            agent_name="probe_agent",
+                            input_jsonl_fpath=str(inputs),
+                            output_jsonl_fpath=str(directory / "rollouts.jsonl"),
+                            num_samples_in_parallel=1,
+                            num_repeats=1,
+                            resume_from_cache=False,
+                            disable_aggregation=True,
+                            disable_health_check=True,
+                            route_failures_to_sidecar=True,
+                        )
                     )
-                )
+            except IncompleteEvaluationError:
+                # Collection reports a run without a graded rollout as incomplete. When the scenario allows the run to
+                # go ungraded (retried or failed), its failure row is the measurement, not an execution error.
+                failures = directory / "rollouts_failures.jsonl"
+                ungraded_allowed = bool(scenario.outcomes) or scenario.terminal_error
+                if not ungraded_allowed or not failures.is_file() or not failures.stat().st_size:
+                    raise
         finally:
             for server in servers:
                 server.should_exit = True

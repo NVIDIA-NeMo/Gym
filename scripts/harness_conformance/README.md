@@ -138,6 +138,13 @@ python scripts/run_harness_conformance.py --harness codex \
 | `retry_429` | Two 429 replies before the tool sequence | TE-1–TE-9, including distinct attempts with identical request bodies |
 | `retry_500` | One 500 reply before the tool sequence | TE-1–TE-9, including retained error payloads |
 | `model_error` | Persistent 400 reported to EnvServer as a failed response with the original error | TE-1, TE-2, TE-4, TE-7, TE-8; no grading-policy requirement |
+| `context_overflow` | One shell call, then every request gets `vllm_model`'s propagated context-length 400 (`code: context_length_exceeded`) | Outcome ladder: graded `incomplete`, or graded `failed` + `model_request_error` 400; P1: `incomplete` |
+| `context_overflow_length` | One shell call, then every request gets `vllm_model`'s default empty completion (Chat `finish_reason: length`; Responses `incomplete`, `max_output_tokens`) | Outcome ladder: graded `incomplete`, or graded `completed` when the harness carries on |
+| `deadline_before_reply` | The first request is never answered; a 20 s harness run deadline ends the run | Outcome ladder: graded `incomplete`, or (transitional) retried `failed` + `unknown`; P1: `incomplete` |
+| `deadline_after_reply` | One shell call, then no answer; the 20 s run deadline ends the run | Outcome ladder: graded `incomplete` |
+| `harness_no_result` | The shell call SIGKILLs the supervised harness's process tree | Outcome ladder: retried `failed` + `agent_run_error` |
+| `model_401` | Persistent 401 | Outcome ladder: `failed` + `model_request_rejected`, not retried |
+| `model_503` | Persistent 503 | Outcome ladder: retried `failed` + `model_request_error` 503; harness retries end within 30 s |
 | `judge_verifier` | Final policy answer graded by a separate scripted judge; the saved grade references its verifier-owned call, which has no policy step | TE-1–TE-4, TE-6–TE-9 |
 | `verifier_failure` | Completed tool sequence graded zero | TE-1–TE-9, including a known verifier failure |
 | `context_compaction` | Automatic compaction between shell actions; summary reused, helper retained without becoming a turn | Existing P0 checks plus P1 compaction checks (TE-13) |
@@ -155,6 +162,47 @@ reports a failed response with the model error to EnvServer; it does not re-rais
 the model failure. The runner witnesses that response before grading. EnvServer
 owns verification and masking policy, so this scenario does not prescribe a grade
 or require verification. Retained model-call evidence is still required.
+
+### Outcome-ladder scenarios
+
+The scenarios from `context_overflow` to `model_503` state the response the
+outcome ladder reports for each run (`Scenario.outcomes`) and the Environment
+Server's action on it: verify (a graded rollout in `rollouts.jsonl`), retry (a
+failure row with `_ng_failure_terminal: false`) or fail (`_ng_failure_terminal:
+true`). Their P0 checks are:
+
+- `outcome.http_ok`: the agent answers the Environment Server with HTTP 200, never
+  a 5xx. The runner wraps the agent app to witness the status (`agent_replies`).
+- `outcome.ladder`: the response's status and exact `ng_agent_outcome` are one of
+  the scenario's outcomes. A `completed` or `incomplete` response carries no
+  `ng_agent_outcome`.
+- `outcome.disposition`: the Environment Server took that outcome's action.
+- `model.retries_bounded` (`model_503`): the agent replies within 30 s of its first
+  model request, so its own retries of the 503 are bounded.
+
+`outcome.target` (P1) names the outcome the ladder reports once its transitional
+rules are gone: `incomplete` for a context overflow, and for a deadline before any
+model reply. Checks that cannot apply report `not_applicable`: `model.finished` and
+`verifier.answer` when the script never gives the final answer, the `verifier.*`
+checks when the Environment Server did not grade the run, and the tool checks when
+the tool call kills the harness.
+
+Each harness's run deadline comes from its adapter's deadline key
+(`episode.DEADLINE_KEYS`): `timeout` for OpenCode, Pi, Codex, Kilo Code and
+OpenClaw, and `sandbox_runner_timeout_seconds` for Hermes, Stirrup and NOOA. A
+scenario's `run_deadline_seconds` sets it, well under the episode timeout;
+otherwise it is the probe `--timeout`. A never-answered request is held until the
+harness disconnects, and the witness keeps it without a status.
+
+`harness_no_result` uses the process supervisor's marker: the tool call walks up to
+the harness that carries `NEMO_GYM_SUPERVISOR=<identity>`, kills it and every
+process with the same identity, and spares the supervisor (marked `detached`).
+Simple Agent runs inside the Gym agent server, with no run deadline and no harness
+process to end, so it skips the two deadline scenarios and `harness_no_result`
+(`registry.LACKS`; the summary lists them under `skipped_scenarios`).
+
+A run that ends in a failure row is a measurement in these scenarios and in
+`model_error`, not an execution error.
 
 Every applicable individual P0 check must pass;
 TE labels group results and do not determine priority or grant exemptions.
@@ -211,10 +259,10 @@ schema consumable by `provider.Probe._tool` and, if it ends episodes on a finish
 tool's schema consumable by `provider.Probe._finish`. Keep expectations and witnesses out
 of the task input and preserve the normal Gym collection path.
 
-Registration also means adding the harness name to hard-coded tuples. `episode._config`
-passes the probe's `--timeout` as the agent's `timeout` only to the harnesses in its
-`("opencode", "pi")` tuple; add a harness whose adapter has a `timeout` field, so that
-the harness uses the probe timeout instead of the adapter's default. `ci.install_runtime`
+Registration also means naming the harness's run deadline and its missing capabilities.
+Add its adapter's deadline key to `episode.DEADLINE_KEYS`, so that the harness uses the
+probe timeout or the scenario's deadline instead of the adapter's default; a harness
+without one goes in `registry.LACKS` with `run_deadline`. `ci.install_runtime`
 installs the adapter's `requirements.txt` and then returns early only for the harnesses
 in its `("hermes", "stirrup", "simple")` tuple: Hermes comes from those requirements,
 Stirrup installs in the task sandbox during session setup, and Simple Agent is built in.

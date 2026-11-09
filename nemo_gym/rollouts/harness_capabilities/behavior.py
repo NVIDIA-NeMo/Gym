@@ -5,11 +5,14 @@
 
 import json
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from typing import Literal
 
 from pydantic import ValidationError
 
 from nemo_gym.agents.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
+from nemo_gym.artifacts.rollout_rows import NG_FAILURE_CLASS_KEY
 from nemo_gym.core.failure_kinds import MODEL_REQUEST_ERROR, MODEL_REQUEST_REJECTED
 from nemo_gym.models.chat_completions_converter import message_content_to_text
 from nemo_gym.server_runtime.base_environment_server import is_retryable_dependency_status
@@ -18,12 +21,69 @@ from .checks import BehavioralCheck
 from .results import Results
 
 
+EnvironmentAction = Literal["verify", "retry", "fail", "count_as_zero"]
+
+
 def _mapping(value: object) -> dict:
     return value if isinstance(value, dict) else {}
 
 
 def _objects(value: object) -> list[dict]:
     return [v for v in value if isinstance(v, dict)] if isinstance(value, list) else []
+
+
+@dataclass(frozen=True)
+class ExpectedOutcome:
+    """One response the outcome ladder may report for a run, and the Environment Server's action on it.
+
+    ``failure_kind`` and ``status_code`` are the response's ``ng_agent_outcome``. Only a failed response carries one;
+    the ladder removes it from a completed or incomplete response.
+    """
+
+    status: Literal["completed", "incomplete", "failed"]
+    action: EnvironmentAction
+    failure_kind: str | None = None
+    status_code: int | None = None
+
+    def __post_init__(self) -> None:
+        if (self.status == "failed") != (self.failure_kind is not None):
+            raise ValueError("a failed outcome names its failure kind; a completed or incomplete one names none")
+        if self.failure_kind is not None:
+            # Accept only an outcome the agent could report.
+            AgentOutcome(failure_kind=self.failure_kind, status_code=self.status_code)
+
+    def describe(self) -> str:
+        outcome = "" if self.failure_kind is None else f" {self.failure_kind}"
+        status = "" if self.status_code is None else f" {self.status_code}"
+        return f"{self.status}{outcome}{status} ({self.action})"
+
+    def matches(self, response: dict) -> bool:
+        """Whether an agent response has this status and exactly this ``ng_agent_outcome``."""
+        if response.get("status") != self.status:
+            return False
+        raw = _mapping(response.get("metadata")).get(AGENT_OUTCOME_METADATA_KEY)
+        if self.failure_kind is None or raw is None:
+            return self.failure_kind is None and raw is None
+        try:
+            outcome = AgentOutcome.model_validate_json(raw)
+        except ValidationError:
+            return False
+        return outcome == AgentOutcome(failure_kind=self.failure_kind, status_code=self.status_code)
+
+
+def environment_action(record: dict | None) -> EnvironmentAction | None:
+    """The Environment Server's action on an episode, read from the record collection kept for it.
+
+    A graded rollout is ``verify``. A failure row is ``fail`` when ``_ng_failure_terminal`` is set (not retried) and
+    ``retry`` when it is not; a row the policy counted as zero is ``count_as_zero``. ``None`` without a record.
+    """
+    if record is None:
+        return None
+    if record.get(NG_FAILURE_CLASS_KEY) is None:
+        return "verify"
+    if record.get("_ng_failure_counts_as_zero"):
+        return "count_as_zero"
+    return "fail" if record.get("_ng_failure_terminal") else "retry"
 
 
 def _terminal_outcome(status: int) -> AgentOutcome:
@@ -188,14 +248,30 @@ def inspect_behavior(
     expected_reward: float,
     fingerprint: Callable,
     judge_verifier: bool = False,
+    final_answer: bool = True,
+    tool_results: bool = True,
+    outcomes: Sequence[ExpectedOutcome] = (),
+    target_outcome: ExpectedOutcome | None = None,
+    retry_budget_seconds: float | None = None,
 ) -> list[dict]:
-    """Check saved evidence and observations against explicit test expectations."""
+    """Check saved evidence and observations against explicit test expectations.
+
+    ``final_answer`` is false when the script never gives the final answer, and ``tool_results`` is false when a
+    scripted tool call ends the harness, so no result returns to the model. ``outcomes`` are the responses the outcome
+    ladder may report for the run, each with the Environment Server's action on it; the run's response must be one of
+    them (P0). ``target_outcome`` is the one the ladder reports once its transitional rules are gone (P1).
+    ``retry_budget_seconds`` bounds the time from the first model request to the agent's reply, for a harness that
+    retries a failing model itself.
+    """
     results = Results()
     attempts = (witness or {}).get("attempts", [])
     statuses = [a["status_code"] for a in attempts]
     agent_responses = (witness or {}).get("agent_responses", [])
     tools = (witness or {}).get("tool_calls", [])
     available = witness is not None
+    action = environment_action(record)
+    # A run whose outcome may go ungraded is verified only when the Environment Server graded it.
+    graded = action == "verify" if outcomes else not terminal_error
 
     results.run(
         BehavioralCheck(
@@ -280,7 +356,7 @@ def inspect_behavior(
             reason="the harness did not finish the scripted model exchange",
             predicate=lambda: bool((witness or {}).get("finished")),
             available=available,
-            applies=not terminal_error,
+            applies=not terminal_error and final_answer,
         )
     )
     results.run(
@@ -294,7 +370,7 @@ def inspect_behavior(
                 len(tools) == tool_steps and all((t.get("executed") and t.get("result_seen") for t in tools))
             ),
             available=available,
-            applies=tool_steps > 0,
+            applies=tool_steps > 0 and tool_results,
         )
     )
     verifications = (witness or {}).get("verifications", [])
@@ -307,7 +383,7 @@ def inspect_behavior(
             reason="expected verifier outcome was not observed",
             predicate=lambda: len(verifications) == 1 and verifications[0]["reward"] == expected_reward,
             available=available,
-            applies=not terminal_error,
+            applies=graded,
         )
     )
     results.run(
@@ -319,7 +395,7 @@ def inspect_behavior(
             reason="the verifier did not receive the scripted final answer",
             predicate=lambda: len(verifications) == 1 and verifications[0].get("answer_seen"),
             available=available,
-            applies=not terminal_error,
+            applies=graded and final_answer,
         )
     )
     results.run(
@@ -331,7 +407,7 @@ def inspect_behavior(
             reason="rollout reward differs from the verifier witness",
             predicate=lambda: record.get("reward") == expected_reward,
             available=record is not None and available,
-            applies=not terminal_error,
+            applies=graded,
         )
     )
     results.run(
@@ -343,7 +419,7 @@ def inspect_behavior(
             reason="completed verification must retain evaluation_completed=true and mask_sample=false",
             predicate=lambda: record.get("evaluation_completed") is True and record.get("mask_sample") is False,
             available=record is not None and available,
-            applies=not terminal_error,
+            applies=graded,
         )
     )
     judges = (witness or {}).get("judge_calls", [])
@@ -379,15 +455,113 @@ def inspect_behavior(
     )
     return (
         results.dump()
+        + outcome_checks(
+            witness,
+            record,
+            outcomes=outcomes,
+            target_outcome=target_outcome,
+            retry_budget_seconds=retry_budget_seconds,
+        )
         + model_checks(record, attempts + judges, fingerprint=fingerprint, available=available)
         + tool_checks(
             record,
             tools + _objects((witness or {}).get("native_tool_calls")),
             finish_id=((witness or {}).get("finish_call") or {}).get("id"),
-            applies=tool_steps > 0,
+            applies=tool_steps > 0 and tool_results,
             available=available,
         )
     )
+
+
+def outcome_checks(
+    witness: dict | None,
+    record: dict | None,
+    *,
+    outcomes: Sequence[ExpectedOutcome],
+    target_outcome: ExpectedOutcome | None = None,
+    retry_budget_seconds: float | None = None,
+) -> list[dict]:
+    """Compare the agent's reply and the Environment Server's action with the outcome ladder's expectation.
+
+    The witness records the agent's HTTP replies to the Environment Server (``agent_replies``) and the responses it
+    accepted (``agent_responses``); the record is the graded rollout or the failure row collection kept.
+    """
+    results = Results()
+    available = witness is not None
+    replies = _objects((witness or {}).get("agent_replies"))
+    responses = _objects((witness or {}).get("agent_responses"))
+    response = responses[0] if len(responses) == 1 else None
+    matched = next((o for o in outcomes if response is not None and o.matches(response)), None)
+    action = environment_action(record)
+    expected = ", ".join(o.describe() for o in outcomes)
+    results.run(
+        BehavioralCheck(
+            id="outcome.http_ok",
+            tier="P0",
+            evidence=(),
+            location="witness.json",
+            reason="the agent must reply to the Environment Server with HTTP 200 and report the run's outcome in the "
+            "response, never with a 5xx",
+            predicate=lambda: bool(replies) and all(reply.get("http_status") == 200 for reply in replies),
+            available=available,
+            applies=bool(outcomes),
+        )
+    )
+    results.run(
+        BehavioralCheck(
+            id="outcome.ladder",
+            tier="P0",
+            evidence=(),
+            location="witness.json",
+            reason=f"the agent's response must be one the outcome ladder reports for this run: {expected}",
+            predicate=lambda: matched is not None,
+            available=available,
+            applies=bool(outcomes),
+        )
+    )
+    results.run(
+        BehavioralCheck(
+            id="outcome.disposition",
+            tier="P0",
+            evidence=(),
+            location="$",
+            reason="the Environment Server must take the reported outcome's action: verify (a graded rollout), retry "
+            "(a failure row with _ng_failure_terminal false) or fail (_ng_failure_terminal true)",
+            predicate=lambda: action == matched.action,
+            available=available and record is not None,
+            applies=bool(outcomes),
+            depends_on=("outcome.ladder",),
+        )
+    )
+    results.run(
+        BehavioralCheck(
+            id="outcome.target",
+            tier="P1",
+            evidence=(),
+            location="witness.json",
+            reason=f"the outcome ladder's target for this run is {target_outcome.describe() if target_outcome else ''}",
+            predicate=lambda: response is not None and target_outcome.matches(response),
+            available=available,
+            applies=target_outcome is not None,
+        )
+    )
+    attempts = _objects((witness or {}).get("attempts"))
+    started = [a["received_at"] for a in attempts if isinstance(a.get("received_at"), (int, float))]
+    replied = [r["replied_at"] for r in replies if isinstance(r.get("replied_at"), (int, float))]
+    results.run(
+        BehavioralCheck(
+            id="model.retries_bounded",
+            tier="P0",
+            evidence=(),
+            location="witness.json",
+            reason=f"the harness must stop retrying the failing model and reply within {retry_budget_seconds or 0:g}s "
+            "of its first model request",
+            predicate=lambda: bool(started) and bool(replied) and replied[0] - min(started) <= retry_budget_seconds,
+            available=available,
+            applies=retry_budget_seconds is not None,
+        )
+    )
+    return results.dump()
 
 
 def model_checks(
@@ -405,7 +579,12 @@ def model_checks(
         expected_exchanges[exchange] += 1
         chat = "messages" in attempt["request"]
         choices = response.get("choices") or []
-        finish = choices[0].get("finish_reason") if chat and choices else None
+        # An incomplete Responses reply names its stop in incomplete_details; a completed one names none.
+        finish = (
+            (choices[0].get("finish_reason") if choices else None)
+            if chat
+            else _mapping(response.get("incomplete_details")).get("reason")
+        )
         expected_metadata[
             (exchange, json.dumps(response.get("id")), json.dumps(response.get("status")), json.dumps(finish))
         ] += 1

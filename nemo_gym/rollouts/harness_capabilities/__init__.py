@@ -20,7 +20,7 @@ from nemo_gym._public_api import lazy_exports
 
 
 if TYPE_CHECKING:
-    from nemo_gym.rollouts.harness_capabilities.behavior import inspect_behavior
+    from nemo_gym.rollouts.harness_capabilities.behavior import ExpectedOutcome, inspect_behavior
     from nemo_gym.rollouts.harness_capabilities.checker import NAMES, EvidenceScope, inspect_record
     from nemo_gym.rollouts.harness_capabilities.checks import PriorityTier
     from nemo_gym.rollouts.harness_capabilities.cli import digest_file, inspect_bundle, json_rows, main
@@ -33,6 +33,7 @@ if TYPE_CHECKING:
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
     "EvidenceScope": "checker",
+    "ExpectedOutcome": "behavior",
     "NAMES": "checker",
     "PriorityTier": "checks",
     "digest_file": "cli",
