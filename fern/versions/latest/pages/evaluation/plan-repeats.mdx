@@ -8,6 +8,8 @@ position: 7
 
 Use `gym eval plan-repeats` before collecting a comparison to choose repeat counts from historical standard deviations. Plan one benchmark, a model's selected benchmarks, or a suite average. The command reads a small YAML file; it does not start evaluations or access a cluster.
 
+For a step-by-step example with expected counts, reports, baseline reuse, and multiple metrics, follow [Plan a Comparison Budget](/main/tutorials/evaluation-tutorials/plan-repeats).
+
 One repeat means one complete pass over the fixed benchmark task population. Supply the standard deviation of those complete-pass scores, rather than the standard deviation across tasks or the standard error of an existing average. Scores and standard deviations use the same normalized 0–100 scale as [suite comparison](/main/evaluation/compare-results#compare-a-benchmark-suite), with all selected metrics oriented so higher scores are better.
 
 ## Plan against an existing baseline
@@ -47,7 +49,7 @@ Runnable examples are checked in under [`examples/repeat-planning/`](https://git
 
 `baseline.mode: existing` keeps each cell's available baseline count fixed and plans additional candidate repeats. The baseline's uncertainty stays in the calculation, while its collection cost is already paid. Existing counts need not be multiples of the current `repeat_step`.
 
-`repeat_step` is the increment for newly collected complete passes. Eight fixed prepared dataset copies permit 8, 16, 24, … planned passes, corresponding to runtime multipliers 1, 2, 3, …. The planner changes the multiplier rather than the prepared copies. The default step is one, and new counts are always at least two.
+`repeat_step` is the increment for newly collected complete passes. Eight fixed prepared dataset copies permit 8, 16, 24, … planned passes, corresponding to runtime multipliers 1, 2, 3, …. Apply the reported count by adjusting the runtime multiplier while keeping prepared copies fixed; the planner does not modify the launch configuration. The default step is one, and new counts are always at least two.
 
 ## Choose the quality claim
 
@@ -91,11 +93,11 @@ cells:
     repeat_step: 10
     metrics:
       - name: accuracy
-        baseline_std_points: 2.0
-        candidate_std_points: 2.0
+        baseline_std_points: 1.0
+        candidate_std_points: 1.0
       - name: non-hallucination
-        baseline_std_points: 3.0
-        candidate_std_points: 3.0
+        baseline_std_points: 1.0
+        candidate_std_points: 1.0
 ```
 
 Use either the cell-level SD shorthand or a `metrics` list. Omit a candidate SD to use its baseline SD forecast. Supply normalized SDs; metric labels alone do not convert raw scoring units or reverse a metric's direction. For each arm, the planner combines the supplied metric variances with squared equal metric weights, then plans against the resulting benchmark SD. It does not average SDs or treat extra metrics as extra benchmarks.
@@ -108,7 +110,7 @@ The analytic power calculation uses forecast variances, Welch–Satterthwaite de
 
 The default validation uses 10,000 normal-model experiments and reports power and false-success rate with 95% Wilson Monte Carlo intervals. `validation_trials` and `seed` are configurable in YAML; set `validation_trials: 0` to skip this diagnostic. Simulation holds the supplied variance forecasts fixed, so its intervals measure simulation precision rather than uncertainty in historical SD estimates. A disagreement with the analytic target remains visible; simulation does not change the chosen allocation.
 
-Single-benchmark searches check legal integer allocations and identify an exact minimum within `max_repeats` (default 20,000 per arm). Suite searches report a feasible local allocation rather than a globally optimal integer solution. Exhausting a bound means that no feasible plan was found within that search, not that the target is impossible. A zero total forecast variance cannot support a Welch power calculation.
+Single-benchmark searches check legal integer allocations and identify an exact minimum within `max_repeats` (default 20,000 newly planned repeats per arm). Existing baseline counts may exceed that limit. Suite searches report a feasible local allocation rather than a globally optimal integer solution. Exhausting a bound means that no feasible plan was found within that search, not that the target is impossible. A zero total forecast variance cannot support a Welch power calculation.
 
 If the final planned experiment is inconclusive, retain that result. Adding repeats after inspecting a confidence interval requires a separately designed sequential procedure; this command plans fixed counts in advance.
 

@@ -1337,6 +1337,8 @@ gym eval plan-repeats \
 
 Writes `repeat_planning_report.md` and/or `repeat_planning_report.json`, with full-precision numerical evidence in JSON. Statistical targets, candidate experiment count, repeat increments, costs, search bounds, and optional simulation validation are configured in YAML. See [Plan Repeats](/main/evaluation/plan-repeats) for complete examples and the distinction between analytic power and validation through the comparison procedure.
 
+Follow [Plan a Comparison Budget](/main/tutorials/evaluation-tutorials/plan-repeats) for a walkthrough from SD inputs to verified example allocations and the final comparison decision.
+
 ### `gym eval reverify`
 
 Recompute rewards by replaying a stored response through a resources server's `/verify` endpoint — without re-running model inference. The command accepts native Gym rollouts or the initial completed, text-only Relay ATIF v1.7 profile. It starts the resources server automatically from the provided config.

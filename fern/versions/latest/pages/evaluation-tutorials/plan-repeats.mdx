@@ -1,0 +1,186 @@
+---
+title: "Plan a Comparison Budget"
+description: "Choose benchmark and suite repeat counts, inspect a complete planning report, and carry the planned decision into a Gym comparison."
+position: 7
+---
+
+# Plan a Comparison Budget
+
+Suppose you want to compare a quantized checkpoint with a baseline. You have historical repeat-level standard deviations and want to know how many complete benchmark passes to collect before deciding whether the candidate's quality loss is acceptable.
+
+This walkthrough uses `gym eval plan-repeats` to plan one benchmark, reuse a baseline across several candidates, and plan a suite with an existing baseline. It also shows how a benchmark with two metrics keeps the same weight as a benchmark with one. All SDs here are illustrative; the commands perform CPU-only statistical calculations and do not start model inference.
+
+## Prerequisites
+
+Complete [Installation](/main/get-started/installation) and run the commands from a NeMo Gym checkout containing `examples/repeat-planning/`.
+
+One repeat is one complete pass over a fixed benchmark task population. Supply the standard deviation across those complete-pass scores, on the normalized 0–100 scale, with higher scores better. An SD across individual tasks or the standard error of an existing mean is a different quantity. See [Plan Repeats](/main/evaluation/plan-repeats) for the complete input contract.
+
+## 1. Define the decision before collecting results
+
+Start with one model and one benchmark. Assume a complete-pass SD of one score point for both checkpoints. Choose these planning settings:
+
+| Setting | Value | Meaning |
+| --- | --- | --- |
+| Acceptable loss | 1 point | Establish that the true candidate-minus-baseline change is above −1 point. |
+| Assumed true change | 0 points | Forecast equal baseline and candidate quality. |
+| Target analytic power | 80% | Target an 80% chance of establishing the chosen non-inferiority claim under the planning model. |
+| One-sided significance level | 5% | Use the lower bound of a two-sided 90% Welch interval for the final decision. |
+| Distinct candidate checkpoints | 1 | Compare one candidate with the baseline; this is separate from repeat count. |
+
+Copy the complete single-benchmark example:
+
+```bash
+mkdir -p results/repeat-planning-walkthrough
+cp examples/repeat-planning/benchmark.yaml \
+    results/repeat-planning-walkthrough/benchmark.yaml
+```
+
+The copied file contains:
+
+```yaml
+schema_version: 1
+aggregation_level: benchmark
+baseline:
+  mode: optimize
+candidate_experiments: 1
+margin_points: 1.0
+target_power: 0.80
+alpha: 0.05
+expected_delta_points: 0.0
+cells:
+  - model: model-a
+    benchmark: example-benchmark
+    baseline_std_points: 1.0
+    candidate_std_points: 1.0
+```
+
+`aggregation_level: benchmark` makes the quality claim about this one model × benchmark entry. `baseline.mode: optimize` asks for new baseline and candidate counts. With no `repeat_step` or `repeat_cost`, all integer counts of at least two are allowed and each pass has unit cost.
+
+## 2. Run the planner and read the report
+
+```bash
+gym eval plan-repeats \
+    --plan results/repeat-planning-walkthrough/benchmark.yaml \
+    --output-dir results/repeat-planning-walkthrough/benchmark
+```
+
+The command writes `repeat_planning_report.md` and `repeat_planning_report.json`. The example produces:
+
+| Report item | Result |
+| --- | ---: |
+| New baseline passes | 15 |
+| New candidate passes | 12 |
+| Total new passes | 27 |
+| Approximate planning power | 80.58% |
+| Simulated Welch decision power | 80.66% |
+| Simulation's 95% Monte Carlo interval | 79.87%–81.42% |
+
+These simulation values use the default 10,000 trials and seed `20261109`. The Markdown report rounds values; JSON retains full precision.
+
+The allocation meets the **analytic** target. Its simulation checks the actual Welch decision with newly estimated sample variances and degrees of freedom. The two power values need not be identical. The Monte Carlo interval measures simulation uncertainty; it is not a confidence interval for the candidate's eventual score difference and does not measure uncertainty in the supplied historical SDs.
+
+One candidate does not require equal arm counts. The exact integer search finds a 27-pass allocation for this input, while constraining both arms to equal counts would require 28 passes. The report identifies the search method so you can distinguish a scalar minimum from a suite's feasible local allocation.
+
+## 3. Reuse a planned baseline across 48 candidates
+
+Suppose the baseline will serve 48 distinct candidate checkpoints, all with the same candidate SD forecast. Copy the previous input:
+
+```bash
+cp results/repeat-planning-walkthrough/benchmark.yaml \
+    results/repeat-planning-walkthrough/shared-baseline.yaml
+```
+
+In `shared-baseline.yaml`, change only `candidate_experiments` from `1` to `48`, then run:
+
+```bash
+gym eval plan-repeats \
+    --plan results/repeat-planning-walkthrough/shared-baseline.yaml \
+    --output-dir results/repeat-planning-walkthrough/shared-baseline
+```
+
+| Report item | One candidate | 48 candidates |
+| --- | ---: | ---: |
+| Baseline passes collected once | 15 | 30 |
+| Passes per candidate checkpoint | 12 | 9 |
+| Candidate passes across all checkpoints | 12 | 432 |
+| Total new passes | 27 | 462 |
+| Approximate power per comparison | 80.58% | 80.17% |
+
+The larger baseline investment reduces each candidate's planned repeat count. The count of 48 changes the total cost objective; it does not turn 48 checkpoints into repeat observations for one comparison. Power remains marginal for one candidate-versus-baseline decision, rather than a guarantee that all 48 decisions succeed.
+
+## 4. Plan a suite against an existing baseline
+
+Next, suppose baseline passes are already available: 16 for GPQA and 32 for AA-LCR. The checked-in suite example supplies SDs of two and three points, respectively, for both arms. Its repeat increments are eight and sixteen passes, matching fixed prepared dataset copies.
+
+```bash
+cp examples/repeat-planning/suite.yaml \
+    results/repeat-planning-walkthrough/suite.yaml
+gym eval plan-repeats \
+    --plan results/repeat-planning-walkthrough/suite.yaml \
+    --output-dir results/repeat-planning-walkthrough/suite
+```
+
+This file uses `aggregation_level: suite` and `baseline.mode: existing`. Its report shows:
+
+| Benchmark | Suite weight | Existing baseline passes | New candidate passes | Candidate runtime multiplier |
+| --- | ---: | ---: | ---: | ---: |
+| GPQA | 0.5 | 16 | 96 | 12 |
+| AA-LCR | 0.5 | 32 | 160 | 10 |
+
+The existing 48 baseline passes contribute uncertainty but no new collection cost. The plan requests 256 new candidate passes in total and has approximate power **80.16%** for the equal-weight suite average. The search reports a feasible local allocation, without claiming a global integer minimum.
+
+The runtime multiplier column shows how to apply the counts when prepared copies stay fixed. The planner reports counts; you apply them to the evaluation's launch configuration. It does not edit that configuration or submit a run.
+
+This suite plan supports an average-quality claim. It does not independently power GPQA and AA-LCR at 80%. To plan a separate benchmark claim, make a separate file with `aggregation_level: benchmark` and only that benchmark's entry. Use `aggregation_level: model` when averaging selected benchmarks of one model; each file still describes one aggregate.
+
+## 5. Give a two-metric benchmark the same weight
+
+Run the complete example that combines one GPQA metric with two AA Omniscience metrics:
+
+```bash
+cp examples/repeat-planning/multiple-metrics.yaml \
+    results/repeat-planning-walkthrough/multiple-metrics.yaml
+gym eval plan-repeats \
+    --plan results/repeat-planning-walkthrough/multiple-metrics.yaml \
+    --output-dir results/repeat-planning-walkthrough/multiple-metrics
+```
+
+This example supplies one-point SDs for every selected metric. Its existing baseline counts and repeat increments are eight for GPQA and ten for Omniscience. Each benchmark has suite weight 0.5. Inspect the report's metric inputs and benchmark composites:
+
+| Benchmark | Selected metric | Within-benchmark weight | Metric's overall suite weight |
+| --- | --- | ---: | ---: |
+| GPQA | score | 1 | 0.5 |
+| AA Omniscience | accuracy | 0.5 | 0.25 |
+| AA Omniscience | non-hallucination | 0.5 | 0.25 |
+
+The two Omniscience rows describe a single benchmark with total suite weight 0.5. Its baseline and candidate composite SDs are both **0.7071 points**, while GPQA's are one point. All Omniscience metrics share one repeat count and one repeat cost.
+
+The minimum allowed new counts already meet the target: **eight GPQA passes and ten Omniscience passes per candidate**, 18 new passes in total, with approximate suite power **94.95%**. These results use this example's SDs and existing counts; they are not measured AA Omniscience or GPQA budgets.
+
+## 6. Collect the planned passes and compare once
+
+Keep the input YAML and report with the experiment. Collect the reported baseline and per-candidate counts using the evaluation workflow appropriate to your benchmark, keeping tasks, scoring, sampling, and other comparison settings fixed. The commands above only plan the budget.
+
+After collecting a single-benchmark comparison, use the same decision level:
+
+```bash
+gym eval compare \
+    --baseline results/baseline/rollouts.jsonl \
+    --candidates results/candidate/rollouts.jsonl \
+    --confidence-level 0.90 \
+    --output-dir results/final-comparison
+```
+
+For the suite, configure the collected runs in a comparison manifest and use:
+
+```bash
+gym eval compare-suite \
+    --suite collected-suite.yaml \
+    --confidence-level 0.90 \
+    --output-dir results/final-suite-comparison
+```
+
+These final commands require the collected artifacts; the planning walkthrough does not create them. A comparison manifest names run paths and metrics, while a planning YAML contains SD inputs and design settings. See [Compare Results](/main/evaluation/compare-results) for the comparison manifest and report walkthrough.
+
+For the one-point margin used here, establish non-inferiority when the resulting delta interval's lower endpoint is above −1 normalized point. Single-benchmark `compare` can report raw reward units: for a reward scale of 0–1, the same threshold is −0.01. Suite comparison uses normalized score points. An interval crossing the threshold is inconclusive; it does not establish that the candidate is too much worse. Keep that outcome rather than automatically extending the experiment after inspecting the result.
