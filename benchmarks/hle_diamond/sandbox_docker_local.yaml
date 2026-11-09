@@ -30,8 +30,8 @@
 #   defines a second block, `sandbox_docker` (the content of
 #   nemo_gym/sandbox/providers/docker/configs/docker.yaml under that name), and repoints the three
 #   hle_diamond sandboxed agents at it (the Pi block targets the pi_agent session presets; composing it
-#   with pi_legacy_agent.yaml or pi_search_legacy_agent.yaml fails validation). Only the agent the
-#   composed preset defines is started;
+#   with pi_legacy_agent.yaml or pi_search_legacy_agent.yaml fails validation, so those take
+#   sandbox_docker_local_pi_legacy_agent.yaml instead). Only the agent the composed preset defines is started;
 #   the other blocks below stay partial, inert entries.
 # - The Docker provider ignores sandbox_config.ttl_s when an entrypoint is set (the presets set
 #   `entrypoint: [sleep, infinity]`), so container lifetime relies on the agent's cleanup; check
@@ -114,6 +114,7 @@ hle_diamond_pi_agent:
   responses_api_agents:
     # The Pi presets run pi_agent sessions; composed with pi_legacy_agent.yaml or pi_search_legacy_agent.yaml this
     # partial block lands in the same instance as pi_sandboxed_agent and fails validation.
+    # sandbox_docker_local_pi_legacy_agent.yaml removes it for those presets.
     pi_agent:
       sandbox_provider: sandbox_docker
       network_access: inherit

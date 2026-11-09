@@ -25,10 +25,11 @@ of the `test` split and downloads it at run time. Nothing from the dataset is co
 | `hle_diamond/opencode_full`, `hle_diamond/opencode_search_full` | 1000 (272 with an image) | `prompts/opencode.yaml`, baked at prepare time by `prepare_opencode.py` | the OpenCode presets over the full set, images attached through `opencode run -f`; needs a vision-capable policy model |
 | `hle_diamond/opencode_reference` | 728 | `prompts/opencode.yaml` | `opencode_search` on the reference sandbox image (upstream's Python 3.11.16 environment) under upstream's egress policy; needs the OpenSandbox provider (see Reference preset) |
 
-Two composable overrides live next to the presets and are not benchmarks (no dataset, not listed by
-`gym list benchmarks`): [`judge_openai.yaml`](judge_openai.yaml) (dedicated judge, see Scoring) and
+Three composable overrides live next to the presets and are not benchmarks (no dataset, not listed by
+`gym list benchmarks`): [`judge_openai.yaml`](judge_openai.yaml) (dedicated judge, see Scoring),
 [`sandbox_docker_local.yaml`](sandbox_docker_local.yaml) (sandboxed presets on a local Docker host,
-see Quickstart).
+see Quickstart) and [`sandbox_docker_local_pi_legacy_agent.yaml`](sandbox_docker_local_pi_legacy_agent.yaml)
+(the same for `pi_legacy_agent` and `pi_search_legacy_agent`).
 
 **Why the default inverts `hle`'s convention.** `benchmarks/hle` defaults to the text subset and
 exposes images as the `hle/config_vision` variant, because HLE's headline figures are text-only.
@@ -53,7 +54,8 @@ sandbox from `PI_SANDBOX_IMAGE` with the shared settings in
 [`offline_science.yaml`](../../responses_api_agents/pi_agent/configs/profiles/offline_science.yaml), and the search
 preset gets Tavily through the agent's `tool_servers`. `pi_legacy_agent` and `pi_search_legacy_agent` keep the
 deprecated `pi_sandboxed_agent` on the `legacy_agent` relay; composing them with `sandbox_docker_local.yaml` fails
-validation, so they have no local-Docker path. What differs from that relay is listed in
+validation, so on local Docker they take `sandbox_docker_local_pi_legacy_agent.yaml` in its place. What differs
+from that relay is listed in
 [`benchmarks/hle`'s README](../hle/README.md#sandboxed-agents); in short, a harness crash is retried and then
 reported as a failed rollout instead of scoring 0, there is no `PI_ARTIFACTS_DIR`, rows carry
 `ng_agent_observations` instead of the `pi_*` fields, and `pi_agent` refuses request fields other than the input,
@@ -570,6 +572,8 @@ infrastructure only") and say nothing about the score.
 export OPENSANDBOX_API_KEY=unused-local-docker
 export OPENSANDBOX_DOMAIN=unused.invalid
 # For the pi presets: PI_SANDBOX_IMAGE=gym-pi-science:local, and drop the reasoning.effort line below.
+# For pi_legacy_agent and pi_search_legacy_agent: sandbox_docker_local_pi_legacy_agent.yaml in place of
+# sandbox_docker_local.yaml (the reasoning.effort line stays: the relay ignores it).
 export OPENCODE_SANDBOX_IMAGE=gym-opencode-science:local
 export OPENCODE_ARTIFACTS_DIR=/abs/path/oc-artifacts          # the harness's native transcripts (the pi session presets keep none)
 mkdir -p /abs/path/model-calls
@@ -591,7 +595,10 @@ gym eval run --benchmark hle_diamond/opencode --split benchmark --model-type lit
   cannot be removed or re-typed by an override, and repoints `hle_diamond_opencode_agent` and
   `hle_diamond_pi_agent` at it with `network_access: inherit` (restricted policies fail closed on
   any provider but OpenSandbox). Only the agent the preset defines is started; the other block stays
-  a partial, inert entry. It also replaces the presets' environment note, which says internet is
+  a partial, inert entry. Its Pi block targets the `pi_agent` session presets;
+  `sandbox_docker_local_pi_legacy_agent.yaml` pulls it in, drops that block and applies the same
+  settings to the legacy presets' `pi_sandboxed_agent`. It also replaces the presets' environment note,
+  which says internet is
   disabled, with the truth.
 - Uncomment `network: host` (the verified form) in the override on hosts whose firewall drops
   bridge (docker0) to host traffic or whose hostname resolves to a loopback alias such as

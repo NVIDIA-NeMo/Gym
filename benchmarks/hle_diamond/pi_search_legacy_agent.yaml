@@ -1,7 +1,7 @@
 # Deprecated: pi_sandboxed_agent and its legacy_agent relay will be removed after the Environment Server
 # migration. Use pi_search.yaml instead, which runs pi_agent through single_agent_turn_legacy.
 # The two harnesses are configured differently, so do not compare their scores as the same measurement.
-# sandbox_docker_local.yaml overrides the session preset's pi_agent; composing it with this file fails validation.
+# On local Docker, compose sandbox_docker_local_pi_legacy_agent.yaml: sandbox_docker_local.yaml fails validation here.
 # Pi preset with Tavily search, excluding the HLE-Diamond answer-exposure list.
 config_paths:
 - benchmarks/hle_diamond/pi_legacy_agent.yaml

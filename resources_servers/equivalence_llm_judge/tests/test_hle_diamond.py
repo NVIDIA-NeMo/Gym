@@ -621,6 +621,20 @@ class TestLocalDockerOverride:
         assert instance is None and error is not None
         assert not is_almost_server(block)
 
+    @pytest.mark.parametrize("config_file", ["pi_legacy_agent.yaml", "pi_search_legacy_agent.yaml"])
+    def test_legacy_pi_presets_reach_docker_through_their_own_override(self, config_file):
+        # sandbox_docker_local.yaml's pi_agent block lands beside the relay preset's pi_sandboxed_agent; the
+        # legacy override drops it, so the instance keeps exactly one agent, now on the Docker provider.
+        resolved = _resolve(config_file, "sandbox_docker_local_pi_legacy_agent.yaml")
+        agents = resolved["hle_diamond_pi_agent"]["responses_api_agents"]
+        assert list(agents) == ["pi_sandboxed_agent"]
+        agent = agents["pi_sandboxed_agent"]
+
+        assert (agent["sandbox_provider"], agent["network_access"]) == ("sandbox_docker", "inherit")
+        assert list(resolve_provider_config(agent["sandbox_provider"], resolved)) == ["docker"]
+        assert "NOT restricted" in agent["system_prompt"] and "disabled" not in agent["system_prompt"]
+        assert agent["thinking"] == "high"
+
     def test_override_tells_the_model_the_truth_about_egress_and_keeps_the_preset_knobs(self):
         opencode = get_first_server_config_dict(
             _resolve("opencode_search.yaml", "sandbox_docker_local.yaml"), "hle_diamond_opencode_agent"
