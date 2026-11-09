@@ -24,6 +24,13 @@ healthbench_professional_healthbench_rubric_resources_server:
       length_adjustment_penalty_per_500_chars: 0.0147
       reward_metric: overall_score_length_adjusted
 
+# The stepped environment must use Professional's length-adjusted rubric server.
+healthbench_rubric_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_server:
+        name: healthbench_professional_healthbench_rubric_resources_server
+
 healthbench_professional_benchmark_simple_agent:
   _inherit_from: healthbench_rubric_simple_agent
   responses_api_agents:
