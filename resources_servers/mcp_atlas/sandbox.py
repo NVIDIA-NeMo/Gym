@@ -3,8 +3,9 @@
 """One private MCP-Atlas agent-environment sandbox per rollout.
 
 Each sandbox is the upstream ``ghcr.io/scaleapi/mcp-atlas`` image run through ``nemo_gym.sandbox`` (Apptainer on
-Slurm). It serves only the MCP servers its task enables, on its own host port, so stateful servers (filesystem,
-memory, git, desktop-commander) never leak state between tasks. Service credentials reach the sandbox through
+Slurm). Each task has dedicated process and scratch state, but the host-loopback transport shares networking;
+evaluated code still needs an enforced boundary from other rollouts and Gym control endpoints before scoring.
+Service credentials reach the sandbox through
 ``SandboxSpec.env``, which the provider writes to a private env file, never onto a command line.
 """
 
