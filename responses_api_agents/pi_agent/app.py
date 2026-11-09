@@ -24,7 +24,7 @@ import shutil
 from asyncio import Semaphore
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from time import time
+from time import monotonic, time
 from typing import Any, ClassVar, Literal, Optional
 from uuid import uuid4
 
@@ -75,8 +75,8 @@ from nemo_gym.sandbox import (
     DirectSandboxConnection,
     SandboxSpec,
     create_provider,
+    media_path,
     resolve_provider_config,
-    upload_media,
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse, MCPToolAccess, ToolAccess
 from nemo_gym.trajectory import (
@@ -1046,10 +1046,8 @@ class PiAgent(SimpleResponsesAPIAgent):
             flag = "--system-prompt" if self.config.system_prompt_mode == "replace" else "--append-system-prompt"
             command += [flag, system]
         # Pi attaches `@file` arguments, media included, to the prompt it reads from stdin.
-        media_paths = await upload_media(
-            state.session.sandbox, files=media, directory=f"{state.session.session_dir}/input-media"
-        )
-        command += [f"@{path}" for path in media_paths]
+        # The paths depend only on the content, so the same task gives Pi the same prompt in every sandbox.
+        command += [f"@{media_path(file)}" for file in media]
         env = {
             "PI_CODING_AGENT_DIR": f"{state.session.session_dir}/home/.pi/agent",
             "PI_SKIP_VERSION_CHECK": "1",
@@ -1060,13 +1058,16 @@ class PiAgent(SimpleResponsesAPIAgent):
         try:
             async with self.sem:
                 try:
+                    # Staging spends the activation's budget; Pi runs for what remains.
                     raw = await state.execute(
                         command=command,
                         env=env,
                         prompt=prompt,
+                        media=media,
                         timeout=timeout,
                         close_timeout=self.config.session_close_timeout_seconds,
                         files=files,
+                        deadline=monotonic() + timeout,
                     )
                 except TimeoutError:
                     # The supervisor stops Pi at the deadline, and execute returns. If the provider's exec limit

@@ -4,6 +4,7 @@
 import asyncio
 import base64
 import functools
+import hashlib
 import json
 import os
 import re
@@ -19,6 +20,7 @@ import zlib
 from contextlib import asynccontextmanager, contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from time import monotonic
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -29,6 +31,7 @@ from omegaconf import OmegaConf
 from pydantic import ValidationError
 
 from nemo_gym.agents import (
+    AGENT_TIMEOUT_METADATA_KEY,
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
     AgentCloseSessionRequest,
@@ -41,6 +44,7 @@ from nemo_gym.agents import (
 from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent, TaskId
 from nemo_gym.data.tasks.harbor import load_task, materialize_task
+from nemo_gym.sandbox import MEDIA_DIRECTORY, SandboxTransferError, SandboxUnavailableError
 from responses_api_agents.pi_agent.app import PiAgent, PiAgentConfig, PiAgentRunRequest, _parse_recorded_events
 
 
@@ -147,6 +151,12 @@ class Sandbox:
             return await self.launch(command, **kwargs)
         if "ln -s stop " in command:
             await self.signal()
+        # stage_media renames its partial uploads into place, and removes them when staging fails.
+        if command.startswith("rm -f -- "):
+            for path in shlex.split(command)[3:]:
+                self.files.pop(path, None)
+        for source, destination in re.findall(r"mv -f -- (\S+) (\S+)", command):
+            self.files[shlex.split(destination)[0]] = self.files.pop(shlex.split(source)[0])
         return SimpleNamespace(return_code=0, error_type=None, stdout="", stderr="")
 
     async def upload(self, source, destination):
@@ -287,6 +297,100 @@ def test_session_attaches_prompt_images_and_declares_image_input(setup):
     assert staged_attachments(sandbox, payload) == [png(0)]
     models = json.loads(sandbox.files[f"{sandbox.directory}/home/.pi/agent/models.json"])
     assert models["providers"]["nemo"]["models"][0]["input"] == ["text", "image"]
+
+
+def test_session_stages_prompt_images_at_content_named_paths(setup):
+    agent, sandbox = setup
+    with TestClient(agent.setup_webserver()) as client:
+        payload = activate_over_http(sandbox, client, [{"role": "user", "content": [image_part(png(0))]}])
+    digest = hashlib.sha256(png(0)).hexdigest()
+    assert [arg for arg in payload["command"] if arg.startswith("@")] == [f"@{MEDIA_DIRECTORY}/{digest}.png"]
+    assert sandbox.files[f"{MEDIA_DIRECTORY}/{digest}.png"] == png(0)
+
+
+async def start_image_activation(agent, metadata=None):
+    """Seed a session and start an activation whose user prompt holds one image."""
+    request = Request({"type": "http", "headers": [], "session": {}, "path_params": {"rollout_id": "pi-smoke-a2"}})
+    seeded = await agent.seed_agent_session(request, seed())
+    body = NeMoGymResponseCreateParamsNonStreaming.model_validate(
+        {"input": [{"role": "user", "content": [image_part(png(0))]}], "metadata": metadata}
+    )
+    return request, seeded.agent_session_id, asyncio.create_task(agent.responses(request, body))
+
+
+async def test_close_during_media_staging_stops_it_before_releasing_the_sandbox(setup):
+    agent, sandbox = setup
+    staging = asyncio.Event()
+    order = []
+    upload = sandbox.upload
+
+    async def blocked_media_upload(source, destination):
+        if destination.startswith(f"{MEDIA_DIRECTORY}/"):
+            staging.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                order.append("staging stopped")
+                raise
+        await upload(source, destination)
+
+    sandbox.disconnect.side_effect = lambda: order.append("sandbox released")
+    with patch.object(sandbox, "upload", side_effect=blocked_media_upload):
+        request, session_id, task = await start_image_activation(agent)
+        await asyncio.wait_for(staging.wait(), 2)
+        await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert order == ["staging stopped", "sandbox released"]
+    sandbox.launch.assert_not_called()
+    assert not [path for path in sandbox.files if path.startswith(f"{MEDIA_DIRECTORY}/")]
+
+
+@pytest.mark.parametrize(
+    ("rename", "error"),
+    [
+        ({"return_code": None, "error_type": "timeout"}, SandboxUnavailableError),
+        ({"return_code": 1, "error_type": None}, SandboxTransferError),
+    ],
+    ids=["provider-timeout", "failed-in-sandbox"],
+)
+async def test_media_staging_failure_reports_the_sandbox_error_and_removes_partial_uploads(setup, rename, error):
+    agent, sandbox = setup
+    execute = sandbox.execute
+
+    async def failing_rename(command, **kwargs):
+        if "mv -f -- " in command:
+            return SimpleNamespace(stdout="", stderr="rename failed", **rename)
+        return await execute(command, **kwargs)
+
+    sandbox.exec.side_effect = failing_rename
+    request, session_id, task = await start_image_activation(agent)
+    with pytest.raises(error) as failure:
+        await asyncio.wait_for(task, 10)
+    # A provider timeout while staging is a sandbox failure, not the activation's deadline.
+    assert not isinstance(failure.value, TimeoutError)
+    sandbox.launch.assert_not_called()
+    assert not [path for path in sandbox.files if path.startswith(f"{MEDIA_DIRECTORY}/")]
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+
+
+async def test_media_staging_spends_the_activation_deadline(setup):
+    agent, sandbox = setup
+    upload = sandbox.upload
+
+    async def slow_media_upload(source, destination):
+        if destination.startswith(f"{MEDIA_DIRECTORY}/"):
+            await asyncio.sleep(5)
+        await upload(source, destination)
+
+    with patch.object(sandbox, "upload", side_effect=slow_media_upload):
+        request, session_id, task = await start_image_activation(agent, metadata={AGENT_TIMEOUT_METADATA_KEY: "0.2"})
+        started = monotonic()
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(task, 10)
+        assert monotonic() - started < 2
+    sandbox.launch.assert_not_called()
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
 
 
 def test_session_attaches_user_images_in_order_after_a_system_message(setup):
@@ -2934,7 +3038,8 @@ def test_task_timeout_metadata_reaches_sandbox_supervisor(
         )
         assert response.status_code == 200, response.text
         command = shlex.split(sandbox.launch.await_args.args[0])
-        assert float(command[command.index("--timeout") + 1]) == expected
+        # Staging spends the budget first, so Pi runs for what remains of it.
+        assert expected - 1 < float(command[command.index("--timeout") + 1]) <= expected
         assert agent.config.timeout == 1800
         assert response.json()["metadata"]["agent_timeout_sec"] == str(float(expected))
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
