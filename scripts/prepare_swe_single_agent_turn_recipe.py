@@ -578,6 +578,11 @@ def prepare(args: argparse.Namespace) -> dict:
 
 
 def main() -> None:
+    if sys.argv[1:2] == ["continue"]:
+        from scripts.swe_training_continuation import main as continue_main
+
+        continue_main(sys.argv[2:])
+        return
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--source-mount-image-provenance",
