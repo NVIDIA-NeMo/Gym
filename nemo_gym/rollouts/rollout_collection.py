@@ -118,7 +118,9 @@ from nemo_gym.rollouts.batch_status import (
     RunStatusTracker,
     _aggregate_entries_for_member,
     _aggregate_member_environments,
+    _AggregateBinding,
     _atomic_write_json,
+    _merge_aggregate_bindings,
     _read_aggregate_entries,
     disable_run_status,
 )
@@ -2747,13 +2749,45 @@ def _refresh_shard_status_aggregation(
     input_paths: List[str],
     aggregate_metrics_fpath: Optional[Path],
     *,
-    legacy_bindings: Optional[Mapping[str, Mapping[str, Optional[frozenset[str]]]]] = None,
+    legacy_bindings: Optional[Mapping[str, Optional[Mapping[str, _AggregateBinding]]]] = None,
 ) -> None:
     """Mark each shard's run status with the outcome of the aggregation that merged it, keeping its counts.
 
     EvalRDL sums the shards' status files, so the merged output gets no status file of its own.
     """
     entries, artifact_error = _read_aggregate_entries(aggregate_metrics_fpath)
+    source_bindings = []
+    unverified_source = False
+    # A merged aggregate cannot separate two members sharing one route, even when they came from different shards.
+    # Read every source's bound inventory, including shards without a status file. Legacy bindings were captured
+    # while aggregation read its inputs, so this never scans those rollout files a second time.
+    for path in input_paths:
+        bindings = (legacy_bindings or {}).get(path)
+        manifest_path = manifest_path_for(Path(path))
+        materialized_path = materialized_path_for(Path(path))
+        try:
+            if manifest_path.exists() or materialized_path.exists():
+                with materialized_path.open("rb") as source:
+                    rows = [orjson.loads(line) for line in source if line.strip()]
+                if manifest_path.exists():
+                    manifest = RunManifest.model_validate_json(manifest_path.read_bytes())
+                    if _digest(rows) != manifest.materialized_digest:
+                        raise ConfigError("Saved materialized inputs do not match the run manifest.")
+                    bindings = _aggregate_member_environments(rows)
+                else:
+                    # Only historical agent-only inputs retain exact-label lookup without a bound inventory.
+                    bindings = {
+                        member: replace(binding, unresolved=True) if binding.environments else binding
+                        for member, binding in _aggregate_member_environments(rows).items()
+                    }
+        except (ConfigError, OSError, ValueError, TypeError):
+            logger.warning("Could not verify aggregation routes for %s.", path, exc_info=True)
+            bindings = None
+        if bindings is None:
+            unverified_source = True
+        else:
+            source_bindings.append(bindings)
+    bindings = _merge_aggregate_bindings(entries, source_bindings)
     for path in input_paths:
         status_fpath = batch_status_path_for(Path(path))
         # Run status is best-effort: a shard whose status cannot be read or written is logged and skipped, never a
@@ -2763,33 +2797,10 @@ def _refresh_shard_status_aggregation(
             members = status.get("members")
             if status.get("tracking") != "enabled" or not isinstance(members, dict):
                 continue
-            bindings = (legacy_bindings or {}).get(path, {})
-            manifest_path = manifest_path_for(Path(path))
-            materialized_path = materialized_path_for(Path(path))
-            if manifest_path.exists() or materialized_path.exists():
-                try:
-                    with materialized_path.open("rb") as source:
-                        rows = [orjson.loads(line) for line in source if line.strip()]
-                    if manifest_path.exists():
-                        manifest = RunManifest.model_validate_json(manifest_path.read_bytes())
-                        if _digest(rows) != manifest.materialized_digest:
-                            raise ConfigError("Saved materialized inputs do not match the run manifest.")
-                        bindings = _aggregate_member_environments(rows)
-                    else:
-                        # Agent-only artifacts keep their historical lookup; environment bindings require the
-                        # manifest that ties their materialized routes to this source run.
-                        bindings = {
-                            member: None if names else names
-                            for member, names in _aggregate_member_environments(rows).items()
-                        }
-                    # A member absent from its saved inventory cannot fall back to a coincidental label.
-                except (ConfigError, OSError, ValueError, TypeError):
-                    logger.warning("Could not verify aggregation routes for %s.", status_fpath, exc_info=True)
-                    bindings = {member: None for member in members}
-            # A member absent from the source metadata cannot fall back to a coincidental metric label.
-            bindings = {member: bindings.get(member) for member in members}
             for agent, member in members.items():
-                matched, binding_error = _aggregate_entries_for_member(entries, agent, bindings[agent])
+                matched, binding_error = _aggregate_entries_for_member(
+                    entries, agent, None if unverified_source else bindings.get(agent)
+                )
                 failed = (
                     aggregate_metrics_fpath is None
                     or artifact_error
@@ -6189,7 +6200,7 @@ class RolloutAggregationHelper(BaseModel):
         health_histories: Dict[Path, Optional[RolloutStore]] = {}
         legacy_paths: List[Path] = []
         legacy_results: List[Dict] = []
-        legacy_bindings: Dict[str, Dict[str, Optional[frozenset[str]]]] = {}
+        legacy_bindings: Dict[str, Optional[Dict[str, _AggregateBinding]]] = {}
         history_results: Dict[str, List[Dict]] = {}
         shard_keys: Dict[str, set] = {}
         run_ids: set[str] = set()
@@ -6232,7 +6243,12 @@ class RolloutAggregationHelper(BaseModel):
                     legacy_results.append(result)
                     status_rows.append(_batch_status_row(result, {}))
                 shard_digests[shard_path] = (f.tell(), digest.hexdigest())
-            legacy_bindings[shard_path] = _aggregate_member_environments(status_rows)
+            try:
+                legacy_bindings[shard_path] = _aggregate_member_environments(status_rows)
+            except ConfigError:
+                # Status needs every contributing source's identity; this does not change legacy scoring/parsing.
+                logger.warning("Could not verify aggregation routes for %s.", shard_path, exc_info=True)
+                legacy_bindings[shard_path] = None
         print(f"Loaded {len(results)} rollout record(s) from {len(input_paths)} shard(s)")
 
         # Sort for deterministic aggregation ordering (matches run_from_config's post-collection sort)

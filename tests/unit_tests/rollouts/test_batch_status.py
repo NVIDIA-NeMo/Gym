@@ -145,6 +145,45 @@ def test_aggregation_requires_every_saved_environment_of_a_shared_agent(tmp_path
     assert missing["members"]["candidate"]["aggregation_status"] == "error"
 
 
+@pytest.mark.parametrize("with_manifest", [False, True])
+@pytest.mark.parametrize("mixed_aliases", [False, True])
+def test_distinct_status_members_cannot_share_one_aggregate(
+    tmp_path: Path, with_manifest: bool, mixed_aliases: bool
+) -> None:
+    rows = [
+        materialized_row(member, "source", index, 0) | {ENVIRONMENT_SERVER_STAMP_KEY_NAME: "environment"}
+        for index, member in enumerate(("first_candidate", "second_candidate"))
+    ]
+    if mixed_aliases:
+        # The first member uses an exact agent label; the second uses the aggregate's environment stamp.
+        del rows[0][ENVIRONMENT_SERVER_STAMP_KEY_NAME]
+    tracker = (
+        BatchStatusTracker(write_manifest(tmp_path / "batch_manifest.json", rows), rows)
+        if with_manifest
+        else RunStatusTracker(tmp_path / "rollouts_batch_status.json", rows)
+    )
+    metrics = tmp_path / "rollouts_aggregate_metrics.json"
+    metrics.write_bytes(
+        orjson.dumps(
+            [
+                {
+                    AGENT_REF_KEY_NAME: {"name": "first_candidate"},
+                    ENVIRONMENT_SERVER_STAMP_KEY_NAME: "environment",
+                    "key_metrics": {"mean/reward": 0.5},
+                }
+            ]
+        )
+    )
+
+    tracker.write_status(rows, [], aggregate_metrics_fpath=metrics, force=True)
+
+    members = json.loads(tracker.status_fpath.read_text())["members"]
+    assert set(members) == {"first_candidate", "second_candidate"}
+    for member in members.values():
+        assert member["completed_rollout_count"] == member["expected_rollout_count"] == 1
+        assert member["aggregation_status"] == "error"
+
+
 @pytest.mark.parametrize("route", [None, "", 7, "absent"])
 def test_aggregation_does_not_accept_a_partial_or_malformed_route_binding(tmp_path: Path, route: object) -> None:
     rows = [
