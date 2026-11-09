@@ -19,6 +19,7 @@ import logging
 import tempfile
 import time
 import urllib.error
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1852,36 +1853,71 @@ class TestResourcesSessions:
         assert _TEST_SESSION_ID not in server._data_storage
         assert _TEST_SESSION_ID not in server._episode_seeds
 
-    def test_eviction_ends_the_ownership_and_checkpoint_tracking(
-        self, server_config, temp_cache_dir, tmp_path
+    def test_eviction_retains_ownership_until_expiration_metadata_expires(
+        self, server_config, temp_cache_dir, tmp_path, monkeypatch
     ) -> None:
-        """An evicted session's ownership must end; a seed's own route keeps it open forever otherwise."""
+        """A late request through another worker must reach the expiration record, including after close."""
         (Path(temp_cache_dir) / "tickers.json").write_text(json.dumps(TestTickerLoading.MOCK_TICKERS_RAW))
-        server = FinanceAgentResourcesServer(
-            config=server_config.model_copy(update={"session_close_retry_window_seconds": 0.01}),
-            server_client=MagicMock(spec=ServerClient),
-        )
-        app = server.setup_webserver()
-        key = server.get_session_middleware_key()
-        # The routing a worker of a multi-worker server installs. Without the app's lifespan no socket is served.
-        install_session_routing(
-            app, socket_dir=str(tmp_path), session_cookie=key, secret_key=key, **server.owned_session_routing()
-        )
-        lifetimes = app.state.nemo_gym_resources_session_lifetimes
+        servers = [
+            FinanceAgentResourcesServer(
+                config=server_config.model_copy(
+                    update={
+                        "session_close_retry_window_seconds": 0.01,
+                        "retrieval_model_server": ModelServerRef(type="responses_api_models", name="retrieval"),
+                    }
+                ),
+                server_client=MagicMock(spec=ServerClient),
+            )
+            for _ in range(2)
+        ]
+        apps = []
+        for server in servers:
+            app = server.setup_webserver()
+            key = server.get_session_middleware_key()
+            install_session_routing(
+                app, socket_dir=str(tmp_path), session_cookie=key, secret_key=key, **server.owned_session_routing()
+            )
+            apps.append(app)
+        server = servers[0]
+        lifetimes = apps[0].state.nemo_gym_resources_session_lifetimes
+        owners = apps[0].state.nemo_gym_session_owners
         server._checkpoint = MagicMock()
-        abandoned = TestClient(app).post("/seed_session", json=_episode_seed("abandoned").model_dump(mode="json"))
-        assert abandoned.status_code == 200
-        assert lifetimes.holds("abandoned")
-        server._session_start_times["abandoned"] -= server.config.session_ttl_seconds + 1
-
-        fresh = TestClient(app).post("/seed_session", json=_episode_seed("fresh").model_dump(mode="json"))
-
-        assert fresh.status_code == 200
-        assert "abandoned" not in server._data_storage and "fresh" in server._data_storage
-        server._checkpoint.ended.assert_called_once_with("abandoned")
-        time.sleep(0.05)
-        assert not lifetimes.holds("abandoned")
-        assert lifetimes.holds("fresh")
+        with ExitStack() as stack:
+            a, b = [stack.enter_context(TestClient(app)) for app in apps]
+            abandoned = a.post("/seed_session", json=_episode_seed("abandoned").model_dump(mode="json"))
+            assert abandoned.status_code == 200
+            server._session_start_times["abandoned"] -= server.config.session_ttl_seconds + 1
+            a.cookies.clear()
+            assert a.post("/seed_session", json=_episode_seed("fresh").model_dump(mode="json")).status_code == 200
+            assert "abandoned" not in server._data_storage and "fresh" in server._data_storage
+            server._checkpoint.ended.assert_called_once_with("abandoned")
+            b.cookies.update(abandoned.cookies)
+            time.sleep(0.05)
+            assert lifetimes.holds("abandoned")
+            lost = b.post("/retrieve_information", json={"prompt": "Summarize {{doc}}"})
+            assert lost.status_code == 404
+            verify_body = _verify_body_without_answer().model_dump(mode="json")
+            masked = b.post("/verify", json=verify_body)
+            assert masked.status_code == 200
+            assert masked.json()["mask_sample"] is True
+            assert masked.json()["failure_kind"] == "session_expired"
+            assert masked.json()["reward"] == 0.0
+            assert (
+                b.post("/close_session", json=_close(_episode_seed("abandoned")).model_dump(mode="json")).status_code
+                == 200
+            )
+            time.sleep(0.05)
+            assert lifetimes.holds("abandoned")
+            assert b.post("/verify", json=verify_body).json()["failure_kind"] == "session_expired"
+            # The idle routing sweep can release the owner once the record no longer affects verification.
+            deadline = server._expired_session_ids["abandoned"]
+            monkeypatch.setattr(
+                "nemo_gym.server_runtime.request_handling.session_routing.monotonic", lambda: deadline + 1
+            )
+            for session_id in lifetimes.sweep():
+                owners.release(session_id)
+            assert owners.owner("abandoned") is None
+            assert lifetimes.holds("fresh")
 
     @pytest.mark.asyncio
     async def test_retired_attempt_releases_its_session(self, server) -> None:
@@ -1926,6 +1962,12 @@ class TestResourcesSessions:
                 await server.seed_session(_mock_request("abandoned"), seed)
             assert error.value.status_code == 409
             await server.close_resources_session(_close(seed))
+
+    @pytest.mark.asyncio
+    async def test_expiration_record_stops_masking_without_another_seed(self, server) -> None:
+        server._expired_session_ids["abandoned"] = time.monotonic() - 1
+        result = await server.verify(_mock_request("abandoned"), _verify_body_without_answer())
+        assert not getattr(result, "mask_sample", False)
 
     @pytest.mark.asyncio
     async def test_a_new_agent_run_seed_clears_an_expired_session(self, server) -> None:

@@ -597,8 +597,8 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
     def _evict_stale_sessions(self, request: Request) -> None:
         # An Agent's legacy /run never closes its session, so one that fails before /verify would otherwise stay.
         cutoff = time.monotonic() - self.config.session_ttl_seconds
-        # Verify and close end a session's checkpoint tracking and ownership through their routes; an evicted
-        # session has no such request, so end both here. With several workers its ownership would otherwise stay.
+        # End checkpoint tracking now, but keep routing ownership while the expiration record can mask verify.
+        # Otherwise a late request on another worker would score the same session instead of masking it.
         participant = self.checkpoint_participant
         app_state = getattr(getattr(request, "app", None), "state", None)
         lifetimes = getattr(app_state, "nemo_gym_resources_session_lifetimes", None)
@@ -618,7 +618,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                 if participant is not None:
                     participant.ended(session_id)
                 if lifetimes is not None:
-                    lifetimes.ended(session_id)
+                    lifetimes.ended(session_id, retain_until=self._expired_session_ids[session_id])
 
     def _check_time_budget(self, session_id: str) -> Optional[str]:
         """Return an error message if the rollout has exceeded its time budget, else None."""
@@ -1570,7 +1570,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
             [[0]] = incorrect      → binary: 0.0 | scaled: 0.0
         """
         session_id = request.session.get(SESSION_ID_KEY)
-        if session_id and session_id in self._expired_session_ids:
+        if session_id and self._expired_session_ids.get(session_id, 0.0) > time.monotonic():
             # The session outlived session_ttl_seconds, so its tool calls since then found no session.
             return FinanceAgentVerifyResponse(
                 **(
