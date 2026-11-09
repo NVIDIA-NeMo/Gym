@@ -1370,7 +1370,8 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         ``ng_agent_outcome`` on a failed response only (and removes it from any other), names the deciding row in
         ``ng_agent_stop_reason``, and sets ``incomplete_details`` for an output-limit stop. With ``session``, a run
         that timed out after a rollout stop expired the session counts as stopped and gains the ``ng_rollout_stop``
-        marker, as ``report_rollout_stop`` adds it. The output, usage and ``error`` stay the adapter's; a failed
+        marker, as ``report_rollout_stop`` adds it; a run the session's close cancelled (``evidence.stopped`` without
+        an expired session) is stopped without the marker. The output, usage and ``error`` stay the adapter's; a failed
         response without an ``error`` gets a generic one.
         """
         if session is not None and session.expired and evidence.timed_out and not evidence.stopped:
@@ -1384,9 +1385,9 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         metadata[AGENT_STOP_REASON_METADATA_KEY] = decision.stop_reason
         if decision.outcome is not None:
             metadata[AGENT_OUTCOME_METADATA_KEY] = decision.outcome.model_dump_json(exclude_none=True)
-        if decision.stop_reason == "stopped":
-            reason = session.expire_reason if session is not None else None
-            metadata[ROLLOUT_STOP_METADATA_KEY] = json.dumps({"reason": reason}, separators=(",", ":"))
+        if decision.stop_reason == "stopped" and session is not None and session.expired:
+            # The marker tells a rollout stop apart from a timeout or the close cancelling the run.
+            metadata[ROLLOUT_STOP_METADATA_KEY] = json.dumps({"reason": session.expire_reason}, separators=(",", ":"))
         update: dict[str, Any] = {"status": decision.status, "metadata": metadata}
         if decision.stop_reason == "output_limit" and response.incomplete_details is None:
             update["incomplete_details"] = IncompleteDetails(reason="max_output_tokens")
