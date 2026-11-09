@@ -15,7 +15,7 @@
 """The chain markers: the strings the auto-resume chain scripts write into a job directory and the recovery
 evidence reader parses back.
 
-They are the whole contract between the chain (``nemo_gym.orchestration.executors.resume_script``, which renders
+They are the whole contract between the chain (``nemo_gym.orchestration.executors.slurm.resume_script``, which renders
 the scripts) and the recovery planner (``nemo_gym.eval.recovery``), so they live below both: the chain imports
 them from here, and the planner never imports the chain.
 """

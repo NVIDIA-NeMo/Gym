@@ -28,7 +28,7 @@ from nemo_gym.orchestration.executors.slurm.chain import (
     REPIN_JOURNAL_NAME,
     WALLTIME_JOURNAL_NAME,
 )
-from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
+from nemo_gym.orchestration.executors.slurm.script import build_sbatch_script
 from nemo_gym.orchestration.jobs import BenchmarkJob, SubmissionRecord
 from tests.unit_tests.orchestration.test_eval_resubmit import _handle
 from tests.unit_tests.orchestration.test_eval_resubmit import _local_index as _local_index

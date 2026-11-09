@@ -24,7 +24,7 @@ from nemo_gym.orchestration.executors.slurm.judge_profile import (
     served_judge_placement,
     served_judge_profile,
 )
-from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
+from nemo_gym.orchestration.executors.slurm.script import build_sbatch_script
 
 
 def model_served(

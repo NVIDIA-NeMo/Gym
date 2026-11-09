@@ -29,7 +29,7 @@ from nemo_gym.orchestration.executors.slurm import executor as slurm_executor
 from nemo_gym.orchestration.executors.slurm import judge_job as slurm_judge_job
 from nemo_gym.orchestration.executors.slurm import scheduler as slurm_scheduler
 from nemo_gym.orchestration.executors.slurm.reader import READER_SRUN_ENV
-from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
+from nemo_gym.orchestration.executors.slurm.script import build_sbatch_script
 from nemo_gym.orchestration.jobs import MANIFEST_NAME, BenchmarkJob, SubmissionRecord
 from nemo_gym.orchestration.submit import inspect_recovery, recover
 from nemo_gym.rollouts.rollout_collection import RolloutAggregationHelper

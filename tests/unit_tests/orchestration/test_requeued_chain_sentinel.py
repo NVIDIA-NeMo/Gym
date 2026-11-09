@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 from nemo_gym.orchestration.api import ResumeConfig
-from nemo_gym.orchestration.executors.resume_script import (
+from nemo_gym.orchestration.executors.slurm.resume_script import (
     ACCOUNTING_UNKNOWN_PREFIX,
     INCOMPLETE_MARKER_NAME,
     REQUEUE_RECONCILED_NOTE,

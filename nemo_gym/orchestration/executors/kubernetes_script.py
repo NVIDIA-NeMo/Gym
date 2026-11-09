@@ -18,7 +18,7 @@
 v1 scope: single node, one Job per benchmark, one pod. Model/ray services become native sidecar
 containers (`initContainers` with `restartPolicy: Always`, k8s >= 1.29) so kubelet enforces
 start-before-driver ordering and readiness via probes, instead of the hand-rolled bash health-check
-loop `slurm_script.py` needs on Slurm. The driver is the pod's single regular container.
+loop `slurm/script.py` needs on Slurm. The driver is the pod's single regular container.
 """
 
 import re
@@ -199,7 +199,7 @@ def _sidecar_containers(config: SubmitConfig, compute: KubernetesComputeConfig) 
 
 def _command_env(benchmark: BenchmarkRunConfig, run_dir: str) -> dict[str, str]:
     """Env a `command` benchmark gets in place of `gym eval run` arguments -- mirrors
-    slurm_script.py's _command_env, kept local to avoid coupling the two executor modules."""
+    slurm/script.py's _command_env, kept local to avoid coupling the two executor modules."""
     env = {"NEMO_GYM_BENCH_DIR": run_dir}
     for key, name in (
         ("policy_base_url", "NEMO_GYM_POLICY_BASE_URL"),

@@ -26,7 +26,7 @@ from pathlib import Path
 import pytest
 
 from nemo_gym.orchestration.api import ResumeConfig
-from nemo_gym.orchestration.executors.resume_script import (
+from nemo_gym.orchestration.executors.slurm.resume_script import (
     ACCOUNTING_UNKNOWN_PREFIX,
     CHAIN_END_JOURNAL_NAME,
     DRIVER_FAILURE_NAME,
@@ -962,7 +962,7 @@ def test_a_failure_without_scheduler_infrastructure_cause_stops_and_keeps_its_el
 
 
 def test_the_prologue_carries_the_scheduler_cause_capability():
-    from nemo_gym.orchestration.executors.resume_script import SCHEDULER_CAUSE_MARKER
+    from nemo_gym.orchestration.executors.slurm.resume_script import SCHEDULER_CAUSE_MARKER
 
     assert SCHEDULER_CAUSE_MARKER in render_resume_prologue(ResumeConfig(max_retries=1)).splitlines()
 
@@ -1448,7 +1448,7 @@ def test_inspection_names_a_follow_up_cancelled_before_it_started(tmp_path):
 
 def test_inspection_names_a_chain_stopped_on_rejected_sandbox_credentials(tmp_path):
     from nemo_gym.eval.recovery.planner import decide_from_collected
-    from nemo_gym.orchestration.executors.resume_script import CREDENTIALS_REJECTED_REASON
+    from nemo_gym.orchestration.executors.slurm.resume_script import CREDENTIALS_REJECTED_REASON
     from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect, ident, write_job_dir
 
     job = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[])

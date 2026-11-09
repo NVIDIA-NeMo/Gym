@@ -20,7 +20,9 @@ Its parts, each in its own module:
 - ``chain``: recovery of a run's auto-resume chain (``recovery_evidence``, ``resubmit``), mixed into the executor;
 - ``judge_job``: judge-only jobs that grade a run's saved answers again (``reverify_judge_failures``), mixed in too;
 - ``reader``: the remote Store reader both of them read a run through;
-- ``scheduler``: the Slurm commands they share.
+- ``scheduler``: the Slurm commands they share;
+- ``script``: render a benchmark's sbatch script, and ``resume_script``: the auto-resume prologue and epilogue it
+  includes for a resumable job.
 
 Only Slurm implements resubmit today, so these parts are Slurm code with no scheduler-agnostic interface between
 them; the executor capabilities give resubmit its seam when a second scheduler needs one.

@@ -51,7 +51,7 @@ from nemo_gym.orchestration.api import (
     SubmitConfig,
     VllmPDServiceConfig,
 )
-from nemo_gym.orchestration.executors.resume_script import _walltime_to_seconds
+from nemo_gym.orchestration.executors.slurm.resume_script import _walltime_to_seconds
 from nemo_gym.orchestration.executors.slurm.scheduler import _slurm_duration
 
 

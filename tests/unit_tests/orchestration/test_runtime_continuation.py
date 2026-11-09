@@ -11,8 +11,8 @@ from pathlib import Path
 import pytest
 
 from nemo_gym.orchestration.api import ResumeConfig, SubmitConfig
-from nemo_gym.orchestration.executors.resume_script import EXPORT_RECEIPT_MISSING_REASON, INCOMPLETE_MARKER_NAME
-from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
+from nemo_gym.orchestration.executors.slurm.resume_script import EXPORT_RECEIPT_MISSING_REASON, INCOMPLETE_MARKER_NAME
+from nemo_gym.orchestration.executors.slurm.script import build_sbatch_script
 from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.rollouts.rollout_store import RolloutStore
 from tests.unit_tests.orchestration.test_managed_recovery_selection import prepare_managed

@@ -49,9 +49,6 @@ from nemo_gym.orchestration.executors.connection import (
     get_connection,
 )
 from nemo_gym.orchestration.executors.git_ref import validate_gym_install_ref
-from nemo_gym.orchestration.executors.resume_script import (
-    _walltime_to_seconds,
-)
 from nemo_gym.orchestration.executors.slurm.judge_profile import (
     JUDGE_POOL_NAME,
     JudgeProfileUnsupported,
@@ -65,6 +62,9 @@ from nemo_gym.orchestration.executors.slurm.judge_profile import (
 from nemo_gym.orchestration.executors.slurm.reader import (
     READER_SRUN_ENV,
 )
+from nemo_gym.orchestration.executors.slurm.resume_script import (
+    _walltime_to_seconds,
+)
 from nemo_gym.orchestration.executors.slurm.scheduler import (
     _RESUBMIT_LOCK,
     _chain_live_check,
@@ -73,7 +73,7 @@ from nemo_gym.orchestration.executors.slurm.scheduler import (
     _sbatch_command,
     _submission_exports,
 )
-from nemo_gym.orchestration.executors.slurm_script import (
+from nemo_gym.orchestration.executors.slurm.script import (
     _with_default_capture_dir,
     build_sbatch_script,
 )

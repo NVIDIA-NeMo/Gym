@@ -32,13 +32,13 @@ from hydra.core.override_parser.overrides_parser import OverridesParser
 from omegaconf import OmegaConf
 
 from nemo_gym.orchestration.api import NodePool, RayServiceConfig, SubmitConfig, VllmPDTierConfig
-from nemo_gym.orchestration.executors.resume_script import render_resume_epilogue
 from nemo_gym.orchestration.executors.script_templates import (
     RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT_S,
     render_driver_entrypoint,
     render_gym_cmd,
 )
-from nemo_gym.orchestration.executors.slurm_script import (
+from nemo_gym.orchestration.executors.slurm.resume_script import render_resume_epilogue
+from nemo_gym.orchestration.executors.slurm.script import (
     _RAY_SERVE_GATEWAY_SOURCE_PATH,
     _build_ray_command,
     _build_service_command,

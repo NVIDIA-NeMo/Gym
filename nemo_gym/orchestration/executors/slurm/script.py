@@ -49,14 +49,6 @@ from nemo_gym.orchestration.executors.otel import (
     vllm_traces_env,
     vllm_traces_flag,
 )
-from nemo_gym.orchestration.executors.resume_script import (
-    DRIVER_FAILURE_NAME,
-    KEEP_BUDGET_ENV,
-    RESUBMIT_ENV,
-    _walltime_to_seconds,
-    render_resume_epilogue,
-    render_resume_prologue,
-)
 from nemo_gym.orchestration.executors.script_templates import (
     DRIVER_FAILURE_ENV,
     ENSURE_RAY_INSTALLED,
@@ -70,6 +62,14 @@ from nemo_gym.orchestration.executors.script_templates import (
     render_ray_prelude,
     render_vllm_ray_symmetric_run,
     render_write_file_from_base64,
+)
+from nemo_gym.orchestration.executors.slurm.resume_script import (
+    DRIVER_FAILURE_NAME,
+    KEEP_BUDGET_ENV,
+    RESUBMIT_ENV,
+    _walltime_to_seconds,
+    render_resume_epilogue,
+    render_resume_prologue,
 )
 from nemo_gym.orchestration.executors.utils import flatten_export_args, flatten_run_args
 from nemo_gym.orchestration.exports import effective_exports, export_install_extras, export_run_settings
@@ -360,7 +360,7 @@ def _escape_for_double_quoted_bash(text: str) -> str:
     return text.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
 
 
-_RAY_SERVE_GATEWAY_SOURCE_PATH = Path(__file__).resolve().parent.parent / "ray_serve_gateway.py"
+_RAY_SERVE_GATEWAY_SOURCE_PATH = Path(__file__).resolve().parents[2] / "ray_serve_gateway.py"
 
 
 def _build_vllm_ray_serve_command(

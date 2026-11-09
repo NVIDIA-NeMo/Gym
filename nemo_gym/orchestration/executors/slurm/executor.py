@@ -70,7 +70,7 @@ from nemo_gym.orchestration.executors.slurm.scheduler import (
     _submission_env_exports,
     _submission_exports,
 )
-from nemo_gym.orchestration.executors.slurm_script import (
+from nemo_gym.orchestration.executors.slurm.script import (
     _resolve_env,
     build_sbatch_script,
 )

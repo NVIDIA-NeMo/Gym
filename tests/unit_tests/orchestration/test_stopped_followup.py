@@ -17,7 +17,7 @@
 import pytest
 
 from nemo_gym.eval.recovery.continuation import stopped_followup
-from nemo_gym.orchestration.executors.resume_script import RETRY_FILE_NAME
+from nemo_gym.orchestration.executors.slurm.resume_script import RETRY_FILE_NAME
 from tests.unit_tests.orchestration.test_allocation_cut_recovery import _cut_run
 from tests.unit_tests.orchestration.test_eval_resubmit import _handle, _resumable_run
 from tests.unit_tests.orchestration.test_eval_resubmit import _local_index as _local_index

@@ -32,9 +32,9 @@ from nemo_gym.orchestration.executors.base import BaseExecutor, UnsupportedOpera
 from nemo_gym.orchestration.executors.connection import LocalConnection
 from nemo_gym.orchestration.executors.kubernetes import KubernetesExecutor
 from nemo_gym.orchestration.executors.otel import render_collector_config
-from nemo_gym.orchestration.executors.resume_script import RETRY_FILE_NAME, render_resume_prologue
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor
-from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
+from nemo_gym.orchestration.executors.slurm.resume_script import RETRY_FILE_NAME, render_resume_prologue
+from nemo_gym.orchestration.executors.slurm.script import build_sbatch_script
 from nemo_gym.orchestration.jobs import (
     INDEX_RESTORE_JOURNAL_NAME,
     MANIFEST_NAME,
@@ -1145,7 +1145,7 @@ def test_recovery_does_not_reconstruct_an_unknown_manual_budget_epoch(tmp_path, 
 
 
 def test_recover_refuses_unbounded_saved_prologue_before_dispatch(tmp_path, slurm_bin):
-    from nemo_gym.orchestration.executors.resume_script import BOUNDED_BUDGET_MARKER
+    from nemo_gym.orchestration.executors.slurm.resume_script import BOUNDED_BUDGET_MARKER
     from nemo_gym.orchestration.submit import recover
 
     job_dir, script, _ = _resumable_run(tmp_path)
@@ -1161,7 +1161,7 @@ def test_resubmit_refuses_a_chain_without_scheduler_cause_admission_before_dispa
     tmp_path: Path, slurm_bin: Path, recover_budget: bool
 ) -> None:
     # A job.sh rendered before scheduler-cause admission retries FAILED, OUT_OF_MEMORY and DEADLINE jobs.
-    from nemo_gym.orchestration.executors.resume_script import SCHEDULER_CAUSE_MARKER
+    from nemo_gym.orchestration.executors.slurm.resume_script import SCHEDULER_CAUSE_MARKER
     from nemo_gym.orchestration.submit import recover
 
     job_dir, script, _ = _resumable_run(tmp_path)
@@ -1188,7 +1188,7 @@ def test_recover_keeps_an_eligible_infrastructure_retry_and_spent_budgets(tmp_pa
 
 @pytest.mark.parametrize("recover_budget", [True, False])
 def test_resubmit_refuses_old_allocation_accounting_capability(tmp_path, slurm_bin, recover_budget):
-    from nemo_gym.orchestration.executors.resume_script import ALLOCATION_ACCOUNTING_MARKER
+    from nemo_gym.orchestration.executors.slurm.resume_script import ALLOCATION_ACCOUNTING_MARKER
     from nemo_gym.orchestration.submit import recover
 
     job_dir, script, _ = _resumable_run(tmp_path)

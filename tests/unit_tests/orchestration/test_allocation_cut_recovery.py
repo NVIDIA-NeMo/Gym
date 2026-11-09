@@ -39,7 +39,7 @@ from nemo_gym.eval.recovery.evidence import (
 from nemo_gym.eval.recovery.planner import decide_from_collected
 from nemo_gym.orchestration.api import ResumeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.script_templates import render_driver_entrypoint
-from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
+from nemo_gym.orchestration.executors.slurm.script import build_sbatch_script
 from nemo_gym.orchestration.server_supervisor import ServerSpinupTimeoutError
 from nemo_gym.rollouts.rollout_recovery import RunManifest, validate_resume
 from nemo_gym.rollouts.rollout_store import RolloutStore
@@ -535,7 +535,7 @@ _TERMINAL_REQUEUE = "100|PREEMPTED|15000|0\n100|FAILED|14|1\n101|FAILED|16|0\n"
 
 
 def test_a_terminal_requeued_chain_is_reconciled_and_resumes_its_in_flight_rows(tmp_path, slurm_bin):
-    from nemo_gym.orchestration.executors.resume_script import REQUEUE_RECONCILED_NOTE
+    from nemo_gym.orchestration.executors.slurm.resume_script import REQUEUE_RECONCILED_NOTE
     from nemo_gym.orchestration.submit import inspect_recovery, recover
     from tests.unit_tests.orchestration.test_eval_resubmit import _start_queued_job
 
@@ -607,7 +607,7 @@ def _twice_requeued_run(tmp_path, slurm_bin, *, stored_walltime):
 
 
 def test_a_second_requeue_is_reconciled_from_every_allocation_and_named(tmp_path, slurm_bin):
-    from nemo_gym.orchestration.executors.resume_script import REQUEUE_RECONCILED_NOTE
+    from nemo_gym.orchestration.executors.slurm.resume_script import REQUEUE_RECONCILED_NOTE
     from nemo_gym.orchestration.submit import inspect_recovery, recover
 
     # Stored before 102 ran: both incarnations of 100 and the 16 s of 101.

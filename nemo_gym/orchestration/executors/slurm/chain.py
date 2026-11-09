@@ -82,7 +82,17 @@ from nemo_gym.orchestration.executors.otel import (
     otel_active,
     render_collector_config,
 )
-from nemo_gym.orchestration.executors.resume_script import (
+from nemo_gym.orchestration.executors.slurm.reader import (
+    COLLECTOR_NOT_RUN,
+    READER_NOT_RUN_HOST,
+    _remote_managed_evidence,
+    collector_command,
+    reader_placement,
+    reader_step,
+    reader_token,
+    without_placement,
+)
+from nemo_gym.orchestration.executors.slurm.resume_script import (
     ACCOUNTING_UNKNOWN_PREFIX,
     ALLOCATION_ACCOUNTING_MARKER,
     BOUNDED_BUDGET_MARKER,
@@ -97,16 +107,6 @@ from nemo_gym.orchestration.executors.resume_script import (
     SCHEDULER_CAUSE_MARKER,
     _walltime_to_seconds,
 )
-from nemo_gym.orchestration.executors.slurm.reader import (
-    COLLECTOR_NOT_RUN,
-    READER_NOT_RUN_HOST,
-    _remote_managed_evidence,
-    collector_command,
-    reader_placement,
-    reader_step,
-    reader_token,
-    without_placement,
-)
 from nemo_gym.orchestration.executors.slurm.scheduler import (
     _JOB_ID_RE,
     _RESUBMIT_LOCK,
@@ -116,7 +116,7 @@ from nemo_gym.orchestration.executors.slurm.scheduler import (
     _slurm_duration,
     _submission_exports,
 )
-from nemo_gym.orchestration.executors.slurm_script import (
+from nemo_gym.orchestration.executors.slurm.script import (
     build_sbatch_script,
 )
 from nemo_gym.orchestration.jobs import (

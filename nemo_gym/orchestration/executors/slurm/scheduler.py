@@ -35,7 +35,7 @@ from nemo_gym.orchestration.executors.otel import (
     resolve_token,
     validate_destination,
 )
-from nemo_gym.orchestration.executors.resume_script import (
+from nemo_gym.orchestration.executors.slurm.resume_script import (
     RESUBMIT_LOCK_NAME,
     _walltime_to_seconds,
 )

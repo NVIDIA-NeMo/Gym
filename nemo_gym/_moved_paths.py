@@ -176,6 +176,12 @@ MOVED_MODULES: dict[str, MovedPath] = {
     "nemo_gym.orchestration.executors.judge_profile": MovedPath(
         new="nemo_gym.orchestration.executors.slurm.judge_profile", since="0.8.0"
     ),
+    "nemo_gym.orchestration.executors.resume_script": MovedPath(
+        new="nemo_gym.orchestration.executors.slurm.resume_script", since="0.8.0"
+    ),
+    "nemo_gym.orchestration.executors.slurm_script": MovedPath(
+        new="nemo_gym.orchestration.executors.slurm.script", since="0.8.0"
+    ),
 }
 
 
@@ -841,14 +847,14 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             """,
         ),
         **_names(
-            "nemo_gym.orchestration.executors.resume_script",
+            "nemo_gym.orchestration.executors.slurm.resume_script",
             "0.8.0",
             """
             RESUBMIT_ENV
             """,
         ),
         **_names(
-            "nemo_gym.orchestration.executors.slurm_script",
+            "nemo_gym.orchestration.executors.slurm.script",
             "0.8.0",
             """
             build_sbatch_script

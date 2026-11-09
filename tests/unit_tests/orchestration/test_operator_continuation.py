@@ -26,8 +26,8 @@ from nemo_gym.eval.recovery.decision import (
     UNKNOWN_BUDGET_REASON,
 )
 from nemo_gym.eval.recovery.evidence import OPERATOR_CONTINUATION_JOURNAL_NAME
-from nemo_gym.orchestration.executors.resume_script import ACCOUNTING_UNKNOWN_PREFIX, RETRY_EXTENSION_NAME
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor
+from nemo_gym.orchestration.executors.slurm.resume_script import ACCOUNTING_UNKNOWN_PREFIX, RETRY_EXTENSION_NAME
 from nemo_gym.orchestration.jobs import load_submission_record
 from tests.unit_tests.orchestration.test_eval_resubmit import _handle
 from tests.unit_tests.orchestration.test_eval_resubmit import _local_index as _local_index
