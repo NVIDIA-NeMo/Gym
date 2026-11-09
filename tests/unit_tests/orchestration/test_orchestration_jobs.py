@@ -26,10 +26,12 @@ from pytest import MonkeyPatch
 from nemo_gym.orchestration.api import SubmitConfig
 from nemo_gym.orchestration.executors.base import BaseExecutor
 from nemo_gym.orchestration.jobs import (
+    MANIFEST_NAME,
     RESOLVED_CONFIG_NAME,
     SCHEMA_VERSION,
     BenchmarkJob,
     SubmissionRecord,
+    benchmark_artifact_dirs,
     local_index_dir,
     new_gym_job_id,
 )
@@ -377,3 +379,25 @@ def test_submission_environment_includes_nested_service_host_references(tmp_path
     assert observation.required_env == ["DECODE_KEY", "PREFILL_KEY", "ROUTER_KEY"]
     assert observation.forwarded_env == []
     assert "private-nested-test-value" not in observation.model_dump_json()
+
+
+def test_benchmark_artifact_dirs_resolves_a_job_id_and_a_run_directory(tmp_path: Path, monkeypatch: MonkeyPatch):
+    monkeypatch.setattr("nemo_gym.orchestration.jobs.local_index_dir", lambda: tmp_path)
+    record = _record()
+    (tmp_path / f"{record.gym_job_id}.json").write_text(record.dumps())
+    expected = {"gsm8k": Path("/jobs/gym-job-20260909T100203Z-abc123/gsm8k/artifacts")}
+
+    assert benchmark_artifact_dirs(record.gym_job_id) == expected
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / MANIFEST_NAME).write_text(record.dumps())
+    assert benchmark_artifact_dirs(str(run_dir)) == expected
+
+
+def test_benchmark_artifact_dirs_is_none_without_a_record(tmp_path: Path, monkeypatch: MonkeyPatch):
+    monkeypatch.setattr("nemo_gym.orchestration.jobs.local_index_dir", lambda: tmp_path)
+    (tmp_path / "run").mkdir()
+
+    assert benchmark_artifact_dirs("gym-job-unknown") is None
+    assert benchmark_artifact_dirs(str(tmp_path / "run")) is None
