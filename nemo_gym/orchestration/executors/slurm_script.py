@@ -22,6 +22,7 @@ from typing import Any
 from nemo_gym.artifacts.exporters import exporter_extras
 from nemo_gym.config.global_config import MODEL_CALL_CAPTURE_DIR_KEY_NAME, OBSERVABILITY_ENABLED_KEY_NAME
 from nemo_gym.data.gitlab_utils import gitlab_storage_extras
+from nemo_gym.eval.recovery.markers import DRIVER_FAILURE_ENV
 from nemo_gym.orchestration.api import (
     RUNTIME_ENV_PREFIX,
     BenchmarkRunConfig,
@@ -58,7 +59,6 @@ from nemo_gym.orchestration.executors.resume_script import (
     render_resume_prologue,
 )
 from nemo_gym.orchestration.executors.script_templates import (
-    DRIVER_FAILURE_ENV,
     ENSURE_RAY_INSTALLED,
     EVAL_SUCCEEDED_MARKER_ENV,
     bash_var,
