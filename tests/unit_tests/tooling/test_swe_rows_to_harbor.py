@@ -26,6 +26,40 @@ from resources_servers.swebench.patch_capture import capture_model_patch, prepar
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
+
+@pytest.mark.parametrize("compatible", [True, False])
+def test_grader_uses_task_venv_only_when_it_meets_python_requirement(tmp_path: Path, compatible: bool) -> None:
+    binaries = tmp_path / "bin"
+    binaries.mkdir()
+    for name in ("python", "python3"):
+        path = binaries / name
+        path.write_text("#!/bin/sh\nexit 1\n")
+        path.chmod(0o755)
+    (binaries / "mkdir").symlink_to("/bin/mkdir")
+    task_python = tmp_path / "task-python"
+    if compatible:
+        task_python.symlink_to(sys.executable)
+    else:
+        task_python.write_text("#!/bin/sh\nexit 1\n")
+        task_python.chmod(0o755)
+    marker = tmp_path / "graded"
+    grader = tmp_path / "grade.py"
+    grader.write_text(f"from pathlib import Path\nPath({str(marker)!r}).write_text('graded')\n")
+    script = convert._test_script()
+    script = script.replace("/opt/conda/bin/python3", str(tmp_path / "absent-conda"))
+    script = script.replace("/usr/local/bin/python3", str(tmp_path / "absent-local"))
+    script = script.replace("/env/.venv/bin/python", shlex.quote(str(task_python)))
+    script = script.replace("/tests/nemo_gym/grade.py", shlex.quote(str(grader)))
+    script = script.replace("/logs/verifier", shlex.quote(str(tmp_path / "logs")))
+    result = subprocess.run(
+        ["/bin/bash", "-c", script], env={"PATH": str(binaries)}, capture_output=True, text=True, timeout=10
+    )
+    assert result.returncode == (0 if compatible else 1)
+    assert marker.exists() is compatible
+    if not compatible:
+        assert "no Python 3.10+" in result.stderr
+
+
 GOLDEN_PATCH = (
     "diff --git a/widget/core.py b/widget/core.py\n--- a/widget/core.py\n+++ b/widget/core.py\n"
     "@@ -1 +1 @@\n-VALUE = 1\n+VALUE = 2\n"
