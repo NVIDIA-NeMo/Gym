@@ -265,6 +265,9 @@ def test_http_session_flow_runs_pi_in_borrowed_sandbox(setup):
             payload = staged(sandbox)
             assert payload["prompt"] == "Fix the code"
             assert payload["command"][0].endswith("/node/bin/node")
+            observer = f"{sandbox.directory}/compaction-observer.mjs"
+            assert sandbox.files[observer] == Path(__file__).parents[1].joinpath("compaction-observer.mjs").read_text()
+            assert payload["command"][1:3] == ["--import", observer]
             assert "PATH" not in payload["env"]
             assert "HOME" not in payload["env"]
             assert not any(key.startswith("XDG_") for key in payload["env"])
@@ -1343,6 +1346,46 @@ def test_optional_usage_details_preserve_unknown_contributors(setup, cache_read,
     assert response["usage"]["output_tokens"] == 5
     assert response["usage"]["output_tokens_details"]["reasoning_tokens"] is None
     assert response["output"][0]["type"] == "reasoning"
+
+
+@pytest.mark.parametrize("helper_cache, expected", [(3, 8), (0, None), (None, None)])
+def test_compaction_helper_contributes_cached_usage(setup, helper_cache, expected):
+    agent, sandbox = setup
+    policy = {
+        "role": "assistant",
+        "responseId": "policy-response",
+        "content": [{"type": "text", "text": "Fixed"}],
+        "usage": {"input": 2, "output": 1, "cacheRead": 5},
+        "stopReason": "stop",
+    }
+    helper_usage = {"input": 7, "output": 1}
+    if helper_cache is not None:
+        helper_usage["cacheRead"] = helper_cache
+    response, observations = sandbox_event_response(
+        agent,
+        sandbox,
+        [
+            {"type": "compaction_start", "reason": "overflow", "ng_compaction_id": "one"},
+            {
+                "type": "ng_pi_compaction_call",
+                "compaction_id": "one",
+                "message": {
+                    "role": "assistant",
+                    "content": [],
+                    "responseId": "helper-response",
+                    "usage": helper_usage,
+                },
+            },
+            {"type": "compaction_end", "ng_compaction_id": "one", "result": {"summary": "Summary"}},
+            {"type": "message_end", "message": policy},
+            {"type": "agent_end", "messages": [policy]},
+        ],
+    )
+    assert response["usage"]["input_tokens_details"]["cached_tokens"] == expected
+    assert response["usage"]["input_tokens"] == 2 + 5 + 7 + (helper_cache or 0)
+    assert response["usage"]["output_tokens"] == 2
+    gaps = {gap["code"] for gap in observations["gaps"]}
+    assert ("cached_token_usage_unavailable" in gaps) is (expected is None)
 
 
 def test_defaulted_cache_zero_remains_unknown(setup):
