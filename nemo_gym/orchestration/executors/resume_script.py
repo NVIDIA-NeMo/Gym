@@ -34,6 +34,7 @@ from pathlib import Path
 from nemo_gym.core.failure_kinds import (
     COLLECTION_RESUME_REFUSED,
     DRIVER_INSTALL_FAILED,
+    ENVIRONMENT_PREPARE_FAILED,
     ENVIRONMENT_PROTOCOL_VIOLATION,
     PROVIDER_CREDENTIALS_REJECTED,
     PROVIDER_QUOTA_EXHAUSTED,
@@ -126,6 +127,7 @@ GUARDED_DRIVER_FAILURE_KINDS = (
     DRIVER_INSTALL_FAILED,
     COLLECTION_RESUME_REFUSED,
     PROVIDER_CREDENTIALS_REJECTED,
+    ENVIRONMENT_PREPARE_FAILED,
     PROVIDER_QUOTA_EXHAUSTED,
     ENVIRONMENT_PROTOCOL_VIOLATION,
 )
@@ -136,6 +138,10 @@ SPINUP_TIMEOUT_REASON = (
 CREDENTIALS_REJECTED_REASON = (
     f"{PROVIDER_CREDENTIALS_REJECTED}: the provider refused the credentials; the chain does not retry it; "
     "fix the credentials, then continue with gym eval resubmit --recover"
+)
+PREPARE_FAILED_REASON = (
+    f"{ENVIRONMENT_PREPARE_FAILED}: EVAL STOPPED: data preparation failed; the chain does not retry it; "
+    "fix the benchmark's preparation, then continue with gym eval resubmit --recover"
 )
 QUOTA_EXHAUSTED_REASON = (
     f"{PROVIDER_QUOTA_EXHAUSTED}: the grading provider's quota is exhausted; the chain does not retry it; "
@@ -609,6 +615,8 @@ if [[ "$_prev_slurm_job_id" != "" ]]; then
             _gym_stop_incomplete "Previous job $_prev_slurm_job_id ended $_prev_state: {resume_refused_reason}" ;;
         {provider_credentials_rejected})
             _gym_stop_incomplete "Previous job $_prev_slurm_job_id ended $_prev_state: {credentials_rejected_reason}" ;;
+        {environment_prepare_failed})
+            _gym_stop_incomplete "Previous job $_prev_slurm_job_id ended $_prev_state: {prepare_failed_reason}" ;;
         {provider_quota_exhausted})
             _gym_stop_incomplete "Previous job $_prev_slurm_job_id ended $_prev_state: {quota_exhausted_reason}" ;;
         {environment_protocol_violation})
@@ -1026,6 +1034,8 @@ def render_resume_prologue(resume: ResumeConfig, *, admission_command: str = "fa
         resume_refused_reason=RESUME_REFUSED_REASON,
         provider_credentials_rejected=PROVIDER_CREDENTIALS_REJECTED,
         credentials_rejected_reason=CREDENTIALS_REJECTED_REASON,
+        environment_prepare_failed=ENVIRONMENT_PREPARE_FAILED,
+        prepare_failed_reason=PREPARE_FAILED_REASON,
         provider_quota_exhausted=PROVIDER_QUOTA_EXHAUSTED,
         environment_protocol_violation=ENVIRONMENT_PROTOCOL_VIOLATION,
         protocol_violation_reason=PROTOCOL_VIOLATION_REASON,
