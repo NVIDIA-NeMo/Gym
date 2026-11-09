@@ -22,7 +22,7 @@ BENCHMARK_DIR = Path(__file__).parent
 OUTPUT_FPATH = BENCHMARK_DIR / "data" / "babyvision_opencode_benchmark.jsonl"
 NUM_ROWS = 388
 # Two known copies of the same 388 rows (in one, 175 PNG images are re-encoded as JPEG).
-KNOWN_MD5 = {"b3a93182cce0e658e4f81601275e1f04", "4216333e6620668edb267b032250f635"}
+KNOWN_MD5 = {"b3a93182cce0e658e4f81601275e1f04", "4216333e6620668edb267b032250f635"}  # pragma: allowlist secret
 
 INSTRUCTION = """You are a meticulous visual-reasoning agent and you are provided with a question and a set of images.
 

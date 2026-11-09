@@ -53,6 +53,7 @@ from resources_servers.string_match.app import (
     _extract_last_assistant_text,
     _grade_string_match,
 )
+from resources_servers.visual_coding_opencode.task_data import TaskData
 from resources_servers.visual_coding_opencode.verifier_fixture import (
     create_visual_coding_opencode_server,
     invoke_visual_coding_opencode,
@@ -133,10 +134,8 @@ class VisualCodingOpenCodeConfig(BaseResourcesServerConfig):
     judge_max_text_chars: int = Field(default=4000, ge=1)
 
 
-class VisualCodingOpenCodeVerifyRequest(BaseVerifyRequest):
+class VisualCodingOpenCodeVerifyRequest(TaskData, BaseVerifyRequest):
     model_config = ConfigDict(extra="allow")
-    expected_answer: str
-    question: str = ""
 
 
 class VisualCodingOpenCodeVerifyResponse(BaseVerifyResponse):

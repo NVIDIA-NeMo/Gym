@@ -29,6 +29,7 @@ from typing import Any, Awaitable, Callable, ClassVar, Optional
 from urllib.parse import urlsplit
 from warnings import warn
 
+from aiohttp import ClientResponseError
 from fastapi import Body, FastAPI, HTTPException, Request, Response
 from pydantic import (
     BaseModel,
@@ -45,11 +46,16 @@ from nemo_gym.agents.agent_activation_types import (
     AgentContinuationCapabilities,
     AgentContinuationRequirements,
 )
-from nemo_gym.agents.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
+from nemo_gym.agents.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome, policy_timeout_failure
 from nemo_gym.agents.utils.ordered_operations import ActivationConflictError, OrderedOperationLedger
 from nemo_gym.agents.utils.sandbox_session import ExpiryUnsupportedError, SandboxSession
 from nemo_gym.client.server_client import apply_rollout_prefix, rollout_path_prefix
-from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT, ModelServerRef
+from nemo_gym.config.config_types import (
+    ROLLOUT_PATH_PREFIX,
+    TOKEN_CAPTURE_PATH_SEGMENT,
+    ModelServerRef,
+    ResourcesServerRef,
+)
 from nemo_gym.config.global_config import (
     OBSERVABILITY_ENABLED_KEY_NAME,
     TOKEN_CAPTURE_BLOCK,
@@ -310,6 +316,9 @@ class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):
     )
     skip_verification: bool = False
     skip_verification_reward: float = 0.0
+    # Resources servers, such as a search server, whose MCP tools each episode grants this agent besides its own
+    # Resources server's. A single_agent_turn Environment Server seeds them; one may also set its own list.
+    tool_servers: list[ResourcesServerRef] = Field(default_factory=list)
     # Whether this agent's rollouts participate in training token capture.
     # Native agents already receive token ids inline and normally leave this disabled.
     # Opaque external harnesses enable it because their returned output has no token ids.
@@ -388,6 +397,9 @@ def _agent_boundary(
 ):
     """``endpoint`` with its failures raised as one agent route failure caused by them.
 
+    A model reply that confirms a policy response timeout makes ``agent.responses`` raise the typed
+    ``model_policy_response_timeout`` failure instead.
+
     The reply body and status stay those of the original error. ``HTTPException``, cancellation and any error
     ``app`` has a handler for (such as a checkpoint ``ControlError``, answered 409) pass through to that
     handler. A failure an agent boundary already reported (``/run`` calling this server's ``/v1/responses``)
@@ -406,6 +418,11 @@ def _agent_boundary(
                 app, error
             ):
                 raise
+            if operation == "agent.responses" and isinstance(error, ClientResponseError):
+                # The model call this route makes is the policy's: a confirmed response timeout keeps its kind.
+                timeout = policy_timeout_failure(error)
+                if timeout is not None:
+                    raise timeout from error
             raise agent_route_failure(error, operation=operation, stage=stage) from error
 
     return bounded

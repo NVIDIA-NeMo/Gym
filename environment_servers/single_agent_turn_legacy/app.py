@@ -58,13 +58,13 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
         return app
 
     async def run_legacy(self, row: dict[str, Any]) -> dict[str, Any]:
+        is_episode_request = "episode_id" in row and "task" in row
         request = (
-            SingleAgentTurnRequest.model_validate(row)
-            if "episode_id" in row and "task" in row
-            else self._episode_request_from_row(row)
+            SingleAgentTurnRequest.model_validate(row) if is_episode_request else self._episode_request_from_row(row)
         )
         response = await self.run_request(request)
-        return self._legacy_result(response)
+        # An episode request is answered with the episode reply it asks for; only a flat row gets a flat result.
+        return response.model_dump(mode="json") if is_episode_request else self._legacy_result(response)
 
     def _episode_request_from_row(self, row: dict[str, Any]) -> SingleAgentTurnRequest:
         task_source = row.get(TASK_SOURCE_KEY_NAME, self.config.resources_server.name)
