@@ -696,6 +696,61 @@ def test_hermes_client_preserves_requests_after_append_edit_and_lost_base(hermes
     assert requests == originals
     assert [request["_gym_history"]["mode"] for request in wire] == ["full", "append", "full", "append", "full"]
     assert wire[1]["messages"] == [assistant, tool]
+    assert "tools" not in wire[1]
+    assert wire[1]["_gym_history"]["reuse_fields"] == ["tools"]
+    assert wire[-1]["tools"] == options["tools"]
+
+
+def test_hermes_cached_options_preserve_changes_null_and_absence(hermes_backend):
+    create, restart, wire = hermes_backend
+    client = HistoryDeltaClient()
+    messages = [{"role": "user", "content": "task"}]
+    tools = [{"type": "function", "function": {"name": "shell"}}]
+    first = {"messages": messages, "tools": tools, "instructions": "Be concise"}
+    assert client.call(create, **first) == first
+    assert client.call(create, **first) == first
+    assert "tools" not in wire[-1]
+    assert "instructions" not in wire[-1]
+
+    changed = {"messages": messages, "tools": [], "instructions": "New instructions"}
+    assert client.call(create, **changed) == changed
+    assert wire[-1]["tools"] == []
+    assert wire[-1]["instructions"] == "New instructions"
+
+    cleared = {"messages": messages, "tools": None, "instructions": None}
+    assert client.call(create, **cleared) == cleared
+    assert wire[-1]["tools"] is None
+    assert wire[-1]["instructions"] is None
+    assert client.call(create, **cleared) == cleared
+    assert "tools" not in wire[-1]
+
+    restart()
+    assert client.call(create, **cleared) == cleared
+    assert wire[-1]["_gym_history"]["mode"] == "full"
+    assert wire[-1]["tools"] is None
+
+    absent = {"messages": messages}
+    assert client.call(create, **absent) == absent
+    assert client.call(create, **first) == first
+    assert wire[-1]["tools"] == tools
+
+
+def test_cached_options_count_toward_buffer_capacity(envelope):
+    history = [{"role": "user", "content": "task"}]
+    request = envelope(history, identity="one")
+    request["instructions"] = "x" * 1000
+    buffer = HistoryBuffer(max_bytes=200)
+    with pytest.raises(ValueError, match="buffer capacity"):
+        buffer.reconstruct("rollout", request)
+    assert not buffer.retains_rollout("rollout")
+
+
+@pytest.mark.parametrize("reused", [["model"], ["tools", "tools"], None])
+def test_invalid_cached_option_markers_are_rejected(buffer, envelope, reused):
+    request = envelope([], identity="one")
+    request["_gym_history"].update(mode="append", base_version="missing", reuse_fields=reused)
+    with pytest.raises(ValueError, match="cached request fields"):
+        buffer.reconstruct("rollout", request)
 
 
 def test_invalid_delta_is_rejected(buffer, envelope):

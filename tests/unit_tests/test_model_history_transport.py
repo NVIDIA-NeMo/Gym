@@ -272,8 +272,8 @@ def test_lost_append_response_preserves_history_for_next_request(post_model, mod
     user = {"role": "user", "content": "task"}
     assistant = {"role": "assistant", "content": "answer"}
     follow_up = {"role": "user", "content": "continue"}
-    first_request = {"input": [user]}
-    appended_request = {"input": [user, assistant]}
+    first_request = {"input": [user], "tools": [{"type": "function", "name": "shell"}], "instructions": "Be concise"}
+    appended_request = {**first_request, "input": [user, assistant]}
     next_request = {"input": [user, assistant, follow_up]}
 
     first_response = post_model(endpoint="responses", json=first_request)
@@ -362,26 +362,70 @@ def test_stale_delta_is_rejected_and_full_resync_restores_request():
     upstream_history = HistoryBuffer()
     user = {"role": "user", "content": "task"}
     assistant = {"role": "assistant", "content": "answer"}
-    first_request = {"input": [user]}
-    appended_request = {"input": [user, assistant]}
+    first_request = {"input": [user], "tools": [{"type": "function", "name": "shell"}], "instructions": "Be concise"}
+    appended_request = {**first_request, "input": [user, assistant]}
 
-    first_wire, first_identity, first_items = history_state.prepare(first_request, "input")
+    first_wire, first_identity, first_items, first_parameters = history_state.prepare(first_request, "input")
     assert upstream_history.reconstruct("rollout", json.loads(first_wire), history_field="input") == first_request
-    history_state.submitted(first_identity, first_items)
+    history_state.submitted(first_identity, first_items, first_parameters)
 
-    accepted_wire, _, _ = history_state.prepare(appended_request, "input")
-    stale_wire, _, _ = history_state.prepare(appended_request, "input")
+    accepted_wire, _, _, _ = history_state.prepare(appended_request, "input")
+    stale_wire, _, _, _ = history_state.prepare(appended_request, "input")
     assert (
         upstream_history.reconstruct("rollout", json.loads(accepted_wire), history_field="input") == appended_request
     )
     with pytest.raises(HistoryResync, match="Missing or stale history base"):
         upstream_history.reconstruct("rollout", json.loads(stale_wire), history_field="input")
 
-    full_resync_wire, _, _ = history_state.prepare(appended_request, "input", full=True)
+    full_resync_wire, _, _, _ = history_state.prepare(appended_request, "input", full=True)
     assert (
         upstream_history.reconstruct("rollout", json.loads(full_resync_wire), history_field="input")
         == appended_request
     )
+
+
+def test_cached_request_fields_reuse_replace_null_and_absence():
+    state = DeltaState()
+    buffer = HistoryBuffer()
+    history = [{"role": "user", "content": "task"}]
+    tools = [{"type": "function", "name": "shell"}]
+
+    def send(request):
+        wire, identity, items, parameters = state.prepare(request, "input")
+        body = json.loads(wire)
+        reconstructed = buffer.reconstruct("rollout", body, history_field="input")
+        state.submitted(identity, items, parameters)
+        assert reconstructed == request
+        return body
+
+    first = send({"input": history, "tools": tools, "instructions": "Be concise"})
+    assert first["tools"] == tools
+    assert first["instructions"] == "Be concise"
+
+    unchanged = send({"input": history, "tools": tools, "instructions": "Be concise"})
+    assert unchanged["_gym_history"]["reuse_fields"] == ["tools", "instructions"]
+    assert "tools" not in unchanged
+    assert "instructions" not in unchanged
+
+    replaced = send({"input": history, "tools": [], "instructions": "New instructions"})
+    assert replaced["tools"] == []
+    assert replaced["instructions"] == "New instructions"
+
+    cleared = send({"input": history, "tools": None, "instructions": None})
+    assert cleared["tools"] is None
+    assert cleared["instructions"] is None
+
+    still_null = send({"input": history, "tools": None, "instructions": None})
+    assert still_null["_gym_history"]["reuse_fields"] == ["tools", "instructions"]
+
+    absent = send({"input": history})
+    assert "reuse_fields" not in absent["_gym_history"]
+    assert "tools" not in absent
+    assert "instructions" not in absent
+
+    restored = send({"input": history, "tools": tools, "instructions": "Be concise"})
+    assert restored["tools"] == tools
+    assert restored["instructions"] == "Be concise"
 
 
 def test_disabled_codex_configuration_leaves_command_and_environment_unchanged(tmp_path):

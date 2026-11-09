@@ -25,6 +25,7 @@ from uuid import uuid4
 
 MAX_HISTORY_BODY_BYTES = 32 * 1024 * 1024
 _MAX_HISTORY_STATES = 64
+_CACHED_FIELDS = ("tools", "instructions")
 _CONVERSATION_HEADERS = ("thread-id", "x-session-affinity", "x-opencode-session", "x-session-id")
 _HOP = {
     "connection",
@@ -74,13 +75,14 @@ class DeltaState:
         self.conversation_id = uuid4().hex
         self.version: str | None = None
         self.items: list[bytes] = []
+        self.parameters: dict[str, bytes] = {}
         self._lock = threading.Lock()
 
-    def prepare(self, body: dict, field: str, *, full: bool = False) -> tuple[bytes, str, list[bytes]]:
+    def prepare(self, body: dict, field: str, *, full: bool = False) -> tuple[bytes, str, list[bytes], dict[str, bytes]]:
         items = [_encoded(item) for item in body[field]]
         history_bytes = b"[" + b",".join(items) + b"]"
         with self._lock:
-            version, previous_items = self.version, self.items
+            version, previous_items, previous_parameters = self.version, self.items, self.parameters
         # submitted() replaces the list without mutating published lists, so
         # this snapshot remains consistent while another request is submitted.
         append = not full and version is not None and items[: len(previous_items)] == previous_items
@@ -97,12 +99,18 @@ class DeltaState:
             field: body[field][len(previous_items) :] if append else body[field],
             "_gym_history": envelope,
         }
-        return _encoded(payload), identity, items
+        parameters = {key: _encoded(body[key]) for key in _CACHED_FIELDS if key in body}
+        reused = [key for key, value in parameters.items() if append and previous_parameters.get(key) == value]
+        if reused:
+            envelope["reuse_fields"] = reused
+            for key in reused:
+                del payload[key]
+        return _encoded(payload), identity, items, parameters
 
-    def submitted(self, identity: str, items: list[bytes]) -> None:
+    def submitted(self, identity: str, items: list[bytes], parameters: dict[str, bytes]) -> None:
         """Keep a candidate base after sending; Gym rejects it if it was not stored."""
         with self._lock:
-            self.version, self.items = identity, items
+            self.version, self.items, self.parameters = identity, items, parameters
 
 
 class HistoryTransport:
@@ -371,7 +379,7 @@ class HistoryTransport:
                         # Gym stores history before inference. A lost response does not
                         # imply a lost base; let the next request try that version.
                         # A missing base still triggers the explicit 409/full fallback.
-                        state.submitted(prepared[1], prepared[2])
+                        state.submitted(prepared[1], prepared[2], prepared[3])
                     response = connection.getresponse()
                     if response.status == 409 and prepared and attempt == 0:
                         rejection = response.read(MAX_HISTORY_BODY_BYTES + 1)

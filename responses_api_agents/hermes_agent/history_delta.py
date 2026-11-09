@@ -10,6 +10,8 @@ from uuid import uuid4
 
 from openai import ConflictError
 
+_CACHED_FIELDS = ("tools", "instructions")
+
 
 def _encoded(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
@@ -22,6 +24,7 @@ class HistoryDeltaClient:
         self.conversation_id = uuid4().hex
         self._version: str | None = None
         self._messages: list[bytes] = []
+        self._parameters: dict[str, bytes] = {}
 
     def call(self, create: Any, *args: Any, **kwargs: Any) -> Any:
         """Transmit an exact prefix delta; reset after edits or an explicit resync response."""
@@ -34,6 +37,8 @@ class HistoryDeltaClient:
         # Reuse the canonical message bytes instead of serializing history again.
         history_bytes = b"[" + b",".join(encoded) + b"]"
         digest = hashlib.sha256(history_bytes).hexdigest()
+        effective = {**kwargs, **(kwargs.get("extra_body") or {})}
+        parameters = {key: _encoded(effective[key]) for key in _CACHED_FIELDS if key in effective}
 
         def send(mode: str) -> Any:
             envelope = {
@@ -48,9 +53,17 @@ class HistoryDeltaClient:
                 raise ValueError("History transport cannot override messages in extra_body")
             headers = dict(kwargs.get("extra_headers") or {})
             headers["x-gym-history-transport"] = "v1"
+            payload = dict(kwargs)
+            reused = [key for key, value in parameters.items()
+                      if mode == "append" and self._parameters.get(key) == value]
+            if reused:
+                envelope["reuse_fields"] = reused
+                for key in reused:
+                    payload.pop(key, None)
+                    extra.pop(key, None)
             return create(
                 **{
-                    **kwargs,
+                    **payload,
                     "messages": messages[len(self._messages) :] if mode == "append" else messages,
                     "extra_body": {**extra, "_gym_history": envelope},
                     "extra_headers": headers,
@@ -68,7 +81,7 @@ class HistoryDeltaClient:
                 raise
             identity = uuid4().hex
             response = send("full")
-        self._version, self._messages = identity, encoded
+        self._version, self._messages, self._parameters = identity, encoded, parameters
         return response
 
 

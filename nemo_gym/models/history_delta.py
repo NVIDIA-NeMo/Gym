@@ -13,6 +13,7 @@ from typing import Any
 
 # Match the standalone sandbox transport's request-body limit.
 MAX_HISTORY_BODY_BYTES = 32 * 1024 * 1024
+_CACHED_FIELDS = {"tools", "instructions"}
 
 
 class HistoryResync(ValueError):
@@ -31,8 +32,17 @@ def _extract_history(
     envelope = body.get("_gym_history")
     if not isinstance(envelope, dict):
         raise ValueError("_gym_history must be an object")
-    if set(envelope) != {"conversation_id", "request_id", "base_version", "mode", "messages_sha256"}:
+    if set(envelope) - {"reuse_fields"} != {"conversation_id", "request_id", "base_version", "mode", "messages_sha256"}:
         raise ValueError("Invalid history transport fields")
+    reused = envelope.get("reuse_fields", [])
+    if (
+        not isinstance(reused, list)
+        or any(not isinstance(key, str) or key not in _CACHED_FIELDS for key in reused)
+        or len(set(reused)) != len(reused)
+        or any(key in body for key in reused)
+        or (reused and envelope.get("mode") != "append")
+    ):
+        raise ValueError("Invalid cached request fields")
     conversation, identity = envelope["conversation_id"], envelope["request_id"]
     if any(not isinstance(v, str) or not v or len(v) > 128 for v in (conversation, identity)):
         raise ValueError("Invalid conversation/request identity")
@@ -53,6 +63,7 @@ def _extract_history(
 class _History:
     version: str
     messages: list[dict[str, Any]]
+    parameters: dict[str, Any]
     request_hash: str
     touched: float
     size: int
@@ -101,6 +112,7 @@ class HistoryBuffer:
             if previous.request_hash != request_hash:
                 raise ValueError("Request identity reused with a different payload")
             complete = previous.messages
+            parameters = previous.parameters
         else:
             if mode == "append":
                 if previous is None or previous.version != base:
@@ -108,19 +120,29 @@ class HistoryBuffer:
                 complete = previous.messages + messages
             else:
                 complete = messages
+            # Absence means absent, null means null. Only explicitly marked
+            # unchanged fields are restored from the same versioned base.
+            parameters = {key: body[key] for key in _CACHED_FIELDS if key in body}
+            for name in body["_gym_history"].get("reuse_fields", []):
+                if previous is None or name not in previous.parameters:
+                    raise HistoryResync("Missing cached request field")
+                parameters[name] = previous.parameters[name]
             encoded = _encoded(complete)
             if hashlib.sha256(encoded).hexdigest() != expected:
                 raise HistoryResync("Reconstructed history digest mismatch")
-            if len(encoded) > self._max_bytes:
+            parameter_bytes = _encoded(parameters) if parameters else b""
+            size = len(encoded) + len(parameter_bytes)
+            if size > self._max_bytes:
                 raise ValueError("History exceeds experiment buffer capacity")
             # Detach mutable input objects from the buffer's owned state.
             complete = json.loads(encoded)
-            self._entries[key] = _History(identity, complete, request_hash, now, len(encoded))
+            parameters = json.loads(parameter_bytes) if parameter_bytes else {}
+            self._entries[key] = _History(identity, complete, parameters, request_hash, now, size)
         self._entries[key].touched = now
         self._entries.move_to_end(key)
         while len(self._entries) > self._max_entries or sum(v.size for v in self._entries.values()) > self._max_bytes:
             self._remove_history(next(iter(self._entries)))
-        return {k: v for k, v in body.items() if k != "_gym_history"} | {history_field: complete}
+        return {k: v for k, v in body.items() if k != "_gym_history"} | {history_field: complete} | parameters
 
 
 class HistoryTransportProtocol:
