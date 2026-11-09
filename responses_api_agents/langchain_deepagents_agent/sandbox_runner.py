@@ -39,8 +39,9 @@ from responses_api_agents.langchain_deepagents_agent.responses_chat_model import
 # deepagents' own files (offloaded conversation history, evicted large tool results) stay in graph state under this
 # path, so the harness writes nothing of its own into the task sandbox.
 HARNESS_FILES_ROOT = "/.deepagents/"
-# Statuses after which the same model request can still succeed, so it is sent again a few times.
-_RETRY_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+# Statuses after which the same model request can still succeed, so it is sent again a few times: these and every 5xx.
+# Any other 4xx fails the same way each time. Three attempts wait at most 2 x 30 s in all.
+_RETRY_STATUSES = frozenset({408, 425, 429})
 _MODEL_ATTEMPTS = 3
 _MAX_RETRY_DELAY_S = 30.0
 
@@ -95,7 +96,7 @@ class SandboxResponsesChatModel(ResponsesChatModel):
                         self.usages.append(body.get("usage"))
                         return body
                     failure: Exception = ModelRequestError(response.status, await response.text())
-                    retryable = response.status in _RETRY_STATUSES
+                    retryable = response.status in _RETRY_STATUSES or 500 <= response.status < 600
                     retry_after = response.headers.get("Retry-After")
             except (aiohttp.ClientError, TimeoutError) as error:
                 failure, retryable, retry_after = ModelTransportError(f"{type(error).__name__}: {error}"), True, None

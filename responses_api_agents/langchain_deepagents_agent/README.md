@@ -145,9 +145,9 @@ not list this agent yet, so start its servers with `--allow-unsupported-pairing`
   Python and no network access to a package index. The agent server needs `uv` and access to the package index and
   the python-build-standalone releases; `sandbox_install_timeout_seconds` bounds the install.
 - **Model calls** go from the sandbox to the Model Server at the rollout's URL, so the sandbox must reach the Model
-  Server: set `use_absolute_ip: true` for a sandbox outside the host's network. An HTTP 408, 429 or 5xx, or a
-  connection failure, is retried twice after the server's `Retry-After` or an exponential backoff, at most 30 s. A
-  call that still fails ends the run: the response is `failed` and reports the cause in `ng_agent_outcome`
+  Server: set `use_absolute_ip: true` for a sandbox outside the host's network. An HTTP 408, 425, 429 or 5xx, or a
+  connection failure, is retried twice after the server's `Retry-After` or an exponential backoff, at most 30 s; any
+  other 4xx is not retried. A call that still fails ends the run: the response is `failed` and reports the cause in `ng_agent_outcome`
   (`model_request_error` with the HTTP status, or `model_transport_error`), so the Environment Server's outcome
   policy decides whether to verify or retry the episode.
 - **Request fields.** `input`, `instructions` (as a system message), and `temperature`, `top_p` and `reasoning`

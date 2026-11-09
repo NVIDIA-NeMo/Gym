@@ -116,14 +116,20 @@ async def test_deepagents_keeps_an_evicted_tool_result_in_graph_state(workdir):
     ("answers", "status", "requests"),
     [
         ([429, 503, [text("done")]], None, 3),
-        ([400], 400, 1),
+        ([408, 425, [text("done")]], None, 3),
+        ([501, 599, [text("done")]], None, 3),
+        *(([code], code, 1) for code in (400, 401, 403, 404, 413, 422)),
         ([429, 429, 429], 429, 3),
+        ([502, 504, 500], 500, 3),
     ],
 )
 async def test_retryable_statuses_are_sent_again_and_others_fail_the_run(
     workdir, monkeypatch, answers, status, requests
 ):
-    monkeypatch.setattr(sandbox_runner, "_retry_delay", lambda retry_after, attempt: 0)
+    delays = []
+    retry_delay = sandbox_runner._retry_delay
+    # Record each wait the runner asks for, without sleeping it.
+    monkeypatch.setattr(sandbox_runner, "_retry_delay", lambda *args: delays.append(retry_delay(*args)) or 0)
     model = ModelServer(answers)
     try:
         output = await sandbox_runner.run(_payload(model, workdir), workdir.parent / "session")
@@ -131,6 +137,8 @@ async def test_retryable_statuses_are_sent_again_and_others_fail_the_run(
         model.close()
 
     assert len(model.requests) == requests
+    assert len(delays) == requests - 1
+    assert sum(delays) <= 2 * sandbox_runner._MAX_RETRY_DELAY_S
     assert output["model_calls"] == 1
     if status is None:
         assert output["status"] == "completed"
