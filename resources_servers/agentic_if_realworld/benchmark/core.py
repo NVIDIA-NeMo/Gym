@@ -423,12 +423,17 @@ def runtime_identity() -> dict:
             "openai",
         ]
     }
-    sources = {str(p.relative_to(ROOT)): digest(p) for p in ROOT.rglob("*.py")}
+
+    def tracked_sources(base: Path):
+        # Skip hidden directories: .venv and checkouts other servers fetch at test time (e.g. ether0's
+        # .ether0) are not part of this code and appear mid-run while shard workers share a checkout.
+        return (p for p in base.rglob("*.py") if not any(part.startswith(".") for part in p.relative_to(base).parts))
+
+    sources = {str(p.relative_to(ROOT)): digest(p) for p in tracked_sources(ROOT)}
     component_root = ROOT.parents[2]
     for boundary in ["benchmarks", "resources_servers", "responses_api_models", "responses_api_agents", "nemo_gym"]:
-        for p in (component_root / boundary).rglob("*.py"):
-            if ".venv" not in p.parts:
-                sources["gym/" + str(p.relative_to(component_root))] = digest(p)
+        for p in tracked_sources(component_root / boundary):
+            sources["gym/" + str(p.relative_to(component_root))] = digest(p)
     return {
         "python": sys.version,
         "dependencies": versions,
