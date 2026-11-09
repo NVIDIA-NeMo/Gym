@@ -20,6 +20,7 @@ from nemo_gym.server_runtime.base_environment_server import (
     BaseEnvironmentServerWithToolsConfig,
     CleanupContext,
     ServedTools,
+    handled_episode_failure,
 )
 from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
 from nemo_gym.server_runtime.episode_tokens import EPISODE_TOKEN_HEADER, EpisodeTokens, episode_token_secret
@@ -659,17 +660,155 @@ def test_an_episode_that_finished_is_not_cleaned_up_again_at_shutdown() -> None:
     assert sandbox.stopped and sandbox.stops_started == 1
 
 
-def test_a_subclass_implements_run_episode_not_run() -> None:
-    class _OnlyRun(BaseEnvironmentServerWithTools[_Request, _Response]):
-        request_model = _Request
-        response_model = _Response
+@pytest.mark.parametrize("also_run_episode", [False, True], ids=["run-only", "run-and-run-episode"])
+def test_a_subclass_implements_run_episode_not_run(also_run_episode: bool) -> None:
+    """Overriding run would skip the tracking the shutdown sweep needs, even when run calls run_episode."""
 
-        async def run(self, request: _Request, cleanup: CleanupContext) -> _Response:
-            raise AssertionError("not reached")
+    async def run(self: Any, request: _Request, cleanup: CleanupContext) -> _Response:
+        return await self.run_episode(request, cleanup)
 
-        async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
-            return AggregateMetrics()
+    members = {"__module__": __name__, "run": run, "request_model": _Request, "response_model": _Response}
+    if also_run_episode:
+        members["run_episode"] = _Server.run_episode
 
-    config = _server()[0].config
-    with pytest.raises(TypeError, match="run_episode"):
-        _OnlyRun(config=config, server_client=MagicMock(spec=ServerClient))
+    with pytest.raises(TypeError, match="implements run_episode"):
+        type("_OverridesRun", (_Server,), members)
+
+
+def test_shutdown_runs_each_cleanup_under_its_episodes_rollout() -> None:
+    """A cleanup that calls a Resources Server sends the call under the episode's attempt, also at shutdown."""
+    seen: list[tuple[str, str | None]] = []
+    started = asyncio.Event()
+
+    async def run_episode(self: _Server, request: _Request, cleanup: CleanupContext) -> _Response:
+        async def release() -> None:
+            seen.append((request.episode_id.capture_key, current_rollout_id()))
+
+        cleanup.register_cleanup("release", release)
+        if len(self._running_cleanups) == 2:
+            started.set()
+        await asyncio.Event().wait()
+
+    server, _ = _server()
+    type(server).run_episode = run_episode
+
+    async def scenario() -> None:
+        requests = [_request("3-0").model_copy(update={"episode_id": EpisodeId(rollout_id="3-0", attempt=2)})]
+        requests.append(_request("4-0"))
+        episodes = [asyncio.create_task(server.run_request(request)) for request in requests]
+        await started.wait()
+        await server.finish_running_cleanups()
+        for episode in episodes:
+            episode.cancel()
+        await asyncio.gather(*episodes, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+    # The sweep sees each episode's own key; the episodes' cancelled requests find the cleanups already done.
+    assert sorted(seen) == [("3-0-a2", "3-0-a2"), ("4-0", "4-0")]
+    assert current_rollout_id() is None
+
+
+def test_shutdown_stops_a_sandbox_even_when_another_cleanup_hangs(caplog: pytest.LogCaptureFixture) -> None:
+    """In BIRD-Interact the agent-session close runs first and can retry an agent that is shutting down too."""
+    sandbox = _Sandbox()
+    started = asyncio.Event()
+
+    async def run_episode(self: _Server, request: _Request, cleanup: CleanupContext) -> _Response:
+        cleanup.register_cleanup("sandbox", sandbox.stop)
+        cleanup.register_cleanup("agent session", asyncio.Event().wait)
+        started.set()
+        await asyncio.Event().wait()
+
+    server, _ = _server()
+    type(server).run_episode = run_episode
+    server.config.cleanup_timeout_seconds = 0.3
+
+    async def scenario() -> float:
+        episode = asyncio.create_task(server.run_request(_request()))
+        await started.wait()
+        began = asyncio.get_running_loop().time()
+        await server.finish_running_cleanups()
+        took = asyncio.get_running_loop().time() - began
+        episode.cancel()
+        await asyncio.gather(episode, return_exceptions=True)
+        return took
+
+    took = asyncio.run(scenario())
+
+    assert sandbox.stopped and sandbox.stops_started == 1
+    assert took < 1
+    assert "Episode cleanup unconfirmed at shutdown: episode_id=3-0" in caplog.text
+
+
+def test_shutdown_retries_a_cleanup_that_failed_when_its_episode_ended() -> None:
+    """A sandbox stop that got a provider error stays tracked, so shutdown stops the sandbox before its TTL."""
+    sandbox = _Sandbox()
+    failures = [RuntimeError("provider returned 503")]
+
+    async def stop() -> None:
+        if failures:
+            raise failures.pop()
+        await sandbox.stop()
+
+    async def run_episode(self: _Server, request: _Request, cleanup: CleanupContext) -> _Response:
+        cleanup.register_cleanup("sandbox", stop)
+        return _Response(episode_id=request.episode_id, task_id=request.task.task_id, result="done")
+
+    server, _ = _server()
+    type(server).run_episode = run_episode
+
+    async def scenario() -> None:
+        await server.run_request(_request())
+        assert not sandbox.stopped and len(server._running_cleanups) == 1
+        await server.finish_running_cleanups()
+
+    asyncio.run(scenario())
+
+    assert sandbox.stopped and sandbox.stops_started == 1
+
+
+def test_shutdown_during_an_interrupted_stop_waits_for_it_in_uvicorns_order() -> None:
+    """Uvicorn cancels /run once, then exits the lifespan while the request's own cleanup still stops the sandbox."""
+
+    async def scenario() -> tuple[_Sandbox, bool]:
+        server, sandbox, started = _sandbox_server(hold=True)
+        app = server.setup_webserver()
+        episode = asyncio.create_task(server.run_request(_request()))
+        await started.wait()
+
+        episode.cancel()
+        while sandbox.stops_started == 0:
+            await asyncio.sleep(0)
+        async with app.router.lifespan_context(app):
+            pass
+        stopped_at_lifespan_exit = sandbox.stopped
+        await asyncio.gather(episode, return_exceptions=True)
+        return sandbox, stopped_at_lifespan_exit
+
+    sandbox, stopped_at_lifespan_exit = asyncio.run(scenario())
+
+    assert stopped_at_lifespan_exit and sandbox.stops_started == 1
+
+
+def test_a_handled_failure_in_a_tool_fails_the_episode() -> None:
+    """A sandbox that crashes during a tool call is an environment failure, not the agent's."""
+    replies: list[httpx.Response] = []
+
+    class _Crashing(_Counter):
+        @episode_tool
+        async def execute(self, arguments: _Nothing) -> None:
+            """Run a command in a sandbox that has crashed."""
+            raise handled_episode_failure(terminal=False, failure_reason="The episode's sandbox crashed")
+
+    async def agent(server: _Server, counter: _Counter, served: ServedTools) -> None:
+        replies.append(await http.post("/execute", json={}, headers=_headers(served)))
+        replies.append(await http.post("/execute", json={}, headers=_headers(served)))
+
+    server, http = _server(agent)
+    type(server).toolset = staticmethod(lambda counter: TypedToolset(_Crashing()))
+    response = asyncio.run(server.run_request(_request()))
+
+    assert [reply.status_code for reply in replies] == [500, 500]
+    assert response.failure is not None and response.failure.terminal is False
+    assert "sandbox crashed" in response.failure.failure_reason
