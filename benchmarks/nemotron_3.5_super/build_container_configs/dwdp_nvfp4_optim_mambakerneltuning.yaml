@@ -1,5 +1,5 @@
 input_container_fpath: results/vllm/vllm-openai:v0.32.0___with_gym_vllmfixes___mooncakemetricstry2___fixduplicatemambaforward.sqsh
-output_container_fpath: results/vllm/vllm-openai:v0.32.0___with_gym_vllmfixes___dwdp_nvfp4_optim.sqsh
+output_container_fpath: results/vllm/vllm-openai:v0.32.0___with_gym_vllmfixes___dwdp_nvfp4_optim_mambakerneltuning.sqsh
 
 slurm:
   account: nemotron_rl_algo
@@ -11,7 +11,7 @@ slurm:
 
 vllm:
   repo: https://github.com/bxyu-nvidia/vllm.git
-  branch: bxyu/v0.32.0-dwdpnvfp4
+  branch: bxyu/v0.32.0-mambakerneltuning
   version: "0.32.0"
   precompiled_wheel_commit: v0.32.0
 
@@ -55,7 +55,7 @@ warmup:
 run:
   env:
     _copy: shared_run_warmup_env_vars
-    EXPERIMENT_NAME: opencode_swe_verified/super_3.5_GA-BF16-p2d2-dwdp-nvfp4-optim
+    EXPERIMENT_NAME: opencode_swe_verified/super_3.5_GA-BF16-p2d2-dwdp-nvfp4-optim-mambakerneltuning
     SBATCH_TIMELIMIT: "01:30:00"
   args: |
     --config responses_api_models/vllm_model/configs/vllm_model.yaml \
