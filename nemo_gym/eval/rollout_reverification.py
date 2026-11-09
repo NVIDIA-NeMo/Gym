@@ -771,8 +771,10 @@ def _build_verify_payload(pair: InputRolloutPair) -> Dict:
         payload = row_keys | task_data | fields | {"response": response}
     # File-backed verifiers need the artifact path produced by the rollout, and
     # adaptive comparison needs the exact reference subset used for that row.
-    # Preserve only verifier inputs, not rewards or failure bookkeeping.
-    for key in ("deliverables_dir", "reference_ids"):
+    # Preserve only verifier inputs, not rewards or failure bookkeeping. SciCode's /verify grades the accumulated
+    # per-sub-step solutions an agent sent, which a masked row keeps (the response holds only the last step), with the
+    # usage accounting that travels through the verifier.
+    for key in ("deliverables_dir", "reference_ids", "solutions", "token_usage_version", "step_usage"):
         if key in pair.rollout:
             payload[key] = pair.rollout[key]
     if replay_patch:

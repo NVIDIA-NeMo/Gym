@@ -71,6 +71,22 @@ _RAY_WORKER_EVENT_LOOP: asyncio.AbstractEventLoop | None = None
 _RAY_WORKER_HTTP_CONFIG: GlobalAIOHTTPAsyncClientConfig | None = None
 
 
+class HarborTrialError(RuntimeError):
+    """Retain the original trial failure across the Ray worker boundary."""
+
+    def __init__(self, exception_type: str, exception_message: str, trial_dir: str) -> None:
+        super().__init__(exception_type, exception_message, trial_dir)
+        self.exception_type = exception_type
+        self.exception_message = exception_message
+        self.trial_dir = trial_dir
+
+    def __str__(self) -> str:
+        if self.exception_message.startswith("[sandbox "):
+            prefix, _, message = self.exception_message.partition("]")
+            return f"{prefix}] Harbor trial failed with {self.exception_type}: {message.lstrip()}"
+        return f"Harbor trial failed with {self.exception_type}: {self.exception_message}"
+
+
 async def _run_worker_job(job_config_dict: dict, task_name: str, http_config: dict) -> str:
     global _RAY_WORKER_HTTP_CONFIG
     cfg = GlobalAIOHTTPAsyncClientConfig.model_validate(http_config)
@@ -750,9 +766,10 @@ class HarborAgent(SimpleResponsesAPIAgent):
                         provider=getattr(environment, "value", environment),
                         reason=exception_info.exception_type,
                     )
-                    raise RuntimeError(
-                        f"{facts}Harbor trial failed with {exception_info.exception_type}: "
-                        f"{exception_info.exception_message}"
+                    raise HarborTrialError(
+                        exception_info.exception_type,
+                        f"{facts}{exception_info.exception_message}",
+                        str(trial_dir.resolve()),
                     )
 
                 return str(trial_dir.resolve())
