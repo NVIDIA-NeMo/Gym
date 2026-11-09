@@ -128,6 +128,14 @@ class GymChatLLM(BaseLLM):
         self._crew_run = crew_run
         self._complete = complete
 
+    @classmethod
+    def _wrap_call_method(cls, method_name: str) -> None:
+        """Keep ``call`` and ``acall`` without CrewAI's retry wrapper.
+
+        CrewAI's wrapper sends a failed call up to three times when the error's text reads like a rate limit, a 4xx
+        included. ``complete`` is the only retry layer: it retries HTTP 408, 425, 429 and 5xx within a bounded wait.
+        """
+
     def call(
         self,
         messages: Any,

@@ -267,3 +267,32 @@ def test_context_limit_requires_the_explicit_provider_code(body, expected):
     error = ModelRequestError(400, body)
     assert error.context_limit is expected
     assert error.status == 400
+
+
+@pytest.mark.parametrize(
+    "status, body",
+    [
+        (403, '{"error": {"message": "Rate limit exceeded for this API key"}}'),
+        (429, '{"error": {"message": "Too many requests"}}'),
+    ],
+)
+@pytest.mark.parametrize("blocking", [False, True])
+async def test_crewai_sends_a_failed_model_call_once(status, body, blocking):
+    """The runner's model call is the only retry layer: CrewAI adds no attempts, even for rate-limit wording."""
+    from responses_api_agents.crewai_agent.crew import CrewRun, GymChatLLM
+    from responses_api_agents.crewai_agent.sandbox_runner import ModelRequestError
+
+    calls = 0
+
+    async def complete(messages, tools):
+        nonlocal calls
+        calls += 1
+        raise ModelRequestError(status, body)
+
+    llm = GymChatLLM(crew_run=CrewRun(asyncio.get_running_loop()), complete=complete, model="gym")
+    with pytest.raises(ModelRequestError):
+        if blocking:
+            await asyncio.to_thread(llm.call, "task")
+        else:
+            await llm.acall("task")
+    assert calls == 1
