@@ -1576,7 +1576,8 @@ def test_rejudge_cold_binding_is_shared_and_read_only(prepared_run, mutation):
     assert cold._state.failure_count("0-0") == 1
 
 
-def test_canonical_rejudge_links_new_verifier_and_preserves_history(prepared_run):
+@pytest.mark.parametrize("schema_version", ["1.0", "2.0"])
+def test_canonical_rejudge_links_new_verifier_and_preserves_history(prepared_run, schema_version):
     from nemo_gym.trajectory.trajectory_record import TrajectoryRecord
 
     output, prepare = prepared_run
@@ -1598,11 +1599,13 @@ def test_canonical_rejudge_links_new_verifier_and_preserves_history(prepared_run
     }
     old = TrajectoryRecord.model_validate(
         {
+            "schema_version": schema_version,
             "task_id": "t",
             "rollout_id": "r",
             "invocations": [
                 {
                     "invocation_id": "policy-invocation",
+                    **({"agent_instance": "policy-worker"} if schema_version == "2.0" else {}),
                     "status": "completed",
                     "model_calls": [{"model_call_id": "policy-call"}],
                 }
@@ -1610,6 +1613,7 @@ def test_canonical_rejudge_links_new_verifier_and_preserves_history(prepared_run
             "turns": [
                 {
                     "invocation_id": "policy-invocation",
+                    **({"agent_instance": "policy-worker"} if schema_version == "2.0" else {}),
                     "task_id": "t",
                     "rollout_id": "r",
                     "turn_no": 1,
@@ -1623,12 +1627,56 @@ def test_canonical_rejudge_links_new_verifier_and_preserves_history(prepared_run
             "tool_calls": [
                 {
                     "invocation_id": "policy-invocation",
+                    **(
+                        {
+                            "agent_instance": "policy-worker",
+                            "span_id": "tool-parent",
+                            "failure_id": "policy-tool-failure",
+                            "timings": [
+                                {
+                                    "boundary": "executor",
+                                    "timing_source": "synthetic.tool",
+                                    "started_at": 1.0,
+                                    "completed_at": 2.0,
+                                    "duration_ms": 1000,
+                                    "duration_source": "monotonic",
+                                }
+                            ],
+                        }
+                        if schema_version == "2.0"
+                        else {}
+                    ),
                     "tool_call_id": "original-tool-call",
                     "tool_name": "lookup",
                     "status": "completed",
                     "output": {"evidence": "Original tool result"},
-                }
+                },
+                *(
+                    [
+                        {
+                            "invocation_id": "policy-invocation",
+                            "agent_instance": "policy-worker",
+                            "span_id": "tool-child",
+                            "parent_span_id": "tool-parent",
+                            "tool_call_id": "child-tool-call",
+                            "status": "completed",
+                        }
+                    ]
+                    if schema_version == "2.0"
+                    else []
+                ),
             ],
+            "failure_events": (
+                {
+                    "policy-tool-failure": {
+                        "boundary": "harness",
+                        "failure_kind": "example:tool_failure",
+                        "failure_reason": "Retained policy tool failure",
+                    }
+                }
+                if schema_version == "2.0"
+                else {}
+            ),
             "model_calls": [policy_call, old_judge_call],
             "verifier_invocations": [
                 {
@@ -1642,6 +1690,7 @@ def test_canonical_rejudge_links_new_verifier_and_preserves_history(prepared_run
     ).model_dump(mode="json")
     enriched = TrajectoryRecord.model_validate(
         {
+            "schema_version": schema_version,
             "task_id": "t",
             "rollout_id": "r",
             "verifier_invocations": [
@@ -1713,10 +1762,15 @@ def test_canonical_rejudge_links_new_verifier_and_preserves_history(prepared_run
     assert selected["_ng_rejudged_failure_observations"]["ng_trajectory"] == old
     assert selected["_ng_rejudge_verifier_invocation_ids"] == ["new-verifier"]
     trajectory = selected["ng_trajectory"]
+    assert trajectory["schema_version"] == schema_version
+    identity_key = "capture_key" if schema_version == "2.0" else "rollout_id"
+    assert trajectory[identity_key] == old[identity_key] == "r"
     assert trajectory["verifier_invocations"] == [enriched["verifier_invocations"][0]]
     assert trajectory["model_calls"] == [old["model_calls"][0], enriched["model_calls"][0]]
     for field in ("invocations", "turns", "tool_calls"):
         assert trajectory[field] == old[field]
+    if schema_version == "2.0":
+        assert trajectory["failure_events"] == old["failure_events"]
     assert selected["response"] == answer and selected["reward"] == 0.0
     assert failures_path_for(output).read_bytes() == failures_before
 

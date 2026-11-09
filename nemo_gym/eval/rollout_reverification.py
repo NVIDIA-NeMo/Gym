@@ -65,6 +65,7 @@ from nemo_gym.config.global_config import (
 )
 from nemo_gym.core import VERIFIER_ERROR
 from nemo_gym.core.failure_transport import FailureHeader, FailureReportRow
+from nemo_gym.models.model_call_capture import ModelCallCaptureConfig
 from nemo_gym.rollouts.model_calls import model_call_capture_dirs_from_config, observability_enabled_from_config
 from nemo_gym.rollouts.rollout_collection import (
     NG_RESULT_TYPE_KEY,
@@ -2000,6 +2001,9 @@ class RolloutReverificationHelper(BaseModel):
         global_config = setup_server_client().global_config_dict
         capture_dirs = model_call_capture_dirs_from_config(global_config)
         observability_enabled = observability_enabled_from_config(global_config)
+        trajectory_schema_version = ModelCallCaptureConfig.model_validate(
+            global_config.get("model_call_capture") or {}
+        ).trajectory_schema_version
         try:
             for future in _run_verification_payloads(payloads_to_reverify, semaphore=semaphore):
                 row, result = await future
@@ -2038,6 +2042,7 @@ class RolloutReverificationHelper(BaseModel):
                     result,
                     capture_dirs=capture_dirs,
                     observability_enabled=observability_enabled,
+                    trajectory_schema_version=trajectory_schema_version,
                     excluded_verifier_invocation_ids=excluded_verifiers,
                 )
 

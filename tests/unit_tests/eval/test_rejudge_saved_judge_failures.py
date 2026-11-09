@@ -272,6 +272,7 @@ async def test_the_real_reverify_path_settles_a_saved_judge_failure_without_any_
     assert len(posted) == 1
 
 
+@pytest.mark.parametrize("schema_version,redacted", [("1.0", False), ("2.0", False), ("2.0", True)])
 @pytest.mark.parametrize(
     "attempt,explicit,capture_mode",
     [
@@ -286,7 +287,7 @@ async def test_the_real_reverify_path_settles_a_saved_judge_failure_without_any_
     ],
 )
 async def test_inline_rejudgment_retains_new_captures_and_derives_grading_health(
-    tmp_path, monkeypatch, attempt, explicit, capture_mode
+    tmp_path, monkeypatch, attempt, explicit, capture_mode, schema_version, redacted
 ):
     import asyncio
     import json
@@ -323,6 +324,7 @@ async def test_inline_rejudgment_retains_new_captures_and_derives_grading_health
     config = {
         "observability_enabled": True,
         "model_call_capture_dir": str(captures.root),
+        "model_call_capture": {"trajectory_schema_version": schema_version},
         "agent": {
             "responses_api_agents": {
                 "simple_agent": {
@@ -490,11 +492,14 @@ async def test_inline_rejudgment_retains_new_captures_and_derives_grading_health
                 "_ng_environment_server": "environment",
                 "_ng_result_type": "legacy_agent",
                 "ng_agent_observations": {
+                    "schema_version": schema_version,
                     "source": "synthetic",
+                    "gaps": [{"code": "multimodal_history_redacted"}] if redacted else [],
                     "records": [
                         {
                             "kind": "agent_invocation",
                             "invocation_id": f"agent-{key}",
+                            **({"agent_instance": "policy-worker"} if schema_version == "2.0" else {}),
                             "status": "completed",
                             "in_session": False,
                             "verification_skipped": False,
@@ -504,7 +509,13 @@ async def test_inline_rejudgment_retains_new_captures_and_derives_grading_health
                     ],
                 },
             }
-            await enrich_run_result(row, result, capture_dirs=[captures.root], observability_enabled=True)
+            await enrich_run_result(
+                row,
+                result,
+                capture_dirs=[captures.root],
+                observability_enabled=True,
+                trajectory_schema_version=schema_version,
+            )
             store.record_outcome(row | result)
 
         with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
@@ -552,6 +563,10 @@ async def test_inline_rejudgment_retains_new_captures_and_derives_grading_health
     selected = RolloutStore.read(output)
     recovered = next(item for item in selected.selected("success") if item["_ng_task_index"] == 1)
     trajectory = recovered["ng_trajectory"]
+    assert failure["ng_trajectory"]["schema_version"] == trajectory["schema_version"] == schema_version
+    wire_identity = "capture_key" if schema_version == "2.0" else "rollout_id"
+    assert failure["ng_trajectory"][wire_identity] == trajectory[wire_identity] == capture_key
+    assert ("rollout_id" if schema_version == "2.0" else "capture_key") not in trajectory
     [verifier] = trajectory["verifier_invocations"]
     assert len(posted) == (2 if capture_mode == "prior_sse_history" else 1)
     assert all(item["response"] == failure["response"] == recovered["response"] for item in posted)
@@ -562,6 +577,10 @@ async def test_inline_rejudgment_retains_new_captures_and_derives_grading_health
     assert trajectory["invocations"] == failure["ng_trajectory"]["invocations"]
     assert trajectory["turns"] == failure["ng_trajectory"]["turns"]
     assert trajectory["tool_calls"] == failure["ng_trajectory"]["tool_calls"]
+    assert recovered["ng_agent_observations"] == failure["ng_agent_observations"]
+    if redacted:
+        assert all(call["request"] is None and call["response"] is None for call in trajectory["model_calls"])
+        assert any(gap["code"] == "multimodal_history_redacted" for gap in trajectory["gaps"])
     assert {item["model_call_id"] for item in trajectory["model_calls"]}.isdisjoint({"judge-3"})
     assert captures.path_for(capture_key).read_bytes().startswith(original_capture)
     assert output.with_name("rollouts_failures.jsonl").read_bytes() == failures_bytes
@@ -577,6 +596,9 @@ async def test_inline_rejudgment_retains_new_captures_and_derives_grading_health
     assert len(recovered_files) == (2 if capture_mode == "prior_sse_history" else 1)
     persisted = [orjson.loads(line) for path in recovered_files for line in path.read_bytes().splitlines()]
     [persisted_recovery] = [item for item in persisted if item["_ng_task_index"] == 1]
+    assert persisted_recovery["ng_trajectory"]["schema_version"] == schema_version
+    assert persisted_recovery["ng_trajectory"][wire_identity] == capture_key
+    assert persisted_recovery["ng_agent_observations"] == failure["ng_agent_observations"]
     assert {item["model_call_id"] for item in persisted_recovery["ng_model_call_capture"]["calls"]} >= {
         f"judge-{state['recover_start'] + 1}"
     }
@@ -584,15 +606,16 @@ async def test_inline_rejudgment_retains_new_captures_and_derives_grading_health
     (artifacts / "rollouts_aggregate_metrics.json").write_text(
         json.dumps([{"agent_ref": {"name": "agent"}, "key_metrics": {"reward": 0.5}}])
     )
-    run_health_checks(output, workers=1)
-    health = _prepare_run_health_metrics(output)
-    complete = capture_mode in {"complete", "prior_sse", "prior_sse_history"}
-    assert health["health/grading_recovery/known"] == int(complete)
-    if complete:
-        assert health["health/grading_recovery/judge_recovered_attempts"] == 0
-        assert health["health/trial/known"] == 1 and health["health/trial/failed"] == 0
-        assert health["health/trial_failures/judge"] == 0
-        assert due_judge_failures(output) == []
+    if schema_version == "1.0":
+        run_health_checks(output, workers=1)
+        health = _prepare_run_health_metrics(output)
+        complete = capture_mode in {"complete", "prior_sse", "prior_sse_history"}
+        assert health["health/grading_recovery/known"] == int(complete)
+        if complete:
+            assert health["health/grading_recovery/judge_recovered_attempts"] == 0
+            assert health["health/trial/known"] == 1 and health["health/trial/failed"] == 0
+            assert health["health/trial_failures/judge"] == 0
+            assert due_judge_failures(output) == []
 
 
 def _verifier(monkeypatch, reply) -> list[int]:
