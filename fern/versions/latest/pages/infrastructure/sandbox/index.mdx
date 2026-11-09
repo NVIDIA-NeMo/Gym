@@ -310,15 +310,17 @@ plot = await download_bytes(sandbox, path="/workspace/plot.png")
 ```
 
 For media in a prompt, `nemo_gym.core.split_text_and_media` decodes a message's content into its text and its media files.
-`upload_media()` writes each file into a directory, named `media-<index>` with the extension of its media type, and returns the sandbox paths to pass to a harness.
-Give each call its own directory:
+`stage_media()` writes each file to `/tmp/nemo-gym-media/<sha256>.<extension>`, named by its content, and returns the sandbox paths to pass to a harness, in order.
+Every rollout of a task then gets the same paths, and so the same prompt.
+Each file is uploaded under a unique name and renamed onto its path, so sessions that share a sandbox can stage the same image at once and never read a partly written file.
+Sessions do not delete staged files, because another session may be reading them; they are bounded by the number of distinct files.
 
 ```python
 from nemo_gym.core import split_text_and_media
-from nemo_gym.sandbox import upload_media
+from nemo_gym.sandbox import stage_media
 
 text, media = split_text_and_media(message.content)
-paths = await upload_media(sandbox, files=media, directory="/workspace/input-media")
+paths = await stage_media(sandbox, media)
 ```
 
 ## Status and Cleanup

@@ -16,7 +16,7 @@
 
 ``split_text_and_media`` decodes a message into its text and its media files,
 and ``MediaFile`` converts between bytes and data URIs.
-``nemo_gym.sandbox.upload_media`` writes the decoded files into a sandbox for a harness CLI to read.
+``nemo_gym.sandbox.stage_media`` writes the decoded files into a sandbox for a harness CLI to read.
 
 Images are the supported media today.
 Supporting another kind means adding its media types to ``_MEDIA_TYPE_EXTENSIONS`` and ``_MEDIA_TYPE_SIGNATURES``
@@ -35,7 +35,8 @@ _MEDIA_TYPE_EXTENSIONS = {"image/png": "png", "image/jpeg": "jpg", "image/gif": 
 # The leading bytes of each supported media type.
 # Harnesses such as Pi tell an image's type from these bytes, not from its label or file extension.
 _MEDIA_TYPE_SIGNATURES = {
-    "image/png": re.compile(rb"\x89PNG\r\n\x1a\n"),
+    # The PNG standard puts the IHDR chunk first, and Pi reads a PNG without it as text.
+    "image/png": re.compile(rb"\x89PNG\r\n\x1a\n.{4}IHDR", re.DOTALL),
     "image/jpeg": re.compile(rb"\xff\xd8\xff"),
     "image/gif": re.compile(rb"GIF8[79]a"),
     "image/webp": re.compile(rb"RIFF.{4}WEBP", re.DOTALL),
