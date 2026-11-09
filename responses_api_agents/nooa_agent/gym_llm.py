@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable, Mapping
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
@@ -368,6 +369,28 @@ class GymResponsesLLM(UnifiedLLM):
         self._cookies = cookies
         self._calls = 0
         self._lock = asyncio.Lock()
+        # The SDK's cached renderer regenerates its trailing live-context message
+        # instead of keeping it in history. Retain the exact context that preceded
+        # each response so replay does not detach generated tokens from their prompt.
+        self._response_context: dict[str, tuple[LLMResponse, list[dict[str, Any]]]] = {}
+
+    def _replay_context(
+        self, messages: list[dict[str, Any] | LLMResponse | CacheBoundary]
+    ) -> list[dict[str, Any] | LLMResponse | CacheBoundary]:
+        result: list[dict[str, Any] | LLMResponse | CacheBoundary] = []
+        for message in messages:
+            saved = self._response_context.get(message.id) if isinstance(message, LLMResponse) else None
+            if saved is not None:
+                response, context = saved
+                if (
+                    message.replay_scope == response.replay_scope == self._gym_replay_scope
+                    and message.parts == response.parts
+                    and all(_native_matches_public(part) for part in message.parts)
+                    and result[-len(context) :] != context
+                ):
+                    result.extend(deepcopy(context))
+            result.append(message)
+        return result
 
     def get_context_limits(
         self, overrides: dict[str, Any] | None = None, *, fallback_reserve: int = 0
@@ -417,7 +440,7 @@ class GymResponsesLLM(UnifiedLLM):
         try:
             limits = self.get_context_limits(kwargs)
             input_items, instructions = _responses_input(
-                messages, gaps=self._state.gaps, replay_scope=self._gym_replay_scope
+                self._replay_context(messages), gaps=self._state.gaps, replay_scope=self._gym_replay_scope
             )
             request: dict[str, Any] = {
                 "input": input_items,
@@ -530,7 +553,7 @@ class GymResponsesLLM(UnifiedLLM):
             except (json.JSONDecodeError, ValueError, TypeError) as error:
                 raise InvalidPolicyOutputError(f"Gym model returned invalid {output_model.__name__} JSON") from error
 
-        return LLMResponse(
+        result = LLMResponse(
             raw_response=response,
             parts=parts,
             replay_scope=self._gym_replay_scope,
@@ -538,3 +561,11 @@ class GymResponsesLLM(UnifiedLLM):
             finish_reason="tool_calls" if function_calls else _finish_reason(response),
             usage=usage,
         )
+        boundaries = [index for index, message in enumerate(messages) if isinstance(message, CacheBoundary)]
+        if len(boundaries) == 1:
+            suffix = messages[boundaries[0] + 1 :]
+            # This is the cached renderer's explicit user-context suffix, not an
+            # inferred missing turn. Foreign/edited responses never recover it.
+            if suffix and all(isinstance(item, dict) and item.get("role") == "user" for item in suffix):
+                self._response_context[result.id] = (result, deepcopy(suffix))
+        return result

@@ -22,8 +22,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aiohttp import ClientResponseError
+from nooa.context_blocks.events import ToolCallEvent, ToolResult
 from nooa.context_blocks.formatter import OpenAIProviderFormatter
-from nooa.context_blocks.models import RenderedMessage, Role, ToolCallInfo
+from nooa.context_blocks.models import BlockMetadata, RenderedMessage, ResolvedBlock, Role, ToolCallInfo
+from nooa.context_blocks.render_config import RenderConfig
 from nooa.llm_types import AssistantReasoning, AssistantText
 from nooa.storage.serialization import deserialize, serialize
 from nooa.storage.sqlite import SQLiteStorageManager
@@ -33,6 +35,7 @@ from pydantic import BaseModel
 from nemo_gym.core import (
     NeMoGymEasyInputMessageForTraining,
     NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCallForTraining,
     NeMoGymResponseFunctionWebSearch,
     NeMoGymResponseOutputMessage,
@@ -41,6 +44,7 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NeMoGymResponseReasoningItemForTraining,
 )
+from nemo_gym.models.token_capture.lineage import RolloutLineage
 from responses_api_agents.nooa_agent.gym_llm import (
     GymResponsesLLM,
     InvalidPolicyOutputError,
@@ -1325,3 +1329,99 @@ async def test_invalid_reply_caps_fail_planning_and_call_before_model_transport(
         await llm.acall([{"role": "user", "content": "hello"}], **params)
     client.post.assert_not_awaited()
     assert state.used == 0
+
+
+@pytest.mark.parametrize("with_tools", [False, True])
+async def test_cached_renderer_context_remains_before_each_exact_response(with_tools: bool) -> None:
+    renderer = RenderConfig()
+    static = ResolvedBlock(key="task", content="Fixed task", metadata=BlockMetadata(static=True))
+    user = ResolvedBlock(key="request", content="Solve", role=Role.USER)
+    history = [static, user]
+    output = [
+        NeMoGymResponseOutputMessage(
+            id="answer",
+            type="message",
+            role="assistant",
+            status="completed",
+            content=[NeMoGymResponseOutputText(type="output_text", text="Next step.", annotations=[])],
+        )
+    ]
+    if with_tools:
+        output.append(
+            NeMoGymResponseFunctionToolCallForTraining(
+                id="tool-item",
+                call_id="tool-call",
+                name="execute_python",
+                arguments='{"code":"print(1)"}',
+                prompt_token_ids=[1],
+                generation_token_ids=[2],
+                generation_log_probs=[-0.1],
+            )
+        )
+    llm, _, state = make_llm(
+        model_response(*output),
+        max_policy_calls=None,
+    )
+    lineage = RolloutLineage()
+    previous = None
+    for turn in range(3):
+        dynamic = ResolvedBlock(key="context_usage", content=f"Live context {turn}")
+        messages = renderer.provider_formatter.format(renderer.block_formatter.format([*history, dynamic]))
+        if previous is not None:
+            raw_items, _ = _responses_input(messages, replay_scope=llm._gym_replay_scope)
+            raw_request = NeMoGymResponseCreateParamsNonStreaming(input=raw_items)
+            assert (
+                lineage.resolve(raw_request.model_dump(mode="json", exclude_none=True)["input"]).reason == "no_match"
+            )
+        response = await llm.acall(messages)
+        call = state.calls[-1]
+        request = call.request.model_dump(mode="json", exclude_none=True)["input"]
+        output = [item.model_dump(mode="json", exclude_none=True) for item in call.response.output]
+        if previous is not None:
+            assert request[: len(previous)] == previous
+            resolution = lineage.resolve(request)
+            assert resolution.match.model_call_id == f"call-{turn - 1}"
+        previous = request + output
+        lineage.record(f"call-{turn}", previous, list(range(turn + 1)), f"digest-{turn}", context_len=len(request))
+        history.append(
+            ResolvedBlock(key=f"answer-{turn}", content=response.content, role=Role.ASSISTANT, event=response)
+        )
+        if with_tools:
+            event = ToolCallEvent(
+                tool_call_id="tool-call",
+                name="execute_python",
+                arguments={"code": "print(1)"},
+                llm_response_id=response.id,
+                result=ToolResult(tool_call_id="tool-call", content="1"),
+            )
+            history.append(ResolvedBlock(key=f"tool-{turn}", content="1", role=Role.ASSISTANT, event=event))
+    # An explicit history edit still fails the unchanged-context matcher.
+    edited = deepcopy(request)
+    edited[0]["content"] = "Changed original task"
+    assert lineage.resolve(edited).reason == "no_match"
+
+
+@pytest.mark.parametrize("edited", [False, True])
+async def test_cached_context_is_not_duplicated_or_attached_to_edited_turn(edited: bool) -> None:
+    llm, _, state = make_llm(
+        model_response(
+            NeMoGymResponseOutputMessage(
+                id="answer",
+                type="message",
+                role="assistant",
+                status="completed",
+                content=[NeMoGymResponseOutputText(type="output_text", text="Answer.", annotations=[])],
+            )
+        )
+    )
+    user = {"role": "user", "content": "Task"}
+    context = {"role": "user", "content": "Original live context"}
+    response = await llm.acall([user, CacheBoundary(), context])
+    if edited:
+        messages = [user, response.replace_text("Edited answer")]
+    else:
+        messages = [user, context, response]
+    await llm.acall(messages)
+    request = state.calls[-1].request.model_dump(mode="json", exclude_none=True)["input"]
+    contexts = [item for item in request if item.get("content") == context["content"]]
+    assert len(contexts) == (0 if edited else 1)
