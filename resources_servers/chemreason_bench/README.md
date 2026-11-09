@@ -285,7 +285,9 @@ That selection, the four families whose answer describes or validates a procedur
 is 4,963 `gen` instances; its `mean/reward` is a pooled per-instance score over those
 families, **not** the published Primary-Overall. The filter is also exposed as repeatable
 `--task-type` flags. Unknown families are rejected, and the download count gate still
-checks the complete corpus before any subset is written.
+checks the complete corpus before any subset is written. A selection that matches no rows (for
+example `protocol=lm` with a family that has no LM variant) is an error and leaves an
+existing dataset file untouched.
 
 ## Tests
 

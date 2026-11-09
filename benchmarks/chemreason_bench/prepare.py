@@ -411,6 +411,13 @@ def prepare(
 
     if selected_task_types is not None:
         rows = [row for row in rows if row["task_type"] in selected_task_types]
+        if not rows:
+            # e.g. protocol="lm" with a family that has no lm rows: writing would
+            # truncate an existing prepared file and report success.
+            raise ValueError(
+                f"No rows match protocol={protocol!r} and task_types={list(selected_task_types)!r}; "
+                "the existing dataset file is left untouched"
+            )
         print(f"  --task-type {list(selected_task_types)}: {len(rows)} instances, NOT the scored population")
     if limit is not None:
         rows = rows[:limit]
