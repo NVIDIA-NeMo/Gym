@@ -11,6 +11,10 @@ captures use partner_if's shared registered judge. Existing raw API panels stay
 outside the benchmark package. Core Gym dependencies supply aiohttp, pydantic
 and jsonschema. Component dependencies install the pinned `ripgrep-bin` executable
 for readonly searches; no system ripgrep or private runtime installation is required.
+Both entrypoints verify that executable at startup and fail before inference if
+the component dependency is missing or unusable. A directory search is excluded
+when its inventory includes uncaptured file contents within the requested glob
+scope; an inventory listing alone does not require those contents.
 
 The `expanded-v3` profile also supplies replay-generated session metadata and
 an actual-message transcript for skills that inspect their own session. These
@@ -58,12 +62,16 @@ root, with exact same-model request reconstruction. Parent and joined Explore
 calls share the configured call ceiling and always go through Gym's Model Server,
 with captured response IDs and session ownership. Close cancels unfinished work
 and returns its actual observations. There is no fallback to a host shell.
+Tool-call IDs are scoped to the parent or worker conversation, so reused IDs
+cannot attach a worker's result to a parent call.
 
 The Environment Server closes each step before invoking the shared verifier.
 `ReplayConfig.first_answer` bounds each engine step; it does not change the
 Environment Server's prefix scoring boundary. The final episode response sums
 only fresh known usage; missing counts stay unknown. Sampling and call limits
 come from `replay` config, not generic single-response CLI overrides.
+The pairing uses a separate Model Server configuration to preserve those settings
+for both parent and Explore calls when other cohort routes override sampling.
 
 The `app.py` entrypoint is retained for historical saved-capture grading using
 `benchmarks/partner_if/config_ngc_replay_audit.yaml`; it refuses fresh policy

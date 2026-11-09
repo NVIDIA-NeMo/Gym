@@ -297,24 +297,49 @@ class PrimeChildAgent(PrimeAgent):
 
         async def collect() -> dict:
             value = json.loads(await read_text(state.session.sandbox, path=f"{directory}/state/capture.json"))
-            if value.get("version") != 1 or value.get("termination") not in {"completed", "turn_limit"}:
-                raise RuntimeError("Prime child did not produce a complete SDK capture")
-            effective = json.loads(
-                await read_text(state.session.sandbox, path=f"{directory}/state/effective-session.json")
-            )
-            state.observations = child_observations(
-                value,
-                system_prompt=effective["systemPrompt"],
-                model_ref=self.config.model_server,
-                invocation_id=state.request.agent_session_id,
-            )
+            if (
+                not isinstance(value, dict)
+                or value.get("version") != 1
+                or value.get("termination") not in {"completed", "turn_limit", "error"}
+                or not isinstance(value.get("events"), list)
+                or not isinstance(value.get("deliveries"), list)
+                or not all(isinstance(item, dict) for item in value["events"] + value["deliveries"])
+                or type(value.get("assistantTurns")) is not int
+                or value["assistantTurns"] < 0
+            ):
+                raise RuntimeError("Prime child did not produce a valid SDK capture")
             destination = Path(self.config.artifact_directory).expanduser() / uuid4().hex
             destination.mkdir(parents=True, mode=0o700)
             (destination / "capture.json").write_text(json.dumps(value))
             (destination / "cleanup.json").write_text(json.dumps(state.session.cleanup))
-            for filename in ("effective-session.json", "model-requests.jsonl"):
-                text = await read_text(state.session.sandbox, path=f"{directory}/state/{filename}")
-                (destination / filename).write_text(text)
+            effective, gaps = {}, []
+            filenames = ["effective-session.json", "model-requests.jsonl"]
+            if value["termination"] == "error":
+                filenames.append("errors.jsonl")
+            for filename in filenames:
+                try:
+                    text = await read_text(state.session.sandbox, path=f"{directory}/state/{filename}")
+                    (destination / filename).write_text(text)
+                    if filename == "effective-session.json":
+                        effective = json.loads(text)
+                        if not isinstance(effective, dict) or not isinstance(effective.get("systemPrompt"), str):
+                            raise ValueError("Effective system prompt unavailable")
+                except Exception:
+                    gaps.append(
+                        ObservationGap(
+                            code=f"{filename.replace('.', '_')}_unavailable",
+                            invocation_id=state.request.agent_session_id,
+                        )
+                    )
+                    if filename == "effective-session.json":
+                        effective = {}
+            state.observations = child_observations(
+                value,
+                system_prompt=effective.get("systemPrompt", ""),
+                model_ref=self.config.model_server,
+                invocation_id=state.request.agent_session_id,
+            )
+            state.observations.gaps.extend(gaps)
             return value
 
         captured = await state.session.execute(
@@ -330,6 +355,12 @@ class PrimeChildAgent(PrimeAgent):
             if e.get("type") == "message_end" and e.get("message", {}).get("role") == "assistant"
         ]
         failures = [m for m in assistants if m.get("stopReason") == "error" or m.get("errorMessage")]
+        if captured["termination"] == "error" and not failures:
+            failures.append(
+                {
+                    "errorMessage": "Prime SDK execution or disposal failed; retained capture contains available evidence"
+                }
+            )
         # A budget abort is a control event; preserve the preceding model/tool trajectory.
         visible = [
             e

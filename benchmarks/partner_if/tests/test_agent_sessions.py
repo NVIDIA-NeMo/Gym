@@ -244,6 +244,38 @@ async def test_worker_calls_keep_capture_owners_cookies_and_actual_tool_failures
 
 
 @pytest.mark.asyncio
+async def test_parent_and_worker_reusing_call_id_keep_results_in_their_conversation(tmp_path, monkeypatch):
+    agent = make_agent(tmp_path)
+    seen = []
+    provider(
+        monkeypatch,
+        [
+            response(call("Agent", {"prompt": "Read the skill", "subagent_type": "Explore"}, "same")),
+            response(call("Read", {"file_path": "/opt/agent/skills/registry-access/SKILL.md"}, "same")),
+            response(content="Worker found the registry instructions."),
+            response(probe()),
+        ],
+        seen,
+    )
+    first = await agent._seed_agent_session_state(seed())
+    reply = await agent._execute_step(request_for(), first, activation())
+    trajectory = reply.model_extra["_ng_trajectory"]
+    child = next(i for i in trajectory["invocations"] if i["parent_invocation_id"])
+    assert child["spawned_by_tool_call_id"] == "same"
+    outputs = {t["tool_name"]: t for t in trajectory["tool_calls"] if t["tool_call_id"] == "same"}
+    assert outputs["Agent"]["invocation_id"] == "step1"
+    assert "Worker found" in outputs["Agent"]["output"]
+    assert outputs["Read"]["invocation_id"] == child["invocation_id"]
+    assert "Worker found" not in outputs["Read"]["output"]
+    assert reply.usage.total_tokens == 360
+    second = await agent._seed_agent_session_state(seed("step2"))
+    resumed = await agent._execute_step(request_for("step2"), second, activation(2, reply))
+    assert len(seen) == 4
+    fresh = resumed.model_extra["_ng_trajectory"]["tool_calls"]
+    assert all(t["tool_call_id"] != "same" for t in fresh)
+
+
+@pytest.mark.asyncio
 async def test_provider_failure_is_not_resumable_and_close_preserves_observations(tmp_path, monkeypatch):
     agent = make_agent(tmp_path)
     seen = []

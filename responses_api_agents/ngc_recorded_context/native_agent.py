@@ -48,6 +48,7 @@ from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.ngc_recorded_context.app import response_from_output
 from responses_api_agents.ngc_recorded_context.replay import ReplayConfig, capture, execute, load_runtime, write_json
 from responses_api_agents.ngc_recorded_context.saved_prefix import SavedPolicyPrefix, prefix_digest
+from responses_api_agents.ngc_recorded_context.setup_ripgrep import ensure_ripgrep
 
 
 class NativeReplayAgentConfig(BaseResponsesAPIAgentConfig):
@@ -120,6 +121,10 @@ def decode_gym_reasoning(raw: dict) -> dict:
 
 class NativeReplayAgent(SimpleResponsesAPIAgent):
     config: NativeReplayAgentConfig
+
+    def model_post_init(self, context: object) -> None:
+        ensure_ripgrep()
+        super().model_post_init(context)
 
     async def run(self, request: Request, body: BaseRunRequest = Body()) -> BaseVerifyResponse:
         raise HTTPException(409, "Run this replay through its paired Environment Server and agent sessions")
@@ -292,7 +297,7 @@ class NativeReplayAgent(SimpleResponsesAPIAgent):
                             status="completed",
                         )
                     )
-                    owners[call["id"]] = owner
+                    owners[(group or "parent", call["id"])] = owner
                     if call["function"]["name"] == "Agent" and group is None:
                         parent_turn = int(context.name.split("-")[1])
                         child_spawns[f"delegate-{parent_turn:02d}-{index:02d}"] = call["id"]
@@ -321,7 +326,7 @@ class NativeReplayAgent(SimpleResponsesAPIAgent):
             return status, raw
 
         def observed_tool(event):
-            owner = owners.get(event["tool_call_id"])
+            owner = owners.get((event["conversation_id"], event["tool_call_id"]))
             if owner is None:
                 return  # Reconstructed tools from the saved prefix are not new actions.
             observation = TrajectoryToolCall(
@@ -349,7 +354,7 @@ class NativeReplayAgent(SimpleResponsesAPIAgent):
                 if turn.invocation_id == owner:
                     turn.step_count += 1
                     break
-            if event["kind"] in {"delegate_result", "delegate_partial", "fixture_gap"}:
+            if owner == root_id and event["kind"] in {"delegate_result", "delegate_partial", "fixture_gap"}:
                 child = next(
                     (v for v in invocations.values() if v.spawned_by_tool_call_id == event["tool_call_id"]), None
                 )

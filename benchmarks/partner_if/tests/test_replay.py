@@ -261,7 +261,7 @@ def test_replay_config_routes_only_private_profile_without_a_container():
     assert config.replay.max_new_turns == 6
     assert config.replay.max_policy_calls == 8
     assert config.replay.evaluation_boundary == "first_answer"
-    assert config.model_server.name == "policy_model"
+    assert config.model_server.name == "partner_if_ngc_replay_model"
     from responses_api_agents.partner_if_dispatcher.app import PartnerIFDispatcherConfig
 
     dispatcher_block = OmegaConf.to_container(get_first_server_config_dict(cfg, "partner_if_dispatcher"), resolve=True)
@@ -276,15 +276,15 @@ def test_replay_config_routes_only_private_profile_without_a_container():
     assert "datasets" not in block
     from pathlib import Path
 
-    from nemo_gym.environment import load_manifest, resolve_manifest_config_path
-    from nemo_gym.environment.registry import resolve_catalog_entry
+    from nemo_gym.environment import discover_environment_catalog, load_manifest, resolve_manifest_config_path
     from nemo_gym.environment.validation import _mirror_differences, _resolve_manifest_composition
 
     manifest = Path(__file__).resolve().parents[1] / "config_ngc_replay" / "manifest.yaml"
     declared = load_manifest(manifest)
     resolved = resolve_manifest_config_path(manifest, declared)
     assert _mirror_differences(declared, _resolve_manifest_composition(resolved)) == {}
-    assert resolve_catalog_entry("partner_if/config_ngc_replay", kind="benchmark").config_path == resolved
+    entry = next(e for e in discover_environment_catalog() if e.name == "partner_if/config_ngc_replay")
+    assert entry.config_path == resolved
 
 
 def test_three_matched_review_requests_validate_and_keep_expected_labels_out_of_judge_input():

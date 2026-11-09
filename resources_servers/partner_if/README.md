@@ -36,6 +36,9 @@ arguments fail. Python syntax, `await` usage and execution are not assessed. An 
 or missing registry, unresolved schema reference, or incomplete trajectory is
 unscorable. Schema references are resolved locally without network retrieval. This
 checker measures the one-call reproduction contract, not every IF-TOOLGROUND scenario.
+Every advertised schema is checked before scoring, including uncalled functions
+and unused schema branches. Reference-shaped values inside instance data such as
+`const`, `default`, or `examples` are not treated as schema references.
 
 The fixed output checks in `fixed_checks.py` take no parameters. They parse the answer as
 CommonMark with `markdown-it-py`, so code blocks, code spans and quotes don't count as the

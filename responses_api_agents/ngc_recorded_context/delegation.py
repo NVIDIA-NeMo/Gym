@@ -87,7 +87,17 @@ async def explore(arguments, *, state, case, config, model, directory, invoke, w
                 else:
                     result, kind = state.dispatch(call, schemas)
                 if observe_tool is not None:
-                    observe_tool(tool_observation(call, result, kind, state, observed_at, observed_monotonic))
+                    observe_tool(
+                        tool_observation(
+                            call,
+                            result,
+                            kind,
+                            state,
+                            observed_at,
+                            observed_monotonic,
+                            conversation_id=directory.name,
+                        )
+                    )
                 events.append(
                     {
                         "turn": turn,

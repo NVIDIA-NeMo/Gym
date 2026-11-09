@@ -78,3 +78,7 @@ Session close exports the native SDK conversation as Gym observations. Kernel er
 observations even when the SDK's outer isError flag is false; missing model response IDs remain evidence gaps.
 The borrowed sandbox's provider/ID and cleanup receipt describe supervised process completion. Agent close
 does not destroy that sandbox; teardown remains the Resources Server's responsibility.
+Well-formed SDK captures are retained even when execution or disposal fails.
+Those invocations remain failed, with missing diagnostic files recorded as gaps.
+Corroborated parent deliveries can still be verified; absent or malformed captures
+remain unscorable.

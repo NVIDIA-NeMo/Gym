@@ -6,14 +6,41 @@ from typing import TYPE_CHECKING
 
 from jsonschema.exceptions import SchemaError
 from jsonschema.validators import validator_for
-from referencing import Registry
+from referencing import Registry, Resource
 from referencing.exceptions import Unresolvable
+from referencing.jsonschema import specification_with
 
 from resources_servers.partner_if.evidence import EvidenceUnavailable
 
 
 if TYPE_CHECKING:
     from resources_servers.partner_if.checks import CheckContext
+
+
+def _check_references(schema: dict, validator: type) -> None:
+    """Resolve schema references without traversing instance data or retrieving URLs."""
+    specification = specification_with(
+        validator.META_SCHEMA["$id"] if "$id" in validator.META_SCHEMA else validator.META_SCHEMA["id"]
+    )
+    resource = Resource.from_contents(schema, default_specification=specification)
+    registry = Registry().with_resource("", resource).crawl()
+    pending = [(resource, registry.resolver().in_subresource(resource))]
+    visited = set()
+    while pending:
+        current, resolver = pending.pop()
+        if id(current.contents) in visited:
+            continue
+        visited.add(id(current.contents))
+        validator.check_schema(current.contents)
+        if isinstance(current.contents, dict):
+            dialect = validator_for(current.contents, default=validator)
+            dialect.check_schema(current.contents)
+            for keyword in ("$ref", "$dynamicRef", "$recursiveRef"):
+                if keyword in dialect.VALIDATORS and keyword in current.contents:
+                    resolved = resolver.lookup(current.contents[keyword])
+                    target = Resource.from_contents(resolved.contents, default_specification=specification)
+                    pending.append((target, resolved.resolver))
+        pending.extend((child, resolver.in_subresource(child)) for child in current.subresources())
 
 
 def single_advertised_tool_call(context: "CheckContext") -> tuple[bool, str]:
@@ -42,8 +69,11 @@ def single_advertised_tool_call(context: "CheckContext") -> tuple[bool, str]:
         try:
             validator = validator_for(schema)
             validator.check_schema(schema)
+            _check_references(schema, validator)
         except SchemaError as error:
             raise EvidenceUnavailable("The advertised function has an invalid parameter schema") from error
+        except Unresolvable as error:
+            raise EvidenceUnavailable("The advertised parameter schema contains an unresolved reference") from error
         # Dataset schemas may use local references, but must never fetch remote resources while grading.
         validators[name] = validator(schema, registry=Registry())
     calls = [event for event in evidence.trajectory if event.kind == "tool_call"]

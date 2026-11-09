@@ -5,11 +5,21 @@
 from time import perf_counter, time
 
 
-def tool_observation(call: dict, result: str, kind: str, state, started_at: float, started_monotonic: float) -> dict:
+def tool_observation(
+    call: dict,
+    result: str,
+    kind: str,
+    state,
+    started_at: float,
+    started_monotonic: float,
+    *,
+    conversation_id: str = "parent",
+) -> dict:
     failed = kind in {"fixture_gap", "invalid_call", "file_error"}
     exit_code = state.readonly.last_status if kind == "readonly_tool_result" and state.readonly is not None else None
     failed = failed or (exit_code is not None and exit_code != 0)
     return {
+        "conversation_id": conversation_id,
         "tool_call_id": call["id"],
         "function": call["function"],
         "kind": kind,

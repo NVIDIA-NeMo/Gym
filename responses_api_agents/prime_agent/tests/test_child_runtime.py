@@ -42,6 +42,56 @@ export async function createAgentSession(options){
 """
 
 
+def sdk_error_capture(tmp_path, *, delivered: bool, dispose_error: bool = False):
+    """Have the actual checked-in shim catch an SDK error and write its real capture."""
+    send = "if(turn===2) await options.agentMessageController.sendAgentMessage({target:'parent',message:'report on last allowed turn'});"
+    replacement = """
+        if(turn===2){
+          const receipt=await options.agentMessageController.sendAgentMessage({target:'parent',message:'Task-specific findings'});
+          emit({type:'tool_execution_end',toolName:'ipython',toolCallId:String(turn),result:{details:{status:'ok',sentAgentMessages:[{id:receipt.id,receiverRole:'parent',deliveryStatus:'delivered'}]}}});
+          THROW_AFTER_SEND
+        }
+    """.replace("THROW_AFTER_SEND", "" if dispose_error else "throw new Error('SDK failed after delivery');")
+    if not delivered:
+        replacement = "if(turn===2) throw new Error('SDK failed without delivery');"
+    source = SDK_DOUBLE.replace(send, replacement)
+    if dispose_error:
+        source = source.replace(
+            "disposeAsync:async()=>{}", "disposeAsync:async()=>{throw new Error('SDK disposal failed')}"
+        )
+    runtime = tmp_path / "runtime"
+    for package, code in (
+        ("prime-agent", source),
+        ("@earendil-works/pi-ai", "export function cleanupSessionResources(){}"),
+    ):
+        directory = runtime / "node_modules" / package
+        (directory / "dist").mkdir(parents=True)
+        (directory / "package.json").write_text('{"type":"module"}')
+        (directory / "dist/index.js").write_text(code)
+    args = {
+        "runtime": str(runtime),
+        "state": str(tmp_path / "state"),
+        "cwd": str(tmp_path),
+        "models": {},
+        "model": "test",
+        "prompt": "Send findings",
+        "maxTurns": 2,
+        "maxTokens": 65536,
+        "temperature": 0,
+        "captureDirectory": str(tmp_path / "export"),
+    }
+    request = tmp_path / "request.json"
+    request.write_text(json.dumps(args))
+    result = subprocess.run(
+        ["node", str(Path(__file__).parents[1] / "child_runtime.mjs"), str(request)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads((tmp_path / "export/capture.json").read_text())
+
+
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node is required for the SDK shim unit test")
 def test_last_allowed_turn_executes_its_tools_before_stopping(tmp_path):
     runtime = tmp_path / "runtime"

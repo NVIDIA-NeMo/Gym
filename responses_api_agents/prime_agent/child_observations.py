@@ -25,7 +25,12 @@ def child_observations(
         invocation_id=invocation_id,
         activation_id=1,
         in_session=True,
-        status="incomplete" if capture["termination"] == "turn_limit" else "completed",
+        status="failed"
+        if capture["termination"] == "error"
+        else "incomplete"
+        if capture["termination"] == "turn_limit"
+        else "completed",
+        error_type="sdk_error" if capture["termination"] == "error" else None,
         stop_reason="max_iterations" if capture["termination"] == "turn_limit" else None,
     )
     if system_prompt:

@@ -91,6 +91,9 @@ class ReplayAgent(SimpleResponsesAPIAgent):
     _semaphore: asyncio.Semaphore = PrivateAttr(default_factory=lambda: asyncio.Semaphore(1))
 
     def model_post_init(self, context: object) -> None:
+        from responses_api_agents.ngc_recorded_context.setup_ripgrep import ensure_ripgrep
+
+        ensure_ripgrep()
         super().model_post_init(context)
         if self.config.num_workers != 1:
             raise ValueError("Recorded replay requires one worker for bounded concurrency")

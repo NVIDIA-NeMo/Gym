@@ -185,6 +185,80 @@ def test_local_schema_references_work_and_remote_references_are_not_fetched():
         run_check(evidence)
 
 
+@pytest.mark.parametrize("names", [[], ["a"], ["missing"], ["a", "b"]])
+@pytest.mark.parametrize(
+    "reference",
+    [
+        {"$ref": "https://example.invalid/missing.json"},
+        {"properties": {"unused": {"$ref": "#/$defs/missing"}}},
+        {"$defs": {"unused": {"$ref": "https://example.invalid/missing.json"}}},
+    ],
+)
+async def test_uncalled_invalid_references_mask_every_candidate(names, reference):
+    evidence = EvidenceBundle(
+        tools=[tool("a"), tool("b") | {"parameters": reference}],
+        trajectory=[
+            {"source_index": i, "kind": "tool_call", "tool_name": name, "arguments": {"code": "pass"}}
+            for i, name in enumerate(names)
+        ],
+    )
+    result = await evaluate(contract(), evidence, judge=AsyncMock(side_effect=AssertionError("No judge")))
+    assert result.status == "unscorable" and result.reward is None
+
+
+@pytest.mark.parametrize("names,passed", [([], False), (["a"], True), (["missing"], False), (["a", "b"], False)])
+async def test_valid_uncalled_references_preserve_candidate_verdicts(names, passed):
+    schema = {"$defs": {"args": tool()["parameters"]}, "$ref": "#/$defs/args"}
+    evidence = EvidenceBundle(
+        tools=[tool("a"), tool("b") | {"parameters": schema}],
+        trajectory=[
+            {"source_index": i, "kind": "tool_call", "tool_name": name, "arguments": {"code": "pass"}}
+            for i, name in enumerate(names)
+        ],
+    )
+    result = await evaluate(contract(), evidence, judge=AsyncMock(side_effect=AssertionError("No judge")))
+    assert result.status == "scored" and result.reward == int(passed)
+
+
+@pytest.mark.parametrize("keyword", ["const", "examples", "default"])
+def test_reference_shaped_instance_data_is_not_resolved(keyword):
+    value = {"$ref": "https://example.invalid/not-a-schema.json"}
+    schema = {keyword: [value] if keyword == "examples" else value}
+    evidence = EvidenceBundle(
+        tools=[tool("a"), tool("b") | {"parameters": schema}],
+        trajectory=[{"source_index": 0, "kind": "tool_call", "tool_name": "a", "arguments": {"code": "pass"}}],
+    )
+    assert run_check(evidence)
+
+
+@pytest.mark.parametrize(
+    "draft",
+    [
+        "http://json-schema.org/draft-04/schema#",
+        "http://json-schema.org/draft-07/schema#",
+        "https://json-schema.org/draft/2020-12/schema",
+    ],
+)
+def test_reference_preflight_preserves_supported_dialects_and_cycles(draft):
+    schema = {"$schema": draft, "definitions": {"args": tool()["parameters"]}, "$ref": "#/definitions/args"}
+    evidence = EvidenceBundle(
+        tools=[tool("a") | {"parameters": schema}],
+        trajectory=[
+            {
+                "source_index": 0,
+                "kind": "tool_call",
+                "tool_name": "a",
+                "arguments": {"code": "pass"},
+            }
+        ],
+    )
+    assert run_check(evidence)
+    # A recursive definition need not be exercised by this empty object.
+    evidence.tools[0]["parameters"] = {"$schema": draft, "type": "object", "properties": {"next": {"$ref": "#"}}}
+    evidence.trajectory[0].arguments = {}
+    assert run_check(evidence)
+
+
 async def test_frozen_calls_are_not_counted_as_new_calls_by_the_adapter():
     body = VerifyRequest.model_validate(
         {

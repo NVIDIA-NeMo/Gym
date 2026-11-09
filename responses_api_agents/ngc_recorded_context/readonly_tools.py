@@ -264,7 +264,7 @@ class ReadonlyTools:
         executable = shutil.which("rg")
         if executable is None:
             raise CoverageGap("rg is not installed")
-        options, positional = [], []
+        options, positional, file_filters = [], [], []
         with_value = {"--glob", "-g", "-e", "--regexp", "-m", "--max-count", "-A", "-B", "-C"}
         flags = {"-n", "--line-number", "-i", "-S", "-s", "-F", "--fixed-strings", "-l", "--files-with-matches"}
         if self.workspace_listing:
@@ -276,12 +276,15 @@ class ReadonlyTools:
                 if i + 1 >= len(args):
                     raise CoverageGap("Missing rg option value")
                 options.extend(args[i : i + 2])
+                if token in {"--glob", "-g"}:
+                    file_filters.extend(args[i : i + 2])
                 i += 2
             elif token in flags:
                 options.append(token)
                 i += 1
             elif token.startswith("--glob="):
                 options.append(token)
+                file_filters.append(token)
                 i += 1
             elif token.startswith("-"):
                 raise CoverageGap("rg option is outside readonly coverage")
@@ -297,13 +300,13 @@ class ReadonlyTools:
             raise CoverageGap("Search needs a frozen path or pipeline input")
         # Source selection is intentionally explicit: Python libraries plus the
         # API schema. Unknown file requests are exclusions, not empty matches.
-        selected = {}
+        selected = set()
         for requested in positional:
             if not requested.startswith("/") or ".." in PurePosixPath(requested).parts:
                 raise CoverageGap("Search path escapes frozen roots")
             matches = {
-                p: text
-                for p, text in self.files.items()
+                p
+                for p in self.files.keys() | self.tracked_paths
                 if p == requested
                 or p.startswith(requested.rstrip("/") + "/")
                 or fnmatch.fnmatch(p, requested + "/*")
@@ -316,14 +319,42 @@ class ReadonlyTools:
             selected.update(matches)
         with tempfile.TemporaryDirectory(prefix="recorded-context-search-") as directory:
             root = Path(directory).resolve()
-            for virtual, text in selected.items():
+            for virtual in selected:
                 target = root / virtual.lstrip("/")
                 if not target.resolve().is_relative_to(root):
                     raise CoverageGap("Unsafe frozen source path")
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(text)
-            paths = [str(root / p.lstrip("/")) for p in sorted(selected)]
-            command = [executable, "--no-config", "--color", "never", "--sort", "path", *options, *paths]
+                target.write_text(self.files.get(virtual, ""))
+            # Search the isolated tree so glob filters apply to directory entries,
+            # rather than passing explicit filenames that override rg's filters.
+            paths = [str(root)] if selected else []
+            if selected - self.files.keys() and "--files" not in options:
+                # Apply the same trusted glob filter to inventory placeholders. Empty
+                # placeholders may select files, but never supply content evidence.
+                scope = subprocess.run(
+                    [executable, "--no-config", "--hidden", "--no-ignore", "--files", *file_filters, *paths],
+                    text=True,
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                )
+                if scope.returncode not in {0, 1}:
+                    raise CoverageGap("Cannot establish complete source-search coverage")
+                required = {"/" + Path(p).relative_to(root).as_posix() for p in scope.stdout.splitlines()}
+                if required - self.files.keys():
+                    raise CoverageGap("Search scope includes existing source files whose contents were not captured")
+            command = [
+                executable,
+                "--no-config",
+                "--hidden",
+                "--no-ignore",
+                "--color",
+                "never",
+                "--sort",
+                "path",
+                *options,
+                *paths,
+            ]
             result = subprocess.run(command, input=stdin, text=True, capture_output=True, timeout=10, check=False)
             stdout = result.stdout.replace(str(root), "")
             stderr = result.stderr.replace(str(root), "")

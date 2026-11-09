@@ -6,6 +6,15 @@ replay_package_dir: benchmarks/partner_if/data/ngc_replay/registry
 replay_runtime_contract_path: null
 replay_runtime_contract_sha256: null
 replay_artifacts: ${oc.env:PWD}/results/partner_if/ngc-recorded-context/live
+partner_if_ngc_replay_model:
+  _copy: policy_model
+  responses_api_models:
+    vllm_model:
+      sampling_overrides:
+        temperature: ${partner_if_ngc_replay_agent.responses_api_agents.ngc_recorded_context.replay.temperature}
+        top_p: ${partner_if_ngc_replay_agent.responses_api_agents.ngc_recorded_context.replay.top_p}
+        max_tokens: ${partner_if_ngc_replay_agent.responses_api_agents.ngc_recorded_context.replay.max_tokens}
+        max_completion_tokens: null
 partner_if_ngc_replay_agent:
   responses_api_agents:
     ngc_recorded_context:
@@ -19,7 +28,7 @@ partner_if_ngc_replay_agent:
       model: ${policy_model_name}
       model_server:
         type: responses_api_models
-        name: policy_model
+        name: partner_if_ngc_replay_model
       replay:
         package_dir: ${replay_package_dir}
         runtime_contract_path: ${replay_runtime_contract_path}

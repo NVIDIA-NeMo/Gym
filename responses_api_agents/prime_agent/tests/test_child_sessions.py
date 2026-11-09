@@ -379,6 +379,92 @@ async def test_child_legacy_run_is_not_exposed():
         await agent().run(MagicMock(), {})
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("delivered,dispose_error", [(True, False), (True, True), (False, False)])
+async def test_sdk_error_capture_survives_export_close_and_shared_grading(tmp_path, delivered, dispose_error):
+    import json
+    import shutil
+
+    if shutil.which("node") is None:
+        pytest.skip("Node is required for the actual SDK shim")
+    from nemo_gym.agents import SandboxSession
+    from resources_servers.partner_if.app import VerifyRequest
+    from resources_servers.partner_if.tests.test_prime_evidence import seed as resource_seed
+    from resources_servers.partner_if.tests.test_prime_evidence import server as resource_server
+    from responses_api_agents.prime_agent.tests.test_child_runtime import sdk_error_capture
+
+    captured = sdk_error_capture(tmp_path, delivered=delivered, dispose_error=dispose_error)
+    assert captured["termination"] == "error"
+    instance = agent(artifact_directory=str(tmp_path / "captures"))
+    from nemo_gym.sandbox import SandboxExecResult
+
+    sandbox = AsyncMock()
+    sandbox.exec.return_value = SandboxExecResult(return_code=0, stdout="", stderr="")
+    session = SandboxSession(sandbox=sandbox, session_dir="/tmp/session", workdir="/repo", harness="test")
+    state = ChildSession(request=seed(), runtime="/runtime", session=session)
+
+    async def execute(**kwargs):
+        return await kwargs["collect"]()
+
+    session.execute = AsyncMock(side_effect=execute)
+    instance._build_models_config = MagicMock(return_value={})
+
+    async def read(sandbox, *, path):
+        if path.endswith("capture.json"):
+            return json.dumps(captured)
+        raise FileNotFoundError(path)  # Optional diagnostics must not erase the capture.
+
+    with patch("responses_api_agents.prime_agent.child_app.read_text", AsyncMock(side_effect=read)):
+        reply = await instance._execute_child(state, NeMoGymResponseCreateParamsNonStreaming(input="Send findings"))
+    assert reply.status == "failed" and reply.error is not None
+    assert state.observations.records[0].status == "failed"
+    assert list((tmp_path / "captures").glob("*/capture.json"))
+    assert state.observations.gaps
+    closed = await instance._close_agent_session_state(state)
+    assert closed.agent_observations.records
+
+    resources = resource_server()
+    contract = {
+        "task_id": "synthetic",
+        "origin": "synthetic",
+        "source": "authored test",
+        "rubric_version": "v1",
+        "audit_signoff": True,
+        "data_kind": "synthetic_smoke",
+        "evidence_mode": "live_agent",
+        "rubrics": [
+            {
+                "id": "send",
+                "constraint": "Deliver findings",
+                "verifier": {
+                    "id": "text_contains_v1",
+                    "params": {"source": "artifact:parent_reports", "literal": "Task-specific findings"},
+                },
+            }
+        ],
+    }
+    body = VerifyRequest.model_validate(
+        {
+            "responses_create_params": {"input": [{"role": "user", "content": "Send findings"}]},
+            "response": reply.model_dump(),
+            "verifier_metadata": {"partner_if": contract},
+        }
+    )
+    seeded = resource_seed().model_copy(
+        update={"task_data": {"verifier_metadata": body.verifier_metadata.model_dump(mode="json")}}
+    )
+    resources._seeds[seeded.resources_session_id] = seeded
+    resources._sandboxes[seeded.resources_session_id] = AsyncMock()
+    with patch("resources_servers.partner_if.prime_app.read_text", AsyncMock(return_value=json.dumps(captured))):
+        graded = await resources.verify(
+            Request({"type": "http", "session": {"session_id": seeded.resources_session_id}}), body
+        )
+    assert graded.mask_sample is (not delivered)
+    assert graded.evaluation_completed is delivered
+    if delivered:
+        assert graded.reward == 1
+
+
 def test_text_blocks_are_preserved_and_multimodal_inputs_are_refused():
     instance = agent()
     instance.validate_input(

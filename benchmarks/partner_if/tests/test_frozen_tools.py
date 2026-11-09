@@ -77,6 +77,29 @@ def test_source_search_uses_actual_frozen_bytes_and_rejects_shell_options():
         tool.search(["x", "/etc/passwd"], "")
 
 
+def test_search_requires_complete_content_but_inventory_listing_does_not():
+    inventory = {"root": "/repo", "paths": ["a.py", "b.py", "ignored.md"]}
+    tool = ReadonlyTools({"/repo/a.py": "no match"}, {}, source_inventory=inventory, workspace_listing=True)
+    with pytest.raises(CoverageGap, match="not captured"):
+        tool.search(["needle", "/repo"], "")
+    with pytest.raises(CoverageGap, match="not captured"):
+        tool.search(["needle", "/repo/*.py"], "")
+    assert tool.search(["needle", "/repo/a.py"], "")[2] == 1
+    assert set(tool.search(["--files", "/repo"], "")[0].splitlines()) == {
+        "/repo/a.py",
+        "/repo/b.py",
+        "/repo/ignored.md",
+    }
+    tool.files["/repo/b.py"] = "needle"
+    # The missing markdown file is excluded by rg's actual glob semantics.
+    stdout, stderr, code = tool.search(["-g", "*.py", "needle", "/repo"], "")
+    assert code == 0 and not stderr and "needle" in stdout
+    with pytest.raises(CoverageGap, match="not captured"):
+        tool.search(["needle", "/repo"], "")
+    tool.files["/repo/ignored.md"] = "nothing"
+    assert tool.search(["needle", "/repo"], "")[2] == 0
+
+
 def test_generated_transcript_contains_actual_messages_only():
     fixture = state()
     messages = [{"role": "user", "content": "synthetic request"}]
