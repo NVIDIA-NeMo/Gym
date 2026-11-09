@@ -240,7 +240,9 @@ def setup():
         timeout=30,
         context_window=32000,
         max_output_tokens=4096,
-        session_close_timeout_seconds=1,
+        # Bounds every close-phase step, including the artifact capture each HTTP-flow test runs; 1 s flaked on loaded
+        # CI runners. A test of the close deadline itself sets agent.config.session_close_timeout_seconds locally.
+        session_close_timeout_seconds=30,
     )
     module = "responses_api_agents.opencode_agent.app"
     with (

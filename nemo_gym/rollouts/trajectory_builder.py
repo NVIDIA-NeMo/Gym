@@ -17,9 +17,9 @@
 from __future__ import annotations
 
 import logging
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Iterable, Sequence
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Literal, Optional
 
 from nemo_gym.artifacts.rollout_rows import (
     _strip_capture_payloads,
@@ -30,7 +30,11 @@ from nemo_gym.config.global_config import (
 )
 from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
 from nemo_gym.core.episode_types import TaskId, is_materialized_task_row
+from nemo_gym.core.failure_records import FailureEvent
+from nemo_gym.core.failure_transport import FailureReportRow
 from nemo_gym.data.task_materialization import TASK_ID_FIELDS
+from nemo_gym.trajectory.tool_timing import normalize_tool_calls, tool_snapshot_advances, tool_snapshot_output
+from nemo_gym.trajectory.trajectory_format import project_result_v1, project_trajectory_v1, validate_failure_events
 from nemo_gym.trajectory.trajectory_record import (
     NG_AGENT_OBSERVATIONS_KEY,
     NG_TRAJECTORY_KEY,
@@ -127,6 +131,7 @@ def _turns_from_model_calls(
     *,
     verifier_invocations: Iterable[VerifierInvocation] = (),
     compactions: Sequence[ContextCompactionObservation] = (),
+    include_payloads: bool = True,
 ) -> list[TrajectoryTurn]:
     """Build policy turns from captured calls for an agent that sent no trajectory.
 
@@ -188,9 +193,9 @@ def _turns_from_model_calls(
                 rollout_id=rollout_id,
                 turn_no=turn_counts[invocation_id],
                 timestamp=call.started_at or call.completed_at or 0.0,
-                question=question,
-                answer=answer,
-                reasoning_content=reasoning,
+                question=question if include_payloads else None,
+                answer=answer if include_payloads else None,
+                reasoning_content=reasoning if include_payloads else None,
                 step_count=tool_counts[invocation_id],
                 model_calls=[
                     ModelCallRef(
@@ -207,13 +212,20 @@ def _turns_from_model_calls(
     return turns
 
 
-def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> TrajectoryRecord:
+def _build_trajectory_record(
+    row: dict[str, Any],
+    result: dict[str, Any],
+    *,
+    schema_version: Literal["1.0", "2.0"] | None = None,
+    include_payloads: bool = True,
+) -> TrajectoryRecord:
     task_id, rollout_id = _trajectory_identity(row)
     gaps: list[ObservationGap] = []
     invocations: list[AgentInvocation] = []
     verifier_invocations: list[VerifierInvocation] = []
     turns: list[TrajectoryTurn] = []
-    tools: list[TrajectoryToolCall] = []
+    tools: list[ToolCallObservation] = []
+    failure_events: dict[str, dict[str, Any]] = {}
     model_calls: list[TrajectoryModelCall] = []
     compactions: list[ContextCompactionObservation] = []
 
@@ -241,12 +253,25 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
             gaps.extend(trajectory.gaps)
             invocations = trajectory.invocations
             verifier_invocations = trajectory.verifier_invocations
-            tools = trajectory.tool_calls
+            tools = list(trajectory.tool_calls)
+            failure_events = dict(trajectory.failure_events)
             model_calls = trajectory.model_calls
         except Exception as exc:
             gaps.append(ObservationGap(code="producer_trajectory_invalid", detail=type(exc).__name__))
 
+    previous_tool_outputs: dict[tuple[str, str], list[Any]] = defaultdict(list)
+    for tool in tools:
+        if tool.span_id is None:
+            # Legacy records take their model-visible output from their own transcript.
+            # Resolve that snapshot before applying an incoming outcome, so an old
+            # transcript cannot overwrite a newly completed snapshot afterwards.
+            source_output = tool_snapshot_output(tool, invocations)
+            if source_output is not None:
+                tool.output = source_output
+        previous_tool_outputs[(tool.invocation_id, tool.tool_call_id)].append(tool.output)
     observations_read = False
+    observation_gaps: list[ObservationGap] = []
+    observed_invocations: list[AgentInvocation] = []
     raw_observations = result.get(NG_AGENT_OBSERVATIONS_KEY)
     if raw_observations is not None:
         try:
@@ -254,38 +279,85 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
             compactions = [
                 record for record in observations.records if isinstance(record, ContextCompactionObservation)
             ]
-            gaps.extend(observations.gaps)
+            observation_gaps = observations.gaps
             observed_invocations = [record for record in observations.records if isinstance(record, AgentInvocation)]
-            producer_invocation_ids = {record.invocation_id for record in invocations}
-            invocations.extend(
-                record for record in observed_invocations if record.invocation_id not in producer_invocation_ids
-            )
-            observed_tools = [record for record in observations.records if isinstance(record, ToolCallObservation)]
-            if observed_tools:
-                outputs = {
-                    (invocation.invocation_id, item.call_id): item.output
-                    for invocation in invocations
-                    for item in invocation.conversation
-                    if getattr(item, "type", None) in {"function_call_output", "custom_tool_call_output"}
-                }
-                positions = {(tool.invocation_id, tool.tool_call_id): index for index, tool in enumerate(tools)}
-                for observed in observed_tools:
-                    key = (observed.invocation_id, observed.tool_call_id)
-                    position = positions.get(key)
-                    existing = tools[position] if position is not None else None
-                    merged = existing.model_dump(mode="json") if existing is not None else {}
+            invocation_by_id = {record.invocation_id: record for record in invocations}
+            conflicting_invocations: set[str] = set()
+            for record in observed_invocations:
+                retained = invocation_by_id.get(record.invocation_id)
+                if retained is None:
+                    invocations.append(record)
+                    invocation_by_id[record.invocation_id] = record
+                elif retained.agent_instance is None:
+                    retained.agent_instance = record.agent_instance
+                elif record.agent_instance is not None and retained.agent_instance != record.agent_instance:
+                    conflicting_invocations.add(record.invocation_id)
+                    gaps.append(
+                        ObservationGap(
+                            code="invocation_agent_instance_conflict",
+                            invocation_id=record.invocation_id,
+                            agent_instance=record.agent_instance,
+                        )
+                    )
+            # Preserve conflicting snapshots in the raw bundle; they cannot supply tools
+            # for the retained invocation owner. Unrelated observations remain usable.
+            observed_tools = [
+                record
+                for record in observations.records
+                if isinstance(record, ToolCallObservation) and record.invocation_id not in conflicting_invocations
+            ]
+            # Canonical tools merge by execution-attempt identity after capture is available.
+            # Keep the v1 single-call update behavior only for records that have no attempt identity.
+            for observed in observed_tools:
+                existing = next(
+                    (
+                        tool
+                        for tool in tools
+                        if tool.span_id is None
+                        and observed.span_id is None
+                        and tool.invocation_id == observed.invocation_id
+                        and tool.tool_call_id == observed.tool_call_id
+                    ),
+                    None,
+                )
+                if existing is not None:
+                    merged_tool = existing.model_dump(mode="json")
                     update = observed.model_dump(mode="json", exclude_none=True)
-                    if existing is not None and observed.status == "unknown" and existing.status != "unknown":
+                    advances = tool_snapshot_advances(existing.status, observed.status)
+                    if observed.status != existing.status and not advances:
                         update.pop("status", None)
-                    merged.update(update)
-                    if key in outputs:
-                        merged["output"] = outputs[key]
-                    projected = TrajectoryToolCall.model_validate(merged)
-                    if position is None:
-                        positions[key] = len(tools)
-                        tools.append(projected)
-                    else:
-                        tools[position] = projected
+                        if observed.status not in {"unknown", "incomplete"}:
+                            observation_gaps.append(
+                                ObservationGap(code="tool_outcome_conflict", invocation_id=observed.invocation_id)
+                            )
+                    snapshot_output = tool_snapshot_output(observed, observed_invocations)
+                    unique_request = (
+                        sum(
+                            record.invocation_id == observed.invocation_id
+                            and record.tool_call_id == observed.tool_call_id
+                            for record in observed_tools
+                        )
+                        == 1
+                    )
+                    if (
+                        unique_request
+                        and snapshot_output is not None
+                        and (advances or existing.output is None and existing.status == observed.status)
+                    ):
+                        update["output"] = snapshot_output
+                    elif (
+                        unique_request
+                        and snapshot_output is not None
+                        and existing.status == observed.status
+                        and existing.output != snapshot_output
+                    ):
+                        observation_gaps.append(
+                            ObservationGap(code="tool_output_ambiguous", invocation_id=observed.invocation_id)
+                        )
+                    merged_tool.update(update)
+                    tools[tools.index(existing)] = TrajectoryToolCall.model_validate(merged_tool)
+                else:
+                    tools.append(observed)
             observations_read = True
         except Exception as exc:
             gaps.append(ObservationGap(code="agent_observations_invalid", detail=type(exc).__name__))
@@ -323,11 +395,11 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
                 "local_response_reason",
                 "failure_report",
                 "model_operations",
-                "error_category",
-                "latency_ttft_ms",
                 "requested_max_tokens",
                 "applied_max_tokens",
                 "output_budget_refit",
+                "error_category",
+                "latency_ttft_ms",
             )
             if raw_call.get(key) is not None
         }
@@ -336,6 +408,8 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
             metadata.setdefault("response_status", response["status"])
         projected = TrajectoryModelCall(
             model_call_id=model_call_id,
+            agent_instance=raw_call.get("agent_instance"),
+            clock_domain=raw_call.get("clock_domain"),
             client_session_id=raw_call.get("client_session_id"),
             client_assistant_message_id=raw_call.get("client_assistant_message_id"),
             started_at=raw_call.get("started_at"),
@@ -414,6 +488,7 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
             result.get("resolved"),
             verifier_invocations=verifier_invocations,
             compactions=compactions,
+            include_payloads=include_payloads,
         )
     if not model_calls:
         gaps.append(ObservationGap(code="model_calls_unavailable"))
@@ -426,7 +501,108 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
     if not any(invocation.conversation for invocation in invocations):
         gaps.append(ObservationGap(code="conversation_unavailable"))
 
+    # Canonical-only saved trajectories are replayable without their original envelope.
+    # Prefer already validated canonical events on ID conflicts, retaining an explicit gap.
+    report = FailureReportRow.report(result)
+    if report.omitted:
+        gaps.append(ObservationGap(code="failure_report_unavailable"))
+    for supplied in (
+        result.get("failure_events"),
+        {key: event.model_dump(mode="json") for key, event in report.events.items()},
+    ):
+        if supplied is None:
+            continue
+        if not isinstance(supplied, dict):
+            gaps.append(ObservationGap(code="failure_events_invalid"))
+            continue
+        combined = dict(failure_events)
+        conflicts = []
+        try:
+            for event_id, event in supplied.items():
+                incoming = FailureEvent.model_validate({"event_id": event_id, **event}).model_dump(mode="json")
+                if event_id in combined:
+                    retained = FailureEvent.model_validate({"event_id": event_id, **combined[event_id]}).model_dump(
+                        mode="json"
+                    )
+                    if retained != incoming:
+                        conflicts.append(event_id)
+                else:
+                    combined[event_id] = event
+            validate_failure_events(combined)
+        except (ValueError, TypeError, KeyError):
+            gaps.append(ObservationGap(code="failure_events_invalid"))
+            continue
+        failure_events = combined
+        for event_id in conflicts:
+            gaps.append(ObservationGap(code="failure_event_conflict", detail=event_id))
+            # The event map retains canonical evidence; a conflicting producer cannot
+            # establish which event an imported reference meant.
+            tools = [
+                tool.model_copy(update={"failure_id": None})
+                if tool.failure_id == event_id and not isinstance(tool, TrajectoryToolCall)
+                else tool
+                for tool in tools
+            ]
+    tools, tool_gaps = normalize_tool_calls(
+        tools,
+        capture_key=rollout_id,
+        producer_id=raw_observations.get("source", "trajectory")
+        if isinstance(raw_observations, dict)
+        else "trajectory",
+        model_calls=model_calls,
+        invocations=invocations,
+        failure_events=failure_events,
+        observation_gaps=observation_gaps,
+        observation_invocations=observed_invocations,
+    )
+    # A retained invocation may precede the bundle's newer tool snapshot. Keep its
+    # typed result coherent with the accepted attempt without replacing unrelated
+    # conversation text or any independently captured model request/response.
+    for invocation in invocations:
+        for item in invocation.conversation:
+            if getattr(item, "type", None) not in {"function_call_output", "custom_tool_call_output"}:
+                continue
+            matching = [
+                tool
+                for tool in tools
+                if tool.invocation_id == invocation.invocation_id
+                and tool.tool_call_id == item.call_id
+                and (invocation.agent_instance is None or tool.agent_instance in {None, invocation.agent_instance})
+            ]
+            previous = previous_tool_outputs.get((invocation.invocation_id, item.call_id), [])
+            if (
+                len(matching) == 1
+                and matching[0].output is not None
+                and len(previous) == 1
+                and previous[0] != matching[0].output
+            ):
+                item.output = matching[0].output
+
+    gaps.extend(tool_gaps)
+    gaps = [
+        gap
+        for gap in gaps
+        if not (
+            gap.code == "tool_completion_unavailable"
+            and gap.span_id is not None
+            and len(matches := [tool for tool in tools if gap.matches_tool(tool)]) == 1
+            and matches[0].status not in {"unknown", "incomplete"}
+            and (matches[0].completed_at is not None or any(t.completed_at is not None for t in matches[0].timings))
+        )
+    ]
+    version = (
+        "2.0"
+        if (
+            isinstance(raw_observations, dict)
+            and raw_observations.get("schema_version") == "2.0"
+            or isinstance(raw_trajectory, dict)
+            and raw_trajectory.get("schema_version") == "2.0"
+        )
+        else "1.0"
+    )
     return TrajectoryRecord(
+        schema_version=schema_version or version,
+        failure_events=failure_events if (schema_version or version) == "2.0" else {},
         task_id=task_id,
         rollout_id=rollout_id,
         invocations=invocations,
@@ -434,13 +610,38 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
         turns=turns,
         model_calls=model_calls,
         tool_calls=tools,
-        gaps=list({(gap.code, gap.invocation_id, gap.detail): gap for gap in gaps}.values()),
+        gaps=list(
+            {(gap.code, gap.agent_instance, gap.invocation_id, gap.span_id, gap.detail): gap for gap in gaps}.values()
+        ),
     )
 
 
-def _attach_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> None:
+def _attach_trajectory_record(
+    row: dict[str, Any],
+    result: dict[str, Any],
+    *,
+    schema_version: Literal["1.0", "2.0"] | None = None,
+    include_payloads: bool = True,
+) -> None:
     try:
-        result[NG_TRAJECTORY_KEY] = _build_trajectory_record(row, result).model_dump(mode="json")
+        record = _build_trajectory_record(
+            row, result, schema_version=schema_version, include_payloads=include_payloads
+        )
+        trajectory = record.model_dump(mode="json", context={"defer_v1_projection": True})
+        if record.schema_version == "1.0":
+            raw_bundle = result.get(NG_AGENT_OBSERVATIONS_KEY)
+            try:
+                if raw_bundle is not None:
+                    AgentObservationBundle.model_validate(raw_bundle)
+            except (ValueError, TypeError):
+                # The builder retained the validation gap. Keep the malformed raw evidence
+                # and decline ID changes when its reference constraints cannot be read.
+                trajectory = project_trajectory_v1(trajectory, restore_native_ids=False)
+            else:
+                trajectory, bundle = project_result_v1(trajectory, raw_bundle)
+                if bundle is not None:
+                    result[NG_AGENT_OBSERVATIONS_KEY] = bundle
+        result[NG_TRAJECTORY_KEY] = trajectory
     except Exception as exc:
         result.pop(NG_TRAJECTORY_KEY, None)
         logger.warning("Could not project standardized trajectory evidence.", exc_info=True)

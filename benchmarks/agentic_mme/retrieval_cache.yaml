@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Overlay added after a live retrieval overlay (retrieval_serpapi.yaml, retrieval_tavily_serpapi_lens.yaml, ...):
+# answer google_search / google_lens_search / fetch_webpage from a shared on-disk cache of earlier
+# provider responses before calling the provider, and write misses back. Search hits are exact
+# (normalised query) only. Fuzzy matching (token_sort_ratio >= cache_fuzzy_threshold over the FTS5
+# index at <cache_root>/index/master.db, rejected when the queries' numbers differ) is off: it can
+# serve another question's results (capital of australia vs austria). Enable it only for cost-bound
+# runs, with a strict threshold; a fuzzy hit tells the model which query it matched. Set
+# cache_write: false to only read. Rebuild master.db between runs:
+# python -m responses_api_agents.agentic_mme_agent.search_cache <cache dir>
+# AGENTIC_MME_SEARCH_CACHE is required: with no default, a run that lists this overlay but misses the
+# variable fails at configuration time instead of silently sending every query to the provider.
+agentic_mme_agent:
+  responses_api_agents:
+    agentic_mme_agent:
+      retrieval:
+        cache_root: ${oc.env:AGENTIC_MME_SEARCH_CACHE}
+        cache_fuzzy_threshold: 0
+        cache_write: true
