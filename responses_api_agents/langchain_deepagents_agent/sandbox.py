@@ -71,6 +71,11 @@ class DeepAgentsSandboxSession(AgentSessionState):
             )
 
         async def collect() -> dict[str, Any]:
+            if self.session.expired_before_launch:
+                return {
+                    "status": "incomplete", "stop_reason": "wall_time", "model_error": None,
+                    "messages": [], "model_calls": 0, "usages": [],
+                }
             try:
                 return json.loads(await read_text(self.session.sandbox, path=output_path))
             except Exception as error:

@@ -44,6 +44,7 @@ from nemo_gym.agents import (
     AgentSessionSetupError,
     AgentSessionState,
     SandboxSession,
+    SimpleResponsesAPIAgent,
     assert_model_url_reachable_from_sandbox,
     resolve_agent_timeout,
 )
@@ -61,7 +62,7 @@ from nemo_gym.core import (
     observe_failure,
     sdk_error_details,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, create_provider, resolve_provider_config
+from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, create_provider, resolve_provider_config, resolve_provider_metadata
 from nemo_gym.trajectory import AgentObservationBundle, ObservationGap, SandboxObservation
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.langchain_deepagents_agent.responses_langchain_bridge import (
@@ -181,6 +182,8 @@ class DeepAgentsAgentConfig(SimpleAgentConfig):
 
 def _usage(output: Mapping[str, Any]) -> Optional[NeMoGymResponseUsage]:
     """The run's total usage, or None unless every model call returned with usage."""
+    if output.get("usage_incomplete"):
+        return None
     usages = output.get("usages") or []
     if len(usages) != output.get("model_calls") or any(usage is None for usage in usages):
         return None
@@ -224,6 +227,10 @@ class DeepAgentsAgent(SimpleAgent):
         if self.config.tool_profile == "tavily_search":
             self.agent = self.build_agent(GymResponsesChatModel(agent=self))
 
+    async def retire_agent_session(self, session_key: str) -> None:
+        """Release the graph and sandbox before retiring a checkpoint attempt."""
+        await SimpleResponsesAPIAgent.retire_agent_session(self, session_key)
+
     def build_agent(self, model: BaseChatModel) -> Any:
         """Build the in-process graph once; subclasses may still provide their own graph."""
         model.profile = {"max_input_tokens": self.config.max_input_tokens}
@@ -258,7 +265,8 @@ class DeepAgentsAgent(SimpleAgent):
                 raise AgentSeedRejectedError("Sandboxed DeepAgents requires an absolute sandbox workdir")
             provider_ref, workdir = access.connection.provider_config_ref, access.workdir
         try:
-            provider_config = resolve_provider_config(provider_ref, get_global_config_dict())
+            global_config = get_global_config_dict()
+            provider_config = resolve_provider_config(provider_ref, global_config)
             # The runner calls the Model Server from inside the sandbox, which cannot reach a loopback address.
             assert_model_url_reachable_from_sandbox(
                 self.resolve_model_base_url(self.config.model_server.name, body.episode_id.capture_key),
@@ -272,6 +280,13 @@ class DeepAgentsAgent(SimpleAgent):
                     "ttl_s",
                     self.config.sandbox_install_timeout_seconds + self.config.sandbox_runner_timeout_seconds + 600,
                 )
+                sandbox_config["metadata"] = {
+                    **resolve_provider_metadata(provider_ref, global_config),
+                    **(sandbox_config.get("metadata") or {}),
+                    "gym-agent": "deepagents",
+                    "gym-session": body.agent_session_id[:63],
+                    "gym-rollout": body.episode_id.capture_key[:63],
+                }
                 spec = SandboxSpec(**sandbox_config)
             provider = create_provider(provider_config)
         except (TypeError, ValueError) as error:
@@ -279,7 +294,6 @@ class DeepAgentsAgent(SimpleAgent):
         try:
             if access is None:
                 sandbox = AsyncSandbox(provider)
-                await sandbox.start(spec)
             else:
                 sandbox = await AsyncSandbox.connect(access.connection.descriptor, provider=provider)
         except BaseException:
@@ -314,6 +328,9 @@ class DeepAgentsAgent(SimpleAgent):
             sandbox_id=sandbox.sandbox_id,
         )
         try:
+            if access is None:
+                await sandbox.start(spec)
+                state.sandbox_id = sandbox.sandbox_id
             await state.install_runtime(timeout=self.config.sandbox_install_timeout_seconds)
         except BaseException as error:
             try:
@@ -512,6 +529,10 @@ class DeepAgentsAgent(SimpleAgent):
         if rollout_id != state.request.episode_id.capture_key:
             raise HTTPException(409, "Activation rollout does not match the seeded agent session")
         if state.activation is None:
+            if isinstance(state, DeepAgentsSandboxSession) and body.tools:
+                raise HTTPException(
+                    422, "Sandboxed DeepAgents runs only deepagents' own tools; the request declares tools"
+                )
             # Bound before the first await, so a retry that arrives meanwhile joins this run.
             state.activation_request = body.model_copy(deep=True)
 

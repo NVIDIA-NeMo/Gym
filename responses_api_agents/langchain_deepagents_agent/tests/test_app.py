@@ -877,3 +877,17 @@ async def test_missing_usage_stays_unknown_across_in_process_model_calls(missing
 
     await RunnableLambda(invoke_model).ainvoke({}, config=_run_config(holder))
     assert agent.server_client.post.await_count == 3
+
+
+async def test_retirement_cancels_a_shielded_in_process_graph():
+    agent = _make_agent()
+    started, order = asyncio.Event(), []
+    request = await _seed_with_graph(agent, _hanging_graph(started, order))
+    activation = asyncio.create_task(
+        agent.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="go"))
+    )
+    await asyncio.wait_for(started.wait(), 10)
+    await agent.retire_agent_session("agent-session")
+    with pytest.raises(asyncio.CancelledError):
+        await activation
+    assert order == ["cancelled"]

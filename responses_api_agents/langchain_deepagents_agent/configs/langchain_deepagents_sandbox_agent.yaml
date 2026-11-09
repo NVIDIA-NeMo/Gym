@@ -1,3 +1,7 @@
+use_absolute_ip: true
+absolute_ip_server_types:
+  - responses_api_models
+
 # DeepAgents in a task sandbox: the one the resources server lends the session, or one the agent starts from
 # sandbox_provider. It runs only in agent sessions, so an Environment Server composes it with a benchmark.
 # langchain_deepagents_agent.yaml runs the in-process graph with Tavily search instead.

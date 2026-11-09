@@ -83,6 +83,7 @@ class SandboxResponsesChatModel(ResponsesChatModel):
     request_defaults: dict[str, Any] = Field(default_factory=dict)
     # Model calls the graph made, and the usage of each that returned (None where a response had no usage).
     calls: int = 0
+    usage_incomplete: bool = False
     usages: list[dict[str, Any] | None] = Field(default_factory=list)
 
     async def create_response(self, request_body: dict[str, Any]) -> dict[str, Any]:
@@ -92,7 +93,12 @@ class SandboxResponsesChatModel(ResponsesChatModel):
             try:
                 async with self.http.post(self.url, json=request) as response:
                     if response.status < 400:
-                        body = await response.json(content_type=None)
+                        try:
+                            body = await response.json(content_type=None)
+                        except (aiohttp.ClientError, TimeoutError):
+                            # Successful headers may precede a generation whose usage we never receive.
+                            self.usage_incomplete = True
+                            raise
                         self.usages.append(body.get("usage"))
                         return body
                     failure: Exception = ModelRequestError(response.status, await response.text())
@@ -237,6 +243,7 @@ async def run(payload: dict[str, Any], scratch: Path) -> dict[str, Any]:
         "messages": messages_to_dict(messages[len(input_messages) :]),
         "model_calls": model.calls,
         "usages": model.usages,
+        "usage_incomplete": model.usage_incomplete,
     }
 
 

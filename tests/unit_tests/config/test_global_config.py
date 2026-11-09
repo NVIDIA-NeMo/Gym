@@ -3501,7 +3501,7 @@ class TestComposeUnboundAgent:
             ("hermes_agent", ["mcp"]),
             ("opencode_agent", ["mcp"]),
             ("pool_agent", ["mcp"]),
-            ("langchain_deepagents_agent", []),
+            ("langchain_deepagents_agent", ["direct_http"]),
         ],
     )
     def test_swap_to_agent_with_sessions_keeps_single_agent_turn_legacy(
@@ -3520,6 +3520,8 @@ class TestComposeUnboundAgent:
         servers = config["gpqa_mcqa_environment_server"]["environment_servers"]
         assert list(servers) == ["single_agent_turn_legacy"]
         server_before["agent_server"]["name"] = f"gpqa_mcqa_{harness_type}"
+        if harness_type == "langchain_deepagents_agent":
+            server_before["resources_tool_transports"] = []
         assert OmegaConf.to_container(servers["single_agent_turn_legacy"]) == server_before
 
     def test_agent_session_agent_types_match_the_agent_apps(self) -> None:

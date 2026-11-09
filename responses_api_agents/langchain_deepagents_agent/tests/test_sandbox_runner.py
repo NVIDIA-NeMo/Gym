@@ -281,3 +281,41 @@ async def test_deleted_scratch_is_recreated_before_the_next_command(workdir):
     result = await shell.aexecute("echo recovered")
     assert result.exit_code == 0
     assert result.output == "recovered\n"
+
+
+async def test_success_body_interruption_keeps_usage_unknown_after_recovery(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    import aiohttp
+
+    from responses_api_agents.langchain_deepagents_agent.app import _usage
+    from responses_api_agents.langchain_deepagents_agent.tests.fakes import USAGE
+
+    class Reply:
+        status = 200
+        headers = {}
+
+        def __init__(self, read):
+            self.json = read
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+    replies = iter([
+        Reply(AsyncMock(side_effect=aiohttp.ClientPayloadError("truncated"))),
+        Reply(AsyncMock(return_value={"usage": USAGE})),
+        Reply(AsyncMock(return_value={"usage": USAGE})),
+    ])
+    model = sandbox_runner.SandboxResponsesChatModel(
+        http=SimpleNamespace(post=lambda *args, **kwargs: next(replies)), url="http://model/responses"
+    )
+    monkeypatch.setattr(sandbox_runner, "_retry_delay", lambda *args: 0)
+    for _ in range(2):
+        await model.create_response({})
+        assert _usage({"model_calls": model.calls, "usages": model.usages, "usage_incomplete": model.usage_incomplete}) is None
+    assert model.calls == 2
+    assert model.usages == [USAGE, USAGE]
