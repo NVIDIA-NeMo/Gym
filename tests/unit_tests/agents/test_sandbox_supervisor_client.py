@@ -71,6 +71,17 @@ async def test_file_transport_keeps_contents_out_of_shell(session):
     sandbox.exec.assert_not_awaited()
 
 
+async def test_text_transfer_writes_utf8_and_reads_line_endings_as_newlines(session):
+    sandbox, session_dir = session
+    path = str(session_dir / "prompt.txt")
+    text = "caf\u00e9 \u2713 \u56fe\n"
+    await upload_text(sandbox, path=path, text=text)
+    assert Path(path).read_bytes() == text.encode("utf-8")
+    assert await read_text(sandbox, path=path) == text
+    Path(path).write_bytes(b"windows\r\nprogress\rdone\n")
+    assert await read_text(sandbox, path=path) == "windows\nprogress\ndone\n"
+
+
 async def test_byte_transfer_keeps_binary_contents_unchanged(session):
     sandbox, session_dir = session
     sandbox.exec = AsyncMock(side_effect=AssertionError("file transfer must not invoke a shell"))

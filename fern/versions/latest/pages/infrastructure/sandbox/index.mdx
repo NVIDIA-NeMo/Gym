@@ -277,6 +277,8 @@ Use `files` for small files that should exist before the first command runs.
 A `str` value is written as UTF-8 text, and a `bytes` value, such as an image, is written unchanged:
 
 ```python
+from pathlib import Path
+
 spec = SandboxSpec(
     image="ghcr.io/example/eval-image:py312",
     workdir="/workspace",
@@ -296,26 +298,27 @@ await sandbox.download("/workspace/log.txt", output_path)
 
 `upload()` and `download()` operate on files. If you need structured values, serialize them locally before uploading and parse the downloaded file locally after the sandbox command completes.
 
-To write in-memory content into a sandbox that is already running, use `upload_bytes()` or `upload_text()` from `nemo_gym.sandbox`.
-Both go through `upload()`, so the content never passes through a shell:
+To move in-memory content into or out of a sandbox that is already running, use `upload_bytes()` and `download_bytes()`, or `upload_text()` and `read_text()` for UTF-8 text, from `nemo_gym.sandbox`.
+They go through `upload()` and `download()`, so the content never passes through a shell:
 
 ```python
-from nemo_gym.sandbox import upload_bytes, upload_text
+from nemo_gym.sandbox import download_bytes, upload_bytes, upload_text
 
 await upload_bytes(sandbox, path="/workspace/figure.png", data=image_bytes)
 await upload_text(sandbox, path="/workspace/notes.md", text="# Notes\n")
+plot = await download_bytes(sandbox, path="/workspace/plot.png")
 ```
 
-For media decoded from a prompt with `nemo_gym.core.split_text_and_media`, `upload_media()` writes each file into a directory and returns the sandbox paths, named by media type, to pass to a harness.
-`download_media()` reads one back as a `MediaFile`, taking the media type from the file extension:
+For media in a prompt, `nemo_gym.core.split_text_and_media` decodes a message's content into its text and its media files.
+`upload_media()` writes each file into a directory, named `media-<index>` with the extension of its media type, and returns the sandbox paths to pass to a harness.
+Give each call its own directory:
 
 ```python
 from nemo_gym.core import split_text_and_media
-from nemo_gym.sandbox import download_media, upload_media
+from nemo_gym.sandbox import upload_media
 
 text, media = split_text_and_media(message.content)
 paths = await upload_media(sandbox, files=media, directory="/workspace/input-media")
-screenshot = await download_media(sandbox, path="/workspace/screenshot.png")
 ```
 
 ## Status and Cleanup
