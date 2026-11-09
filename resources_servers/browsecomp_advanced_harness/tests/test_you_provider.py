@@ -40,6 +40,7 @@ def _config(**overrides) -> app_module.TavilySearchResourcesServerConfig:
         port=8080,
         entrypoint="",
         name="",
+        search_provider="ydc",
         ydc_api_key="test_ydc_key",  # pragma: allowlist secret
         exclude_domains_file_path=_DUMMY_EXCLUDE_DOMAINS_FILE,
     )
@@ -83,8 +84,19 @@ def _mock_client(web=None, **kwargs) -> MagicMock:
 
 
 class TestYouConfig:
-    def test_you_is_default_provider(self) -> None:
+    def test_ydc_is_selected_explicitly(self) -> None:
         assert _config().search_provider == "ydc"
+
+    def test_tavily_remains_the_default_provider(self) -> None:
+        config = app_module.TavilySearchResourcesServerConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            tavily_api_key="test_tavily_key",  # pragma: allowlist secret
+            exclude_domains_file_path=_DUMMY_EXCLUDE_DOMAINS_FILE,
+        )
+        assert config.search_provider == "tavily"
 
     def test_requires_you_key(self) -> None:
         with pytest.raises(ValueError, match="ydc_api_key"):
@@ -248,6 +260,18 @@ class TestYouSearch:
         resp = await server.search(_req(), app_module.TavilySearchRequest(queries=["q"], max_total_length=200))
 
         assert "Big" not in resp.results_string
+        assert "[Title]: Small" in resp.results_string
+
+    async def test_oversized_hit_is_skipped_and_only_later_hit_is_saved_in_terminal_mode(self, tmp_path) -> None:
+        server = _server(workspace="per_session", workspace_root=str(tmp_path))
+        server._you_clients = [_mock_client([_hit("Big", highlights=["z" * 5000]), _hit("Small")])]
+
+        resp = await server.search(_req(), app_module.TavilySearchRequest(queries=["q"], max_total_length=200))
+
+        assert "Big" not in resp.results_string
+        assert "[Title]: Small" in resp.results_string
+        (page,) = (Path(tmp_path) / "test_session_id" / "pages").iterdir()
+        assert "[Title]: Small" in page.read_text()
 
     async def test_oversized_snippet_is_truncated_not_dropped(self) -> None:
         # Regression: one hit whose highlights exceed the query's budget slice used to end
@@ -303,6 +327,29 @@ class TestYouSearch:
         (page,) = (Path(tmp_path) / "test_session_id" / "pages").iterdir()
         assert "z" * 20000 in page.read_text()
         assert "z" * 5001 not in resp.results_string
+
+    async def test_terminal_mode_budget_includes_saved_path_line(self, tmp_path) -> None:
+        server = _server(workspace="per_session", workspace_root=str(tmp_path))
+        server._you_clients = [_mock_client([_hit("Huge", highlights=["z" * 20000])])]
+
+        resp = await server.search(_req(), app_module.TavilySearchRequest(queries=["q"], max_total_length=1000))
+
+        assert len(resp.results_string) <= 1000
+        saved = resp.results_string.split("[Saved to]: ")[1].split(" ")[0]
+        page = Path(tmp_path) / "test_session_id" / saved
+        assert "z" * 20000 in page.read_text()
+
+    async def test_terminal_mode_every_query_block_fits_its_slice(self, tmp_path) -> None:
+        server = _server(workspace="per_session", workspace_root=str(tmp_path))
+        server._you_clients = [_mock_client([_hit("Huge", highlights=["z" * 20000])])]
+
+        resp = await server.search(
+            _req(), app_module.TavilySearchRequest(queries=[f"q{i}" for i in range(6)], max_total_length=6000)
+        )
+
+        blocks = resp.results_string.split("\n\n[Search Query]")
+        assert len(blocks) == 6
+        assert all(len(block) <= 1000 and "[Saved to]" in block for block in blocks)
 
     async def test_query_too_long(self) -> None:
         server = _server()

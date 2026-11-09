@@ -78,10 +78,12 @@ TOOLS = [
             "All queries will be searched in parallel. "
             "If you want to search with multiple keywords, "
             "put them in a single query. "
-            "Each result's full raw content is saved to "
+            "Each result's retrieved search content is saved to "
             "pages/<idx>_search_<slug>_rN.txt under the current workspace; "
-            "the tool response returns the per-result title, URL, snippet, "
-            "and [Saved to] path. Use bash_command to read the saved files."
+            "it may be query-relevant highlights rather than the full page. "
+            "The tool response returns the per-result title, URL, snippet, "
+            "and [Saved to] path. Use bash_command to read the saved files "
+            "or browse to fetch the full page."
         ),
         "parameters": {
             "type": "object",

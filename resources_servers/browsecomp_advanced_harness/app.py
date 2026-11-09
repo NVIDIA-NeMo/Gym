@@ -999,9 +999,20 @@ class _PageWriter:
             with self.manifest_path.open("a", encoding="utf-8") as f:
                 f.write(line)
 
+    @staticmethod
+    def _search_fname(idx, query, result_idx) -> str:
+        return f"{idx:04d}_search_{_slugify(query)}_r{result_idx}.txt"
+
+    def peek_search_path(self, query, result_idx) -> str:
+        """Path the next write_search_result call returns, without writing, so a caller can budget
+        the [Saved to] line before committing to the write (valid while no other write intervenes)."""
+        with self._lock:
+            idx = self._counter + 1
+        return f"pages/{self._search_fname(idx, query, result_idx)}"
+
     def write_search_result(self, query, result_idx, title, url, content) -> str:
         idx = self._next_idx()
-        fname = f"{idx:04d}_search_{_slugify(query)}_r{result_idx}.txt"
+        fname = self._search_fname(idx, query, result_idx)
         body = f"[Query]: {query}\n[URL]: {url}\n[Title]: {title}\n\n{content}"
         (self.pages_dir / fname).write_text(body, errors="replace")
         self._append_manifest(idx, "search", query, title, len(content))
@@ -1660,21 +1671,25 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             url = result.get("url", "") or ""
             body = self._you_result_body(result)
             header = f"[Title]: {title}\n[URL]: {url}\n[Snippet]: "
+            content = body[: self.config.max_page_bytes] if page_writer is not None and body else ""
+            # The page keeps the full highlights; only the inline snippet is capped. The
+            # [Saved to] line is budgeted up front so the whole entry stays within the slice.
+            saved_line = (
+                f"[Saved to]: {page_writer.peek_search_path(query, ri)} ({len(content)} bytes)\n" if content else ""
+            )
             # 2 = the entry's trailing newline + the "\n" that joins it to the previous block
-            room = max_length - running_len - len(header) - 2
+            room = max_length - running_len - len(header) - len(saved_line) - 2
             if len(body) <= min(_YOU_MAX_SNIPPET_CHARS, room):
                 snippet = body
             else:
                 keep = min(_YOU_MAX_SNIPPET_CHARS, room - len(_YOU_TRUNCATED))
                 if keep < _YOU_MIN_SNIPPET_CHARS:
-                    break
+                    continue  # skip only this hit; a later, shorter one may still fit
                 snippet = body[:keep] + _YOU_TRUNCATED
             entry = f"{header}{snippet}\n"
-            if page_writer is not None and body:
+            if content:
                 # Written only once the entry is known to fit, so no page lands in pages/
-                # without a [Saved to] line ever shown to the model. The page keeps the full
-                # highlights; only the inline snippet is capped.
-                content = body[: self.config.max_page_bytes]
+                # without a [Saved to] line ever shown to the model.
                 saved = page_writer.write_search_result(query, ri, title, url, content)
                 entry += f"[Saved to]: {saved} ({len(content)} bytes)\n"
             blocks.append(entry)
