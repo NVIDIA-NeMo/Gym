@@ -4150,3 +4150,22 @@ def test_missing_agent_turns_detail_is_unchanged_without_a_named_resource_limit(
     finding = _missing_turns_finding(tmp_path, **updates)
 
     assert finding.detail == {"reason": "no agent turn with model activity"}
+
+
+@pytest.mark.parametrize("schema,key", [("1.0", "rollout_id"), ("2.0", "capture_key")])
+@pytest.mark.parametrize("outer", [None, "outer"])
+def test_health_identity_falls_back_to_schema_capture_identity(schema, key, outer):
+    record = {"ng_trajectory": {"schema_version": schema, "task_id": "task", key: "capture"}}
+    if outer:
+        record[health.ROLLOUT_ID_KEY] = outer
+    assert health.evaluate_record(record, frozenset()).rollout_id == (outer or "capture")
+
+
+@pytest.mark.parametrize("status", ["timeout", "cancelled", "incomplete"])
+def test_interrupted_tool_label_preserves_failure_marker_health(tmp_path, status):
+    _, findings = _tool_call_failed_findings(
+        tmp_path,
+        [_tool_call(1, "ripgrep execution failed: spawn rg ENOENT") | {"status": status}],
+    )
+    assert len(findings) == 1
+    assert findings[0].detail["count"] == 1
