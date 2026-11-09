@@ -67,7 +67,7 @@ class MovedPath:
 # Old module path -> new module path.
 # A key also covers every submodule under it.
 MOVED_MODULES: dict[str, MovedPath] = {
-    "nemo_gym.cli_setup_command": MovedPath(new="nemo_gym.orchestration.server_venv", since="0.8.0"),
+    "nemo_gym.cli_setup_command": MovedPath(new="nemo_gym.server_runtime.server_venv", since="0.8.0"),
     "nemo_gym.benchmarks": MovedPath(new="nemo_gym.environment.benchmarks", since="0.8.0"),
     "nemo_gym.deliverables": MovedPath(new="nemo_gym.environment.deliverables", since="0.8.0"),
     "nemo_gym.registry": MovedPath(new="nemo_gym.environment.registry", since="0.8.0"),
@@ -81,8 +81,8 @@ MOVED_MODULES: dict[str, MovedPath] = {
     "nemo_gym.eval_plan": MovedPath(new="nemo_gym.eval.eval_plan", since="0.8.0"),
     "nemo_gym.comparison": MovedPath(new="nemo_gym.eval.comparison", since="0.8.0"),
     "nemo_gym.rollout_compare": MovedPath(new="nemo_gym.eval.rollout_compare", since="0.8.0"),
-    "nemo_gym.h2_ping_sidecar": MovedPath(new="nemo_gym.orchestration.h2_ping_sidecar", since="0.8.0"),
-    "nemo_gym.cli.setup_command": MovedPath(new="nemo_gym.orchestration.server_venv", since="0.8.0"),
+    "nemo_gym.h2_ping_sidecar": MovedPath(new="nemo_gym.server_runtime.h2_ping_sidecar", since="0.8.0"),
+    "nemo_gym.cli.setup_command": MovedPath(new="nemo_gym.server_runtime.server_venv", since="0.8.0"),
     "nemo_gym.testing": MovedPath(new="nemo_gym.server_runtime.testing", since="0.8.0"),
     "nemo_gym.testing.agent_session_conformance": MovedPath(
         new="nemo_gym.agents.testing.agent_session_conformance", since="0.8.0"
@@ -702,6 +702,9 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
         **_names("nemo_gym.eval.eval_plan", "0.8.0", "PlanBenchmark PlanGym build_eval_plan"),
         **_names("nemo_gym.utils.gym_commit", "0.8.0", "installed_gym_commit"),
     },
+    "nemo_gym.server_runtime.h2_ping_sidecar.config": {
+        "H2_PING_SIDECAR_KEY_NAME": MovedPath(new="nemo_gym.config.global_config", since="0.8.0"),
+    },
     "nemo_gym.cli.main": {
         # Split out of main. The asset lookup lost its leading underscore because other modules call it now.
         "_ASSETS": MovedPath(new="nemo_gym.environment.assets:ASSETS", since="0.8.0"),
@@ -712,7 +715,7 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
     "nemo_gym.cli.env": {
         # Split out of env.
         **_names(
-            "nemo_gym.orchestration.server_supervisor",
+            "nemo_gym.server_runtime.supervisor",
             "0.8.0",
             """
             RAY_ENABLE_AUTO_CONNECT_ENV_VAR_NAME ServerSpinupTimeoutError _BASE_URL_KEY_SUFFIX _ConfiguredServer
@@ -727,7 +730,7 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             """,
         ),
         # Moved, and still imported by env for its own use.
-        **_names("nemo_gym.orchestration.server_supervisor", "0.8.0", "RunHelper _resolve_server_dir"),
+        **_names("nemo_gym.server_runtime.supervisor", "0.8.0", "RunHelper _resolve_server_dir"),
         # env imported these for code that moved out of it.
         **_names("nemo_gym.client.server_client", "0.8.0", "ServerClient ServerStatus"),
         **_names(
@@ -740,14 +743,14 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             """,
         ),
         **_names(
-            "nemo_gym.orchestration.h2_ping_sidecar.launcher",
+            "nemo_gym.server_runtime.h2_ping_sidecar.launcher",
             "0.8.0",
             """
             H2PingSidecarManager start_h2_ping_sidecar
             """,
         ),
         **_names(
-            "nemo_gym.orchestration.server_supervisor",
+            "nemo_gym.server_runtime.supervisor",
             "0.8.0",
             """
             ListConfig _resolve_under_cwd_or_install pprint

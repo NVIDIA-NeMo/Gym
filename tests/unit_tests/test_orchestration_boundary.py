@@ -50,15 +50,9 @@ SCANNED_ROOTS = [
 ALLOWED_IMPORTERS = {CORE / "cli" / "main.py"}
 
 KNOWN_VIOLATIONS = {
-    ("benchmarks/terminal_bench_science/prepare_codex.py", "nemo_gym.orchestration"),
-    ("nemo_gym/cli/env.py", "nemo_gym.orchestration.server_supervisor"),
-    ("nemo_gym/cli/env.py", "nemo_gym.orchestration.server_venv"),
     ("nemo_gym/cli/eval.py", "nemo_gym.orchestration.jobs"),
     ("nemo_gym/cli/eval.py", "nemo_gym.orchestration.recovery"),
-    ("nemo_gym/cli/eval.py", "nemo_gym.orchestration.server_supervisor"),
     ("nemo_gym/cli/utils.py", "nemo_gym.orchestration.executors.resume_script"),
-    ("nemo_gym/config/global_config.py", "nemo_gym.orchestration.h2_ping_sidecar.config"),
-    ("nemo_gym/environment/in_process.py", "nemo_gym.orchestration.server_supervisor"),
     ("nemo_gym/eval/rollout_reverification.py", "nemo_gym.orchestration.recovery"),
     ("resources_servers/agentic_if_realworld/benchmark/core.py", "nemo_gym.orchestration.jobs"),
     ("resources_servers/agentic_if_realworld/tests/test_driver.py", "nemo_gym.orchestration"),
@@ -69,13 +63,11 @@ KNOWN_VIOLATIONS = {
     ("resources_servers/gdp_pdf/tests/test_app.py", "nemo_gym.orchestration.recovery"),
     ("resources_servers/math_with_autograder/tests/test_app.py", "nemo_gym.orchestration.recovery"),
     ("resources_servers/physics_judge/tests/test_app.py", "nemo_gym.orchestration.recovery"),
-    ("resources_servers/terminal_bench_4/tests/test_terminal_bench_science.py", "nemo_gym.orchestration"),
     (
         "responses_api_agents/harbor_agent_general/tests/test_skillsbench_observations.py",
         "nemo_gym.orchestration.recovery",
     ),
     ("responses_api_agents/miniswe_sandboxed_agent/tests/test_server.py", "nemo_gym.orchestration.recovery"),
-    ("responses_api_models/vllm_model/tests/test_runtime_policy.py", "nemo_gym.orchestration"),
 }
 
 

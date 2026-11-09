@@ -14,10 +14,10 @@ import psutil
 import pytest
 from omegaconf import OmegaConf
 
-import nemo_gym.orchestration.server_supervisor as server_supervisor
+import nemo_gym.server_runtime.supervisor as server_supervisor
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.global_config import SERVER_SHUTDOWN_TIMEOUT_SECONDS_KEY_NAME
-from nemo_gym.orchestration.server_venv import run_command
+from nemo_gym.server_runtime.server_venv import run_command
 
 
 def _runner(processes, grace_s=0.1):
