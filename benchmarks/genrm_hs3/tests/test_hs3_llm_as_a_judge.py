@@ -8,7 +8,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from benchmarks.genrm_hs3 import prepare_llm_as_a_judge as module
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 
 
 @pytest.mark.parametrize("cached", [True, False])

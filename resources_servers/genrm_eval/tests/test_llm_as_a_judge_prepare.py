@@ -8,11 +8,11 @@ from unittest.mock import Mock
 import pytest
 from omegaconf import OmegaConf
 
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from resources_servers.genrm_eval.llm_as_a_judge import prepare_llm_input
 
 
-@pytest.mark.parametrize("benchmark", ["genrm_hs4", "genrm_judgebench", "genrm_rmbench"])
+@pytest.mark.parametrize("benchmark", ["genrm_hs4", "genrm_judgebench", "genrm_rmbench", "genrm_rewardbench2"])
 @pytest.mark.parametrize("cached", [False, True])
 def test_prepare_and_config(tmp_path, monkeypatch, benchmark, cached):
     module = import_module(f"benchmarks.{benchmark}.prepare_llm_as_a_judge")
