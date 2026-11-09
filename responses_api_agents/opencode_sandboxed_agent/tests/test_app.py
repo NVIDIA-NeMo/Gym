@@ -2741,13 +2741,13 @@ async def test_unconfirmed_exec_result_is_a_typed_provider_failure_and_does_not_
     from nemo_gym.agents import AgentOutcomePolicyConfig
     from nemo_gym.core import (
         FailureClass,
+        FailureHeader,
         NgFailureEvent,
         OutcomeAction,
         StageOutcomePolicyConfig,
         choose_stage_outcome,
         failure_report_for,
     )
-    from nemo_gym.core.failure_transport import FailureHeader
     from nemo_gym.rollouts.rollout_collection import _reply_failure_kind
     from nemo_gym.sandbox import SandboxExecResult, SandboxHandle
 
