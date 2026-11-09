@@ -34,10 +34,10 @@ from uuid import uuid4
 
 import psutil
 from fastapi import HTTPException, Request
+from openai.types.responses import ResponseError
 from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.agents import (
-    AGENT_OUTCOME_METADATA_KEY,
     AGENT_TIMEOUT_METADATA_KEY,
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
@@ -50,6 +50,8 @@ from nemo_gym.agents import (
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    CleanupReceipt,
+    RunEvidence,
     SandboxCommand,
     SandboxNetworkAccess,
     SandboxSession,
@@ -509,6 +511,13 @@ _NODE_FLOOR_CHECK = (
 )
 
 
+def _lifecycle_failure(cleanup: CleanupReceipt | None) -> str | None:
+    """Why the supervised activation itself failed, so the run has no outcome to judge; ``None`` otherwise."""
+    if cleanup is None:
+        return "OpenClaw activation ended without a cleanup receipt"
+    return cleanup["error"] or None
+
+
 class OpenClawAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: Optional[ResourcesServerRef] = None
     model_server: Optional[ModelServerRef] = None
@@ -955,9 +964,9 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         ]
         if state.observations is not None:
             state.observations.gaps.extend(mcp_gaps)
-        if response.error is not None and AGENT_OUTCOME_METADATA_KEY not in (response.metadata or {}):
-            # Runtime and cleanup failures must not become gradable model outcomes.
-            raise HTTPException(502, response.error.message)
+        if (failure := _lifecycle_failure(state.session.cleanup)) is not None:
+            # A supervisor failure leaves no run to judge: the activation fails (agent_route_failed, retried).
+            raise RuntimeError(failure)
         if lost_required := [name for name in lost if name in required_grants]:
             raise HTTPException(
                 502, "Required Gym MCP tools did not connect in the agent run: " + ", ".join(lost_required)
@@ -1214,7 +1223,8 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             gaps.append(ObservationGap(code="runtime_info_unavailable"))
         if result is not None and result["return_code"] is None:
             gaps.append(ObservationGap(code="worker_exit_code_unavailable"))
-        error = result["error"] if result else "OpenClaw activation ended without a cleanup receipt"
+        lifecycle_failure = _lifecycle_failure(result)
+        timed_out = bool(result and result["timed_out"])
         last = assistants[-1] if assistants else {}
         envelope_error = meta.get("error") if isinstance(meta, dict) else None
         context_error = (
@@ -1222,28 +1232,52 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             if isinstance(envelope_error, dict) and envelope_error.get("kind") == "context_overflow"
             else None
         )
-        terminal_result = context_error if context_error is not None else last
+        problem = None
         if context_error is not None:
-            error = error or str(context_error.get("message") or "OpenClaw context overflow")
-        if last.get("stopReason") == "error" or (
-            last.get("stopReason") == "aborted" and not (result and result["timed_out"])
-        ):
-            error = error or last.get("errorMessage") or f"OpenClaw model call {last['stopReason']}"
-        if result and result["return_code"] and not result["timed_out"]:
+            problem = str(context_error.get("message") or "OpenClaw context overflow")
+        if last.get("stopReason") == "error" or (last.get("stopReason") == "aborted" and not timed_out):
+            problem = problem or last.get("errorMessage") or f"OpenClaw model call {last['stopReason']}"
+        if result and result["return_code"] and not timed_out:
             stderr = artifacts.get("stderr.log", "stderr unavailable")[-4000:]
-            error = error or f"OpenClaw exited {result['return_code']}: {stderr}"
-        incomplete = bool(result and result["timed_out"]) or last.get("stopReason") == "length"
-        if not incomplete and not error and last.get("stopReason") != "stop":
-            error = "OpenClaw produced no terminal assistant result"
-        status = "failed" if error else "incomplete" if incomplete else "completed"
+            problem = problem or f"OpenClaw exited {result['return_code']}: {stderr}"
+        if not problem and not timed_out and last.get("stopReason") not in ("stop", "length"):
+            problem = "OpenClaw produced no terminal assistant result"
+        # The worker's exit is unavailable (None) or 0 after a clean run.
+        clean_exit = bool(result) and not result["return_code"]
+        # 2026.6.11 can surface a model error by throwing FailoverError and exiting 1; it requires that terminal
+        # diagnostic as well as the assistant error, so an unrelated worker exit is not taken for the model's.
+        error_exit = bool(result) and (
+            result["return_code"] == 0
+            or (
+                result["return_code"] == 1
+                and artifacts.get("stderr.log", "").strip().rsplit("\n", 1)[-1].startswith("FailoverError: ")
+            )
+        )
+        # An idle-watchdog abort is a model transport failure; other aborts are not model errors.
+        ended_on_error = last.get("stopReason") == "error" or (
+            last.get("stopReason") == "aborted" and self.classify_outcome(last).failure_kind == MODEL_TRANSPORT_ERROR
+        )
+        evidence = RunEvidence(
+            has_result=clean_exit and last.get("stopReason") == "stop",
+            timed_out=timed_out,
+            # The synthetic CLI mirror is excluded from ``assistants``; without a transcript nothing can be told.
+            model_replied=(
+                any(message.get("stopReason") not in ("error", "aborted") for message in assistants)
+                if transcript_name in artifacts
+                else None
+            ),
+            # The CLI's typed envelope, decoupled from its exit status: a context overflow is graded (incomplete).
+            context_limit=context_error is not None,
+            model_limit="output" if last.get("stopReason") == "length" and clean_exit else None,
+            error=self.classify_outcome(last) if ended_on_error and error_exit else None,
+        )
         response = NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
             model=self.config.model,
             object="response",
             output=output,
-            status=status,
-            error={"code": "server_error", "message": error} if error else None,
+            status="completed",
             tool_choice=body.tool_choice,
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,
@@ -1260,6 +1294,14 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 "openclaw_version": self.config.openclaw_version,
             },
         )
+        if lifecycle_failure is not None:
+            # _sandbox_response raises it; the failed status only marks the observations.
+            response.status, response.error = "failed", ResponseError(code="server_error", message=lifecycle_failure)
+        else:
+            response = self.finish_response(response, evidence, session=state.session)
+            if response.status == "failed" and problem:
+                # The run's own reason in place of the ladder's generic one.
+                response.error = ResponseError(code="server_error", message=problem)
         input_items = [NeMoGymEasyInputMessage(role="system", content=system)] if system else []
         input_items.append(NeMoGymEasyInputMessage(role="user", content=prompt))
         try:
@@ -1276,7 +1318,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             state.observations.gaps = [
                 gap for gap in state.observations.gaps if gap.code != "subagent_hierarchy_unavailable"
             ]
-            state.observations.records[0].status = status
+            state.observations.records[0].status = response.status
             state.observations.gaps.extend(gaps)
         except Exception:
             LOG.exception("Could not build OpenClaw observations")
@@ -1284,33 +1326,6 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 source=OPENCLAW_OBSERVATION_SOURCE,
                 gaps=[ObservationGap(code="observation_capture_failed"), *gaps],
             )
-        if (
-            result
-            and (
-                result["return_code"] == 0
-                or (
-                    result["return_code"] == 1
-                    and artifacts.get("stderr.log", "").strip().rsplit("\n", 1)[-1].startswith("FailoverError: ")
-                )
-            )
-            and not result["timed_out"]
-            and not result["error"]
-            and (
-                context_error is not None
-                or last.get("stopReason") == "error"
-                or (
-                    last.get("stopReason") == "aborted"
-                    and self.classify_outcome(last).failure_kind == MODEL_TRANSPORT_ERROR
-                )
-            )
-        ):
-            # 2026.6.11 can surface model errors by throwing FailoverError and
-            # exiting 1. Require its terminal diagnostic as well as the assistant
-            # error; an unrelated worker exit must still raise. The environment
-            # owns verify/retry/fail policy for the preserved model response.
-            # An idle watchdog abort is a model failure; the supervisor's whole-run
-            # deadline and unrelated aborts must not be classified as transport errors.
-            return self.report_outcome(response, terminal_result)
         return response
 
     def model_post_init(self, __context: Any) -> None:

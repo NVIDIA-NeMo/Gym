@@ -21,8 +21,10 @@ from nemo_gym.agents import (
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
     AgentCloseSessionRequest,
+    AgentOutcome,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
+    RunEvidence,
     SandboxSession,
 )
 from nemo_gym.core import EpisodeId, NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming, TaskId
@@ -407,23 +409,27 @@ def test_unsupported_request_semantics_are_rejected(params: dict) -> None:
 TEXT = '{"type":"text","part":{"text":"partial"}}'
 
 
+# Each run's response through the outcome ladder: (status, ng_agent_outcome), or a raised lifecycle failure. Before the
+# ladder every failed row raised (HTTP 500); a run with no usable result now answers 200 failed with agent_run_error,
+# which the Environment Server still retries.
 @pytest.mark.parametrize(
     "exit_code,cleanup,stdout,expected",
     [
-        (0, receipt(), '{"type":"text","part":{"text":"55"}}', "completed"),
-        (None, receipt(return_code=-15, timed_out=True), TEXT, "incomplete"),
-        (None, receipt(return_code=-15, timed_out=True), "", "error"),
-        (None, receipt(return_code=1), "", "error"),
-        (None, receipt(return_code=1), TEXT, "error"),
-        (None, receipt(error="cleanup: lost"), TEXT, "error"),
-        (None, None, TEXT, "error"),
-        (1, receipt(return_code=1), "", "error"),
-        (0, receipt(), '{"type":"error","error":{"name":"APIError"}}', "error"),
-        (0, receipt(), "", "error"),
+        (0, receipt(), '{"type":"text","part":{"text":"55"}}', ("completed", None)),
+        (None, receipt(return_code=-15, timed_out=True), TEXT, ("incomplete", None)),
+        # A deadline before any model reply stays retried: Kilo retries an unreachable model silently.
+        (None, receipt(return_code=-15, timed_out=True), "", ("failed", "unknown")),
+        (None, receipt(return_code=1), "", ("failed", "agent_run_error")),
+        (None, receipt(return_code=1), TEXT, ("failed", "agent_run_error")),
+        (None, receipt(error="cleanup: lost"), TEXT, "raise"),
+        (None, None, TEXT, "raise"),
+        (1, receipt(return_code=1), "", ("failed", "agent_run_error")),
+        (0, receipt(), '{"type":"error","error":{"name":"APIError"}}', ("failed", "unknown")),
+        (0, receipt(), "", ("failed", "agent_run_error")),
     ],
 )
 async def test_sandbox_output_and_failures(
-    exit_code: int | None, cleanup: dict | None, stdout: str, expected: str
+    exit_code: int | None, cleanup: dict | None, stdout: str, expected: tuple[str, str | None] | str
 ) -> None:
     agent = _make_model_server_agent(model="m", system_prompt="configured")
     session = state()
@@ -431,14 +437,18 @@ async def test_sandbox_output_and_failures(
     artifacts = KiloArtifacts(task_environment_ready=True, stdout=stdout, stderr="diagnostic", exit_code=exit_code)
     session.session.execute = AsyncMock(return_value=artifacts)
     body = NeMoGymResponseCreateParamsNonStreaming(input="hi", instructions="requested")
-    if expected == "error":
+    if expected == "raise":
         with pytest.raises(RuntimeError):
             await agent._sandbox_response(session, body, rollout_id="rollout-1-a2")
     else:
         with patch.object(session, "stage_activation", new_callable=AsyncMock) as stage:
             response = await agent._sandbox_response(session, body, rollout_id="rollout-1-a2")
             await session.session.execute.call_args.kwargs["stage_activation"]()
-        assert response.status == expected
+        status, failure_kind = expected
+        assert response.status == status
+        outcome = response.metadata.get("ng_agent_outcome")
+        assert (json.loads(outcome)["failure_kind"] if outcome else None) == failure_kind
+        assert (response.error is not None) == (status == "failed")
         staged = stage.call_args.kwargs
         assert staged["command"][:2] == session.kilo_argv
         assert staged["command"][-1] == "configured\n\nrequested\n\nhi"
@@ -453,9 +463,17 @@ async def test_sandbox_output_and_failures(
 CONNECT_ERROR = 'level=ERROR message="stream error" error.error="AI_APICallError: Cannot connect to API"'
 
 
-@pytest.mark.parametrize("status_code", [400, 429, 503])
+@pytest.mark.parametrize(
+    "status_code,outcome",
+    [
+        # The outcome ladder: a 4xx other than 408/425/429 before any model reply is the run's setup's fault.
+        (400, {"failure_kind": "model_request_rejected"}),
+        (429, {"failure_kind": "model_request_error", "status_code": 429}),
+        (503, {"failure_kind": "model_request_error", "status_code": 503}),
+    ],
+)
 @pytest.mark.parametrize("exit_code", [0, 1])
-async def test_model_http_error_reaches_environment(status_code: int, exit_code: int) -> None:
+async def test_model_http_error_reaches_environment(status_code: int, outcome: dict, exit_code: int) -> None:
     agent = _make_model_server_agent(model="m")
     session = state()
     session.session.cleanup = receipt(return_code=exit_code)
@@ -475,26 +493,28 @@ async def test_model_http_error_reaches_environment(status_code: int, exit_code:
     assert response.status == "failed"
     assert "controlled model failure" in response.error.message
     assert "test-mcp-credential" not in response.error.message
-    assert json.loads(response.metadata["ng_agent_outcome"]) == {
-        "failure_kind": "model_request_error",
-        "status_code": status_code,
-    }
+    assert json.loads(response.metadata["ng_agent_outcome"]) == outcome
     assert response.metadata["harness_execution"] == "sandbox"
 
 
 @pytest.mark.parametrize(
-    "cleanup,exit_code,ready",
+    "cleanup,exit_code,ready,expected",
     [
-        (receipt(return_code=125), 125, True),
-        (receipt(return_code=127), 127, True),
-        (receipt(return_code=1), 125, True),
-        (receipt(return_code=1, timed_out=True), 1, True),
-        (receipt(error="cleanup failed"), 0, True),
-        (None, 0, True),
-        (receipt(), 0, False),
+        # Lifecycle failures: the activation itself failed, so it raises.
+        (receipt(return_code=125), 125, True, "raise"),
+        (receipt(return_code=127), 127, True, "raise"),
+        (receipt(error="cleanup failed"), 0, True, "raise"),
+        (None, 0, True, "raise"),
+        (receipt(), 0, False, "raise"),
+        # The worker's own exit is not one Kilo makes after an error event: no usable result.
+        (receipt(return_code=1), 125, True, "agent_run_error"),
+        # The deadline decides; with no model reply it stays retried.
+        (receipt(return_code=1, timed_out=True), 1, True, "unknown"),
     ],
 )
-async def test_model_error_does_not_hide_runtime_failure(cleanup: dict | None, exit_code: int, ready: bool) -> None:
+async def test_model_error_does_not_hide_runtime_failure(
+    cleanup: dict | None, exit_code: int, ready: bool, expected: str
+) -> None:
     agent = _make_model_server_agent(model="m")
     session = state()
     session.session.cleanup = cleanup
@@ -506,10 +526,15 @@ async def test_model_error_does_not_hide_runtime_failure(cleanup: dict | None, e
             exit_code=exit_code,
         )
     )
-    with pytest.raises(RuntimeError):
-        await agent._sandbox_response(
-            session, NeMoGymResponseCreateParamsNonStreaming(input="hi"), rollout_id="rollout-1-a2"
-        )
+    body = NeMoGymResponseCreateParamsNonStreaming(input="hi")
+    if expected == "raise":
+        with pytest.raises(RuntimeError):
+            await agent._sandbox_response(session, body, rollout_id="rollout-1-a2")
+        return
+    response = await agent._sandbox_response(session, body, rollout_id="rollout-1-a2")
+    # The APIError is not the run's outcome, whatever its status.
+    assert response.status == "failed"
+    assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": expected}
 
 
 @pytest.mark.parametrize(
@@ -517,7 +542,11 @@ async def test_model_error_does_not_hide_runtime_failure(cleanup: dict | None, e
     ["", '{"type":"step_finish","part":{"id":"p1","tokens":{"input":0,"output":0},"reason":"stop"}}'],
 )
 async def test_timeout_before_any_model_call_is_an_execution_failure(stdout: str) -> None:
-    """Kilo retries an unreachable model until the deadline; that must not be graded as the model's zero."""
+    """Kilo retries an unreachable model until the deadline; that must not be graded as the model's zero.
+
+    The outcome ladder keeps it retried (failed ``unknown``, HTTP 200 instead of the former 500) until capture can
+    tell an outage from a slow model.
+    """
     agent = _make_model_server_agent(model="m")
     session = state()
     session.session.cleanup = receipt(return_code=-15, timed_out=True)
@@ -525,10 +554,77 @@ async def test_timeout_before_any_model_call_is_an_execution_failure(stdout: str
         task_environment_ready=True, stdout=stdout, stderr="migration done", exit_code=None, log_tail=CONNECT_ERROR
     )
     session.session.execute = AsyncMock(return_value=artifacts)
-    with pytest.raises(RuntimeError, match="before any model call completed.*Cannot connect to API"):
-        await agent._sandbox_response(
-            session, NeMoGymResponseCreateParamsNonStreaming(input="hi"), rollout_id="rollout-1-a2"
-        )
+    response = await agent._sandbox_response(
+        session, NeMoGymResponseCreateParamsNonStreaming(input="hi"), rollout_id="rollout-1-a2"
+    )
+    assert response.status == "failed"
+    assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "unknown"}
+    assert "before any model call completed" in response.error.message
+    assert "Cannot connect to API" in response.error.message
+
+
+# The default vLLM model server answers a context overflow with an empty completion that stops on `length`.
+LENGTH_STOP = '{"type":"step_finish","part":{"id":"s1","tokens":{"input":0,"output":0},"reason":"length"}}'
+CONTEXT_OVERFLOW = json.dumps(
+    {"type": "error", "error": {"name": "ContextOverflowError", "data": {"message": "Input exceeds context window"}}}
+)
+CONNECTION_RESET = json.dumps(
+    {"type": "error", "error": {"name": "APIError", "data": {"message": "Connection reset", "isRetryable": True}}}
+)
+
+
+@pytest.mark.parametrize(
+    "stdout,cleanup,exit_code,expected",
+    [
+        # A context overflow Kilo names is graded as incomplete, whatever Kilo's exit.
+        (CONTEXT_OVERFLOW, receipt(return_code=1), 1, ("incomplete", None, "context_limit")),
+        (LENGTH_STOP, receipt(), 0, ("incomplete", None, "output_limit")),
+        # A deadline after a model reply is graded, even after an error event (the run raised before the ladder).
+        (
+            f"{TEXT}\n{CONNECTION_RESET}",
+            receipt(return_code=-15, timed_out=True),
+            None,
+            ("incomplete", None, "timeout"),
+        ),
+        # A connection failure Kilo stopped on, without an HTTP status.
+        (CONNECTION_RESET, receipt(return_code=1), 1, ("failed", "model_transport_error", "error")),
+    ],
+)
+async def test_outcome_ladder_reads_kilo_events(
+    stdout: str, cleanup: dict, exit_code: int | None, expected: tuple[str, str | None, str]
+) -> None:
+    agent = _make_model_server_agent(model="m")
+    session = state()
+    session.session.cleanup = cleanup
+    session.session.execute = AsyncMock(
+        return_value=KiloArtifacts(task_environment_ready=True, stdout=stdout, stderr="", exit_code=exit_code)
+    )
+    response = await agent._sandbox_response(
+        session, NeMoGymResponseCreateParamsNonStreaming(input="hi"), rollout_id="rollout-1-a2"
+    )
+    status, failure_kind, stop_reason = expected
+    assert (response.status, response.metadata["ng_agent_stop_reason"]) == (status, stop_reason)
+    outcome = response.metadata.get("ng_agent_outcome")
+    assert (json.loads(outcome)["failure_kind"] if outcome else None) == failure_kind
+    if stop_reason == "output_limit":
+        assert response.incomplete_details.reason == "max_output_tokens"
+
+
+def test_run_evidence_reads_replies_limits_and_exit() -> None:
+    agent = _make_model_server_agent(model="m")
+    assert agent._run_evidence(
+        f"{TEXT}\n{LENGTH_STOP}", timed_out=False, clean_exit=True, error_exit=True
+    ) == RunEvidence(
+        has_result=True, timed_out=False, model_replied=True, model_limit="output", retry_deadline_before_reply=True
+    )
+    # An APIError after a worker exit that Kilo does not make after one is not the error the run ended on.
+    error = json.dumps({"type": "error", "error": {"name": "APIError", "data": {"statusCode": 400}}})
+    assert agent._run_evidence(error, timed_out=False, clean_exit=False, error_exit=False) == RunEvidence(
+        has_result=False, timed_out=False, model_replied=False, retry_deadline_before_reply=True
+    )
+    assert agent._run_evidence(error, timed_out=False, clean_exit=False, error_exit=True).error == AgentOutcome(
+        failure_kind="model_request_error", status_code=400
+    )
 
 
 @pytest.mark.parametrize("timed_out", [True, False])
@@ -566,6 +662,7 @@ async def test_runner_identity_reaches_response_metadata() -> None:
         "harness_hostname": "sandbox-7",
         "harness_pid": "42",
         "kilo_version": "7.4.15",
+        "ng_agent_stop_reason": "completed",
     }
     session.sandbox_id = "sbx-1"
     observations = agent._sandbox_observations(session)

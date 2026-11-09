@@ -32,8 +32,9 @@ in. `--pure` runs without external plugins, so codebase indexing never starts. T
 `kilo.json` written into the run dir supplies the provider and permissions.
 
 A local run that fails (a CLI/API error event, a nonzero exit, or a timeout before any model call
-completed) returns a `failed` response with the reason in `error`; `/run` still verifies it, as the
-other local harnesses do. A timeout after model output returns an `incomplete` response.
+completed) returns a `failed` response with the reason in `error` and the outcome ladder's cause in
+`ng_agent_outcome`; `/run` still verifies it, as the other local harnesses do. A timeout after model output returns an
+`incomplete` response.
 
 ## Model server
 
@@ -213,11 +214,15 @@ Requests carry one text user message, optionally preceded by a system/developer 
 request fields, model overrides, `repo_dir`, `extra_args` and `env` are rejected. Identical
 activation retries join the running task; session close owns cancellation.
 
-CLI/API errors and nonzero exits raise, so the episode fails instead of scoring zero (local runs
-mark them `failed` instead; see Quick start). A killed run
-or a `length` stop returns an `incomplete` response, except a run that times out before any model
-call completes: Kilo retries an unreachable model server without reporting it, so that run raises
-with the end of Kilo's log instead. Observations come from a snapshot of Kilo's
+The adapter reads Kilo's events and exit into the shared outcome ladder (`finish_response`), which sets the
+response's status and `ng_agent_outcome`. A CLI/API error event Kilo exits on returns a failed response with its
+classified cause (`model_request_error` with the HTTP status, `model_transport_error`, or `unknown`); a nonzero exit
+or a run without output returns a failed response with `agent_run_error`, which the Environment Server retries
+instead of scoring zero. A killed run, a `length` stop or Kilo's `ContextOverflowError` returns an `incomplete`
+response, except a run that times out before any model call completes: Kilo retries an unreachable model server
+without reporting it, so that run returns a failed `unknown` response with the end of Kilo's log, which is retried.
+Supervisor failures and an unconfirmed task-environment plugin or MCP server raise. Observations come from a
+snapshot of Kilo's
 SQLite database, taken on the agent server after the run (root and child sessions, tool calls with timing and bash exit status, usage),
 annotated with the root outcome and a sandbox record; if the snapshot is unavailable, a coverage gap
 is reported. The response metadata records the sandbox runner's hostname and PID and the Kilo

@@ -44,13 +44,16 @@ from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     Body,
     CleanupReceipt,
+    RunEvidence,
     SandboxSession,
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.core import (
+    MODEL_CONTEXT_LIMIT,
     MODEL_REQUEST_ERROR,
+    MODEL_TRANSPORT_ERROR,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -230,12 +233,14 @@ def _error_name(error: Any) -> str:
     return name if isinstance(name, str) and name else "kilo_api_error"
 
 
-def _runtime_failure(artifacts: KiloArtifacts, cleanup: CleanupReceipt | None) -> str | None:
-    """Return why a run failed at runtime, from the supervisor receipt; a timeout stays a gradable partial."""
+def _lifecycle_failure(artifacts: KiloArtifacts, cleanup: CleanupReceipt | None) -> str | None:
+    """Return why the activation itself failed, so the run has no outcome to judge; the adapter raises it (a 5xx)."""
     if cleanup is None:
         return "Kilo activation ended without a cleanup receipt"
     if cleanup["error"]:
         return f"Kilo supervision failed: {cleanup['error']}"
+    if not cleanup["cleanup_confirmed"]:
+        return "Kilo harness termination was not confirmed"
     if not artifacts.task_environment_ready:
         # Kilo continues when a plugin fails to load; its tools then ran with Kilo's private HOME.
         return "Kilo did not confirm its task-environment plugin"
@@ -248,6 +253,14 @@ def _runtime_failure(artifacts: KiloArtifacts, cleanup: CleanupReceipt | None) -
         return f"Kilo runner failed before starting Kilo (exit {HARNESS_RUNNER_FAILED})"
     if cleanup["return_code"] in HARNESS_COMMAND_NOT_STARTED:
         return f"Kilo could not be started (exit {cleanup['return_code']})"
+    return None
+
+
+def _runtime_failure(artifacts: KiloArtifacts, cleanup: CleanupReceipt | None) -> str | None:
+    """Return why a run failed at runtime, from the supervisor receipt; a timeout stays a gradable partial."""
+    failure = _lifecycle_failure(artifacts, cleanup)
+    if failure is not None or cleanup["timed_out"]:
+        return failure
     if cleanup["return_code"] not in (0, None):
         return f"Kilo exited {cleanup['return_code']}"
     if artifacts.exit_code not in (0, None):
@@ -390,12 +403,53 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
     """
 
     def classify_outcome(self, native_result: Mapping[str, object]) -> AgentOutcome:
-        """Preserve the HTTP status carried by the pinned CLI's APIError event."""
+        """Classify the pinned CLI's error event by its error name and structured fields, as the OpenCode agent does.
+
+        Kilo 7.4.15 (an OpenCode fork) names a context-window refusal ``ContextOverflowError``. It reports a model
+        HTTP error as an ``APIError`` with ``statusCode``, and a connection, header-timeout or stream failure as an
+        ``APIError`` with ``isRetryable`` and no status.
+        """
+        name = native_result.get("name")
+        if name == "ContextOverflowError":
+            return AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT)
         data = native_result.get("data")
-        status = data.get("statusCode") if isinstance(data, dict) else None
-        if native_result.get("name") == "APIError" and type(status) is int and 400 <= status <= 599:
+        data = data if isinstance(data, dict) else {}
+        status = data.get("statusCode")
+        if name == "APIError" and type(status) is int and 400 <= status <= 599:
             return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
+        if name == "APIError" and status is None and data.get("isRetryable") is True:
+            return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
         return AgentOutcome(failure_kind="unknown")
+
+    def _run_evidence(self, stdout: str, *, timed_out: bool, clean_exit: bool, error_exit: bool) -> RunEvidence:
+        """What Kilo's event stream and exit say about one run, for the outcome ladder.
+
+        ``clean_exit`` means Kilo exited 0. ``error_exit`` means Kilo's exit is one it makes after a terminal error
+        event (0, or 1 for a terminal APIError), so that event is the error the run ended on; any other exit is the
+        worker's own failure and leaves the run without a result.
+        """
+        native_error, length_stop = _scan_run_events(stdout)
+        output_items, usage = parse_kilo_events(stdout)
+        error = None
+        if native_error is not None:
+            error = (
+                self.classify_outcome(native_error)
+                if isinstance(native_error, dict)
+                else AgentOutcome(failure_kind="unknown")
+            )
+        context_limit = error is not None and error.failure_kind == MODEL_CONTEXT_LIMIT
+        return RunEvidence(
+            has_result=clean_exit and bool(output_items),
+            timed_out=timed_out,
+            # No output and no tokens: no model call completed.
+            model_replied=bool(output_items) or any(usage.values()),
+            context_limit=context_limit,
+            model_limit="output" if length_stop and clean_exit else None,
+            error=error if error_exit and not context_limit else None,
+            # Kilo retries a model it cannot reach until the deadline, without events, so a deadline before any
+            # reply cannot yet be told from an outage; it stays retried, as before the ladder.
+            retry_deadline_before_reply=True,
+        )
 
     config: KiloCodeAgentConfig
     sem: Semaphore = None
@@ -840,16 +894,25 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
         *,
         timed_out: bool,
         failure: str | None,
+        error_exit: bool,
         diagnostics: str,
+        session: SandboxSession | None = None,
     ) -> tuple[NeMoGymResponse, str | None]:
-        """Build the response from Kilo's events, with the reason the run failed (None when it did not)."""
+        """Build the response from Kilo's events with the ladder's outcome, and what went wrong in the run.
+
+        ``failure`` is Kilo's own nonzero or unknown exit, if any. The caller puts the returned problem in the
+        ``error`` of a failed response.
+        """
         error, length_stop = _scan_run_events(stdout)
         output_items, usage = parse_kilo_events(stdout)
+        evidence = self._run_evidence(
+            stdout, timed_out=timed_out, clean_exit=not timed_out and failure is None, error_exit=error_exit
+        )
         if error is not None:
             problem = f"Kilo reported an execution error: {error}; {diagnostics}"
         elif failure is not None:
             problem = f"{failure}: {diagnostics}"
-        elif timed_out and not output_items and not any(usage.values()):
+        elif timed_out and not evidence.model_replied:
             # Kilo retries a model it cannot reach until the deadline, without events. A timeout here
             # means an unreachable or failed model server, not the model's own partial work.
             problem = (
@@ -860,14 +923,8 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
             problem = "Kilo completed without any trajectory events"
         else:
             problem = None
-        response = self._build_response(
-            body, output_items, usage, self.config.model, incomplete=timed_out or length_stop
-        )
-        if isinstance(error, dict) and self.classify_outcome(error).failure_kind == MODEL_REQUEST_ERROR:
-            response.status = "failed"
-            response.error = ResponseError(code="server_error", message=problem[:2000])
-            response = self.report_outcome(response, error)
-        return response, problem
+        response = self._build_response(body, output_items, usage, self.config.model)
+        return self.finish_response(response, evidence, session=session), problem
 
     async def _sandbox_response(
         self, state: KiloSandboxSession, body: NeMoGymResponseCreateParamsNonStreaming, *, rollout_id: str
@@ -901,29 +958,22 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
                 timeout=self.config.timeout,
                 close_timeout=self.config.session_close_timeout_seconds,
             )
+        cleanup = state.session.cleanup
+        diagnostics = artifacts.log_tail or artifacts.stderr[-4096:]
+        failure = _lifecycle_failure(artifacts, cleanup)
+        if failure is not None:
+            raise RuntimeError(state.redact_diagnostics(f"{failure}: {diagnostics}"))
         response, problem = self._response_from_events(
             body,
             artifacts.stdout,
-            timed_out=bool(state.session.cleanup and state.session.cleanup["timed_out"]),
-            failure=_runtime_failure(artifacts, state.session.cleanup),
-            diagnostics=artifacts.log_tail or artifacts.stderr[-4096:],
+            timed_out=cleanup["timed_out"],
+            failure=_runtime_failure(artifacts, cleanup),
+            # Kilo exits 1 for a terminal APIError.
+            error_exit=cleanup["return_code"] in (0, 1) and artifacts.exit_code in (0, 1),
+            diagnostics=diagnostics,
+            session=state.session,
         )
-        if problem is not None:
-            cleanup = state.session.cleanup
-            if not (
-                "ng_agent_outcome" in (response.metadata or {})
-                and cleanup
-                and cleanup["cleanup_confirmed"]
-                and not cleanup["timed_out"]
-                and not cleanup["error"]
-                and cleanup["return_code"] in (0, 1)
-                and artifacts.exit_code in (0, 1)
-                and artifacts.task_environment_ready
-                and artifacts.required_mcp_ready
-            ):
-                raise RuntimeError(state.redact_diagnostics(problem))
-            # Kilo exits 1 for a terminal APIError. Preserve that model response so
-            # the Environment Server can apply its failure/retry policy.
+        if response.status == "failed" and problem is not None:
             response.error = ResponseError(code="server_error", message=state.redact_diagnostics(problem)[:2000])
         response.metadata = {
             **(response.metadata or {}),
@@ -987,13 +1037,13 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
             stdout,
             timed_out=timed_out,
             failure=None if timed_out or exit_code == 0 else f"Kilo exited {exit_code}",
+            error_exit=exit_code in (0, 1),
             diagnostics=stderr[-4096:],
         )
-        if problem is not None:
+        if response.status == "failed" and problem is not None:
             # The legacy /run path still verifies (the conformance convention), so a failed run is
             # marked failed rather than passed off as a completed answer.
             LOG.warning("Kilo run failed: %s", problem[:500])
-            response.status = "failed"
             response.error = ResponseError(code="server_error", message=problem[:2000])
         if db_usage is not None:
             response.usage = db_usage
@@ -1009,10 +1059,8 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
             if isinstance(record, ContextCompactionObservation):
                 record.source_model_ref = self.config.model_server
             if isinstance(record, AgentInvocation) and record.parent_invocation_id is None:
-                if problem is not None:
-                    record.status = "failed"
-                elif response.status == "incomplete":
-                    record.status = "incomplete"
+                if response.status in ("failed", "incomplete"):
+                    record.status = response.status
         observations.gaps.append(ObservationGap(code="no_sandbox_runtime"))
         if timed_out:
             observations.gaps.append(ObservationGap(code="agent_run_timeout"))
@@ -1024,9 +1072,8 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
         output_items: list[NeMoGymResponseOutputItem],
         usage: dict[str, int],
         model_name: str,
-        *,
-        incomplete: bool = False,
     ) -> NeMoGymResponse:
+        """The response for Kilo's parsed output; ``finish_response`` then gives it the run's status."""
         if not any(
             getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
             for item in output_items
@@ -1050,7 +1097,7 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
             created_at=int(time()),
             model=model_name,
             object="response",
-            status="incomplete" if incomplete else "completed",
+            status="completed",
             output=output_items,
             tool_choice=body.tool_choice,
             tools=body.tools,

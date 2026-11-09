@@ -238,10 +238,16 @@ Successful and limit-truncated Responses retain reasoning, tool calls/results, a
 Sandbox sessions forward their invocation ID as `x-session-id`, separately from the rollout URL,
 so capture can attach rejected model attempts without a response ID to the correct invocation.
 
+The adapter reads the transcript, the CLI's JSON envelope and the supervisor's receipt into the shared outcome
+ladder (`finish_response`), which sets the response's status and `ng_agent_outcome`.
 A terminal assistant model error returns a failed response with its original message, partial
 output, usage, and `ng_agent_outcome`. HTTP errors retain their upstream status as
-`model_request_error`; unrecognized causes remain `unknown`. The environment decides whether
-to verify, retry, or fail using its outcome policy. Runtime, cancellation, and cleanup failures
+`model_request_error`, except a 4xx other than 408, 425 and 429 before any model reply
+(`model_request_rejected`); unrecognized causes remain `unknown`. A model error counts only when the CLI exits 0, or
+exits 1 with its `FailoverError` diagnostic. The CLI's typed context overflow returns partial output as
+`incomplete`, whatever its exit. A run without a usable result (another nonzero exit, an abort that is not the
+model's idle timeout, or no terminal reply) returns a failed response with `agent_run_error`. The environment decides
+whether to verify, retry, or fail using its outcome policy. Supervisor and cancellation failures
 still raise errors, with transcript evidence retained by close.
 Usage sums observed assistant model calls, including cache reads/writes and failed final calls.
 Transcript rewrites retaining the same response ID and message count once; synthetic CLI summary

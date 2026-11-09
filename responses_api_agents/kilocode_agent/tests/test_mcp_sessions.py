@@ -527,11 +527,15 @@ async def test_kilo_error_event_reaches_logs_and_errors_only_redacted(caplog: py
     session.session.execute = AsyncMock(
         return_value=KiloArtifacts(stdout=error_event, stderr="", exit_code=0, task_environment_ready=True)
     )
-    with caplog.at_level(logging.WARNING), pytest.raises(RuntimeError, match="execution error") as error:
-        await agent._sandbox_response(
+    with caplog.at_level(logging.WARNING):
+        response = await agent._sandbox_response(
             session, NeMoGymResponseCreateParamsNonStreaming(input="hi"), rollout_id="rollout-1-a2"
         )
-    assert "[REDACTED]" in str(error.value) and "task-token" not in str(error.value)
+    # The outcome ladder answers the unclassified error with a failed response (it raised before the ladder).
+    assert response.status == "failed"
+    assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "unknown"}
+    message = response.error.message
+    assert "execution error" in message and "[REDACTED]" in message and "task-token" not in message
     assert "task-token" not in caplog.text
 
 
