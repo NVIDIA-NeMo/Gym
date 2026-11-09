@@ -1013,8 +1013,11 @@ class HLEWebToolsResourcesServer(SimpleResourcesServer):
         )
 
     def multiple_workers_unsupported_reason(self) -> Optional[str]:
-        # A rollout's seed and its searches could reach different workers, and the module defines no worker app.
-        return "seeded questions, session bindings and the page cache live in one process"
+        # Session state (seeded questions, bindings) is keyed by the session ID, which session routing pins to the
+        # owning worker, so it is not what stops several workers: uvicorn would import this module in each worker
+        # and serve a module-level ``app`` it does not define, and the URL-keyed page cache and the page-check pool
+        # are per process, so each worker would fetch, scan and cache its own copy of a page.
+        return "the module defines no module-level app for uvicorn workers, and the page cache and page-check pool are per process"
 
     # ---- routes and MCP exposure ----
 

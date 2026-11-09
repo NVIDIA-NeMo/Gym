@@ -807,8 +807,15 @@ async def test_rejected_keys_do_not_spend_the_retry_budget(monkeypatch, key_pool
 
 
 def test_a_launch_with_several_workers_is_refused():
-    with pytest.raises(ValueError, match="hle_tools needs num_workers=1: seeded questions"):
+    """The refusal names what actually stops several uvicorn workers. Session state (seeded questions, bindings) is
+    keyed by the session ID, which session routing pins to the owning worker, so that is not the reason."""
+    with pytest.raises(ValueError, match="hle_tools needs num_workers=1: ") as excinfo:
         refuse_unsupported_num_workers(make_server(num_workers=2))
+    reason = str(excinfo.value).split(": ", 1)[1]
+    assert reason == (
+        "the module defines no module-level app for uvicorn workers, and the page cache and page-check pool are per process"
+    )
+    assert "seeded questions" not in reason and "session bindings" not in reason
 
 
 def test_shipped_blocklist_is_the_pinned_upstream_snapshot(tmp_path):

@@ -216,11 +216,15 @@ hle_tools:
 | `max_http_attempts`, `http_timeout_s` | 3, 60 | the retry budget per call and the timeout per attempt |
 | `tavily_base_url` | `https://api.tavily.com` | the Tavily API base URL, for a proxy or a stub |
 
-Run the server single-worker (leave `num_workers` unset): seeded questions, session bindings and the page
-cache live in the process, so with `num_workers > 1` a rollout's seed and its searches could reach different
-workers. The server says so through `multiple_workers_unsupported_reason`, so a launch with `num_workers > 1`
-is refused before uvicorn starts, dry runs included (`<instance name> needs num_workers=1: ...`, for the
-Diamond preset `hle_tools needs num_workers=1: ...`).
+Run the server single-worker (leave `num_workers` unset). The per-session state (the seeded question and the
+episode binding) is keyed by the session ID, which session routing pins to the worker that owns the session (a
+resources request by its cookie's `session_id`, an MCP tool call by its token's `sid`), so that state alone
+would not need one worker. What does: with `num_workers > 1` uvicorn imports the entrypoint in each worker and
+serves a module-level `app`, which this module does not define, and the page cache (keyed by URL) and the
+page-check pool are per process, so each worker would fetch, scan and cache its own copy of a page. The server
+says so through `multiple_workers_unsupported_reason`, so a launch with `num_workers > 1` is refused before
+uvicorn starts, dry runs included (`<instance name> needs num_workers=1: ...`, for the Diamond preset
+`hle_tools needs num_workers=1: the module defines no module-level app for uvicorn workers, ...`).
 
 `verify` is a stub: this is a tool server. A preset pairs it through the agent's `tool_servers` and
 grades the rollout with its own `resources_server` (for HLE-Diamond, the equivalence judge). Should
