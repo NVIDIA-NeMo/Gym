@@ -58,6 +58,14 @@ retrieval).
 - **Budgets:** `config.yaml` sets no round or tool-call limit (`max_rounds: null`, `max_tool_calls: null`): the
   episode ends when the model answers without a tool call or when a model call is refused. Set both to restore the
   component default of 15.
+- **Harness step limits:** a harness with its own step limit, such as OpenCode's `agent.build.steps`, marks a
+  response whose prompt reached that limit (`harness_step_limit_reached`). OpenCode then asks for a final answer but
+  still offers the tools. The resources server's `score_step_limit_answer` decides whether that answer counts. Its
+  default, `false`, scores it 0, the same as the Agentic-MME agent's 0 for an episode that runs out of tool rounds;
+  the share of marked rollouts shows as `step_limit_reached`. To match the Agentic-MME agent's 15 rounds plus one
+  answer call, set `agent.build.steps: 17`, so the answer must come by call 16. In a GRPO test that scored the answer
+  at the limit, the share of rollouts that reached the limit grew from under 1% to about half within 22 steps. With
+  the default, almost no rollout reached it in the first 10 steps.
 - **Images per request:** every image stays in every later model request. `max_images_per_request` is off by
   default; with a serving engine that limits images per prompt (vLLM `limit_mm_per_prompt.image`), set it to that
   limit, or serve with a limit of at least the input images plus `max_tool_calls`. An image tool call past the limit

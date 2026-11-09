@@ -1,0 +1,98 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Agentic-MME with OpenCode in place of the Agentic-MME agent. The resources server starts one sandbox per episode
+# that holds the task images under images/, and lends it to OpenCode. OpenCode sees the images in its prompt and works
+# on the files with its own shell, Python and read tools instead of the 14 fixed image tools, so its scores are a
+# separate track from config.yaml. Web search is off.
+#
+# Needs a sandbox image built from resources_servers/agentic_mme/sandbox_image/Dockerfile (AGENTIC_MME_SANDBOX_IMAGE)
+# and the OpenSandbox provider block below (OPENSANDBOX_DOMAIN, OPENSANDBOX_API_KEY). prepare.py writes the images
+# under benchmarks/agentic_mme/data/images; for the example rows set
+# AGENTIC_MME_IMAGE_ROOT=resources_servers/agentic_mme/data/example_images.
+config_paths:
+  - benchmarks/agentic_mme/config.yaml
+  - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+
+agentic_mme:
+  resources_servers:
+    agentic_mme:
+      allowed_agents: [opencode_agent]
+      # Names the top-level provider block from opensandbox.yaml.
+      sandbox_provider: sandbox
+      image_root: ${oc.env:AGENTIC_MME_IMAGE_ROOT,benchmarks/agentic_mme/data/images}
+      sandbox_config:
+        image: ${oc.env:AGENTIC_MME_SANDBOX_IMAGE,null}
+        # Without a TTL the OpenSandbox SDK expires a sandbox 10 minutes after creation. The resources session
+        # expires with the sandbox, so the TTL outlives the episode deadline below plus close and cleanup.
+        ttl_s: 7200
+        env:
+          # execd otherwise waits 1 s after every command.
+          EXECD_API_GRACE_SHUTDOWN: 50ms
+        resources: {cpu: 4, memory_mib: 16384}
+
+# Drop the Agentic-MME agent; the environment server below runs OpenCode instead.
+agentic_mme_agent: null
+
+agentic_mme_opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      entrypoint: app.py
+      description: Agentic-MME with OpenCode in a sandbox that holds the task images
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
+      opencode_version: 1.17.11
+      concurrency: 32
+      # The served context length minus max_output_tokens.
+      context_window: ${oc.select:agentic_mme_opencode_context_window,114688}
+      max_output_tokens: ${oc.select:agentic_mme_opencode_max_output_tokens,16384}
+      # The OpenCode process, inside the environment server's episode deadline.
+      timeout: 3600
+      session_close_timeout_seconds: 90
+      opencode_config:
+        tools:
+          webfetch: false
+          websearch: false
+          task: false
+        permission:
+          # OpenCode asks before it reads or writes outside the working directory, as when the model saves a crop
+          # under /tmp. `opencode run` rejects every request that would ask, and a rejection ends the run with no
+          # answer. The lent sandbox holds only the task images, so allow every path.
+          external_directory: allow
+          # OpenCode also asks when the model repeats an identical tool call (doom loop), and the rejection makes
+          # `opencode run` exit with code 1, so the rollout fails unscored. Allow it; a step budget,
+          # not a crash, should end a loop.
+          doom_loop: allow
+        compaction:
+          # Automatic compaction summarizes the session and continues from the summary, in model calls that training
+          # cannot join to the scored call. With it off, a run that fills the context ends with a context-limit error.
+          auto: false
+        # A step limit (agent.build.steps) is off here. With one, OpenCode asks for a final answer from that call on
+        # but still offers the tools. The agentic_mme server scores an answer at or after the limit 0 by default
+        # (score_step_limit_answer: false), like the Agentic-MME agent's 0 for an episode that runs out of rounds;
+        # a policy trained with that answer scored learned to use every step. agent.build.steps: 17 matches the
+        # Agentic-MME agent's 15 tool rounds plus one answer call. Under token capture the session refuses a step
+        # limit until the capture fix for OpenCode's step-limit note lands.
+      datasets:
+        - name: agentic_mme_opencode
+          type: benchmark
+          jsonl_fpath: benchmarks/agentic_mme/data/agentic_mme_opencode_benchmark.jsonl
+          prepare_script: benchmarks/agentic_mme/prepare.py
+          num_repeats: 1
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/agentic_mme/data/example_opencode.jsonl
+          num_repeats: 1
+
+agentic_mme_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      # The episode's wall-clock bound: the lent sandbox's start, OpenCode's timeout (3600 s), the session close and
+      # the judge fit inside it, and it ends well before the sandbox's ttl_s (7200 s). The default (21600 s) would
+      # outlive the sandbox, and a verify after the sandbox expires is masked as a lost session.
+      default_episode_timeout_seconds: 5400
+      # resources_server comes from resources_servers/agentic_mme/configs/agentic_mme.yaml.
+      agent_server:
+        type: responses_api_agents
+        name: agentic_mme_opencode_agent
