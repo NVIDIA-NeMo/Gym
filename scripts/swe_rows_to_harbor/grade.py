@@ -28,6 +28,7 @@ import asyncio
 import importlib.util
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -169,7 +170,28 @@ def grade_swe_rebench(task: dict[str, Any], patch: str, pristine: list[str], roo
     return v, result, patch
 
 
-SOURCES = {"scale_swe": grade_scale_swe, "swe_rebench": grade_swe_rebench}
+def grade_swe_next(task: dict[str, Any], patch: str, pristine: list[str], root: Path, logs: Path):
+    """Run the same expected-output parser and grading rule as the SWE-Next server."""
+    v = _load("nemo_gym_swe_next_verification", "resources_servers/swe_next/verification.py")
+    row = task["row"]
+    patch = v.drop_patch_sections(patch, pristine)
+    inputs = v.VerificationInputs(
+        instance_id=row["instance_id"],
+        workdir=row.get("workdir") or "/testbed",
+        patch=patch,
+        test_patch=row.get("test_patch") or "",
+        expected_output_json=row.get("expected_output_json") or "{}",
+    )
+    write_verification_files(v.verification_files(inputs), root)
+    sandbox = LocalSandbox()
+    linked = asyncio.run(sandbox.exec("ln -sfn /workspace " + shlex.quote(inputs.workdir)))
+    if linked.error_type is not None or linked.return_code != 0:
+        return v, v.VerificationResult(False, False, False, None, "", "Missing SWE-Next working directory"), patch
+    result = asyncio.run(v.run_verification(sandbox, inputs, timeout_s=task["evaluation_timeout"], log_dir=logs))
+    return v, result, patch
+
+
+SOURCES = {"scale_swe": grade_scale_swe, "swe_rebench": grade_swe_rebench, "swe_next": grade_swe_next}
 
 
 def main(argv: list[str] | None = None) -> int:

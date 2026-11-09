@@ -306,7 +306,49 @@ class SWERebenchAdapter(SourceAdapter):
         )
 
 
-ADAPTERS: dict[str, Callable[..., SourceAdapter]] = {"scale_swe": ScaleSWEAdapter, "swe_rebench": SWERebenchAdapter}
+class SWENextAdapter(SourceAdapter):
+    """Use SWE-Next's image setup, hidden-test isolation and expected-status grader."""
+
+    name = "swe_next"
+
+    def plan(self, row: dict[str, Any]) -> TaskPlan:
+        workdir = row.get("workdir") or "/testbed"
+        wd = shlex.quote(workdir)
+        hidden = "r2e_tests parsed_commit.json modified_files.json modified_entities.json syn_issue.json expected_test_output.json execution_result.json"
+        steps = [
+            f"mkdir -p {STATE_DIR}",
+            f"ln -sfn /workspace {wd}",
+            f"cd {wd} && rm -rf {hidden} && if grep -qs r2e_tests run_tests.sh; then rm -f run_tests.sh; fi",
+            f"cd {wd} && git init -q && git config user.email nemo-gym@nvidia.com "
+            "&& git config user.name nemo-gym && git add -A "
+            "&& git commit -q -m 'nemo_gym: initial snapshot' --allow-empty",
+        ]
+        steps += self.anti_cheat_steps(workdir)
+        steps += [self.identity_step(workdir), self.pristine_step(workdir)]
+        steps.append(f"git -C {wd} rev-parse HEAD > {STATE_DIR}/base_commit")
+        return TaskPlan(
+            source=self.name,
+            instance_id=row["instance_id"],
+            image=row["image_ref"],
+            workdir="/workspace",
+            prompt=_prompt(row),
+            golden_patch=row.get("patch") or "",
+            setup_script="#!/bin/bash\nset -e\n" + "\n".join(steps) + "\n",
+            capture_command=self.capture_command(workdir, f"$(cat {STATE_DIR}/base_commit)"),
+            grading_row=_pick(row, "instance_id", "workdir", "test_patch", "expected_output_json"),
+            vendored={
+                "resources_servers/swe_next/verification.py": REPO_ROOT / "resources_servers/swe_next/verification.py"
+            },
+            evaluation_timeout=int(self.config.get("evaluation_timeout") or 1200),
+            resources=self.resources(),
+        )
+
+
+ADAPTERS: dict[str, Callable[..., SourceAdapter]] = {
+    "scale_swe": ScaleSWEAdapter,
+    "swe_rebench": SWERebenchAdapter,
+    "swe_next": SWENextAdapter,
+}
 
 
 def _non_fatal(command: str, what: str) -> str:

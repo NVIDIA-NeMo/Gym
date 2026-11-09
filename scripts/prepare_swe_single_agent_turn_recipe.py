@@ -192,6 +192,7 @@ def configure_gym(
     output: Path,
     parser_cache: Path,
     prepared: PreparedTaskset | None = None,
+    source_server: str = "swe_rebench",
 ) -> None:
     """Bind each harness to its own resources or Harbor environment instance."""
     validate_harnesses(harnesses, route=route)
@@ -205,16 +206,24 @@ def configure_gym(
     gym.environment_server_routes = {}
     gym.environment_routing_mode = "agent" if route == "old-run" else "taskset"
     if route != "harbor":
-        resources = server_config("swe_rebench")
+        resources = server_config(source_server)
         resources.update(
             evaluation_timeout=180,
             inconclusive_verification_retries=1,
-            log_parser_cache_dir=str(parser_cache),
             verification_log_dir=str(output / "verifier"),
         )
+        if source_server == "swe_next":
+            resources["sandbox_config"]["resources"] = {"cpu": 8, "memory_mib": 30720, "disk_gib": 30}
+            resources["sandbox_config"]["provider_options"]["resource_requests"] = {
+                "cpu": 1,
+                "memory_mib": 4096,
+                "disk_gib": 30,
+            }
+        if source_server == "swe_rebench":
+            resources["log_parser_cache_dir"] = str(parser_cache)
         resources["sandbox_config"].update(ttl_s=1800, ready_timeout_s=120, env={"OPENCODE_VERSION": "1.17.11"})
         resources["sandbox_config"]["provider_options"]["platform"] = {"os": "linux", "arch": "amd64"}
-        gym.swe_resources = {"resources_servers": {"swe_rebench": resources}}
+        gym.swe_resources = {"resources_servers": {source_server: resources}}
     for harness in harnesses:
         agent = OLD_AGENTS[harness] if route == "old-run" else f"{harness}_agent"
         # Pi has no generic sandboxed YAML; NOOA's template also starts an unbound environment.
@@ -281,7 +290,7 @@ def configure_gym(
             {"type": "resources_servers", "name": "swe_resources"} if route == "old-run" else None
         )
         gym[agent] = {"responses_api_agents": {agent: settings}}
-        taskset = f"swe_rebench_{harness}"
+        taskset = f"{source_server}_{harness}"
         environment = f"{taskset}_environment"
         impl = {"old-run": "legacy_agent", "single-agent-turn": "single_agent_turn", "harbor": "harbor"}[route]
         options = {
@@ -315,7 +324,12 @@ def configure_gym(
 
 
 def materialize_training_rows(
-    rows: list[dict], *, harnesses: list[str], route: str, prepared: PreparedTaskset | None = None
+    rows: list[dict],
+    *,
+    harnesses: list[str],
+    route: str,
+    prepared: PreparedTaskset | None = None,
+    source_server: str = "swe_rebench",
 ) -> list[dict]:
     """Keep task-major order across harnesses and preserve each route's actual request contract."""
     validate_harnesses(harnesses, route=route)
@@ -323,7 +337,7 @@ def materialize_training_rows(
     materialized = []
     for row in rows:
         for harness in harnesses:
-            taskset = f"swe_rebench_{harness}"
+            taskset = f"{source_server}_{harness}"
             if route == "old-run":
                 record = row | {
                     "agent_ref": {"type": "responses_api_agents", "name": OLD_AGENTS[harness]},
@@ -331,7 +345,7 @@ def materialize_training_rows(
                 }
             elif prepared:
                 record = materialize_harbor_task(
-                    by_id[task_folder_name("swe_rebench", row["instance_id"])], taskset
+                    by_id[task_folder_name(source_server, row["instance_id"])], taskset
                 ).model_dump(mode="json")
             else:
                 record = materialize_task(row, taskset=taskset)
