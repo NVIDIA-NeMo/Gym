@@ -18,6 +18,7 @@ import base64
 import binascii
 import json
 import logging
+import math
 import sqlite3
 import sys
 import tempfile
@@ -34,6 +35,7 @@ from uuid import uuid4
 
 from anyio import CancelScope
 from fastapi import Request
+from numpy import percentile
 from openai.types.responses import ResponseInputTextParam
 from pydantic import ConfigDict, Field, FilePath
 
@@ -642,6 +644,28 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
     config: OpenCodeSandboxedAgentConfig
     # The harness runs inside the task sandbox and calls the model server from there.
     calls_model_from_sandbox: ClassVar[bool] = True
+
+    def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        """Summarize measured command runtimes in seconds across scored rollouts."""
+        runtimes = [
+            value
+            for task in tasks
+            for rollout in task
+            if isinstance(value := rollout.get("opencode_runtime"), (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            and value >= 0
+        ]
+        metrics = super().compute_metrics(tasks)
+        if runtimes:
+            metrics.update({f"p{p}/opencode_runtime": float(percentile(runtimes, p)) for p in (50, 90)})
+        return metrics
+
+    def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
+        """Include runtime percentiles alongside the default headline metrics."""
+        return super().get_key_metrics(agent_metrics) | {
+            key: agent_metrics[key] for key in ("p50/opencode_runtime", "p90/opencode_runtime") if key in agent_metrics
+        }
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)

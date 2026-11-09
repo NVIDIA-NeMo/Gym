@@ -30,10 +30,10 @@ from unittest.mock import AsyncMock, MagicMock, call
 import anyio
 from fastapi import Request
 from pydantic import ValidationError
-from pytest import LogCaptureFixture, MonkeyPatch, fixture, mark, raises
+from pytest import LogCaptureFixture, MonkeyPatch, approx, fixture, mark, raises
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
-from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.config import AggregateMetricsRequest, ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -65,6 +65,40 @@ from responses_api_agents.opencode_sandboxed_agent.app import (
 
 
 class TestOpenCodeSandboxedAgent:
+    async def test_aggregate_runtime_percentiles_use_individual_rollouts(self) -> None:
+        server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=MagicMock(spec=ServerClient))
+        result = await server.aggregate_metrics(
+            AggregateMetricsRequest(
+                verify_responses=[
+                    {
+                        "_ng_task_index": task,
+                        "_ng_rollout_index": repeat,
+                        "reward": 0.0 if failed else 1.0,
+                        "opencode_failed": failed,
+                        "opencode_runtime": runtime,
+                    }
+                    for task, repeat, runtime, failed in [
+                        (0, 0, 10.0, False),
+                        (0, 1, 20.0, False),
+                        (1, 0, 100.0, True),
+                    ]
+                ]
+                + [{"_ng_task_index": 2, "reward": 1.0}]
+            )
+        )
+        for metrics in (result.agent_metrics, result.key_metrics):
+            assert metrics["p50/opencode_runtime"] == 20.0
+            assert metrics["p90/opencode_runtime"] == approx(84.0)
+        assert "mean/reward" in result.key_metrics
+
+    @mark.parametrize("runtimes", [[], [None, True, -1, float("nan"), float("inf"), "10"]])
+    def test_runtime_percentiles_omit_unmeasured_values(self, runtimes) -> None:
+        server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=MagicMock(spec=ServerClient))
+        tasks = [[{"opencode_runtime": value} for value in runtimes]]
+        assert server.compute_metrics(tasks) == {}
+        tasks[0].append({"opencode_runtime": 0.0})
+        assert server.compute_metrics(tasks) == {"p50/opencode_runtime": 0.0, "p90/opencode_runtime": 0.0}
+
     def test_import_only_loads_shared_opencode_modules(self) -> None:
         code = (
             f"import sys; import responses_api_agents; responses_api_agents.__path__ = [{str(Path(__file__).resolve().parents[2])!r}]; "
