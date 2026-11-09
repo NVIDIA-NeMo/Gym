@@ -20,7 +20,9 @@ import pytest
 from nemo_gym.core.media import MediaFile, UnsupportedContentError, split_text_and_media
 
 
-PNG = MediaFile("image/png", b"\x89PNG\r\n\x1a\n\x00\xff")
+PNG = MediaFile(
+    "image/png", b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00"
+)
 JPEG = MediaFile("image/jpeg", b"\xff\xd8\xff\xe0\x00")
 PAYLOAD = PNG.to_data_uri().partition(",")[2]
 
@@ -69,9 +71,10 @@ def test_the_content_decides_the_media_type_of_a_mislabeled_file(data: bytes, me
     assert MediaFile.from_data_uri(uri) == MediaFile(media_type, data)
 
 
-@pytest.mark.parametrize("data", [b"", b"plain text, not an image"])
+@pytest.mark.parametrize("data", [b"", b"plain text, not an image", b"\x89PNG\r\n\x1a\n\x00\xff"])
 def test_data_uri_must_hold_data_of_a_supported_media_type(data: bytes) -> None:
-    # Pi skips an empty file and reads one it does not recognize as text, so neither reaches the model as media.
+    # Pi skips an empty file and reads one it does not recognize as text, such as a PNG without its IHDR chunk,
+    # so neither reaches the model as media.
     with pytest.raises(UnsupportedContentError, match="no data of a supported media type"):
         MediaFile.from_data_uri(f"data:image/png;base64,{base64.b64encode(data).decode()}")
 

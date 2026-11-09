@@ -135,11 +135,13 @@ if TYPE_CHECKING:
     )
     from nemo_gym.sandbox.utils import (
         CPU_CAP_ENV_VARS,
+        MEDIA_DIRECTORY,
         cpu_cap_env,
         download_bytes,
+        media_path,
         read_text,
+        stage_media,
         upload_bytes,
-        upload_media,
         upload_text,
     )
 
@@ -154,6 +156,7 @@ _PUBLIC_API = {
     "DockerCreateConfig": "providers.docker.provider",
     "DockerProvider": "providers.docker.provider",
     "LocalProvider": "providers.local.provider",
+    "MEDIA_DIRECTORY": "utils",
     "ORPHAN_REAP_TIMEOUT_S": "providers.base",
     "OpenSandboxProvider": "providers.opensandbox.provider",
     "SandboxAccess": "access",
@@ -170,6 +173,7 @@ _PUBLIC_API = {
     "download_dir": "transfer",
     "download_path": "transfer",
     "exec_as_root": "transfer",
+    "media_path": "utils",
     "opensandbox_shm_labels": "compose_config",
     "read_text": "utils",
     "remote_kind": "transfer",
@@ -178,10 +182,10 @@ _PUBLIC_API = {
     "sandbox_platform": "compose_config",
     "service_gpus": "compose_fields",
     "service_resources": "compose_fields",
+    "stage_media": "utils",
     "upload_archive": "transfer",
     "upload_bytes": "utils",
     "upload_dir": "transfer",
-    "upload_media": "utils",
     "upload_path": "transfer",
     "upload_text": "utils",
 }
