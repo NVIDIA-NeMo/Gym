@@ -77,9 +77,14 @@ def test_a_tool_without_a_docstring_is_refused() -> None:
         TypedToolset(_Undocumented())
 
 
-@pytest.mark.parametrize("signature", ["no_arguments", "two_arguments", "not_a_model"])
+@pytest.mark.parametrize("signature", ["no_arguments", "two_arguments", "not_a_model", "keyword_only"])
 def test_a_tool_must_take_one_model_of_arguments(signature: str) -> None:
+    """The server passes the arguments model positionally, so a keyword-only parameter is refused when built."""
+
     async def no_arguments(self) -> None:
+        """Doc."""
+
+    async def keyword_only(self, *, arguments: _Amount) -> None:
         """Doc."""
 
     async def two_arguments(self, first: _Amount, second: _Amount) -> None:
@@ -90,10 +95,52 @@ def test_a_tool_must_take_one_model_of_arguments(signature: str) -> None:
 
     owner_type = type("_Owner", (), {"tool": episode_tool(locals()[signature])})
 
-    with pytest.raises(TypeError, match="one Pydantic model"):
+    with pytest.raises(TypeError, match="one positional Pydantic model"):
         TypedToolset(owner_type())
+
+
+def test_a_tool_must_be_async() -> None:
+    def add(self, arguments: _Amount) -> int:
+        """Doc."""
+        return arguments.amount
+
+    with pytest.raises(TypeError, match="must be an async method"):
+        episode_tool(add)
 
 
 def test_a_tool_name_must_be_one_path_segment() -> None:
     with pytest.raises(ValidationError):
-        ToolSpec(name="a/b", description="d", parameters={})
+        ToolSpec(name="a/b", description="d", parameters={"type": "object"})
+
+
+@pytest.mark.parametrize("parameters", [{}, {"type": "string"}, {"properties": {}}])
+def test_a_tools_parameters_must_be_an_object_schema(parameters: dict) -> None:
+    with pytest.raises(ValidationError, match="type"):
+        ToolSpec(name="add", description="d", parameters=parameters)
+
+
+class _Line(BaseModel):
+    start: _Amount
+    end: _Amount
+
+
+def test_a_specs_declaration_keeps_the_nested_schema() -> None:
+    spec = ToolSpec(name="draw", description="Draw a line.", parameters=_Line.model_json_schema())
+
+    declaration = spec.function_tool()
+
+    assert declaration == {
+        "type": "function",
+        "name": "draw",
+        "description": "Draw a line.",
+        "parameters": _Line.model_json_schema(),
+        "strict": False,
+    }
+    assert "_Amount" in declaration["parameters"]["$defs"]
+
+
+def test_each_class_builds_its_tools_once() -> None:
+    """Every episode of a server builds a toolset; the specs come from the class, not the episode."""
+    first, second = TypedToolset(_Counter()), TypedToolset(_Counter())
+
+    assert [spec is other for spec, other in zip(first.specs(), second.specs())] == [True, True]
