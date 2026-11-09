@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """The same schema validates source rows and collated tasks without exposing labels."""
 
+import ast
+from pathlib import Path
+
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
@@ -9,6 +12,159 @@ from benchmarks.opencode_multimodal_benchmarks.prepare import task_row
 from nemo_gym.data import TaskDataValidator
 from resources_servers.opencode_multimodal_benchmarks.reporting import benchmark_report
 from resources_servers.opencode_multimodal_benchmarks.task_data import TaskData
+from resources_servers.opencode_multimodal_benchmarks.tests.test_app import request, server  # noqa: F401
+from resources_servers.opencode_multimodal_benchmarks.verifier import VisualVerifyRequest
+
+
+BENCHMARKS = ("VStarBench", "HRBench8K", "VTCBench", "ZeroBench")
+
+
+def _minimal_metadata(benchmark):
+    metadata = {
+        "benchmark": benchmark,
+        "index": "1",
+        "question": "Which animal?",
+        "answer": "cat",
+        "expected_samples": 1,
+    }
+    if benchmark in {"VStarBench", "HRBench8K"}:
+        metadata.update(answer="A", options={"A": "cat", "B": "dog"})
+    if benchmark == "HRBench8K":
+        metadata["cycle_category"] = "1"
+    return metadata
+
+
+def _wire_request(metadata):
+    value = request(metadata["benchmark"], "cat").model_dump()
+    value["verifier_metadata"] = metadata
+    return VisualVerifyRequest.model_validate(value)
+
+
+def _assert_declared_task_reads(source, names, *, derived=()):
+    """Guard literal metadata reads; minimal-task execution below covers dynamic reads."""
+    reads = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name) and node.value.id in names:
+            key = node.slice
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in names
+            and node.func.attr == "get"
+            and node.args
+        ):
+            key = node.args[0]
+        else:
+            continue
+        if isinstance(key, ast.Constant) and isinstance(key.value, str):
+            reads.add(key.value)
+    missing = reads - TaskData.model_fields.keys() - set(derived)
+    assert not missing, f"Consumer reads undeclared task fields: {sorted(missing)}"
+
+
+@pytest.mark.parametrize(
+    "filename,names,derived",
+    [
+        ("verifier.py", {"task"}, ()),
+        ("mcq.py", {"task"}, ()),
+        ("vtcbench.py", {"task"}, ()),
+        ("metrics.py", {"metadata"}, ()),
+        # These rows also carry explicitly derived scoring/report fields.
+        ("reporting.py", {"row"}, ("hit", "type", "accuracy")),
+        ("app.py", {"row"}, ("verifier_metadata", "reward", "hit", "accuracy", "cycle", "type")),
+    ],
+)
+def test_consumer_metadata_reads_are_declared(filename, names, derived):
+    source = (Path(__file__).resolve().parents[1] / filename).read_text()
+    _assert_declared_task_reads(source, names, derived=derived)
+
+
+def test_consumer_guard_detects_an_added_undeclared_field():
+    with pytest.raises(AssertionError, match="undeclared_reference"):
+        _assert_declared_task_reads('def score(task): return task["undeclared_reference"]', {"task"})
+
+
+def test_consumer_guard_detects_a_removed_schema_field(monkeypatch):
+    monkeypatch.delitem(TaskData.model_fields, "answer")
+    source = (Path(__file__).resolve().parents[1] / "vtcbench.py").read_text()
+    with pytest.raises(AssertionError, match="answer"):
+        _assert_declared_task_reads(source, {"task"})
+
+
+@pytest.mark.parametrize("benchmark", BENCHMARKS)
+@pytest.mark.parametrize("field", ["index", "question", "answer", "expected_samples"])
+def test_wire_boundary_requires_shared_consumer_fields(benchmark, field):
+    metadata = _minimal_metadata(benchmark)
+    metadata.pop(field)
+    with pytest.raises(ValidationError):
+        _wire_request(metadata)
+
+
+@pytest.mark.parametrize("benchmark", BENCHMARKS)
+@pytest.mark.parametrize(
+    "field,value", [("answer", ""), ("answer", " \n"), ("expected_samples", 0), ("expected_samples", -1)]
+)
+def test_wire_boundary_rejects_unusable_consumer_values(benchmark, field, value):
+    with pytest.raises(ValidationError):
+        _wire_request(_minimal_metadata(benchmark) | {field: value})
+
+
+@pytest.mark.parametrize("benchmark", ["VStarBench", "HRBench8K"])
+@pytest.mark.parametrize("options", [None, {}, {"A": " "}])
+def test_wire_boundary_requires_usable_mcq_options(benchmark, options):
+    metadata = _minimal_metadata(benchmark)
+    metadata.pop("options")
+    if options is not None:
+        metadata["options"] = options
+    with pytest.raises(ValidationError):
+        _wire_request(metadata)
+
+
+@pytest.mark.parametrize("cycle", [None, "", " \n"])
+def test_wire_boundary_requires_hrbench_cycle(cycle):
+    metadata = _minimal_metadata("HRBench8K")
+    metadata.pop("cycle_category")
+    if cycle is not None:
+        metadata["cycle_category"] = cycle
+    with pytest.raises(ValidationError):
+        _wire_request(metadata)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("benchmark", BENCHMARKS)
+async def test_minimal_wire_task_runs_verification_and_reporting(server, benchmark):
+    body = _wire_request(_minimal_metadata(benchmark))
+    if benchmark == "VTCBench":
+        assert body.verifier_metadata["options"] == {}
+    # Avoid a judge: each benchmark receives an unambiguous correct prediction.
+    prediction = "A" if benchmark in {"VStarBench", "HRBench8K"} else "cat"
+    if benchmark == "ZeroBench":
+        prediction = "{cat}"
+    value = request(benchmark, prediction).model_dump()
+    value["verifier_metadata"] = body.verifier_metadata
+    result = await server.verify(VisualVerifyRequest.model_validate(value))
+    assert result.reward == 1
+    repeats = 5 if benchmark == "ZeroBench" else 1
+    metrics = server.compute_metrics([[result.model_dump() | {"_ng_rollout_index": i} for i in range(repeats)]])
+    assert metrics[f"{benchmark}/complete"] is True
+    assert metrics[f"{benchmark}/expected"] == 1
+
+
+@pytest.mark.parametrize("benchmark", BENCHMARKS)
+def test_aggregation_does_not_infer_completeness_from_landed_rows(server, benchmark):
+    metadata = _wire_request(_minimal_metadata(benchmark)).verifier_metadata
+    repeats = 5 if benchmark == "ZeroBench" else 1
+
+    def rows(value):
+        return [[{"verifier_metadata": value, "reward": 1, "_ng_rollout_index": i} for i in range(repeats)]]
+
+    missing_count = dict(metadata)
+    missing_count.pop("expected_samples")
+    with pytest.raises(ValueError, match="require expected_samples"):
+        server.compute_metrics(rows(missing_count))
+    metrics = server.compute_metrics(rows(metadata | {"expected_samples": 2}))
+    assert metrics[f"{benchmark}/complete"] is False
 
 
 @pytest.mark.parametrize("benchmark", ["VStarBench", "HRBench8K", "VTCBench", "ZeroBench"])
