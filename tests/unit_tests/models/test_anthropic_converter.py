@@ -479,6 +479,28 @@ class TestResponsesToAnthropicResponse:
         assert message.stop_reason == "tool_use"
         assert message.content[1].input == {"a": 1}
 
+    @pytest.mark.parametrize("blank", ["", " ", "\n\t"])
+    def test_mixed_response_omits_blank_text_without_trimming_content(self, blank):
+        content = [
+            {"type": "thinking", "thinking": "keep reasoning", "signature": ""},
+            {"type": "text", "text": blank},
+            {"type": "text", "text": "  keep this text\n"},
+            {"type": "tool_use", "id": "call-1", "name": "check", "input": {}},
+        ]
+        conv, response = self._response_from_anthropic({"content": content, "stop_reason": "tool_use"})
+        # Build distinct Responses text parts: the inverse converter coalesces
+        # adjacent Anthropic text blocks before this serialization boundary.
+        payload = response.model_dump(mode="json")
+        for item in payload["output"]:
+            if item["type"] == "message":
+                item["content"] = [
+                    {"type": "output_text", "text": block["text"], "annotations": []} for block in content[1:3]
+                ]
+        response = type(response).model_validate(payload)
+        served = conv.responses_to_anthropic_response(response, model="m")
+        assert served["content"] == [content[0], content[2], content[3]]
+        assert served["stop_reason"] == "tool_use"
+
     def test_empty_output_yields_empty_content(self) -> None:
         # Defensive: a downstream response carrying no output items maps to empty content,
         # which is still a valid Anthropic Message. (Realistic empty responses arrive as an
