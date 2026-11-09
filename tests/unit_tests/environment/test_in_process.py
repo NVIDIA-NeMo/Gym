@@ -13,8 +13,8 @@ from nemo_gym.config.global_config import maybe_get_global_config_dict, scoped_g
 from nemo_gym.environment import in_process
 from nemo_gym.environment.in_process import PlannedBenchmark, TaskRunner, plan_benchmark, serve_benchmark
 from nemo_gym.eval.eval_plan import PlanBenchmark, PlanGym, build_eval_plan
-from nemo_gym.orchestration.server_supervisor import ServerSpinupTimeoutError, ServerStartFailedError
 from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
+from nemo_gym.server_runtime.supervisor import ServerSpinupTimeoutError, ServerStartFailedError
 
 
 HEAD = BaseServerConfig(host="127.0.0.1", port=4242)

@@ -161,7 +161,7 @@ async def test_sandbox_spans_have_no_rollout_id_outside_a_rollout(
         if span.name.startswith("gym.sandbox."):
             names.add(span.name)
             assert "nemo.gym.rollout.id" not in span.attributes
-    assert names == {"gym.sandbox.start", "gym.sandbox.exec", "gym.sandbox.stop"}
+    assert names == {"gym.sandbox.request", "gym.sandbox.start", "gym.sandbox.exec", "gym.sandbox.stop"}
 
 
 class _FailingProvider(_StubProvider):
@@ -347,7 +347,7 @@ def test_supervisor_is_the_only_writer_of_the_active_servers_gauge():
     )
 
     callers = {line.split(":")[0].rsplit("/", 1)[-1] for line in hits}
-    assert callers == {"server_supervisor.py", "metrics.py"}, (
+    assert callers == {"supervisor.py", "metrics.py"}, (
         f"gym.servers.active must only be written by the server supervisor, found: {sorted(callers)}"
     )
 

@@ -155,7 +155,7 @@ def exit_cleanly_on_config_error(fn):
         except BaseException as e:
             if getattr(e, "failure_kind", None) is not None:
                 # The driver step of a resumable job hands the kind to the guard of its next segment.
-                from nemo_gym.orchestration.executors.slurm.resume_script import record_failure_kind
+                from nemo_gym.eval.recovery.markers import record_failure_kind
 
                 record_failure_kind(e)
             if isinstance(e, IncompleteEvaluationError):

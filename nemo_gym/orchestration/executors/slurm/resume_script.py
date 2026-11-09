@@ -28,13 +28,12 @@ driver step, cancels both when the job finished the run.
 """
 
 import logging
-import os
-from pathlib import Path
 
 from nemo_gym.core.failure_kinds import (
     COLLECTION_RESUME_REFUSED,
     DRIVER_INSTALL_FAILED,
     PROVIDER_CREDENTIALS_REJECTED,
+    PROVIDER_QUOTA_EXHAUSTED,
     SERVER_SPINUP_TIMEOUT,
     SERVER_START_FAILED,
 )
@@ -53,7 +52,6 @@ from nemo_gym.eval.recovery.markers import (
     RETRY_FILE_NAME,
 )
 from nemo_gym.orchestration.api import ResumeConfig
-from nemo_gym.orchestration.executors.script_templates import DRIVER_FAILURE_ENV
 
 
 logger = logging.getLogger(__name__)
@@ -114,14 +112,19 @@ GUARDED_DRIVER_FAILURE_KINDS = (
     DRIVER_INSTALL_FAILED,
     COLLECTION_RESUME_REFUSED,
     PROVIDER_CREDENTIALS_REJECTED,
+    PROVIDER_QUOTA_EXHAUSTED,
 )
 SPINUP_TIMEOUT_REASON = (
     f"{SERVER_SPINUP_TIMEOUT}: the Gym servers did not become ready within server_spinup_timeout_seconds; "
     "the chain does not retry it; raise the limit with gym eval resubmit --recover --server-spinup-timeout-seconds N --spinup-timeout-reason TEXT"
 )
 CREDENTIALS_REJECTED_REASON = (
-    f"{PROVIDER_CREDENTIALS_REJECTED}: the sandbox provider refused the credentials; the chain does not retry it; "
+    f"{PROVIDER_CREDENTIALS_REJECTED}: the provider refused the credentials; the chain does not retry it; "
     "fix the credentials, then continue with gym eval resubmit --recover"
+)
+QUOTA_EXHAUSTED_REASON = (
+    f"{PROVIDER_QUOTA_EXHAUSTED}: the grading provider's quota is exhausted; the chain does not retry it; "
+    "after the reset continue with gym eval resubmit --recover (re-judges the saved answers, no model calls)"
 )
 RESUME_REFUSED_REASON = (
     f"{COLLECTION_RESUME_REFUSED}: the saved rollouts do not verify against this run's inputs and configuration; "
@@ -577,6 +580,8 @@ if [[ "$_prev_slurm_job_id" != "" ]]; then
             _gym_stop_incomplete "Previous job $_prev_slurm_job_id ended $_prev_state: {resume_refused_reason}" ;;
         {provider_credentials_rejected})
             _gym_stop_incomplete "Previous job $_prev_slurm_job_id ended $_prev_state: {credentials_rejected_reason}" ;;
+        {provider_quota_exhausted})
+            _gym_stop_incomplete "Previous job $_prev_slurm_job_id ended $_prev_state: {quota_exhausted_reason}" ;;
         {server_start_failed})
             # A server that did not start (its port taken, for instance) before the run saved anything: there is
             # nothing to resume, and the failure is the infrastructure's, so the segment starts the run again fresh,
@@ -991,6 +996,8 @@ def render_resume_prologue(resume: ResumeConfig, *, admission_command: str = "fa
         resume_refused_reason=RESUME_REFUSED_REASON,
         provider_credentials_rejected=PROVIDER_CREDENTIALS_REJECTED,
         credentials_rejected_reason=CREDENTIALS_REJECTED_REASON,
+        provider_quota_exhausted=PROVIDER_QUOTA_EXHAUSTED,
+        quota_exhausted_reason=QUOTA_EXHAUSTED_REASON,
         export_receipt_missing_reason=EXPORT_RECEIPT_MISSING_REASON,
         receipt_artifacts=" ".join(f"{key}:{name}" for key, name in _RECEIPT_ARTIFACTS),
     )
@@ -1017,19 +1024,3 @@ def render_resume_epilogue() -> str:
         export_receipt_missing_reason=EXPORT_RECEIPT_MISSING_REASON,
         chain_end_journal_name=CHAIN_END_JOURNAL_NAME,
     )
-
-
-def record_failure_kind(error: BaseException) -> None:
-    """Leave the registered kind ``error`` carries in the failure file the driver step names, for the next guard.
-
-    The driver step of a resumable job names the file in ``DRIVER_FAILURE_ENV``; elsewhere this does nothing.
-    """
-    kind = getattr(error, "failure_kind", None)
-    path = os.environ.get(DRIVER_FAILURE_ENV)
-    if not isinstance(kind, str) or not path:
-        return
-    try:
-        Path(path).write_text(kind + "\n")
-    except OSError as write_error:
-        # The next segment then reads the saved state as it would without the kind.
-        logger.warning("Cannot record failure kind %s in %s: %s", kind, path, write_error)

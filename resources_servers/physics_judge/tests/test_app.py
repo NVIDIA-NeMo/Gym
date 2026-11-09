@@ -37,7 +37,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputText,
     NgFailureEvent,
 )
-from nemo_gym.orchestration.recovery import reverification_cause, saved_row_evidence
+from nemo_gym.eval.recovery.grading import reverification_cause, saved_row_evidence
 from nemo_gym.verification import is_judge_failure
 from resources_servers.math_with_judge.app import LibraryJudgeMathVerifyRequest
 from resources_servers.physics_judge.app import (

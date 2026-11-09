@@ -20,6 +20,13 @@ the scripts) and the recovery planner (``nemo_gym.eval.recovery``), so they live
 them from here, and the planner never imports the chain.
 """
 
+import logging
+import os
+from pathlib import Path
+
+
+logger = logging.getLogger(__name__)
+
 ACCOUNTING_UNKNOWN_PREFIX = "GYM_ACCOUNTING_UNKNOWN:"
 # The line prefix the installed continuation reader prints its decision reason with.
 CONTINUATION_REASON_PREFIX = "__GYM_CONTINUATION_REASON:"
@@ -46,3 +53,22 @@ RETRY_FILE_NAME = ".gym_infra_retries"
 ACCUMULATED_WALLTIME_NAME = ".gym_accumulated_walltime"
 # Written only by `gym eval resubmit --recover --extend-retries`: infra retries added to the configured cap.
 RETRY_EXTENSION_NAME = ".gym_infra_retry_extension"
+# The driver step's environment names the file, <job dir>/.gym_driver_failure.<allocation>, where a driver failure
+# that the next segment would repeat leaves its registered kind (see the guard in executors/slurm/resume_script.py).
+DRIVER_FAILURE_ENV = "GYM_DRIVER_FAILURE_FILE"
+
+
+def record_failure_kind(error: BaseException) -> None:
+    """Leave the registered kind ``error`` carries in the failure file the driver step names, for the next guard.
+
+    The driver step of a resumable job names the file in ``DRIVER_FAILURE_ENV``; elsewhere this does nothing.
+    """
+    kind = getattr(error, "failure_kind", None)
+    path = os.environ.get(DRIVER_FAILURE_ENV)
+    if not isinstance(kind, str) or not path:
+        return
+    try:
+        Path(path).write_text(kind + "\n")
+    except OSError as write_error:
+        # The next segment then reads the saved state as it would without the kind.
+        logger.warning("Cannot record failure kind %s in %s: %s", kind, path, write_error)

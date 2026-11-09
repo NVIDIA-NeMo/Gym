@@ -22,6 +22,7 @@ from nemo_gym.core.failure_kinds import (
     JUDGE_FAILED,
     JUDGE_UNPARSEABLE,
     VERIFIER_ERROR,
+    FailureClassificationConfig,
 )
 from nemo_gym.eval.recovery.decision import (
     FAILURE_CLASS,
@@ -469,7 +470,9 @@ def reverification_cause(row: Mapping[str, Any]) -> str | None:
     return REVERIFY_UNGRADED if _grading_unrecorded(row) else None
 
 
-def masked_without_artifact_kind(row: Mapping[str, Any]) -> str | None:
+def masked_without_artifact_kind(
+    row: Mapping[str, Any], *, classification: FailureClassificationConfig | None = None
+) -> str | None:
     """The kind of a masked result that is never measured nor run again, though infrastructure left it unmeasured; else None.
 
     A masked result ``masked_infrastructure_kind`` rejects only because it kept a saved answer (so every other rule of
@@ -481,7 +484,7 @@ def masked_without_artifact_kind(row: Mapping[str, Any]) -> str | None:
     """
     from nemo_gym.rollouts.rollout_recovery import masked_kept_answer_kind
 
-    kind = masked_kept_answer_kind(row)
+    kind = masked_kept_answer_kind(row, classification=classification)
     return kind if kind is not None and reverification_cause(row) is None else None
 
 

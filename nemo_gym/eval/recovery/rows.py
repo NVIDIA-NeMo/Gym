@@ -48,18 +48,21 @@ from typing import Any
 
 from nemo_gym.agents.agent_outcome import (
     OutcomeAction,
-    choose_action,
 )
 from nemo_gym.artifacts.run_artifacts import ACCEPTED_STAGE_OMISSION, accepted_stage_omission
 from nemo_gym.core.failure_kinds import (
     AGENT_TIMEOUT_INFRASTRUCTURE,
     JUDGE_FAILED,
+    JUDGE_SKIPPED,
     JUDGE_UNPARSEABLE,
     MODEL_CONTEXT_LIMIT,
     MODEL_POLICY_RESPONSE_TIMEOUT,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
+    PROVIDER_QUOTA_EXHAUSTED,
+    quota_reset_text,
 )
+from nemo_gym.core.outcome_policy import is_policy_counted_zero
 from nemo_gym.eval.recovery.budgets import (
     RecoveryBudget,
 )
@@ -103,10 +106,13 @@ from nemo_gym.eval.recovery.policy import (
     _judge_state,
     _policy_evidence,
     _policy_replay_is_unsupported,
+    _quota_wait_reason,
+    _recovery_action,
     _replay_refusal,
     _retry_kind,
     _sidecar_action,
 )
+from nemo_gym.rollouts.rollout_recovery import failure_stage as _policy_stage
 
 
 def decide_recovery(
@@ -210,7 +216,11 @@ def decide_recovery(
                 )
                 continue
             judge = row.get(FAILURE_CLASS) == JUDGE_FAILED
-            if not judge and identity in managed and is_infrastructure_agent_timeout(row):
+            if (
+                not judge
+                and identity in managed
+                and is_infrastructure_agent_timeout(row, classification=policy.classification)
+            ):
                 # A graded agent timeout whose window held a server-side fault (Harbor's graded zero): the Store
                 # selects it as a failure and runs it again under the attempt cap. A run without a Store cannot
                 # reopen a saved result, so there it stays scored and the gate counts its fault evaluation-side.
@@ -230,7 +240,35 @@ def decide_recovery(
                 continue
             reward = row.get("reward")
             graded = isinstance(reward, (int, float)) and not isinstance(reward, bool) and math.isfinite(reward)
-            if not judge and (row.get("mask_sample") is True or row.get("evaluation_completed") is False):
+            if not judge and row.get("mask_sample") is True and row.get("failure_kind") == JUDGE_SKIPPED:
+                # Verification was skipped by configuration: complete and never re-judged or rerun.
+                reason = row.get("_ng_skipped_reason")
+                evidence.append(
+                    IdentityEvidence(
+                        identity=identity,
+                        state=IdentityState.SKIPPED,
+                        failure_kind=JUDGE_SKIPPED,
+                        reason=reason if isinstance(reason, str) else None,
+                    )
+                )
+                continue
+            if (
+                not judge
+                and (row.get("mask_sample") is True or row.get("evaluation_completed") is False)
+                and not is_policy_counted_zero(row)
+            ):
+                if row.get("failure_outcome_action") == OutcomeAction.FAIL:
+                    # The owning boundary already ended this failure; recovery cannot grant a new retry budget.
+                    policy_stopped = True
+                    evidence.append(
+                        IdentityEvidence(
+                            identity=identity,
+                            state=IdentityState.TERMINAL,
+                            failure_kind=row.get("failure_kind"),
+                            events=_events(row),
+                        )
+                    )
+                    continue
                 if reverification_cause(row) is not None:
                     # Masked by a judge or verify-transport failure: its saved answer is graded again, never rerun.
                     saved_results.add(identity)
@@ -243,10 +281,14 @@ def decide_recovery(
                         )
                     )
                     continue
-                infrastructure = masked_infrastructure_kind(row)
+                infrastructure = masked_infrastructure_kind(row, classification=policy.classification)
                 fact = managed.get(identity)
                 spent = fact.attempts if fact is not None else 0
-                kept = masked_without_artifact_kind(row) if infrastructure is None and fact is not None else None
+                kept = (
+                    masked_without_artifact_kind(row, classification=policy.classification)
+                    if infrastructure is None and fact is not None
+                    else None
+                )
                 if kept is not None:
                     if fact.rerun_approved:
                         infrastructure = kept  # the Store counts the approved row as a failed attempt
@@ -267,7 +309,7 @@ def decide_recovery(
                 if infrastructure is not None and fact is not None:
                     # Infrastructure masked it: the Store counts it as a failed attempt and runs it again, and the new
                     # attempt supersedes it. The policy decides it as it decides a failure of that kind.
-                    action = choose_action(failure_kind=infrastructure, http_status=None, config=policy)
+                    action = _recovery_action(row, infrastructure, policy, http_status=None)
                     if action == OutcomeAction.FAIL:
                         # The Store would still run it again, so a policy that fails it stops the run.
                         policy_stopped = True
@@ -330,11 +372,15 @@ def decide_recovery(
                 )
                 continue
             state = _judge_state(row, policy) if judge else IdentityState.SCORED
-            policy_stopped |= judge and state == IdentityState.TERMINAL
+            quota_wait = (
+                judge and state == IdentityState.TERMINAL and row.get("failure_kind") == PROVIDER_QUOTA_EXHAUSTED
+            )
+            policy_stopped |= judge and state == IdentityState.TERMINAL and not quota_wait
             evidence.append(
                 IdentityEvidence(
                     identity=identity,
                     state=state,
+                    reason=_quota_wait_reason(row) if quota_wait else None,
                     failure_kind=row.get("failure_kind") if judge else None,
                     failure_id=row.get(FAILURE_ID) if isinstance(row.get(FAILURE_ID), str) else None,
                     events=_events(row),
@@ -362,7 +408,7 @@ def decide_recovery(
             spent = fact.attempts if fact else 0
             cap = fact.max_attempts if fact else default_max_attempts
             state = IdentityState.UNKNOWN
-            if not _policy_replay_is_unsupported(last):
+            if not _policy_replay_is_unsupported(last, classification=policy.classification):
                 action = _sidecar_action(last, policy)
                 if action == OutcomeAction.FAIL or last.get(TERMINAL) is True:
                     policy_stopped = True
@@ -375,7 +421,9 @@ def decide_recovery(
                     state=state,
                     attempts=spent,
                     max_attempts=cap,
-                    reason=_replay_refusal(last) if state == IdentityState.UNKNOWN else None,
+                    reason=_replay_refusal(last, classification=policy.classification)
+                    if state == IdentityState.UNKNOWN
+                    else None,
                     failure_kind=last.get("failure_kind"),
                     failure_id=last.get(FAILURE_ID) if isinstance(last.get(FAILURE_ID), str) else None,
                     events=_events(last),
@@ -422,11 +470,13 @@ def decide_recovery(
             else (last.get(MAX_ATTEMPTS) if isinstance(last.get(MAX_ATTEMPTS), int) else default_max_attempts)
         )
         spent = fact.attempts if fact else len(rows)
+        quota_wait = False
         if last.get(FAILURE_CLASS) == JUDGE_FAILED:
             # A judge that failed is re-judged from the saved answer, never by running the policy again.
             state = _judge_state(last, policy)
-            policy_stopped |= state == IdentityState.TERMINAL
-        elif is_answered_agent_deadline(last):
+            quota_wait = state == IdentityState.TERMINAL and last.get("failure_kind") == PROVIDER_QUOTA_EXHAUSTED
+            policy_stopped |= state == IdentityState.TERMINAL and not quota_wait
+        elif is_answered_agent_deadline(last, classification=policy.classification):
             # The agent's own deadline ended it with an answer kept: the model's result, which no resume runs again.
             # Collection's metrics score it only when its producer marked it a counted zero.
             state = IdentityState.MODEL_FINAL
@@ -461,7 +511,7 @@ def decide_recovery(
                 reason = f"{reason}: {derived[2]}"
         elif derived is not None and derived[1]:
             # The policy's own request failed: the model's final result, unless a resume would run it again.
-            if last.get(TERMINAL) is True or _policy_replay_is_unsupported(last):
+            if last.get(TERMINAL) is True or _policy_replay_is_unsupported(last, classification=policy.classification):
                 state = IdentityState.MODEL_FINAL
             else:
                 state = IdentityState.UNKNOWN
@@ -469,19 +519,22 @@ def decide_recovery(
         elif last.get(TERMINAL) is True:
             state = IdentityState.TERMINAL
         elif (
-            action := choose_action(
-                failure_kind=kind or "unknown", http_status=_policy_evidence(last)[1], config=policy
-            )
+            action := _recovery_action(last, kind or "unknown", policy, http_status=_policy_evidence(last)[1])
         ) == OutcomeAction.FAIL:
             # Unrestricted resume would still retry this nonterminal saved row.
             policy_stopped = True
             state = IdentityState.TERMINAL
-        elif action == OutcomeAction.VERIFY or _policy_replay_is_unsupported(last):
+        elif action == OutcomeAction.VERIFY or _policy_replay_is_unsupported(
+            last, classification=policy.classification
+        ):
             # Only a judge failure has a supported saved-answer path. A failed verification can retain a finished
             # agent answer, so replay must not generate another. For collection-wrapped model failures, the sidecar projection
             # has no durable model-operation budget accounting: replay must not silently replenish that budget.
             state = IdentityState.UNKNOWN
-            reason = _replay_refusal(last) or "the policy verifies a failure that has no saved judge answer"
+            reason = (
+                _replay_refusal(last, classification=policy.classification)
+                or "the policy verifies a failure that has no saved judge answer"
+            )
         elif spent < cap:
             state = IdentityState.RETRYABLE
         else:
@@ -491,13 +544,16 @@ def decide_recovery(
                 identity=identity,
                 state=state,
                 # The kind its retry selects on stays agent_timeout; the counted kind names the server-side fault.
-                failure_kind=AGENT_TIMEOUT_INFRASTRUCTURE if is_infrastructure_agent_timeout(last) else kind,
+                failure_kind=AGENT_TIMEOUT_INFRASTRUCTURE
+                if is_infrastructure_agent_timeout(last, classification=policy.classification)
+                else kind,
                 http_status=_policy_evidence(last)[1],
+                stage=_policy_stage(last),
                 failure_id=last.get(FAILURE_ID) if isinstance(last.get(FAILURE_ID), str) else None,
                 attempts=spent,
                 max_attempts=cap,
                 events=_events(last),
-                reason=reason if state == IdentityState.UNKNOWN else None,
+                reason=reason if state == IdentityState.UNKNOWN else _quota_wait_reason(last) if quota_wait else None,
                 unscored=unscored,
             )
         )
@@ -637,6 +693,20 @@ def decide_recovery(
                 "re-judge the saved answers with `gym eval reverify --judge-failed-only`",
             )
         if counts.get(IdentityState.TERMINAL):
+            waiting = [
+                item
+                for item in evidence
+                if item.state == IdentityState.TERMINAL and item.failure_kind == PROVIDER_QUOTA_EXHAUSTED
+            ]
+            if len(waiting) == counts[IdentityState.TERMINAL]:
+                resets = sorted({text for item in waiting if (text := quota_reset_text(item.reason))})
+                return decision(
+                    RecoveryAction.STOP,
+                    f"{len(waiting)} saved answer(s) wait on the grading provider's quota "
+                    f"({PROVIDER_QUOTA_EXHAUSTED}), which {'resets at ' + resets[-1] if resets else 'has no known reset'}"
+                    "; nothing can be graded before then. After the reset continue with gym eval resubmit --recover "
+                    "(re-judges the saved answers, no model calls)",
+                )
             return decision(
                 RecoveryAction.STOP,
                 f"{counts[IdentityState.TERMINAL]} terminal unscored failure(s) need an "
@@ -662,6 +732,13 @@ def decide_recovery(
                 RecoveryAction.STOP,
                 f"{counts[IdentityState.MASKED]} completed result(s) are masked and not measured: they are kept and a "
                 f"resume would run nothing; the run is not complete; {populations}",
+            )
+        if counts.get(IdentityState.SKIPPED):
+            reasons = sorted({item.reason for item in evidence if item.state == IdentityState.SKIPPED and item.reason})
+            return decision(
+                RecoveryAction.NOOP,
+                f"{counts[IdentityState.SKIPPED]} result(s) not graded by configuration ({JUDGE_SKIPPED}); "
+                f"nothing is re-judged or rerun{': ' + reasons[0] if reasons else ''}",
             )
         if counts.get(IdentityState.OMITTED):
             return decision(

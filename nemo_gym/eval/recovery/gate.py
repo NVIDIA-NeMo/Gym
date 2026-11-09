@@ -25,6 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from nemo_gym.config.secret_utils import mask_url_passwords
 from nemo_gym.core.failure_kinds import (
     AGENT_TIMEOUT_INFRASTRUCTURE,
+    GRADING_WITHOUT_VERDICT,
     HARBOR_FAILED,
     INFRASTRUCTURE_ERROR,
     JUDGE_FAILED,
@@ -33,6 +34,7 @@ from nemo_gym.core.failure_kinds import (
     SERVER_START_FAILED,
     TRUNCATED_ANSWER,
     VERIFIER_ERROR,
+    FailureClassificationConfig,
 )
 from nemo_gym.eval.recovery.budgets import (
     retry_budget,
@@ -59,13 +61,13 @@ from nemo_gym.eval.recovery.rows import (
     omission_summary,
 )
 from nemo_gym.eval.recovery.trials import (
-    GRADING_WITHOUT_VERDICT,
     UNVERIFIED_NOTE,
     _answer_fault,
     _count,
     _cut_off,
     _fault_text,
     _graded,
+    _health_classification,
     _health_view,
     _observed_trial_operations,
     _percent,
@@ -74,6 +76,7 @@ from nemo_gym.eval.recovery.trials import (
     _recovered_note,
     _scored_fault,
     _trajectory_text,
+    decision_classification,
     fault_report,
     final_zero_trials,
     infrastructure_timeouts,
@@ -109,7 +112,7 @@ def gate_task_summary(
     """
     errors: list[str] = []
     warnings: list[str] = []
-    unverified = summary_valid is None or health_passed is None
+    unverified = summary_valid is None or health_passed is None or decision.unverified
     states = decision.counts
     for state, label in (
         (IdentityState.JUDGE_RECOVERABLE, "judge failures awaiting re-judgment"),
@@ -122,7 +125,11 @@ def gate_task_summary(
     ):
         if states.get(state):
             errors.append(f"{states[state]} {label}: {decision.identities[state.value][:5]}")
-    if score is None or not math.isfinite(score):
+    if decision.unverified:
+        # Deliberately unverified: there is no score to read, and that is no failure.
+        score = None
+        warnings.append(decision.reason)
+    elif score is None or not math.isfinite(score):
         # An incomplete run has no score to read yet, whatever score options were passed: say that, not the options.
         settled = sum(
             states.get(state, 0) for state in (IdentityState.SCORED, IdentityState.MODEL_FINAL, IdentityState.OMITTED)
@@ -452,7 +459,7 @@ class GateCriteria(BaseModel):
     # request timed out after its upload) is the model's fault. True by default: the deployment serving the evaluated
     # model is part of what is evaluated, so its slowness is on the model's side, never the evaluation's. A
     # self-hosted evaluation that owns the serving deployment may set it to false, and the timeout then counts as a
-    # server fault (evaluation-side). Applied by the trial gate (``fault_class``).
+    # server fault (evaluation-side). Applied by the trial gate (``classify_failure``).
     policy_timeout_counts_as_model: bool = Field(default=True, strict=True)
 
     @field_validator("max_response_failure_fraction", "max_trial_failure_fraction", mode="before")
@@ -467,7 +474,7 @@ class GateCriteria(BaseModel):
             raise ValueError("expected a finite number in (0, 1]")
         return float(value)
 
-    def report(self) -> dict[str, Any]:
+    def report(self, *, classification: FailureClassificationConfig | None = None) -> dict[str, Any]:
         """The effective criterion and the accepted, unapplied fractions, as reported beside the gate results."""
         rule = "strictly below, before rounding"
         return {
@@ -475,6 +482,7 @@ class GateCriteria(BaseModel):
                 "max_failure_fraction": GATE_FAILURE_LIMIT,
                 "passes": rule,
                 "policy_timeout_counts_as_model": self.policy_timeout_counts_as_model,
+                "classification": (classification or FailureClassificationConfig()).model_dump(mode="json"),
             },
             "response": {"max_failure_fraction": self.max_response_failure_fraction, "applied": False},
             "trial": {"max_failure_fraction": self.max_trial_failure_fraction, "applied": False},
@@ -517,10 +525,15 @@ def trial_health(
     *,
     limit: float = GATE_FAILURE_LIMIT,
     policy_timeout_counts_as_model: bool = True,
+    classification: FailureClassificationConfig | None = None,
 ) -> tuple[bool | None, str]:
     """Evaluation health from the trial gate (``trial_verdict``): passed, failed or None, with its reason."""
     passed, reason, _ = trial_verdict(
-        decision, collected, limit=limit, policy_timeout_counts_as_model=policy_timeout_counts_as_model
+        decision,
+        collected,
+        limit=limit,
+        policy_timeout_counts_as_model=policy_timeout_counts_as_model,
+        classification=classification,
     )
     return passed, reason
 
@@ -531,10 +544,11 @@ def trial_verdict(
     *,
     limit: float = GATE_FAILURE_LIMIT,
     policy_timeout_counts_as_model: bool = True,
+    classification: FailureClassificationConfig | None = None,
 ) -> tuple[bool | None, str, dict[str, Any] | None]:
     """Evaluation health: evaluation-side trial faults over the expected trials, including repeats.
 
-    The counted failures are ``trial_faults``; a model fault (``fault_class``) is reported with its kind and never
+    The counted failures are ``trial_faults``; a model fault (``classify_failure``) is reported with its kind and never
     fails. Only the evaluation-side share is judged against the limit: at or above it the gate fails. Below it, it
     passes only with an exact count, when actual per-identity operation outcomes cover the observed model/tool and
     grading path of every trial that is not a recorded failure (``_observed_trial_operations``); an observed grading
@@ -550,8 +564,19 @@ def trial_verdict(
     trials = trial_population(decision)
     if not decision.complete or trials <= 0:
         return None, f"trial: not evaluated, the run is not complete ({dict(decision.counts)})", None
-    kinds = trial_faults(decision, collected)
-    report = fault_report(kinds, trials, policy_timeout_counts_as_model=policy_timeout_counts_as_model)
+    classification = _health_classification(
+        decision_classification(decision, classification),
+        policy_timeout_counts_as_model=policy_timeout_counts_as_model,
+    )
+    attributions = Counter()
+    kinds = trial_faults(decision, collected, attributions=attributions, classification=classification)
+    report = fault_report(
+        kinds,
+        trials,
+        policy_timeout_counts_as_model=policy_timeout_counts_as_model,
+        attributions=attributions,
+        classification=classification,
+    )
 
     def verdict(passed: bool | None, reason: str, *, exact: bool = False):
         state = {True: "PASS", False: "FAIL", None: "UNVERIFIED"}[passed]
@@ -560,6 +585,11 @@ def trial_verdict(
 
     if report["evaluation"]["fraction"] >= limit:
         return verdict(False, f"trial: {_fault_text(report, limit)}")
+    if report["unknown"]["count"]:
+        return verdict(
+            None,
+            f"trial: UNVERIFIED, {report['unknown']['count']} trial failure(s) have unknown classification; {UNVERIFIED_NOTE}",
+        )
     recovery = (collected.quality or {}).get("observed_upstream_recovery") if collected else None
     if recovery is not None and (
         not isinstance(recovery, dict)
@@ -585,6 +615,7 @@ def trial_verdict(
     covered = _observed_trial_operations(
         decision,
         collected,
+        classification=classification,
         judge_recovery=judge_recovery,
         grading_failures=invalid_grades,
         policy_recovery=policy_recovery,
@@ -628,6 +659,8 @@ def trial_verdict(
                 kinds + Counter({GRADING_WITHOUT_VERDICT: len(invalid_grades)}),
                 trials,
                 policy_timeout_counts_as_model=policy_timeout_counts_as_model,
+                attributions=attributions,
+                classification=classification,
             )
         retried = (
             f"{recovered_policy} failed policy attempt(s) were retried and completed in the same operation "
@@ -728,6 +761,7 @@ def trial_failure_cause(kind: Any) -> str:
         return "request"
     if kind.startswith(("agent_", "environment_", "harness_")) or kind in (
         HARBOR_FAILED,
+        GRADING_WITHOUT_VERDICT,
         INFRASTRUCTURE_ERROR,
         SERVER_START_FAILED,
     ):
@@ -753,8 +787,9 @@ def failure_facts(decision: RecoveryDecision, collected: CollectedEvidence | Non
     population = trial_population(decision)
     if population <= 0:
         return None
-    final_zero = final_zero_trials(decision, collected)
-    infrastructure = infrastructure_timeouts(decision, collected)
+    classification = decision_classification(decision)
+    final_zero = final_zero_trials(decision, collected, classification=classification)
+    infrastructure = infrastructure_timeouts(decision, collected, classification=classification)
     scored = set(decision.identities.get(IdentityState.SCORED.value, []))
     responses: Counter = Counter()
     for row in (collected.results or []) if collected is not None else []:
@@ -1025,7 +1060,10 @@ def gate_summary_from_collected(
     # operation evidence. Only recovered grading failures with complete joins are accepted. Model health and the raw
     # response faults are reported beside it and never fail the gate.
     trial_passed, trial_reason, evaluation = trial_verdict(
-        decision, collected, policy_timeout_counts_as_model=criteria.policy_timeout_counts_as_model
+        decision,
+        collected,
+        policy_timeout_counts_as_model=criteria.policy_timeout_counts_as_model,
+        classification=decision_classification(decision),
     )
     if trial_passed is None and decision.complete:
         trial_reason = f"{trial_reason} ({trial_boundary(collected.quality)})"
@@ -1037,7 +1075,7 @@ def gate_summary_from_collected(
         health_passed=trial_passed,
         health_reasons=[] if trial_passed else [trial_reason],
     )
-    task["criteria"] = criteria.report()
+    task["criteria"] = criteria.report(classification=decision_classification(decision))
     if collected.unreadable_files:
         # What an unreadable metric, summary or record holds is unknown: never a pass.
         task["errors"].append(f"unreadable artifacts, read as unknown: {collected.unreadable_files[:20]}")

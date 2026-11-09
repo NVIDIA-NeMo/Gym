@@ -40,9 +40,9 @@ from nemo_gym.eval.recovery.planner import decide_from_collected
 from nemo_gym.orchestration.api import ResumeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.script_templates import render_driver_entrypoint
 from nemo_gym.orchestration.executors.slurm.script import build_sbatch_script
-from nemo_gym.orchestration.server_supervisor import ServerSpinupTimeoutError
 from nemo_gym.rollouts.rollout_recovery import RunManifest, validate_resume
 from nemo_gym.rollouts.rollout_store import RolloutStore
+from nemo_gym.server_runtime.supervisor import ServerSpinupTimeoutError
 from tests.unit_tests.orchestration.test_eval_resubmit import _handle, _resumable_run, _sbatch_env
 from tests.unit_tests.orchestration.test_eval_resubmit import _local_index as _local_index
 from tests.unit_tests.orchestration.test_eval_resubmit import slurm_bin as slurm_bin
@@ -378,9 +378,14 @@ _INSTALL_LOG = (
 )
 _DRIVER_FAILURE_STOPS = {
     "provider_credentials_rejected": (
-        "Previous job 100 ended FAILED: provider_credentials_rejected: the sandbox provider refused the "
+        "Previous job 100 ended FAILED: provider_credentials_rejected: the provider refused the "
         "credentials; the chain does not retry it; fix the credentials, then continue with gym eval resubmit "
         "--recover"
+    ),
+    "provider_quota_exhausted": (
+        "Previous job 100 ended FAILED: provider_quota_exhausted: the grading provider's quota is exhausted; the "
+        "chain does not retry it; after the reset continue with gym eval resubmit --recover (re-judges the saved "
+        "answers, no model calls)"
     ),
     "server_spinup_timeout": (
         "Previous job 100 ended FAILED: server_spinup_timeout: the Gym servers did not become ready within "

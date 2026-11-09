@@ -17,6 +17,9 @@ Humans: see [Development Setup → Use of AI and LLM Tools](https://docs.nvidia.
 - Before opening a PR, run the local checks that mirror CI: tests (skip or N/A for docs-only), `pre-commit run --all-files`, and DCO sign-off (`git commit -s`). Cryptographic `-S` signing is optional and not required.
 - AI-generated tests must assert real behavior; avoid vacuous pass-through tests.
 - Prefer the vetted skills under `.agents/skills/` (see [Agent Skills](https://docs.nvidia.com/nemo/gym/latest/contribute/agent-skills)).
+- For session lifecycle and routing terms (lock, fence, close retry window, saved reply, release, owner, episode session),
+  use the names in the Sessions section of `fern/versions/latest/pages/about/concepts/key-terminology.mdx` and do not add
+  synonyms.
 - Docs live under `fern/versions/latest/pages/`. Bleeding-edge nav is `fern/versions/main.yml`. See `fern/README.md` and the `nemo-gym-docs` skill.
 - Do not introduce licenses incompatible with Apache-2.0. New source files need the standard NVIDIA SPDX header.
 
@@ -85,6 +88,12 @@ import-linter contract in `pyproject.toml` enforces the order; its `ignore_impor
 which are removed as the code moves and must not grow. `nemo_gym/verifiers/` sits outside the layers: it runs inside
 Harbor verifier sandboxes and uses only the standard library. Each package's `__init__.py` docstring says what it holds. Old flat paths such as `nemo_gym.server_utils` still import, with a deprecation warning, until 0.10.0
 (`nemo_gym/_moved_paths.py`). For a summary of each package, see `fern/versions/latest/pages/api-reference/index.mdx`.
+
+`nemo_gym.orchestration` is a Gym-aware orchestrator (submit, Slurm/Kubernetes executors, job tracking). It provides no
+core functionality. No module in `nemo_gym/`, and no server, benchmark or script built on it, may import it, except `nemo_gym/cli/main.py`, which wires the
+orchestration entrypoint into the CLI. If another package needs something that lives there, move that code into the
+package that owns it. Deleting `orchestration/` should leave only the CLI wiring to change.
+`tests/unit_tests/test_orchestration_boundary.py` enforces this.
 
 For full architecture and concepts (environments, training approaches, verification), see `fern/versions/latest/pages/about/`.
 

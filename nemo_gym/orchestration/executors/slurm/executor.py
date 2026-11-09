@@ -80,11 +80,11 @@ from nemo_gym.orchestration.jobs import (
     RESOLVED_CONFIG_NAME,
     BenchmarkJob,
     SubmissionRecord,
-    installed_gym_commit,
     new_gym_job_id,
     utc_now,
     utc_timestamp,
 )
+from nemo_gym.utils.gym_commit import installed_gym_commit
 
 
 # How long a recovery's post-run MLflow export may take on the login host, its Gym install included.

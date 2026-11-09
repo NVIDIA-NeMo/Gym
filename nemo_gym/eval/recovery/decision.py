@@ -27,6 +27,7 @@ from nemo_gym.artifacts.rollout_rows import (
     NG_TERMINAL_KEY,
 )
 from nemo_gym.core.failure_kinds import (
+    FailureStage,
     is_namespaced,
     is_registered,
 )
@@ -99,6 +100,8 @@ class IdentityState(StrEnum):
     MISSING = "missing"
     MASKED = "masked"
     OMITTED = "omitted"
+    # Verification skipped by configuration: complete, never re-judged or rerun, and unverified by construction.
+    SKIPPED = "skipped"
     UNKNOWN = "unknown"
 
 
@@ -233,6 +236,7 @@ class IdentityEvidence(BaseModel):
     failure_kind: str | None = None
     # The HTTP status the selected failure recorded, when it recorded one.
     http_status: int | None = None
+    stage: FailureStage | None = None
     failure_id: str | None = None
     attempts: int = 0
     max_attempts: int | None = None
@@ -284,8 +288,13 @@ class RecoveryDecision(BaseModel):
 
     @property
     def complete(self) -> bool:
-        settled = (IdentityState.SCORED, IdentityState.MODEL_FINAL, IdentityState.OMITTED)
+        settled = (IdentityState.SCORED, IdentityState.MODEL_FINAL, IdentityState.OMITTED, IdentityState.SKIPPED)
         return sum(self.counts.get(state, 0) for state in settled) == self.expected
+
+    @property
+    def unverified(self) -> bool:
+        """Whether results of the run were deliberately not verified (``judge_skipped``), so it is UNVERIFIED."""
+        return bool(self.counts.get(IdentityState.SKIPPED))
 
 
 def _known_kind(kind: Any) -> bool:

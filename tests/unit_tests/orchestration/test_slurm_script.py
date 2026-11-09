@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import ast
 import base64
 import contextlib
 import os
@@ -492,6 +493,28 @@ def test_build_vllm_ray_serve_command_embeds_actual_gateway_source(vllm_service)
     assert match, cmd
     decoded = base64.b64decode(match.group(1)).decode()
     assert decoded == _RAY_SERVE_GATEWAY_SOURCE_PATH.read_text()
+
+
+def test_embedded_gateway_imports_nothing_from_nemo_gym():
+    """The embedded gateway has to run where `nemo_gym` was never installed.
+
+    Only this one file is written into the vLLM container, with aiohttp and Ray installed
+    beside it and no `driver.gym_install`. A `nemo_gym` import therefore fails at import
+    time, before argv is parsed, and the model service never becomes available. Parsed
+    rather than grepped so an import inside a function counts too: deferring one only
+    moves the failure to the first call.
+    """
+    tree = ast.parse(_RAY_SERVE_GATEWAY_SOURCE_PATH.read_text())
+
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            imported.add(node.module)
+
+    offenders = sorted(name for name in imported if name == "nemo_gym" or name.startswith("nemo_gym."))
+    assert not offenders, f"ray_serve_gateway.py must stay self-contained, but imports {offenders}"
 
 
 def test_build_vllm_ray_serve_command_single_node_ensures_ray_installed(vllm_service):

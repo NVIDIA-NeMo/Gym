@@ -24,6 +24,7 @@ import signal
 import subprocess
 import sys
 import time
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import replace
@@ -122,10 +123,10 @@ from nemo_gym.eval.eval_plan import (
     eval_plan_json_schema,
     write_eval_plan,
 )
-from nemo_gym.orchestration.server_supervisor import RunHelper
 from nemo_gym.rollouts.health.types import RunHealthConfig
 from nemo_gym.sandbox.compose_config import deployment_platform
 from nemo_gym.sandbox.config import SANDBOX_BLOCK_VOLUME_SOURCES_KEY, validate_volume_sources
+from nemo_gym.server_runtime.supervisor import RunHelper
 from nemo_gym.utils.path_utils import materialized_path_for
 
 
@@ -515,13 +516,15 @@ def _prepare_run_health_metrics(output: Path) -> dict[str, int | float]:
         trial_verdict,
     )
     from nemo_gym.eval.recovery.planner import decide_from_collected
+    from nemo_gym.eval.recovery.policy import RecoveryOutcomePolicyConfig
     from nemo_gym.eval.recovery.trials import (
         _observed_trial_operations,
+        decision_classification,
         fault_report,
         trial_faults,
         trial_population,
     )
-    from nemo_gym.rollouts.rollout_recovery import atomic_output_file
+    from nemo_gym.rollouts.rollout_recovery import atomic_output_file, saved_failure_classification
 
     artifacts = RunArtifacts(output)
     version = _artifact_version(artifacts)
@@ -559,7 +562,13 @@ def _prepare_run_health_metrics(output: Path) -> dict[str, int | float]:
             [sys.executable, "-I", "-S", "-c", COLLECT_SCRIPT, str(job)], capture_output=True, text=True, check=True
         )
         collected = select_managed_evidence(CollectedEvidence.model_validate_json(raw.stdout), job)
-        decision = decide_from_collected(collected, max_infra_retries=None, max_walltime_s=None, live_job=None)
+        decision = decide_from_collected(
+            collected,
+            max_infra_retries=None,
+            max_walltime_s=None,
+            live_job=None,
+            outcome_policy=RecoveryOutcomePolicyConfig(classification=saved_failure_classification(output)),
+        )
         quality = collected.quality if collected.quality and collected.quality.get("source_matches") is True else None
         response, _ = response_health(decision, quality)
         if response is not None:
@@ -578,13 +587,18 @@ def _prepare_run_health_metrics(output: Path) -> dict[str, int | float]:
         trial, _, evaluation = trial_verdict(decision, collected)
         if evaluation is None and trials > 0:
             # Not evaluated (the run is not complete): its known faults are a lower bound.
-            evaluation = fault_report(trial_faults(decision, collected), trials) | {"exact": False}
+            attributions = Counter()
+            kinds = trial_faults(decision, collected, attributions=attributions)
+            evaluation = fault_report(
+                kinds, trials, attributions=attributions, classification=decision_classification(decision)
+            ) | {"exact": False}
         if evaluation is not None:
             exact = evaluation["exact"]
             failed = evaluation["evaluation"]["count"]
             metrics.update(
                 {
                     "health/trial/counts_known": int(exact),
+                    "health/trial/unclassified": evaluation["unknown"]["count"],
                     "health/trial/failed" if exact else "health/trial/failed_lower_bound": failed,
                     "health/trial/expected": trials,
                     "health/trial/omitted": decision.counts.get(IdentityState.OMITTED, 0),
@@ -1933,13 +1947,18 @@ def validate_target(args: argparse.Namespace, overrides: list[str], *, agent: Ag
         sys.exit(1)
 
 
-def eval_status(target: str, *, json_output: bool = False) -> None:
-    """Print saved progress for a run directory or a locally indexed Gym job ID.
+def eval_status(
+    target: str,
+    *,
+    json_output: bool = False,
+    job_artifact_dirs: Callable[[str], dict[str, Path] | None] | None = None,
+) -> None:
+    """Print saved progress for a run directory or, through `job_artifact_dirs`, a Gym job ID.
 
-    Submitted job artifacts must be visible on the current filesystem. This command
-    reads saved progress and does not contact a scheduler or a remote host.
+    `job_artifact_dirs` maps a target that is not a run directory with status files to each benchmark's artifacts
+    directory, or to None when it names no submission. Artifacts must be visible on the current filesystem. This
+    command reads saved progress and does not contact a scheduler or a remote host.
     """
-    from nemo_gym.orchestration.jobs import MANIFEST_NAME, SubmissionRecord, local_index_dir
     from nemo_gym.rollouts.batch_status import BATCH_STATUS_FNAME
 
     def status_files(directory: Path) -> list[Path]:
@@ -1970,26 +1989,24 @@ def eval_status(target: str, *, json_output: bool = False) -> None:
     path = Path(target)
     if not path.is_dir() and (path.exists() or "/" in target or "\\" in target):
         raise NotADirectoryError(f"Run directory expected: {target}")
-    record_path = path / MANIFEST_NAME if path.is_dir() else local_index_dir() / f"{target}.json"
     files = status_files(path) if path.is_dir() else []
     exports: dict[str, dict[str, dict[str, Any]]] = {}
     if files:
         statuses = {str(file): json.loads(file.read_text()) for file in files}
         exports = {str(file): export_facts(file) for file in files}
-    elif record_path.is_file():
-        record = SubmissionRecord.load(json.loads(record_path.read_text()))
+    else:
+        artifact_dirs = job_artifact_dirs(target) if job_artifact_dirs is not None else None
+        if artifact_dirs is None:
+            raise FileNotFoundError(f"No {BATCH_STATUS_FNAME} or Gym job record found for {target}")
         statuses = {}
-        for benchmark in record.benchmarks:
-            directory = Path(benchmark.job_dir) / "artifacts"
+        for benchmark, directory in artifact_dirs.items():
             files = status_files(directory)
             if not files:
-                statuses[benchmark.benchmark] = {"status": "unavailable", "path": str(directory)}
+                statuses[benchmark] = {"status": "unavailable", "path": str(directory)}
             for file in files:
-                name = benchmark.benchmark if len(files) == 1 else f"{benchmark.benchmark}/{file.name}"
+                name = benchmark if len(files) == 1 else f"{benchmark}/{file.name}"
                 statuses[name] = json.loads(file.read_text())
                 exports[name] = export_facts(file)
-    else:
-        raise FileNotFoundError(f"No {BATCH_STATUS_FNAME} or Gym job record found for {target}")
     if json_output:
         print(
             json.dumps(
@@ -2034,6 +2051,26 @@ def eval_status(target: str, *, json_output: bool = False) -> None:
                 f"by kind: {json.dumps(member.get('failures_by_kind', {}), sort_keys=True)}; "
                 f"model-final by kind: {json.dumps(member.get('model_final_by_kind', {}), sort_keys=True)}"
             )
+
+
+@exit_cleanly_on_config_error
+def compare_suite() -> None:
+    """Compare baseline and candidate runs across a configured benchmark and model suite."""
+    from nemo_gym.environment.comparison import resolve_benchmark_reward_metric
+    from nemo_gym.eval.comparison.suite.report import render_suite_summary, write_suite_reports
+    from nemo_gym.eval.comparison.suite.runner import build_suite_comparison, invoked_command
+    from nemo_gym.eval.comparison.suite.schema import SuiteComparisonConfig
+
+    config_dict = get_global_config_dict()
+    if not config_dict.get("suite_fpath") and not (config_dict.get("help") or config_dict.get("h")):
+        raise ConfigError("gym eval compare-suite requires --suite PATH.")
+    config = SuiteComparisonConfig.model_validate(config_dict)
+    result = build_suite_comparison(config, invoked_command(), reward_metric_resolver=resolve_benchmark_reward_metric)
+    output = Path(config.output_dirpath) if config.output_dirpath else result.suite_fpath.parent
+    written = write_suite_reports(result, output, config.report_format)
+    print(render_suite_summary(result))
+    for path in written:
+        print(f"Wrote: {path}")
 
 
 __getattr__ = moved_names_getattr(__name__)

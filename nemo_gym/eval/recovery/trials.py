@@ -17,7 +17,9 @@
 import math
 from collections import Counter
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, cast, get_args
+
+from pydantic import ValidationError
 
 from nemo_gym.core.failure_kinds import (
     AGENT_TIMEOUT_INFRASTRUCTURE,
@@ -27,15 +29,18 @@ from nemo_gym.core.failure_kinds import (
     JUDGE_UNPARSEABLE,
     MALFORMED_ANSWER,
     MODEL_CONTEXT_LIMIT,
-    MODEL_FAULT_KINDS,
     MODEL_POLICY_RESPONSE_TIMEOUT,
     MODEL_REQUEST_ERROR,
-    MODEL_SERVER_ERROR,
-    NON_POLICY_MODEL_REJECTION,
-    SERVER_FAULT_KINDS,
     TRUNCATED_ANSWER,
-    is_server_status,
+    FailureClass,
+    FailureClassificationConfig,
+    FailureStage,
+    classify_failure,
+    is_server_failure,
+    reporting_failure_kind,
 )
+from nemo_gym.core.failure_records import FailureBoundary, FailureEvent
+from nemo_gym.core.outcome_policy import is_policy_counted_zero
 from nemo_gym.eval.recovery.decision import (
     FAILURE_CLASS,
     FAILURE_EVENTS,
@@ -64,6 +69,8 @@ from nemo_gym.eval.recovery.grading import (
 from nemo_gym.eval.recovery.policy import (
     _policy_evidence,
 )
+from nemo_gym.rollouts.rollout_recovery import applied_failure_class as _applied_class
+from nemo_gym.rollouts.rollout_recovery import failure_stage as _policy_stage
 
 
 def _percent(limit: float) -> str:
@@ -156,6 +163,7 @@ def _observed_trial_operations(
     decision: RecoveryDecision,
     collected: CollectedEvidence | None,
     *,
+    classification: FailureClassificationConfig | None = None,
     judge_recovery: dict[str, int] | None = None,
     grading_failures: list[str] | None = None,
     policy_recovery: dict[str, int] | None = None,
@@ -189,6 +197,7 @@ def _observed_trial_operations(
     inside one completed operation is recovered the same way (``policy_recovery`` receives its counts): each failed
     attempt is an event of that operation and of the row, and the answer is the final attempt's.
     """
+    classification = decision_classification(decision, classification)
     decision = _health_view(decision)
     from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
 
@@ -768,7 +777,7 @@ def _observed_trial_operations(
             # result at any reward: the verifier graded the state the model reached. That request's failure is
             # accounted for; one of an evaluation-side kind is not.
             ended = _ended_on_failed_request(row) if _reward(row) not in (None, 0) else None
-            if ended is not None and ended[0] in MODEL_FAULT_KINDS:
+            if ended is not None and _row_fault_class(row, ended[0], classification) == FailureClass.MODEL:
                 report = (ended[1].get("response_metadata") or {}).get("failure_report")
                 events = report.get("events") if isinstance(report, dict) else None
                 if isinstance(events, dict):
@@ -922,7 +931,12 @@ def _last_captured_call(calls: list) -> Any:
     return last
 
 
-def infrastructure_timeouts(decision: RecoveryDecision, collected: CollectedEvidence | None) -> set[Identity]:
+def infrastructure_timeouts(
+    decision: RecoveryDecision,
+    collected: CollectedEvidence | None,
+    *,
+    classification: FailureClassificationConfig | None = None,
+) -> set[Identity]:
     """Scored identities whose graded result is an agent timeout with a server-side fault in its window.
 
     A Harbor graded zero a run without a Store cannot reopen (``is_infrastructure_agent_timeout``): it stays in the
@@ -934,14 +948,21 @@ def infrastructure_timeouts(decision: RecoveryDecision, collected: CollectedEvid
     return {
         _identity(row)
         for row in ((collected.results or []) if collected is not None else [])
-        if _identity(row) in scored and is_infrastructure_agent_timeout(row)
+        if _identity(row) in scored
+        and is_infrastructure_agent_timeout(row, classification=decision_classification(decision, classification))
     }
 
 
-def final_zero_trials(decision: RecoveryDecision, collected: CollectedEvidence | None) -> dict[Identity, str]:
-    """Scored identities whose rollout ended on a failed policy request and was scored zero, with the failure kind.
+def final_zero_trials(
+    decision: RecoveryDecision,
+    collected: CollectedEvidence | None,
+    *,
+    classification: FailureClassificationConfig | None = None,
+) -> dict[Identity, str]:
+    """Scored zeros with a saved policy decision or a failed final policy request, with their failure kinds.
 
-    The last policy call of the row's one invocation ends in a failed model operation whose failure event the call
+    A consistent saved counted-zero decision retains its own registered failure kind. Otherwise, the last
+    policy call of the row's one invocation ends in a failed model operation whose failure event the call
     recorded, and the row's reward is zero. Such a trial is settled as a failure under the benchmark protocol: it
     has no selectable response, and it is counted once, in the trial family. An agent that records no call of its own
     (it has no invocation, or its invocations reference none) ended on a failed request when its last captured call (``_last_captured_call``)
@@ -952,22 +973,28 @@ def final_zero_trials(decision: RecoveryDecision, collected: CollectedEvidence |
     budget the window cannot hold. The policy's last call is its last captured one when its invocations reference
     none, since another model's capture may follow.
     """
+    classification = decision_classification(decision, classification)
     scored = set(decision.identities.get(IdentityState.SCORED.value, []))
     found: dict[Identity, str] = {}
-    infrastructure = infrastructure_timeouts(decision, collected)
+    infrastructure = infrastructure_timeouts(decision, collected, classification=classification)
     for row in (collected.results or []) if collected is not None else []:
         reward = row.get("reward")
         if _identity(row) not in scored or type(reward) not in (int, float) or reward != 0:
             continue
         if _identity(row) in infrastructure:
             continue  # Counted once, as its agent timeout's server-side fault.
-        ended = _ended_on_failed_request(row)
+        if (kind := _policy_zero_kind(row)) is not None:
+            found[_identity(row)] = kind
+            continue
+        ended = _ended_on_failed_request(row, classification=classification)
         if ended is not None:
             found[_identity(row)] = ended[0]
     return found
 
 
-def _ended_on_failed_request(row: Mapping[str, Any]) -> tuple[Any, Mapping[str, Any]] | None:
+def _ended_on_failed_request(
+    row: Mapping[str, Any], *, classification: FailureClassificationConfig | None = None
+) -> tuple[Any, Mapping[str, Any]] | None:
     """The failure kind of the request a row's rollout ended on, with that call, or None (``final_zero_trials``).
 
     The last policy call of the row's one invocation ended in a failed model operation whose failure event the call
@@ -987,7 +1014,9 @@ def _ended_on_failed_request(row: Mapping[str, Any]) -> tuple[Any, Mapping[str, 
         last = _last_captured_call(observed["model_calls"])
         failed = _failed_request(last)
         if failed is not None:
-            return status_fault_kind(failed[0], failed[1], policy=_policy_call(row, last)), last
+            return status_fault_kind(
+                failed[0], failed[1], policy=_policy_call(row, last), classification=classification
+            ), last
         return None
     if not isinstance(invocations, list) or len(invocations) != 1 or not isinstance(invocations[0], dict):
         return None
@@ -1026,7 +1055,9 @@ def _ended_on_failed_request(row: Mapping[str, Any]) -> tuple[Any, Mapping[str, 
         and event.get("operation_id") == final.get("operation_id")
         and isinstance(event.get("failure_kind"), str)
     ):
-        return status_fault_kind(event["failure_kind"], event.get("http_status")), last[0]
+        return status_fault_kind(event["failure_kind"], event.get("http_status"), classification=classification), last[
+            0
+        ]
     return None
 
 
@@ -1247,45 +1278,27 @@ def _predates_operation_observations(decision: RecoveryDecision, collected: Coll
     return True
 
 
-# The trial gate's fault classes are the shared default (``MODEL_FAULT_KINDS``, ``SERVER_FAULT_KINDS`` in
-# ``nemo_gym.core.failure_kinds``), keyed on a failure's recorded HTTP status first (``status_fault_kind``) and on the
-# run's ``policy_timeout_counts_as_model`` setting (``fault_class``). The gate-derived classes are named there too.
-GRADING_WITHOUT_VERDICT = "grading_without_verdict"
-
-
-def status_fault_kind(kind: Any, http_status: Any, *, policy: bool = True) -> Any:
-    """A counted failure's kind for the trial gate's classes, keyed on the HTTP status the failure recorded.
-
-    A model-server reply with a 5xx status is the server's fault (``MODEL_SERVER_ERROR``) whatever the kind says. A
-    4xx rejection keeps its kind when the evaluated policy made the request (its context or request is the model's
-    own), and is ``NON_POLICY_MODEL_REJECTION`` (evaluation-side) for another model's request. Without a recorded
-    status the kind decides, as before.
-    """
-    if type(http_status) is not int:
-        return kind
-    if is_server_status(http_status):
-        return MODEL_SERVER_ERROR
-    if 400 <= http_status <= 499 and not policy:
-        return NON_POLICY_MODEL_REJECTION
-    return kind
+# Classification is shared with boundary policies; the gate only counts final trial outcomes.
+def status_fault_kind(
+    kind: Any, http_status: Any, *, policy: bool = True, classification: FailureClassificationConfig | None = None
+) -> Any:
+    """The shared reporting label for observed HTTP evidence; saved events remain unchanged."""
+    return reporting_failure_kind(kind, http_status, policy=policy, config=classification)
 
 
 UNVERIFIED_NOTE = "unverified: this withholds a pass and is no health failure"
 
 
-def fault_class(kind: Any, *, policy_timeout_counts_as_model: bool = True) -> str | None:
-    """A counted trial failure's class: ``model``, ``server``, or None for another evaluation-side kind.
-
-    A policy-model response timeout is the model's fault by default (``GateCriteria.policy_timeout_counts_as_model``)
-    and the server's when a run sets that to false.
-    """
-    if kind == MODEL_POLICY_RESPONSE_TIMEOUT and not policy_timeout_counts_as_model:
-        return "server"
-    if kind in MODEL_FAULT_KINDS:
-        return "model"
-    if kind in SERVER_FAULT_KINDS or (isinstance(kind, str) and kind.startswith("provider_")):
-        return "server"
-    return None
+def _health_classification(
+    classification: FailureClassificationConfig | None, *, policy_timeout_counts_as_model: bool
+) -> FailureClassificationConfig:
+    """Express the existing timeout switch as a shared classification override."""
+    config = classification or FailureClassificationConfig()
+    if policy_timeout_counts_as_model:
+        return config
+    return config.model_copy(
+        update={"by_failure_kind": config.by_failure_kind | {MODEL_POLICY_RESPONSE_TIMEOUT: FailureClass.EVALUATION}}
+    )
 
 
 # The reasons that say an answer ran into its output cap: a chat ``length`` finish, or a responses-API incomplete
@@ -1353,18 +1366,35 @@ def _answer_fault(row: Mapping[str, Any], collected: CollectedEvidence | None) -
     return EMPTY_ANSWER if _empty_answer(row) else MALFORMED_ANSWER
 
 
-def _scored_kind(row: Mapping[str, Any]) -> str | None:
+def _policy_zero_kind(row: Mapping[str, Any]) -> str | None:
+    """A consistent applied zero keeps its own kind, without reinterpreting diagnostic requests."""
+    kind = row.get("failure_kind")
+    return kind if is_policy_counted_zero(row) and _known_kind(kind) else None
+
+
+def _scored_kind(row: Mapping[str, Any], *, classification: FailureClassificationConfig | None = None) -> str | None:
     """The registered failure kind a scored result row records as its own outcome, keyed on its recorded HTTP status
-    (``status_fault_kind``), or None. For example Harbor's graded ``agent_timeout`` is a scored main result."""
+    (``status_fault_kind``), or None. For example Harbor's graded ``agent_timeout`` is a scored main result.
+
+    A persisted outcome decision governs metric admission, independently of fault attribution and the existing
+    evaluation-health threshold. Counting a provider failure as zero does not make it a model fault or healthy.
+    """
+    if (kind := _policy_zero_kind(row)) is not None:
+        return kind
     kind, status = _policy_evidence(row)
-    return status_fault_kind(kind, status) if _known_kind(kind) else None
+    return status_fault_kind(kind, status, classification=classification) if _known_kind(kind) else None
 
 
-def _scored_fault(row: Mapping[str, Any], collected: CollectedEvidence | None) -> str | None:
+def _scored_fault(
+    row: Mapping[str, Any],
+    collected: CollectedEvidence | None,
+    *,
+    classification: FailureClassificationConfig | None = None,
+) -> str | None:
     """A scored row's one counted fault: its own recorded kind (``_scored_kind``), else its answer's
     (``_answer_fault``), else ``judge_unparseable`` when its saved judge evaluation recorded no verdict
     (``_unparsed_judge_verdict``)."""
-    fault = _scored_kind(row) or _answer_fault(row, collected)
+    fault = _scored_kind(row, classification=classification) or _answer_fault(row, collected)
     if fault is None and _judge_unparseable(row):
         return JUDGE_UNPARSEABLE
     return fault
@@ -1594,7 +1624,7 @@ def _row_recovered_attempts(row: Mapping[str, Any]) -> list[tuple[str, dict[str,
 def _unaccounted_failures(row: Mapping[str, Any], recovered: Mapping[str, Any]) -> bool:
     """Whether the row recorded a model failure that no recovery accounts for.
 
-    Every failure event the row saved or its captured calls reported must be a recovered attempt (``recovered``: the
+    Every model failure event the row saved or its captured calls reported must be a recovered attempt (``recovered``: the
     events the coverage join joined, with the row's own ``_row_recovered_attempts``), a saved copy must agree with its
     call's, and every failed model operation must be one whose failure such a recovery accounts for. A trial that
     ended on its failed request is counted separately (``final_zero_trials``) and is never asked this.
@@ -1608,6 +1638,20 @@ def _unaccounted_failures(row: Mapping[str, Any], recovered: Mapping[str, Any]) 
     if not isinstance(saved, dict) or (calls is not None and not isinstance(calls, list)):
         return True
     for event_id, event in saved.items():
+        if (
+            isinstance(event, dict)
+            and event.get("boundary") in FailureBoundary
+            and event["boundary"] != FailureBoundary.MODEL
+        ):
+            # The enclosing graded result completed. Non-model observations cannot join model attempts and
+            # do not contradict that outcome; a selected final failure is counted before this coverage check.
+            try:
+                observed = FailureEvent.model_validate(event)
+            except ValidationError:
+                return True
+            if observed.event_id != event_id:
+                return True
+            continue
         if (
             event_id not in joined
             or not isinstance(event, dict)
@@ -1671,68 +1715,141 @@ def _recovered_note(joined: Mapping[str, int]) -> str:
     )
 
 
-def trial_faults(decision: RecoveryDecision, collected: CollectedEvidence | None) -> Counter:
-    """The trial gate's counted failures by kind.
+def decision_classification(
+    decision: RecoveryDecision, explicit: FailureClassificationConfig | None = None
+) -> FailureClassificationConfig:
+    """The resolved recovery policy snapshot supplies the same mapping to all health readers."""
+    if explicit is not None:
+        return explicit
+    saved = decision.outcome_policy or {}
+    return FailureClassificationConfig.model_validate(saved.get("classification", {}))
 
-    Settled model failures (MODEL_FINAL), scored rows whose rollout ended on a failed policy request
-    (``final_zero_trials``), scored-zero incomplete answers the benchmark's rule scored without a recorded grade
-    (``_answer_fault``: truncated with a cutoff signal, otherwise empty or malformed), and scored rows whose saved
-    judge evaluation recorded no verdict (``judge_unparseable``) or that record their own failure kind, each counted
-    once (``_scored_fault``).
-    """
+
+def _row_fault_class(
+    row: Mapping[str, Any], fault: str, classification: FailureClassificationConfig | None
+) -> FailureClass:
+    if (applied := _applied_class(row)) is not None:
+        return applied
+    kind, status = _policy_evidence(row)
+    zero = _policy_zero_kind(row)
+    kind = zero or kind
+    # Only selected final evidence may provide stage/status; unrelated recovered events cannot classify a verdict.
+    if zero == fault or (
+        _known_kind(kind) and status_fault_kind(kind, status, classification=classification) == fault
+    ):
+        return classify_failure(failure_kind=kind, stage=_policy_stage(row), http_status=status, config=classification)
+    ended = _ended_on_failed_request(row, classification=classification)
+    if ended is not None and ended[0] == fault:
+        meta = ended[1].get("response_metadata") or {}
+        report, operations = meta.get("failure_report"), meta.get("model_operations")
+        events = report.get("events") if isinstance(report, Mapping) else None
+        last = operations[-1] if isinstance(operations, list) and operations else None
+        event = (
+            events.get(last.get("failure_id")) if isinstance(events, Mapping) and isinstance(last, Mapping) else None
+        )
+        if isinstance(event, Mapping):
+            stage = event.get("stage")
+            # A length refusal refines a generic or missing event kind. Otherwise keep the
+            # observed kind so stage rules still precede HTTP-derived reporting labels.
+            return classify_failure(
+                failure_kind=fault if _length_refusal_kind(meta) == fault else event.get("failure_kind"),
+                stage=cast(FailureStage, stage) if stage in get_args(FailureStage) else None,
+                http_status=event.get("http_status"),
+                policy=_policy_call(row, ended[1]),
+                config=classification,
+            )
+    return classify_failure(failure_kind=fault, config=classification)
+
+
+def trial_faults(
+    decision: RecoveryDecision,
+    collected: CollectedEvidence | None,
+    *,
+    attributions: Counter | None = None,
+    classification: FailureClassificationConfig | None = None,
+) -> Counter:
+    """Count final trial failures once; classify selected outcomes, never recovered observations."""
+    classification = decision_classification(decision, classification)
     decision = _health_view(decision)
-    final_zero = final_zero_trials(decision, collected)
-    infrastructure = infrastructure_timeouts(decision, collected)
-    kinds = Counter(
-        status_fault_kind(e.failure_kind, e.http_status)
-        for e in decision.evidence
-        if e.state == IdentityState.MODEL_FINAL
-    )
-    kinds.update(final_zero.values())
-    kinds[AGENT_TIMEOUT_INFRASTRUCTURE] += len(infrastructure)
+    final_zero = final_zero_trials(decision, collected, classification=classification)
+    infrastructure = infrastructure_timeouts(decision, collected, classification=classification)
+    kinds = Counter()
+    failures = {_identity(row): row for row in (collected.failures if collected else [])}
+    for evidence in decision.evidence:
+        if evidence.state != IdentityState.MODEL_FINAL:
+            continue
+        kind = status_fault_kind(evidence.failure_kind, evidence.http_status, classification=classification)
+        kinds[kind] += 1
+        if attributions is not None:
+            applied = _applied_class(failures.get(evidence.identity, {}))
+            selected = (
+                applied
+                if applied is not None
+                else classify_failure(
+                    failure_kind=evidence.failure_kind,
+                    stage=evidence.stage,
+                    http_status=evidence.http_status,
+                    config=classification,
+                )
+            )
+            attributions[kind, selected] += 1
     scored = set(decision.identities.get(IdentityState.SCORED.value, []))
-    kinds.update(
-        fault
-        for row in (collected.results or [] if collected is not None else [])
-        if _identity(row) in scored
-        and _identity(row) not in final_zero
-        and _identity(row) not in infrastructure
-        and (fault := _scored_fault(row, collected)) is not None
-    )
+    for row in collected.results or [] if collected is not None else []:
+        identity = _identity(row)
+        if identity not in scored:
+            continue
+        fault = (
+            AGENT_TIMEOUT_INFRASTRUCTURE
+            if identity in infrastructure
+            else final_zero.get(identity) or _scored_fault(row, collected, classification=classification)
+        )
+        if fault is None:
+            continue
+        kinds[fault] += 1
+        if attributions is not None:
+            attributions[fault, _row_fault_class(row, fault, classification)] += 1
     return +kinds
 
 
-def fault_report(kinds: Counter, trials: int, *, policy_timeout_counts_as_model: bool = True) -> dict[str, Any]:
-    """Model and evaluation-side fault counts, fractions and kinds over the trials; ``server`` counts server faults."""
+def fault_report(
+    kinds: Counter,
+    trials: int,
+    *,
+    policy_timeout_counts_as_model: bool = True,
+    attributions: Counter | None = None,
+    classification: FailureClassificationConfig | None = None,
+) -> dict[str, Any]:
+    """Report shared classes separately; server is only a subcategory of evaluation."""
+    config = _health_classification(classification, policy_timeout_counts_as_model=policy_timeout_counts_as_model)
 
-    def side(found: dict) -> dict[str, Any]:
+    def side(found: Counter) -> dict[str, Any]:
         count = sum(found.values())
         return {"count": count, "fraction": count / trials, "kinds": dict(sorted(found.items(), key=str))}
 
-    def class_of(kind):
-        return fault_class(kind, policy_timeout_counts_as_model=policy_timeout_counts_as_model)
-
-    model = {kind: n for kind, n in kinds.items() if class_of(kind) == "model"}
-    evaluation = {kind: n for kind, n in kinds.items() if class_of(kind) != "model"}
-    server = sum(n for kind, n in evaluation.items() if class_of(kind) == "server")
-    report = {"trials": trials, "evaluation": side(evaluation) | {"server": server}, "model": side(model)}
+    remaining = kinds.copy()
+    classes = {failure_class: Counter() for failure_class in FailureClass}
+    for (kind, attribution), count in (attributions or {}).items():
+        remaining[kind] -= count
+        classes[FailureClass(attribution)][kind] += count
+    for kind, count in remaining.items():
+        if count:
+            classes[classify_failure(failure_kind=kind, config=config)][kind] += count
+    evaluation = classes[FailureClass.EVALUATION]
+    server_kinds = {kind: n for kind, n in evaluation.items() if is_server_failure(kind, config=config)}
+    report = {
+        "trials": trials,
+        "evaluation": side(evaluation) | {"server": sum(server_kinds.values()), "server_kinds": server_kinds},
+        "model": side(classes[FailureClass.MODEL]),
+        "unknown": side(classes[FailureClass.UNKNOWN]),
+    }
     return report if policy_timeout_counts_as_model else report | {"policy_timeout_counts_as_model": False}
 
 
 def _fault_text(report: dict[str, Any], limit: float) -> str:
     """``evaluation-side faults: N of M (x%) is [not] below L (server S: kind n; kind n); model faults: ...``."""
     trials, evaluation, model = report["trials"], report["evaluation"], report["model"]
-    flag = report.get("policy_timeout_counts_as_model", True)
-    server = [
-        f"{kind} {n}"
-        for kind, n in evaluation["kinds"].items()
-        if fault_class(kind, policy_timeout_counts_as_model=flag) == "server"
-    ]
-    other = [
-        f"{kind} {n}"
-        for kind, n in evaluation["kinds"].items()
-        if fault_class(kind, policy_timeout_counts_as_model=flag) != "server"
-    ]
+    server = [f"{kind} {n}" for kind, n in evaluation["kinds"].items() if kind in evaluation["server_kinds"]]
+    other = [f"{kind} {n}" for kind, n in evaluation["kinds"].items() if kind not in evaluation["server_kinds"]]
     named = ([f"server {evaluation['server']}: {', '.join(server)}"] if server else []) + other
     below = "is below" if evaluation["fraction"] < limit else "is not below"
     return (

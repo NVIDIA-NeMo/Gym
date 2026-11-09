@@ -14,11 +14,12 @@
 # limitations under the License.
 """The recovery outcome policy: which saved failure is retried, and the failure kind it is selected on."""
 
+import time
 from collections.abc import Mapping
 from enum import StrEnum
 from typing import Any
 
-from pydantic import Field, ValidationError, model_validator
+from pydantic import Field, ValidationError
 
 from nemo_gym.agents.agent_outcome import (
     AGENT_OUTCOME_METADATA_KEY,
@@ -35,6 +36,12 @@ from nemo_gym.core.failure_kinds import (
     MODEL_CONTEXT_LIMIT,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
+    PROVIDER_CREDENTIALS_REJECTED,
+    PROVIDER_QUOTA_EXHAUSTED,
+    FailureClassificationConfig,
+    classify_failure,
+    quota_reset_text,
+    quota_reset_unix,
 )
 from nemo_gym.core.failure_records import FailureBoundary
 from nemo_gym.core.failure_transport import FailureReportRow
@@ -45,6 +52,8 @@ from nemo_gym.eval.recovery.decision import (
     TERMINAL,
     IdentityState,
 )
+from nemo_gym.rollouts.rollout_recovery import applied_failure_class as _applied_class
+from nemo_gym.rollouts.rollout_recovery import failure_stage as _policy_stage
 
 
 class RecoveryOutcomePolicyConfig(OutcomePolicyConfig):
@@ -63,17 +72,9 @@ class RecoveryOutcomePolicyConfig(OutcomePolicyConfig):
         }
     )
     default_action: OutcomeAction = OutcomeAction.RETRY
+    classification: FailureClassificationConfig = Field(default_factory=FailureClassificationConfig)
 
-    @model_validator(mode="after")
-    def require_recovery_actions(self) -> "RecoveryOutcomePolicyConfig":
-        """Recovery cannot score an explicit zero, so ``count_as_zero`` is refused at configuration load."""
-        if OutcomeAction.COUNT_AS_ZERO in {
-            self.default_action,
-            *self.by_failure_kind.values(),
-            *self.by_status_code.values(),
-        }:
-            raise ValueError("recovery outcome policy does not support count_as_zero")
-        return self
+    supported_actions = frozenset({OutcomeAction.VERIFY, OutcomeAction.RETRY, OutcomeAction.FAIL})
 
 
 class OutcomePolicySource(StrEnum):
@@ -178,10 +179,20 @@ def _policy_evidence(row: Mapping[str, Any]) -> tuple[str | None, int | None]:
     return (kind if isinstance(kind, str) else None), status
 
 
+def _recovery_action(
+    row: Mapping[str, Any], kind: str, policy: RecoveryOutcomePolicyConfig, *, http_status: int | None
+) -> OutcomeAction:
+    """Apply recovery rules to shared classification without changing the selected evidence or budgets."""
+    classification = _applied_class(row)
+    if classification is None:
+        classification = classify_failure(
+            failure_kind=kind, stage=_policy_stage(row), http_status=http_status, config=policy.classification
+        )
+    return choose_action(failure_kind=kind, http_status=http_status, failure_class=classification, config=policy)
+
+
 def _sidecar_action(row: Mapping[str, Any], policy: "RecoveryOutcomePolicyConfig") -> OutcomeAction:
-    return choose_action(
-        failure_kind=_retry_kind(row) or "unknown", http_status=_policy_evidence(row)[1], config=policy
-    )
+    return _recovery_action(row, _retry_kind(row) or "unknown", policy, http_status=_policy_evidence(row)[1])
 
 
 # Compatibility with older metadata-only projections of a judge's saved answer.
@@ -202,13 +213,43 @@ def _saved_answer(row: Mapping[str, Any]) -> bool:
     return has_saved_generation({"response": answer, **stage})
 
 
+def _now() -> float:
+    return time.time()
+
+
+def _quota_reset_unix(row: Mapping[str, Any]) -> float | None:
+    return quota_reset_unix("resets at " + text) if (text := _quota_reset_text(row)) else None
+
+
+def _quota_wait_reason(row: Mapping[str, Any]) -> str | None:
+    text = _quota_reset_text(row)
+    return f"resets at {text}" if text else None
+
+
+def _quota_reset_text(row: Mapping[str, Any]) -> str | None:
+    """The reset time a quota-stopped row names: the collected fact, else its reason (a live run's row)."""
+    collected = row.get("_ng_quota_resets_at")
+    return (
+        collected
+        if isinstance(collected, str)
+        else (quota_reset_text(row.get("failure_reason")) or quota_reset_text(row.get("_ng_failure_message")))
+    )
+
+
 def _judge_state(row: Mapping[str, Any], policy: "RecoveryOutcomePolicyConfig") -> "IdentityState":
     """A judge failure's treatment: verify re-judges the saved answer only (none saved: stop), fail leaves it
     ungraded; any other action would run the policy again, so it stops."""
     if row.get(TERMINAL) is True:
         return IdentityState.TERMINAL
     kind, status = _policy_evidence(row)
-    action = choose_action(failure_kind=kind or JUDGE_FAILED, http_status=status, config=policy)
+    if kind in (PROVIDER_QUOTA_EXHAUSTED, PROVIDER_CREDENTIALS_REJECTED):
+        # The grading provider refused until the operator acts (its quota resets, its key is fixed). The saved answer
+        # is graded again, never regenerated; before a quota's named reset time nothing can be graded, so it stops.
+        if not _saved_answer(row):
+            return IdentityState.UNKNOWN
+        reset = _quota_reset_unix(row) if kind == PROVIDER_QUOTA_EXHAUSTED else None
+        return IdentityState.TERMINAL if reset is not None and _now() < reset else IdentityState.JUDGE_RECOVERABLE
+    action = _recovery_action(row, kind or JUDGE_FAILED, policy, http_status=status)
     if action == OutcomeAction.VERIFY:
         return IdentityState.JUDGE_RECOVERABLE if _saved_answer(row) else IdentityState.UNKNOWN
     return IdentityState.TERMINAL if action == OutcomeAction.FAIL else IdentityState.UNKNOWN
@@ -242,7 +283,9 @@ def _cause_chain(row: Mapping[str, Any]) -> list[tuple[str | None, ...]] | None:
     return chain or None
 
 
-def _replay_refusal(row: Mapping[str, Any]) -> str | None:
+def _replay_refusal(
+    row: Mapping[str, Any], *, classification: FailureClassificationConfig | None = None
+) -> str | None:
     """Why replay needs a saved-answer path or model-budget accounting unavailable to recovery; None when it does not."""
     from nemo_gym.rollouts.rollout_recovery import (
         has_recorded_grade,
@@ -253,7 +296,7 @@ def _replay_refusal(row: Mapping[str, Any]) -> str | None:
     )
 
     # An agent timeout whose window held a server-side fault kept no answer or grade of the model's: it runs again.
-    infrastructure = is_infrastructure_agent_timeout(row)
+    infrastructure = is_infrastructure_agent_timeout(row, classification=classification)
     if not infrastructure and (has_saved_generation(row) or _saved_answer(row) or keeps_partial_response(row)):
         return "the row kept an answer that a rerun would replace"
     if not infrastructure and has_recorded_grade(row):
@@ -277,9 +320,11 @@ def _replay_refusal(row: Mapping[str, Any]) -> str | None:
     return None
 
 
-def _policy_replay_is_unsupported(row: Mapping[str, Any]) -> bool:
+def _policy_replay_is_unsupported(
+    row: Mapping[str, Any], *, classification: FailureClassificationConfig | None = None
+) -> bool:
     """Whether replay needs a saved-answer path or model-budget accounting unavailable to recovery."""
-    return _replay_refusal(row) is not None
+    return _replay_refusal(row, classification=classification) is not None
 
 
 def _retry_kind(row: Mapping[str, Any]) -> str | None:
