@@ -36,13 +36,16 @@ from nemo_gym.agents import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAP
 from nemo_gym.client import apply_rollout_prefix
 from nemo_gym.config import ModelServerRef, get_first_server_config_dict
 from nemo_gym.core import (
+    AGENT_LIMIT,
+    AGENT_TIMEOUT,
+    MODEL_CONTEXT_LIMIT,
+    PROVIDER_UNAVAILABLE,
     FailureBoundary,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NgFailureEvent,
     observe_failure,
 )
-from nemo_gym.core.failure_kinds import AGENT_LIMIT, AGENT_TIMEOUT, MODEL_CONTEXT_LIMIT, PROVIDER_UNAVAILABLE
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxCreateError,
@@ -164,6 +167,13 @@ def _should_mask_sample(
         or agent_timed_out
         or error_kind in ("eval_timeout", "sandbox")
     )
+
+
+RUNTIME_MISSING = "anyswe_agent:runtime_missing"
+
+
+class _RuntimeMissingError(RuntimeError):
+    """The task image lacks the agent runtime: a configuration error, not a provider failure."""
 
 
 def _masked_failure_kind(
@@ -827,7 +837,7 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             else:
                 runtime = await sandbox.exec("test -x /agent_deps_mount/bin/python", timeout_s=30, user="root")
                 if runtime.return_code != 0:
-                    raise RuntimeError("task image does not contain /agent_deps_mount/bin/python")
+                    raise _RuntimeMissingError("task image does not contain /agent_deps_mount/bin/python")
             if external_runtime:
                 unpacked = await sandbox.exec(
                     "mkdir -p /sandbox/agent_deps_runtime && "
@@ -870,6 +880,8 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             if isinstance(exc, NgFailureEvent):
                 observe_failure(exc)
                 sandbox_failure_kind = exc.failure_kind
+            elif isinstance(exc, _RuntimeMissingError):
+                sandbox_failure_kind = RUNTIME_MISSING
             sandbox_failure_reason = repr(exc)
             sandbox_failed = True
             update_metrics(
@@ -946,12 +958,17 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         failure_kind = _masked_failure_kind(
             resolved, agent_error_kind, agent_timed_out, error_kind, sandbox_failure_kind
         )
-        failure_reason = (
-            (sandbox_failure_reason if error_kind == "sandbox" else None)
-            or (f"the agent run timed out after {params.swebench_agent_timeout}s" if agent_timed_out else None)
-            or eval_timeout_reason
-            or (f"the resolved run ended with {agent_error_kind}" if failure_kind else None)
-        )
+        # The reason names the same failure as the kind, in the precedence _masked_failure_kind uses.
+        if error_kind == "sandbox":
+            failure_reason = sandbox_failure_reason or "the sandbox failed during the eval command"
+        elif agent_timed_out:
+            failure_reason = f"the agent run timed out after {params.swebench_agent_timeout}s"
+        elif error_kind == "eval_timeout":
+            failure_reason = eval_timeout_reason or f"the eval run timed out after {params.swebench_tests_timeout}s"
+        elif failure_kind is not None:
+            failure_reason = f"the resolved run ended with {agent_error_kind}"
+        else:
+            failure_reason = None
         update_metrics(
             params.metrics_fpath,
             {

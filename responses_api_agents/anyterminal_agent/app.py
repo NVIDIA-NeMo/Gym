@@ -35,8 +35,13 @@ from nemo_gym import PARENT_DIR
 from nemo_gym.agents import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.client import apply_rollout_prefix
 from nemo_gym.config import ModelServerRef, get_first_server_config_dict
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.core.failure_kinds import AGENT_TIMEOUT, PROVIDER_UNAVAILABLE
+from nemo_gym.core import (
+    AGENT_TIMEOUT,
+    PROVIDER_UNAVAILABLE,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
+)
 from nemo_gym.sandbox import (
     ApptainerProvider,
     AsyncSandbox,
@@ -425,25 +430,44 @@ class AnyTerminalVerifyResponse(TerminalBenchMetrics, BaseVerifyResponse):
     instance_config: Dict[str, Any]
 
 
+SETUP_FAILED = "anyterminal_agent:setup_failed"
+
+
+class _SetupError(RuntimeError):
+    """A run cannot start because its local inputs are wrong (missing runtime or task tests), not the provider."""
+
+
 def _masked_failure(
     agent_error_type: Optional[str],
     eval_error_type: Optional[str],
     sandbox_error: Optional[str],
+    sandbox_error_kind: Optional[str] = None,
 ) -> tuple[Optional[str], Optional[str]]:
     """The ``failure_kind`` and ``failure_reason`` of a masked run, or ``(None, None)`` when nothing masks it.
 
     ``*_error_type`` is the ``error_type`` of the agent or eval ``exec`` result (``"timeout"`` or ``"sandbox"``);
-    ``sandbox_error`` is the message of an exception the sandbox raised. The run's first failure names it.
+    ``sandbox_error`` is the message of an exception raised around the sandbox and ``sandbox_error_kind`` the kind
+    that exception carried, if any. The stages run in order, so a recorded ``exec`` error happened before any later
+    exception and names the run; an exception names it only when no ``exec`` reported an error.
     """
-    if sandbox_error is not None:
-        return PROVIDER_UNAVAILABLE, sandbox_error
     for stage, error_type in (("agent", agent_error_type), ("eval", eval_error_type)):
         if error_type == "sandbox":
             return PROVIDER_UNAVAILABLE, f"the sandbox failed during the {stage} command"
         if error_type == "timeout":
             kind = AGENT_TIMEOUT if stage == "agent" else "anyterminal_agent:eval_timeout"
             return kind, f"the {stage} command timed out"
+    if sandbox_error is not None:
+        return sandbox_error_kind or PROVIDER_UNAVAILABLE, sandbox_error
     return None, None
+
+
+def _exception_kind(exc: Exception) -> Optional[str]:
+    """The kind a sandbox-side exception carries; None means the default ``provider_unavailable``."""
+    if isinstance(exc, NgFailureEvent):
+        return exc.failure_kind
+    if isinstance(exc, _SetupError):
+        return SETUP_FAILED
+    return None
 
 
 ### Sandbox provider selection
@@ -571,7 +595,7 @@ class RunTerminalAgent(BaseModel):
         else:
             result = await sandbox.exec("test -x /agent_deps_mount/bin/python", timeout_s=30, user="root")
             if result.return_code != 0:
-                raise RuntimeError("task image does not contain /agent_deps_mount/bin/python")
+                raise _SetupError("task image does not contain /agent_deps_mount/bin/python")
         if external_runtime:
             result = await sandbox.exec(
                 "tar -xzf /tmp/anyterminal-agent-deps.tar.gz -C /agent_deps_mount && "
@@ -652,7 +676,10 @@ class RunTerminalAgent(BaseModel):
         staging_tests = cfg.persistent_dir / "staging" / "tests"
         if staging_tests.exists():
             shutil.rmtree(staging_tests)
-        shutil.copytree(src, staging_tests)
+        try:
+            shutil.copytree(src, staging_tests)
+        except FileNotFoundError as e:
+            raise _SetupError(f"task tests directory not found: {src}") from e
 
     async def _run_eval(self, sandbox: AsyncSandbox, cfg: AnyTerminalInstanceConfig) -> tuple[float, Optional[str]]:
         t0 = time.time()
@@ -683,7 +710,7 @@ class RunTerminalAgent(BaseModel):
                 metadata=cfg.sandbox_default_metadata,
             ),
         )
-        agent_error_type = eval_error_type = sandbox_error = None
+        agent_error_type = eval_error_type = sandbox_error = sandbox_error_kind = None
         sandbox_failed = False
         agent_run_time = eval_run_time = None
         try:
@@ -700,13 +727,15 @@ class RunTerminalAgent(BaseModel):
         except Exception as e:
             sandbox_failed = True
             sandbox_error = repr(e)
+            sandbox_error_kind = _exception_kind(e)
             print(f"[{cfg.task_name}] sandbox run failed: {e}", flush=True)
         finally:
             try:
                 await sandbox.stop()
             except Exception as e:
                 sandbox_failed = True
-                sandbox_error = sandbox_error or repr(e)
+                if sandbox_error is None:
+                    sandbox_error, sandbox_error_kind = repr(e), _exception_kind(e)
                 print(f"[{cfg.task_name}] sandbox cleanup failed: {e}", flush=True)
             shutil.rmtree(cfg.persistent_dir / "staging", ignore_errors=True)
 
@@ -722,7 +751,9 @@ class RunTerminalAgent(BaseModel):
 
         agent_timed_out = agent_error_type is not None
         container_timed_out = eval_error_type is not None
-        failure_kind, failure_reason = _masked_failure(agent_error_type, eval_error_type, sandbox_error)
+        failure_kind, failure_reason = _masked_failure(
+            agent_error_type, eval_error_type, sandbox_error, sandbox_error_kind
+        )
         metrics = TerminalBenchMetrics(
             ray_queue_time=time.time() - cfg.ray_queue_timestamp,
             resolved=resolved,

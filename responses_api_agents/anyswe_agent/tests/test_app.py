@@ -640,3 +640,58 @@ class TestSandboxGradingFailures:
             assert error.__cause__ is cause
         else:
             assert not log.report.events
+
+
+class TestReturnedGradingFailures:
+    @pytest.mark.parametrize(
+        "returned,failure_kind,reason_part",
+        [
+            ("eval_timeout", "anyswe_agent:eval_timeout", "timed out"),
+            ("sandbox", "provider_unavailable", "sandbox"),
+        ],
+    )
+    async def test_returned_grading_failure_has_an_evaluation_reason(
+        self, tmp_path, monkeypatch, returned, failure_kind, reason_part
+    ) -> None:
+        with patch.object(AnySweAgent, "model_post_init", lambda self, context: None):
+            agent = AnySweAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        agent._server = AnySweServerConfig(
+            run_session_id="s",
+            base_results_dir=tmp_path,
+            model_server_url="http://model:9000",
+            resolved_sandbox_provider={"opensandbox": {}},
+            sandbox_default_metadata={},
+        )
+        agent._sem = asyncio.Semaphore(1)
+        monkeypatch.setattr(AnySweAgent, "rollout_id_from_run", lambda self, body: None)
+
+        class Sandbox:
+            async def start(self):
+                pass
+
+            async def stop(self):
+                pass
+
+            async def exec(self, command, **kwargs):
+                return SimpleNamespace(
+                    return_code=1 if command == "test -f /trajectories_mount/response.json" else 0,
+                    error_type=None,
+                    stdout="",
+                    stderr="",
+                )
+
+            async def download(self, remote, local):
+                local.write_bytes(b"diff --git a/test.py b/test.py\n")
+
+        monkeypatch.setattr("responses_api_agents.anyswe_agent.app.AsyncSandbox", lambda *args: Sandbox())
+        monkeypatch.setattr(AnySweAgent, "_grade_sandbox_patch", AsyncMock(return_value=(False, returned)))
+        body = AnySweRunRequest(
+            responses_create_params={"input": "fix it", "metadata": {"instance_id": "repo__repo-1"}}
+        )
+
+        response = await agent.run(body)
+
+        assert response.mask_sample is True
+        assert response.failure_kind == failure_kind
+        assert reason_part in response.failure_reason
+        assert "resolved" not in response.failure_reason

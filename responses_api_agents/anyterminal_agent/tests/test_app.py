@@ -35,7 +35,7 @@ from pydantic import ValidationError
 from nemo_gym import PARENT_DIR
 from nemo_gym.client import ServerClient
 from nemo_gym.config import OBSERVABILITY_ENABLED_KEY_NAME, TOKEN_CAPTURE_BLOCK
-from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent
 from nemo_gym.sandbox import ApptainerProvider, DockerProvider
 from nemo_gym.sandbox.providers.apptainer import provider as apptainer_provider
 from responses_api_agents.anyterminal_agent import app
@@ -854,6 +854,54 @@ class TestProcessSingleDatapoint:
         assert metrics["failure_kind"] == "provider_unavailable"
         assert "boom" in metrics["failure_reason"]
         sandbox.stop.assert_awaited_once()
+
+    async def test_agent_timeout_keeps_its_kind_when_cleanup_fails_later(self, tmp_path: Path) -> None:
+        cfg = _make_instance_config(tmp_path)
+        sandbox = SimpleNamespace(
+            start=AsyncMock(),
+            exec=AsyncMock(return_value=_sandbox_result(return_code=124, error_type="timeout")),
+            stop=AsyncMock(side_effect=RuntimeError("stop failed")),
+        )
+        with patch("responses_api_agents.anyterminal_agent.app.AsyncSandbox", return_value=sandbox):
+            with patch.object(RunTerminalAgent, "_stage_tests", new=AsyncMock(return_value=None)):
+                await RunTerminalAgent(config=cfg).process_single_datapoint()
+
+        metrics = json.loads(cfg.metrics_fpath.read_text())
+        assert metrics["failure_kind"] == "agent_timeout"
+        assert metrics["sandbox_failed"] is True
+        assert metrics["mask_sample"] is True
+
+    async def test_typed_sandbox_failure_keeps_its_kind(self, tmp_path: Path) -> None:
+        cfg = _make_instance_config(tmp_path)
+        error = NgFailureEvent(
+            boundary="sandbox",
+            failure_kind="provider_credentials_rejected",
+            operation="create",
+            failure_reason="rejected",
+        )
+        sandbox = SimpleNamespace(start=AsyncMock(side_effect=error), exec=AsyncMock(), stop=AsyncMock())
+        with patch("responses_api_agents.anyterminal_agent.app.AsyncSandbox", return_value=sandbox):
+            await RunTerminalAgent(config=cfg).process_single_datapoint()
+
+        metrics = json.loads(cfg.metrics_fpath.read_text())
+        assert metrics["failure_kind"] == "provider_credentials_rejected"
+        assert metrics["mask_sample"] is True
+
+    async def test_missing_task_tests_is_a_setup_failure_not_a_provider_failure(self, tmp_path: Path) -> None:
+        cfg = _make_instance_config(tmp_path)
+        cfg.problem_info["task_dir"] = str(tmp_path / "no_such_task")
+        sandbox = SimpleNamespace(
+            start=AsyncMock(),
+            exec=AsyncMock(return_value=_sandbox_result()),
+            stop=AsyncMock(),
+        )
+        with patch("responses_api_agents.anyterminal_agent.app.AsyncSandbox", return_value=sandbox):
+            await RunTerminalAgent(config=cfg).process_single_datapoint()
+
+        metrics = json.loads(cfg.metrics_fpath.read_text())
+        assert metrics["failure_kind"] == "anyterminal_agent:setup_failed"
+        assert "no_such_task" in metrics["failure_reason"]
+        assert metrics["mask_sample"] is True
 
     async def test_remote_provider_stages_and_collects(self, tmp_path: Path) -> None:
         archive = tmp_path / "deps.tar.gz"
