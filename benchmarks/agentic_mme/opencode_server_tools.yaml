@@ -18,6 +18,9 @@ agentic_mme:
       serve_image_tools: true
       task_images_in_sandbox: false
       expose_tools_over_mcp: true
+      # OpenCode in the lent sandbox calls the image tools on this server's /mcp, so the sandbox reaches this server's
+      # host as well as the policy model's.
+      sandbox_network_access: model_and_tools
 
 agentic_mme_opencode_agent:
   responses_api_agents:

@@ -283,3 +283,51 @@ def test_task_images_in_sandbox_off_needs_a_sandbox_provider(image_root) -> None
     )
     with pytest.raises(ValueError, match="needs sandbox_provider"):
         AgenticMMEServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+@pytest.mark.parametrize(
+    ("network_access", "extra", "tool_servers"),
+    [
+        ("model_only", {}, []),
+        ("model_and_tools", {"expose_tools_over_mcp": True}, ["agentic_mme"]),
+    ],
+)
+def test_the_lent_sandbox_gets_the_configured_network(
+    image_root, monkeypatch, network_access, extra, tool_servers
+) -> None:
+    made = []
+    monkeypatch.setattr(agentic_mme_app, "LentSandboxes", lambda *args, **kwargs: made.append(kwargs) or MagicMock())
+
+    _server(
+        image_root,
+        sandbox_network_access=network_access,
+        sandbox_model_server={"type": "responses_api_models", "name": "policy_model"},
+        **extra,
+    )
+
+    (kwargs,) = made
+    assert kwargs["network_access"] == network_access
+    assert kwargs["model_server"] == "policy_model"
+    assert list(kwargs["tool_servers"]) == tool_servers
+
+
+def test_model_and_tools_needs_the_tools_over_mcp(image_root) -> None:
+    with pytest.raises(ValueError, match="needs expose_tools_over_mcp"):
+        _server(
+            image_root,
+            sandbox_network_access="model_and_tools",
+            sandbox_model_server={"type": "responses_api_models", "name": "policy_model"},
+        )
+
+
+def test_a_network_rule_needs_a_lent_sandbox(image_root) -> None:
+    config = AgenticMMEConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="agentic_mme",
+        image_root=str(image_root),
+        sandbox_network_access="model_only",
+    )
+    with pytest.raises(ValueError, match="applies to a lent sandbox"):
+        AgenticMMEServer(config=config, server_client=MagicMock(spec=ServerClient))

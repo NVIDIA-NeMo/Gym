@@ -19,6 +19,13 @@ agentic_mme:
       allowed_agents: [opencode_agent]
       # Names the top-level provider block from opensandbox.yaml.
       sandbox_provider: sandbox
+      # The lent sandbox reaches the policy model and nothing else, so the harness cannot install tools or look answers
+      # up on the internet. The model server must have an address the sandbox can reach (++use_absolute_ip=true).
+      # A provider that does not enforce network policies, such as Docker, needs sandbox_network_access: inherit.
+      sandbox_network_access: model_only
+      sandbox_model_server:
+        type: responses_api_models
+        name: policy_model
       image_root: ${oc.env:AGENTIC_MME_IMAGE_ROOT,benchmarks/agentic_mme/data/images}
       sandbox_config:
         image: ${oc.env:AGENTIC_MME_SANDBOX_IMAGE,null}
@@ -47,6 +54,10 @@ agentic_mme_opencode_agent:
         name: policy_model
       model: ${policy_model_name}
       opencode_version: 1.17.11
+      # A sandbox without internet access cannot download OpenCode, so it runs the copy that
+      # resources_servers/agentic_mme/sandbox_image/Dockerfile installs: OpenCode 1.17.11 for glibc x86_64.
+      sandbox_executable_path: /opt/opencode/bin/opencode
+      sandbox_executable_sha256: 0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded  # pragma: allowlist secret
       concurrency: 32
       # The served context length minus max_output_tokens.
       context_window: ${oc.select:agentic_mme_opencode_context_window,114688}

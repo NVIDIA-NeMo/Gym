@@ -171,6 +171,12 @@ whether it holds the task images. Two configs run OpenCode this way:
   server serves the 14 image tools over MCP, and OpenCode's own shell, file and web tools are off. The prompt and
   tools match the Agentic-MME agent's, so its scores compare with `config.yaml`.
 
+`sandbox_network_access` sets the lent sandbox's network. `opencode.yaml` uses `model_only`: the sandbox reaches only
+the policy model (`sandbox_model_server`), so OpenCode cannot install tools or look answers up on the internet, and it
+runs the copy of OpenCode that the sandbox image holds. `opencode_server_tools.yaml` uses `model_and_tools`, which
+also lets the sandbox reach this server's `/mcp` route. Only OpenSandbox enforces these rules; with another provider,
+set `sandbox_network_access: inherit`.
+
 Both need a sandbox image built from `sandbox_image/Dockerfile` (`AGENTIC_MME_SANDBOX_IMAGE`) and the OpenSandbox
 provider (`OPENSANDBOX_DOMAIN`, `OPENSANDBOX_API_KEY`). OpenCode calls the model server from inside the sandbox, and
 with server tools also this server's `/mcp` route, so the servers it calls advertise the node's address:

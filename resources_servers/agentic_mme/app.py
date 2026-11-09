@@ -20,7 +20,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path, PurePosixPath
-from typing import Any, ClassVar, Optional
+from typing import Any, ClassVar, Literal, Optional
 
 import cv2
 from fastapi import FastAPI, HTTPException, Request
@@ -186,6 +186,10 @@ class AgenticMMEConfig(BaseResourcesServerConfig):
     # stateless, as the agent's own image tools need.
     sandbox_provider: Optional[str] = None
     sandbox_config: AgenticMMESandboxConfig = Field(default_factory=AgenticMMESandboxConfig)
+    # Egress of the lent sandbox. model_only reaches only sandbox_model_server's host; model_and_tools also reaches this
+    # server, for a harness that calls the image tools over MCP. inherit keeps the provider's network.
+    sandbox_network_access: Literal["inherit", "model_only", "model_and_tools"] = "inherit"
+    sandbox_model_server: Optional[ModelServerRef] = None
     # Whether the lent sandbox holds the task images. Turn it off with serve_image_tools to lend an empty sandbox, so
     # that the harness reaches the images only through this server's tools.
     task_images_in_sandbox: bool = True
@@ -259,12 +263,20 @@ class AgenticMMEServer(SimpleResourcesServer):
                 raise ValueError(
                     "Set sandbox_config.image to an image built from resources_servers/agentic_mme/sandbox_image"
                 )
+            if self.config.sandbox_network_access == "model_and_tools" and not self.config.expose_tools_over_mcp:
+                raise ValueError("sandbox_network_access model_and_tools needs expose_tools_over_mcp: true")
+            model_server = self.config.sandbox_model_server
             self._lent_sandboxes = LentSandboxes(
                 self.config.sandbox_provider,
                 self.config.sandbox_config,
                 image=self.config.sandbox_config.image,
                 workdir=WORKDIR,
+                network_access=self.config.sandbox_network_access,
+                model_server=model_server.name if model_server is not None else None,
+                tool_servers=[self.config.name] if self.config.sandbox_network_access == "model_and_tools" else (),
             )
+        elif self.config.sandbox_network_access != "inherit":
+            raise ValueError("sandbox_network_access applies to a lent sandbox; set sandbox_provider")
         elif not self.config.task_images_in_sandbox:
             raise ValueError("task_images_in_sandbox: false needs sandbox_provider, which lends the sandbox")
         if self._loads_task_images and self.config.image_root is None:
