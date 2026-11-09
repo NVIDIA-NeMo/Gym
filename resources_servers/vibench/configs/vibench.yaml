@@ -3,10 +3,12 @@
 # server copies the app out, stops the sandbox and grades the copy in fresh compose stacks.
 # configs/vibench_legacy_agent.yaml keeps the deprecated legacy relay path through vibench_agent; the two paths are
 # configured differently, so do not compare their scores as the same measurement.
+# With Docker, pair this config with resources_servers/vibench/configs/docker.yaml, not
+# responses_api_agents/vibench_agent/configs/docker.yaml: that overlay is for the legacy config only, and with it the
+# sandbox gets a loopback model URL, so OpenCode cannot reach the model.
 config_paths:
-  # opencode_agent's command deny-list only, not opencode_agent.yaml: OpenCode 1.17.11 places the keys of a `tools`
-  # map, such as the one opencode_agent.yaml sets, before the permission map's "*" rule, and the last matching rule
-  # wins, so with that map none of the denials apply. The agent below sets its own fields instead.
+  # opencode_agent's command deny-list, which also denies the web and skill tools. The agent below adds `task: deny`
+  # and sets its own fields.
   - responses_api_agents/opencode_agent/configs/permissions/default.yaml
   - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
 
@@ -63,7 +65,7 @@ vibench_resources_server:
       keep_evaluation_artifacts: ${oc.env:VIBENCH_KEEP_ARTIFACTS,false}
 
 # OpenCode builds the app in the lent sandbox, with opencode_agent's command deny-list and without the web, subagent
-# and skill tools. The other settings keep vibench_agent's (configs/vibench.yaml).
+# and skill tools. The other settings keep vibench_agent's (configs/vibench_legacy_agent.yaml).
 vibench_opencode_agent:
   _inherit_from: opencode_agent
   responses_api_agents:
@@ -80,10 +82,10 @@ vibench_opencode_agent:
       opencode_version: 1.17.11
       # OpenCode asks for max_output_tokens on every call, and an OpenAI-compatible server refuses a request whose
       # prompt plus output budget exceeds the served context, so use the served context length minus the output
-      # budget (262,144 - 32,768). The previous recipe asked for the whole window, which vLLM refuses outright.
+      # budget (262,144 - 32,768). The legacy recipe asks for the whole window, which vLLM refuses outright.
       context_window: 229376
       max_output_tokens: 32768
-      # The build budget per rollout, as before.
+      # The build budget per rollout, as in the legacy recipe.
       timeout: 5400
       sandbox_install_timeout_seconds: 600
       session_close_timeout_seconds: 60

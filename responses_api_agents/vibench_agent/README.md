@@ -1,5 +1,12 @@
 # vibench_agent
 
+> [!WARNING]
+> **Deprecated.** ViBench now runs by default from
+> [`resources_servers/vibench/configs/vibench.yaml`](../../resources_servers/vibench/configs/vibench.yaml),
+> where `opencode_agent` builds the app in a sandbox the resources server owns, through an agent session. This agent
+> runs only from `resources_servers/vibench/configs/vibench_legacy_agent.yaml` and will be removed after the
+> Environment Server migration.
+
 The build half of the [ViBench](https://github.com/ViBench/vibench-public) environment. It
 takes a product requirements document, builds a working web application in its own sandbox,
 and copies the result out as a tarball for

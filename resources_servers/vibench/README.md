@@ -143,7 +143,9 @@ config. It sets both settings, so only the model server listens on the host's ad
 the default bridge can route to — and with it the run's token-capture path. Single-tenant hosts
 only, or firewall the port; see the comment at the top of that file. The stock config's 180s
 exec timeout would also kill the build, which OpenCode runs as one long exec. Do not use
-`network: host`: that puts model-written code on the host network namespace.
+`network: host`: that puts model-written code on the host network namespace. Do not use
+`responses_api_agents/vibench_agent/configs/docker.yaml` either: it belongs to the legacy relay
+config, and with it the sandbox gets a loopback model URL that OpenCode cannot reach.
 
 ```bash
 gym env start \
@@ -170,10 +172,8 @@ recipe asks for the whole window on every call, which an OpenAI-compatible serve
 refuses, and OpenCode then ends the build with no model call at all. OpenCode also runs with
 `opencode_agent`'s command deny-list (`configs/permissions/default.yaml`), which also denies Git
 network commands, Git history mining and `curl`/`wget` to GitHub; the legacy recipe denies only
-process killing and `rm -rf /`. The recipe loads that deny-list but not `opencode_agent.yaml`:
-OpenCode 1.17.11 places the keys of a `tools` map, such as the one that file sets, before the
-permission map's `"*"` rule, and the last matching rule wins, so with that map none of the denials
-apply. Web, subagent and skill tools are turned off through `permission` instead.
+process killing and `rm -rf /`. That deny-list also turns off the web and skill tools, and the
+recipe turns off subagents (`task`) through `permission` as well.
 
 Start with `--limit 1`. A single rollout builds an app and then runs a full compose stack
 per test plan; wall-clock is tens of minutes and the box needs headroom for
@@ -183,8 +183,8 @@ per test plan; wall-clock is tens of minutes and the box needs headroom for
 
 `responses_api_agents/vibench_agent` still runs ViBench behind the `legacy_agent` relay, from
 `configs/vibench_legacy_agent.yaml`, which is deprecated. That agent starts its own build sandbox
-from the same image, runs OpenCode in it with the legacy recipe above, and writes the app as a tarball into `artifact_dir`, a
-directory it shares with this server; `seed_session` hands it only the PRD text and asset
+from the same image, runs OpenCode in it with the legacy recipe above, and writes the app as a
+tarball into `artifact_dir`, a directory it shares with this server; `seed_session` hands it only the PRD text and asset
 directories, and `verify` unpacks the tarball and grades it the same way. The shared directory puts
 the agent and this server on one host. With Docker, use the agent's own `configs/docker.yaml`; with
 OpenSandbox, set `sandbox_model_base_url` on the agent. See
@@ -218,6 +218,9 @@ example tasks graded, 16/16 test plans, no build or seeding failures:
 Mean 0.785. The spread matters more than the mean: `wedding` well below the rest shows the
 scale is not saturated. `data/example_rollouts.jsonl` holds this run, with its task paths
 updated to the `v1/` layout.
+
+The default session path (`configs/vibench.yaml`) has been run through seed, build and harvest
+on OpenSandbox, but not yet graded end to end, so these numbers are not a baseline for it.
 
 The reward tracks model capability. An earlier run with a weaker policy model scored 0.0 on
 `notes` with 0/19 steps, its app unreachable because the build produced no output, while the

@@ -1,6 +1,8 @@
 # Deprecated: vibench_agent and its legacy_agent relay will be removed after the Environment Server migration.
 # Use vibench.yaml instead, which runs opencode_agent through single_agent_turn_legacy with a build sandbox this
-# resources server owns.
+# resources server owns. Switch the overlay too: with Docker, vibench.yaml takes
+# resources_servers/vibench/configs/docker.yaml, and with OpenSandbox it takes use_absolute_ip instead of this agent's
+# sandbox_model_base_url.
 #
 # Resources server: owns the task data and ViBench-backed grading. It creates no sandbox --
 # the agent copies the built app out and this server grades it in a fresh stack.
