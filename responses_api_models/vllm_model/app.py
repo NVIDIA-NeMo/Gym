@@ -1914,9 +1914,6 @@ class VLLMModel(SimpleResponsesAPIModel):
         }
         if "routed_experts" in bundle:
             normalized["routed_experts"] = bundle["routed_experts"]
-        for field in ("generation_topk_token_ids", "generation_topk_log_probs"):
-            if bundle.get(field) is not None:
-                normalized[field] = cls._require_log_prob_list(bundle[field], f"{source}.{field}")
 
         if len(normalized["generation_token_ids"]) != len(normalized["generation_log_probs"]):
             raise RuntimeError(

@@ -1735,7 +1735,7 @@ class TestSessionSandbox:
         (work / "opencode.json").write_text("{}")
         env = {
             "XDG_DATA_HOME": str(work / ".opencode-data"),
-            "OPENAI_BASE_URL": "http://10.0.0.1:5000/ng-tok/k/v1",
+            "OPENAI_BASE_URL": "http://10.0.0.1:5000/ng-rollout/1-2/v1",
             "OPENAI_API_KEY": "EMPTY",  # pragma: allowlist secret
             "WANDB_API_KEY": "secret",  # pragma: allowlist secret
             "OPENSANDBOX_API_KEY": "secret",  # pragma: allowlist secret
@@ -1761,7 +1761,7 @@ class TestSessionSandbox:
         self._run(tmp_path, provider)
         env = provider.execs[-1]["env"]
         assert "WANDB_API_KEY" not in env and "OPENSANDBOX_API_KEY" not in env
-        assert env["OPENAI_BASE_URL"].endswith("/ng-tok/k/v1") and env["OPENAI_API_KEY"] == "EMPTY"
+        assert env["OPENAI_BASE_URL"].endswith("/ng-rollout/1-2/v1") and env["OPENAI_API_KEY"] == "EMPTY"
         assert env["OMP_NUM_THREADS"] == "1" and env["EXTRA"] == "1" and env["HOME"] == "/root"
 
     def test_timeout_exit_codes_mark_timed_out(self, tmp_path: Path) -> None:

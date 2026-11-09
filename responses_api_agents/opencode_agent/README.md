@@ -216,7 +216,7 @@ Both paths honor configured `thinking` and declare interleaved `reasoning_conten
 Different prompt placement can affect results; this integration does not establish
 local/session score parity or migrate existing benchmark defaults.
 
-## Local runs: images, RL token tracking and session placement
+## Local runs: images and session placement
 
 These options apply to the local CLI path (`/run` and `/v1/responses` without a
 sandbox session). All default to off, which keeps the existing behavior.
@@ -226,7 +226,6 @@ sandbox session). All default to off, which keeps the existing behavior.
 | `attach_images` | Writes the data-URL images of the last user message into the run directory as `image_<i>.<ext>` and attaches them with `-f`. |
 | `vision` | Declares the generated `model_server` model entry image-capable (`attachment`, image input modality), so OpenCode sends attachments and `read` returns image files as images. |
 | `private_tmp` | Runs each session in a fresh user and mount namespace (`unshare`) whose `/tmp` is the run's own, so concurrent runs that write fixed `/tmp` names do not collide. Needs unprivileged user namespaces. |
-| `track_token_ids` | Routes OpenCode's model calls through this agent (`/ng-tok/<run>/v1/chat/completions`), which pins each call's prompt to the tokens sampled before and returns the calls with their token IDs and log-probabilities as the rollout output, for RL training. Requires `model_server` and a single server worker. |
 | `session_nodes` | Spreads sessions over this many Ray nodes (this server's node first, then other alive nodes by IP), each session a Ray task pinned to one node. Only the session database comes back. Needs the `ray` extra and identical paths on every node. |
 | `session_exclude_actor_classes` | Ray actor class names (for example a training worker) whose nodes never host sessions. |
 | `session_sandbox` | Runs each session in its own sandbox from a `nemo_gym.sandbox` provider (for example OpenSandbox) instead of on a cluster node: the run directory is uploaded, OpenCode runs there, the session database is downloaded and the sandbox is deleted. Provider credentials come from environment variables named in `provider_secret_env`. Excludes `session_nodes > 1`. |
