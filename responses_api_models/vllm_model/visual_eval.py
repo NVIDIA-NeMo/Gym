@@ -30,7 +30,7 @@ class _TurnState:
 
 
 class VisualEvalModelConfig(VLLMModelConfig):
-    max_images: int | None = Field(default=33, gt=0)
+    max_images: int | None = Field(default=None, gt=0)
     turn_budget: EvalTurnBudget | None = None
 
     @model_validator(mode="after")

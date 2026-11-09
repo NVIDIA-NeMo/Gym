@@ -15,6 +15,7 @@ policy_model:
   responses_api_models:
     vllm_model:
       entrypoint: visual_eval.py
+      max_images: 33
       turn_budget: null
 
 visual_opencode_environment_server:

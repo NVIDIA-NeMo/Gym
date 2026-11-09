@@ -18,6 +18,7 @@ policy_model:
   responses_api_models:
     vllm_model:
       entrypoint: visual_eval.py
+      max_images: 33
       num_workers: 1
       turn_budget:
         regular_turns: 55

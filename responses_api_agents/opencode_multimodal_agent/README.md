@@ -286,9 +286,11 @@ model requests. Additional images are replaced with:
 > Image limit reached. This additional image was omitted. You cannot receive additional images.
 
 This guard operates on a request copy and does not modify the saved history.
-Set the model limit to `null` to disable it. Evaluation also accepts `null` for
-the agent's initial-image limit. Match these settings to the serving model's
-image capacity.
+The model adapter defaults to no image cap. The standalone `eval_55_grace10.yaml`
+and `eval_advisory.yaml` presets explicitly select 33; the benchmark runtime profile
+and hosted preset explicitly select `null`. Set the model limit to `null` to disable it.
+Evaluation also accepts `null` for the agent's initial-image limit. Match these
+settings to the serving model's image capacity.
 
 Reasoning-history rendering is controlled by the model server's
 `chat_template_kwargs.truncate_history_thinking`; set it to `false` to retain
