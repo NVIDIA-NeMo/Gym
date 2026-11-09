@@ -53,6 +53,7 @@ from nemo_gym.agents import (
     confirmed_policy_response_timeout,
     failure_outcome_policy,
 )
+from nemo_gym.agents.agent_outcome import POLICY_TIMEOUT_OPERATION, policy_timeout_failure
 from nemo_gym.client import get_response_json, raise_for_status, rollout_path_prefix
 from nemo_gym.client import request as http_request
 from nemo_gym.config import (
@@ -251,10 +252,6 @@ class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
         return value
 
 
-# The classified policy-request timeout whose outcome the legacy /run boundary selects.
-POLICY_TIMEOUT_OPERATION = "agent.policy_request"
-
-
 def _selected_model_body_failure(error: ClientResponseError) -> bool:
     """Whether the reply's selected failure chain holds a model request that failed after successful headers.
 
@@ -436,7 +433,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
     async def retire_agent_session(self, session_key: str) -> None:
         self._legacy_replies.pop(session_key, None)
-        self._free_session(session_key)
+        self._release_retired_session(session_key)
 
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         if not isinstance(state, SimpleAgentSessionState):
@@ -587,18 +584,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 except ClientResponseError as error:
                     if _selected_model_body_failure(error) or _selected_failure_unknown(error):
                         raise  # The reply's report travels on unchanged; it is not another session chance.
-                    failure = None
-                    if _policy_request_timed_out(error):
-                        report = FailureHeader.decode(error.headers)
-                        final = report.events[report.failure_id]
-                        failure = NgFailureEvent(
-                            boundary=FailureBoundary.AGENT,
-                            failure_kind=MODEL_POLICY_RESPONSE_TIMEOUT,
-                            failure_reason="Policy model request timed out on every attempt",
-                            operation=POLICY_TIMEOUT_OPERATION,
-                            operation_id=final.operation_id,
-                        )
-                        failure.__cause__ = error
+                    failure = policy_timeout_failure(error)
                     if not in_session:
                         if failure is not None:
                             raise failure from error

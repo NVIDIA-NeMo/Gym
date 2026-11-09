@@ -113,7 +113,7 @@ def test_a_run_of_answers_truncated_at_the_output_cap_passes_evaluation_health_w
     _, (passed, reason, report), task = _gate(collected)
     assert passed is True, reason
     assert report["status"] == "PASS" and report["exact"] is True
-    assert report["evaluation"] == {"count": 0, "fraction": 0.0, "kinds": {}, "server": 0}
+    assert report["evaluation"] == {"count": 0, "fraction": 0.0, "kinds": {}, "server": 0, "server_kinds": {}}
     assert report["model"] == {"count": 123, "fraction": 0.123, "kinds": {"truncated_answer": 123}}
     assert "model faults: 123 of 1000 (12.30%) (truncated_answer 123)" in reason
     assert "lower bound" not in reason and "UNVERIFIED" not in reason
