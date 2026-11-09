@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+version = "1.0"
+
+[task]
+name = ${task_name}
+
+[agent]
+timeout_sec = 600
+user = "agent"
+
+[verifier]
+timeout_sec = 300
+user = "root"
+
+[verifier.env]
+VIALS_VERIFIER_URL = ${verifier_url}
+
+[environment]
+workdir = "/task"
+cpus = 2
+memory_mb = 4096
+storage_mb = 2048
+network_mode = "allowlist"
+allowed_hosts = [${verifier_host}]

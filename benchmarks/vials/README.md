@@ -9,7 +9,8 @@ evaluation: questions and images go to a vision-capable policy model without too
 - Scorer: `resources_servers/vials`
 
 
-Tool-assisted evaluation can be added as a separate configuration later.
+An optional Harbor exporter prepares tool-assisted tasks; direct evaluation uses
+the existing configuration unchanged. See the Harbor export instructions below.
 
 ## Sources
 
@@ -151,6 +152,63 @@ gym eval run --no-serve --benchmark vials --model-type vllm_model \
 
 Inspect policy responses, judge diagnostics, and masked samples before interpreting
 accuracy. Offline verifier fixtures do not establish agreement with live judges.
+
+## Harbor export (tool-assisted)
+
+`harbor/adapter.py` follows the other benchmark adapters: its `prepare()` function
+returns a `gym.jsonl` task index, and it can also run as a CLI. It reuses the
+pinned direct preparation when the source JSONL is missing. Generated tasks live
+under `data/harbor/` and are gitignored.
+
+Build the shared scientific-Python runtime on a Docker-capable machine:
+
+```bash
+docker build -t vials-tools:local -f benchmarks/vials/harbor/Dockerfile benchmarks/vials
+```
+
+Export a small suite first:
+
+```bash
+python -m benchmarks.vials.harbor.adapter \
+    --docker-image vials-tools:local \
+    --verifier-url http://YOUR-GYM-VERIFIER-HOST:PORT/verify \
+    --limit 3
+```
+
+`--verifier-url` must point to the running **VIALS resources server** (not the
+head server or a model provider), reachable from the task container. Judge
+credentials and model configuration stay on that Gym server. Start the normal
+VIALS services using `gym env start --benchmark vials --model-type openai_model`
+with the policy/judge settings from `env.yaml`; find the resources server URL
+using `gym env status`. On a remote/container deployment, configure its listen
+address and routing so that this URL is reachable; `localhost` inside a container
+usually addresses the container itself.
+
+To export all 161 tasks, omit `--limit`. Existing tasks require `--overwrite`;
+use a new output directory when changing to a smaller subset. `--source` can
+select another prepared JSONL, such as `data/example.jsonl`. The ordinary
+direct-evaluation JSONL is not changed when exporting an existing source.
+
+Each task has instructions, a lightweight Dockerfile copying only ordered images
+on top of the shared runtime, and private `tests/` assets. Harbor must stage the
+tests **after agent execution**, without mounting the full task tree into the
+agent container. The agent writes `/task/answer.txt`; the verifier sends that
+answer and the original grading inputs to Gym and writes Harbor `reward.json`
+plus diagnostic `info.json`. Missing/empty answers score zero. Judge transport
+or masked failures raise a trial error instead of creating a zero reward.
+
+The task requests a network allowlist containing only the Gym verifier hostname.
+Use a Harbor backend that enforces that allowlist, and a shared image available
+to its builder. The native `gym eval run <Harbor-folder>` loader currently rejects
+network-restricted tasks; use Harbor itself or a compatible Harbor bridge/backend
+for these exports. A full Harbor rollout and runtime isolation checks remain
+necessary before claiming tool-assisted benchmark results. Export validation is
+not an end-to-end Harbor evaluation. Agent/harness selection and image-input
+support must also be tested for the chosen Harbor harness.
+
+The instructions and scientific package selection adapt upstream VIALS's
+MIT-licensed Harbor adapter at the code revision above. The tool-assisted setting
+differs from the direct runs and must be reported separately.
 
 ## Licenses and intended use
 
