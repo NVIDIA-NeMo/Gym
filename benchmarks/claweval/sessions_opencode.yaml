@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+  - benchmarks/claweval/sessions.yaml
+  - responses_api_agents/opencode_agent/configs/opencode_agent.yaml
+
+opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      sandbox_provider: sandbox
+      sandbox_config:
+        image: ${oc.env:CLAW_EVAL_AGENT_IMAGE}
+      system_prompt_mode: replace
+      return_session_trajectory: true
+      mcp_tool_timeout_seconds: 300
+      # Native ClawEval tools own task side effects; built-in host tools would change the benchmark.
+      opencode_config:
+        compaction: {auto: false}
+        permission:
+          '*': deny
+          'claweval_*': allow

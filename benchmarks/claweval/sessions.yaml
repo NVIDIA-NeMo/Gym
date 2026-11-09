@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+  - resources_servers/claweval/configs/claweval.yaml
+  - environment_servers/claweval/configs/claweval.yaml
+
+observability_enabled: true
+environment_server_routes:
+  claweval: claweval_episode
+
+claweval_resources:
+  resources_servers:
+    claweval:
+      datasets:
+        - name: example
+          type: example
+          taskset: claweval
+          jsonl_fpath: resources_servers/claweval/data/example.jsonl
+          num_repeats: 1

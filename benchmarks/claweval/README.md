@@ -1,5 +1,9 @@
 # Claw-Eval in NeMo Gym
 
+For interchangeable assistant harnesses through agent sessions, see the
+[ClawEval Resources guide](../../resources_servers/claweval/README.md).
+The native-runner configurations described below remain separate comparison runs.
+
 Gym schedules one native Claw-Eval trial per `/run`, collects its trajectory and
 native reward, and aggregates the results. The local Claw-Eval runner owns the
 agent loop, multimodal inputs, simulated user, tools, Pyxis sandbox, mock services,
