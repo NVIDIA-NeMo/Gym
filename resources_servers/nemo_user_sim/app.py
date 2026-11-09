@@ -9,7 +9,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import re
 from collections.abc import Mapping, Sequence
 from time import monotonic
 from types import SimpleNamespace
@@ -29,8 +28,6 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     TaskId,
-    is_namespaced,
-    is_registered,
 )
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
@@ -46,6 +43,7 @@ from resources_servers.nemo_user_sim.episode_contracts import (
     UserSimTaskInput,
     UserSimVerification,
     UserSimVerifyRequest,
+    usersim_failure,
 )
 
 
@@ -64,8 +62,6 @@ PROBE_SCORERS = {
     "tool_calling": "tool_use",
 }
 ASSISTANT_QUALITY_AXES = ("helpfulness", "accuracy", "coherence")
-# A failed simulation whose outcome names no failure_class.
-SIMULATION_FAILED = "usersim:simulation_failed"
 logger = logging.getLogger(__name__)
 
 
@@ -283,14 +279,15 @@ class UserSimResourcesServer(SimpleResourcesServer):
         if trajectory_id and result_row.get("trajectory_id") != trajectory_id:
             raise HTTPException(status_code=409, detail="UserSim result trajectory_id does not match the seeded task")
 
-        if usersim_result.simulation_outcome.get("failure_attribution") == "assistant_model":
+        simulation_failure = usersim_failure(usersim_result.simulation_outcome)
+        if simulation_failure is not None and not simulation_failure.mask_sample:
+            # The assistant model caused the failure, so it is scored, without running the scorers.
             participants_completed = {"user", "assistant"} <= _conversation_roles(usersim_result)
-            outcome = usersim_result.simulation_outcome
             return UserSimVerification(
                 reward=0.0,
                 mask_sample=False,
-                failure_kind=_usersim_failure_kind(outcome.get("failure_class")),
-                failure_reason=_usersim_failure_reason(outcome),
+                failure_kind=simulation_failure.failure_kind,
+                failure_reason=simulation_failure.failure_reason,
                 reward_components={
                     "participants_completed": float(participants_completed),
                     "conversation_status": float(usersim_result.conversation_status),
@@ -359,21 +356,17 @@ class UserSimResourcesServer(SimpleResourcesServer):
             scorer_pass = False
         else:
             scorer_pass = None
-        outcome = usersim_result.simulation_outcome
-        simulation_failed = outcome.get("status") == "failed"
-        failure_attribution = outcome.get("failure_attribution")
         evaluator_error = assistant_eval.get("error")
         participants_completed = {"user", "assistant"} <= _conversation_roles(usersim_result)
         scenario_completed = usersim_result.conversation_status and participants_completed and scorer_pass is True
         quality_missing = scenario_completed and assistant_quality is None and not assistant_eval.get("skipped", False)
         scorer_inconclusive = scorer_result_state == "ok" and scorer_pass is None
-        mask_sample = (simulation_failed and failure_attribution != "assistant_model") or bool(
+        # A failure the assistant model caused returned above, so a simulation failure here is masked.
+        mask_sample = simulation_failure is not None or bool(
             scorer_error or evaluator_error or quality_missing or scorer_inconclusive
         )
-        failure_kind = (
-            (_usersim_failure_kind(outcome.get("failure_class")) or SIMULATION_FAILED) if simulation_failed else None
-        )
-        failure_reason = _usersim_failure_reason(outcome) if simulation_failed else None
+        failure_kind = simulation_failure.failure_kind if simulation_failure is not None else None
+        failure_reason = simulation_failure.failure_reason if simulation_failure is not None else None
         if scorer_error:
             failure_kind = VERIFIER_ERROR
             failure_reason = str(scorer_error)
@@ -551,20 +544,6 @@ def _scorer_for_row(row: Mapping[str, Any]) -> str | None:
     if probe_type.startswith("health_") and row.get("probe_variant", "default") != "guarded":
         return None
     return PROBE_SCORERS.get(probe_type)
-
-
-def _usersim_failure_kind(value: Any) -> str | None:
-    if not value:
-        return None
-    name = str(value)
-    if is_registered(name) or is_namespaced(name):
-        return name
-    normalized = re.sub(r"[^a-z0-9_]+", "_", name.lower()).strip("_") or "simulation_failed"
-    return f"usersim:{normalized}"
-
-
-def _usersim_failure_reason(outcome: Mapping[str, Any]) -> str | None:
-    return outcome.get("failure_detail") or outcome.get("failure_reason")
 
 
 def _conversation_roles(result: UserSimSimulationResult) -> set[str]:

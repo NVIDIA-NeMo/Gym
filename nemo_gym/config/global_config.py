@@ -2083,6 +2083,30 @@ def get_first_server_config_dict(global_config_dict: DictConfig, top_level_path:
     return server_config_dict
 
 
+def skipped_verification_reward(
+    global_config_dict: DictConfig,
+    agent_name: str,
+    *,
+    skip_verification: bool | None,
+    skip_verification_reward: float | None,
+) -> float | None:
+    """The fixed reward that replaces an Environment Server's /verify call, or None to verify.
+
+    The server's own settings win; otherwise those of the agent named ``agent_name`` apply, because Gym fills the
+    global skip_verification flags in only on agents. The agent's raw values are parsed as the agent's own config
+    parses them, so a string "false" stays false.
+    """
+    agent_config = get_first_server_config_dict(global_config_dict, agent_name)
+    skip = skip_verification
+    if skip is None:
+        skip = TypeAdapter(bool).validate_python(agent_config.get(SKIP_VERIFICATION_KEY_NAME, False))
+    if not skip:
+        return None
+    if skip_verification_reward is not None:
+        return skip_verification_reward
+    return TypeAdapter(float).validate_python(agent_config.get(SKIP_VERIFICATION_REWARD_KEY_NAME, 0.0))
+
+
 def allowed_agents_for(global_config_dict: DictConfig, resources_server_name: Optional[str]) -> Optional[List[str]]:
     """The agent types `resources_server_name` declares support for, or None when it declares none.
 

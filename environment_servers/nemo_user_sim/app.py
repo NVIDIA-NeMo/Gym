@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
+from warnings import warn
 
 from aiohttp import ClientError, ClientResponseError
 from fastapi import Body
@@ -38,6 +39,7 @@ from nemo_gym.config import (
     ModelServerRef,
     ResourcesServerRef,
     get_first_server_config_dict,
+    skipped_verification_reward,
 )
 from nemo_gym.core import (
     FailureStage,
@@ -102,6 +104,9 @@ class UserSimEnvironmentServerConfig(BaseEnvironmentServerConfig):
     embedding_model: ModelServerRef
     resources_server: ResourcesServerRef
     actor_call_timeout_seconds: float = Field(300.0, gt=0)
+    # Unset, each falls back to the assistant agent's own setting, which also carries the global flag.
+    skip_verification: bool | None = None
+    skip_verification_reward: float | None = None
 
     def target_for_alias(self, alias: str) -> AgentServerRef | ModelServerRef:
         return {
@@ -362,6 +367,15 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
     response_model = UserSimEpisodeResponse
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
+        """Forward to the Resources Server; without verification there is nothing to aggregate."""
+        if self._skipped_verification_reward() is not None:
+            warn(
+                "Skipping aggregate metrics because skip_verification=True; "
+                "use disable_aggregation=True to avoid writing aggregate metric files.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return AggregateMetrics()
         response = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/aggregate_metrics",
@@ -520,43 +534,53 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
                     bridge.resources_cookies.clear()
                     bridge.resources_cookies.update(session.close_response.resources_cookies)
 
-        try:
-            verify_http_response = await self.server_client.post(
-                server_name=self.config.resources_server.name,
-                url_path="/verify",
-                json=UserSimVerifyRequest(
-                    episode_id=request.episode_id,
-                    task_id=request.task.task_id,
-                    verification_input=UserSimVerificationInput(
-                        resolved_row=task.resolved_row,
-                        usersim_result=result,
-                        invocations=bridge.invocations,
+        verification: UserSimVerification | None = None
+        skipped_reward = self._skipped_verification_reward()
+        if skipped_reward is None:
+            try:
+                verify_http_response = await self.server_client.post(
+                    server_name=self.config.resources_server.name,
+                    url_path="/verify",
+                    json=UserSimVerifyRequest(
+                        episode_id=request.episode_id,
+                        task_id=request.task.task_id,
+                        verification_input=UserSimVerificationInput(
+                            resolved_row=task.resolved_row,
+                            usersim_result=result,
+                            invocations=bridge.invocations,
+                        ),
                     ),
-                ),
-                cookies=bridge.resources_cookies,
-                # The resources cleanup closes the session, so the Resources Server keeps tracking it until then.
-                headers={CHECKPOINT_CLOSE_FOLLOWS_HEADER: "1"},
-            )
-            await raise_for_status(verify_http_response)
-            verification = UserSimVerification.model_validate(await get_response_json(verify_http_response))
-            if verification.usersim_result is not None:
-                result = verification.usersim_result
-        except Exception as error:
-            raise self._failure("verification", error) from error
+                    cookies=bridge.resources_cookies,
+                    # The resources cleanup closes the session, so the Resources Server keeps tracking it until then.
+                    headers={CHECKPOINT_CLOSE_FOLLOWS_HEADER: "1"},
+                )
+                await raise_for_status(verify_http_response)
+                verification = UserSimVerification.model_validate(await get_response_json(verify_http_response))
+                if verification.usersim_result is not None:
+                    result = verification.usersim_result
+            except Exception as error:
+                raise self._failure("verification", error) from error
 
+        # The Resources session closes whether or not verification ran.
         try:
             await resources_cleanup.close()
         except Exception as error:
             raise self._failure("cleanup", error, terminal=True) from error
 
-        return UserSimEpisodeResponse(
-            episode_id=request.episode_id,
-            task_id=request.task.task_id,
-            result=UserSimEpisodeResult.from_verification(
+        if verification is None:
+            episode_result = UserSimEpisodeResult.skipped(
+                reward=skipped_reward, usersim_result=result, invocations=bridge.invocations
+            )
+        else:
+            episode_result = UserSimEpisodeResult.from_verification(
                 verification=verification,
                 usersim_result=result,
                 invocations=bridge.invocations,
-            ),
+            )
+        return UserSimEpisodeResponse(
+            episode_id=request.episode_id,
+            task_id=request.task.task_id,
+            result=episode_result,
         )
 
     async def _run_usersim(self, bridge: _ConversationBridge, resolved_row: dict[str, Any]) -> dict[str, Any]:
@@ -589,6 +613,15 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
             return event.result
         finally:
             await runtime.close()
+
+    def _skipped_verification_reward(self) -> float | None:
+        """The fixed reward that replaces /verify, or None to verify; the assistant agent supplies unset settings."""
+        return skipped_verification_reward(
+            self.server_client.global_config_dict,
+            self.config.assistant_agent.name,
+            skip_verification=self.config.skip_verification,
+            skip_verification_reward=self.config.skip_verification_reward,
+        )
 
     def responses_path(
         self,

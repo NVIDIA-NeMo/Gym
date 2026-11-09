@@ -734,6 +734,10 @@ harbor_environment_server:
 
 ## Configuration and artifacts
 
+`skip_verification` does not apply to this server. It runs each task's verifier itself, inside the episode, and a
+multi-step task decides from each step's verifier result whether the next step runs. The global
+`skip_verification` flag reaches only agents, and this server has no setting of its own that skips the verifier.
+
 See [`configs/harbor.yaml`](configs/harbor.yaml) for this layer's supported settings. Verifier logs default
 to `${results_dir}/harbor/verifier/<generated-directory>`, using Gym's absolute results root. An explicit
 relative `artifacts_dir` is relative to that root; an absolute path is used directly. The server reserves

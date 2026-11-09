@@ -1351,7 +1351,8 @@ def test_the_trial_boundary_names_the_run_provenance_and_the_open_protocol_quest
                     "implementation": "scicode_agent",
                     "resources_server": "r",
                     "skip_verification": None,
-                }
+                },
+                "env": {"kind": "environment_servers", "implementation": "nemo_user_sim", "skip_verification": True},
             },
         },
         ended_on_failed_model_call=0,
@@ -1362,6 +1363,7 @@ def test_the_trial_boundary_names_the_run_provenance_and_the_open_protocol_quest
     assert d.action == RecoveryAction.NOOP and health.startswith("response/trial health unknown")
     assert "trial: UNOBSERVED 99 of 100 expected trials" in health and "route_failures_to_sidecar None" in health
     assert "('scicode_agent', 'r', None)" in health and "rollouts ended on a failed model call at least 0" in health
+    assert "environment servers (skip_verification) {'env': True}" in health
     assert "open for the benchmark PIC" in health
     assert "verification_skipped {'true': 0, 'false': 0, 'absent': 100}" in health
     assert "in_session) runtime observations are absent or malformed, so it is unknown" in health

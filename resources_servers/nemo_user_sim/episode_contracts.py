@@ -4,11 +4,20 @@
 """Seed and verification contracts for the NeMo UserSim Resources Server."""
 
 import json
+import re
+from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, validate_failure_kind
+from nemo_gym.core import (
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    is_namespaced,
+    is_registered,
+    validate_failure_kind,
+)
 from nemo_gym.server_runtime import (
     ResourcesSeedSessionResponse,
     ResourcesVerifyRequest,
@@ -21,6 +30,46 @@ from resources_servers.nemo_user_sim.task_data import (
 
 
 USERSIM_EPISODE_PROTOCOL = "usersim.ConversationLoop"
+# A failed simulation whose outcome names no failure_class.
+SIMULATION_FAILED = "usersim:simulation_failed"
+
+
+@dataclass(frozen=True)
+class UserSimFailure:
+    """The failure fields a UserSim episode records for a failure UserSim reported in its outcome."""
+
+    mask_sample: bool
+    failure_kind: str | None
+    failure_reason: str | None
+
+
+def usersim_failure(outcome: Mapping[str, Any]) -> UserSimFailure | None:
+    """Classify a UserSim simulation outcome by who caused its failure, or return None when nothing failed.
+
+    A failure attributed to the assistant model is the policy's own and stays in the score. Any other failed
+    simulation (user model, judge, tool simulation, infrastructure) is masked. Verification and an episode that
+    skips verification both apply this rule, so skipping never turns a failed simulation into an ordinary row.
+    """
+    failure_kind = _usersim_failure_kind(outcome.get("failure_class"))
+    failure_reason = outcome.get("failure_detail") or outcome.get("failure_reason")
+    if outcome.get("failure_attribution") == "assistant_model":
+        return UserSimFailure(mask_sample=False, failure_kind=failure_kind, failure_reason=failure_reason)
+    if outcome.get("status") != "failed":
+        return None
+    return UserSimFailure(
+        mask_sample=True, failure_kind=failure_kind or SIMULATION_FAILED, failure_reason=failure_reason
+    )
+
+
+def _usersim_failure_kind(value: Any) -> str | None:
+    """Map a UserSim failure_class to a registered or ``usersim:``-namespaced Gym failure kind."""
+    if not value:
+        return None
+    name = str(value)
+    if is_registered(name) or is_namespaced(name):
+        return name
+    normalized = re.sub(r"[^a-z0-9_]+", "_", name.lower()).strip("_") or "simulation_failed"
+    return f"usersim:{normalized}"
 
 
 class UserSimSeedResponse(ResourcesSeedSessionResponse):

@@ -13,7 +13,7 @@ import pytest
 import usersim.engine.external as usersim_external
 from aiohttp import ClientConnectionError, ClientResponseError, InvalidURL, InvalidUrlRedirectClientError
 from omegaconf import OmegaConf
-from pydantic import ConfigDict
+from pydantic import ConfigDict, ValidationError
 
 from environment_servers.nemo_user_sim.app import (
     UserSimEnvironmentServer,
@@ -31,16 +31,32 @@ from environment_servers.nemo_user_sim.app import (
 )
 from environment_servers.nemo_user_sim.episode_contracts import UserSimEpisodeRequest, UserSimEpisodeResult
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
-from nemo_gym.config import AgentServerRef, BaseServerConfig, ModelServerRef, ResourcesServerRef
-from nemo_gym.core import EpisodeId, MaterializedTask, TaskId
+from nemo_gym.config import (
+    AgentServerRef,
+    AggregateMetrics,
+    AggregateMetricsRequest,
+    BaseServerConfig,
+    ModelServerRef,
+    ResourcesServerRef,
+)
+from nemo_gym.core import (
+    EpisodeId,
+    MaterializedTask,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    TaskId,
+)
 from nemo_gym.data import materialize_task
 from nemo_gym.rollouts.rollout_collection import _episode_record
 from nemo_gym.server_runtime import is_handled_episode_failure
 from resources_servers.nemo_user_sim.app import UserSimResourcesServer, UserSimResourcesServerConfig
 from resources_servers.nemo_user_sim.episode_contracts import (
+    UserSimInvocation,
     UserSimSimulationResult,
     UserSimTaskInput,
     UserSimVerification,
+    UserSimVerificationInput,
+    UserSimVerifyRequest,
 )
 
 
@@ -1017,6 +1033,311 @@ async def test_assistant_transport_failure_skips_verification(
     assert response.failure.terminal is terminal
     assert response.result is None
     assert "/verify" not in [path for _, path, _ in client.calls]
+
+
+def _usersim_result() -> UserSimSimulationResult:
+    return UserSimSimulationResult(
+        trajectory_id=_resolved_row()["trajectory_id"],
+        conversation_messages=[{"role": "assistant", "content": "Done."}],
+        conversation_status=True,
+        simulation_outcome={"status": "completed"},
+    )
+
+
+def _skipping_server(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    environment: dict[str, Any],
+    assistant: dict[str, Any],
+    usersim_result: UserSimSimulationResult | None = None,
+) -> tuple[UserSimEnvironmentServer, _Client]:
+    """A server whose conversation finishes with one assistant turn, under the given skip settings."""
+    finished = usersim_result or _usersim_result()
+    server, client = _lifecycle_server()
+    server.config = server.config.model_copy(update=environment)
+    client.global_config_dict.assistant.responses_api_agents.simple_agent.update(assistant)
+
+    async def finish_conversation(bridge: _ConversationBridge, _resolved_row: dict[str, Any]) -> dict[str, Any]:
+        bridge.invocations.append(
+            UserSimInvocation(
+                sequence=0,
+                role="assistant",
+                request=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+                response=NeMoGymResponse.model_validate(_responses_body([])),
+            )
+        )
+        return finished.model_dump(mode="json")
+
+    monkeypatch.setattr(server, "_run_usersim", finish_conversation)
+    return server, client
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("environment", "assistant", "reward"),
+    [
+        ({"skip_verification": True, "skip_verification_reward": 0.5}, {}, 0.5),
+        # Unset on the Environment Server, the assistant agent's setting applies; Gym fills it from the global flag.
+        ({}, {"skip_verification": True, "skip_verification_reward": 0.25}, 0.25),
+        ({"skip_verification": True}, {}, 0.0),
+        # Each field falls back on its own.
+        ({"skip_verification": True}, {"skip_verification_reward": 2.0}, 2.0),
+        ({"skip_verification_reward": 3.0}, {"skip_verification": True, "skip_verification_reward": 0.25}, 3.0),
+        ({}, {"skip_verification": "true", "skip_verification_reward": "0.5"}, 0.5),
+    ],
+    ids=[
+        "environment_setting",
+        "assistant_agent_setting",
+        "default_reward",
+        "agent_reward_fallback",
+        "environment_reward_wins",
+        "agent_strings",
+    ],
+)
+async def test_skip_verification_returns_the_fixed_reward_and_still_closes_every_session(
+    monkeypatch: pytest.MonkeyPatch, environment: dict[str, Any], assistant: dict[str, Any], reward: float
+) -> None:
+    server, client = _skipping_server(monkeypatch, environment=environment, assistant=assistant)
+    client.responses = [*_seeded_participant_responses(), _Response({}), _Response({}), _Response({})]
+
+    response = await server.run_request(_request())
+
+    assert response.failure is None and response.result is not None
+    assert [path for _, path, _ in client.calls] == [
+        "/seed_session",
+        "/v1/agent_sessions",
+        "/v1/agent_sessions",
+        "/v1/agent_sessions/close",
+        "/v1/agent_sessions/close",
+        "/close_session",
+    ]
+    # The Resources session closes with the cookie it was seeded with, as after a verification.
+    assert client.calls[-1][2]["cookies"] == {"session": "resources-cookie"}
+    result = response.result.model_dump(mode="json")
+    assert (result["reward"], result["verification_skipped"], result["verification"]) == (reward, True, None)
+    assert result["reward_components"] == {} and result["mask_sample"] is False
+    assert result["usersim_result"]["conversation_status"] is True
+    assert [invocation["role"] for invocation in result["invocations"]] == ["assistant"]
+    record = _episode_record(
+        {
+            "episode_id": {"rollout_id": "0-0", "attempt": 0},
+            "task_id": {"taskset": "nemo_user_sim:example", "task_id": "0"},
+            "result": result,
+        }
+    )
+    assert record["reward"] == reward and record["verification_skipped"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("environment", "assistant"),
+    [
+        ({"skip_verification": False}, {"skip_verification": True}),
+        # The agent's raw value is parsed as its own config parses it, so a string "false" stays false.
+        ({}, {"skip_verification": "false"}),
+        ({}, {}),
+    ],
+    ids=["environment_overrides_agent", "agent_string_false", "unset"],
+)
+async def test_a_server_that_does_not_skip_keeps_verifying(
+    monkeypatch: pytest.MonkeyPatch, environment: dict[str, Any], assistant: dict[str, Any]
+) -> None:
+    server, client = _skipping_server(monkeypatch, environment=environment, assistant=assistant)
+    client.responses = [
+        *_seeded_participant_responses(),
+        _Response({}),
+        _Response({}),
+        _Response({"reward": 0.75, "reward_components": {"assistant_quality": 0.75}, "scenario_completed": True}),
+        _Response({}),
+    ]
+
+    response = await server.run_request(_request())
+
+    assert [path for _, path, _ in client.calls] == [
+        "/seed_session",
+        "/v1/agent_sessions",
+        "/v1/agent_sessions",
+        "/v1/agent_sessions/close",
+        "/v1/agent_sessions/close",
+        "/verify",
+        "/close_session",
+    ]
+    assert client.calls[-1][2]["cookies"] == {"session": "resources-cookie"}
+    result = response.result.model_dump(mode="json")
+    assert result["reward"] == 0.75 and result["verification"]["scenario_completed"] is True
+    assert "verification_skipped" not in result
+
+
+@pytest.mark.asyncio
+async def test_skip_verification_returns_empty_aggregate_metrics_without_calling_resources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server, client = _skipping_server(monkeypatch, environment={"skip_verification": True}, assistant={})
+
+    with pytest.warns(RuntimeWarning, match="skip_verification=True"):
+        metrics = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[]))
+
+    assert metrics == AggregateMetrics()
+    assert client.calls == []
+
+
+def _resources_server_for(client: _Client) -> tuple[UserSimResourcesServer, SimpleNamespace]:
+    """A real UserSim Resources Server seeded with the episode the Environment Server seeded on ``client``."""
+    resources_server = UserSimResourcesServer(
+        config=UserSimResourcesServerConfig(
+            name="resources",
+            host="resources",
+            port=8006,
+            entrypoint="app.py",
+            probe_scorer_model=ModelServerRef(type="responses_api_models", name="support"),
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    resources_server.session_id_to_seed = {}
+    resources_server.fenced_resources_session_ids = {}
+    return resources_server, SimpleNamespace(session={SESSION_ID_KEY: "real-resources-session"})
+
+
+@pytest.mark.asyncio
+async def test_skip_verification_masks_a_simulation_that_failed_without_the_assistant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    failed = UserSimSimulationResult(
+        trajectory_id=_resolved_row()["trajectory_id"],
+        conversation_messages=[{"role": "assistant", "content": "Done."}],
+        conversation_status=False,
+        simulation_outcome={
+            "status": "failed",
+            "failure_class": "user_followup_gate_exhausted",
+            "failure_attribution": "user_model",
+            "failure_detail": "The user model never produced an accepted follow-up",
+        },
+    )
+    server, client = _skipping_server(
+        monkeypatch,
+        environment={"skip_verification": True, "skip_verification_reward": 0.5},
+        assistant={},
+        usersim_result=failed,
+    )
+    client.responses = [*_seeded_participant_responses(), _Response({}), _Response({}), _Response({})]
+
+    response = await server.run_request(_request())
+
+    assert response.failure is None and response.result is not None
+    assert "/verify" not in [path for _, path, _ in client.calls]
+    result = response.result
+    # The failure is not the policy's, so the row is masked rather than given the fixed reward.
+    assert (result.reward, result.mask_sample, result.verification_skipped) == (0.0, True, True)
+    assert result.failure_kind == "usersim:user_followup_gate_exhausted"
+    assert result.failure_reason == "The user model never produced an accepted follow-up"
+
+    # /verify classifies the same conversation the same way.
+    resources_server, resources_request = _resources_server_for(client)
+    seed_body = next(call[2]["json"] for call in client.calls if call[1] == "/seed_session")
+    await resources_server.seed_session(resources_request, seed_body)
+
+    async def no_scorers(*_args: Any, **_kwargs: Any) -> Any:
+        return {"axes": {}, "scorers": {}, "skipped": True}, {}, None
+
+    monkeypatch.setattr(resources_server, "_evaluate", no_scorers)
+    verification = await resources_server.verify(
+        resources_request,
+        UserSimVerifyRequest(
+            episode_id=seed_body.episode_id,
+            task_id=seed_body.task_id,
+            verification_input=UserSimVerificationInput(
+                resolved_row=_resolved_row(), usersim_result=failed, invocations=result.invocations
+            ),
+        ),
+    )
+    assert (verification.reward, verification.mask_sample, verification.failure_kind, verification.failure_reason) == (
+        result.reward,
+        result.mask_sample,
+        result.failure_kind,
+        result.failure_reason,
+    )
+
+
+@pytest.mark.asyncio
+async def test_skip_verification_scores_an_assistant_mistake_as_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    server, client = _lifecycle_server()
+    server.config = server.config.model_copy(update={"skip_verification": True, "skip_verification_reward": 1.0})
+    client.responses = [*_seeded_participant_responses(), _Response({}), _Response({}), _Response({})]
+
+    async def fail_assistant(*_args: Any) -> dict[str, Any]:
+        error = ValueError("invalid assistant response")
+        raise _ParticipantActivationError("assistant_model", error) from error
+
+    monkeypatch.setattr(server, "_run_usersim", fail_assistant)
+
+    response = await server.run_request(_request())
+
+    assert response.failure is None and response.result is not None
+    assert "/verify" not in [path for _, path, _ in client.calls]
+    assert client.calls[-1][1] == "/close_session"
+    result = response.result
+    # The policy caused the failure, so it stays in the score at 0.0 instead of earning the fixed reward.
+    assert (result.reward, result.mask_sample, result.verification_skipped) == (0.0, False, True)
+    assert result.failure_kind == "usersim:assistant_activation_error"
+    assert result.failure_reason == "assistant_model activation failed: ValueError: invalid assistant response"
+
+
+@pytest.mark.asyncio
+async def test_skip_verification_keeps_a_retryable_assistant_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    server, client = _lifecycle_server()
+    server.config = server.config.model_copy(update={"skip_verification": True})
+    client.responses = [*_seeded_participant_responses(), _Response({}), _Response({}), _Response({})]
+
+    async def fail_assistant(*_args: Any) -> dict[str, Any]:
+        error = ClientConnectionError("assistant disconnected")
+        raise _ParticipantActivationError("assistant_model", error) from error
+
+    monkeypatch.setattr(server, "_run_usersim", fail_assistant)
+
+    response = await server.run_request(_request())
+
+    assert response.result is None and response.failure is not None
+    assert (response.failure.stage, response.failure.terminal) == ("agent", False)
+    assert "/verify" not in [path for _, path, _ in client.calls]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("skip", [True, False], ids=["skipped", "verified"])
+async def test_a_failed_resources_close_is_a_terminal_cleanup_failure(
+    monkeypatch: pytest.MonkeyPatch, skip: bool
+) -> None:
+    server, client = _skipping_server(monkeypatch, environment={"skip_verification": skip}, assistant={})
+    verify = (
+        [] if skip else [_Response({"reward": 0.75, "reward_components": {"q": 0.75}, "scenario_completed": True})]
+    )
+    client.responses = [
+        *_seeded_participant_responses(),
+        _Response({}),
+        _Response({}),
+        *verify,
+        ClientConnectionError("lost close"),
+        _Response({}),
+        _Response({}),
+    ]
+
+    response = await server.run_request(_request())
+
+    assert response.result is None and response.failure is not None
+    assert (response.failure.stage, response.failure.terminal) == ("cleanup", True)
+    assert ("/verify" in [path for _, path, _ in client.calls]) is not skip
+
+
+def test_a_result_carries_a_verification_exactly_when_it_was_not_skipped() -> None:
+    with pytest.raises(ValidationError, match="exactly when it was not skipped"):
+        UserSimEpisodeResult(
+            reward=0.0, reward_components={}, verification=None, usersim_result=_usersim_result(), invocations=[]
+        )
+    skipped = UserSimEpisodeResult.skipped(reward=0.0, usersim_result=_usersim_result(), invocations=[])
+    with pytest.raises(ValidationError, match="exactly when it was not skipped"):
+        UserSimEpisodeResult.model_validate(
+            skipped.model_dump()
+            | {"verification": {"reward": 0.0, "reward_components": {}, "scenario_completed": False}}
+        )
 
 
 @pytest.mark.parametrize("status", [404, 408, 409, 425, 429, 500, 503])
