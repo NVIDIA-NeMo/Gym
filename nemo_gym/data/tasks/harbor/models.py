@@ -181,7 +181,11 @@ class HarborVerifier(HarborPhaseSettings):
     for ``main``'s ``tests/score.py``). The server empties ``/logs/verifier`` before a shared verification and
     before the next turn of a multi-step task; these names alone survive, as regular files, so an agent-planted
     report or reward is never left for the grader. Plain file names: no path separators, never the grader's own
-    outputs (:data:`VERIFIER_OUTPUT_NAMES`)."""
+    outputs (:data:`VERIFIER_OUTPUT_NAMES`). ``reward_key`` is a Gym extension set from ``dataset.toml`` alone
+    (``[gym.defaults]``, or ``[gym.tasks."<task_id>".verifier]`` over it; the loader ignores it in a ``task.toml``):
+    the ``reward.json`` key that is the score, the other keys being metrics, and the key a step's scalar
+    ``min_reward`` gates. A file without it is an invalid reward. Unset, a ``reward`` key is the score, else the keys
+    are summed."""
 
     timeout_sec: float = Field(default=600, gt=0)
     user: str | int | None = None
@@ -190,6 +194,7 @@ class HarborVerifier(HarborPhaseSettings):
     environment: HarborEnvironment | None = None
     collect: list[HarborCollectHook] = Field(default_factory=list)
     inputs: list[str] = Field(default_factory=list)
+    reward_key: str | None = Field(default=None, min_length=1)
 
     @model_validator(mode="after")
     def shared_has_no_environment(self) -> "HarborVerifier":

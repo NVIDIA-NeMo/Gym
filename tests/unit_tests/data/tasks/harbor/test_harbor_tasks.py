@@ -2624,6 +2624,67 @@ def test_declared_sidecar_inputs_come_from_dataset_toml_and_are_plain_file_names
         load_task(folder / "hello")
 
 
+def test_reward_key_comes_from_dataset_defaults_and_a_task_override_wins(tmp_path):
+    """#5641: `[gym.defaults] reward_key` names the reward.json key that is the score of every task, a
+    `[gym.tasks."<id>".verifier] reward_key` replaces it for one task, and setting it changes the task's digest."""
+    folder = tmp_path / "ds"
+    write_task(folder / "a")
+    write_task(folder / "b")
+    plain = load_task(folder / "a")
+    assert plain.config.verifier.reward_key is None
+    (folder / "dataset.toml").write_text(
+        '[gym.defaults]\nreward_key = "overall"\n[gym.tasks."b".verifier]\nreward_key = "score"\n'
+    )
+    a, b = load_task(folder / "a"), load_task(folder / "b")
+    assert (a.config.verifier.reward_key, b.config.verifier.reward_key) == ("overall", "score")
+    assert a.digest != plain.digest
+    (folder / "dataset.toml").write_text('[gym.defaults]\nreward_key = ""\n')
+    with pytest.raises(HarborTaskError, match="reward_key"):
+        load_task(folder / "a")
+
+
+def test_reward_key_in_a_task_toml_is_ignored_as_harbor_ignores_it(tmp_path, caplog):
+    """#5641: the score key comes from dataset.toml alone, so a task folder scores the same under Gym and Harbor."""
+    folder = tmp_path / "ds"
+    write_task(folder / "a", toml=HELLO_TOML.replace("[verifier]\n", '[verifier]\nreward_key = "overall"\n', 1))
+    with caplog.at_level(logging.WARNING):
+        task = load_task(folder / "a")
+    assert task.config.verifier.reward_key is None
+    assert "ignoring unknown key `verifier.reward_key`" in caplog.text
+    (folder / "dataset.toml").write_text('[gym.defaults]\nreward_key = "score"\n')
+    assert load_task(folder / "a").config.verifier.reward_key == "score"
+
+
+def test_reward_key_is_refused_for_a_dataset_python_verifier(tmp_path):
+    folder = tmp_path / "ds"
+    write_task(folder / "a")
+    shutil.rmtree(folder / "a" / "tests")
+    (folder / "verifier.py").write_text("def verify(workspace):\n    return 1.0\n")
+    assert load_task(folder / "a").python_verifier is not None
+    (folder / "dataset.toml").write_text('[gym.defaults]\nreward_key = "overall"\n')
+    with pytest.raises(HarborTaskError, match="reward_key applies to test.sh verifiers"):
+        load_task(folder / "a")
+
+
+def test_an_unset_reward_key_leaves_the_digest_of_a_shaping_dataset_unchanged(tmp_path):
+    """Adding `reward_key` to `[gym.defaults]` must not move the digest of a dataset that does not set it: the slice
+    folded into the digest is the defaults as they were before the key existed."""
+    import hashlib
+
+    from nemo_gym.data.tasks.harbor.dataset_config import read_dataset_config
+    from nemo_gym.data.tasks.harbor.task import task_digest
+
+    folder = tmp_path / "ds"
+    write_task(folder / "a")
+    (folder / "dataset.toml").write_text("[gym.defaults]\ntimeout_multiplier = 2.0\n")
+    applied = {
+        "defaults": {"timeout_multiplier": 2.0, "resource_multiplier": 1.0},
+        "task": {"environment": {}, "verifier": {}, "artifacts": []},
+    }
+    before = hashlib.sha256(f"folder\n{json.dumps(applied, sort_keys=True)}".encode()).hexdigest()
+    assert task_digest("folder", read_dataset_config(folder), "a") == before
+
+
 def _with_steps(root: Path, names: list[str]) -> Path:
     """``root`` with one ``steps/<name>/`` folder per name (an instruction and a stub test.sh), as the loader reads."""
     for name in names:

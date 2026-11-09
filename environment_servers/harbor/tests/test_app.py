@@ -1689,6 +1689,31 @@ class TestVerify:
         )
         assert result.reward_components is None and result.verifier_return_code == 0
 
+    async def test_dataset_reward_key_is_the_score_and_the_other_keys_stay_metrics(self, tmp_path, monkeypatch):
+        """#5641: a multi-metric reward.json without a `reward` key scored the sum of its fields (1.5 here). The
+        dataset's `reward_key` names the field that is the score; the others are kept as metrics, not added up."""
+        folder = tmp_path / "datasets" / "ds"
+        folder.mkdir(parents=True)
+        (folder / "dataset.toml").write_text('[gym.defaults]\nreward_key = "overall"\n')
+        sandbox = FakeSandbox(verifier_files={"reward.json": json.dumps({"accuracy": 1.0, "overall": 0.5})})
+        _, task, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
+        result = response.result
+        assert task.config.verifier.reward_key == "overall"
+        assert result.reward == 0.5 and result.mask_sample is False and result.failure_kind is None
+        assert result.verifier_rewards == {"accuracy": 1.0, "overall": 0.5}
+        assert result.reward_components is None
+
+    async def test_a_reward_file_without_the_dataset_reward_key_is_an_invalid_reward(self, tmp_path, monkeypatch):
+        folder = tmp_path / "datasets" / "ds"
+        folder.mkdir(parents=True)
+        (folder / "dataset.toml").write_text('[gym.defaults]\nreward_key = "overall"\n')
+        sandbox = FakeSandbox(verifier_files={"reward.json": json.dumps({"accuracy": 1.0, "speed": 0.5})})
+        _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
+        result = response.result
+        assert result.reward == 0.0 and result.mask_sample is False
+        assert result.failure_kind == "harbor:invalid_reward"
+        assert "no 'overall' key" in result.failure_reason and "['accuracy', 'speed']" in result.failure_reason
+
     async def test_missing_reward_scores_zero_and_is_measured(self, tmp_path, monkeypatch):
         sandbox = FakeSandbox(
             verifier_files={"test-stdout.txt": "pytest exploded"},
@@ -1871,6 +1896,17 @@ class TestSeparateVerification:
 
         monkeypatch.setattr(server, "_create_verifier_sandbox", create_verifier)
         return server, task, agent, verifier, created
+
+    async def test_a_separate_verifier_reads_the_dataset_reward_key(self, tmp_path, monkeypatch):
+        """#5641: the separate path passes the task's `[verifier]` itself as the settings `_score` reads."""
+        (tmp_path / "datasets" / "ds").mkdir(parents=True)
+        (tmp_path / "datasets" / "ds" / "dataset.toml").write_text('[gym.defaults]\nreward_key = "overall"\n')
+        verifier = FakeSandbox(verifier_files={"reward.json": json.dumps({"accuracy": 1.0, "overall": 0.5})})
+        server, task, _, _, _ = self.prepared(tmp_path, monkeypatch, verifier=verifier)
+
+        result = (await run_episode(server, task)).result
+
+        assert result.verifier_mode == "separate" and result.reward == 0.5 and result.reward_components is None
 
     async def test_collects_artifacts_then_verifies_in_a_fresh_sandbox(self, tmp_path, monkeypatch):
         server, task, agent, verifier, created = self.prepared(tmp_path, monkeypatch)
