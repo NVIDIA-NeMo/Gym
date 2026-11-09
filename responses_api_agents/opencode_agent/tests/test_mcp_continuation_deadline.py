@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""MCP grant staging in a continuation activation spends the activation's own deadline."""
+"""MCP grant staging belongs to the activation: it spends a continuation activation's deadline, and close stops it."""
 
 import asyncio
 import json
+import threading
 from time import monotonic
 
 import pytest
@@ -16,7 +17,7 @@ from responses_api_agents.opencode_agent.tests.test_continuation import (
     install_artifact_runner,
     roots,
 )
-from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import seed, setup  # noqa: F401
+from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import close_body, seed, setup  # noqa: F401
 
 
 GRANT = {
@@ -79,3 +80,45 @@ def test_mcp_staging_expiry_is_incomplete_and_next_activation_recovers(setup, tm
         assert receipt["cleanup_confirmed"]
     sandbox.disconnect.assert_awaited_once()
     sandbox.stop.assert_not_awaited()
+
+
+def test_session_close_stops_mcp_staging_before_releasing_the_sandbox(setup):  # noqa: F811
+    agent, sandbox = setup
+    events = []
+    started = threading.Event()
+    upload = sandbox.upload
+
+    async def stall_grants(source, destination):
+        if not destination.endswith("/mcp-grants.json"):
+            return await upload(source, destination)
+        started.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            events.append("upload cancelled")
+            raise
+
+    async def disconnected(*args, **kwargs):
+        events.append("sandbox released")
+
+    sandbox.upload = stall_grants
+    sandbox.stop.side_effect = disconnected
+    sandbox.disconnect.side_effect = disconnected
+    body = seed().model_dump(mode="json")
+    body["tool_accesses"] = [GRANT]
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=body)
+        assert created.status_code == 200, created.text
+        activation = threading.Thread(
+            target=client.post,
+            args=("/ng-rollout/opencode-smoke-a2/v1/responses",),
+            kwargs={"json": {"input": "task"}},
+        )
+        activation.start()
+        assert started.wait(10)
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        assert closed.status_code == 200, closed.text
+        activation.join(10)
+        assert not activation.is_alive()
+    assert events[:2] == ["upload cancelled", "sandbox released"], events
+    sandbox.launch.assert_not_awaited()
