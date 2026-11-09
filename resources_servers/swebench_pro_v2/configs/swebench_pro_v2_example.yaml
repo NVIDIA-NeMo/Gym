@@ -12,4 +12,4 @@ swebench_pro_v2_opencode_sandboxed_agent:
           type: example
           jsonl_fpath: resources_servers/swebench_pro_v2/data/example.jsonl
           prepare_script: resources_servers/swebench_pro_v2/prepare_examples.py
-          license: TBD
+          license: Apache 2.0
