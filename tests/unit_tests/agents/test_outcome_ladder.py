@@ -289,6 +289,16 @@ def test_finish_response_marks_an_output_limit():
     assert finished.incomplete_details.reason == "max_output_tokens"
 
 
+def test_finish_response_does_not_mark_a_run_the_close_cancelled():
+    # Only a rollout stop gains ng_rollout_stop; the marker tells it apart from the close cancelling the run.
+    for session in (None, SimpleNamespace(expired=False, expire_reason=None)):
+        finished = _agent().finish_response(
+            _response(status="completed"), _evidence(stopped=True, has_result=False), session=session
+        )
+        assert finished.status == "incomplete"
+        assert finished.metadata == {AGENT_STOP_REASON_METADATA_KEY: "stopped"}
+
+
 @pytest.mark.parametrize(
     "expired, timed_out, status, marked",
     [
