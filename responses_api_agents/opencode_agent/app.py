@@ -92,7 +92,6 @@ from nemo_gym.sandbox import (
     SandboxSpec,
     create_provider,
     resolve_provider_config,
-    upload_text,
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse, MCPToolAccess
 from nemo_gym.trajectory import (
@@ -127,7 +126,6 @@ from responses_api_agents.opencode_agent.runtime import (
     IMAGE_INPUT_MODEL_OPTIONS,
     OPENCODE_VERSION,
     REQUIRED_MCP_PLUGIN_FILE,
-    REQUIRED_MCP_PLUGIN_SOURCE,
     RUNTIME_INSTALLER_FILE,
     RUNTIME_INSTALLER_SOURCE,
     TASK_ENVIRONMENT_PLUGIN_FILE,
@@ -1769,17 +1767,6 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         mcp_servers, mcp_grants = self._granted_mcp_servers(state.request)
         if mcp_servers:
             config["mcp"] = mcp_servers
-            directory = state.session.session_dir
-            # Staging spends the activation's budget; an expiry here is a pre-launch timeout.
-            async with asyncio.timeout_at(deadline):
-                await state.session.sandbox.upload(
-                    REQUIRED_MCP_PLUGIN_SOURCE, f"{directory}/{REQUIRED_MCP_PLUGIN_FILE}"
-                )
-                await upload_text(
-                    state.session.sandbox, path=f"{directory}/mcp-grants.json", text=json.dumps(mcp_grants)
-                )
-                # null until the plugin checks the grants before the first model call of this activation.
-                await upload_text(state.session.sandbox, path=f"{directory}/mcp-status.json", text=json.dumps(None))
         # System instructions are separate from the user's task and applied to every OpenCode model turn.
         if system:
             if self.config.system_prompt_mode == "replace":
@@ -1811,6 +1798,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             "cwd": state.session.workdir,
             "command": command,
             "prompt": prompt,
+            "mcp_grants": mcp_grants if mcp_servers else None,
             "env": {
                 **_private_directories(state.persistent_directory),
                 **({"NEMO_GYM_OPENCODE_ACTIVATION_ID": state.invocation_prefix} if state.is_continuation else {}),

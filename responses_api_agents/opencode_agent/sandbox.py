@@ -30,7 +30,12 @@ from nemo_gym.sandbox import SandboxExecResult, read_text, stage_media, upload_t
 from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap, TrajectoryRecord
 from responses_api_agents.opencode_agent.artifacts import parse_opencode_observations
 from responses_api_agents.opencode_agent.observability import scope_opencode_activation
-from responses_api_agents.opencode_agent.runtime import TASK_ENVIRONMENT_PLUGIN_FILE, TASK_ENVIRONMENT_PLUGIN_SOURCE
+from responses_api_agents.opencode_agent.runtime import (
+    REQUIRED_MCP_PLUGIN_FILE,
+    REQUIRED_MCP_PLUGIN_SOURCE,
+    TASK_ENVIRONMENT_PLUGIN_FILE,
+    TASK_ENVIRONMENT_PLUGIN_SOURCE,
+)
 from responses_api_agents.opencode_agent.snapshot import snapshot, stored_sessions
 
 
@@ -330,7 +335,8 @@ class OpenCodeSandboxSession(AgentSessionState):
     ) -> SandboxCommand:
         """Stage the invocation and return the OpenCode worker command.
 
-        Staging runs inside the session's execute, so close stops it before the sandbox is released.
+        Staging runs inside the session's execute, so close fences it. A continuation activation's deadline also
+        bounds it.
         """
         if payload.get("instructions"):
             await upload_text(
@@ -341,6 +347,13 @@ class OpenCodeSandboxSession(AgentSessionState):
                 TASK_ENVIRONMENT_PLUGIN_SOURCE, f"{self.session.session_dir}/{TASK_ENVIRONMENT_PLUGIN_FILE}"
             )
         directory = self.session.session_dir
+        if payload.get("mcp_grants") is not None:
+            await self.session.sandbox.upload(REQUIRED_MCP_PLUGIN_SOURCE, f"{directory}/{REQUIRED_MCP_PLUGIN_FILE}")
+            await upload_text(
+                self.session.sandbox, path=f"{directory}/mcp-grants.json", text=json.dumps(payload["mcp_grants"])
+            )
+            # null until the plugin checks the grants before the first model call of this activation.
+            await upload_text(self.session.sandbox, path=f"{directory}/mcp-status.json", text=json.dumps(None))
         await upload_text(self.session.sandbox, path=f"{directory}/prompt.txt", text=payload["prompt"])
         command = list(payload["command"])
         # OpenCode shows each attached file's path to the model, so stage_media names files by content:
