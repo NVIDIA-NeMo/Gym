@@ -24,6 +24,7 @@ from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
+    ENVIRONMENT_SERVER_STAMP_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
@@ -32,6 +33,7 @@ from nemo_gym.config.global_config import (
 from nemo_gym.rollouts.batch_status import (
     BatchManifest,
     BatchStatusTracker,
+    RunStatusTracker,
     observe_materialized_rows,
     validate_batch_manifest,
 )
@@ -81,6 +83,88 @@ def manifest_payload(rows: list[dict], metric_keys: dict[str, list[str]] | None 
 def write_manifest(path: Path, rows: list[dict], metric_keys: dict[str, list[str]] | None = None) -> Path:
     path.write_bytes(orjson.dumps(manifest_payload(rows, metric_keys), option=orjson.OPT_INDENT_2))
     return path
+
+
+@pytest.mark.parametrize("with_manifest", [False, True])
+@pytest.mark.parametrize("aggregate_case", ["matched", "wrong_route", "missing_route", "duplicate_route", "error"])
+def test_aggregation_status_uses_saved_route_instead_of_a_coincidental_agent_label(
+    tmp_path: Path, with_manifest: bool, aggregate_case: str
+) -> None:
+    rows = [materialized_row("environment", "source", 0, 0) | {ENVIRONMENT_SERVER_STAMP_KEY_NAME: "environment"}]
+    tracker = (
+        BatchStatusTracker(write_manifest(tmp_path / "batch_manifest.json", rows), rows)
+        if with_manifest
+        else RunStatusTracker(tmp_path / "rollouts_batch_status.json", rows)
+    )
+    entry = {
+        AGENT_REF_KEY_NAME: {"name": "candidate"},
+        ENVIRONMENT_SERVER_STAMP_KEY_NAME: "environment",
+        "key_metrics": {"mean/reward": 0.5},
+    }
+    if aggregate_case in ("wrong_route", "missing_route"):
+        entry[AGENT_REF_KEY_NAME] = {"name": "environment"}
+        if aggregate_case == "wrong_route":
+            entry[ENVIRONMENT_SERVER_STAMP_KEY_NAME] = "other_environment"
+        else:
+            del entry[ENVIRONMENT_SERVER_STAMP_KEY_NAME]
+    elif aggregate_case == "error":
+        entry["aggregation_error"] = {"type": "ClientResponseError", "http_status": 500, "message": "private"}
+    entries = [entry]
+    if aggregate_case == "duplicate_route":
+        entries.append(entry | {AGENT_REF_KEY_NAME: {"name": "other_candidate"}})
+    metrics = tmp_path / "rollouts_aggregate_metrics.json"
+    metrics.write_bytes(orjson.dumps(entries))
+
+    tracker.write_status(rows, [], aggregate_metrics_fpath=metrics, force=True)
+
+    status = json.loads(tracker.status_fpath.read_text())
+    member = status["members"]["environment"]
+    assert member["completed_rollout_count"] == member["expected_rollout_count"] == 1
+    assert member["aggregation_status"] == ("complete" if aggregate_case == "matched" else "error")
+    assert "private" not in tracker.status_fpath.read_text()
+
+
+def test_aggregation_requires_every_saved_environment_of_a_shared_agent(tmp_path: Path) -> None:
+    rows = [
+        materialized_row("candidate", "source", index, 0) | {ENVIRONMENT_SERVER_STAMP_KEY_NAME: environment}
+        for index, environment in enumerate(("first_environment", "second_environment"))
+    ]
+    tracker = RunStatusTracker(tmp_path / "rollouts_batch_status.json", rows)
+    metrics = tmp_path / "rollouts_aggregate_metrics.json"
+    entries = [
+        {AGENT_REF_KEY_NAME: {"name": environment}, ENVIRONMENT_SERVER_STAMP_KEY_NAME: environment}
+        for environment in ("first_environment", "second_environment")
+    ]
+    metrics.write_bytes(orjson.dumps(entries))
+    complete = tracker.build_status(rows, [], aggregate_metrics_fpath=metrics)
+    assert complete["members"]["candidate"]["aggregation_status"] == "complete"
+
+    metrics.write_bytes(orjson.dumps(entries[:1]))
+    missing = tracker.build_status(rows, [], aggregate_metrics_fpath=metrics)
+    assert missing["members"]["candidate"]["completed_rollout_count"] == 2
+    assert missing["members"]["candidate"]["aggregation_status"] == "error"
+
+
+@pytest.mark.parametrize("route", [None, "", 7, "absent"])
+def test_aggregation_does_not_accept_a_partial_or_malformed_route_binding(tmp_path: Path, route: object) -> None:
+    rows = [
+        materialized_row("candidate", "source", index, 0) | {ENVIRONMENT_SERVER_STAMP_KEY_NAME: "environment"}
+        for index in range(2)
+    ]
+    if route == "absent":
+        del rows[1][ENVIRONMENT_SERVER_STAMP_KEY_NAME]
+    else:
+        rows[1][ENVIRONMENT_SERVER_STAMP_KEY_NAME] = route
+    tracker = RunStatusTracker(tmp_path / "rollouts_batch_status.json", rows)
+    metrics = tmp_path / "rollouts_aggregate_metrics.json"
+    metrics.write_bytes(
+        orjson.dumps([{AGENT_REF_KEY_NAME: {"name": "candidate"}, ENVIRONMENT_SERVER_STAMP_KEY_NAME: "environment"}])
+    )
+
+    status = tracker.build_status(rows, [], aggregate_metrics_fpath=metrics)
+
+    assert status["members"]["candidate"]["completed_rollout_count"] == 2
+    assert status["members"]["candidate"]["aggregation_status"] == "error"
 
 
 class TestObserveMaterializedRows:

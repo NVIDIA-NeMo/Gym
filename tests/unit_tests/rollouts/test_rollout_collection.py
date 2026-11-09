@@ -12826,6 +12826,90 @@ class TestEnvironmentServerRouting:
         assert NG_FAILURE_CLASS_KEY not in result
         assert nemo_gym.rollouts.rollout_collection._materialized_taskset(flat) is None
 
+    @pytest.mark.parametrize("mode", ["collection", "collection_in_memory", "recorded_shard"])
+    async def test_taskset_status_joins_aggregate_route_without_renaming_agent_metrics(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+    ) -> None:
+        """Episode completion and its candidate-labelled aggregate must agree in live and offline status."""
+        aggregate_requests = []
+
+        async def post(server_name, url_path, json, **kwargs):
+            assert server_name == "environment"
+            if url_path == "/aggregate_metrics":
+                aggregate_requests.append(json)
+                return FakeResponse(200, compute_aggregate_metrics(json.verify_responses).model_dump())
+            assert url_path == "/run"
+            task_id = json["task"]["task_id"]
+            return FakeResponse(
+                200,
+                {
+                    "episode_id": json["episode_id"],
+                    "task_id": task_id,
+                    "result": {"reward": float(task_id["task_id"] == "second")},
+                },
+            )
+
+        client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        client.global_config_dict = _environment_server_config()
+        inputs = [
+            {"task_id": {"taskset": "swe_pro", "task_id": name}, "task_input": {"task_data": {"id": name}}}
+            for name in ("first", "second")
+        ]
+        source = tmp_path / "input.jsonl"
+        source.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in inputs))
+        output = tmp_path / ("rollouts-shard.jsonl" if mode == "recorded_shard" else "rollouts.jsonl")
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(source),
+            output_jsonl_fpath=str(output),
+            environment_server_routes={"swe_pro": "environment"},
+            upload_rollouts=False,
+            disable_health_check=True,
+            require_complete=True,
+            retain_results_in_memory=mode == "collection_in_memory",
+        )
+        helper = RolloutCollectionHelper()
+        if mode == "recorded_shard":
+            rows = helper._preprocess_rows_from_config(config)
+            for future in helper.run_examples(rows, record_output_dir=tmp_path, record_shard="shard"):
+                await future
+            original_artifacts = {
+                path: path.read_bytes()
+                for path in (
+                    output,
+                    materialized_path_for(output),
+                    failures_path_for(output),
+                    nemo_gym.rollouts.rollout_collection.manifest_path_for(output),
+                )
+            }
+            await RolloutAggregationHelper().run_from_config(
+                RolloutAggregationConfig(
+                    input_glob=str(output),
+                    output_jsonl_fpath=str(output),
+                    merge_shards=False,
+                    disable_health_check=True,
+                )
+            )
+            assert {path: path.read_bytes() for path in original_artifacts} == original_artifacts
+        else:
+            await helper.run_from_config(config)
+
+        [entry] = orjson.loads(output.with_name(output.stem + "_aggregate_metrics.json").read_bytes())
+        assert entry[AGENT_REF_KEY_NAME] == {"name": "hermes"}
+        assert entry[NG_ENVIRONMENT_SERVER_KEY] == "environment"
+        assert entry["key_metrics"]["mean/reward"] == 0.5
+        status = orjson.loads(output.with_name(output.stem + "_batch_status.json").read_bytes())
+        assert set(status["members"]) == {"environment"}
+        member = status["members"]["environment"]
+        assert member["expected_rollout_count"] == member["completed_rollout_count"] == 2
+        assert member["remaining_rollout_count"] == 0
+        assert member["aggregation_status"] == "complete"
+        assert len(aggregate_requests) == 1
+        for path in (output, materialized_path_for(output)):
+            rows = [orjson.loads(line) for line in path.read_bytes().splitlines()]
+            assert len(rows) == 2
+            assert all(AGENT_REF_KEY_NAME not in row for row in rows)
+            assert all(row[NG_ENVIRONMENT_SERVER_KEY] == "environment" for row in rows)
+
     async def test_call_aggregate_metrics_groups_by_environment_server(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -15907,7 +15991,9 @@ class TestRunStatusFiles:
             metrics_fpath = tmp_path / "rollouts_aggregate_metrics.json"
             metrics_fpath.write_bytes(orjson.dumps(metrics))
 
-        _refresh_shard_status_aggregation([str(shard)], metrics_fpath)
+        _refresh_shard_status_aggregation(
+            [str(shard)], metrics_fpath, legacy_bindings={str(shard): {"a": frozenset()}}
+        )
 
         refreshed = orjson.loads(status_fpath.read_bytes())["members"]["a"]
         assert refreshed == {**member, "aggregation_status": expected}
@@ -15938,6 +16024,94 @@ class TestRunStatusFiles:
         assert "Could not update the run status" in caplog.text
         second = orjson.loads((tmp_path / "rollouts-rs1_batch_status.json").read_bytes())
         assert second["members"]["a"]["aggregation_status"] == "error"
+
+
+@pytest.mark.parametrize(
+    "damage", ["changed_inputs", "missing_inputs", "missing_manifest", "missing_both", "scalar_input", "invalid_agent"]
+)
+def test_offline_status_requires_bound_materialized_routes(tmp_path: Path, damage: str) -> None:
+    from nemo_gym.rollouts.rollout_collection import _refresh_shard_status_aggregation
+    from nemo_gym.rollouts.rollout_recovery import RunManifest, manifest_path_for
+
+    output = tmp_path / "rollouts-shard.jsonl"
+    materialized = materialized_path_for(output)
+    rows = [
+        {
+            "task_id": {"taskset": "tasks", "task_id": "first"},
+            "task_input": {"task_data": {"id": "first"}},
+            NG_ENVIRONMENT_SERVER_KEY: "environment",
+            TASK_INDEX_KEY_NAME: 0,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+        }
+    ]
+    materialized.write_bytes(orjson.dumps(rows[0]) + b"\n")
+    manifest = manifest_path_for(output)
+    RunManifest.create(materialized, rows, {}, _environment_server_config()).write(manifest)
+    status_path = output.with_name(output.stem + "_batch_status.json")
+    member = {"expected_rollout_count": 1, "completed_rollout_count": 1, "aggregation_status": "complete"}
+    status_path.write_bytes(orjson.dumps({"tracking": "enabled", "members": {"environment": member}}))
+    metrics = tmp_path / "aggregate_metrics.json"
+    # Even a matching display label cannot replace missing or changed route evidence.
+    metrics.write_bytes(
+        orjson.dumps([{AGENT_REF_KEY_NAME: {"name": "environment"}, NG_ENVIRONMENT_SERVER_KEY: "environment"}])
+    )
+    if damage == "changed_inputs":
+        materialized.write_bytes(orjson.dumps(rows[0] | {NG_ENVIRONMENT_SERVER_KEY: "other_environment"}) + b"\n")
+    elif damage == "missing_inputs":
+        materialized.unlink()
+    elif damage == "missing_manifest":
+        manifest.unlink()
+    elif damage == "missing_both":
+        manifest.unlink()
+        materialized.unlink()
+    elif damage == "scalar_input":
+        materialized.write_bytes(b"7\n")
+    else:
+        materialized.write_bytes(orjson.dumps(rows[0] | {AGENT_REF_KEY_NAME: "invalid"}) + b"\n")
+    before = {path: path.read_bytes() for path in (materialized, manifest) if path.exists()}
+
+    _refresh_shard_status_aggregation([str(output)], metrics)
+
+    assert orjson.loads(status_path.read_bytes())["members"]["environment"] == {
+        **member,
+        "aggregation_status": "error",
+    }
+    assert {path: path.read_bytes() for path in before} == before
+
+
+async def test_offline_aggregation_retains_status_for_agent_only_shards_without_sidecars(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The aggregator's actual legacy input rows supply the binding when no managed inventory exists."""
+    install_fake_server_client(
+        monkeypatch,
+        AsyncMock(return_value=FakeResponse(200, AggregateMetrics(key_metrics={"mean/reward": 1.0}).model_dump())),
+        agent_names=("a",),
+    )
+    shard = tmp_path / "rollouts-shard.jsonl"
+    shard.write_bytes(
+        orjson.dumps(
+            {AGENT_REF_KEY_NAME: {"name": "a"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0}
+        )
+        + b"\n"
+    )
+    status = shard.with_name(shard.stem + "_batch_status.json")
+    member = {"expected_rollout_count": 1, "completed_rollout_count": 1, "aggregation_status": "deferred"}
+    status.write_bytes(orjson.dumps({"tracking": "enabled", "members": {"a": member}}))
+    before = shard.read_bytes()
+
+    await RolloutAggregationHelper().run_from_config(
+        RolloutAggregationConfig(
+            input_glob=str(shard), output_jsonl_fpath=str(shard), merge_shards=False, disable_health_check=True
+        )
+    )
+
+    assert orjson.loads(status.read_bytes())["members"]["a"] == {**member, "aggregation_status": "complete"}
+    assert shard.read_bytes() == before
+    assert not materialized_path_for(shard).exists()
+    assert not nemo_gym.rollouts.rollout_collection.manifest_path_for(shard).exists()
+    [entry] = orjson.loads(shard.with_name(shard.stem + "_aggregate_metrics.json").read_bytes())
+    assert entry[AGENT_REF_KEY_NAME] == {"name": "a"}
 
 
 async def test_run_status_keeps_results_persisted_inside_the_throttle_when_the_run_fails(

@@ -116,6 +116,8 @@ from nemo_gym.models.model_call_capture import ModelCallCaptureConfig
 from nemo_gym.rollouts.batch_status import (
     BatchStatusTracker,
     RunStatusTracker,
+    _aggregate_entries_for_member,
+    _aggregate_member_environments,
     _atomic_write_json,
     _read_aggregate_entries,
     disable_run_status,
@@ -851,6 +853,7 @@ def _batch_status_row(result: Dict, agent_refs_by_key: Dict[Tuple[int, int], Dic
         key: result[key]
         for key in (
             AGENT_REF_KEY_NAME,
+            NG_ENVIRONMENT_SERVER_KEY,
             TASK_INDEX_KEY_NAME,
             ROLLOUT_INDEX_KEY_NAME,
             NG_FAILURE_CLASS_KEY,
@@ -2740,7 +2743,12 @@ def _raise_for_aggregation_errors(metrics_fpath: Optional[Path]) -> None:
         )
 
 
-def _refresh_shard_status_aggregation(input_paths: List[str], aggregate_metrics_fpath: Optional[Path]) -> None:
+def _refresh_shard_status_aggregation(
+    input_paths: List[str],
+    aggregate_metrics_fpath: Optional[Path],
+    *,
+    legacy_bindings: Optional[Mapping[str, Mapping[str, Optional[frozenset[str]]]]] = None,
+) -> None:
     """Mark each shard's run status with the outcome of the aggregation that merged it, keeping its counts.
 
     EvalRDL sums the shards' status files, so the merged output gets no status file of its own.
@@ -2755,13 +2763,38 @@ def _refresh_shard_status_aggregation(input_paths: List[str], aggregate_metrics_
             members = status.get("members")
             if status.get("tracking") != "enabled" or not isinstance(members, dict):
                 continue
+            bindings = (legacy_bindings or {}).get(path, {})
+            manifest_path = manifest_path_for(Path(path))
+            materialized_path = materialized_path_for(Path(path))
+            if manifest_path.exists() or materialized_path.exists():
+                try:
+                    with materialized_path.open("rb") as source:
+                        rows = [orjson.loads(line) for line in source if line.strip()]
+                    if manifest_path.exists():
+                        manifest = RunManifest.model_validate_json(manifest_path.read_bytes())
+                        if _digest(rows) != manifest.materialized_digest:
+                            raise ConfigError("Saved materialized inputs do not match the run manifest.")
+                        bindings = _aggregate_member_environments(rows)
+                    else:
+                        # Agent-only artifacts keep their historical lookup; environment bindings require the
+                        # manifest that ties their materialized routes to this source run.
+                        bindings = {
+                            member: None if names else names
+                            for member, names in _aggregate_member_environments(rows).items()
+                        }
+                    # A member absent from its saved inventory cannot fall back to a coincidental label.
+                except (ConfigError, OSError, ValueError, TypeError):
+                    logger.warning("Could not verify aggregation routes for %s.", status_fpath, exc_info=True)
+                    bindings = {member: None for member in members}
+            # A member absent from the source metadata cannot fall back to a coincidental metric label.
+            bindings = {member: bindings.get(member) for member in members}
             for agent, member in members.items():
-                entry = entries.get(agent)
+                matched, binding_error = _aggregate_entries_for_member(entries, agent, bindings[agent])
                 failed = (
                     aggregate_metrics_fpath is None
                     or artifact_error
-                    or entry is None
-                    or AGGREGATION_ERROR_KEY in entry
+                    or binding_error
+                    or any(AGGREGATION_ERROR_KEY in entry for entry in matched)
                 )
                 member["aggregation_status"] = "error" if failed else "complete"
             _atomic_write_json(status_fpath, status)
@@ -6156,6 +6189,7 @@ class RolloutAggregationHelper(BaseModel):
         health_histories: Dict[Path, Optional[RolloutStore]] = {}
         legacy_paths: List[Path] = []
         legacy_results: List[Dict] = []
+        legacy_bindings: Dict[str, Dict[str, Optional[frozenset[str]]]] = {}
         history_results: Dict[str, List[Dict]] = {}
         shard_keys: Dict[str, set] = {}
         run_ids: set[str] = set()
@@ -6185,6 +6219,7 @@ class RolloutAggregationHelper(BaseModel):
             legacy_paths.append(shard)
             keys = shard_keys[str(shard)] = set()
             digest = hashlib.sha256()
+            status_rows = []
             with open(shard_path, "rb") as f:
                 for line_no, line in enumerate(f, 1):
                     digest.update(line)
@@ -6195,7 +6230,9 @@ class RolloutAggregationHelper(BaseModel):
                     keys.add((result.get(TASK_INDEX_KEY_NAME), result.get(ROLLOUT_INDEX_KEY_NAME)))
                     results.append(result)
                     legacy_results.append(result)
+                    status_rows.append(_batch_status_row(result, {}))
                 shard_digests[shard_path] = (f.tell(), digest.hexdigest())
+            legacy_bindings[shard_path] = _aggregate_member_environments(status_rows)
         print(f"Loaded {len(results)} rollout record(s) from {len(input_paths)} shard(s)")
 
         # Sort for deterministic aggregation ordering (matches run_from_config's post-collection sort)
@@ -6354,7 +6391,7 @@ class RolloutAggregationHelper(BaseModel):
                 force=True,
             )
         else:
-            _refresh_shard_status_aggregation(input_paths, aggregate_metrics_fpath)
+            _refresh_shard_status_aggregation(input_paths, aggregate_metrics_fpath, legacy_bindings=legacy_bindings)
 
         _raise_for_aggregation_errors(aggregate_metrics_fpath)
 
