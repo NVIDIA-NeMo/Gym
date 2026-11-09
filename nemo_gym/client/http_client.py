@@ -86,6 +86,10 @@ _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG: bool = False
 _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY: bool = False
 
 
+# Longest status line or header value the global client reads.
+GLOBAL_AIOHTTP_MAX_HEADER_BYTES = 65536
+
+
 _UPSTREAM_ERROR_LOG_BODY_CHARS = 2000
 
 
@@ -242,6 +246,9 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
         connector=connector,
         timeout=ClientTimeout(),
         cookie_jar=DummyCookieJar(),
+        # Release downloads can return Content-Security-Policy headers longer than aiohttp's 8190-byte default.
+        max_line_size=GLOBAL_AIOHTTP_MAX_HEADER_BYTES,
+        max_field_size=GLOBAL_AIOHTTP_MAX_HEADER_BYTES,
     )
 
     global _GLOBAL_AIOHTTP_CLIENT, _GLOBAL_AIOHTTP_CLIENT_CONFIG, _GLOBAL_AIOHTTP_CLIENT_LOOP
