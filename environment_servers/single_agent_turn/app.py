@@ -8,23 +8,19 @@ from typing import Any, Literal
 from uuid import uuid4
 from warnings import warn
 
-from aiohttp import ClientConnectorError
 from fastapi import Body
 from omegaconf import DictConfig, OmegaConf
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from nemo_gym.agents import (
     AGENT_ACTIVATION_HEADER,
-    AGENT_OUTCOME_METADATA_KEY,
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
-    AgentOutcome,
     AgentOutcomePolicyConfig,
     AgentSeedSessionRequest,
     AgentSeedSessionResponse,
     OutcomeAction,
-    agent_outcome_policy,
-    confirmed_policy_response_timeout,
+    agent_response_action,
     verification_failure_fields,
 )
 from nemo_gym.client import get_response_json, raise_boundary_failure, rollout_path_prefix
@@ -41,15 +37,12 @@ from nemo_gym.config import (
 )
 from nemo_gym.core import (
     MODEL_POLICY_RESPONSE_TIMEOUT,
-    MODEL_REQUEST_ERROR,
     FailureBoundary,
     FailureReport,
     FailureReportRow,
-    ModelFailureDetails,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NgFailureEvent,
-    rebuild_failure,
 )
 from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
@@ -320,22 +313,9 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             return trajectory.model_dump(mode="json") if trajectory else None
 
         if stage == "verify":
-            action = agent_outcome_policy(agent_response, config=self.config.agent_outcome_policy)
-            cause = self._agent_failure(agent_response)
-            if agent_response.status == "failed" and AGENT_OUTCOME_METADATA_KEY in (agent_response.metadata or {}):
-                extra = agent_response.model_extra or {}
-                report = extra.get("failure_report")
-                # A report that selects nothing (e.g. a provider 400 without a Gym failure) keeps the policy action.
-                unselected = (
-                    isinstance(report, dict) and report.get("failure_id") is None and not report.get("omitted")
-                )
-                if cause is None and "failure_report" in extra and not unselected:
-                    action = OutcomeAction.FAIL
-                elif cause is not None and cause.failure_kind == MODEL_POLICY_RESPONSE_TIMEOUT:
-                    action = self._timeout_action(action)
-                elif cause is not None and cause.failure_kind == MODEL_REQUEST_ERROR and cause.http_status is None:
-                    # An enclosing HTTP 500 is not a provider verdict or evidence of an unexecuted request.
-                    action = action if self._model_request_not_sent(agent_response) else OutcomeAction.FAIL
+            action, cause = agent_response_action(
+                agent_response, config=self.config.agent_outcome_policy, timeout_action=self._timeout_action
+            )
             if action == OutcomeAction.COUNT_AS_ZERO:
                 # Explicit policy completion is not a verifier execution.
                 report = FailureReport.model_validate(agent_response.model_extra["failure_report"])
@@ -690,64 +670,6 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             "responses_create_params": task_input.responses_create_params.model_dump(mode="json", exclude_unset=True),
             "response": agent_response.model_dump(mode="json"),
         }
-
-    @staticmethod
-    def _agent_failure(response: NeMoGymResponse) -> NgFailureEvent | None:
-        """Rebuild only the cause selected by this failed reply and matching its outcome."""
-        if response.status != "failed":
-            return None
-        try:
-            outcome = AgentOutcome.model_validate_json((response.metadata or {}).get(AGENT_OUTCOME_METADATA_KEY, ""))
-            report = FailureReport.model_validate((response.model_extra or {}).get("failure_report"))
-        except (ValidationError, TypeError):
-            return None
-        if report.omitted or report.failure_id is None:
-            return None
-        selected = report.events[report.failure_id]
-        if selected.failure_kind != outcome.failure_kind:
-            return None
-        if selected.http_status is not None and selected.http_status != outcome.status_code:
-            return None
-        if selected.failure_kind == MODEL_POLICY_RESPONSE_TIMEOUT:
-            if (
-                selected.boundary != FailureBoundary.AGENT
-                or selected.operation != "agent.policy_request"
-                or not selected.operation_id
-                or selected.cause_id is None
-                or report.events[selected.cause_id].operation_id != selected.operation_id
-                or not confirmed_policy_response_timeout(report.model_copy(update={"failure_id": selected.cause_id}))
-            ):
-                return None
-        return rebuild_failure(report)
-
-    @staticmethod
-    def _model_request_not_sent(response: NeMoGymResponse) -> bool:
-        """A selected connector failure is safe only if every attempt of that operation never connected."""
-        report = FailureReport.model_validate(response.model_extra["failure_report"])
-        selected = report.events[report.failure_id]
-        if (
-            selected.boundary != FailureBoundary.MODEL
-            or selected.operation != "model_request"
-            or not selected.operation_id
-            or not selected.attempt_id
-        ):
-            return False
-        observed = [
-            event
-            for event in report.events.values()
-            if event.boundary == FailureBoundary.MODEL and event.operation == "model_request"
-        ]
-        if any(not event.operation_id or not event.attempt_id for event in observed):
-            return False
-        attempts = [event for event in observed if event.operation_id == selected.operation_id]
-        connector_type = f"{ClientConnectorError.__module__}.{ClientConnectorError.__qualname__}"
-        return len({event.attempt_id for event in attempts}) == len(attempts) and all(
-            isinstance(event.details, ModelFailureDetails)
-            and event.details.request_upload_complete is False
-            and event.foreign_error is not None
-            and event.foreign_error.exception_type == connector_type
-            for event in attempts
-        )
 
     def _timeout_action(self, fallback: OutcomeAction) -> OutcomeAction:
         """Keep the migrated agent's explicit timeout rule unless the environment overrides policy."""

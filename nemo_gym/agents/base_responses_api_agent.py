@@ -22,7 +22,7 @@ from abc import abstractmethod
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager, nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import wraps
 from time import monotonic
 from typing import Any, Awaitable, Callable, ClassVar, Optional
@@ -31,6 +31,8 @@ from warnings import warn
 
 from aiohttp import ClientResponseError
 from fastapi import Body, FastAPI, HTTPException, Request, Response
+from openai.types.responses.response import IncompleteDetails
+from openai.types.responses.response_error import ResponseError
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -46,7 +48,14 @@ from nemo_gym.agents.agent_activation_types import (
     AgentContinuationCapabilities,
     AgentContinuationRequirements,
 )
-from nemo_gym.agents.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome, policy_timeout_failure
+from nemo_gym.agents.agent_outcome import (
+    AGENT_OUTCOME_METADATA_KEY,
+    AGENT_STOP_REASON_METADATA_KEY,
+    AgentOutcome,
+    RunEvidence,
+    decide_outcome,
+    policy_timeout_failure,
+)
 from nemo_gym.agents.utils.ordered_operations import ActivationConflictError, OrderedOperationLedger
 from nemo_gym.agents.utils.sandbox_session import ExpiryUnsupportedError, SandboxSession
 from nemo_gym.client.server_client import apply_rollout_prefix, rollout_path_prefix
@@ -1351,6 +1360,40 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             }
         )
 
+    def finish_response(
+        self, response: NeMoGymResponse, evidence: RunEvidence, *, session: SandboxSession | None = None
+    ) -> NeMoGymResponse:
+        """Give a run's response the outcome the shared ladder (``decide_outcome``) decides from ``evidence``.
+
+        The adapter returns the result with HTTP 200, whatever the outcome; a 5xx is left for a crashed adapter or a
+        failed lifecycle step (launch, supervisor, artifacts, provider). This sets the response's ``status``, writes
+        ``ng_agent_outcome`` on a failed response only (and removes it from any other), names the deciding row in
+        ``ng_agent_stop_reason``, and sets ``incomplete_details`` for an output-limit stop. With ``session``, a run
+        that timed out after a rollout stop expired the session counts as stopped and gains the ``ng_rollout_stop``
+        marker, as ``report_rollout_stop`` adds it. The output, usage and ``error`` stay the adapter's; a failed
+        response without an ``error`` gets a generic one.
+        """
+        if session is not None and session.expired and evidence.timed_out and not evidence.stopped:
+            evidence = replace(evidence, stopped=True)
+        decision = decide_outcome(evidence)
+        metadata = {
+            key: value
+            for key, value in (response.metadata or {}).items()
+            if key not in (AGENT_OUTCOME_METADATA_KEY, ROLLOUT_STOP_METADATA_KEY)
+        }
+        metadata[AGENT_STOP_REASON_METADATA_KEY] = decision.stop_reason
+        if decision.outcome is not None:
+            metadata[AGENT_OUTCOME_METADATA_KEY] = decision.outcome.model_dump_json(exclude_none=True)
+        if decision.stop_reason == "stopped":
+            reason = session.expire_reason if session is not None else None
+            metadata[ROLLOUT_STOP_METADATA_KEY] = json.dumps({"reason": reason}, separators=(",", ":"))
+        update: dict[str, Any] = {"status": decision.status, "metadata": metadata}
+        if decision.stop_reason == "output_limit" and response.incomplete_details is None:
+            update["incomplete_details"] = IncompleteDetails(reason="max_output_tokens")
+        if decision.status == "failed" and response.error is None:
+            update["error"] = ResponseError(code="server_error", message=_FAILED_RUN_MESSAGES[decision.stop_reason])
+        return response.model_copy(update=update)
+
     def report_rollout_stop(self, response: NeMoGymResponse, session: SandboxSession) -> NeMoGymResponse:
         """Mark the response of a run that ``POST /rollouts/{rollout_id}/stop`` ended.
 
@@ -1364,6 +1407,15 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         return response.model_copy(
             update={"metadata": {**(response.metadata or {}), ROLLOUT_STOP_METADATA_KEY: marker}}
         )
+
+
+# The ``error`` message ``finish_response`` gives a failed response that has none, by the ladder row that failed it.
+_FAILED_RUN_MESSAGES = {
+    "infra": "The run reached its deadline while a server or provider fault was recorded",
+    "timeout": "The run reached its deadline before any model reply",
+    "error": "The run ended on an error",
+    "no_result": "The harness produced no usable result",
+}
 
 
 # Serves the names this module had before token_id_capture was renamed token_capture, with a warning.
