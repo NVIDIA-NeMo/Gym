@@ -9,7 +9,8 @@ model-selected shell or source code executes. Unsupported operations exclude
 the attempt. Complete
 captures use partner_if's shared registered judge. Existing raw API panels stay
 outside the benchmark package. Core Gym dependencies supply aiohttp, pydantic
-and jsonschema; no separate private runtime installation is required.
+and jsonschema. Component dependencies install the pinned `ripgrep-bin` executable
+for readonly searches; no system ripgrep or private runtime installation is required.
 
 The `expanded-v3` profile also supplies replay-generated session metadata and
 an actual-message transcript for skills that inspect their own session. These

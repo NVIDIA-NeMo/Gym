@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: partner_if
+name: partner_if/config_ngc_replay
 version: 0.4.0
 experimental: true
 kind: benchmark
@@ -31,4 +31,4 @@ datasets:
 canonical_split: benchmark
 prompt_source: prepared
 lifecycle: active
-config_path: config_ngc_replay.yaml
+config_path: ../config_ngc_replay.yaml

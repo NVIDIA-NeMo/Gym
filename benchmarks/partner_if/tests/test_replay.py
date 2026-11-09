@@ -277,12 +277,14 @@ def test_replay_config_routes_only_private_profile_without_a_container():
     from pathlib import Path
 
     from nemo_gym.environment import load_manifest, resolve_manifest_config_path
+    from nemo_gym.environment.registry import resolve_catalog_entry
     from nemo_gym.environment.validation import _mirror_differences, _resolve_manifest_composition
 
-    manifest = Path(__file__).resolve().parents[1] / "manifest_ngc_replay.yaml"
+    manifest = Path(__file__).resolve().parents[1] / "config_ngc_replay" / "manifest.yaml"
     declared = load_manifest(manifest)
     resolved = resolve_manifest_config_path(manifest, declared)
     assert _mirror_differences(declared, _resolve_manifest_composition(resolved)) == {}
+    assert resolve_catalog_entry("partner_if/config_ngc_replay", kind="benchmark").config_path == resolved
 
 
 def test_three_matched_review_requests_validate_and_keep_expected_labels_out_of_judge_input():
