@@ -25,8 +25,12 @@ class SpatialClawSessionState(AgentSessionState):
 async def resource_call(access: DirectHTTPToolAccess, path: str, payload: dict[str, Any]) -> Any:
     """Use the exact episode URL, headers, and cookie jar granted by Resources."""
     response = await request(
-        method="POST", url=f"{str(access.base_url).rstrip('/')}/{path.lstrip('/')}",
-        json=payload, cookies=access.cookies, headers=access.headers, _max_num_tries=1,
+        method="POST",
+        url=f"{str(access.base_url).rstrip('/')}/{path.lstrip('/')}",
+        json=payload,
+        cookies=access.cookies,
+        headers=access.headers,
+        _max_num_tries=1,
     )
     await raise_for_status(response)
     return await get_response_json(response)
@@ -41,10 +45,19 @@ class RemoteKernel:
         self._init_code = ""
         self._injection_code = ""
         self._km = SimpleNamespace(kernel_id="resource-owned")
+        self.failure: str | None = None
 
     async def call(self, operation: str, **kwargs: Any) -> Any:
-        reply = await resource_call(self.access, "/kernel", {"operation": operation, **kwargs})
-        return reply["result"]
+        if self.failure is not None:
+            raise RuntimeError(self.failure)
+        try:
+            reply = await resource_call(self.access, "/kernel", {"operation": operation, **kwargs})
+            return reply["result"]
+        except Exception as error:
+            # Native nodes catch execution exceptions. Keep infrastructure failure
+            # evidence outside the graph so it cannot become a scored fallback.
+            self.failure = f"Resource kernel {operation} failed: {type(error).__name__}: {error}"
+            raise
 
     def set_init_code(self, code: str) -> None:
         self._init_code = code

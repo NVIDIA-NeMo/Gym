@@ -5,21 +5,24 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from shlex import quote
 from typing import Annotated, Any, ClassVar, Literal, Self
 
 from fastapi import FastAPI, Request
-from mcp import types
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PositiveFloat, PrivateAttr, model_validator
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import ModelServerRef
 from nemo_gym.metrics.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.sandbox import SandboxAccess, SandboxConfig
 from nemo_gym.server_runtime import (
     BaseSeedSessionRequest,
+    LentSandboxes,
     MCPTool,
     ResourcesSeedRejectedError,
     ResourcesSeedSessionRequest,
@@ -52,7 +55,7 @@ LOG = logging.getLogger(__name__)
 
 
 class SpatialClawResourcesServerConfig(BaseResourcesServerConfig):
-    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.UNSUPPORTED
     spatialclaw_url: str = SPATIALCLAW_URL
     spatialclaw_commit: str = SPATIALCLAW_COMMIT
     spatialclaw_root: str | None = None
@@ -72,6 +75,19 @@ class SpatialClawResourcesServerConfig(BaseResourcesServerConfig):
     runtime_setup_timeout: PositiveFloat = 600
     runtime_close_timeout: PositiveFloat = 60
     keep_workspaces: bool = True
+    score_step_limit_answer: bool = False
+    sandbox_provider: str | None = None
+    sandbox_config: SandboxConfig = Field(default_factory=SandboxConfig)
+    sandbox_image: str | None = None
+    sandbox_workdir: str = "/workspace"
+    sandbox_network_access: Literal["inherit", "model_only", "model_and_tools"] = "inherit"
+
+    @model_validator(mode="after")
+    def validate_sandbox_workdir(self) -> Self:
+        path = PurePosixPath(self.sandbox_workdir)
+        if not path.is_absolute() or ".." in path.parts or path == PurePosixPath("/"):
+            raise ValueError("sandbox_workdir must be an absolute task directory")
+        return self
 
 
 class SpatialClawSeedRequest(TaskData, BaseSeedSessionRequest):
@@ -125,6 +141,7 @@ class SpatialClawVerifyResponse(BaseVerifyResponse):
     native_score: float | None
     scored: bool
     evaluation_completed: bool
+    step_limit_reached: bool = False
 
 
 def _flatten_numeric(value: Any, prefix: str = "") -> dict[str, float | int]:
@@ -154,15 +171,29 @@ class SpatialClawResourcesServer(SimpleResourcesServer):
     _runtime_lock: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
     _session_runtimes: dict[str, SpatialClawSessionRuntime] = PrivateAttr(default_factory=dict)
     _source_root: Path | None = PrivateAttr(default=None)
+    _lent_sandboxes: LentSandboxes | None = PrivateAttr(default=None)
+    _sandbox_accesses: dict[str, SandboxAccess] = PrivateAttr(default_factory=dict)
 
     def model_post_init(self, __context: Any) -> None:
         super().model_post_init(__context)
         self._load_lock = asyncio.Lock()
+        if self.config.sandbox_provider:
+            self._lent_sandboxes = LentSandboxes(
+                self.config.sandbox_provider,
+                self.config.sandbox_config,
+                image=self.config.sandbox_image,
+                workdir=self.config.sandbox_workdir,
+                network_access=self.config.sandbox_network_access,
+                model_server=self.config.model_server.name
+                if self.config.sandbox_network_access != "inherit"
+                else None,
+                tool_servers=[self.config.name] if self.config.sandbox_network_access == "model_and_tools" else (),
+            )
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
-        app.post("/get_context")(self.get_context)
-        app.post("/execute")(self.execute)
+        app.post("/get_context", response_model=None)(self.get_context)
+        app.post("/execute", response_model=None)(self.execute)
         app.post("/kernel")(self.kernel)
         parent = app.router.lifespan_context
 
@@ -178,6 +209,8 @@ class SpatialClawResourcesServer(SimpleResourcesServer):
                             await self.release_session_state(session_id)
                     except Exception:
                         LOG.exception("SpatialClaw resource cleanup failed for %s", session_id)
+                if self._lent_sandboxes is not None:
+                    await self._lent_sandboxes.release_all()
 
         app.router.lifespan_context = lifespan
         return app
@@ -203,14 +236,54 @@ class SpatialClawResourcesServer(SimpleResourcesServer):
                 runtime.initialize(self, sample, benchmark, capture_key, media=body.media),
                 timeout=self.config.runtime_setup_timeout,
             )
+        if self._lent_sandboxes is not None:
+            if identity is None:
+                raise ResourcesSeedRejectedError("Lent SpatialClaw sandboxes require a typed episode seed")
+            files = await asyncio.to_thread(self._sandbox_files, runtime)
+            access = await self._lent_sandboxes.lend(session_id, identity[1], files=files)
+            self._sandbox_accesses[session_id] = access.model_copy(update={"workdir": self._sandbox_workdir(runtime)})
+
+    def _sandbox_workdir(self, runtime: SpatialClawSessionRuntime) -> str:
+        return str(PurePosixPath(self.config.sandbox_workdir) / runtime.workspace.name)
+
+    def _sandbox_files(self, runtime: SpatialClawSessionRuntime) -> dict[str, str | bytes]:
+        context = runtime.context or {}
+        metadata = context.get("metadata") or {}
+        paths = [*context.get("images", []), *metadata.get("ref_images", [])]
+        paths = list(dict.fromkeys(paths))
+        target = PurePosixPath(self._sandbox_workdir(runtime))
+        mapped = {path: str(target / "media" / f"{i:04d}-{Path(path).name}") for i, path in enumerate(paths)}
+        files: dict[str, str | bytes] = {mapped[path]: Path(path).read_bytes() for path in paths}
+        manifest = {
+            "instruction": context.get("instruction", ""),
+            "images": [mapped[path] for path in context.get("images", [])],
+            "reference_images": [mapped[path] for path in metadata.get("ref_images", [])],
+        }
+        files[str(target / "task.json")] = json.dumps(manifest)
+        if runtime.context is not None:
+            runtime.context["sandbox_media"] = manifest
+        return files
 
     async def release_session_state(self, session_id: str) -> None:
+        if self._lent_sandboxes is not None:
+            access = self._sandbox_accesses.get(session_id)
+            sandbox = self._lent_sandboxes.get(session_id)
+            if access is not None and sandbox is not None:
+                # The child is derived from the resource session's SHA-256, not
+                # from caller-supplied paths. Local preserves caller workdirs,
+                # so remove only our staged child before stopping the sandbox.
+                cleaned = await sandbox.exec(
+                    "/bin/rm -rf -- " + quote(access.workdir),
+                    cwd=self.config.sandbox_workdir,
+                    timeout_s=self.config.runtime_close_timeout,
+                )
+                if cleaned.error_type is not None or cleaned.return_code != 0:
+                    raise RuntimeError("Could not remove SpatialClaw's staged sandbox media")
+            await self._lent_sandboxes.release(session_id)
+        self._sandbox_accesses.pop(session_id, None)
         runtime = self._session_runtimes.get(session_id)
         if runtime is not None:
-            async with self._runtime_lock:
-                await runtime.close(
-                    timeout=self.config.runtime_close_timeout, keep_workspace=self.config.keep_workspaces
-                )
+            await runtime.close(timeout=self.config.runtime_close_timeout, keep_workspace=self.config.keep_workspaces)
             self._session_runtimes.pop(session_id, None)
 
     async def seed_session(
@@ -223,10 +296,11 @@ class SpatialClawResourcesServer(SimpleResourcesServer):
         if isinstance(response, ResourcesSeedSessionResponse):
             return response.model_copy(
                 update={
+                    "sandbox_access": self._sandbox_accesses.get(body.resources_session_id),
                     "observation": (
                         "Use the granted get_context tool to inspect this task's native media and Python environment. "
                         "Use execute for Python cells; submit the answer with ReturnAnswer(...)."
-                    )
+                    ),
                 }
             )
         return response
@@ -243,7 +317,7 @@ class SpatialClawResourcesServer(SimpleResourcesServer):
             raise ResourcesSessionLostError("SpatialClaw task session has already been verified")
         return runtime
 
-    async def get_context(self, request: Request) -> types.CallToolResult:
+    async def get_context(self, request: Request) -> dict[str, Any]:
         """Get the task's native instructions and initial images, without answers or grading data."""
         session_id = self._request_session_id(request)
         async with self.session_lock(session_id or ""):
@@ -252,23 +326,21 @@ class SpatialClawResourcesServer(SimpleResourcesServer):
                 raise ResourcesSessionLostError("SpatialClaw task initialization is incomplete")
             return context_result(runtime.context)
 
-    async def execute(self, request: Request, body: ExecuteRequest) -> types.CallToolResult:
+    async def execute(self, request: Request, body: ExecuteRequest) -> dict[str, Any]:
         """Execute one bounded Python cell in this task's persistent native environment."""
         session_id = self._request_session_id(request)
         async with self.session_lock(session_id or ""):
             runtime = self._runtime(session_id)
-            async with self._runtime_lock:
-                return await runtime.execute(body.code, body.timeout)
+            return await runtime.execute(body.code, body.timeout)
 
     async def kernel(self, request: Request, body: KernelRequest) -> dict[str, Any]:
         """Private native-adapter kernel protocol; not advertised through MCP."""
         session_id = self._request_session_id(request)
         async with self.session_lock(session_id or ""):
             runtime = self._runtime(session_id)
-            async with self._runtime_lock:
-                result = await runtime.rpc(
-                    body.operation, code=body.code, timeout=body.timeout, name=body.name, answer=body.answer
-                )
+            result = await runtime.rpc(
+                body.operation, code=body.code, timeout=body.timeout, name=body.name, answer=body.answer
+            )
             return {"result": result}
 
     def _load_benchmark_sync(self) -> Any:
@@ -356,7 +428,14 @@ class SpatialClawResourcesServer(SimpleResourcesServer):
                         }
                     )
                     body = body.model_copy(update={"response": response})
-                return await self._score_prediction(body, runtime.accepted_answer or "")
+                step_limit = (body.response.metadata or {}).get("harness_step_limit_reached") == "true"
+                prediction = runtime.accepted_answer or ""
+                if step_limit and not self.config.score_step_limit_answer:
+                    prediction = ""
+                result = await self._score_prediction(body, prediction)
+                if step_limit and not self.config.score_step_limit_answer:
+                    result = result.model_copy(update={"reward": 0.0, "native_score": 0.0, "scored": True})
+                return result
         return await self._score_prediction(body, (body.response.output_text or "").strip())
 
     async def _score_prediction(self, body: SpatialClawVerifyRequest, prediction: str) -> SpatialClawVerifyResponse:
@@ -377,6 +456,7 @@ class SpatialClawResourcesServer(SimpleResourcesServer):
                 "native_score": native_score,
                 "scored": native_score is not None,
                 "evaluation_completed": True,
+                "step_limit_reached": (body.response.metadata or {}).get("harness_step_limit_reached") == "true",
             }
         )
 
@@ -427,6 +507,10 @@ class SpatialClawResourcesServer(SimpleResourcesServer):
         )
         metrics.update({f"spatialclaw/{key}": value for key, value in _flatten_numeric(native_results).items()})
         metrics["spatialclaw/num_evaluated_tasks"] = len(selected_samples)
+        measured = [rollout for task in tasks for rollout in task if not rollout.get("mask_sample")]
+        metrics["spatialclaw/step_limit_reached"] = (
+            sum(bool(rollout.get("step_limit_reached")) for rollout in measured) / len(measured) if measured else 0.0
+        )
         if type(benchmark).__name__ == "VideoMMEv2Bench":
             metrics["spatialclaw/num_evaluated_groups"] = len(selected_samples) // 4
             metrics["spatialclaw/num_dropped_groups"] = dropped_groups

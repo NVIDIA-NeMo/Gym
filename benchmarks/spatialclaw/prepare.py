@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -32,7 +33,11 @@ def _ensure_server_venv() -> Path:
     venv_python = SERVER_DIR / ".venv" / "bin" / "python"
     completion_marker = SERVER_DIR / ".venv" / ".spatialclaw-requirements-installed"
     with _checkout_lock(SERVER_DIR / ".venv.setup.lock"):
-        if venv_python.exists() and completion_marker.exists():
+        dependency_files = [SERVER_DIR / "requirements.txt", SERVER_DIR / "overrides.txt"]
+        fingerprint = hashlib.sha256(b"\0".join(
+            path.read_bytes() if path.exists() else b"" for path in dependency_files
+        )).hexdigest()
+        if venv_python.exists() and completion_marker.exists() and completion_marker.read_text() == fingerprint:
             return venv_python
         if not venv_python.exists():
             subprocess.run(
@@ -40,12 +45,11 @@ def _ensure_server_venv() -> Path:
                 check=True,
                 cwd=SERVER_DIR,
             )
-        subprocess.run(
-            ["uv", "pip", "install", "--python", str(venv_python), "-r", "requirements.txt"],
-            check=True,
-            cwd=SERVER_DIR,
-        )
-        completion_marker.touch()
+        command = ["uv", "pip", "install", "--python", str(venv_python), "-r", "requirements.txt"]
+        if (SERVER_DIR / "overrides.txt").exists():
+            command.extend(["--overrides", "overrides.txt"])
+        subprocess.run(command, check=True, cwd=SERVER_DIR)
+        completion_marker.write_text(fingerprint)
     return venv_python
 
 

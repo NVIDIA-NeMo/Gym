@@ -464,8 +464,10 @@ def launch_config(sandbox):
 BUILTIN_AGENTS = {"build", "plan", "general", "explore", "compaction", "title", "summary"}
 
 
-async def test_request_sampling_reaches_every_builtin_agent_and_enables_temperature(setup):
+@pytest.mark.parametrize("version", ["1.17.11", "1.18.34"])
+async def test_request_sampling_reaches_every_builtin_agent_and_enables_temperature(setup, version):
     agent, sandbox = setup
+    agent.config.opencode_version = version
     response, _ = await episode(agent, sandbox, temperature=1.0, top_p=0.95)
     assert response.status == "completed"
     _, config = launch_config(sandbox)
@@ -474,16 +476,20 @@ async def test_request_sampling_reaches_every_builtin_agent_and_enables_temperat
     assert config["provider"]["nemo_gym"]["models"]["dummy_model"]["temperature"] is True
 
 
-async def test_top_p_alone_leaves_the_temperature_capability_unset(setup):
+@pytest.mark.parametrize("version", ["1.17.11", "1.18.34"])
+async def test_top_p_alone_leaves_the_temperature_capability_unset(setup, version):
     agent, sandbox = setup
+    agent.config.opencode_version = version
     await episode(agent, sandbox, top_p=0.5)
     _, config = launch_config(sandbox)
     assert config["agent"] == {name: {"top_p": 0.5} for name in BUILTIN_AGENTS}
     assert "temperature" not in config["provider"]["nemo_gym"]["models"]["dummy_model"]
 
 
-async def test_request_temperature_marks_the_native_model_entry(setup):
+@pytest.mark.parametrize("version", ["1.17.11", "1.18.34"])
+async def test_request_temperature_marks_the_native_model_entry(setup, version):
     agent, sandbox = setup
+    agent.config.opencode_version = version
     agent.config.sandbox_model_id = "gpt-5.5"
     response, _ = await episode(agent, sandbox, temperature=0.6)
     assert response.status == "completed"
@@ -493,8 +499,10 @@ async def test_request_temperature_marks_the_native_model_entry(setup):
     assert config["agent"] == {name: {"temperature": 0.6} for name in BUILTIN_AGENTS}
 
 
-async def test_prompt_replacement_keeps_request_sampling_on_the_build_agent(setup):
+@pytest.mark.parametrize("version", ["1.17.11", "1.18.34"])
+async def test_prompt_replacement_keeps_request_sampling_on_the_build_agent(setup, version):
     agent, sandbox = setup
+    agent.config.opencode_version = version
     agent.config.system_prompt_mode = "replace"
     response, _ = await episode(agent, sandbox, instructions="outer", temperature=1.0, top_p=0.95)
     assert response.status == "completed"

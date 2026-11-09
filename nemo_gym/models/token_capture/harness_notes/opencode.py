@@ -37,8 +37,10 @@ OPENCODE_MAX_STEPS_NOTE = HarnessNote(
     name="max_steps",
     text=OPENCODE_MAX_STEPS_PROMPT,
     # Compared on 2026-11-09 with packages/opencode/src/session/prompt/max-steps.txt (1.15.13, 1.17.8) and
-    # packages/core/src/session/runner/max-steps.ts (1.17.11, 1.19.4): every release a config on main pins.
-    checked_versions=frozenset({"1.15.13", "1.17.8", "1.17.11", "1.19.4"}),
+    # packages/core/src/session/runner/max-steps.ts (1.17.11, 1.19.4).
+    # The SpatialClaw fork's 1.18.34 was compared byte-for-byte at
+    # https://gitlab-master.nvidia.com/ehosseiniasl/opencode/-/blob/a2acc05f2aab51e574c46fecbe09c4b7e97a6c8d/packages/core/src/session/runner/max-steps.ts#L1
+    checked_versions=frozenset({"1.15.13", "1.17.8", "1.17.11", "1.18.34", "1.19.4"}),
 )
 
 NOTES = (OPENCODE_MAX_STEPS_NOTE,)

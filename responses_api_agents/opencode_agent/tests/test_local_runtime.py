@@ -185,8 +185,9 @@ async def test_invalid_session_never_falls_back_to_local(marker: str | None) -> 
     local.assert_not_awaited()
 
 
-def test_token_capture_knows_the_notes_of_the_default_opencode_version() -> None:
+@pytest.mark.parametrize("version", [OPENCODE_VERSION, "1.18.34"])
+def test_token_capture_knows_the_notes_of_the_pinned_opencode_versions(version: str) -> None:
     """Token capture recognizes OpenCode's notes by their exact text, which is checked per release."""
     notes = [note for note in HARNESS_NOTES if note.harness == "opencode"]
     assert notes
-    assert all(OPENCODE_VERSION in note.checked_versions for note in notes)
+    assert all(version in note.checked_versions for note in notes)

@@ -259,7 +259,12 @@ case "$workdir/" in "${export_dir%/}"/*) overlap=1 ;; esac
 # Built-in agents by OpenCode version. Each sets its own sampling (1.17.11's ``title`` fixes temperature 0.5) and none
 # inherits from ``build``, so request sampling goes to all of them. A name OpenCode does not define would add an
 # agent, so other versions refuse request sampling, as the adapter did before it applied any.
-_OPENCODE_AGENTS = {"1.17.11": ("build", "plan", "general", "explore", "compaction", "title", "summary")}
+# The 1.18.34 list is checked in the fork at a2acc05f2aab51e574c46fecbe09c4b7e97a6c8d:
+# packages/core/src/plugin/agent.ts:126 and packages/opencode/src/agent/agent.ts:140.
+_OPENCODE_AGENTS = {
+    "1.17.11": ("build", "plan", "general", "explore", "compaction", "title", "summary"),
+    "1.18.34": ("build", "plan", "general", "explore", "compaction", "title", "summary"),
+}
 # Isolation shared by every OpenCode process of a session: run, export and import.
 _OPENCODE_ISOLATION = {
     "OPENCODE_DISABLE_PROJECT_CONFIG": "true",
@@ -1427,25 +1432,32 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             [NeMoGymEasyInputMessage(role="user", content=body.input)] if isinstance(body.input, str) else body.input
         )
         roles = [getattr(item, "role", None) for item in items]
-        if roles not in (["user"], ["system", "user"], ["developer", "user"]):
+        user_start = int(bool(roles) and roles[0] in ("system", "developer"))
+        if not roles[user_start:] or any(role != "user" for role in roles[user_start:]):
             raise HTTPException(
-                422, "OpenCode sandbox execution accepts one user prompt and an optional system or developer message"
+                422,
+                "OpenCode sandbox execution accepts consecutive user messages and an optional leading system or developer message",
             )
-        texts = []
+        system_texts = []
+        user_texts = []
         media: list[MediaFile] = []
         for item in items:
             try:
                 text, item_media = split_text_and_media(item.content)
             except UnsupportedContentError as error:
                 raise HTTPException(422, f"OpenCode sandbox execution: {error}") from error
-            if item_media and item is not items[-1]:
+            if item_media and item.role != "user":
                 raise HTTPException(422, "OpenCode sandbox execution accepts media only in the user prompt")
-            texts.append(text)
-            media = item_media
-        if not texts[-1].strip():
+            if item.role == "user":
+                user_texts.append(text)
+                media.extend(item_media)
+            else:
+                system_texts.append(text)
+        prompt = "\n\n".join(user_texts)
+        if not prompt.strip():
             raise HTTPException(422, "OpenCode sandbox execution requires a nonempty user prompt")
-        system = "\n\n".join(text for text in [self.config.system_prompt, body.instructions, *texts[:-1]] if text)
-        return texts[-1], system, media
+        system = "\n\n".join(text for text in [self.config.system_prompt, body.instructions, *system_texts] if text)
+        return prompt, system, media
 
     def _session_output(
         self, export: dict[str, Any], observations: AgentObservationBundle

@@ -142,8 +142,9 @@ its private HOME. The adapter requires a fresh successful-initialization receipt
 the task environment hook before accepting a gradable result. A missing or invalid
 receipt fails the activation even if the CLI ignored a plugin-loading error.
 
-The session path accepts one user task, optional system/developer text and
-`instructions`. The user task may include images as base64 data-URI `input_image` parts,
+The session path accepts consecutive user messages, optional leading system/developer text and
+`instructions`. User text is joined in order with blank lines, including a resource's initial observation.
+The user messages may include images as base64 data-URI `input_image` parts,
 alongside nonempty text. The adapter writes each image to `/tmp/nemo-gym-media/<sha256>.<ext>`
 with `nemo_gym.sandbox.stage_media` and attaches it with `opencode run --file`. OpenCode shows
 that path to the model, so naming the file by its content keeps the prompt the same across
@@ -154,6 +155,7 @@ Sessions also lift OpenCode's `attachment.image` limits, which would otherwise s
 any image over 2000 px on a side or 5 MiB of base64, so the model gets images at the size the
 environment sent. Images outside the user task and image URLs are rejected. Saved trajectories keep only the
 text of each message, so they do not contain the images. Request `temperature` and `top_p` are applied to every OpenCode agent
+on the qualified versions 1.17.11 and 1.18.34; other versions reject request sampling controls
 (see [Owner extensions](#owner-extensions)). A request `max_output_tokens` passes when it is at
 least the configured `max_output_tokens`, because OpenCode's limit for each model call already
 stays within it. NeMo RL sets it on every row. A smaller value returns 422. Other controls, history replay and

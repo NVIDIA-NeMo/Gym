@@ -209,13 +209,16 @@ gym eval run \
   --config responses_api_models/openai_model/configs/openai_model.yaml
 ```
 
-The supplied OpenCode profile explicitly uses the Local sandbox provider and the
-native resource kernel executes on the Resources host. These are trusted internal
+The supplied OpenCode profile uses a resource-owned lent Local sandbox for the
+CLI and the native task kernel executes on the Resources host. These are trusted internal
 development paths with shared filesystem access, **without filesystem or network
 isolation**. The profile denies OpenCode's built-in host tools and grants only the
 benchmark's MCP tools; that permission map does not turn Local execution into a
 container. Production isolation and an isolated native kernel deployment are not
-claimed. Both agent and Resources session workers use `num_workers: 1`.
+claimed. Both agent and Resources session workers use `num_workers: 1`. Resources stages
+only selected media and an answer-free task manifest in the lent CLI workspace,
+then destroys that workspace on close. The native reference harness uses the
+resource kernel directly and does not request a CLI sandbox.
 
 Native SpatialClaw keeps its planner, reflection, formatting and fallback policy.
 OpenCode drives its own loop and submits through the benchmark kernel's
@@ -227,9 +230,43 @@ the rollout-prefixed Gym model route; when they occur, a partial OpenCode-only
 usage total is replaced with unknown usage and marked in response metadata.
 Full invocation/turn ownership reconciliation and P0 qualification remain pending.
 
-This is an Evaluation-level pairing. Native SpatialClaw does not advertise a
+The native reference is an Evaluation-level pairing. Native SpatialClaw does not advertise a
 function-calling shell tool, so the shell conformance probes do not apply to it.
 The OpenCode pairing deliberately disables its shell tools and grants benchmark
 Python execution instead; the shell probe suite is not a behavioral certificate
 for this configuration. Real model smokes for both harnesses, health/evidence
 inspection and full benchmark parity are required before certification.
+
+
+## Multi-harness training configuration
+
+This migration includes the pending core dependencies named in the November 9
+multi-harness runbook: Gym [#5719](https://github.com/NVIDIA-NeMo/Gym/pull/5719)
+(images in tool replies, lent sandboxes and OpenCode training controls) and
+[#5833](https://github.com/NVIDIA-NeMo/Gym/pull/5833) (capture chains across the
+step-limit note and tool-name repair). Their commits must land before the
+migration can merge into main; the PR records their exact revisions. The shared
+`tool_output_images` wire contract is used directly; this environment does not
+carry a separate MCP image conversion implementation.
+
+OpenCode is the training path. Its profile disables automatic compaction, sets
+an outer 30-step budget, returns its session trajectory, and caps each model call
+at `SPATIALCLAW_MAX_OUTPUT_TOKENS` (default 16,384). Set the RL request budget at
+least that high, or lower the configured limit explicitly for your experiment.
+Request temperature/top-p support remains version-qualified by the generic
+adapter. This profile's external fork version must be qualified before comparing
+sampling behavior with another version. Answers at the outer step limit score
+zero by default (`score_step_limit_answer: false`). The shared resource Python
+step budget remains independently enforced for both harnesses.
+
+MCP calls are allowed up to 1,800 seconds at the adapter level so GPU tools are
+not cut off by the short connection default. OpenCode/Bun can still impose a
+roughly 300-second fetch timeout; the configured MCP bound does not prove that a
+long-running transport stays alive. Long-tool liveness must be checked against
+the actual deployment.
+
+This setup enables the Environment Server/session and capture interfaces used by
+RL; it is not evidence of a completed RL run. Fresh real-model inference,
+training smoke, zero-poisoned capture-chain checks and health/P0 inspection are
+still pending cluster availability. Native SpatialClaw's own per-turn training
+adapter and multimodal token-history contract remain outside this change.

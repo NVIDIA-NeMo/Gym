@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 config_paths:
 - benchmarks/spatialclaw/opencode/erqa.yaml
 - benchmarks/spatialclaw/opencode/omni3d.yaml

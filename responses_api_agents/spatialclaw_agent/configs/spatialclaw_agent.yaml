@@ -25,6 +25,5 @@ spatialclaw_agent:
       frame_cache_root: ${oc.env:SPATIALCLAW_FRAME_CACHE_ROOT,outputs/spatialclaw_frame_cache}
       keep_workspaces: true
       enable_logging: true
-      # Benchmark configs replace this list via `_inherit_from`. Declaring the
-      # key here keeps the inherited OmegaConf node structurally mergeable.
+      # Session presets declare datasets on Resources; keep this template unbound.
       datasets: []

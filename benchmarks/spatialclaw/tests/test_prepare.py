@@ -70,3 +70,21 @@ def test_server_venv_setup_is_locked_and_reused(monkeypatch, tmp_path) -> None:
     assert [command[1] for command in calls] == ["venv", "pip"]
     assert calls[0][3] == prepare.sys.executable
     assert (server_dir / ".venv" / ".spatialclaw-requirements-installed").is_file()
+
+
+def test_source_environment_reinstalls_when_dependency_overrides_change(monkeypatch, tmp_path):
+    server = tmp_path / "resources"
+    (server / ".venv/bin").mkdir(parents=True)
+    (server / ".venv/bin/python").touch()
+    (server / "requirements.txt").write_text("opencv-python-headless>=4.8\n")
+    overrides = server / "overrides.txt"
+    overrides.write_text("opencv-python-headless>=4.8,<4.13\n")
+    calls = []
+    monkeypatch.setattr(prepare, "SERVER_DIR", server)
+    monkeypatch.setattr(prepare.subprocess, "run", lambda command, **kwargs: calls.append(command))
+    prepare._ensure_server_venv()
+    prepare._ensure_server_venv()
+    assert len(calls) == 1 and calls[0][-2:] == ["--overrides", "overrides.txt"]
+    overrides.write_text(overrides.read_text() + "wcwidth>=0.2\n")
+    prepare._ensure_server_venv()
+    assert len(calls) == 2

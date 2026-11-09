@@ -31,12 +31,24 @@ from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field
 
 from nemo_gym.agents import (
-    AGENT_OUTCOME_METADATA_KEY, AgentCloseSessionResponse, AgentSeedRejectedError,
-    AgentSeedSessionRequest, AgentSessionState, AgentOutcome,
-
+    AGENT_OUTCOME_METADATA_KEY,
+    AgentCloseSessionResponse,
+    AgentOutcome,
+    AgentSeedRejectedError,
+    AgentSeedSessionRequest,
+    AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
+)
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.client import request as http_request
+from nemo_gym.config import (
+    AggregateMetrics,
+    AggregateMetricsRequest,
+    ModelServerRef,
+    ResourcesServerRef,
+    get_first_server_config_dict,
 )
 from nemo_gym.core import (
     NeMoGymChatCompletion,
@@ -46,21 +58,17 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef, ResourcesServerRef
-from nemo_gym.config import get_first_server_config_dict
 from nemo_gym.server_runtime import (
-    DirectHTTPToolAccess, MCPToolAccess,
-
     BaseRunRequest,
     BaseVerifyResponse,
+    DirectHTTPToolAccess,
+    MCPToolAccess,
 )
-from nemo_gym.client import get_response_json, raise_for_status
-from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
-from nemo_gym.client import request as http_request
 from nemo_gym.trajectory import AgentObservationBundle
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.spatialclaw_agent.kernel_transport import _kernel_transport_loop
 from responses_api_agents.spatialclaw_agent.observability import read_observations, response_usage
-from responses_api_agents.spatialclaw_agent.sessions import SpatialClawSessionState, RemoteKernelPool, resource_call
+from responses_api_agents.spatialclaw_agent.sessions import RemoteKernelPool, SpatialClawSessionState, resource_call
 
 
 SPATIALCLAW_URL = "ssh://git@gitlab-master.nvidia.com:12051/ehosseiniasl/spatial_claw.git"
@@ -737,9 +745,9 @@ class SpatialClawAgent(SimpleResponsesAPIAgent):
             except asyncio.CancelledError:
                 pass
         observations = state.observations or AgentObservationBundle(
-            source="spatialclaw", records=[], gaps=[{
-                "code": "observation_capture_failed", "detail": "Activation did not produce native observations"
-            }],
+            source="spatialclaw",
+            records=[],
+            gaps=[{"code": "observation_capture_failed", "detail": "Activation did not produce native observations"}],
         )
         return AgentCloseSessionResponse(
             agent_session_id=state.request.agent_session_id,
@@ -777,18 +785,30 @@ class SpatialClawAgent(SimpleResponsesAPIAgent):
         failure = (result.model_extra or {}).get("_ng_agent_failure")
         if failure:
             status = failure.get("http_status")
-            kind = "model_request_error" if isinstance(status, int) else (
-                "model_transport_error" if failure.get("mask_sample") else "agent_limit"
-                if failure.get("failure_kind") == "agent_timeout" else "agent_invalid_output"
+            kind = (
+                "model_request_error"
+                if isinstance(status, int)
+                else (
+                    "model_transport_error"
+                    if failure.get("mask_sample")
+                    else "agent_limit"
+                    if failure.get("failure_kind") == "agent_timeout"
+                    else "agent_invalid_output"
+                )
             )
             result.status = "failed"
             result.metadata = dict(result.metadata or {}) | {
                 AGENT_OUTCOME_METADATA_KEY: AgentOutcome(failure_kind=kind, status_code=status).model_dump_json()
             }
         if not failure or not failure.get("mask_sample"):
-            await resource_call(state.access, "/kernel", {
-                "operation": "finalize_answer", "answer": result.output_text or "",
-            })
+            await resource_call(
+                state.access,
+                "/kernel",
+                {
+                    "operation": "finalize_answer",
+                    "answer": result.output_text or "",
+                },
+            )
         extras = dict(result.model_extra or {})
         extras.pop("_ng_agent_failure", None)
         extras.pop("_ng_agent_observations", None)
@@ -819,7 +839,7 @@ class SpatialClawAgent(SimpleResponsesAPIAgent):
                 if state is None:
                     instruction, images, metadata = await self._materialize_inputs(body, session_dir, spatial_config)
                 else:
-                    context = (await resource_call(state.access, "/get_context", {}))["structuredContent"]
+                    context = await resource_call(state.access, "/get_context", {})
                     instruction, images, metadata = context["instruction"], context["images"], context["metadata"]
                 from spatial_agent.config import set_config
                 from spatial_agent.workflow import SpatialAgentWorkflow
@@ -876,6 +896,14 @@ class SpatialClawAgent(SimpleResponsesAPIAgent):
                 if workflow is not None:
                     await _shutdown_workflow(workflow)
                 transport_failure = _model_transport_failure(journal)
+                if state is not None and workflow is not None:
+                    resource_failure = workflow._kernel_pool.kernel.failure
+                    if resource_failure is not None and transport_failure is None:
+                        failure = {
+                            "failure_kind": "spatialclaw:resource_transport_error",
+                            "failure_reason": resource_failure,
+                            "mask_sample": True,
+                        }
                 if transport_failure:
                     failure = transport_failure
                     result = {**result, "final_answer": {"text": ""}, "termination_reason": "model_error"}

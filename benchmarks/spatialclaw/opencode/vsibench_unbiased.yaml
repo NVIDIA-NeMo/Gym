@@ -13,3 +13,11 @@ spatialclaw_vsibench_unbiased_benchmark_environment_server:
     single_agent_turn:
       resources_tool_transports:
       - mcp
+spatialclaw_vsibench_unbiased_benchmark_resources_server:
+  resources_servers:
+    spatialclaw:
+      sandbox_provider: spatialclaw_harness_sandbox
+      sandbox_workdir: ${oc.env:SPATIALCLAW_SANDBOX_ROOT,/tmp/spatialclaw-harness-tasks}
+      sandbox_config:
+        ttl_s: 2700
+      sandbox_network_access: inherit

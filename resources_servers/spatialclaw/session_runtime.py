@@ -19,7 +19,25 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Request
-from mcp import types
+
+
+class _ResourceKernelPool:
+    """Retain the manager before startup so failed setup always has a close handle."""
+
+    def __init__(self, kernel: Any) -> None:
+        self.kernel = kernel
+
+    async def acquire(self) -> Any:
+        if not self.kernel.is_running:
+            await self.kernel.start()
+        return self.kernel
+
+    async def release(self, kernel: Any) -> None:
+        # One Resources session owns this manager until the episode closes.
+        pass
+
+    async def shutdown_all(self) -> None:
+        await self.kernel.shutdown()
 
 
 @dataclass
@@ -105,6 +123,12 @@ class SpatialClawSessionRuntime:
 
         set_config(self.spatial_config)
         self.workflow = SpatialAgentWorkflow(self.spatial_config)
+        from spatial_agent.kernel.manager import JupyterKernelManager
+
+        # Publish before any awaited startup; the native pool otherwise keeps a
+        # newly starting manager only in an acquire() local variable.
+        self.kernel = JupyterKernelManager(timeout_sec=self.spatial_config.timeout_sec)
+        self.workflow._kernel_pool = _ResourceKernelPool(self.kernel)
         _install_gym_llm_transport(
             self.workflow.llm_client, journal=self.workspace / "gym-model-responses.jsonl", cookies={}
         )
@@ -196,7 +220,7 @@ class SpatialClawSessionRuntime:
             return await kernel.clear_sentinel(name or "_return_answer_result")
         raise ValueError(f"Unsupported kernel operation: {operation}")
 
-    async def execute(self, code: str, timeout: float | None) -> types.CallToolResult:
+    async def execute(self, code: str, timeout: float | None) -> dict[str, Any]:
         from spatial_agent.kernel.safety import SecuritySandbox
 
         if self.execution_count >= self.spatial_config.max_steps:
@@ -216,11 +240,11 @@ class SpatialClawSessionRuntime:
         # Keep references until every shutdown succeeds so an Environment close
         # retry can finish cleanup after a failed first attempt.
         async def release() -> None:
-            if self.kernel is not None:
-                await self.kernel.shutdown()
             if self.workflow is not None:
                 await self.workflow._kernel_pool.shutdown_all()
                 await self.workflow.llm_client.close()
+            elif self.kernel is not None:
+                await self.kernel.shutdown()
 
         await asyncio.wait_for(release(), timeout=timeout)
         if not keep_workspace and self.workspace.exists():
@@ -240,32 +264,27 @@ def execution_dict(result: Any) -> dict[str, Any]:
     return json.loads(json.dumps(value, default=str))
 
 
-def _image_content(url: str) -> types.ImageContent | None:
-    if not url.startswith("data:image/") or ";base64," not in url:
-        return None
-    header, data = url.split(";base64,", 1)
-    return types.ImageContent(type="image", data=data, mimeType=header.removeprefix("data:"))
-
-
-def context_result(context: dict[str, Any]) -> types.CallToolResult:
-    images = []
-    texts = []
+def context_result(context: dict[str, Any]) -> dict[str, Any]:
+    images: list[dict[str, str]] = []
+    messages = []
     for message in context["messages"]:
         content = message["content"]
         if isinstance(content, str):
-            texts.append(content)
+            messages.append(message)
             continue
+        texts = []
         for part in content:
             if part.get("type") == "text":
-                texts.append(part["text"])
+                texts.append(part)
             elif part.get("type") == "image_url":
-                image = _image_content(part["image_url"]["url"])
-                if image is not None:
-                    images.append(image)
-    return tool_result(context, text="\n\n".join(texts), images=images)
+                images.append({"image_url": part["image_url"]["url"]})
+        messages.append({**message, "content": texts})
+    # Images travel through Gym's tool-output contract. Keeping their base64 in
+    # the JSON text as well would duplicate them in every subsequent model call.
+    return tool_result({**context, "messages": messages}, images=images)
 
 
-def execution_images(result: Any) -> list[types.ImageContent]:
+def execution_images(result: Any) -> list[dict[str, str]]:
     from spatial_agent.nodes.execute_node import _parse_show_markers
 
     images = []
@@ -273,31 +292,23 @@ def execution_images(result: Any) -> list[types.ImageContent]:
         data = value.get("data", value) if isinstance(value, dict) else {}
         for mime in ("image/png", "image/jpeg"):
             if mime in data:
-                images.append(types.ImageContent(type="image", data=data[mime], mimeType=mime))
+                images.append({"image_url": f"data:{mime};base64,{data[mime]}"})
     for shown in _parse_show_markers(result.stdout or ""):
         for image in shown["images"]:
             stream = io.BytesIO()
             image.save(stream, format="PNG")
             images.append(
-                types.ImageContent(
-                    type="image", data=base64.b64encode(stream.getvalue()).decode(), mimeType="image/png"
-                )
+                {
+                    "image_url": "data:image/png;base64," + base64.b64encode(stream.getvalue()).decode(),
+                    "label": shown.get("label") or None,
+                }
             )
     return images
 
 
 def tool_result(
-    payload: dict[str, Any],
-    *,
-    text: str | None = None,
-    images: list[types.ImageContent] | None = None,
-    error: bool = False,
-) -> types.CallToolResult:
-    return types.CallToolResult(
-        content=[
-            types.TextContent(type="text", text=text if text is not None else json.dumps(payload)),
-            *(images or []),
-        ],
-        structuredContent=payload,
-        isError=error,
-    )
+    payload: dict[str, Any], *, images: list[dict[str, str]] | None = None, error: bool = False
+) -> dict[str, Any]:
+    from nemo_gym.core import TOOL_OUTPUT_IMAGES_KEY
+
+    return {**payload, TOOL_OUTPUT_IMAGES_KEY: images or [], "is_error": error}
