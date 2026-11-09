@@ -462,6 +462,18 @@ class TestTokenAccounting:
         assert call.kwargs["json"] == body
 
     @pytest.mark.asyncio
+    async def test_skip_verification_reports_no_metrics_and_does_not_call_the_resources_server(self):
+        # No /verify ran, so the rows carry no graded fields for the resources server to score.
+        agent = _agent()
+        agent.config.skip_verification = True
+        agent.server_client.post = AsyncMock()
+        body = AggregateMetricsRequest(verify_responses=[{"reward": 0.0}])
+        with pytest.warns(RuntimeWarning, match="skip_verification"):
+            result = await agent.aggregate_metrics(body)
+        assert (result.agent_metrics, result.key_metrics) == ({}, {})
+        agent.server_client.post.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_unknown_reasoning_details_do_not_poison_known_output_count(self):
         row = await _collect_usage([_usage(100, reasoning_tokens=None), _usage(200)])
         assert row["response"]["usage"]["output_tokens"] == 300

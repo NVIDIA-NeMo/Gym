@@ -121,7 +121,7 @@ AA-aligned problem set and prompt.
 The rollout rows carry one pass/fail bit per sub-step (`step_results`). To also keep each sub-step's
 exit code, timeout flag, duration, exception class and bounded stdout/stderr tails, turn on the
 resources server's opt-in record (see `resources_servers/scicode/README.md`); add `record_step_code`
-to keep the accumulated code each sub-step's tests ran against as well:
+to copy into each record the accumulated code its tests ran against (the row's `solutions` already keep it):
 
 ```bash
 gym eval run ... --benchmark scicode \

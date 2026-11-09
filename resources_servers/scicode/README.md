@@ -40,6 +40,11 @@ succeeds. The paths differ in two cases, both set by the Environment Server rath
   ends as the Environment Server's verification failure.
 - `/run` always verifies; `single_agent_turn_legacy` honors `skip_verification`.
 
+Every row keeps the `solutions` it was graded on, from either path, so `REVERIFY_MODE = stateless` holds: a re-verify
+grades the saved solutions again. `/verify` refuses, as a verification failure rather than a score, a request that
+carries no `solutions` (a row saved before rows kept them cannot be graded again) and an answer whose solution keys or
+`step_usage` step numbers are not the row's sub-steps (an agent session whose `agent_context` disagrees with the row).
+
 ## Execution (no Docker sandbox)
 
 The agent sends a `solutions` dict — `{"<problem_id>.<step>": accumulated_code}` — to `/verify`. For
@@ -86,8 +91,8 @@ default and the rows grow by up to `2 * output_tail_chars` per sub-step when it 
 `record_step_code: true` as well, each record also carries `code`: the accumulated program the
 sub-step's tests ran against (the agent's `solutions[step_id]`: the problem's dependency header and any
 prefilled reference steps from the dataset, then the model's code for the previous sub-steps and this
-one; `null` for a sentinel step that never ran). That mixes dataset text with model-generated code and
-grows a row by the size of every scored program, so it is a second opt-in. The agent's raw per-step
+one; `null` for a sentinel step that never ran). The row's `solutions` already hold these programs; the opt-in
+copies each one into its record, beside the step's outputs, so it stays off by default. The agent's raw per-step
 generations are a separate concern: enable model-call observability to keep them.
 
 ```yaml
@@ -150,7 +155,8 @@ gym env test +entrypoint=resources_servers/scicode
 
 Covers test sanitization, the program builder, subprocess pass/fail/timeout and the execution
 details it reports (exit code, timeout, duration, bounded output tails, exception class), and the
-`verify()` paths (no solutions, missing/unconfigured test data, all-pass, all-fail, prefilled-excluded,
+`verify()` paths (empty solutions, a request without solutions or with other sub-steps, a saved row graded
+again, missing/unconfigured test data, all-pass, all-fail, prefilled-excluded,
 out-of-context, `step_outputs` on and off, `code` on and off).
 
 ## Licensing

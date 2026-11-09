@@ -46,8 +46,10 @@ steps / non-prefilled steps. With no eligible sub-steps, the subproblem mean is 
   backend rejects a request for exceeding context before generation. This keeps
   earlier sub-step token totals available; it does not replace unknown usage on
   actual generated responses. Older saved records are not repaired automatically.
-- If any generated response lacks usage, suppress all aggregate token statistics,
-  omit the token means, and report `token_usage_complete: false`.
+- If any generated response lacks usage, or a failed rollout that
+  `count_failure_classes_as_zero` adds carries no usage record, suppress all
+  aggregate token statistics, omit the token means, and report
+  `token_usage_complete: false`.
   Accuracy, coverage, and raw rollout records remain available. Missing optional
   reasoning/cache breakdowns do not invalidate known input/output/total usage.
 

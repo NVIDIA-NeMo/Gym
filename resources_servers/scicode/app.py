@@ -102,7 +102,7 @@ class ScicodeResourcesServerConfig(BaseResourcesServerConfig):
     output_tail_chars: int = Field(default=2000, ge=0)
     # Opt-in on top of record_step_outputs: each record also carries `code`, the accumulated solution the
     # sub-step's tests ran against (the agent's solutions[step_id]); None for a sentinel step that never ran.
-    # Off by default: the code is model-generated and grows a row by the size of every scored program.
+    # Off by default: the row's `solutions` already hold the code, and this copies it into every record.
     record_step_code: bool = False
 
 
@@ -124,8 +124,10 @@ class ScicodeVerifyResponse(BaseVerifyResponse):
     token_usage_version: Optional[int] = None
     step_usage: Optional[List[dict]] = None
     # Declared so it survives into the rollout output (identifies the problem); the request's
-    # sub_steps/solutions are intentionally not carried through to keep rollout rows small.
+    # sub_steps are intentionally not carried through to keep rollout rows small.
     problem_id: str = ""
+    # The graded answer: kept on every row so a stateless re-verify (REVERIFY_MODE) grades the same solutions.
+    solutions: Optional[Dict[str, str]] = None
     step_results: List[bool] = []
     num_steps_passed: int = 0
     num_steps_total: int = 0
@@ -153,10 +155,9 @@ class ScicodeVerifyResponse(BaseVerifyResponse):
 def _lift_session_results(body: ScicodeVerifyRequest) -> ScicodeVerifyRequest:
     """Read the solutions and step usage that an agent session's response carries, as /run sends them.
 
-    The field leaves the response either way, so the rollout row keeps one copy of ``step_usage`` and
-    ``token_usage_version``. Like a ``/run`` row, it keeps no solutions. A field without a solutions dict breaks
-    the contract between the agent and this server, not the model's answer, so it fails verification instead of
-    grading nothing.
+    The field leaves the response either way, so the rollout row keeps one copy of the solutions, ``step_usage``
+    and ``token_usage_version``, as a ``/run`` row does. A field without a solutions dict breaks the contract
+    between the agent and this server, not the model's answer, so it fails verification instead of grading nothing.
     """
     data = body.model_dump()
     results = data["response"].pop(SCICODE_RESPONSE_KEY, None)
@@ -167,6 +168,26 @@ def _lift_session_results(body: ScicodeVerifyRequest) -> ScicodeVerifyRequest:
     if data.get("solutions") is None:
         data |= {key: results.get(key) for key in ("solutions", "step_usage", "token_usage_version")}
     return ScicodeVerifyRequest.model_validate(data)
+
+
+def _check_solved_steps(body: ScicodeVerifyRequest) -> None:
+    """Refuse an answer that is not for this row's sub-steps.
+
+    The agent sends a solutions dict, empty when it generated nothing. A request without one (a rollout row saved
+    before rows kept their solutions, say) or one whose solutions or step usage name other sub-steps (an agent
+    session whose agent_context disagrees with the row) would grade nothing or the wrong steps as the model's 0.
+    """
+    if body.solutions is None:
+        raise ValueError("The request carries no solutions: nothing to grade")
+    expected = {f"{body.problem_id}.{i + 1}" for i in range(len(body.sub_steps))}
+    if unknown := sorted(set(body.solutions) - expected):
+        raise ValueError(f"Solutions for sub-steps the row does not have: {unknown}")
+    step_usage = (body.model_extra or {}).get("step_usage")
+    if step_usage is not None:
+        solved = [step.get("step_number") for step in step_usage]
+        row = [step["step_number"] for step in body.sub_steps]
+        if solved != row:
+            raise ValueError(f"The agent worked on sub-steps {solved}, the row has {row}")
 
 
 def _across_run_stats(tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
@@ -206,17 +227,28 @@ def _across_run_stats(tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
     return metrics
 
 
+def _usage_recorded(row: Dict[str, Any]) -> bool:
+    """Whether a row reports its rollout's usage: a counted failure row carries no response and no accounting."""
+    return row.get("token_usage_version") is not None or row.get("response") is not None
+
+
 def _token_metrics(tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
-    """Pool generated steps across attempts, rather than averaging per-problem ratios."""
+    """Pool generated steps across attempts, rather than averaging per-problem ratios.
+
+    A failed rollout that ``count_failure_classes_as_zero`` adds to the metrics carries neither a response nor
+    ``token_usage_version``: its usage is unknown, so the token totals are reported as incomplete.
+    """
     rows = [r for task in tasks for r in task]
-    versions = {r.get("token_usage_version") for r in rows}
-    if not rows or versions == {None}:
+    recorded = [r for r in rows if _usage_recorded(r)]
+    unrecorded = len(rows) - len(recorded)
+    versions = {r.get("token_usage_version") for r in recorded}
+    if not recorded or versions == {None}:
         # Historical rollouts contain only the last step's usage.
         return {}
     if versions != {TOKEN_USAGE_VERSION}:
         raise ValueError("Cannot aggregate SciCode rollouts with different token accounting versions")
 
-    steps = [step for r in rows for step in r["step_usage"] if step["status"] != "prefilled"]
+    steps = [step for r in recorded for step in r["step_usage"] if step["status"] != "prefilled"]
     generated = [step for step in steps if step["status"] == "generated"]
     metrics = {
         # Aggregate values are exported as numeric scores by NeMo Evaluator.
@@ -226,7 +258,7 @@ def _token_metrics(tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
         "num_steps_with_usage": sum(step["usage"] is not None for step in generated),
         "generation_coverage": len(generated) / len(steps) if steps else None,
     }
-    complete = metrics["num_steps_with_usage"] == len(generated)
+    complete = metrics["num_steps_with_usage"] == len(generated) and not unrecorded
     metrics["token_usage_complete"] = complete
     # Override the generic means too: pandas would otherwise silently average only
     # the rollouts with known usage, presenting a partial measurement as a full one.
@@ -342,7 +374,8 @@ class ScicodeResourcesServer(SimpleResourcesServer):
 
     async def verify(self, body: ScicodeVerifyRequest) -> ScicodeVerifyResponse:
         body = _lift_session_results(body)
-        solutions = body.solutions or {}
+        _check_solved_steps(body)
+        solutions = body.solutions
         record = self.config.record_step_outputs
         record_code = record and self.config.record_step_code
         # Score only sub-steps the agent produced a solution for. Sub-steps absent from solutions
@@ -490,13 +523,13 @@ class ScicodeResourcesServer(SimpleResourcesServer):
             step["status"] == "generated" and step["usage"] is None
             for row in body.verify_responses
             for step in (row.get("step_usage") or [])
-        ):
+        ) or any(not _usage_recorded(row) for row in body.verify_responses):
             # Suppress generic token statistics at every level (including per-task
             # and per-repeat). Keep the caller's raw rollout records unchanged.
             body = body.model_copy(
                 update={
                     "verify_responses": [
-                        {**row, "response": {**(row.get("response") or {}), "usage": None}}
+                        {**row, "response": {**row["response"], "usage": None}} if row.get("response") else row
                         for row in body.verify_responses
                     ]
                 }

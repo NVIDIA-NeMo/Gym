@@ -322,6 +322,35 @@ class TestTokenAccounting:
         with pytest.raises(ValueError, match="different token accounting versions"):
             _aggregate([_row(*_generated(100)), old_row])
 
+    def test_a_counted_failure_row_leaves_token_usage_incomplete(self):
+        # count_failure_classes_as_zero adds a failed rollout as its dataset fields and a zero reward, no response.
+        failed = {"reward": 0.0, "mask_sample": False, "problem_id": "2"}
+        result = _aggregate([_row(*_generated(100, 200)), failed])
+        assert result.key_metrics["token_usage_complete"] is False
+        assert result.key_metrics["mean/output_tokens_per_problem"] is None
+        assert result.key_metrics["mean/output_tokens_per_subproblem"] is None
+        assert (result.agent_metrics["num_generated_steps"], result.agent_metrics["num_steps_with_usage"]) == (2, 2)
+
+    def test_only_counted_failure_rows_report_no_token_metrics(self):
+        result = _aggregate([{"reward": 0.0, "mask_sample": False}])
+        assert "token_usage_complete" not in result.key_metrics
+
+    @pytest.mark.asyncio
+    async def test_aggregate_endpoint_with_a_counted_failure_row_exports_no_token_totals(self):
+        rows = [
+            {**_row(*_generated(100)), "num_steps_passed": 1, "num_steps_total": 1},
+            {"reward": 0.0, "mask_sample": False, "problem_id": "2"},
+        ]
+        rows = [{"_ng_task_index": i, "_ng_rollout_index": 0, **row} for i, row in enumerate(rows)]
+        body = AggregateMetricsRequest(verify_responses=rows)
+        original = body.model_dump()
+        result = await _server().aggregate_metrics(body)
+        assert body.model_dump() == original
+        assert result.key_metrics["token_usage_complete"] is False
+        assert "mean/output_tokens_per_problem" not in result.key_metrics
+        token_numbers = {k: v for k, v in result.agent_metrics.items() if "tokens" in k}
+        assert all(not isinstance(v, (int, float)) for v in token_numbers.values()), token_numbers
+
 
 class TestHeadlineRepeatIntervals:
     @pytest.mark.asyncio

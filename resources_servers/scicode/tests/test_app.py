@@ -439,7 +439,7 @@ class TestApp:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("has_solution", [False, True])
     async def test_verify_preserves_step_usage(self, has_solution):
-        request_json = _request(solutions={"1.1": "a"} if has_solution else None).model_dump()
+        request_json = _request(solutions={"1.1": "a"} if has_solution else {}, n_steps=1).model_dump()
         request_json["token_usage_version"] = 1
         request_json["step_usage"] = [
             {
@@ -487,7 +487,10 @@ class TestApp:
     async def test_top_level_solutions_win_over_the_response_field(self):
         body = _request(solutions={"1.1": "PASS", "1.2": "PASS"}).model_dump()
         body["token_usage_version"] = 1
-        body["step_usage"] = [{"step_number": "1.1", "status": "generated", "usage": None}]
+        body["step_usage"] = [
+            {"step_number": "1.1", "status": "generated", "usage": None},
+            {"step_number": "1.2", "status": "generated", "usage": None},
+        ]
         body["response"][app.SCICODE_RESPONSE_KEY] = {
             "solutions": {"1.1": "FAIL", "1.2": "FAIL"},
             "step_usage": [],
@@ -510,6 +513,37 @@ class TestApp:
         with tempfile.NamedTemporaryFile(suffix=".h5") as h5, pytest.raises(ValueError, match="no solutions dict"):
             await _server(h5.name).verify(ScicodeVerifyRequest.model_validate(body))
 
+    @pytest.mark.asyncio
+    async def test_a_request_without_solutions_fails_verification(self):
+        # A row saved before rows kept their solutions would otherwise be graded again as an empty answer.
+        with pytest.raises(ValueError, match="no solutions"):
+            await _server().verify(_request(solutions=None))
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("solutions", "step_numbers", "match"),
+        [
+            # The session's agent_context named another problem: its keys miss every sub-step of the row.
+            ({"2.1": "a", "2.2": "b"}, ["1.1", "1.2"], "sub-steps the row does not have"),
+            # The agent_context has more sub-steps than the row.
+            ({"1.1": "a", "1.2": "b", "1.3": "c"}, ["1.1", "1.2"], "sub-steps the row does not have"),
+            # Same count, other step numbers: the agent wrote prompts for other sub-steps.
+            ({"1.1": "a", "1.2": "b"}, ["1.1", "1.3"], "worked on sub-steps"),
+            # The agent_context has fewer sub-steps than the row.
+            ({"1.1": "a"}, ["1.1"], "worked on sub-steps"),
+        ],
+    )
+    async def test_an_answer_for_other_sub_steps_fails_verification(self, solutions, step_numbers, match):
+        body = _request(solutions=None).model_dump()
+        body["response"][app.SCICODE_RESPONSE_KEY] = {
+            "solutions": solutions,
+            "step_usage": [{"step_number": n, "status": "generated", "usage": None} for n in step_numbers],
+            "token_usage_version": 1,
+        }
+        with tempfile.NamedTemporaryFile(suffix=".h5") as h5, _mock_substep(passed=True):
+            with pytest.raises(ValueError, match=match):
+                await _server(h5.name).verify(ScicodeVerifyRequest.model_validate(body))
+
     def test_sanity(self):
         _server()
 
@@ -523,8 +557,9 @@ class TestApp:
         assert config.required_grading_interpreters == 1
 
     @pytest.mark.asyncio
-    async def test_verify_no_solutions_returns_zero(self):
-        result = await _server().verify(_request(solutions=None))
+    async def test_verify_empty_solutions_returns_zero(self):
+        # The agent sends an empty dict when it generated no sub-step (every step prefilled, say).
+        result = await _server().verify(_request(solutions={}))
         assert result.reward == 0.0
         assert result.num_steps_total == 0
         assert result.num_steps_passed == 0
@@ -855,7 +890,7 @@ class TestApp:
 
     @pytest.mark.asyncio
     async def test_verify_with_the_flag_and_no_solutions_returns_an_empty_list(self):
-        result = await _server(record_step_outputs=True).verify(_request(solutions=None))
+        result = await _server(record_step_outputs=True).verify(_request(solutions={}))
         assert result.step_outputs == []
         assert result.num_steps_total == 0
 
@@ -955,7 +990,10 @@ async def test_a_regrade_payload_carries_the_solutions_the_original_verify_saw()
 
     original = _request(solutions={"1.1": "x = 1", "1.2": "x = 1\ny = 2"}).model_dump()
     original["token_usage_version"] = 1
-    original["step_usage"] = [{"step_number": "1.1", "status": "generated", "usage": None}]
+    original["step_usage"] = [
+        {"step_number": "1.1", "status": "generated", "usage": None},
+        {"step_number": "1.2", "status": "generated", "usage": None},
+    ]
     error = ClientResponseError(MagicMock(real_url="http://verifier/verify"), (), status=500, message="boom")
     failure = verify_route_failure(error, operation_id="op", attempt=1)
     failure.__cause__ = error
@@ -970,3 +1008,36 @@ async def test_a_regrade_payload_carries_the_solutions_the_original_verify_saw()
     with tempfile.NamedTemporaryFile(suffix=".h5") as h5, _mock_substep(passed=True):
         result = await _server(h5.name).verify(ScicodeVerifyRequest.model_validate(payload))
     assert (result.reward, result.num_steps_total) == (1.0, 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["run", "session"])
+async def test_a_success_row_is_graded_again_to_the_same_reward(path):
+    from nemo_gym.eval.rollout_reverification import InputRolloutPair, _build_verify_payload
+
+    accounting = {
+        "solutions": {"1.1": "PASS", "1.2": "FAIL"},
+        "token_usage_version": 1,
+        "step_usage": [
+            {"step_number": "1.1", "status": "generated", "usage": None},
+            {"step_number": "1.2", "status": "generated", "usage": None},
+        ],
+    }
+    body = _request(solutions=None).model_dump()
+    if path == "run":
+        body |= accounting
+    else:
+        body["response"][app.SCICODE_RESPONSE_KEY] = accounting
+    materialized = {k: body[k] for k in ("responses_create_params", "problem_id", "sub_steps")}
+    passed = {"passed": True, "error": "", "returncode": 0, "timed_out": False}
+    failed = {"passed": False, "error": "", "returncode": 1, "timed_out": False}
+    with tempfile.NamedTemporaryFile(suffix=".h5") as h5, _mock_substep_details({"PASS": passed, "FAIL": failed}):
+        server = _server(h5.name)
+        row = (await server.verify(ScicodeVerifyRequest.model_validate(body))).model_dump(mode="json")
+        payload = _build_verify_payload(InputRolloutPair(input=materialized, rollout=row))
+        regraded = (await server.verify(ScicodeVerifyRequest.model_validate(payload))).model_dump(mode="json")
+    assert row["solutions"] == accounting["solutions"]
+    assert (row["reward"], row["num_steps_passed"], row["num_steps_total"]) == (0.0, 1, 2)
+    assert {k: regraded[k] for k in ("reward", "step_results", "solutions", "step_usage")} == {
+        k: row[k] for k in ("reward", "step_results", "solutions", "step_usage")
+    }
