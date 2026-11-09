@@ -34,6 +34,7 @@ record for a failed `/run`), whose keys can change: depend on the other fields, 
 """
 
 import json
+import math
 import re
 import tempfile
 import uuid
@@ -63,13 +64,14 @@ from nemo_gym.data.task_selection import row_task_id, select_tasks
 from nemo_gym.environment.assets import asset_config_path
 from nemo_gym.environment.benchmark_preparation import PrepareBenchmarkConfig, plan_for_config
 from nemo_gym.eval.eval_plan import EvalPlan
-from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
+from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper, _metric_failure_kind
 from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
 from nemo_gym.server_runtime.supervisor.server_supervisor import (
     RunHelper,
     ServerSpinupTimeoutError,
     ServerStartFailedError,
 )
+from nemo_gym.telemetry.gym_metrics import record_rollout_completed, record_rollout_reward
 from nemo_gym.utils.decorators import experimental
 
 
@@ -348,10 +350,31 @@ class TaskRunner:
         )
         try:
             (completion,) = completions
-            _, result = await completion
+            resolved_row, result = await completion
         finally:
             await completions.aclose()
-        return _outcome(result)
+        outcome = _outcome(result)
+        _record_outcome(outcome, self._helper._dispatch_name(resolved_row))
+        return outcome
+
+
+def _record_outcome(outcome: RolloutOutcome, dispatch_name: str) -> None:
+    """Count the rollout in `gym.rollout.completed_total` and, when it has a reward, `gym.rollout.rewarded_total`.
+
+    The outcome is `scored` when a reward exists and `failed` when none does. A failure's kind labels the count either
+    way, so a scored rollout that carries a kind is still counted under it.
+    """
+    failure = outcome.failure
+    labels = {}
+    if failure is not None:
+        kind = _metric_failure_kind(failure.kind)
+        labels = {"failure_class": kind, "failure_kind": kind, "failure_type": failure.exception_type}
+    if outcome.reward is None:
+        record_rollout_completed("failed", dispatch_name=dispatch_name, **labels)
+        return
+    record_rollout_completed("scored", dispatch_name=dispatch_name, **labels)
+    if math.isfinite(outcome.reward):
+        record_rollout_reward(outcome.reward, dispatch_name=dispatch_name, masked=outcome.masked)
 
 
 def _raw(result: Mapping[str, Any] | RolloutFailureRecord) -> dict[str, Any]:
