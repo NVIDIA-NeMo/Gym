@@ -48,7 +48,7 @@ async def test_binary_checks_select_only_requested_artifacts_and_capable_judges(
     call = AsyncMock(return_value=({"passed": True, "reasoning": "test response"}, "{}"))
     monkeypatch.setattr("resources_servers.aa_briefcase_lite.app.sample_judge", choose)
     monkeypatch.setattr(AABriefcaseLiteResourcesServer, "_binary_call", call)
-    reward, results, invalid = await server._verify_binary(
+    reward, results = await server._verify_binary(
         AABriefcaseLiteVerifyRequest.model_construct(task_id="w1_t4", deliverables_dir=str(tmp_path)),
         "Create a video and captions.",
         judges,
@@ -67,11 +67,10 @@ async def test_binary_checks_select_only_requested_artifacts_and_capable_judges(
     assert missing["passed"] is False
     assert missing["judge_name"] is None
     assert missing["missing_deliverables"] == ["absent.srt"]
-    assert invalid == 0
 
     # A required artifact that disappears is a zero for its check, and the other checks keep their judges.
     (tmp_path / "clip.mp4").unlink()
-    reward, results, _invalid = await server._verify_binary(
+    reward, results = await server._verify_binary(
         AABriefcaseLiteVerifyRequest.model_construct(task_id="w1_t4", deliverables_dir=str(tmp_path)),
         "Create a video and captions.",
         judges,

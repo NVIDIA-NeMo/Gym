@@ -124,5 +124,5 @@ def verify_body(deliverables_dir: str) -> AABriefcaseLiteVerifyRequest:
     )
 
 
-def pairwise_result(wins: int, losses: int, ties: int = 0) -> dict[str, Any]:
-    return {"win_count_a": wins, "win_count_b": losses, "tie_count": ties, "invalid_count": 0}
+def pairwise_result(wins: int, losses: int, ties: int = 0, invalid: int = 0) -> dict[str, Any]:
+    return {"win_count_a": wins, "win_count_b": losses, "tie_count": ties, "invalid_count": invalid}

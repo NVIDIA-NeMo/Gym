@@ -39,7 +39,7 @@ from nemo_gym.core import (
     observe_failure,
 )
 from nemo_gym.server_runtime import BaseVerifyResponse, SimpleResourcesServer
-from nemo_gym.verification import JUDGE_FAILURES, is_judge_failure, reraise_judge_errors
+from nemo_gym.verification import JUDGE_FAILURES, JudgeError, is_judge_failure, reraise_judge_errors
 from resources_servers.gdpval import persisted_layout
 from resources_servers.gdpval.app import (
     GDPValResourcesServer,
@@ -230,8 +230,6 @@ class AABriefcaseLiteVerifyResponse(AABriefcaseLiteVerifyRequest, BaseVerifyResp
 
     verify_mode: Literal["binary", "pairwise", "all"]
     judge_response: Optional[Dict[str, Any]] = None
-    invalid_judge_response: bool = False
-    invalid_judge_retryable: Optional[bool] = None
     rubric_passed: int = 0
     rubric_total: int = 0
     pairwise_wins: int = 0
@@ -572,12 +570,11 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
         body: AABriefcaseLiteVerifyRequest,
         task_markdown: str,
         judges: list[ResolvedJudge],
-    ) -> tuple[float, list[dict[str, Any]], int]:
+    ) -> tuple[float, list[dict[str, Any]]]:
         checks = self._checks_for_task(body.task_id, "binary")
         section_cache: dict[tuple[tuple[str, ...], str], list[dict[str, Any]]] = {}
         stages: dict[tuple[str, ...], tuple[Path, list[str]]] = {}
         results: list[dict[str, Any]] = []
-        invalid = 0
         passed = 0
         with ExitStack() as stack:
             for check in checks:
@@ -622,21 +619,25 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
                 parsed, raw = await reraise_judge_errors(
                     self._binary_call(selected, task_markdown, check, section_cache[cache_key])
                 )
+                if parsed is None:
+                    # A check the judge never answered is no verdict on the model: scoring it as a fail would lower
+                    # the row, and leaving it out would score a partial rubric.
+                    raise JudgeError(
+                        f"judge {selected.name} gave no usable verdict for check {check['check_id']} "
+                        f"after {self.config.binary_formatting_retries + 1} attempts"
+                    )
                 result: dict[str, Any] = {
                     "check_id": check["check_id"],
                     "check_type": check["check_type"],
                     "judge_name": selected.name,
-                    "passed": parsed["passed"] if parsed else None,
-                    "reasoning": parsed["reasoning"] if parsed else "invalid judge response",
+                    "passed": parsed["passed"],
+                    "reasoning": parsed["reasoning"],
                 }
                 if self.config.persist_raw_judge_responses:
                     result["raw_response"] = raw
-                if parsed is None:
-                    invalid += 1
-                elif parsed["passed"]:
-                    passed += 1
+                passed += parsed["passed"]
                 results.append(result)
-        return passed / len(checks), results, invalid
+        return passed / len(checks), results
 
     @staticmethod
     def _pairwise_judges(resolved: list[ResolvedJudge]) -> list[Judge]:
@@ -680,7 +681,7 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
         eval_missing: list[str],
         ref_stage: Path,
         ref_missing: list[str],
-    ) -> tuple[list[dict[str, Any]], int, int, int, int]:
+    ) -> tuple[list[dict[str, Any]], int, int, int]:
         """Judge every pairwise criterion of one reference; a judge failure raises and drops the reference."""
         eval_sections: dict[str, list[dict[str, Any]]] = {}
         ref_sections: dict[str, list[dict[str, Any]]] = {}
@@ -697,7 +698,7 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
             for judge in judges
         }
         results: list[dict[str, Any]] = []
-        wins = losses = ties = invalid = 0
+        wins = losses = ties = 0
         for check in checks:
             absent = [name for name in _requested_filenames([check]) if name in eval_missing]
             if absent:
@@ -742,10 +743,15 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
                     rng=rng,
                 )
             )
+            if result["invalid_count"]:
+                # A vote the judge never cast would leave the criterion decided by the others.
+                raise JudgeError(
+                    f"{result['invalid_count']} of {self.config.pairwise_num_trials} judge answers for check "
+                    f"{check['check_id']} against reference {reference_id} were unusable"
+                )
             wins += int(result["win_count_a"])
             losses += int(result["win_count_b"])
             ties += int(result["tie_count"])
-            invalid += int(result["invalid_count"])
             results.append(
                 {
                     "check_id": check["check_id"],
@@ -755,7 +761,7 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
                     **result,
                 }
             )
-        return results, wins, losses, ties, invalid
+        return results, wins, losses, ties
 
     async def _verify_pairwise(
         self,
@@ -765,11 +771,11 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
         eval_stage: Path,
         eval_missing: list[str],
         stack: ExitStack,
-    ) -> tuple[float, list[dict[str, Any]], int, int, int, int]:
+    ) -> tuple[float, list[dict[str, Any]], int, int, int]:
         checks = self._checks_for_task(body.task_id, "pairwise")
         filenames = _requested_filenames(checks)
         results: list[dict[str, Any]] = []
-        wins = losses = ties = invalid = 0
+        wins = losses = ties = 0
         attempted = 0
         failed: dict[str, BaseException] = {}
         for reference_id, reference in self._resolved_references().items():
@@ -834,18 +840,17 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
                     {**_skipped_reference(reference_id, reference, "judge_failed"), "error": str(error)[:500]}
                 )
                 continue
-            matchup_results, matchup_wins, matchup_losses, matchup_ties, matchup_invalid = matchup
+            matchup_results, matchup_wins, matchup_losses, matchup_ties = matchup
             results.extend(matchup_results)
             wins += matchup_wins
             losses += matchup_losses
             ties += matchup_ties
-            invalid += matchup_invalid
         if attempted and len(failed) == attempted:
             # Nothing was judged, so the task has no pairwise score; the last failure masks the row.
             raise list(failed.values())[-1]
         judged = wins + losses + ties
         reward = (wins + 0.5 * ties) / judged if judged else 0.0
-        return reward, results, wins, losses, ties, invalid
+        return reward, results, wins, losses, ties
 
     async def web_search(self, body: Any) -> str:
         raise HTTPException(status_code=404, detail="AA-Briefcase-Lite offers no web tools")
@@ -929,13 +934,12 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
 
             binary_reward = 0.0
             binary_results: list[dict[str, Any]] = []
-            binary_invalid = 0
             if self.config.reward_mode in {"binary", "all"}:
-                binary_reward, binary_results, binary_invalid = await self._verify_binary(body, task_markdown, judges)
+                binary_reward, binary_results = await self._verify_binary(body, task_markdown, judges)
 
             pairwise_reward = 0.0
             pairwise_results: list[dict[str, Any]] = []
-            wins = losses = ties = pairwise_invalid = 0
+            wins = losses = ties = 0
             if self.config.reward_mode in {"pairwise", "all"}:
                 eval_stage, missing = _stage_submission(
                     body.deliverables_dir, filenames, stack, carry_renders=self._carry_renders
@@ -949,7 +953,7 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
                         modalities=modalities,
                         label="submitted artifact",
                     )
-                pairwise_reward, pairwise_results, wins, losses, ties, pairwise_invalid = await self._verify_pairwise(
+                pairwise_reward, pairwise_results, wins, losses, ties = await self._verify_pairwise(
                     body,
                     task_markdown,
                     resolved,
@@ -958,7 +962,6 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
                     stack,
                 )
 
-        invalid = binary_invalid + pairwise_invalid
         if self.config.reward_mode == "binary":
             reward = binary_reward
         elif self.config.reward_mode == "pairwise":
@@ -989,8 +992,6 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
             reward=reward,
             verify_mode=self.config.reward_mode,
             judge_response=judge_response,
-            invalid_judge_response=bool(invalid),
-            invalid_judge_retryable=True if invalid else None,
             rubric_passed=sum(1 for item in binary_results if item.get("passed") is True),
             rubric_total=len(binary_results),
             pairwise_wins=wins,
@@ -1012,22 +1013,17 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
         return self._aa_dataset_root / "submissions" / reference_id / task_id / "submission"
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
-        valid = [row for row in body.verify_responses if not row.get("invalid_judge_response")]
-        base = (
-            await SimpleResourcesServer.aggregate_metrics(self, AggregateMetricsRequest(verify_responses=valid))
-            if valid
-            else AggregateMetrics()
-        )
-        passed = sum(int(row.get("rubric_passed", 0)) for row in valid)
-        rubric_total = sum(int(row.get("rubric_total", 0)) for row in valid)
-        wins = sum(int(row.get("pairwise_wins", 0)) for row in valid)
-        losses = sum(int(row.get("pairwise_losses", 0)) for row in valid)
-        ties = sum(int(row.get("pairwise_ties", 0)) for row in valid)
-        skipped_references = sum(int(row.get("pairwise_references_skipped", 0)) for row in valid)
+        rows = body.verify_responses
+        base = await SimpleResourcesServer.aggregate_metrics(self, body) if rows else AggregateMetrics()
+        passed = sum(int(row.get("rubric_passed", 0)) for row in rows)
+        rubric_total = sum(int(row.get("rubric_total", 0)) for row in rows)
+        wins = sum(int(row.get("pairwise_wins", 0)) for row in rows)
+        losses = sum(int(row.get("pairwise_losses", 0)) for row in rows)
+        ties = sum(int(row.get("pairwise_ties", 0)) for row in rows)
+        skipped_references = sum(int(row.get("pairwise_references_skipped", 0)) for row in rows)
         judged = wins + losses + ties
         extra: dict[str, Any] = {
-            "aa_lite/rows_total": len(body.verify_responses),
-            "aa_lite/rows_valid": len(valid),
+            "aa_lite/rows_total": len(rows),
             "aa_lite/binary_passed": passed,
             "aa_lite/binary_total": rubric_total,
             "aa_lite/binary_pass_rate": passed / rubric_total if rubric_total else 0.0,

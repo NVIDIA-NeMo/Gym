@@ -12,6 +12,7 @@ import httpx
 import pytest
 from openai import APIStatusError, APITimeoutError
 
+from nemo_gym.verification import JudgeError
 from resources_servers.aa_briefcase_lite.app import (
     AABriefcaseLiteResourcesServer,
     AABriefcaseLiteResourcesServerConfig,
@@ -274,16 +275,19 @@ async def test_binary_empty_answers_retry_only_the_affected_check(monkeypatch, t
         "resources_servers.aa_briefcase_lite.app._BinaryJudgeHttpClient",
         lambda **kwargs: _BinaryJudgeHttpClient(transport=httpx.MockTransport(respond), **kwargs),
     )
-    reward, results, invalid = await server._verify_binary(
+    verify = server._verify_binary(
         AABriefcaseLiteVerifyRequest.model_construct(task_id="task", deliverables_dir=str(tmp_path)),
         "Task",
         [judge],
     )
-
-    assert reward == 0.5
-    assert results[0]["passed"] is True
-    assert results[1]["passed"] is (None if empty_answers == 3 else False)
-    assert invalid == (1 if empty_answers == 3 else 0)
+    if empty_answers == 3:
+        # A check the judge never answered is a judge failure, not a failed check.
+        with pytest.raises(JudgeError, match="second check.*after 3 attempts"):
+            await verify
+    else:
+        reward, results = await verify
+        assert reward == 0.5
+        assert [item["passed"] for item in results] == [True, False]
     assert len(requests) == 1 + min(empty_answers + 1, 3)
     assert sum("first check" in str(request["messages"]) for request in requests) == 1
     assert all(request == requests[1] for request in requests[1:])

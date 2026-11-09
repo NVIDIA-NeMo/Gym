@@ -44,6 +44,57 @@ async def test_a_failed_binary_judge_call_masks_the_row_and_keeps_the_deliverabl
     assert (tmp_path / "submitted" / "report.md").read_text() == "the report"
 
 
+async def test_an_unusable_binary_verdict_masks_the_row_as_judge_failed(
+    make_server, tmp_path: Path, monkeypatch
+) -> None:
+    server = make_server(reward_mode="binary")
+    # The first check passes; the judge never gives a usable answer to the second.
+    monkeypatch.setattr(server, "_binary_call", AsyncMock(side_effect=[PASSED, (None, "")]))
+
+    row = await _verify(server, tmp_path, {"report.md": "the report"})
+
+    assert row["mask_sample"] is True
+    assert row["failure_kind"] == "judge_failed"
+    assert "no usable verdict for check a2" in row["failure_reason"]
+    assert row["reward"] == 0.0
+    assert (tmp_path / "submitted" / "report.md").read_text() == "the report"
+
+
+async def test_an_unusable_pairwise_answer_drops_its_reference_like_a_failed_call(
+    make_server, tmp_path: Path, monkeypatch
+) -> None:
+    server = make_server(reward_mode="pairwise")
+
+    def run_trials(**kwargs):
+        invalid = 1 if "ref_b report" in str(kwargs["submission_b"]) else 0
+        return pairwise_result(wins=2 - invalid, losses=0, invalid=invalid)
+
+    monkeypatch.setattr("resources_servers.aa_briefcase_lite.app.run_trials", run_trials)
+
+    row = await _verify(server, tmp_path, {"report.md": "x"})
+
+    assert not row.get("mask_sample")
+    assert row["pairwise_wins"] == 2
+    skipped = [r for r in row["judge_response"]["pairwise_results"] if r.get("skipped_reason") == "judge_failed"]
+    assert [r["reference_id"] for r in skipped] == ["ref_b"]
+
+
+async def test_a_task_whose_every_reference_gave_unusable_answers_is_a_judge_failure(
+    make_server, tmp_path: Path, monkeypatch
+) -> None:
+    server = make_server(reward_mode="pairwise")
+    monkeypatch.setattr(
+        "resources_servers.aa_briefcase_lite.app.run_trials",
+        lambda **kwargs: pairwise_result(wins=1, losses=0, invalid=1),
+    )
+
+    row = await _verify(server, tmp_path, {"report.md": "x"})
+
+    assert row["mask_sample"] is True
+    assert row["failure_kind"] == "judge_failed"
+    assert row["reward"] == 0.0
+
+
 async def test_one_failed_reference_does_not_fail_the_task(make_server, tmp_path: Path, monkeypatch) -> None:
     server = make_server(reward_mode="pairwise")
 

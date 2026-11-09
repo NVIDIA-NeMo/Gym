@@ -78,10 +78,13 @@ Report `aa_lite/binary_pass_rate` and `aa_lite/pairwise_win_rate` separately,
 alongside their counts and Gym's expected, scored, and missing rollout coverage.
 Failed rollouts are recorded in the failures sidecar and may never reach the
 resource aggregate, so `aa_lite/rows_total` alone does not establish completeness.
-Invalid judge rows are excluded from aggregate scores. In `all` mode, an invalid
-judgment in either path excludes the whole task from both aggregate scores.
-The pairwise rate counts a tie
-as half a win. In `all` mode, each task's scalar `reward` is the convenience mean
+A judge that gives no usable answer to a check after the format retries is a judge
+failure: the task is masked as `judge_failed` and `gym eval reverify --judge-failed-only`
+judges it again, so the score never counts a check the judge did not answer. A failed
+binary check masks the task. A pairwise reference whose judging failed, or that has no
+submission for the task, is skipped and counted in `aa_lite/pairwise_references_skipped`;
+the task is masked only when every reference failed (`judge_failed`) or none could be
+judged (`verifier_error`). The pairwise rate counts a tie as half a win. In `all` mode, each task's scalar `reward` is the convenience mean
 of its binary and pairwise scores; it is not an Elo calculation.
 
 AA-Briefcase-Lite is demonstrative and does not produce official AA-Briefcase Elo.
