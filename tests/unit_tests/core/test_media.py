@@ -119,3 +119,29 @@ def test_split_accepts_text_parts_and_reads_a_missing_text_as_empty() -> None:
 def test_split_rejects_content_it_cannot_pass_on(part: dict, message: str) -> None:
     with pytest.raises(UnsupportedContentError, match=message):
         split_text_and_media([{"type": "input_text", "text": "look"}, part])
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"GIF87a\x01\x00",
+        # A RIFF size of 10 has the byte \n, which a signature without re.DOTALL would not match.
+        b"RIFF\x0a\x00\x00\x00WEBPVP8 ",
+    ],
+)
+def test_every_variant_of_a_signature_is_accepted(data: bytes) -> None:
+    assert MediaFile.from_data_uri(f"data:image/png;base64,{base64.b64encode(data).decode()}").data == data
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"RIFF\x10\x00\x00\x00WAVEfmt ",
+        b"\xff\xd8\x00\x00",
+        b"GIF8\x00a",
+        b"padding\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR",
+    ],
+)
+def test_signatures_must_match_whole_and_at_the_start(data: bytes) -> None:
+    with pytest.raises(UnsupportedContentError, match="no data of a supported media type"):
+        MediaFile.from_data_uri(f"data:image/png;base64,{base64.b64encode(data).decode()}")

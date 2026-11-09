@@ -26,7 +26,7 @@ from nemo_gym.core.media import MediaFile
 from nemo_gym.sandbox.api import AsyncSandbox
 
 
-LOG = logging.getLogger(__name__)
+LOGGER = logging.getLogger(__name__)
 
 
 # Parallelism caps for CPU-limited sandboxes, each set by cpu_cap_env() to the
@@ -64,9 +64,16 @@ CPU_CAP_ENV_VARS: tuple[str, ...] = (
 
 async def upload_bytes(sandbox: AsyncSandbox, *, path: str, data: bytes) -> None:
     """Upload bytes unchanged through file transfer without shell interpolation."""
+    await _upload(sandbox, path=path, data=data, readable_by_all=False)
+
+
+async def _upload(sandbox: AsyncSandbox, *, path: str, data: bytes, readable_by_all: bool) -> None:
     with tempfile.TemporaryDirectory(prefix="sandbox-upload-") as directory:
         source = Path(directory) / "payload"
         source.write_bytes(data)
+        if readable_by_all:
+            # Providers that copy the file keep its mode, which the host's umask may have made private.
+            source.chmod(0o644)
         await sandbox.upload(source, path)
 
 
@@ -93,9 +100,12 @@ async def read_text(sandbox: AsyncSandbox, *, path: str) -> str:
 
 
 # Prompt media live in one directory per sandbox, named by content, so every rollout of a task gets the same paths.
-# Sessions never delete these files, because a session sharing a borrowed sandbox may be reading them; they are bounded
-# by the number of distinct media files, and an owned sandbox is destroyed with them at close.
+# Sessions never delete these files, because a session sharing a borrowed sandbox may be reading them. A sandbox that
+# isolates its /tmp drops them when it is destroyed; the local provider, and Apptainer without --contain, share the
+# host's /tmp, where they stay until the host clears it.
 MEDIA_DIRECTORY = "/tmp/nemo-gym-media"
+# Bounds removing partial uploads after a failure, so a cancelled caller is not held by an unresponsive sandbox.
+_CLEANUP_TIMEOUT_S = 30
 
 
 def media_path(file: MediaFile) -> str:
@@ -108,42 +118,58 @@ async def stage_media(sandbox: AsyncSandbox, files: Iterable[MediaFile]) -> list
 
     Harness CLIs read media from files, so an agent decodes prompt media with ``nemo_gym.core.split_text_and_media``,
     stages it here and passes the paths to the harness.
-    Each file is uploaded under a unique name and then renamed onto its path in the same directory. The rename is
-    atomic, so a session sharing the sandbox never reads a partly written file, and replacing an existing file swaps
-    in identical bytes.
+    The sandbox's default user creates the media directory, so it can rename files there even when uploads run as
+    another user. Each file is uploaded under a unique name, readable by every user, and then renamed onto its path in
+    the same directory. The rename is atomic, so a session sharing the sandbox never reads a partly written file, and
+    replacing an existing file swaps in identical bytes. When staging fails, the partial uploads are removed.
+
+    Raises:
+        SandboxUnavailableError: The provider could not run a staging command, for example because it timed out.
+        SandboxTransferError: A staging command failed inside the sandbox, for example on a permission error.
     """
     media = list(files)
     paths = [media_path(file) for file in media]
-    moves: dict[str, str] = {}
+    if not media:
+        return paths
+    await _run_media_command(sandbox, f"mkdir -p -- {quote(MEDIA_DIRECTORY)}", action="create the media directory")
+    partials: dict[str, str] = {}
     try:
         for path, file in zip(paths, media):
-            if path not in moves:
-                moves[path] = f"{MEDIA_DIRECTORY}/.{uuid.uuid4().hex}.partial"
-                await upload_bytes(sandbox, path=moves[path], data=file.data)
+            if path not in partials:
+                partials[path] = f"{MEDIA_DIRECTORY}/.{uuid.uuid4().hex}.partial"
+                await _upload(sandbox, path=partials[path], data=file.data, readable_by_all=True)
+        # -T fails on a directory at the target path, which mv would otherwise move the file into.
+        renames = " && ".join(f"mv -fT -- {quote(partial)} {quote(path)}" for path, partial in partials.items())
+        await _run_media_command(sandbox, renames, action="rename the staged media files")
     except BaseException:
-        await _remove_partial_media(sandbox, moves.values())
+        await _remove_partial_media(sandbox, partials.values())
         raise
-    if not moves:
-        return paths
-    renames = " && ".join(f"mv -f -- {quote(partial)} {quote(path)}" for path, partial in moves.items())
-    partials = " ".join(quote(partial) for partial in moves.values())
-    result = await sandbox.exec(f"{{ {renames}; }} || {{ rm -f -- {partials}; exit 1; }}", cwd="/")
-    if result.error_type == "timeout":
-        raise TimeoutError("Staging media files in the sandbox timed out")
-    if result.return_code != 0 or result.error_type:
-        raise RuntimeError(f"Cannot stage media files in the sandbox: {result.stderr}")
     return paths
 
 
+async def _run_media_command(sandbox: AsyncSandbox, command: str, *, action: str) -> None:
+    # Imported here so that importing nemo_gym.sandbox, which loads this module eagerly, does not load transfer.
+    from nemo_gym.sandbox.transfer import SandboxTransferError, SandboxUnavailableError
+
+    result = await sandbox.exec(command, cwd="/")
+    if result.error_type:
+        raise SandboxUnavailableError(
+            f"The sandbox could not {action}: {result.error_type}: {result.stderr or result.stdout or ''}"
+        )
+    if result.return_code:
+        raise SandboxTransferError(f"Cannot {action} in {MEDIA_DIRECTORY}: {result.stderr or result.stdout or ''}")
+
+
 async def _remove_partial_media(sandbox: AsyncSandbox, partials: Iterable[str]) -> None:
-    """Remove partial uploads after a failed upload, so a borrowed sandbox does not keep them."""
-    arguments = " ".join(quote(partial) for partial in partials)
-    if not arguments:
-        return
+    """Remove partial uploads after a failure, so a borrowed sandbox does not keep them."""
+    command = "rm -f -- " + " ".join(quote(partial) for partial in partials)
     try:
-        await sandbox.exec(f"rm -f -- {arguments}", cwd="/")
+        result = await sandbox.exec(command, cwd="/", timeout_s=_CLEANUP_TIMEOUT_S)
     except Exception:
-        LOG.warning("Cannot remove partial media uploads from the sandbox", exc_info=True)
+        LOGGER.warning("Cannot remove partial media uploads from the sandbox", exc_info=True)
+        return
+    if result.error_type or result.return_code:
+        LOGGER.warning("Cannot remove partial media uploads from the sandbox: %s", result.stderr or result.error_type)
 
 
 def cpu_cap_env(cpu: float | int | None) -> dict[str, str]:
