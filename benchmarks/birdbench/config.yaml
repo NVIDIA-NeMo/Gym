@@ -31,11 +31,15 @@ birdbench_bird_sql_simple_agent:
           jsonl_fpath: benchmarks/birdbench/data/birdbench_benchmark.jsonl
           prompt_config: benchmarks/birdbench/prompts/default.yaml
           prepare_script: benchmarks/birdbench/prepare.py
+          prepare_project: benchmarks/birdbench
           num_repeats: 16
 
 birdbench_bird_sql_environment_server:
   _inherit_from: bird_sql_environment_server
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: birdbench_bird_sql_resources_server
       agent_server:
         name: birdbench_bird_sql_simple_agent

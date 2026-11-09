@@ -5,7 +5,7 @@ from copy import deepcopy
 
 import pytest
 
-from resources_servers.terminal_bench_4.compose_config import _bytes, resolve_compose
+from resources_servers.terminal_bench_4.compose_config import _bytes, prebuilt_compose, resolve_compose
 
 
 def image_record(**config):
@@ -90,3 +90,69 @@ def test_memory_units():
     assert _bytes("512") == 512
     with pytest.raises(ValueError, match="memory size"):
         _bytes("unlimited")
+
+
+def test_prebuilt_compose_replaces_builds_and_applies_harbor_variables():
+    source = {
+        "services": {
+            "main": {"build": {"context": "."}, "networks": ["default", "task"], "command": ["sleep", "infinity"]},
+            "evaluator": {
+                "build": {"context": "${CONTEXT_DIR}/evaluator"},
+                "pull_policy": "build",
+                "cpus": "${CPUS:-4}",
+                "mem_limit": "${MEMORY-4096M}",
+                "read_only": True,
+                "cap_drop": ["ALL"],
+                "cap_add": ["KILL"],
+                "networks": ["task"],
+                "healthcheck": {"test": ["CMD-SHELL", "test $$HOME = /root"]},
+            },
+            "cache": {"image": "redis:7-alpine", "environment": {"LIMIT": "${UNSET:-64}", "EMPTY": "${BLANK-}"}},
+        },
+        "networks": {"default": {}, "task": {"internal": True}},
+    }
+    original = deepcopy(source)
+    variables = {"CPUS": "2", "MEMORY": "8192M", "BLANK": ""}
+    ignored = ["read_only", "cap_drop", "networks"]
+    result = prebuilt_compose(source, {"evaluator": "registry/evaluator@sha256:1"}, variables, ignored)
+    assert source == original
+    assert "networks" not in result
+    main, evaluator, cache = (result["services"][name] for name in ("main", "evaluator", "cache"))
+    # main runs the task image, which resolve_compose supplies.
+    assert main == {"command": ["sleep", "infinity"]}
+    assert evaluator == {
+        "image": "registry/evaluator@sha256:1",
+        "cpus": "2",
+        "mem_limit": "8192M",
+        "cap_add": ["KILL"],
+        "healthcheck": {"test": ["CMD-SHELL", "test $$HOME = /root"]},
+    }
+    assert cache["environment"] == {"LIMIT": "64", "EMPTY": ""}
+    # Without the task's resources, Compose falls back to the inline defaults.
+    defaults = prebuilt_compose(source, {"evaluator": "image"}, {})["services"]["evaluator"]
+    assert (defaults["cpus"], defaults["mem_limit"], defaults["networks"]) == ("4", "4096M", ["task"])
+
+
+def test_prebuilt_compose_requires_images_and_leaves_unknown_variables_unresolved():
+    with pytest.raises(ValueError, match="'peer' builds from a Dockerfile"):
+        prebuilt_compose({"services": {"peer": {"build": "."}}}, {}, {})
+    document = prebuilt_compose({"services": {"main": {"command": "echo ${UNKNOWN}"}}}, {}, {"CPUS": "1"})
+    with pytest.raises(ValueError, match="substitutions"):
+        resolve_compose(document, "main", {"main": image_record()})
+
+
+def test_records_of_dockerfile_builds_are_keyed_by_task_and_service():
+    records = {
+        "task/main": {"os": "linux", "architecture": "amd64", "config": {"Cmd": ["python3"], "WorkingDir": "/app"}},
+        "task/peer": {"os": "linux", "architecture": "amd64", "config": {"Cmd": ["serve"], "User": "app"}},
+        "pinned": image_record(Cmd=["published"]),
+    }
+    source = {"services": {"peer": {"image": "registry/peer@sha256:2"}, "other": {"image": "pinned"}}}
+    result = resolve_compose(source, "registry/main@sha256:1", records, task="task")
+    main, peer, other = (result["services"][name] for name in ("main", "peer", "other"))
+    assert (main["image"], main["working_dir"]) == ("registry/main@sha256:1", "/app")
+    assert (peer["image"], peer["command"], peer["user"]) == ("registry/peer@sha256:2", ["serve"], "app")
+    # A record for the exact image keeps its digest-pinned reference.
+    assert (other["image"], other["command"]) == ("repo@sha256:digest", ["published"])
+    with pytest.raises(ValueError, match="no recorded OCI"):
+        resolve_compose(source, "registry/main@sha256:1", records)

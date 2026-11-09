@@ -42,30 +42,38 @@ from step_utils import (
     process_problem_steps,
 )
 
-from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest, BaseRunRequest
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME
-from nemo_gym.openai_utils import (
+from nemo_gym.agents.utils.verify_call import masked_verify_failure, verify_with_transport_retry
+from nemo_gym.client import raise_for_status
+from nemo_gym.config import (
+    ROLLOUT_INDEX_KEY_NAME,
+    AggregateMetrics,
+    AggregateMetricsRequest,
+    ModelServerRef,
+    ResourcesServerRef,
+)
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseUsage,
+    NgFailureEvent,
     accumulate_response_usage,
 )
-from nemo_gym.prompt import PromptConfig, load_prompt_config
-from nemo_gym.rollout_observability import (
+from nemo_gym.data import PromptConfig, load_prompt_config
+from nemo_gym.metrics import Stat
+from nemo_gym.server_runtime import BaseRunRequest
+from nemo_gym.trajectory import (
     AgentInvocation,
     ModelCallRef,
     ObservationGap,
     TrajectoryRecord,
     TrajectoryTurn,
 )
-from nemo_gym.server_utils import raise_for_status
 
 
 LOG = logging.getLogger(__name__)
@@ -314,9 +322,20 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
                     )
                 )
             step_record["status"] = "generated"
+            # The top-level response retains only the final step. Preserve stop
+            # evidence for every generation, even when model-call capture is off.
+            step_record["response_id"] = model_response.id
+            step_record["response_status"] = last_response_json.get("status")
+            step_record["incomplete_details"] = last_response_json.get("incomplete_details")
+            step_record["error"] = last_response_json.get("error")
             step_record["usage"] = model_response.usage.model_dump() if model_response.usage is not None else None
             usage_complete = usage_complete and model_response.usage is not None
             usage = accumulate_response_usage(usage, model_response.usage)
+            if (model_response.metadata or {}).get("nemo_gym_context_window_exceeded") == "true":
+                step_record["status"] = "context_window_exceeded"
+                out_of_context = True
+                solutions[f"{body.problem_id}.{cur_step + 1}"] = OUT_OF_CONTEXT
+                continue
             generation = model_response.output_text
             extracted = extract_python_script(generation)
             previous_llm_code[cur_step] = extracted
@@ -330,14 +349,24 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
         verify_request_data["response"]["usage"] = usage.model_dump() if usage_complete else None
         verify_request_data["token_usage_version"] = TOKEN_USAGE_VERSION
         verify_request_data["step_usage"] = step_usage
-        verify_response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/verify",
-            json=verify_request_data,
-            cookies=cookies,
-        )
-        await raise_for_status(verify_response)
-        result = await verify_response.json()
+
+        async def verify() -> dict[str, Any]:
+            verify_response = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path="/verify",
+                json=verify_request_data,
+                cookies=cookies,
+            )
+            await raise_for_status(verify_response)
+            return await verify_response.json()
+
+        try:
+            result = await verify_with_transport_retry(
+                verify, server_client=self.server_client, server_name=self.config.resources_server.name
+            )
+        except NgFailureEvent as failure:
+            # The grader failed, not the model: keep the answer and mask the row with the typed failure.
+            result = masked_verify_failure(verify_request_data, failure)
         if trajectory is not None:
             # Prefilled/skipped subproblems are not model decisions.
             if trajectory.turns:
@@ -363,6 +392,8 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
                 }
             )
         metrics = await super().aggregate_metrics(body)
+        # Custom repeat estimates are added after the shared headline selection.
+        metrics.key_metrics.update(self.get_key_metrics(metrics.agent_metrics))
         # NeMo Evaluator requires numeric scores. Omit unavailable values rather
         # than exporting nulls or inventing zero consumption.
         metrics.agent_metrics = {k: v for k, v in metrics.agent_metrics.items() if v is not None}
@@ -387,6 +418,12 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
             for k, v in agent_metrics.items()
             if k.startswith("mean/")
             or k.startswith("subtask_accuracy")
+            or k
+            in {
+                f"{stat.across_repeats_prefix}{metric}"
+                for stat in (Stat.MEAN, Stat.CI_LOW_95, Stat.CI_HIGH_95)
+                for metric in ("subtask_accuracy", "mean/problem_accuracy")
+            }
             or k in {"generation_coverage", "token_usage_complete"}
         }
 

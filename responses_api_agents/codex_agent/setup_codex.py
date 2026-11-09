@@ -59,6 +59,14 @@ def _install_node_locally() -> Path:
     return _LOCAL_PREFIX / "bin"
 
 
+def ensure_node() -> None:
+    """Ensure ``node`` is on PATH, installing a local Linux Node.js if necessary."""
+    if shutil.which("node"):
+        return
+    bin_dir = _install_node_locally()
+    os.environ["PATH"] = str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
+
+
 def ensure_codex(version: str | None = None) -> None:
     """Ensure ``codex`` is on PATH, installing it if necessary."""
     if shutil.which("codex"):
