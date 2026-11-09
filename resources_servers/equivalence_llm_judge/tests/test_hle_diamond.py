@@ -771,13 +771,13 @@ class TestReferencePreset:
 
 
 README = HLE_DIAMOND_DIR / "README.md"
-OVERRIDE_FILES = ("judge_openai.yaml", "sandbox_docker_local.yaml")
+OVERRIDE_FILES = ("judge_openai.yaml", "sandbox_docker_local.yaml", "sandbox_docker_local_pi_legacy_agent.yaml")
 CONFIG_PATHS_PREFIX = "+config_paths=["
 
 
 def _documented_command_lines() -> list[str]:
     """Every documented `gym eval run` line (full commands and `...` fragments) in the README and in the
-    two override headers, with backslash continuations joined and comment markers stripped."""
+    override headers, with backslash continuations joined and comment markers stripped."""
     lines: list[str] = []
     for path in (README, *(HLE_DIAMOND_DIR / name for name in OVERRIDE_FILES)):
         text = re.sub(r"\\\n#?[ \t]*", " ", path.read_text(encoding="utf-8"))
@@ -915,7 +915,7 @@ class TestDocumentedCommands:
             assert "--config " not in line, line  # merges before the preset: never for these overrides
             if any(name in line for name in OVERRIDE_FILES):
                 assert f"'{CONFIG_PATHS_PREFIX}" in line, line
-            if "sandbox_docker_local.yaml" in line:
+            if "sandbox_docker_local" in line:
                 assert "judge_openai.yaml" in line, line  # otherwise a copied command self-judges
 
     def test_full_set_servers_compose_the_judge_override_after_the_preset(self, monkeypatch):

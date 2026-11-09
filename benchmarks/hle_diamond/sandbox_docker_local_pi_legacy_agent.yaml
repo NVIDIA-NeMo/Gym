@@ -5,7 +5,8 @@
 # sandbox_docker_local.yaml overrides the pi_agent of the Pi session presets; composed with a legacy Pi preset, that
 # block lands beside pi_sandboxed_agent and fails validation. This file pulls in sandbox_docker_local.yaml, drops its
 # pi_agent block and applies the same local Docker settings to pi_sandboxed_agent. Read sandbox_docker_local.yaml
-# for what the override changes and how every result must be labelled. Use it only with the two legacy Pi presets:
+# for what the override changes and how every result must be labelled. Use it only with the two legacy Pi presets;
+# with a Pi session preset it removes that preset's agent and validation fails with an unset resources_server.name.
 #
 #   export OPENSANDBOX_API_KEY=unused-local-docker OPENSANDBOX_DOMAIN=unused.invalid
 #   export PI_SANDBOX_IMAGE=gym-pi-science:local
