@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import ClassVar
 
 from fastapi import Body, HTTPException, Request
 
@@ -69,6 +70,9 @@ class NOOAAgent(SimpleResponsesAPIAgent):
     """Run one NOOA activation per Environment Server-owned episode."""
 
     config: NOOAAgentConfig
+    # Sandboxed mode runs NOOA inside the task sandbox, which calls the model server from there. Embedded mode
+    # calls it from this host, which reaches the advertised node address as well.
+    calls_model_from_sandbox: ClassVar[bool] = True
 
     def classify_outcome(self, native_result: Mapping[str, object]) -> AgentOutcome:
         """Report a trusted model rejection; the environment owns grading and retry policy."""
