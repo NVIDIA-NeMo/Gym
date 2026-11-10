@@ -2293,6 +2293,35 @@ async def test_native_model_error_is_reported_with_classification(setup, status)
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
 
 
+@pytest.mark.parametrize("answered_earlier", [False, True])
+async def test_rejected_request_is_not_inferred_after_an_earlier_activation_answered(setup, answered_earlier):
+    """A continued session's export omits earlier activations' messages, so the session itself must remember that the
+    model already answered; otherwise a later 400 on the first model call of a new activation reads as an initial
+    rejection and ends a run that already produced an answer."""
+    agent, sandbox = setup
+    export = json.loads(sandbox.events)
+    assistant = export["messages"][-1]["info"]
+    assistant.pop("finish")
+    assistant["error"] = {"name": "APIError", "data": {"statusCode": 400, "message": "provider error"}}
+    sandbox.events = json.dumps(export)
+    sandbox.result["return_code"] = 1
+    request = Request(
+        {"type": "http", "headers": [], "session": {}, "path_params": {"rollout_id": "opencode-smoke-a2"}}
+    )
+    seeded = await agent.seed_agent_session(request, seed())
+    state = agent._require_agent_session(seeded.agent_session_id)
+    state.model_answered = answered_earlier
+    task = asyncio.create_task(agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task")))
+    await asyncio.wait_for(sandbox.started.wait(), 2)
+    response = await task
+    assert json.loads(response.metadata["ng_agent_outcome"]) == (
+        {"failure_kind": "model_request_error", "status_code": 400}
+        if answered_earlier
+        else {"failure_kind": "model_request_rejected"}
+    )
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(seeded.agent_session_id)))
+
+
 @pytest.mark.parametrize("message", [None, "", {"responseBody": "private-body"}])
 async def test_native_model_error_without_message_uses_safe_fallback(setup, message):
     agent, sandbox = setup

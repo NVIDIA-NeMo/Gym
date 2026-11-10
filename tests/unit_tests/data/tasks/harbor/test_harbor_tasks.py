@@ -2505,6 +2505,23 @@ class TestCli:
         assert generated["max_output_tokens"] == 16384
         assert not any(token.lstrip("+").startswith("responses_create_params.") for token in tokens)
 
+    def test_max_output_tokens_is_a_command_line_override_of_the_generated_agent(self, tmp_path):
+        """A config overlay loads after the generated YAML, so the limit must also reach the command line, which is
+        merged last; otherwise an overlay's `max_output_tokens` would beat the flag."""
+        agent = resolve_agent("opencode_agent")
+        _, tokens = build_run(
+            self._prepared(tmp_path),
+            agent,
+            sandbox="docker",
+            overrides=["+responses_create_params.max_output_tokens=32768"],
+        )
+        assert "++harbor_ds_agent.responses_api_agents.opencode_agent.max_output_tokens=32768" in tokens
+
+    def test_no_output_limit_override_without_the_flag(self, tmp_path):
+        agent = resolve_agent("opencode_agent")
+        _, tokens = build_run(self._prepared(tmp_path), agent, sandbox="docker", overrides=[])
+        assert not any("max_output_tokens" in token for token in tokens)
+
     @pytest.mark.parametrize(
         ("agent_name", "value", "message"),
         [

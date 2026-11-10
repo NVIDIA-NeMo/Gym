@@ -1956,7 +1956,14 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             usage=usage,
             error_message=reported_message,
         )
-        answered = any(not message.get("error") and message.get("finish") for message in assistants[:-1])
+
+        def answered_turn(message: Mapping[str, Any]) -> bool:
+            return bool(not message.get("error") and message.get("finish"))
+
+        # The export holds only this activation's messages, so earlier activations' answers are kept on the session.
+        # Imported prefix messages are not in the export and never count as answers.
+        answered = state.model_answered or any(answered_turn(message) for message in assistants[:-1])
+        state.model_answered = state.model_answered or any(answered_turn(message) for message in assistants)
         return self.report_outcome(response, {**native_result, _ANSWERED_BEFORE_KEY: answered})
 
 

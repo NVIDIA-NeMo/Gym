@@ -81,6 +81,7 @@ from nemo_gym.data.tasks.harbor.manifest import (
     report_rewrite,
 )
 from nemo_gym.data.tasks.harbor.materialize import (
+    agent_instance,
     run_config,
     write_rows,
 )
@@ -1087,6 +1088,13 @@ def build_run(
         # The harness got the limit above; the collector refuses request overrides for task rows.
         and token.lstrip("+").partition("=")[0] != MAX_OUTPUT_TOKENS_OVERRIDE
     ]
+    if output_limit is not None:
+        # A config-file overlay loads after the generated YAML above and would replace the limit there; a command-line
+        # override is merged last, so the requested limit wins over an overlay's value.
+        tokens.append(
+            f"++{agent_instance(prepared.taskset)}.responses_api_agents.{agent.impl_name}."
+            f"{HARNESS_OUTPUT_LIMIT_FIELD}={output_limit}"
+        )
     if not _has_override(tokens, "split"):
         tokens.append(f"+split={split}")
     return config_path, tokens

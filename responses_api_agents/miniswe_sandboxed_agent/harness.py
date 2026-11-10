@@ -182,11 +182,15 @@ class MiniSWEHarness:
         self.observability_enabled = observability_enabled
         self.extra_instruction = ""
         self.result = None
+        # Set once the runtime is installed. After that a missing interpreter means the agent removed it, not that
+        # setup stopped early, so cleanup must fail rather than skip the process scan.
+        self._runtime_installed = False
         self.remote_directory = f"/tmp/nemo-gym-miniswe-{uuid4().hex}"
 
     async def setup(self) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
         await self._install_miniswe()
+        self._runtime_installed = True
         result = await self.sandbox.exec("command -v setsid", user=self.context.user, cwd=self.context.workdir)
         if result.return_code:
             raise RuntimeError("mini-SWE requires setsid for process cleanup")
@@ -310,10 +314,13 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
 """.replace("MARKER", repr(f"MSWEA_GLOBAL_CONFIG_DIR={self.remote_directory}/config".encode()))
         registry = f"{self.remote_directory}/processes"
         python = quote(self.remote_directory + "/venv/bin/python")
-        result = await self.sandbox.exec(
+        scan = f"{python} -c {quote(script)}"
+        if not self._runtime_installed:
             # Setup that stopped before the venv was installed has started no mini-SWE process to find, and a missing
             # interpreter would only replace setup's own error with this one.
-            f"{{ [ ! -x {python} ] || {python} -c {quote(script)}; }} && "
+            scan = f"{{ [ ! -x {python} ] || {scan}; }}"
+        result = await self.sandbox.exec(
+            f"{scan} && "
             f"if [ -f {quote(registry)} ]; then "
             f"while read pid; do kill -TERM -- -$pid 2>/dev/null || true; done < {quote(registry)}; "
             "sleep 0.2; "
