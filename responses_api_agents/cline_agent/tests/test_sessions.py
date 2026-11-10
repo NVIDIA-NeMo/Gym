@@ -453,7 +453,8 @@ def test_restricted_seed_refuses_missing_mkdir_before_trying_to_create_workdir(m
     instance = agent(sandbox_provider="sandbox", network_access="model_only", sandbox_config={"workdir": str(workdir)})
     reason = check_agent_seed_rejected(instance.setup_webserver(), seed(borrowed=False))
     assert "requires mkdir" in reason and "preinstall Bash and coreutils" in reason
-    remote.exec.assert_awaited_once()
+    # Owned-session cleanup may execute after the prerequisite probe refuses setup.
+    assert remote.exec.await_args_list[0].args[0].startswith(adapter._OFFLINE_PREREQUISITES)
     remote.upload.assert_not_awaited()
     remote.stop.assert_awaited_once()
     assert not workdir.exists()

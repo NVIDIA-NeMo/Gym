@@ -61,7 +61,6 @@ from nemo_gym.sandbox import (
     exec_as_root,
     resolve_provider_config,
 )
-from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 
 
 LOGGER = logging.getLogger(__name__)
@@ -176,7 +175,7 @@ class OracleAgent(SimpleResponsesAPIAgent):
     def _session_for(self, request: Request) -> OracleSession:
         session_id = self._agent_session_id_from_request(request)
         if session_id is None:
-            raise HTTPException(404, "Unknown oracle agent session; seed it first")
+            raise HTTPException(404, "No seeded oracle agent session for this request")
         state = self._require_agent_session(session_id)
         if not isinstance(state, OracleSession):
             raise TypeError("Expected an oracle agent session state")
@@ -359,9 +358,6 @@ class OracleAgent(SimpleResponsesAPIAgent):
                 total_tokens=0,
             ),
         )
-
-    async def run(self, body: BaseRunRequest = Body()) -> BaseVerifyResponse:
-        raise HTTPException(501, "The oracle agent runs only through an environment server, not the legacy /run route")
 
 
 if __name__ == "__main__":

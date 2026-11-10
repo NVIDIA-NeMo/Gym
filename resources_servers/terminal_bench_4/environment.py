@@ -14,15 +14,20 @@ from pathlib import Path, PurePosixPath
 from string import Formatter
 from time import monotonic
 from typing import Any, Literal
+from uuid import uuid4
 
 import yaml
 from pydantic import Field, PositiveFloat, PositiveInt, model_validator
 
+from nemo_gym.config import get_global_config_dict
 from nemo_gym.sandbox import (
+    PLACEMENT_GROUP_KEY,
     AsyncSandbox,
     AsyncSandboxCompose,
     SandboxResources,
     SandboxSpec,
+    SupportsSandboxNetwork,
+    get_provider_class,
     resolve_provider_config,
     resolve_provider_metadata,
     rewrite_image,
@@ -87,7 +92,9 @@ class TaskImages(Settings):
 class EnvironmentConfig(Settings):
     cpu_enforcement_policy: Literal["limit"]
     memory_enforcement_policy: Literal["limit"]
-    sandbox_provider: dict[str, Any]
+    # An inline single-key provider block, or the name of a top-level sandbox block that a provider config defines,
+    # as in DeepSWE's "sandbox_provider: sandbox".
+    sandbox_provider: str | dict[str, Any]
     sandbox_metadata: dict[str, str]
     sandbox_provider_options: dict[str, Any]
     sandbox_env: dict[str, str]
@@ -142,15 +149,47 @@ class ExecLimitConfigurationError(ValueError):
     """A configuration that cannot verify a task within its official verifier budget."""
 
 
+class ProviderCapabilityError(ValueError):
+    """A task needs something the selected sandbox provider cannot offer.
+
+    Retrying cannot help, so the attempt ends as a final infrastructure failure, never as a model zero, before any
+    sandbox starts under the wrong policy.
+    """
+
+
+def resolve_environment_provider(sandbox_provider: str | dict[str, Any]) -> dict[str, Any]:
+    """The provider block of an environment: an inline block as is, a named reference from the global config.
+
+    A reference keeps the block's default_metadata, so the result reads like an inline block.
+    """
+    if not isinstance(sandbox_provider, str):
+        return deepcopy(sandbox_provider)
+    named = get_global_config_dict()
+    return deepcopy(
+        resolve_provider_config(sandbox_provider, named)
+        | {"default_metadata": resolve_provider_metadata(sandbox_provider, named)}
+    )
+
+
 class HealthcheckError(RuntimeError):
     pass
 
 
 class Environment:
-    def __init__(self, task, config: EnvironmentConfig, session_id, directory, *, verifier=False):
+    def __init__(
+        self,
+        task,
+        config: EnvironmentConfig,
+        session_id,
+        directory,
+        *,
+        verifier=False,
+        placement_group: str | None = None,
+    ):
         self.task = task
         self.config = config
         self.session_id = session_id
+        self.placement_group = placement_group or "tb4-" + uuid4().hex
         self.directory = Path(directory)
         self.settings = task.config.verifier_environment if verifier else task.config.environment
         if verifier and config.verifier_resources_from_agent:
@@ -171,7 +210,7 @@ class Environment:
                 f"{task.name} declares no prebuilt {role} image; configure environment.task_images.{role} "
                 f"or environment.task_images.by_task with an image built from its {self.environment_dir.name}/"
             )
-        self.provider_config = deepcopy(config.sandbox_provider)
+        self.provider_config = resolve_environment_provider(config.sandbox_provider)
         self.pool = "default"
         self.main = None
         self.compose = None
@@ -207,13 +246,21 @@ class Environment:
             self.provider_config["opensandbox"].setdefault("connection", {}).setdefault(
                 "api_key", os.environ["OPENSANDBOX_API_KEY"]
             )
-        resolve_provider_config(self.provider_config)
+        provider_name = next(iter(resolve_provider_config(self.provider_config)))
         if config.efs_logs_host_path and "opensandbox" not in self.provider_config:
-            raise ValueError("EFS logs require OpenSandbox")
+            raise ValueError("EFS logs require OpenSandbox; set environment.efs_logs_host_path to null")
         if self.settings.network_mode == "no-network" and (
             self.uses_compose or not {"opensandbox", "docker"} & self.provider_config.keys()
         ):
-            raise ValueError("Offline verification requires a single OpenSandbox or local Docker environment")
+            raise ProviderCapabilityError(
+                "Offline verification requires a single OpenSandbox or local Docker environment; "
+                f"{task.name} cannot run on the {provider_name!r} provider"
+            )
+        if self.uses_compose and not issubclass(get_provider_class(provider_name), SupportsSandboxNetwork):
+            raise ProviderCapabilityError(
+                f"{task.name}: Compose needs direct networking between sandboxes, which the {provider_name!r} "
+                "provider does not offer"
+            )
         if self.uses_compose and config.compose_image_configs is None:
             raise ValueError("Compose requires verified image startup metadata")
 
@@ -224,6 +271,7 @@ class Environment:
             "tb4-task": self.task.name.split("/")[-1],
             **resolve_provider_metadata(self.provider_config),
             **config.sandbox_metadata,
+            PLACEMENT_GROUP_KEY: self.placement_group,
         }
         if self.pool != "default":
             metadata["nemo-gym.nvidia.com/resource-pool"] = self.pool
@@ -318,6 +366,7 @@ class Environment:
             self.compose = AsyncSandboxCompose(
                 resolve_provider_config(self.provider_config),
                 path,
+                placement_group=self.placement_group,
                 service_specs={
                     name: spec
                     if name == "main"
