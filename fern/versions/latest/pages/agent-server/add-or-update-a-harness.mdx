@@ -301,27 +301,31 @@ Validate grant support with an authenticated MCP fixture and a real harness run:
 
 ### Agent context
 
-Some harnesses need task data beyond the initial model input, such as a document to render, images to embed, or the prompt for a later stage. The Environment Server supplies this data in `AgentSeedSessionRequest.agent_context`. Each seed carries context for one agent session. An Environment Server that starts several agents prepares the appropriate context for each session when it constructs that session's seed.
+Some harnesses need task data beyond the initial model input, such as a document to render, images to embed, or the prompt for a later stage. The task row carries that data in `agent_context`, next to `verifier_metadata`, keyed by participant role, because an episode can seed several agents. The Environment Server sends each role's context to that role's agent session in `AgentSeedSessionRequest.agent_context`, and keeps it out of the task data sent to the Resources Server. The initial conversation stays in `responses_create_params.input`. Do not use `responses_create_params.metadata` to carry task data to the harness.
 
-The `single_agent_turn` Environment Server accepts a task row's `agent_context`, next to `verifier_metadata`, and forwards it to its one agent. It keeps that context out of the task data sent to the Resources Server. The initial conversation stays in `responses_create_params.input`. Do not use `responses_create_params.metadata` to carry task data to the harness.
+The `single_agent_turn` Environment Server has one role, `agent`:
 
 ```json
 {
   "responses_create_params": {"input": [{"role": "user", "content": "What does the figure show?"}]},
   "verifier_metadata": {"answer": "a cat"},
   "agent_context": {
-    "values": {"tag": "figqa2"},
-    "artifacts": {"media": {"path": "test_media/figqa2/7f3c"}}
+    "agent": {
+      "values": {"tag": "figqa2"},
+      "artifacts": {"media": {"path": "test_media/figqa2/7f3c"}}
+    }
   }
 }
 ```
 
-This row format is a convenience for `single_agent_turn` and its flat-row adapter. Other Environment Servers define their own task inputs and prepare each agent's context explicitly; they do not need to adopt a shared role-to-context mapping. An Environment Server must reject supplied context it cannot consume instead of silently ignoring it.
+Each Environment Server names its roles. It refuses with HTTP 422 a row that names a role it does not have, and an Environment Server that sends no context, such as `harbor`, `nemo_user_sim` or `swe_together`, refuses the key altogether, so an episode never runs without task data it was given. The `legacy_agent` relay is the exception: it sends the whole row to the agent's `/run`, where `agent_context` is one more row field.
 
-- `values` holds small inline JSON fields. The complete `agent_context`, including artifact references, is limited to 64 KiB as UTF-8 JSON.
+Each role's context has two maps:
+
+- `values` holds small inline JSON fields. One role's context, including its artifact references, is limited to 64 KiB as UTF-8 JSON.
 - `artifacts` names files and directories by a path relative to a root the agent configures. The path cannot be absolute or contain `..` or a NUL byte. The content never travels in the seed.
 - A key appears in `values` or in `artifacts`, not both.
-- An empty `agent_context` counts as none: the seed then omits the key.
+- An empty context counts as none: the seed then omits the key.
 
 An agent declares the keys it reads as a Pydantic model in `agent_context_model`. A field typed `AgentContextArtifact` (or a subclass), optionally unioned with `None`, takes an artifact; any other field takes a value. Omit an optional artifact to use its default of `None`. Unions mixing artifact and value types are unsupported; declare separate fields instead. Before `_seed_agent_session_state()` runs, the base class checks the seed against that model and refuses it with HTTP 422 when:
 

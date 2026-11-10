@@ -11,7 +11,7 @@ from environment_servers.nemo_user_sim.episode_contracts import UserSimEpisodeRe
 from nemo_gym.data.task_materialization import materialize_task
 from nemo_gym.server_runtime._checkpoint.environment import task_digest
 from nemo_gym.server_runtime.agent_context import AGENT_CONTEXT_MAX_BYTES, AgentContext, AgentContextArtifact
-from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnTaskInput
+from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnAgentContext, SingleAgentTurnTaskInput
 
 
 @pytest.mark.parametrize("path", ["manifest.json", "test_media/documents/x/manifest.json", "media/./figure.png"])
@@ -88,12 +88,14 @@ def test_a_rows_agent_context_moves_out_of_the_task_data_the_resources_server_ge
     row = {
         "responses_create_params": {"input": "Describe the figure."},
         "verifier_metadata": {"answer": "a cat"},
-        "agent_context": {"artifacts": {"media": {"path": "test_media/figs/1"}}},
+        "agent_context": {"agent": {"artifacts": {"media": {"path": "test_media/figs/1"}}}},
     }
 
     task_input = SingleAgentTurnTaskInput.model_validate(row)
 
-    assert task_input.agent_context == AgentContext(artifacts={"media": {"path": "test_media/figs/1"}})
+    context = AgentContext(artifacts={"media": {"path": "test_media/figs/1"}})
+    assert task_input.agent_context == SingleAgentTurnAgentContext(agent=context)
+    assert task_input.agent_seed_context == context
     assert task_input.task_data == {"verifier_metadata": {"answer": "a cat"}}
     # The canonical form round-trips with the context in its own field.
     assert SingleAgentTurnTaskInput.model_validate(task_input.model_dump(mode="json")) == task_input
@@ -120,7 +122,9 @@ def test_a_row_without_agent_context_dumps_as_before() -> None:
         ),
     ],
 )
-@pytest.mark.parametrize("agent_context", ["absent", None, {}, {"values": {}, "artifacts": {}}])
+@pytest.mark.parametrize(
+    "agent_context", ["absent", None, {}, {"agent": None}, {"agent": {}}, {"agent": {"values": {}, "artifacts": {}}}]
+)
 def test_a_task_without_agent_context_keeps_its_checkpoint_digest(
     row: dict, digest: str, agent_context: str | dict | None
 ) -> None:
@@ -131,14 +135,14 @@ def test_a_task_without_agent_context_keeps_its_checkpoint_digest(
     assert task_digest(SingleAgentTurnTaskInput.model_validate(row).model_dump(mode="json")) == digest
 
 
-@pytest.mark.parametrize("agent_context", [{}, {"values": {}, "artifacts": {}}, None])
+@pytest.mark.parametrize("agent_context", [{}, {"agent": {}}, {"agent": {"values": {}, "artifacts": {}}}, None])
 def test_an_empty_agent_context_is_no_context(agent_context: dict | None) -> None:
     """A data-preparation script that always writes the key leaves the task input as a row without it."""
     row = {"responses_create_params": {"input": "Hi"}, "id": "1"}
 
     task_input = SingleAgentTurnTaskInput.model_validate({**row, "agent_context": agent_context})
 
-    assert task_input.agent_context is None
+    assert task_input.agent_context is None and task_input.agent_seed_context is None
     assert task_input.model_dump(mode="json") == SingleAgentTurnTaskInput.model_validate(row).model_dump(mode="json")
 
 
@@ -146,15 +150,53 @@ def test_agent_context_in_the_canonical_task_data_container_is_lifted_too() -> N
     task_input = SingleAgentTurnTaskInput.model_validate(
         {
             "responses_create_params": {"input": "Hi"},
-            "task_data": {"id": "1", "agent_context": {"values": {"tag": "figqa2"}}},
+            "task_data": {"id": "1", "agent_context": {"agent": {"values": {"tag": "figqa2"}}}},
         }
     )
 
-    assert task_input.agent_context == AgentContext(values={"tag": "figqa2"})
+    assert task_input.agent_seed_context == AgentContext(values={"tag": "figqa2"})
     assert task_input.task_data == {"id": "1"}
 
 
-@pytest.mark.parametrize("context", [None, {}, {"values": {"tag": "figure"}}])
+@pytest.mark.parametrize(
+    ("agent_context", "others"),
+    [
+        # The context of one agent, not keyed by role.
+        ({"values": {"tag": "figqa2"}}, "['values']"),
+        ({"user": {"values": {"tag": "figqa2"}}}, "['user']"),
+        ({"agent": {"values": {"tag": "figqa2"}}, "assistant": {}}, "['assistant']"),
+    ],
+)
+@pytest.mark.parametrize("nested", [False, True], ids=["flat", "task_data"])
+def test_single_agent_turn_refuses_a_role_it_does_not_have(agent_context: dict, others: str, nested: bool) -> None:
+    row = {"responses_create_params": {"input": "Hi"}, "task_data": {"id": "1"}}
+    (row["task_data"] if nested else row)["agent_context"] = agent_context
+
+    with pytest.raises(ValidationError, match="single_agent_turn has one role, 'agent'") as error:
+        SingleAgentTurnTaskInput.model_validate(row)
+
+    assert f"got {others}" in str(error.value)
+    assert error.value.errors()[0]["loc"] == ("agent_context",)
+
+
+def test_the_size_limit_applies_to_each_roles_context() -> None:
+    """The row's role map adds its own bytes; what one session keeps is the role's context."""
+    prompt = "x" * (AGENT_CONTEXT_MAX_BYTES - 39)
+    task_input = SingleAgentTurnTaskInput.model_validate(
+        {"responses_create_params": {"input": "Hi"}, "agent_context": {"agent": {"values": {"prompt": prompt}}}}
+    )
+
+    assert task_input.agent_seed_context == AgentContext(values={"prompt": prompt})
+    with pytest.raises(ValidationError, match="over the 65536-byte limit"):
+        SingleAgentTurnTaskInput.model_validate(
+            {
+                "responses_create_params": {"input": "Hi"},
+                "agent_context": {"agent": {"values": {"prompt": prompt + "x"}}},
+            }
+        )
+
+
+@pytest.mark.parametrize("context", [None, {}, {"agent": {"values": {"tag": "figure"}}}])
 def test_usersim_task_input_rejects_unsupported_agent_context_after_materialization(context: object) -> None:
     path = Path(__file__).resolve().parents[3] / "resources_servers/nemo_user_sim/data/example.jsonl"
     row = json.loads(path.read_text().splitlines()[0])
