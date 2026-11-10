@@ -4234,6 +4234,35 @@ def test_missing_agent_turns_names_the_resource_limit_that_ended_the_sandbox(tmp
     }
 
 
+@pytest.mark.parametrize(("error_type", "timed_out"), [("timeout", 1), ("UnknownError", 0), (None, 0)])
+def test_opencode_timeout_is_reported_without_changing_grade_or_verdict(
+    tmp_path: Path, error_type: str | None, timed_out: int
+) -> None:
+    record = _record(0, 0, usage={"input_tokens": 3, "output_tokens": 2, "total_tokens": 5})
+    record.update(
+        reward=0.0,
+        opencode_failed=True,
+        opencode_finished=False,
+        opencode_export_found=True,
+        opencode_exit_code=124 if timed_out else 1,
+        opencode_error_type=error_type,
+    )
+    record["ng_trajectory"]["invocations"] = [
+        {"kind": "agent_invocation", "invocation_id": "root", "status": "incomplete", "model_calls": []}
+    ]
+    rollout_path = _write_fixture(tmp_path, [(record, [_call()])])
+    saved_rollout = rollout_path.read_bytes()
+
+    result = run_health_checks(rollout_path, workers=1)
+
+    timeouts = result.summary["run"]["stats"]["timeouts"]
+    assert timeouts["timed_out"] == timed_out
+    assert timeouts["by_evidence"] == {"typed": 0, "legacy": timed_out}
+    assert timeouts["by_limit"] == ({"opencode_error_type=timeout": 1} if timed_out else {})
+    assert result.summary["run"]["verdicts"] == {"healthy": 1, "unhealthy": 0, "unobserved": 0}
+    assert rollout_path.read_bytes() == saved_rollout
+
+
 @pytest.mark.parametrize("limit", [None, {}, {"detail": "no resource"}, {"resource": ""}, "storage"])
 def test_missing_agent_turns_detail_is_unchanged_without_a_named_resource_limit(tmp_path: Path, limit) -> None:
     updates = {} if limit is None else {"sandbox_resource_limit": limit}
