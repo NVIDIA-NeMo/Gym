@@ -110,8 +110,9 @@ async def test_model_rejection_obeys_environment_policy_and_closes(
     assert receipt.agent_observations == observations
     assert receipt.resources_cookies == {"resource": "seed"}
     assert client.post.call_args_list[-1].kwargs["cookies"] == receipt.resources_cookies
-    # CodeAct exhausts its three attempts before the environment applies its policy.
-    assert instance.server_client.post.await_count == 3
+    # NOOA's strategy calls the model three times before the environment applies its policy, but only a status that
+    # may clear (here 503) is sent again; a rejected request is sent once.
+    assert instance.server_client.post.await_count == (3 if status == 503 else 1)
     for call in instance.server_client.post.await_args_list:
         assert call.kwargs["url_path"] == "/ng-rollout/rollout-a2/training-token-capture/v1/responses"
         assert call.kwargs["cookies"] == {}
@@ -173,7 +174,8 @@ async def test_worker_result_and_checkpoint_preserve_model_status(
     root = next(item for item in restored.trajectory.invocations if item.parent_invocation_id is None)
     assert root.status == "failed"
     assert root.error_type == "GenerationError"
-    assert instance.server_client.post.await_count == 3
+    # Only a status that may clear (503) is sent again; a rejected request is sent once.
+    assert instance.server_client.post.await_count == (3 if status == 503 else 1)
     checkpoint_path = tmp_path / "checkpoint.json"
     entrypoint.write_checkpoint(checkpoint_path, restored)
     checkpoint = entrypoint.SandboxCheckpoint.model_validate_json(checkpoint_path.read_text())

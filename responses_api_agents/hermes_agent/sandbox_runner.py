@@ -79,10 +79,10 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
     _use_model_server(payload["model_base_url"])
 
     try:
-        from .model_kwargs import _model_api_kwargs, install_summary_compat
+        from .model_kwargs import _model_api_kwargs, install_model_retry_policy, install_summary_compat
         from .sandbox_observer import SESSION_TOKEN_COUNTERS, SandboxHermesObserver
     except ImportError:
-        from model_kwargs import _model_api_kwargs, install_summary_compat
+        from model_kwargs import _model_api_kwargs, install_model_retry_policy, install_summary_compat
         from sandbox_observer import SESSION_TOKEN_COUNTERS, SandboxHermesObserver
     from run_agent import AIAgent
 
@@ -117,6 +117,7 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
 
     agent._build_api_kwargs = build_api_kwargs
     install_summary_compat(agent, preserve_reasoning_history=payload["chat_template_kwargs_enabled"])
+    install_model_retry_policy(agent)
     result = None
     error = None
     stop_reason = None

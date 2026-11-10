@@ -87,7 +87,11 @@ from nemo_gym.trajectory import (
     ObservationGap,
     ToolCallObservation,
 )
-from responses_api_agents.hermes_agent.model_kwargs import _model_api_kwargs, install_summary_compat
+from responses_api_agents.hermes_agent.model_kwargs import (
+    _model_api_kwargs,
+    install_model_retry_policy,
+    install_summary_compat,
+)
 from responses_api_agents.hermes_agent.observability import HermesAgentObserver, normalize_hermes_messages
 from responses_api_agents.hermes_agent.sandbox import HarnessProcessInfo, HermesSandboxSession
 
@@ -998,6 +1002,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
         agent._build_api_kwargs = _patched_build_api_kwargs
         install_summary_compat(agent, preserve_reasoning_history=self.config.chat_template_kwargs_enabled)
+        install_model_retry_policy(agent)
         observer = None
         if observation_collector is not None:
             try:

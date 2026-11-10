@@ -48,7 +48,9 @@ import logging
 from time import perf_counter
 from typing import TYPE_CHECKING, Any, Optional
 
+import httpx
 import stirrup.core.agent as _stirrup_agent_mod
+from openai import AsyncOpenAI
 from pydantic import ValidationError as _PydanticValidationError
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
 from stirrup.clients.utils import to_openai_tools
@@ -159,6 +161,22 @@ _TRUNCATION_RECOVERY_NUDGE = (
 )
 
 
+# Only these 4xx may clear on another attempt; every 5xx may too. The OpenAI SDK alone would also resend a 409.
+_RETRYABLE_CLIENT_ERROR_STATUSES = frozenset({408, 425, 429})
+# The SDK follows a Retry-After of up to 60 s; with Stirrup's two retries this keeps the total wait within 20 s.
+_MAX_RETRY_WAIT_S = 10.0
+
+
+class _ModelRetryPolicyClient(AsyncOpenAI):
+    """AsyncOpenAI that resends a failed model request only for 408, 425, 429 and 5xx, and waits a bounded time."""
+
+    def _should_retry(self, response: httpx.Response) -> bool:
+        return response.status_code in _RETRYABLE_CLIENT_ERROR_STATUSES or response.status_code >= 500
+
+    def _calculate_retry_timeout(self, *args: Any, **kwargs: Any) -> float:
+        return min(super()._calculate_retry_timeout(*args, **kwargs), _MAX_RETRY_WAIT_S)
+
+
 class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
     """ChatCompletionsClient that sizes max_completion_tokens per call and
     does not raise on a length-finish response."""
@@ -177,6 +195,13 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
+        sdk_client = self._client
+        self._client = _ModelRetryPolicyClient(
+            api_key=sdk_client.api_key,
+            base_url=sdk_client.base_url,
+            timeout=sdk_client.timeout,
+            max_retries=sdk_client.max_retries,
+        )
         if max_completion_tokens_cap < 1:
             raise ValueError("max_completion_tokens_cap must be at least 1")
         if min_completion_tokens < 1:

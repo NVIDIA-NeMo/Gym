@@ -10,7 +10,11 @@ from pathlib import Path
 
 import pytest
 
-from responses_api_agents.hermes_agent.model_kwargs import _model_api_kwargs
+from responses_api_agents.hermes_agent.model_kwargs import (
+    ModelRequestRejected,
+    _model_api_kwargs,
+    install_model_retry_policy,
+)
 
 
 @pytest.mark.parametrize("source", ["extra_body", "metadata"])
@@ -74,3 +78,64 @@ def test_standalone_runner_loads_shared_helper_without_gym_on_path(tmp_path):
     assert completed.returncode == 2
     assert "usage: sandbox_runner.py" in completed.stderr
     assert "ImportError" not in completed.stderr
+
+
+class _StatusError(Exception):
+    def __init__(self, status_code: int) -> None:
+        super().__init__(f"Error code: {status_code} - {{'error': {{'message': 'controlled'}}}}")
+        self.status_code = status_code
+        self.body = {"message": "controlled"}
+        self.response = object()
+
+
+class _Agent:
+    def __init__(self, error: Exception) -> None:
+        self._client_kwargs = {"api_key": "gym", "base_url": "http://model/v1"}
+        self.error = error
+        self.calls = 0
+
+    def _interruptible_api_call(self, api_kwargs: dict) -> dict:
+        self.calls += 1
+        raise self.error
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 409, 422])
+def test_retry_policy_turns_a_rejection_into_an_error_hermes_does_not_resend(status: int) -> None:
+    error = _StatusError(status)
+    agent = _Agent(error)
+    install_model_retry_policy(agent)
+    install_model_retry_policy(agent)  # installing twice wraps once
+
+    with pytest.raises(ModelRequestRejected) as caught:
+        agent._interruptible_api_call({"messages": []})
+
+    # Hermes ends the run on a ValueError; Gym's classifier still reads the SDK's text and status.
+    assert isinstance(caught.value, ValueError)
+    assert str(caught.value) == str(error)
+    assert caught.value.status_code == status
+    assert caught.value.body == error.body and caught.value.response is error.response
+    assert caught.value.__cause__ is error
+    assert agent.calls == 1
+    assert agent._client_kwargs["max_retries"] == 0
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        _StatusError(408),
+        _StatusError(413),
+        _StatusError(425),
+        _StatusError(429),
+        _StatusError(500),
+        _StatusError(503),
+        ConnectionError("refused"),
+    ],
+)
+def test_retry_policy_leaves_failures_that_may_clear_to_hermes(error: Exception) -> None:
+    agent = _Agent(error)
+    install_model_retry_policy(agent)
+
+    with pytest.raises(type(error)) as caught:
+        agent._interruptible_api_call({"messages": []})
+
+    assert caught.value is error

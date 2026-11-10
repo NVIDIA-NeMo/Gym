@@ -350,8 +350,21 @@ def test_sandbox_rejection_preserves_runtime_token_totals(
     assert "400" in result["error"]
     assert result["prompt_tokens"] == (10 if has_completed_call else 0)
     assert result["completion_tokens"] == (2 if has_completed_call else 0)
-    assert len(server.requests) == (4 if has_completed_call else 3)
+    # Hermes would resend the 400 twice as a transient failure; Gym's retry policy sends it once.
+    assert len(server.requests) == (2 if has_completed_call else 1)
     assert output["observations"]["invocations"][0]["status"] == "failed"
+
+
+@pytest.mark.parametrize("status", [401, 404, 409, 422])
+def test_sandbox_rejected_model_request_is_sent_once(tmp_path, restore_process_globals, status) -> None:
+    # Without Gym's retry policy the OpenAI SDK resends a 409 twice, and Hermes resends every SDK 400.
+    answers = [{"error": {"message": "rejected request", "type": "invalid_request_error"}}]
+    with _ModelServer(answers, status_codes=[status]) as server:
+        output = _run(_payload(server.base_url, max_turns=4), tmp_path)
+
+    assert output["result"]["failed"]
+    assert str(status) in output["result"]["error"]
+    assert len(server.requests) == 1
 
 
 @pytest.mark.parametrize("marker", ["present", "absent", "omitted"])

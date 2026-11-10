@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aiohttp import ClientResponseError
-from nooa import Agent, strategy
+from nooa import Agent, CodeActStrategy, strategy
 from nooa.errors import GenerationError, LoopDetectedError
 
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseFunctionToolCall
@@ -65,6 +65,13 @@ class PolicyAgent(Agent):
         return await self.primary(text)
 
     async def primary(self, text: str) -> str:
+        """Answer the question."""
+        ...
+
+
+class CodeActPolicyAgent(Agent):
+    @strategy(CodeActStrategy())
+    async def analyze(self, text: str) -> str:
         """Answer the question."""
         ...
 
@@ -748,7 +755,10 @@ async def test_model_rejection_preserves_original_provider_error(
         )
     )
 
-    assert runner._server_client.post.await_count == (3 if wrapped else 1) * (3 if status == 429 else 1)
+    # NOOA's strategy calls the model again after an error (3 times here), but a 4xx other than 408, 425 and 429 is
+    # sent only once: the later calls fail before any request.
+    may_resend = status in (408, 425, 429) or status >= 500
+    assert runner._server_client.post.await_count == (3 if wrapped and may_resend else 1) * (3 if status == 429 else 1)
     root = next(item for item in result.trajectory.invocations if item.parent_invocation_id is None)
     assert root.status == "failed"
     assert root.error_type == ("GenerationError" if wrapped else "ClientResponseError")
@@ -759,6 +769,27 @@ async def test_model_rejection_preserves_original_provider_error(
     assert response.status == "failed"
     assert response.error.message == str(failure)
     assert any(gap.code == "model_rejected" and gap.detail == str(failure) for gap in observations.gaps)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 401, 503])
+async def test_codeact_sends_a_rejected_model_request_once(status: int) -> None:
+    runner, _ = policy_runner(CodeActPolicyAgent)
+    failure = model_http_error(status)
+    runner._server_client.post = AsyncMock(side_effect=failure)
+
+    result = await runner.run(
+        NOOARunRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="question"),
+            model_url_path="/v1/responses",
+        )
+    )
+
+    # CodeAct calls the model again after each error until its consecutive-error limit; a 503 may be sent again
+    # (within the policy-call budget of 3), a 400 or 401 only once.
+    assert runner._server_client.post.await_count == (3 if status == 503 else 1)
+    assert result.termination_reason is NOOATerminationReason.MODEL_REJECTED
+    assert result.model_status_code == status
 
 
 @pytest.mark.asyncio
@@ -786,8 +817,8 @@ async def test_non_error_model_http_status_is_not_reported_as_rejection(status: 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", [400, 401, 413, 422, 503])
-async def test_successful_model_retry_clears_rejection(status: int) -> None:
+@pytest.mark.parametrize("status", [408, 503])
+async def test_successful_model_retry_clears_failure(status: int) -> None:
     runner, _ = policy_runner()
     runner._server_client.post.side_effect = [
         model_http_error(status),
@@ -812,6 +843,33 @@ async def test_successful_model_retry_clears_rejection(status: int) -> None:
     assert result.termination_reason is None
     assert result.termination_error is None
     assert result.model_status_code is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 401, 413, 422])
+async def test_rejected_model_request_is_not_sent_again(status: int) -> None:
+    runner, _ = policy_runner()
+    failure = model_http_error(status)
+    recovery = FakeHTTPResponse(
+        model_response(
+            NeMoGymResponseFunctionToolCall(
+                id="fc-retry", call_id="call-retry", name="return_result", arguments='{"result":"recovered"}'
+            )
+        )
+    )
+    runner._server_client.post.side_effect = [failure, recovery]
+
+    result = await runner.run(
+        NOOARunRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="question"),
+            model_url_path="/v1/responses",
+        )
+    )
+
+    assert runner._server_client.post.await_count == 1
+    assert result.termination_reason is NOOATerminationReason.MODEL_REJECTED
+    assert result.termination_error == str(failure)
+    assert result.model_status_code == status
 
 
 @pytest.mark.asyncio
