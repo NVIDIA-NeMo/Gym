@@ -30,6 +30,7 @@ from pydantic_core import InitErrorDetails, PydanticCustomError
 from nemo_gym.agents import (
     AgentCloseSessionResponse,
     AgentOutcome,
+    AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     AgentSessionState,
@@ -37,6 +38,7 @@ from nemo_gym.agents import (
     Body,
     SandboxSession,
     SimpleResponsesAPIAgent,
+    UnsupportedSandboxPlatformError,
     sandbox_server_url,
 )
 from nemo_gym.config import ModelServerRef, get_global_config_dict
@@ -347,6 +349,9 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 await state.close(self.config.session_close_timeout_seconds)
             except BaseException:
                 raise AgentSessionSetupError(state, error=error) from error
+            if isinstance(error, UnsupportedSandboxPlatformError):
+                # The platform comes from the sandbox image, so a new sandbox would fail the same way.
+                raise AgentSeedRejectedError(str(error)) from error
             raise
         return state
 

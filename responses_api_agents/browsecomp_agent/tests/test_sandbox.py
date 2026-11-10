@@ -14,8 +14,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from aiohttp import web
 
+from nemo_gym.agents import UnsupportedSandboxPlatformError, check_agent_seed_rejected
 from nemo_gym.core import NeMoGymResponse, NgFailureEvent
-from responses_api_agents.browsecomp_agent.sandbox import BrowsecompSandboxSession, _write_sources
+from responses_api_agents.browsecomp_agent.sandbox import (
+    BrowsecompSandboxSession,
+    SandboxIsolationError,
+    _write_sources,
+)
 from responses_api_agents.browsecomp_agent.tests.test_agent_sessions import (
     EPISODE,
     GRANT,
@@ -636,21 +641,22 @@ def test_the_sandbox_activation_clamps_its_deadline_and_fails_on_an_error_receip
     assert "BrowseComp sandbox failed: ConnectionError" in str(failed.value.__cause__)
 
 
-def test_missing_process_isolation_refuses_the_seed_after_stopping_the_sandbox(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    "error",
+    [
+        SandboxIsolationError("BrowseComp requires an isolated PID namespace"),
+        UnsupportedSandboxPlatformError("No sandbox Python runtime is available for Darwin on arm64"),
+    ],
+    ids=["no process isolation", "unsupported platform"],
+)
+def test_a_sandbox_no_retry_can_fix_refuses_the_seed_after_stopping_the_sandbox(
+    monkeypatch: pytest.MonkeyPatch, error: Exception
 ) -> None:
     from nemo_gym.agents import SandboxSession
-    from responses_api_agents.browsecomp_agent.sandbox import SandboxIsolationError
 
     client, _, _ = _agent([], monkeypatch)
-    monkeypatch.setattr(
-        BrowsecompSandboxSession,
-        "install_runtime",
-        AsyncMock(side_effect=SandboxIsolationError("BrowseComp requires an isolated PID namespace")),
-    )
-    reply = client.post("/v1/agent_sessions", json=_seed().model_dump(mode="json"))
-    assert reply.status_code == 422
-    assert "isolated PID namespace" in reply.text
+    monkeypatch.setattr(BrowsecompSandboxSession, "install_runtime", AsyncMock(side_effect=error))
+    assert str(error) in check_agent_seed_rejected(client.app, _seed())
     SandboxSession.close.assert_awaited_once()
 
 

@@ -65,7 +65,7 @@ if TYPE_CHECKING:
     from nemo_gym.agents.utils.ordered_operations import ActivationConflictError, OrderedOperationLedger
     from nemo_gym.agents.utils.sandbox_network import SandboxNetworkAccess, restrict_sandbox_network
     from nemo_gym.agents.utils.sandbox_observation import lifecycle_observation
-    from nemo_gym.agents.utils.sandbox_python import SandboxPythonRuntime
+    from nemo_gym.agents.utils.sandbox_python import SandboxPythonRuntime, UnsupportedSandboxPlatformError
     from nemo_gym.agents.utils.sandbox_session import (
         HARNESS_COMMAND_NOT_STARTED,
         HARNESS_RUNNER_FAILED,
@@ -136,6 +136,7 @@ _PUBLIC_API = {
     "SandboxPythonRuntime": "utils.sandbox_python",
     "SandboxSession": "utils.sandbox_session",
     "SimpleResponsesAPIAgent": "base_responses_api_agent",
+    "UnsupportedSandboxPlatformError": "utils.sandbox_python",
     "agent_outcome_policy": "agent_outcome",
     "assert_model_url_reachable_from_sandbox": "base_responses_api_agent",
     "check_agent_seed_rejected": "testing.agent_session_conformance",

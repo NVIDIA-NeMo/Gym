@@ -39,6 +39,7 @@ from nemo_gym.agents import (
     Body,
     SandboxSession,
     SimpleResponsesAPIAgent,
+    UnsupportedSandboxPlatformError,
     assert_model_url_reachable_from_sandbox,
 )
 from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
@@ -478,8 +479,8 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 await state.close(timeout=self.config.session_close_timeout_seconds)
             except BaseException:
                 raise AgentSessionSetupError(state, error=error) from error
-            if isinstance(error, SandboxIsolationError):
-                # Every retry would get a sandbox from the same provider.
+            if isinstance(error, (SandboxIsolationError, UnsupportedSandboxPlatformError)):
+                # Every retry would get a sandbox from the same provider and image.
                 raise AgentSeedRejectedError(str(error)) from error
             raise
         return state
