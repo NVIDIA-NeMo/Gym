@@ -4,9 +4,9 @@ experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier
 domain: knowledge
-description: ARC-AGI-2 public evaluation set (120 grid-transformation puzzles, 172 test inputs), exact-match grid answers
+description: ARC-AGI-2 public evaluation set (120 grid-transformation puzzles), exact-match grid answers, no tools
 modality: text
-licensing: unknown
+licensing: Apache-2.0
 authors:
 - dhanley
 reward:

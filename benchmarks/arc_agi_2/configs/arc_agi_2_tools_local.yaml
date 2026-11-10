@@ -1,0 +1,33 @@
+# ARC-AGI-2 public evaluation set with the code-execution harness, model code run in a local sandbox process on the
+# agent host (no isolation beyond resource limits; for development, not for shared clusters): arc_code_agent builds the prompt (digits plus one
+# image per grid), runs the model's Python in its sandbox and auto-submits a transform that passes every example pair.
+# The arc_code resources server grades the final grid by exact match. Pair it with a vision-language policy served with
+# a reasoning parser. Set the model's thinking switch with arc_code_agent.thinking_template_kwargs and
+# final_template_kwargs, and native_tools: true for models trained for native function calling.
+config_paths:
+  - resources_servers/arc_code/configs/arc_code.yaml
+  - responses_api_agents/arc_code_agent/configs/arc_code_agent.yaml
+
+arc_agi_2_resources_server:
+  _inherit_from: arc_code_resources_server
+
+arc_agi_2_arc_code_agent:
+  _inherit_from: arc_code_agent
+  responses_api_agents:
+    arc_code_agent:
+      resources_server:
+        name: arc_agi_2_resources_server
+      datasets:
+      - name: arc_agi_2_tools
+        type: benchmark
+        jsonl_fpath: benchmarks/arc_agi_2/data/arc_agi_2_tools.jsonl
+        prepare_script: benchmarks/arc_agi_2/prepare.py
+        num_repeats: 4
+
+arc_agi_2_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: arc_agi_2_arc_code_agent

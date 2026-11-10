@@ -95,7 +95,8 @@ async def test_a_lost_sandbox_is_an_error_reply_and_is_recreated(pool):
     await pool.run(HEADER, [], "print(1)")
     FakeSandbox.fail_next_exec = True
     reply = await pool.run(HEADER, [], "print(2)")
-    assert reply["output"] == "" and "sandbox restarted" in reply["error"]
+    assert reply["output"] == "" and reply["error"] == arc_sandbox_api.RESTARTED_REPLY
+    assert "sandbox lost" not in reply["error"]  # provider details stay in the log, out of the trajectory
     reply = await pool.run(HEADER, [], "print(3)")
     reply = await pool.run(HEADER, [], "print(3)")  # both pool members have run again
     assert reply["output"].strip() == "3" and FakeSandbox.created == pool.num_workers + 1

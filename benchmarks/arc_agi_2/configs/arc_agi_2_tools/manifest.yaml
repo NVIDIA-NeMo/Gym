@@ -4,10 +4,10 @@ experimental: true
 kind: benchmark
 integration_profile: custom-gym-agent-loop
 domain: knowledge
-description: ARC-AGI-2 public evaluation set with the arc_code_agent code-execution harness (Python sandbox, images
-  of the grids, auto-submitted answers), exact-match grid answers
+description: ARC-AGI-2 public evaluation set with the arc_code_agent code-execution harness, model code run in OpenSandbox
+  sandboxes (images of the grids, auto-submitted answers), exact-match grid answers
 modality: multimodal
-licensing: unknown
+licensing: Apache-2.0
 authors:
 - dhanley
 reward:

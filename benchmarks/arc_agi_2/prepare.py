@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Prepare the ARC-AGI-2 public evaluation set (120 tasks, 172 test inputs).
+"""Prepare the ARC-AGI-2 public evaluation set (120 tasks: 167 test inputs on GitHub, 172 in the ARC Prize 2026 files).
 
 Downloads the task files from the ARC-AGI-2 GitHub repository at a pinned commit and writes one row per test input
 to two files that differ only in how the prompt is built:

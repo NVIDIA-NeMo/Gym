@@ -25,12 +25,20 @@ comes back to the model as an error reply.
 
 import asyncio
 import json
+import logging
 import tempfile
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from responses_api_agents.arc_code_agent.arc_sandbox import TOOLS_DIR, SandboxPool
+
+
+LOGGER = logging.getLogger(__name__)
+# What the model sees when a remote sandbox fails. Provider details (endpoints, exception text) go to the log only, so
+# they never enter a trajectory or the exported training data.
+UNAVAILABLE_REPLY = "sandbox unavailable; the code was not run, try again"
+RESTARTED_REPLY = "sandbox restarted; the code was not run, try again"
 
 
 # Flat under /tmp: it exists in every image, and file writes need not create parent directories.
@@ -114,11 +122,8 @@ class _ApiServer:
             try:
                 await self.start()
             except Exception as exc:
-                return {
-                    "output": "",
-                    "timed_out": False,
-                    "error": f"sandbox unavailable ({type(exc).__name__}: {exc})",
-                }
+                LOGGER.warning("sandbox start failed: %s: %s", type(exc).__name__, exc)
+                return {"output": "", "timed_out": False, "error": UNAVAILABLE_REPLY}
         remote = f"{REMOTE_DIR}/arc-req-{uuid.uuid4().hex}.json"
         try:
             with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
@@ -138,8 +143,9 @@ class _ApiServer:
                 raise RuntimeError(f"no reply (exit {result.return_code}): {(result.stderr or '')[-300:]}")
             return reply
         except Exception as exc:  # recreate the sandbox on next use and report to the model
+            LOGGER.warning("sandbox run failed, restarting: %s: %s", type(exc).__name__, exc)
             await self.close()
-            return {"output": "", "timed_out": False, "error": f"sandbox restarted ({type(exc).__name__}: {exc})"}
+            return {"output": "", "timed_out": False, "error": RESTARTED_REPLY}
 
     async def close(self) -> None:
         if self.sandbox is not None:
