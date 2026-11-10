@@ -7,6 +7,7 @@ import logging
 import shlex
 import tempfile
 import uuid
+from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -28,10 +29,28 @@ from nemo_gym.sandbox import (
     resolve_provider_metadata,
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
+from nemo_gym.utils import is_nemo_gym_fastapi_worker
 from responses_api_agents.harness_agent.app import _FABRIC_ADAPTERS, resolve_agent
 
 
 LOG = logging.getLogger(__name__)
+
+DEPRECATION_WARNING = (
+    "DEPRECATED: harness_exa_search runs each episode through its own legacy /run path and will be removed after "
+    "the environment-server migration. Use a session harness (codex_agent, pi_agent, hermes_agent, opencode_agent, "
+    "openclaw_agent, kilocode_agent) under single_agent_turn_legacy with a tavily_search tool server set to "
+    "search_provider: exa in tool_servers instead, as the deepsearchqa and widesearch config copies for those "
+    "harnesses do. The Claude Code, Cline, Prime Agent, Simple Strands and NeMo Fabric DeepAgents copies have no such "
+    "path yet and keep working here. See resources_servers/tavily_search/README.md."
+)
+
+
+@cache
+def _warn_deprecated_once() -> None:
+    # Workers of a multi-worker server rebuild it after the main process has already logged this.
+    if not is_nemo_gym_fastapi_worker():
+        LOG.warning(DEPRECATION_WARNING)
+
 
 _MODEL_RELAY_PORT = 18080
 _HOP_BY_HOP_HEADERS = {"connection", "content-length", "host", "transfer-encoding"}
@@ -184,6 +203,7 @@ class HarnessExaSearchAgent(SimpleResponsesAPIAgent):
         return f"{base}{self.url_path_for_request('', request).rstrip('/')}{trace_context_path_segment()}"
 
     def model_post_init(self, context: Any) -> None:
+        _warn_deprecated_once()
         self._agent_types = resolve_agent(self.config.agent)
         model = get_first_server_config_dict(self.server_client.global_config_dict, self.config.model_server.name)
         self._model_url = self.server_client._build_server_base_url(model)

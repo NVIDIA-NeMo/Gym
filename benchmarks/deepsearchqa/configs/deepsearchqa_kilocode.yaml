@@ -1,3 +1,28 @@
+# DeepSearchQA with Kilo Code in a sandbox the agent creates, searching the web with Exa through the
+# exa_search tool server (tavily_search with search_provider: exa). single_agent_turn_legacy seeds the
+# deepsearchqa verifier and an exa_search session, grants its web_search, find_in_page and scroll_page tools to
+# Kilo Code over MCP, closes the agent, verifies its answer, then closes both sessions. Kilo Code calls the model
+# server and exa_search from the sandbox, so Gym binds them to an address the sandbox can reach. Export
+# EXA_API_KEY and pass a sandbox provider config (nemo_gym/sandbox/providers/<provider>/configs/<provider>.yaml).
+use_absolute_ip: true
+absolute_ip_server_types: [responses_api_models, resources_servers]
+
+exa_search:
+  resources_servers:
+    tavily_search:
+      entrypoint: app.py
+      domain: agent
+      description: Exa web search and page tools
+      search_provider: exa
+      exa_api_key: ${oc.env:EXA_API_KEY}
+      # Keeps the benchmark's own dataset pages out of search results and page reads.
+      exclude_domains_file_path: benchmarks/deepsearchqa/search_exclusions.json
+      expose_tools_over_mcp: true
+      use_judge: false
+      max_cached_page_chars: 200000
+      max_scroll_words: 2000
+      verified: false
+
 deepsearchqa:
   resources_servers:
     deepsearchqa:
@@ -14,39 +39,40 @@ deepsearchqa:
         max_output_tokens: 32768
         temperature: null
         top_p: null
+
 deepsearchqa_agent:
   responses_api_agents:
-    harness_exa_search:
+    kilocode_agent:
       entrypoint: app.py
       domain: agent
-      description: Run DeepSearchQA with KiloCodeAgent in a sandbox
+      description: Run DeepSearchQA with Kilo Code and Exa web search
       value: Evaluate agentic web search
-      model_server:
-        type: responses_api_models
-        name: policy_model
+      # Names the benchmark for its manifest; the Environment Server binds the episode's resources server.
       resources_server:
         type: resources_servers
         name: deepsearchqa
-      agent: kilocode
-      agent_kwargs:
-        model: ${policy_model_name}
-        thinking: true
-        timeout: 7200
-        setup_timeout: 900
-        system_prompt: You must call an Exa MCP search tool before answering. Research the request on the web and return a complete final answer.
-        context_window: 262144
-        max_output_tokens: 131072
-        kilo_version: 7.4.15
-      image: nikolaik/python-nodejs:python3.13-nodejs22-slim
-      setup_command: python3 -m pip install -q https://github.com/NVIDIA-NeMo/Gym/archive/621ecac6906f332c54ba4a588e3ce7b7005bbe98.zip
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
+      thinking: true
+      timeout: 7200
+      setup_timeout: 900
+      context_window: 262144
+      max_output_tokens: 131072
+      kilo_version: 7.4.15
+      # Per-call MCP tool timeout in ms (Kilo's default is the MCP SDK's 60 s), above the exa_search worst case
+      # of about 183 s. The sandbox lifetime is left to Kilo, which sizes it from setup_timeout and timeout.
+      kilo_config:
+        experimental:
+          mcp_timeout: 300000
+      system_prompt: You must search the web with the web_search tool before answering, and read pages with find_in_page or scroll_page. Research the request on the web and return a complete final answer.
+      concurrency: 32
       sandbox_provider: sandbox
-      sandbox_spec:
-        ttl_s: 9000
+      sandbox_config:
+        image: nikolaik/python-nodejs:python3.13-nodejs22-slim
         resources:
           memory_mib: 8192
-      sandbox_model_base_url: null
-      exa_api_key: ${oc.env:EXA_API_KEY,null}
-      token_id_capture: false
       datasets:
         - name: deepsearchqa
           type: benchmark
@@ -55,8 +81,16 @@ deepsearchqa_agent:
 
 deepsearchqa_environment_server:
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
       entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: deepsearchqa
       agent_server:
         type: responses_api_agents
         name: deepsearchqa_agent
+      # The deepsearchqa verifier serves no tools; the Exa search tools come from exa_search.
+      resources_tool_transports: []
+      tool_servers:
+        - type: resources_servers
+          name: exa_search

@@ -24,7 +24,7 @@ from time import time
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Sequence
 from urllib.parse import unquote, urlparse, urlsplit, urlunsplit
 
-from aiohttp import ClientConnectionError, ClientPayloadError, ClientTimeout
+from aiohttp import ClientConnectionError, ClientPayloadError, ClientTimeout, ContentTypeError
 from fastapi import FastAPI, Request
 from httpx import AsyncClient
 from pydantic import BaseModel, Field, PrivateAttr, model_validator
@@ -38,6 +38,8 @@ from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
+    ResourcesCloseSessionRequest,
+    ResourcesCloseSessionResponse,
     SimpleResourcesServer,
 )
 from nemo_gym.verification import JUDGE_FAILURES, call_judge, is_judge_failure
@@ -70,7 +72,12 @@ DEFAULT_EXCLUDE_DOMAINS_PRIORITY = (
 
 
 class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
-    tavily_api_key: str | List[str]
+    # The search backend of web_search, find_in_page and scroll_page. The exclusion policy, page cache, output
+    # limits and retries apply to both; only the chosen provider's key is required.
+    search_provider: Literal["tavily", "exa"] = "tavily"
+    tavily_api_key: Optional[str | List[str]] = None
+    exa_api_key: Optional[str | List[str]] = None
+    exa_base_url: str = "https://api.exa.ai"
     exclude_domains_file_path: str
     use_judge: bool = True  # If False, use regex matching instead of LLM judge
     judge_model_server: Optional[ModelServerRef] = None
@@ -176,11 +183,20 @@ class TavilySearchAIOHTTPClient(BaseModel):
     retry_api_keys: List[str] = Field(default_factory=list, repr=False)
     max_attempts: int = Field(default=3, ge=1)
     timeout_s: float = Field(default=60, gt=0)
+    # The lower-case header that carries the API key, the prefix of its value, and the provider named in errors.
+    auth_header: str = "authorization"
+    auth_prefix: str = "Bearer "
+    provider_name: str = "Tavily"
+    # Statuses that mean this key cannot serve the call (rejected or out of credits), so the next key is tried:
+    # Tavily's 401 and its 432/433 plan and pay-as-you-go limits by default.
+    rejected_key_statuses: frozenset[int] = frozenset({401, 432, 433})
 
     async def post(self, endpoint: str, content: str, timeout: float) -> TavilySearchAIOHTTPClientResponse:
         headers = {key.lower(): value for key, value in self.headers.items()}
         authorizations = list(
-            dict.fromkeys([headers.get("authorization", ""), *("Bearer " + key for key in self.retry_api_keys)])
+            dict.fromkeys(
+                [headers.get(self.auth_header, ""), *(self.auth_prefix + key for key in self.retry_api_keys)]
+            )
         )
         rejected = set()
         key_index = 0
@@ -188,7 +204,7 @@ class TavilySearchAIOHTTPClient(BaseModel):
             # Skip keys rejected during this call; transient failures still rotate the pool.
             while authorizations[key_index] in rejected:
                 key_index = (key_index + 1) % len(authorizations)
-            headers["authorization"] = authorizations[key_index]
+            headers[self.auth_header] = authorizations[key_index]
             response = None
             try:
                 response = await request(
@@ -200,29 +216,101 @@ class TavilySearchAIOHTTPClient(BaseModel):
                     _max_connection_retries=0,
                 )
                 if response.status == 200:
-                    return TavilySearchAIOHTTPClientResponse(status_code=200, data=await response.json())
-                key_rejected = response.status in {401, 432, 433}
+                    try:
+                        data = await response.json()
+                    except (ContentTypeError, ValueError):
+                        data = None
+                    if not isinstance(data, dict):
+                        # The decode error's repr carries the request headers, key included, and a validation
+                        # error would quote the body; name only the provider.
+                        raise RuntimeError(f"{self.provider_name} HTTP 200 with an unreadable body")
+                    return TavilySearchAIOHTTPClientResponse(status_code=200, data=data)
+                key_rejected = response.status in self.rejected_key_statuses
                 if key_rejected:
-                    rejected.add(headers["authorization"])
+                    rejected.add(headers[self.auth_header])
                 retryable = response.status in RETRY_ERROR_CODES or (
                     key_rejected and len(rejected) < len(authorizations)
                 )
                 if not retryable or attempt + 1 == self.max_attempts:
                     # Provider error bodies may contain credentials; never forward them to the agent.
-                    raise RuntimeError(f"Tavily HTTP {response.status} after {attempt + 1} attempts")
+                    raise RuntimeError(f"{self.provider_name} HTTP {response.status} after {attempt + 1} attempts")
             except (ClientConnectionError, ClientPayloadError, TimeoutError):
                 if attempt + 1 == self.max_attempts:
-                    raise RuntimeError(f"Tavily transport failure after {attempt + 1} attempts") from None
+                    raise RuntimeError(
+                        f"{self.provider_name} transport failure after {attempt + 1} attempts"
+                    ) from None
             finally:
                 if response is not None:
                     response.release()
             key_index = (key_index + 1) % len(authorizations)
             await sleep(min(2**attempt, 8))
-        raise RuntimeError("Tavily retry budget exhausted")
+        raise RuntimeError(f"{self.provider_name} retry budget exhausted")
 
     @classmethod
     def from_httpx_AsyncClient(cls, client: AsyncClient, debug: bool, **kwargs) -> "TavilySearchAIOHTTPClient":
         return cls(headers=client.headers, base_url=str(client.base_url), debug=debug, **kwargs)
+
+
+class ExaSearchClient(BaseModel):
+    """Exa's /search and /contents, answered in the result shape of the Tavily SDK's ``search`` and ``extract``.
+
+    The tools read only ``url``, ``title`` and ``content`` (search) or ``raw_content`` (extract) of each result, so
+    the exclusion policy, formatting and page cache stay the same for both providers.
+    """
+
+    http: TavilySearchAIOHTTPClient
+
+    async def search(self, query: str, *, max_results: int, exclude_domains: Optional[List[str]]) -> Dict[str, Any]:
+        # Exa's highlights are the passages of each page that best match the query, as Tavily's content is.
+        body: Dict[str, Any] = {"query": query, "numResults": max_results, "contents": {"highlights": True}}
+        if exclude_domains:
+            body["excludeDomains"] = exclude_domains
+        payload = await self._post("/search", body)
+        return {
+            "results": [
+                {
+                    "url": result.get("url"),
+                    "title": result.get("title") or "",
+                    "content": " ... ".join(_strings(result.get("highlights"))),
+                }
+                for result in payload.get("results") or []
+                if isinstance(result, dict)
+            ]
+        }
+
+    async def extract(
+        self, url: str, *, query: Optional[str] = None, max_characters: Optional[int] = None
+    ) -> Dict[str, Any]:
+        # Without a cap Exa returns up to its own default of several million characters of page text.
+        body: Dict[str, Any] = {"urls": [url], "text": {"maxCharacters": max_characters} if max_characters else True}
+        if query is not None:
+            # Like Tavily's query-ranked extract: the passages that match the query, else the page text.
+            body["highlights"] = {"query": query}
+        payload = await self._post("/contents", body)
+        return {
+            "results": [
+                {
+                    "url": result.get("url"),
+                    "raw_content": "\n\n".join(_strings(result.get("highlights"))) or result.get("text") or "",
+                }
+                for result in payload.get("results") or []
+                if isinstance(result, dict)
+            ]
+        }
+
+    async def _post(self, endpoint: str, body: Dict[str, Any]) -> Dict[str, Any]:
+        response = await self.http.post(endpoint, json.dumps(body), timeout=self.http.timeout_s)
+        return response.json()
+
+
+def _strings(values: Any) -> List[str]:
+    return [value for value in values or [] if isinstance(value, str) and value]
+
+
+def _api_keys(configured: Optional[str | List[str]]) -> List[str]:
+    """A key pool from one key, a comma-separated list, or a list of either."""
+    groups = [configured] if isinstance(configured, str) else configured or []
+    return [key.strip() for group in groups for key in group.split(",") if key.strip()]
 
 
 def normalize_hostname(value: str) -> str:
@@ -304,28 +392,50 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
     config: TavilySearchResourcesServerConfig
 
     _async_tavily_clients: Optional[List[AsyncTavilyClient]] = PrivateAttr(default=None)
+    _exa_clients: Optional[List[ExaSearchClient]] = PrivateAttr(default=None)
     _num_requests: int = 0
     _session_id_to_metrics: Optional[Dict[str, TavilySearchMetrics]] = PrivateAttr(default=None)
 
     JUDGE_PROMPT_TEMPLATE: ClassVar[str] = JUDGE_PROMPT_TEMPLATE
 
     def model_post_init(self, __context) -> None:
-        tavily_api_keys = self.config.tavily_api_key
-        if isinstance(tavily_api_keys, str):
-            tavily_api_keys = [tavily_api_keys]
-        tavily_api_keys = [key.strip() for group in tavily_api_keys for key in group.split(",") if key.strip()]
-        if not tavily_api_keys:
-            raise ValueError("At least one Tavily API key is required")
+        if self.config.search_provider == "exa":
+            exa_api_keys = _api_keys(self.config.exa_api_key)
+            if not exa_api_keys:
+                raise ValueError("At least one Exa API key is required when search_provider is exa")
+            # One client per key, each falling back to the others when Exa rejects its key, as for Tavily.
+            self._exa_clients = [
+                ExaSearchClient(
+                    http=TavilySearchAIOHTTPClient(
+                        headers={"content-type": "application/json", "x-api-key": key},
+                        base_url=self.config.exa_base_url.rstrip("/"),
+                        debug=self.config.debug,
+                        retry_api_keys=exa_api_keys[index + 1 :] + exa_api_keys[: index + 1],
+                        max_attempts=self.config.max_http_attempts,
+                        timeout_s=self.config.http_timeout_s,
+                        auth_header="x-api-key",
+                        auth_prefix="",
+                        provider_name="Exa",
+                        # 402: the key's credits or spending budget are exhausted.
+                        rejected_key_statuses=frozenset({401, 402}),
+                    )
+                )
+                for index, key in enumerate(exa_api_keys)
+            ]
+        else:
+            tavily_api_keys = _api_keys(self.config.tavily_api_key)
+            if not tavily_api_keys:
+                raise ValueError("At least one Tavily API key is required")
 
-        self._async_tavily_clients = [AsyncTavilyClient(api_key=k) for k in tavily_api_keys]
-        for index, async_tavily_client in enumerate(self._async_tavily_clients):
-            async_tavily_client._client = TavilySearchAIOHTTPClient.from_httpx_AsyncClient(
-                async_tavily_client._client,
-                self.config.debug,
-                retry_api_keys=tavily_api_keys[index + 1 :] + tavily_api_keys[: index + 1],
-                max_attempts=self.config.max_http_attempts,
-                timeout_s=self.config.http_timeout_s,
-            )
+            self._async_tavily_clients = [AsyncTavilyClient(api_key=k) for k in tavily_api_keys]
+            for index, async_tavily_client in enumerate(self._async_tavily_clients):
+                async_tavily_client._client = TavilySearchAIOHTTPClient.from_httpx_AsyncClient(
+                    async_tavily_client._client,
+                    self.config.debug,
+                    retry_api_keys=tavily_api_keys[index + 1 :] + tavily_api_keys[: index + 1],
+                    max_attempts=self.config.max_http_attempts,
+                    timeout_s=self.config.http_timeout_s,
+                )
 
         self._session_id_to_metrics = defaultdict(TavilySearchMetrics)
 
@@ -343,12 +453,13 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 # Once per server start: the subset is fixed by the policy file and the config.
                 logger.warning(
                     "Exclusion policy %s has %d domain rules but tavily_exclude_domains_limit is %d: %d domains are "
-                    "not sent to Tavily /search (%s, ...) and are enforced only locally; every domain and "
+                    "not sent to %s /search (%s, ...) and are enforced only locally; every domain and "
                     "url_substring rule is still applied to requested and returned URLs.",
                     policy_path,
                     len(sent) + len(not_sent),
                     self.config.tavily_exclude_domains_limit,
                     len(not_sent),
+                    "Exa" if self.config.search_provider == "exa" else "Tavily",
                     ", ".join(not_sent[:5]),
                 )
         self._page_cache: OrderedDict[str, str] = OrderedDict()
@@ -381,6 +492,14 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         return app
 
+    async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
+        response = await super().close_resources_session(body)
+        # A tool-server session is never verified here, so without this its metrics would stay for the server's
+        # lifetime. The cookie session ID of a seeded session is its resources_session_id.
+        if not self.config.dump_session_id_to_metrics_on_exit:
+            self._session_id_to_metrics.pop(body.resources_session_id, None)
+        return response
+
     def mcp_allowed_tools_for_session(self, seed_body: dict[str, Any]) -> list[str]:
         return ["web_search", "find_in_page", "scroll_page"]
 
@@ -388,6 +507,38 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         client = self._async_tavily_clients[self._num_requests % len(self._async_tavily_clients)]
         self._num_requests += 1
         return client
+
+    def _select_exa_client(self) -> ExaSearchClient:
+        client = self._exa_clients[self._num_requests % len(self._exa_clients)]
+        self._num_requests += 1
+        return client
+
+    async def _search(self, query: str) -> Dict[str, Any]:
+        # At most tavily_exclude_domains_limit domains go to the provider (Tavily rejects longer lists); the full
+        # domain and url_substring policy is applied locally to every returned URL by _postprocess_search_results.
+        if self.config.search_provider == "exa":
+            return await self._select_exa_client().search(
+                query, max_results=self.config.max_results, exclude_domains=self._provider_exclude_domains
+            )
+        return await self._select_tavily_client().search(
+            query,
+            max_results=self.config.max_results,
+            exclude_domains=self._provider_exclude_domains,
+            search_depth=self.config.search_depth,
+            # Its LLM-generated answer could summarize a page we later discard, so return
+            # source results only, including for domain-only policies for consistent behavior.
+            include_answer=False,
+            include_raw_content=False,
+        )
+
+    async def _extract(self, url: str, query: Optional[str] = None) -> Dict[str, Any]:
+        if self.config.search_provider == "exa":
+            # With caching on, the cache keeps at most max_cached_page_chars of a page, so more would be discarded.
+            max_characters = self.config.max_cached_page_chars if self.config.max_cached_pages else None
+            return await self._select_exa_client().extract(url, query=query, max_characters=max_characters)
+        if query is None:
+            return await self._select_tavily_client().extract(urls=url)
+        return await self._select_tavily_client().extract(urls=url, query=query)
 
     async def web_search(self, request: Request, body: TavilySearchRequest) -> TavilySearchResponse:
         metrics = self._session_id_to_metrics[request.session[SESSION_ID_KEY]]
@@ -400,20 +551,8 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         if len(body.query) > 400:
             return TavilySearchResponse(results_string="Query is too long")
 
-        async_tavily_client = self._select_tavily_client()
         start_time = time()
-        results = await async_tavily_client.search(
-            body.query,
-            max_results=self.config.max_results,
-            # At most tavily_exclude_domains_limit domains (Tavily rejects longer lists); the full domain and
-            # url_substring policy is applied locally to every returned URL by _postprocess_search_results.
-            exclude_domains=self._provider_exclude_domains,
-            search_depth=self.config.search_depth,
-            # Its LLM-generated answer could summarize a page we later discard, so return
-            # source results only, including for domain-only policies for consistent behavior.
-            include_answer=False,
-            include_raw_content=False,
-        )
+        results = await self._search(body.query)
         metrics.async_tavily_calls.append(
             TavilySearchSingleAsyncTavilyMetrics(
                 function="search", status="success", start_time=start_time, end_time=time()
@@ -438,12 +577,8 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         if self._is_url_excluded(body.url):
             return FindInPageResponse(results_string="URL is in excluded domains")
 
-        async_tavily_client = self._select_tavily_client()
         start_time = time()
-        results = await async_tavily_client.extract(
-            urls=body.url,
-            query=body.query,
-        )
+        results = await self._extract(body.url, query=body.query)
         metrics.async_tavily_calls.append(
             TavilySearchSingleAsyncTavilyMetrics(
                 function="extract", status="success", start_time=start_time, end_time=time()
@@ -499,13 +634,10 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             self._page_cache.move_to_end(body.url)
         else:
             if self.config.debug:
-                print(f"Cache miss for {body.url}, fetching with tavily extract")
+                print(f"Cache miss for {body.url}, fetching with {self.config.search_provider} extract")
 
-            async_tavily_client = self._select_tavily_client()
             start_time = time()
-            results = await async_tavily_client.extract(
-                urls=body.url,
-            )
+            results = await self._extract(body.url)
             metrics.async_tavily_calls.append(
                 TavilySearchSingleAsyncTavilyMetrics(
                     function="extract", status="success", start_time=start_time, end_time=time()
@@ -518,13 +650,19 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             else:
                 page_content = ""
 
-            if self.config.max_cached_pages:
+            # An empty page is usually a failed fetch (Tavily's failed_results, an Exa crawl error in statuses);
+            # caching it would hide the page from every later session.
+            if page_content and self.config.max_cached_pages:
                 if self.config.max_cached_page_chars is not None:
                     page_content = page_content[: self.config.max_cached_page_chars]
                 self._page_cache[body.url] = page_content
                 self._page_cache.move_to_end(body.url)
                 while len(self._page_cache) > self.config.max_cached_pages:
                     self._page_cache.popitem(last=False)
+
+        if not page_content:
+            # Say so, as find_in_page does, instead of an empty page of 0 words the model may read as a real page.
+            return ScrollPageResponse(results_string="No content found.", total_words=0)
 
         words = page_content.split()
         total_words = len(words)
