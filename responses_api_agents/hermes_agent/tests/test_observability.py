@@ -391,9 +391,17 @@ def test_normalize_hermes_messages_keeps_user_images_in_order():
                 ],
             },
             {"role": "user", "content": [{"type": "image_url", "image_url": {"url": image_uri}}]},
+            # Hermes also reads a bare-URL image_url and a Responses input_image part.
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": image_uri},
+                    {"type": "input_image", "image_url": image_uri, "detail": "low"},
+                ],
+            },
         ]
     )
-    first, second = [item.model_dump(mode="json")["content"] for item in items]
+    first, second, third = [item.model_dump(mode="json")["content"] for item in items]
     assert [part["type"] for part in first] == ["input_text", "input_image", "input_text"]
     assert first[0]["text"] == "before"
     assert first[1]["image_url"] == image_uri
@@ -401,3 +409,7 @@ def test_normalize_hermes_messages_keeps_user_images_in_order():
     assert first[2]["text"] == "after"
     assert second[0]["image_url"] == image_uri
     assert second[0]["detail"] == "auto"
+    assert [(part["type"], part["image_url"], part["detail"]) for part in third] == [
+        ("input_image", image_uri, "auto"),
+        ("input_image", image_uri, "low"),
+    ]
