@@ -175,7 +175,7 @@ def test_digests_of_a_long_history_keep_their_values():
     ],
 )
 def test_a_long_history_is_hashed_in_one_update(monkeypatch, digest):
-    """Once a hash object has seen an update of 2 KiB or more, every later update releases the GIL.
+    """On Python 3.13 and 3.14, a hash object releases the GIL on every update after one of 2 KiB or more.
 
     One update per digest keeps a long history from giving up the GIL three times per field.
     """

@@ -319,15 +319,21 @@ def _add_field(fields: bytearray, tag: bytes, value: str) -> None:
 def _digest(domain: bytes, fields: bytearray) -> str:
     """SHA-256 of the domain and every field, hashed in a single update.
 
-    On Python 3.13, a hash object's first update of 2 KiB or more makes it release the GIL on every later update.
+    On Python 3.13 and 3.14, a hash object's first update of 2 KiB or more makes it release the GIL.
+    From then on it releases the GIL on every update.
     That holds even for updates of a single byte.
     Hashing field by field calls update three times per field: tag, length and value.
     After the first large field, each of those calls gives up the GIL.
     The event loop and other threads can run while it is released.
     Taking it back can then wait up to the interpreter's switch interval, 5 ms by default.
     A long conversation has hundreds of fields, so one digest could wait that long hundreds of times.
-    One update over a single buffer gives up the GIL once.
+    One update over a single buffer gives up the GIL at most once, and not at all for a buffer under 2 KiB.
     The digest is the same as hashing the same bytes field by field.
+
+    One case is slower than field-by-field hashing, and it is expected.
+    When every field is under 2 KiB, hashing field by field never releases the GIL.
+    The single buffer still releases it once when the fields add up to 2 KiB or more.
+    With another thread busy, that digest can wait up to one switch interval.
     """
     hasher = hashlib.sha256(domain)
     hasher.update(fields)
