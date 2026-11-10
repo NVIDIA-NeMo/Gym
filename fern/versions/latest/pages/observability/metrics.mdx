@@ -250,6 +250,11 @@ When a collection or an aggregation of shards finishes, the run's coverage and r
 
 Each key becomes one gauge: `coverage/scored` is `gym.run.coverage.scored`, and `retries/at_cap` is `gym.run.retries.at_cap`. Failures by class, `coverage/failed/<class>`, become one gauge, `gym.run.coverage.failed`, with the class in `nemo.gym.run.bucket`. A class that is not a registered failure kind (or `skipped`, or `unknown`) is counted under `unregistered`, so the attribute stays bounded.
 
+`gym.run.coverage.failed` holds two views of the same failures: the total, `coverage/failed`, as a point without `nemo.gym.run.bucket`, and one point per class with it. A run with one failure reports 1 for each, so summing every point counts it twice. Select one view:
+
+- The total: keep the points where `nemo.gym.run.bucket` is not set.
+- The breakdown: keep the points where it is set, and group by it.
+
 `gym.run.info` is 1 for each finished run. Points carry `nemo.gym.run.id`, the run id from the run's records. An aggregation has a run id only when it reads a single shard with attempt history; otherwise it leaves the attribute off, and the `nemo.run.id` resource attribute identifies the job.
 
 A key is recorded only when the run reports it. An unknown count is left out rather than recorded as 0: an aggregation of shards without attempt history, for example, has no `gym.run.coverage.expected`.
