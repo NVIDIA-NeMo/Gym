@@ -19,12 +19,18 @@ packages=(
     libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1
     libpango-1.0-0 libcairo2 libasound2t64 fonts-liberation ffmpeg
 )
+# Workflow timeouts bound installation. A shorter per-attempt timeout
+# can kill dpkg during configuration and leave every subsequent install blocked.
+# Complete any interrupted configuration before retrying the package install.
 for attempt in 1 2 3 4; do
-    if timeout 5m sudo bash -c \
-        'apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@"' \
-        bash "${packages[@]}"; then
+    if sudo bash -c '
+        export DEBIAN_FRONTEND=noninteractive
+        dpkg --configure -a &&
+            apt-get update &&
+            apt-get install -y --no-install-recommends "$@"
+        ' bash "${packages[@]}"; then
         exit 0
     fi
-    echo "apt-get attempt $attempt/4 failed or timed out after 5m; retrying"
+    echo "System dependency install attempt $attempt/4 failed"
 done
 exit 1

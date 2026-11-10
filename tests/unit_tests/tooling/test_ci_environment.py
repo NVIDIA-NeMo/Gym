@@ -916,6 +916,70 @@ def _write_executable(path: Path, contents: str) -> None:
     path.chmod(0o755)
 
 
+@pytest.mark.parametrize("failure", ["none", "interrupted", "permanent"])
+def test_system_dependency_install_recovers_interrupted_configuration(tmp_path: Path, failure: str) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "calls"
+    installed = tmp_path / "installed"
+    _write_executable(bin_dir / "sudo", '#!/bin/sh\nexec "$@"\n')
+    _write_executable(
+        bin_dir / "dpkg",
+        """#!/bin/sh
+set -eu
+test "$DEBIAN_FRONTEND" = noninteractive
+test "$*" = '--configure -a'
+rm -f "$INSTALL_TEST_STATE/interrupted"
+""",
+    )
+    _write_executable(
+        bin_dir / "apt-get",
+        """#!/bin/sh
+set -eu
+echo "$1" >> "$INSTALL_TEST_STATE/calls"
+test "$1" = install || exit 0
+test "$DEBIAN_FRONTEND" = noninteractive
+if test "$INSTALL_TEST_FAILURE" = permanent; then exit 100; fi
+if test "$INSTALL_TEST_FAILURE" = interrupted && ! test -f "$INSTALL_TEST_STATE/attempted"; then
+    touch "$INSTALL_TEST_STATE/attempted" "$INSTALL_TEST_STATE/interrupted"
+    exit 100
+fi
+if test -f "$INSTALL_TEST_STATE/interrupted"; then
+    echo 'dpkg was interrupted' >&2
+    exit 100
+fi
+printf '%s\\n' "$@" > "$INSTALL_TEST_STATE/installed"
+""",
+    )
+    env = os.environ.copy()
+    env.update(
+        PATH=f"{bin_dir}:{env['PATH']}",
+        RUNNER_TEMP=str(tmp_path / "runner"),
+        GITHUB_ENV=str(tmp_path / "github-env"),
+        INSTALL_TEST_STATE=str(tmp_path),
+        INSTALL_TEST_FAILURE=failure,
+    )
+
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / "scripts" / "ci" / "install_test_dependencies.sh")],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+
+    if failure == "permanent":
+        assert result.returncode != 0
+        assert not installed.exists()
+        assert calls.read_text().splitlines().count("install") == 4
+    else:
+        assert result.returncode == 0, result.stderr
+        assert {"--no-install-recommends", "build-essential", "ffmpeg"} <= set(installed.read_text().splitlines())
+        assert not (tmp_path / "interrupted").exists()
+        assert calls.read_text().splitlines().count("install") == (2 if failure == "interrupted" else 1)
+    assert (tmp_path / "github-env").read_text() == f"UV_PYTHON_INSTALL_DIR={tmp_path}/runner/uv-python\n"
+
+
 def test_server_tests_propagates_absolute_cache_and_venv_roots(tmp_path: Path) -> None:
     repo_root = tmp_path / "repo"
     ci_dir = repo_root / "scripts" / "ci"
