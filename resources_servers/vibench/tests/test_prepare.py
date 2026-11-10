@@ -21,9 +21,9 @@ import pytest
 from resources_servers.vibench import prepare
 
 
-def make_checkout(tmp_path: Path, app: str = "notes", with_assets: bool = False) -> Path:
-    """A minimal ViBench-shaped checkout."""
-    app_dir = tmp_path / "prds" / app
+def make_checkout(tmp_path: Path, app: str = "notes", with_assets: bool = False, prds: str = "v1/prds") -> Path:
+    """A minimal vibench-public checkout: ViBench 1.0 apps under v1/prds/, or prds/ before ViBench 2.0."""
+    app_dir = tmp_path / prds / app
     (app_dir / "prd").mkdir(parents=True)
     (app_dir / "prd" / "mvp.txt").write_text("build a notes app")
     (app_dir / "prd" / "feature1.txt").write_text("add sharing")
@@ -44,7 +44,7 @@ class TestArtifactResolution:
     def test_feature_on_mvp_reuses_the_base_feature_test_dir(self, tmp_path):
         """featureN-on_mvp has no test folder of its own; plans live under featureN."""
         root = make_checkout(tmp_path)
-        app_dir = root / "prds" / "notes"
+        app_dir = root / "v1" / "prds" / "notes"
 
         assert prepare.artifact_test_dir(app_dir, "feature1-on_mvp").name == "feature1"
         assert prepare.artifact_test_dir(app_dir, "feature1").name == "feature1"
@@ -53,7 +53,7 @@ class TestArtifactResolution:
     def test_feature_prd_chain_prepends_the_mvp(self, tmp_path):
         """A feature is built on top of the MVP, so the agent needs both briefs in order."""
         root = make_checkout(tmp_path)
-        app_dir = root / "prds" / "notes"
+        app_dir = root / "v1" / "prds" / "notes"
 
         assert [p.name for p in prepare.prd_chain(app_dir, "mvp")] == ["mvp.txt"]
         assert [p.name for p in prepare.prd_chain(app_dir, "feature1")] == ["mvp.txt", "feature1.txt"]
@@ -62,7 +62,7 @@ class TestArtifactResolution:
     def test_discover_artifacts_lists_mvp_first(self, tmp_path):
         root = make_checkout(tmp_path)
 
-        assert prepare.discover_artifacts(root / "prds" / "notes")[0] == "mvp"
+        assert prepare.discover_artifacts(root / "v1" / "prds" / "notes")[0] == "mvp"
 
     def test_discover_artifacts_on_missing_app(self, tmp_path):
         assert prepare.discover_artifacts(tmp_path / "nope") == []
@@ -74,28 +74,42 @@ class TestRowConstruction:
         root = make_checkout(tmp_path, with_assets=True)
         monkeypatch.setattr(prepare, "render_task_prompt", lambda *a, **k: "RENDERED BRIEF")
 
-        row = prepare.build_row(root, "notes", "mvp", None, 300)
+        row = prepare.build_row(root, prepare.prds_dir(root), "notes", "mvp", None, 300)
+
+        assert row["prd_files"] == ["v1/prds/notes/prd/mvp.txt"]
+        assert row["test_plans"] == ["v1/prds/notes/tests/mvp/test1.txt", "v1/prds/notes/tests/mvp/test2.txt"]
+        assert not any(Path(p).is_absolute() for p in row["prd_files"] + row["test_plans"])
+
+    def test_a_checkout_from_before_vibench_2_keeps_its_root_layout(self, tmp_path, monkeypatch):
+        root = make_checkout(tmp_path, prds="prds")
+        monkeypatch.setattr(prepare, "render_task_prompt", lambda *a, **k: "BRIEF")
+
+        row = prepare.build_row(root, prepare.prds_dir(root), "notes", "mvp", None, 300)
 
         assert row["prd_files"] == ["prds/notes/prd/mvp.txt"]
-        assert row["test_plans"] == ["prds/notes/tests/mvp/test1.txt", "prds/notes/tests/mvp/test2.txt"]
-        assert not any(Path(p).is_absolute() for p in row["prd_files"] + row["test_plans"])
+
+    def test_the_v1_layout_wins_when_both_exist(self, tmp_path):
+        root = make_checkout(tmp_path)
+        make_checkout(tmp_path, prds="prds")
+
+        assert prepare.prds_dir(root) == root / "v1" / "prds"
 
     def test_builder_assets_and_grader_assets_are_kept_apart(self, tmp_path, monkeypatch):
         """test_assets/ belongs to the evaluation agent and must never reach the builder."""
         root = make_checkout(tmp_path, with_assets=True)
         monkeypatch.setattr(prepare, "render_task_prompt", lambda *a, **k: "BRIEF")
 
-        row = prepare.build_row(root, "notes", "mvp", None, 300)
+        row = prepare.build_row(root, prepare.prds_dir(root), "notes", "mvp", None, 300)
 
-        assert row["asset_dirs"] == ["prds/notes/assets"]
-        assert row["test_assets_dir"] == "prds/notes/test_assets"
+        assert row["asset_dirs"] == ["v1/prds/notes/assets"]
+        assert row["test_assets_dir"] == "v1/prds/notes/test_assets"
         assert "test_assets" not in row["asset_dirs"][0]
 
     def test_absent_asset_dirs_are_omitted(self, tmp_path, monkeypatch):
         root = make_checkout(tmp_path, with_assets=False)
         monkeypatch.setattr(prepare, "render_task_prompt", lambda *a, **k: "BRIEF")
 
-        row = prepare.build_row(root, "notes", "mvp", None, 300)
+        row = prepare.build_row(root, prepare.prds_dir(root), "notes", "mvp", None, 300)
 
         assert row["asset_dirs"] == []
         assert row["test_assets_dir"] is None
@@ -104,7 +118,7 @@ class TestRowConstruction:
         root = make_checkout(tmp_path)
         monkeypatch.setattr(prepare, "render_task_prompt", lambda *a, **k: "BRIEF")
 
-        row = prepare.build_row(root, "notes", "mvp", "SYS", 300)
+        row = prepare.build_row(root, prepare.prds_dir(root), "notes", "mvp", "SYS", 300)
 
         assert [m["role"] for m in row["responses_create_params"]["input"]] == ["system", "user"]
 
@@ -113,29 +127,30 @@ class TestRowConstruction:
         root = make_checkout(tmp_path)
         monkeypatch.setattr(prepare, "render_task_prompt", lambda *a, **k: None)
 
-        assert prepare.build_row(root, "notes", "mvp", None, 300) is None
+        assert prepare.build_row(root, prepare.prds_dir(root), "notes", "mvp", None, 300) is None
 
     def test_row_is_dropped_when_the_artifact_has_no_test_plans(self, tmp_path, monkeypatch):
         root = make_checkout(tmp_path)
         monkeypatch.setattr(prepare, "render_task_prompt", lambda *a, **k: "BRIEF")
 
-        assert prepare.build_row(root, "notes", "feature2", None, 300) is None
+        assert prepare.build_row(root, prepare.prds_dir(root), "notes", "feature2", None, 300) is None
 
     def test_row_is_dropped_when_a_prd_is_missing(self, tmp_path, monkeypatch):
         root = make_checkout(tmp_path)
-        (root / "prds" / "notes" / "prd" / "mvp.txt").unlink()
+        (root / "v1" / "prds" / "notes" / "prd" / "mvp.txt").unlink()
         monkeypatch.setattr(prepare, "render_task_prompt", lambda *a, **k: "BRIEF")
 
-        assert prepare.build_row(root, "notes", "mvp", None, 300) is None
+        assert prepare.build_row(root, prepare.prds_dir(root), "notes", "mvp", None, 300) is None
 
 
 class TestPromptRendering:
     def test_returns_none_when_the_template_is_absent(self, tmp_path):
         assert prepare.render_task_prompt(tmp_path, "prd text", 300, "mvp") is None
 
-    def test_prefers_vibench_own_interpreter(self, tmp_path):
+    @pytest.mark.parametrize("project", ["v1", "."], ids=["ViBench 2 checkout", "older checkout"])
+    def test_prefers_vibench_own_interpreter(self, tmp_path, project):
         """ViBench's venv has jinja2; the caller's may not."""
-        venv_python = tmp_path / ".venv" / "bin" / "python"
+        venv_python = tmp_path / project / ".venv" / "bin" / "python"
         venv_python.parent.mkdir(parents=True)
         venv_python.write_text("")
 
@@ -222,5 +237,5 @@ class TestMain:
             sys, "argv", ["prepare.py", "--vibench-root", str(tmp_path), "--output", str(tmp_path / "o.jsonl")]
         )
 
-        with pytest.raises(SystemExit, match="No prds/"):
+        with pytest.raises(SystemExit, match="No v1/prds/ or prds/"):
             prepare.main()

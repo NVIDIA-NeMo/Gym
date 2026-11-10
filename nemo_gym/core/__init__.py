@@ -86,6 +86,8 @@ if TYPE_CHECKING:
         reply_failure_report,
         report_for_current_request,
     )
+    from nemo_gym.core.media import MediaFile, UnsupportedContentError, split_text_and_media
+    from nemo_gym.core.operation_timing import OperationTiming, TimingBoundary
     from nemo_gym.core.outcome_policy import (
         OutcomeAction,
         OutcomeDecision,
@@ -157,6 +159,11 @@ if TYPE_CHECKING:
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "MediaFile": "media",
+    "UnsupportedContentError": "media",
+    "split_text_and_media": "media",
+    "OperationTiming": "operation_timing",
+    "TimingBoundary": "operation_timing",
     "AGENT_INVALID_OUTPUT": "failure_kinds",
     "AGENT_LIMIT": "failure_kinds",
     "AGENT_ROUTE_FAILED": "failure_kinds",

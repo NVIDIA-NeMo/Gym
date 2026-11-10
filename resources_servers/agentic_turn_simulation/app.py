@@ -44,8 +44,9 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
+    observe_llm_judge_grading,
 )
-from nemo_gym.verification import call_judge, is_judge_failure
+from nemo_gym.verification import call_judge, is_judge_failure, record_parsed_judge_verdict
 from nemo_gym.verification.judge import _is_retryable_judge_error
 from resources_servers.agentic_turn_simulation.foreign_script import foreign_script_letters
 from resources_servers.agentic_turn_simulation.harnesses import HARNESSES, Harness, select_harness
@@ -588,6 +589,7 @@ class AgenticTurnSimulationResourcesServer(SimpleResourcesServer):
                 choice = reply.choices[0] if reply.choices else None
                 verdict = parse_verdict(choice.message.content if choice is not None else None)
                 if usable(verdict):
+                    record_parsed_judge_verdict()
                     return verdict
                 if choice is not None and choice.finish_reason == "length":
                     _grow_max_tokens(params, JUDGE_DEFAULT_MAX_TOKENS, self.config.judge_max_tokens_cap)
@@ -767,12 +769,17 @@ class AgenticTurnSimulationResourcesServer(SimpleResourcesServer):
         if gate is not None:
             return respond(0.0, code_gate=gate, correct_ladder="no")
 
-        verdicts = await self._judge(body, harness, items, tools)
-        combined = combine(verdicts)
-        judged = {key: combined[key] for key in (*VERDICT_FIELDS, "correct_ladder")} | {"judge_verdicts": verdicts}
-        if combined["n_usable"] == 0:
-            return respond(0.0, **judged, **_masked(failure_kinds.JUDGE_FAILED, "no judge returned a usable verdict"))
-        return respond(1.0 if combined["correct_ladder"] == "yes" else 0.0, **judged)
+        async def grade() -> AgenticTurnSimulationVerifyResponse:
+            verdicts = await self._judge(body, harness, items, tools)
+            combined = combine(verdicts)
+            judged = {key: combined[key] for key in (*VERDICT_FIELDS, "correct_ladder")} | {"judge_verdicts": verdicts}
+            if combined["n_usable"] == 0:
+                return respond(
+                    0.0, **judged, **_masked(failure_kinds.JUDGE_FAILED, "no judge returned a usable verdict")
+                )
+            return respond(1.0 if combined["correct_ladder"] == "yes" else 0.0, **judged)
+
+        return await observe_llm_judge_grading(grade)
 
     # --- aggregate metrics ----------------------------------------------------------------------------------
 

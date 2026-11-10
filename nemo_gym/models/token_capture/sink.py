@@ -334,9 +334,11 @@ async def resolve_parent(request_messages: list | None) -> None:
         )
         return
     logger.warning(
-        "Unresolved parent for model call %s of rollout %s; poisoning the call.",
+        "Unresolved parent for model call %s of rollout %s (reason=%s, %d request items); poisoning the call.",
         context.model_call_id,
         context.capture_key,
+        context.parent_resolution.reason if context.parent_resolution is not None else None,
+        len(context.request_items),
     )
     await ledger.record_failure(
         context.capture_key,
