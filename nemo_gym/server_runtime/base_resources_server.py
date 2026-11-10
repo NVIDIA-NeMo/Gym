@@ -50,7 +50,7 @@ if TYPE_CHECKING:
 
 from nemo_gym.client.server_client import SESSION_ID_KEY
 from nemo_gym.config.config_types import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.core.episode_types import EpisodeId, TaskId
+from nemo_gym.core.episode_types import EpisodeId, RolloutCoordinates, TaskId
 from nemo_gym.core.failure_kinds import SESSION_LOST, SESSION_RELEASE_FAILED, FailureClass, validate_failure_kind
 from nemo_gym.core.failure_records import FailureBoundary
 from nemo_gym.core.failure_transport import observe_failure
@@ -179,6 +179,9 @@ class BaseRunRequest(BaseModel):
 
 class BaseVerifyRequest(BaseRunRequest):
     response: NeMoGymResponse
+    # Sent by an Environment Server, for a verifier that compares the rollouts of one task, such as a GenRM cohort.
+    # Excluded from dumps, so a verify response built from the request does not echo it into the rollout's result.
+    rollout_coordinates: Optional[RolloutCoordinates] = Field(default=None, exclude=True)
 
 
 class BaseVerifyResponse(BaseVerifyRequest):

@@ -329,6 +329,10 @@ ATTEMPT_INDEX_KEY_NAME = "_ng_attempt_index"
 # Otherwise two dispatches would share one capture key.
 # The suffix "-a<N>" is reserved for attempt-qualified ids, so a dataset row's id must not end with it.
 ROLLOUT_ID_KEY_NAME = "_ng_rollout_id"
+# A caller that compares the rollouts of one task as a group, such as a GenRM cohort, names the group and,
+# when it replaces the whole group, the group's attempt. A rollout's own retry counter does not advance it.
+GROUP_ID_KEY_NAME = "_ng_group_id"
+GROUP_ATTEMPT_KEY_NAME = "_ng_group_attempt"
 RESPONSES_CREATE_PARAMS_KEY_NAME = "responses_create_params"
 RESPONSE_KEY_NAME = "response"
 AGENT_REF_KEY_NAME = "agent_ref"

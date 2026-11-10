@@ -34,6 +34,7 @@ if TYPE_CHECKING:
         BaseEpisodeResponse,
         EpisodeId,
         MaterializedTask,
+        RolloutCoordinates,
         TaskId,
     )
     from nemo_gym.core.failure_kinds import (
@@ -256,6 +257,7 @@ _PUBLIC_API = {
     "REQUIRED_TOKEN_METADATA_FIELDS": "responses_api_types",
     "RESPONSES_TO_TRAIN": "responses_api_types",
     "RequestFailureLog": "failure_transport",
+    "RolloutCoordinates": "episode_types",
     "SESSION_EXPIRED": "failure_kinds",
     "SESSION_LOST": "failure_kinds",
     "SSE_KEEPALIVE": "responses_api_types",

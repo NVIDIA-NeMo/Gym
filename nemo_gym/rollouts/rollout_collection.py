@@ -76,6 +76,8 @@ from nemo_gym.config.global_config import (
     ATTEMPT_INDEX_KEY_NAME,
     ENVIRONMENT_SERVER_STAMP_KEY_NAME,
     ENVIRONMENT_SERVER_TYPE_KEY_NAME,
+    GROUP_ATTEMPT_KEY_NAME,
+    GROUP_ID_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
@@ -93,7 +95,7 @@ from nemo_gym.config.global_config import (
     resolve_dataset_agent,
 )
 from nemo_gym.core.episode_context import check_rollout_id_length, maybe_rollout_id_from_run_body
-from nemo_gym.core.episode_types import EpisodeId, TaskId, is_materialized_task_row
+from nemo_gym.core.episode_types import EpisodeId, RolloutCoordinates, TaskId, is_materialized_task_row
 from nemo_gym.core.failure_kinds import (
     AGENT_ROUTE_FAILED,
     CANCELLED,
@@ -512,13 +514,16 @@ def _episode_request_body(row: Mapping[str, Any]) -> dict[str, Any]:
     # Decode the identity the way the agent does.
     # An explicit id may carry the attempt suffix itself, as a restored attempt does.
     capture_key = maybe_rollout_id_from_run_body(row) or f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
-    return {
+    body: dict[str, Any] = {
         "episode_id": EpisodeId.from_capture_key(capture_key).model_dump(mode="json"),
         "task": {
             "task_id": row["task_id"],
             "task_input": row["task_input"],
         },
     }
+    if (coordinates := RolloutCoordinates.from_row(row)) is not None:
+        body["rollout_coordinates"] = coordinates.model_dump(mode="json", exclude_none=True)
+    return body
 
 
 def _rows_of_first_tasks(numbered_rows: Iterable[tuple[int, str]], limit: int) -> Iterator[tuple[int, str]]:
@@ -1054,6 +1059,10 @@ def _stamp_collector_fields(completed: "_CompletedRollout", result: dict[str, An
     result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
     for key in (AGENT_REF_KEY_NAME, TASK_SOURCE_KEY_NAME, SKILLS_REF_KEY_NAME, ATTEMPT_INDEX_KEY_NAME):
         if key in row:
+            result[key] = row[key]
+    # A caller's comparison group, as a flat result's verifier echo kept it, so an episode result carries it too.
+    for key in (GROUP_ID_KEY_NAME, GROUP_ATTEMPT_KEY_NAME):
+        if row.get(key) is not None:
             result[key] = row[key]
     if ROLLOUT_ID_KEY_NAME in row:
         # Capture readback recomputes the id from the finished record.

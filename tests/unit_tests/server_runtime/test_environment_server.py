@@ -15,7 +15,14 @@ from pydantic import BaseModel
 
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.core.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeId, MaterializedTask, TaskId
+from nemo_gym.core.episode_types import (
+    BaseEpisodeRequest,
+    BaseEpisodeResponse,
+    EpisodeId,
+    MaterializedTask,
+    RolloutCoordinates,
+    TaskId,
+)
 from nemo_gym.core.failure_records import EpisodeFailure
 from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.server_runtime.base_environment_server import (
@@ -510,6 +517,59 @@ async def test_a_refused_duplicate_run_leaves_the_live_episode_tracked() -> None
 
     assert tracked == 1
     assert participant.readiness().blocker_count == 0
+
+
+@pytest.mark.parametrize(
+    ("recorded", "resumed", "continues"),
+    [
+        (None, None, True),
+        # Recorded before checkpoints recorded groups (the task's digest alone): it still continues.
+        (None, {"task_index": 0, "rollout_index": 1}, True),
+        (None, {"group_id": "g", "group_attempt": 0}, True),
+        ({"group_id": "g", "group_attempt": 0}, {"task_index": 0, "group_id": "g", "group_attempt": 0}, True),
+        # The caller replaced the whole group: the same rollout arrives under the group's next attempt.
+        ({"group_id": "g", "group_attempt": 0}, {"group_id": "g", "group_attempt": 1}, False),
+        ({"group_id": "g", "group_attempt": 0}, {"group_id": "other", "group_attempt": 0}, False),
+    ],
+    ids=["no_coordinates", "indices_only", "group_after_upgrade", "same_group", "raised_group_attempt", "other_group"],
+)
+async def test_a_continuation_must_carry_the_rollout_coordinates_it_was_recorded_with(
+    recorded: dict[str, Any] | None, resumed: dict[str, Any] | None, continues: bool
+) -> None:
+    from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant, EpisodeRecord, task_digest
+    from nemo_gym.server_runtime._checkpoint.errors import ControlError
+
+    def request(coordinates: dict[str, Any] | None) -> _Request:
+        update = {"rollout_coordinates": None if coordinates is None else RolloutCoordinates(**coordinates)}
+        return _request().model_copy(update=update)
+
+    class _Exported(_EnvironmentServer):
+        checkpoint_mode = "exported"
+
+    server = _Exported(config=_environment_server().config, server_client=MagicMock(spec=ServerClient))
+    participant = EnvironmentParticipant(mode="exported")
+    server._checkpoint = participant
+    old = request(recorded)
+    participant.restore_records(
+        [
+            EpisodeRecord(
+                episode_id=old.episode_id.model_copy(update={"attempt": old.episode_id.attempt - 1}),
+                # Literal formats, not the code under test: a task's digest alone, or the task with its group.
+                task_digest=task_digest(
+                    old.task.model_dump(mode="json")
+                    if recorded is None
+                    else {"task": old.task.model_dump(mode="json"), "group": {"id": "g", "attempt": 0}}
+                ),
+                boundary=None,
+            )
+        ]
+    )
+
+    if continues:
+        assert (await server.run_request(request(resumed))).result == "result"
+    else:
+        with pytest.raises(ControlError, match="different task or comparison group"):
+            await server.run_request(request(resumed))
 
 
 async def test_an_episode_is_untracked_even_if_its_cleanup_is_cancelled() -> None:

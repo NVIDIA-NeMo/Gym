@@ -46,12 +46,19 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, field_validator, model_validator
 
 from nemo_gym.client import SESSION_ID_KEY, get_response_json, raise_for_status
-from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, ModelServerRef
+from nemo_gym.config import (
+    GROUP_ATTEMPT_KEY_NAME,
+    GROUP_ID_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+    ModelServerRef,
+)
 from nemo_gym.core import (
     FailureReport,
     NeMoGymEasyInputMessage,
     NeMoGymResponseCreateParamsNonStreaming,
     RequestFailureLog,
+    RolloutCoordinates,
     rebuild_failure,
 )
 from nemo_gym.server_runtime import (
@@ -106,10 +113,6 @@ def _output_budget_exhausted(raw_response: Any) -> bool:
         return False
     details = raw_response.get("incomplete_details") or {}
     return isinstance(details, dict) and details.get("reason") == "max_output_tokens"
-
-
-GROUP_ID_KEY_NAME = "_ng_group_id"
-GROUP_ATTEMPT_KEY_NAME = "_ng_group_attempt"
 
 
 @lru_cache(maxsize=1)
@@ -316,10 +319,29 @@ class GenRMCompareVerifyRequest(BaseVerifyRequest):
 
     @model_validator(mode="before")
     @classmethod
-    def _warn_on_legacy_group_identity(cls, data: Any) -> Any:
-        """Treat an omitted group attempt as zero during client migration."""
+    def _read_rollout_coordinates(cls, data: Any) -> Any:
+        """Take the cohort coordinates an Environment Server sends as typed ``rollout_coordinates``.
+
+        An Agent's ``/run`` sends the row's flat ``_ng_*`` keys instead, as does judge-failed-only reverification
+        from a stored row. When both arrive, they must agree. Only the ``_ng_*`` key is compared: a task-data column
+        with the bare field name loses to the alias, as it does on the relay.
+        Then treat an omitted group attempt as zero during client migration.
+        """
         if not isinstance(data, dict):
             return data
+        coordinates = data.get("rollout_coordinates")
+        if isinstance(coordinates, RolloutCoordinates):
+            coordinates = coordinates.model_dump(exclude_none=True)
+        if isinstance(coordinates, dict):
+            data = dict(data)
+            for name, key in RolloutCoordinates.row_keys().items():
+                value = coordinates.get(name)
+                if value is None:
+                    continue
+                flat = data.get(key)
+                if flat is not None and flat != value:
+                    raise ValueError(f"{key}={flat!r} disagrees with rollout_coordinates.{name}={value!r}")
+                data[key] = value
         group_id = data.get(GROUP_ID_KEY_NAME, data.get("group_id"))
         has_group_attempt = GROUP_ATTEMPT_KEY_NAME in data or "group_attempt" in data
         if group_id is not None and not has_group_attempt:

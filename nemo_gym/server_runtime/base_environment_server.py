@@ -344,9 +344,10 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
                             await self._checkpoint.claim(request.episode_id)
                             self._checkpoint.begin(
                                 request.episode_id,
-                                request.task.model_dump(mode="json"),
+                                self._checkpointed_input(request),
                                 deadline,
                                 restart=self.checkpoint_mode == "restart_only",
+                                task_alone=request.task.model_dump(mode="json"),
                             )
                             begun = True
                         response = await self.run(request, cleanup)
@@ -437,6 +438,22 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
     def checkpoint_continuation(self, request: EpisodeRequestT) -> dict[str, JsonValue] | None:
         """Return the protocol state this attempt continues from a checkpoint, once, or ``None``."""
         return self._checkpoint.continuation(request.episode_id) if self._checkpoint is not None else None
+
+    @staticmethod
+    def _checkpointed_input(request: EpisodeRequestT) -> dict[str, Any]:
+        """What a continued episode must match: its task and, when the caller names one, its comparison group.
+
+        A caller that replaces a whole group, such as a GenRM cohort, raises the group attempt of the same
+        episodes. Continuing a boundary recorded under the old attempt would score that attempt's answer under
+        the new one. The task and rollout indices are not recorded: they name the episode, as its id does, and a
+        request without a group records the task alone, as before. A checkpoint recorded before groups were
+        recorded still restores: ``begin`` also accepts the task's digest alone.
+        """
+        task = request.task.model_dump(mode="json")
+        coordinates = request.rollout_coordinates
+        if coordinates is None or (coordinates.group_id is None and coordinates.group_attempt is None):
+            return task
+        return {"task": task, "group": {"id": coordinates.group_id, "attempt": coordinates.group_attempt}}
 
     async def checkpoint_boundary(
         self,

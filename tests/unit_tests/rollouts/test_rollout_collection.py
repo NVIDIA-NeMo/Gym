@@ -12036,6 +12036,28 @@ class TestAnAgentThatOnlyEverFails:
         assert set(agent_name_to_dropped) == {"broken_agent"}
 
 
+@pytest.mark.parametrize(
+    ("group", "echo"),
+    [
+        ({"_ng_group_id": "cohort", "_ng_group_attempt": 2}, {}),
+        # A flat result's verifier echo of the row's own group is restated, not changed.
+        ({"_ng_group_id": "cohort", "_ng_group_attempt": 2}, {"_ng_group_id": "cohort", "_ng_group_attempt": 2}),
+        ({}, {}),
+    ],
+    ids=["episode_result", "flat_result_echo", "ungrouped"],
+)
+def test_a_record_carries_the_rows_comparison_group(group: dict, echo: dict) -> None:
+    from nemo_gym.rollouts.rollout_collection import _stamp_collector_fields
+
+    row = {TASK_INDEX_KEY_NAME: 3, ROLLOUT_INDEX_KEY_NAME: 1, **group}
+    record = {"reward": 1.0, **echo}
+
+    _stamp_collector_fields(_CompletedRollout(row=row, result=record, rollout_latency_ms=None), record)
+
+    assert {key: value for key, value in record.items() if key.startswith("_ng_group")} == group
+    assert (record[TASK_INDEX_KEY_NAME], record[ROLLOUT_INDEX_KEY_NAME]) == (3, 1)
+
+
 class TestEnvironmentServerRouting:
     def _row(self) -> dict:
         return {
@@ -12117,6 +12139,8 @@ class TestEnvironmentServerRouting:
                     "task_data": {"instance_id": "instance"},
                 },
             },
+            # The row's collector indices, which the task input does not carry, travel typed for /verify.
+            "rollout_coordinates": {"task_index": 0, "rollout_index": 0},
         }
 
     @pytest.mark.parametrize(

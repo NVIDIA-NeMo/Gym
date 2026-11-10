@@ -339,8 +339,20 @@ whether to replace a failed attempt. The server does not generate answers or sch
 | `_ng_group_attempt` | Nonnegative integer shared by every member of an attempt; defaults to zero. |
 | `_ng_rollout_index` | Required member slot from zero through `num_rollouts_per_prompt - 1`. |
 
+The shipped `genrm_environment_server` and `genrm_simple_agent_reasoning_off_environment_server` are
+`single_agent_turn_legacy` servers. They pass these row keys, with the collector's `_ng_task_index`, to
+`/verify` as the typed `rollout_coordinates` field, because an episode's task data does not carry `_ng_*` keys.
+An Agent's `/run` behind the `legacy_agent` relay, and `gym eval reverify`, send the flat keys instead. The
+server reads either; when both arrive and disagree, `/verify` answers HTTP 422. They must be integers and a
+nonempty string: the Environment Server refuses a row whose coordinates are malformed, such as
+`_ng_group_attempt: "1"`, with HTTP 422 before any session opens.
+
 All members must carry the same prompt and principle. Responses echo these coordinates; group attempt
-numbers and other private metadata are excluded from reward metrics. Shared judge calls run outside any
+numbers and other private metadata are excluded from reward metrics. The Environment Server drops that echo
+from an episode result, which rollout collection refuses with `_ng_*` keys in it, so cohorts also run from
+materialized rows; `single_agent_turn_legacy` puts a flat row's group keys back on its flat result.
+The shipped servers keep the relay's unbounded episode (`default_episode_timeout_seconds: null`), so a raised
+`cohort_collection_timeout_s` or `cohort_evaluation_timeout_s` is not cut short by the adapter's 6 h episode bound. Shared judge calls run outside any
 individual member's token capture context. This also drops the arriving member's OpenTelemetry parent;
 judge spans are separate traces until cohort-level tracing is implemented.
 
@@ -408,7 +420,13 @@ At `/verify`, incomplete membership, cancellation, and supersession release wait
 Subsequent requests from a superseded attempt receive 409. Invalid coordinates receive 422.
 The simple agent converts upstream HTTP errors to HTTP 500 from `/run`. With
 `route_failures_to_sidecar` enabled, the collector records these as `agent_run_error` without a reward.
-By default an HTTP error aborts collection.
+By default an HTTP error aborts collection. Behind `single_agent_turn_legacy`, the shipped environment
+servers, the same errors return HTTP 200 with a flat failure row instead: `_ng_failure_class:
+environment_server_failed`, `_ng_failure_stage: verification`, and the member's answer as
+`_ng_failure_partial_response`. A 503 is retryable (`_ng_failure_terminal: false`), so a resumed run dispatches
+that rollout again, up to `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`, as it does any retryable failure. Each new attempt
+generates a new policy answer before it reaches `/verify`, where a retry of a failed group gets the group's
+recorded failure until the caller replaces the whole group. A 409 or 422 is terminal.
 
 Judge failures (including judge deadlines) use Gym's standard `JudgeError` failsafe instead. Each member
 receives HTTP 200 with its original generated `response`, `_ng_failure_class: judge_failed`, and

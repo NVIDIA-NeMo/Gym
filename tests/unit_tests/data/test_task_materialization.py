@@ -3,13 +3,14 @@
 
 import json
 from copy import deepcopy
+from pathlib import Path
 
 import pytest
 from omegaconf import OmegaConf
 from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationError
 
 from nemo_gym.config.global_config import GlobalConfigDictParser
-from nemo_gym.core.episode_types import EpisodeId
+from nemo_gym.core.episode_types import EpisodeId, RolloutCoordinates
 from nemo_gym.data.dataset_preparation import TrainDataProcessor
 from nemo_gym.data.task_data import TaskDataValidator
 from nemo_gym.data.task_materialization import materialize_task
@@ -188,17 +189,8 @@ def test_collation_routes_declared_taskset_without_rewriting_shared_source(tmp_p
     assert source.read_bytes() == original
 
 
-@pytest.mark.parametrize("task_index", [100, 200])
-@pytest.mark.parametrize("explicit_rollout_id", [False, True])
-def test_collation_preserves_shard_and_retry_identity(tmp_path, task_index, explicit_rollout_id):
-    row = {
-        "responses_create_params": {"input": "same prompt across shards"},
-        "_ng_task_index": task_index,
-        "_ng_attempt_index": 2,
-        "_ng_rollout_index": 0,
-    }
-    if explicit_rollout_id:
-        row["_ng_rollout_id"] = f"shard-{task_index}"
+def _collate_one_taskset_row(tmp_path, row: dict) -> Path:
+    """Collate one source row of a taskset dataset; return the prepared JSONL."""
     source = tmp_path / "source.jsonl"
     source.write_text(json.dumps(row) + "\n")
     output = tmp_path / "collated"
@@ -238,6 +230,23 @@ def test_collation_preserves_shard_and_retry_identity(tmp_path, task_index, expl
             }
         )
     )
+    return output / "example.jsonl"
+
+
+@pytest.mark.parametrize("task_index", [100, 200])
+@pytest.mark.parametrize("explicit_rollout_id", [False, True])
+@pytest.mark.parametrize("group", [{}, {"_ng_group_id": "cohort", "_ng_group_attempt": 1}], ids=["ungrouped", "group"])
+def test_collation_preserves_shard_and_retry_identity(tmp_path, task_index, explicit_rollout_id, group):
+    row = {
+        "responses_create_params": {"input": "same prompt across shards"},
+        "_ng_task_index": task_index,
+        "_ng_attempt_index": 2,
+        "_ng_rollout_index": 0,
+        **group,
+    }
+    if explicit_rollout_id:
+        row["_ng_rollout_id"] = f"shard-{task_index}"
+    output = _collate_one_taskset_row(tmp_path, row).parent
     prepared = json.loads((output / "example.jsonl").read_text())
     for key, value in row.items():
         if key.startswith("_ng_"):
@@ -253,6 +262,20 @@ def test_collation_preserves_shard_and_retry_identity(tmp_path, task_index, expl
     request = SingleAgentTurnRequest.model_validate(_episode_request_body(loaded))
     assert request.episode_id.rollout_id == (f"shard-{task_index}" if explicit_rollout_id else f"{task_index}-0")
     assert request.episode_id.attempt == 2
+    # A source row's group reaches the episode's rollout coordinates, as a flat row's does.
+    assert request.rollout_coordinates == RolloutCoordinates(
+        task_index=task_index,
+        rollout_index=0,
+        group_id=group.get("_ng_group_id"),
+        group_attempt=group.get("_ng_group_attempt"),
+    )
+
+
+def test_collation_refuses_a_row_with_malformed_group_coordinates(tmp_path):
+    row = {"responses_create_params": {"input": "prompt"}, "_ng_group_id": "cohort", "_ng_group_attempt": "1"}
+
+    with pytest.raises(ValueError, match="(?s)line 1: invalid rollout group.*group_attempt"):
+        _collate_one_taskset_row(tmp_path, row)
 
 
 @pytest.mark.parametrize(
@@ -272,6 +295,27 @@ def test_episode_request_decodes_the_capture_key_like_the_agent(identity, expect
     row = {"task_id": {"taskset": "tasks", "task_id": "task"}, "task_input": {}, **identity}
 
     assert EpisodeId.model_validate(_episode_request_body(row)["episode_id"]) == expected
+
+
+def test_episode_request_carries_the_rows_coordinates_beside_the_task() -> None:
+    row = {
+        "task_id": {"taskset": "tasks", "task_id": "task"},
+        "task_input": {"responses_create_params": {"input": "prompt"}, "task_data": {"instance_id": "task"}},
+        "_ng_task_index": 3,
+        "_ng_rollout_index": 2,
+        "_ng_attempt_index": 1,
+        "_ng_group_id": "cohort",
+        "_ng_group_attempt": 4,
+    }
+
+    request = SingleAgentTurnRequest.model_validate(_episode_request_body(row))
+
+    assert request.rollout_coordinates == RolloutCoordinates(
+        task_index=3, rollout_index=2, group_id="cohort", group_attempt=4
+    )
+    assert request.episode_id == EpisodeId(rollout_id="3-2", attempt=1)
+    # The task input stays as prepared; only the typed field carries the coordinates.
+    assert request.task.task_input.task_data == {"instance_id": "task"}
 
 
 def _resources_server(name, datasets, implementation="test"):
