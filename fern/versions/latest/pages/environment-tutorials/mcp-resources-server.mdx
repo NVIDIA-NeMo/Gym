@@ -359,7 +359,8 @@ my_environment:
   environment_servers:
     my_environment:
       entrypoint: app.py
-      tool_transports: [mcp]   # default [direct_http]
+      tool_transports: [mcp]         # default [direct_http]
+      sandbox_provider: {docker: {}}  # required: where the episodes' tools do their work
 ```
 
 | `tool_transports` | Grants | For agents such as |
