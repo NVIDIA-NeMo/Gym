@@ -28,17 +28,34 @@ from yarl import URL
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.trajectory import TrajectoryRecord
+from nemo_gym.trajectory import AgentObservationBundle, TrajectoryRecord
 from responses_api_agents.speed_bench_agent.app import (
     SpeedBenchAgent,
     SpeedBenchAgentConfig,
+    SpeedBenchAgentRunRequest,
     _content_text,
 )
 
 
-def _http(payload: dict, *, cookies: dict | None = None) -> MagicMock:
-    result = MagicMock(status=200, ok=True, cookies=cookies or {})
-    result.read = AsyncMock(return_value=json.dumps(payload).encode())
+def _http(
+    payload: dict | bytes,
+    *,
+    cookies: dict | None = None,
+    status: int = 200,
+    headers: dict | None = None,
+) -> MagicMock:
+    content = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+    result = MagicMock(status=status, ok=status < 400, cookies=cookies or {}, headers=CIMultiDict(headers or {}))
+    result.read = AsyncMock(return_value=content)
+    result.content.read = AsyncMock(return_value=content)
+    if status >= 400:
+        url = URL("http://speed-agent/v1/responses")
+        result.raise_for_status.side_effect = ClientResponseError(
+            RequestInfo(url, "POST", CIMultiDictProxy(CIMultiDict()), url),
+            (),
+            status=status,
+            headers=result.headers,
+        )
     return result
 
 
@@ -141,8 +158,8 @@ def test_multiturn_replay_preserves_metrics_and_owns_each_model_call(capture: bo
         assert all("headers" not in call for call in calls)
 
 
-@pytest.mark.parametrize("fail_second", [False, True])
-def test_run_preserves_evidence_through_self_dispatch(fail_second: bool) -> None:
+@pytest.mark.parametrize("failure_stage", [None, "model", "verify"])
+def test_run_preserves_evidence_through_self_dispatch(failure_stage: str | None) -> None:
     agent, transport = _agent()
     verify_payloads = []
     self_replies = []
@@ -152,26 +169,19 @@ def test_run_preserves_evidence_through_self_dispatch(fail_second: bool) -> None
         payload = json.model_dump(mode="json") if hasattr(json, "model_dump") else json
         if server_name == "policy":
             model_calls.append(payload)
-            if fail_second and len(model_calls) == 2:
+            if failure_stage == "model" and len(model_calls) == 2:
                 raise RuntimeError("model transport failed")
             return _http(_model_response(len(model_calls)))
         if server_name == "speed_agent":
             reply = await asyncio.to_thread(client.post, url_path, json=payload, cookies=cookies)
             self_replies.append(reply)
-            response = _http(reply.json(), cookies=dict(reply.cookies))
-            response.status = reply.status_code
-            response.ok = reply.status_code < 400
-            response.content.read = AsyncMock(return_value=reply.content)
-            url = URL(str(reply.request.url))
-            response.raise_for_status.side_effect = ClientResponseError(
-                RequestInfo(url, "POST", CIMultiDictProxy(CIMultiDict()), url),
-                (),
-                status=reply.status_code,
-                headers=CIMultiDict(reply.headers),
+            return _http(
+                reply.content, cookies=dict(reply.cookies), status=reply.status_code, headers=dict(reply.headers)
             )
-            return response
         if url_path == "/verify":
             verify_payloads.append(payload)
+            if failure_stage == "verify":
+                return _http({"detail": "verification failed"}, status=503)
             return _http(payload | {"reward": 0.0})
         assert url_path == "/seed_session"
         return _http({})
@@ -190,31 +200,145 @@ def test_run_preserves_evidence_through_self_dispatch(fail_second: bool) -> None
                 },
             },
         )
-    assert reply.status_code == (500 if fail_second else 200), reply.text
-    assert self_replies[0].status_code == reply.status_code
+    assert reply.status_code == (500 if failure_stage else 200), reply.text
+    assert self_replies[0].status_code == (500 if failure_stage == "model" else 200)
     result = reply.json()
-    trajectory = TrajectoryRecord.model_validate(result["ng_trajectory"])
-    assert trajectory.task_id == "source-task"
-    assert trajectory.rollout_id == "task-0"
-    assert [(turn.task_id, turn.rollout_id) for turn in trajectory.turns] == [("source-task", "task-0")] * (
-        1 if fail_second else 2
-    )
-    invocation = trajectory.invocations[0]
-    if fail_second:
+    if failure_stage == "model":
+        assert "ng_trajectory" not in result
+        assert "ng_trajectory" not in self_replies[0].json()
+        assert "_ng_trajectory" not in self_replies[0].json()
+        observations = AgentObservationBundle.model_validate(result["ng_agent_observations"])
+        assert observations.model_dump(mode="json") == self_replies[0].json()["ng_agent_observations"]
+        assert observations.source == "speed_bench_agent"
+        assert not observations.gaps
+        invocation = observations.records[0]
+        assert invocation.invocation_id == "root"
         assert not verify_payloads
         assert invocation.status == "failed"
         assert invocation.error_type == "RuntimeError"
         assert [ref.response_id for ref in invocation.model_calls] == ["response-1"]
-        assert [turn.turn_no for turn in trajectory.turns] == [1]
-        assert "ng_trajectory" in self_replies[0].json()
+        assert [item.role for item in invocation.conversation] == ["user", "assistant"]
     else:
-        assert invocation.verification_skipped is False
+        trajectory = TrajectoryRecord.model_validate(result["ng_trajectory"])
+        assert trajectory.task_id == "source-task"
+        assert trajectory.rollout_id == "task-0"
+        assert [(turn.task_id, turn.rollout_id) for turn in trajectory.turns] == [("source-task", "task-0")] * 2
+        invocation = trajectory.invocations[0]
+        assert invocation.status == "completed"
         assert [ref.response_id for ref in invocation.model_calls] == ["response-1", "response-2"]
-        assert result["reward"] == 0.0
-        assert result["response"]["usage"]["total_tokens"] == 33
         assert "_ng_trajectory" in self_replies[0].json()
         assert "_ng_trajectory" not in verify_payloads[0]["response"]
-        assert "_ng_trajectory" not in result["response"]
+        if failure_stage == "verify":
+            assert invocation.verification_skipped is None
+            assert "verification failed" in result["detail"]
+            assert "reward" not in result
+        else:
+            assert invocation.verification_skipped is False
+            assert result["reward"] == 0.0
+            assert result["response"]["usage"]["total_tokens"] == 33
+            assert "_ng_trajectory" not in result["response"]
+
+
+def test_missing_response_id_keeps_the_unavailable_reference_explicit() -> None:
+    agent, transport = _agent()
+    transport.post = AsyncMock(side_effect=[_http(_model_response(1)), _http(_model_response(2) | {"id": ""})])
+    with TestClient(agent.setup_webserver()) as client:
+        reply = client.post(
+            "/ng-rollout/task-0/v1/responses",
+            json={"input": [{"role": "user", "content": "first"}, {"role": "user", "content": "second"}]},
+        )
+    assert reply.status_code == 200, reply.text
+    result = reply.json()
+    trajectory = TrajectoryRecord.model_validate(result["_ng_trajectory"])
+    assert [ref.response_id for ref in trajectory.invocations[0].model_calls] == ["response-1"]
+    assert [turn.turn_no for turn in trajectory.turns] == [1, 2]
+    assert trajectory.turns[1].model_calls == []
+    assert [(gap.code, gap.invocation_id, gap.detail) for gap in trajectory.gaps] == [
+        ("model_call_reference_unavailable", "root", "turn:2")
+    ]
+    assert result["usage"]["total_tokens"] == 33
+    assert [item["content"][0]["text"] for item in result["output"]] == ["answer-1", "answer-2"]
+
+
+async def test_cancelled_model_call_keeps_partial_identity_free_observations() -> None:
+    agent, transport = _agent()
+    cancelled = asyncio.CancelledError("model request cancelled")
+    transport.post = AsyncMock(side_effect=[_http(_model_response(1)), cancelled])
+    request = Request(
+        {
+            "type": "http",
+            "path": "/ng-rollout/task-0/v1/responses",
+            "path_params": {"rollout_id": "task-0"},
+            "headers": [],
+        }
+    )
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await agent.responses(
+            request,
+            Response(),
+            NeMoGymResponseCreateParamsNonStreaming(
+                input=[{"role": "user", "content": "first"}, {"role": "user", "content": "second"}]
+            ),
+        )
+    assert raised.value is cancelled
+    assert not hasattr(request.state, "nemo_gym_agent_trajectory")
+    observations = AgentObservationBundle.model_validate(request.state.nemo_gym_agent_observations)
+    invocation = observations.records[0]
+    assert invocation.status == "incomplete"
+    assert invocation.error_type == "CancelledError"
+    assert [ref.response_id for ref in invocation.model_calls] == ["response-1"]
+    assert [item.role for item in invocation.conversation] == ["user", "assistant"]
+    assert transport.post.await_count == 2
+
+
+@pytest.mark.parametrize(
+    "failure_content",
+    [
+        b"upstream proxy unavailable",
+        b'{"ng_trajectory": {"invalid": true}}',
+        json.dumps(
+            {"ng_trajectory": TrajectoryRecord(task_id="other-task", rollout_id="other-rollout").model_dump()}
+        ).encode(),
+    ],
+)
+async def test_failed_self_dispatch_preserves_original_http_error(failure_content: bytes) -> None:
+    agent, transport = _agent()
+    failure = _http(failure_content, status=502, headers={"x-upstream-detail": "original"})
+    error = failure.raise_for_status.side_effect
+    cause = RuntimeError("original cause")
+    error.__cause__ = cause
+    transport.post = AsyncMock(side_effect=[_http({}), failure])
+    request = Request({"type": "http", "headers": []})
+    body = SpeedBenchAgentRunRequest.model_validate(
+        {"task_id": "source-task", "_ng_rollout_id": "task-0", "responses_create_params": {"input": "first"}}
+    )
+    with pytest.raises(ClientResponseError) as raised:
+        await agent.run(request, body)
+    assert raised.value is error
+    assert error.__cause__ is cause
+    assert error.status == 502
+    assert error.headers["x-upstream-detail"] == "original"
+    assert error.response_content == failure_content
+    failure.content.read.assert_awaited_once_with()
+    failure.read.assert_not_awaited()
+    assert not hasattr(request.state, "nemo_gym_agent_trajectory")
+    assert transport.post.await_count == 2
+
+
+async def test_successful_self_dispatch_rejects_another_rollouts_trajectory() -> None:
+    agent, transport = _agent()
+    response = _model_response(1) | {
+        "_ng_trajectory": TrajectoryRecord(task_id="other-task", rollout_id="other-rollout").model_dump()
+    }
+    transport.post = AsyncMock(side_effect=[_http({}), _http(response)])
+    request = Request({"type": "http", "headers": []})
+    body = SpeedBenchAgentRunRequest.model_validate(
+        {"task_id": "source-task", "_ng_rollout_id": "task-0", "responses_create_params": {"input": "first"}}
+    )
+    with pytest.raises(ValueError, match="trajectory does not match this run's rollout"):
+        await agent.run(request, body)
+    assert not hasattr(request.state, "nemo_gym_agent_trajectory")
+    assert transport.post.await_count == 2
 
 
 @pytest.mark.parametrize(
