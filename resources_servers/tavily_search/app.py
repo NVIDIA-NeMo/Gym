@@ -323,6 +323,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
     _async_tavily_clients: Optional[List[AsyncTavilyClient]] = PrivateAttr(default=None)
     _num_requests: int = 0
     _session_id_to_metrics: Optional[Dict[str, TavilySearchMetrics]] = PrivateAttr(default=None)
+    _archived_session_metrics: Dict[str, TavilySearchMetrics] = PrivateAttr(default_factory=dict)
     seed_request_model = TavilyTypedSeedSessionRequest
 
     JUDGE_PROMPT_TEMPLATE: ClassVar[str] = JUDGE_PROMPT_TEMPLATE
@@ -392,7 +393,8 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 out_file = Path(__file__).parent / "session_id_metrics.json"
                 print(f"Dumping session_id metrics to {out_file}")
 
-                to_dump = {k: v.model_dump(mode="json") for k, v in self._session_id_to_metrics.items()}
+                metrics = self._archived_session_metrics | self._session_id_to_metrics
+                to_dump = {k: v.model_dump(mode="json") for k, v in metrics.items()}
                 with out_file.open("w") as f:
                     json.dump(to_dump, f)
 
@@ -420,9 +422,11 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         self._session_id_to_metrics[session_id] = TavilySearchMetrics()
 
     async def release_session_state(self, session_id: str) -> None:
-        """Release active and retry metrics, except the explicit metrics archive used by the exit dump."""
-        if not self.config.dump_session_id_to_metrics_on_exit:
-            self._session_id_to_metrics.pop(session_id, None)
+        """Remove live metrics, retaining an export-only reference when the exit dump is enabled."""
+        metrics = self._session_id_to_metrics.pop(session_id, None)
+        if metrics is not None and self.config.dump_session_id_to_metrics_on_exit:
+            # In-flight calls may still append to this object; verification retains its own deep snapshot.
+            self._archived_session_metrics[session_id] = metrics
 
     def _session_metrics(self, request: Request) -> TavilySearchMetrics:
         """The metrics of the calling session.

@@ -131,15 +131,16 @@ def verify_json() -> dict[str, Any]:
     }
 
 
-def test_follows_the_session_contract() -> None:
-    server = make_server()
+@pytest.mark.parametrize("dump_metrics", [False, True])
+def test_follows_the_session_contract(dump_metrics: bool) -> None:
+    server = make_server(dump_session_id_to_metrics_on_exit=dump_metrics)
     check_resources_session_contract(
         server.setup_webserver(),
         ResourcesSeedSessionRequest(
             resources_session_id="contract-session", episode_id=EPISODE, task_id=TASK, task_data=TASK_DATA
         ),
         keeps_state=True,
-        holds_state=lambda resources_session_id: resources_session_id in server._session_id_to_metrics,
+        holds_state=server.has_session_state,
         verify_body=verify_json(),
     )
 
@@ -191,8 +192,9 @@ def test_a_late_tool_call_does_not_recreate_a_closed_session() -> None:
     assert verified["metrics"] == {"async_tavily_calls": []}
 
 
-async def test_a_search_in_flight_across_close_does_not_recreate_the_session() -> None:
-    server = make_server()
+@pytest.mark.parametrize("dump_metrics", [False, True])
+async def test_a_search_in_flight_across_close_does_not_recreate_the_session(dump_metrics: bool) -> None:
+    server = make_server(dump_session_id_to_metrics_on_exit=dump_metrics)
     searching, finish = asyncio.Event(), asyncio.Event()
 
     async def slow_search(*args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -212,7 +214,9 @@ async def test_a_search_in_flight_across_close_does_not_recreate_the_session() -
     await asyncio.wait_for(search, timeout=5)
 
     # The search records its call on the metrics it read before the close, not on a new record.
-    assert "resources-session" not in server._session_id_to_metrics
+    assert not server.has_session_state("resources-session")
+    if dump_metrics:
+        assert len(server._archived_session_metrics["resources-session"].async_tavily_calls) == 1
 
 
 def test_a_seed_for_the_same_episode_and_another_task_is_refused() -> None:
@@ -269,7 +273,8 @@ def test_the_exit_dump_keeps_released_metrics(tmp_path: Path, verify_first: bool
         if verify_first:
             assert client.post("/verify", json=verify_json()).json()["reward"] == 1.0
         assert client.post("/close_session", json=close_json()).status_code == 200
-        assert len(server._session_id_to_metrics["resources-session"].async_tavily_calls) == 1
+        assert not server.has_session_state("resources-session")
+        assert len(server._archived_session_metrics["resources-session"].async_tavily_calls) == 1
     dumped = json.loads((tmp_path / "session_id_metrics.json").read_text())
     assert [call["function"] for call in dumped["resources-session"]["async_tavily_calls"]] == ["search"]
 
@@ -343,8 +348,9 @@ def test_checkpoint_retirement_releases_unverified_metrics(typed: bool) -> None:
     assert server._session_episodes == {}
 
 
-def test_verified_metrics_expire_and_close_still_checks_the_episode() -> None:
-    server = make_server()
+@pytest.mark.parametrize("dump_metrics", [False, True])
+def test_verified_metrics_expire_and_close_still_checks_the_episode(dump_metrics: bool) -> None:
+    server = make_server(dump_session_id_to_metrics_on_exit=dump_metrics)
     client = make_client(server)
     with patch("nemo_gym.server_runtime.base_resources_server.monotonic", return_value=0):
         assert client.post("/seed_session", json=seed_json()).status_code == 200
