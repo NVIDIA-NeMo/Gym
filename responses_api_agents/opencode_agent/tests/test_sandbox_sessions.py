@@ -8,6 +8,7 @@ import json
 import shlex
 import sqlite3
 import subprocess
+import sys
 import threading
 from pathlib import Path
 from time import monotonic
@@ -40,6 +41,7 @@ from nemo_gym.core import (
     TaskId,
 )
 from nemo_gym.data.tasks.harbor import load_task, materialize_task
+from nemo_gym.models import token_capture
 from nemo_gym.sandbox import SandboxHandle
 from nemo_gym.trajectory import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
 from responses_api_agents.opencode_agent import app as opencode_app
@@ -1203,13 +1205,34 @@ def test_with_token_capture_a_seed_accepts_build_steps_when_the_capture_fix_is_i
         client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
 
 
-def test_capture_fix_detection_reads_the_installed_token_capture_files(monkeypatch, tmp_path):
-    package = tmp_path / "nemo_gym"
-    (package / "models" / "token_capture").mkdir(parents=True)
-    monkeypatch.setattr(opencode_app.importlib.resources, "files", lambda name: package)
+_HARNESS_NOTES_MODULE = "nemo_gym.models.token_capture.harness_notes"
+
+
+def test_capture_fix_detection_is_off_without_the_harness_notes_module(monkeypatch):
+    monkeypatch.setitem(sys.modules, _HARNESS_NOTES_MODULE, None)  # import raises ImportError
     assert not opencode_app._capture_joins_opencode_step_limit()
-    (package / "models" / "token_capture" / "harness_notes.py").write_text("")
-    assert opencode_app._capture_joins_opencode_step_limit()
+
+
+@pytest.mark.parametrize("layout", ["module", "package"])
+@pytest.mark.parametrize(("harnesses", "expected"), [(["opencode"], True), (["pi"], False), ([], False)])
+def test_capture_fix_detection_finds_an_opencode_note_in_either_layout(
+    monkeypatch, tmp_path, layout, harnesses, expected
+):
+    # #5833 first added harness_notes.py and then moved it into a harness_notes/ package; both must be found.
+    source = "from types import SimpleNamespace\n" + (
+        f"HARNESS_NOTES = tuple(SimpleNamespace(harness=name) for name in {harnesses!r})\n"
+    )
+    if layout == "module":
+        (tmp_path / "harness_notes.py").write_text(source)
+    else:
+        (tmp_path / "harness_notes").mkdir()
+        (tmp_path / "harness_notes" / "__init__.py").write_text(source)
+    monkeypatch.setattr(token_capture, "__path__", [str(tmp_path), *token_capture.__path__])
+    monkeypatch.delitem(sys.modules, _HARNESS_NOTES_MODULE, raising=False)
+    try:
+        assert opencode_app._capture_joins_opencode_step_limit() is expected
+    finally:
+        sys.modules.pop(_HARNESS_NOTES_MODULE, None)
 
 
 def test_http_close_retry_survives_other_session_closes(setup, monkeypatch):

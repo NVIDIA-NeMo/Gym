@@ -15,7 +15,6 @@
 
 import asyncio
 import copy
-import importlib.resources
 import json
 import logging
 import math
@@ -326,14 +325,18 @@ def _serialize_replacement_config(config: dict[str, Any]) -> str:
 def _capture_joins_opencode_step_limit() -> bool:
     """Whether Gym's token capture joins the calls that OpenCode's step-limit note follows.
 
-    The capture fix for OpenCode's step-limit note and renamed tool calls (Gym #5833) adds
-    ``nemo_gym/models/token_capture/harness_notes.py``. Without it, the note turns the next call into a poisoned
-    capture, so a seed with token capture refuses ``agent.build.steps``. The check reads the installed package's
-    files and imports nothing.
+    The capture fix for OpenCode's step-limit note (Gym #5833) adds ``nemo_gym.models.token_capture.harness_notes``
+    with an OpenCode entry in ``HARNESS_NOTES``. Without it, the note turns the next call into a poisoned capture, so
+    a seed with token capture refuses ``agent.build.steps``. The check imports the module, so it does not depend on
+    whether the module is a file or a package.
 
     TODO: remove this check once #5833 is on main, and allow ``agent.build.steps`` with token capture always.
     """
-    return importlib.resources.files("nemo_gym").joinpath("models", "token_capture", "harness_notes.py").is_file()
+    try:
+        from nemo_gym.models.token_capture.harness_notes import HARNESS_NOTES
+    except ImportError:
+        return False
+    return any(note.harness == "opencode" for note in HARNESS_NOTES)
 
 
 def _session_opencode_config_error(opencode_config: Mapping[str, Any]) -> str | None:
