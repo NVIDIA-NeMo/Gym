@@ -916,7 +916,7 @@ def _write_executable(path: Path, contents: str) -> None:
     path.chmod(0o755)
 
 
-@pytest.mark.parametrize("failure", ["none", "interrupted", "permanent", "download_timeout"])
+@pytest.mark.parametrize("failure", ["none", "interrupted", "permanent", "download_timeout", "index_failure"])
 def test_system_dependency_install_recovers_interrupted_configuration(tmp_path: Path, failure: str) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -943,6 +943,13 @@ rm -f "$INSTALL_TEST_STATE/interrupted"
 set -eu
 if test "$1" = update; then
     test "$INSTALL_TEST_BOUNDED" = 1
+    echo update >> "$INSTALL_TEST_STATE/calls"
+    # Container APT update hooks may clear completed and partial downloads.
+    rm -f "$INSTALL_TEST_STATE/downloaded" "$INSTALL_TEST_STATE/partial"
+    if test "$INSTALL_TEST_FAILURE" = index_failure && ! test -f "$INSTALL_TEST_STATE/index-attempted"; then
+        touch "$INSTALL_TEST_STATE/index-attempted"
+        exit 100
+    fi
     exit 0
 fi
 test "$1" = install
@@ -1005,6 +1012,7 @@ printf '%s\\n' "$@" > "$INSTALL_TEST_STATE/installed"
     assert calls.read_text().splitlines().count("download") == (
         4 if failure == "permanent" else 2 if failure in {"interrupted", "download_timeout"} else 1
     )
+    assert calls.read_text().splitlines().count("update") == (2 if failure == "index_failure" else 1)
     assert (tmp_path / "github-env").read_text() == f"UV_PYTHON_INSTALL_DIR={tmp_path}/runner/uv-python\n"
 
 
