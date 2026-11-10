@@ -3,6 +3,7 @@
 """Every provider-response retry sequence ends by an attempt or an elapsed-time bound, internal clients included."""
 
 import asyncio
+import json
 import random
 import socket
 from types import SimpleNamespace
@@ -13,7 +14,7 @@ from aiohttp import ClientResponseError, web
 
 import nemo_gym.client.http_client
 from nemo_gym.client import openai_client as openai_client_module
-from nemo_gym.client.openai_client import NeMoGymAsyncOpenAI
+from nemo_gym.client.openai_client import NeMoGymAsyncOpenAI, PermanentEndpointError
 
 
 RETRYABLE_STATUSES = [429, 503, 502, 504, 520]
@@ -38,6 +39,24 @@ def _answer(status: int, *, retry_after: str | None = None, body: bytes = b'{"er
         content=SimpleNamespace(read=read),
         close=lambda: None,
     )
+
+
+def _oversized(code: str, *, code_first: bool = True, wrapped: bool = False) -> bytes:
+    """A valid JSON error reply longer than the kept body prefix, with its error code before or after the long text."""
+    padding = "x" * (openai_client_module.ERROR_BODY_PREFIX_BYTES + 1000)
+    error = {"code": code, "message": padding} if code_first else {"message": padding, "code": code}
+    payload = {"detail": {"error": error}} if wrapped else {"error": error}
+    body = json.dumps(payload).encode()
+    assert len(body) > openai_client_module.ERROR_BODY_PREFIX_BYTES
+    return body
+
+
+OVERSIZED_SHAPES = [
+    pytest.param(dict(code_first=True), id="code-first"),
+    pytest.param(dict(code_first=False), id="code-last"),
+    pytest.param(dict(code_first=True, wrapped=True), id="detail-code-first"),
+    pytest.param(dict(code_first=False, wrapped=True), id="detail-code-last"),
+]
 
 
 def _provider(monkeypatch: pytest.MonkeyPatch, answer, *, ceiling: int = 500) -> list[int]:
@@ -260,6 +279,82 @@ async def test_concurrent_callers_do_not_retry_in_lockstep_and_all_terminate(mon
     assert len(sent) < 5000
 
 
+@pytest.mark.parametrize("internal", [False, True])
+@pytest.mark.parametrize("shape", OVERSIZED_SHAPES)
+async def test_an_oversized_spent_quota_429_still_trips_the_client(monkeypatch, internal, shape):
+    body = _oversized("insufficient_quota", **shape)
+    sent = _provider(monkeypatch, lambda n: _answer(429, body=body))
+    waits = _sleeps(monkeypatch)
+    client = NeMoGymAsyncOpenAI(api_key="k", base_url=BASE_URL, internal=internal, max_rate_limit_wait_seconds=60)
+
+    with pytest.raises(PermanentEndpointError) as first:
+        await client._request_with_retry(url=f"{BASE_URL}/responses")
+    assert sent == [429] and waits == []
+    assert first.value.response_content == body[: openai_client_module.ERROR_BODY_PREFIX_BYTES]
+
+    with pytest.raises(PermanentEndpointError):
+        await client._request_with_retry(url=f"{BASE_URL}/responses")
+    assert sent == [429] and waits == []  # the tripped client sends nothing more
+
+
+@pytest.mark.parametrize("internal", [False, True])
+@pytest.mark.parametrize("shape", OVERSIZED_SHAPES)
+@pytest.mark.parametrize("status,code", [(401, "invalid_api_key"), (403, "invalid_api_token")])
+async def test_an_oversized_invalid_key_reply_still_trips_the_client(monkeypatch, internal, shape, status, code):
+    body = _oversized(code, **shape)
+    sent = _provider(monkeypatch, lambda n: _answer(status, body=body))
+    waits = _sleeps(monkeypatch)
+    client = NeMoGymAsyncOpenAI(api_key="k", base_url=BASE_URL, internal=internal, max_rate_limit_wait_seconds=60)
+
+    with pytest.raises(PermanentEndpointError) as first:
+        await client._request_with_retry(url=f"{BASE_URL}/responses")
+    assert sent == [status] and waits == []
+    assert first.value.response_content == body[: openai_client_module.ERROR_BODY_PREFIX_BYTES]
+
+    with pytest.raises(PermanentEndpointError):
+        await client._request_with_retry(url=f"{BASE_URL}/responses")
+    assert sent == [status] and waits == []
+
+
+@pytest.mark.parametrize("internal", [False, True])
+@pytest.mark.parametrize("shape", OVERSIZED_SHAPES)
+async def test_an_oversized_context_overflow_is_terminal_for_its_call_only(monkeypatch, internal, shape):
+    body = _oversized("context_length_exceeded", **shape)
+    sent = _provider(monkeypatch, lambda n: _answer(503, body=body) if n == 1 else _answer(200))
+    waits = _sleeps(monkeypatch)
+    client = NeMoGymAsyncOpenAI(api_key="k", base_url=BASE_URL, internal=internal, max_rate_limit_wait_seconds=60)
+
+    with pytest.raises(RuntimeError, match="final status 503"):
+        await client._request_with_retry(url=f"{BASE_URL}/responses")
+    assert sent == [503] and waits == []
+
+    # Not sticky: a later, independent call goes out and succeeds.
+    later = await client._request_with_retry(url=f"{BASE_URL}/responses")
+    assert later.status == 200 and sent == [503, 200]
+
+
+@pytest.mark.parametrize("internal", [False, True])
+async def test_an_oversized_busy_reply_is_still_retried_and_keeps_only_the_capped_prefix(monkeypatch, internal):
+    limit = openai_client_module.ERROR_BODY_PREFIX_BYTES
+    body = _oversized("rate_limit_exceeded")
+    seen: list[bytes] = []
+
+    async def final_error(response, content=None):
+        seen.append(content)
+        raise RuntimeError(f"final status {response.status}")
+
+    sent = _provider(monkeypatch, lambda n: _answer(429, retry_after="1", body=body))
+    monkeypatch.setattr(openai_client_module, "raise_for_status", final_error)
+    waits = _sleeps(monkeypatch)
+    client = NeMoGymAsyncOpenAI(api_key="k", base_url=BASE_URL, internal=internal, max_rate_limit_wait_seconds=2)
+
+    with pytest.raises(RuntimeError, match="final status 429"):
+        await client._request_with_retry(url=f"{BASE_URL}/responses")
+
+    assert len(sent) == 3 and waits == [1.0, 1.0]
+    assert seen == [body[:limit]]
+
+
 @pytest.fixture
 async def stub_provider(monkeypatch):
     """A real HTTP provider whose answers the test scripts; yields (base_url, hits)."""
@@ -324,3 +419,21 @@ async def test_over_real_http_a_context_overflow_reaches_the_provider_once(monke
 
     assert len(hits) == 1 and raised.value.status == status
     assert raised.value.response_content == OVERFLOW_BODY
+
+
+@pytest.mark.parametrize("internal", [False, True])
+@pytest.mark.parametrize("status,code", [(429, "insufficient_quota"), (401, "invalid_api_key")])
+async def test_over_real_http_an_oversized_permanent_error_reaches_the_provider_once(
+    monkeypatch, stub_provider, internal, status, code
+):
+    base_url, hits, script = stub_provider
+    body = _oversized(code, code_first=False)
+    script["answer"] = lambda n: (status, body, {})
+    monkeypatch.setattr(openai_client_module.random, "uniform", lambda low, high: 0.01)
+    client = NeMoGymAsyncOpenAI(api_key="k", base_url=base_url, internal=internal, max_rate_limit_wait_seconds=5)
+
+    for _ in range(2):
+        with pytest.raises(PermanentEndpointError) as raised:
+            await asyncio.wait_for(client.create_chat_completion(**CALL), timeout=10)
+        assert raised.value.status == status
+    assert len(hits) == 1

@@ -185,14 +185,15 @@ def _body_read_cause(response: ClientResponse, failure: Optional[NgFailureEvent]
 
 
 async def _read_error_body(response: ClientResponse, failure: Optional[NgFailureEvent]) -> bytes:
-    """Read an error reply's body once and keep its first ``ERROR_BODY_PREFIX_BYTES``.
+    """Read an error reply's complete body once.
 
-    Reading it all releases the connection; only the prefix is passed on, so the final error and its
-    retry decisions never hold a provider's huge error page. A failed read names the attempt that returned it
-    as its explicit cause.
+    Callers classify the complete body (a permanent-quota, invalid-key or context-overflow code can sit anywhere
+    in it), then keep only its first ``ERROR_BODY_PREFIX_BYTES`` for diagnostics and the final error, so
+    truncation never changes retry classification. A failed read names the attempt that returned it as its
+    explicit cause.
     """
     try:
-        return (await response.content.read())[:ERROR_BODY_PREFIX_BYTES]
+        return await response.content.read()
     except (ClientError, TimeoutError) as error:
         cause = _body_read_cause(response, failure)
         if cause is None:
@@ -287,7 +288,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         default=False,
         description=(
             "Set this to true for internal NeMo Gym servers. Their transport retries connection errors "
-            "without a try limit, and they wait out every 429/5xx answer that a provider sends until "
+            "without a try limit, and they wait out 429, 502, 503, 504 and 520 answers until "
             "max_rate_limit_wait_seconds is spent (max_http_attempts when that is 0), like external 429/503."
         ),
     )
@@ -523,8 +524,11 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             response._ng_observe_body_failure = observe_body_failure
             if response.status in (401, 403):
                 failure = observe_http_failure(response)
-                content = await _read_error_body(response, failure)
-                if _error_body_is_permanent_auth(content):
+                body = await _read_error_body(response, failure)
+                permanent_auth = _error_body_is_permanent_auth(body)
+                content = body[:ERROR_BODY_PREFIX_BYTES]
+                del body
+                if permanent_auth:
                     observe_terminal(
                         operation_id=operation_id,
                         outcome="failed",
@@ -557,8 +561,12 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             # Observed before this loop or a caller's own retry policy decides, so a later success still forwards
             # the failed attempt. A Gym server's reply already forwards its own record; it is not recorded twice.
             last_failure = observe_http_failure(response)
-            content = await _read_error_body(response, last_failure)
-            if response.status == 429 and _error_body_is_permanent_quota(content):
+            body = await _read_error_body(response, last_failure)
+            permanent_quota = response.status == 429 and _error_body_is_permanent_quota(body)
+            context_overflow = _error_body_is_context_overflow(body)
+            content = body[:ERROR_BODY_PREFIX_BYTES]
+            del body
+            if permanent_quota:
                 observe_terminal(
                     operation_id=operation_id,
                     outcome="failed",
@@ -567,7 +575,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                 )
                 self._trip_permanent_error(response.status, content, request_kwargs.get("url"), last_failure)
 
-            if _error_body_is_context_overflow(content):
+            if context_overflow:
                 # The prompt does not fit; resending it cannot succeed, whatever status a server re-emitted it with.
                 observe_terminal(
                     operation_id=operation_id,
