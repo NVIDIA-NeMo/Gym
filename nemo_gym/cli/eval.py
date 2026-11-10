@@ -1961,12 +1961,12 @@ def eval_status(
     target: str,
     *,
     json_output: bool = False,
-    job_artifact_dirs: Callable[[str], dict[str, Path] | None] | None = None,
+    job_artifact_dirs: Callable[[str], dict[str, Path] | None],
 ) -> None:
     """Print saved progress for a run directory or, through `job_artifact_dirs`, a Gym job ID.
 
-    `job_artifact_dirs` maps a target that is not a run directory with status files to each benchmark's artifacts
-    directory, or to None when it names no submission. Artifacts must be visible on the current filesystem. This
+    `job_artifact_dirs` is required: it maps a target that is not a run directory with status files to each benchmark's
+    artifacts directory, or to None when it names no submission. Artifacts must be visible on the current filesystem. This
     command reads saved progress and does not contact a scheduler or a remote host.
     """
     from nemo_gym.rollouts.batch_status import BATCH_STATUS_FNAME
@@ -2005,7 +2005,7 @@ def eval_status(
         statuses = {str(file): json.loads(file.read_text()) for file in files}
         exports = {str(file): export_facts(file) for file in files}
     else:
-        artifact_dirs = job_artifact_dirs(target) if job_artifact_dirs is not None else None
+        artifact_dirs = job_artifact_dirs(target)
         if artifact_dirs is None:
             raise FileNotFoundError(f"No {BATCH_STATUS_FNAME} or Gym job record found for {target}")
         statuses = {}
