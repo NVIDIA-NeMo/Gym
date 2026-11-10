@@ -246,6 +246,7 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
                     "uses_interleaved_reasoning": True,
                     "request_timeout_seconds": 0.25,
                     "max_http_attempts": MODEL_TIMEOUT_ATTEMPTS,
+                    "max_num_tries": 1,
                 }
             }
         if scenario.compaction is not None:
