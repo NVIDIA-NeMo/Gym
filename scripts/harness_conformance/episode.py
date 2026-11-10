@@ -26,7 +26,7 @@ from nemo_gym.rollouts.harness_capabilities import digest_file
 
 from .provider import OpenClawProbe, Probe
 from .registry import HARNESSES
-from .scenarios import MODEL_TIMEOUT_ATTEMPTS, SCENARIOS
+from .scenarios import SCENARIOS
 
 
 class _Server(uvicorn.Server):
@@ -245,7 +245,7 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
                     "uses_reasoning_parser": True,
                     "uses_interleaved_reasoning": True,
                     "request_timeout_seconds": 0.25,
-                    "max_http_attempts": MODEL_TIMEOUT_ATTEMPTS,
+                    "max_num_tries": 1,
                 }
             }
         if scenario.compaction is not None:

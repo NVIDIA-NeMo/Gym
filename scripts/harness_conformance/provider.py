@@ -236,7 +236,13 @@ class Probe:
         if self.scenario.model_timeout:
             timed_out = self.scenario.terminal_error or not self.timeout_attempts
             self.timeout_attempts.append(
-                {"request": body, "timed_out": timed_out, "status_code": None, "response": None}
+                {
+                    "request": body,
+                    "request_id": request.headers.get("X-Request-Id"),
+                    "timed_out": timed_out,
+                    "status_code": None,
+                    "response": None,
+                }
             )
             self.save()
             if timed_out:

@@ -14,6 +14,7 @@ import pytest
 from scripts.harness_conformance.timeouts import inspect_model_timeouts
 
 from nemo_gym.client.openai_client import MODEL_RESPONSE_TIMEOUT_REASON
+from nemo_gym.core.failure_kinds import MODEL_POLICY_RESPONSE_TIMEOUT, MODEL_REQUEST_ERROR
 from nemo_gym.core.failure_records import FailureReport
 from nemo_gym.core.failure_transport import FailureReportRow
 
@@ -60,7 +61,7 @@ async def test_failure_report_witness_preserves_reply_and_reads_terminal_stream(
 
 @pytest.mark.parametrize("exhausted", [False, True])
 def test_real_model_timeout_reaches_environment(tmp_path, exhausted):
-    """A real server/client timeout must survive the real Simple Agent boundary."""
+    """Validate the one-shot fixture independently of the harness's conformance verdict."""
     from scripts.harness_conformance.runner import inspect_episode
     from scripts.harness_conformance.scenarios import SCENARIOS
 
@@ -88,27 +89,56 @@ def test_real_model_timeout_reaches_environment(tmp_path, exhausted):
             stderr=subprocess.STDOUT,
             timeout=45,
         )
-    assert result.returncode == 0, (tmp_path / "episode.log").read_text()
-    measured = inspect_episode(scenario, tmp_path, {"returncode": 0, "timed_out": False})
-    checks = {check["id"]: check for check in measured["checks"]}
-    assert measured["p0_verdict"] == "fulfilled", measured["issues"]
-    for key in ("attempts", "model_events", "caller_events", "terminal_outcome" if exhausted else "recovered_outcome"):
-        assert checks[f"timeout.{key}"]["status"] == "pass", checks[f"timeout.{key}"]
-    # Persistence remains a measured conformance requirement, independently of
-    # this fixture regression. Never waive its verdict when a producer loses events.
-    assert "timeout.saved_events" in checks
+    # Collection may exit 1 when the real timeout leaves no scored row. Require
+    # its actual failure evidence below rather than a successful evaluation.
+    assert result.returncode in (0, 1), (tmp_path / "episode.log").read_text()
     witness = json.loads((tmp_path / "witness.json").read_text())
     assert witness["seeded"] == witness["closed"] == 1
+    (attempt,) = witness["timeout_attempts"]
+    assert attempt["timed_out"] is True
+    (model_report,) = witness["model_server_failure_reports"]
+    model = FailureReport.model_validate(model_report)
+    (event,) = model.events.values()
+    assert not model.omitted and model.failure_id == event.event_id
+    assert event.boundary == "model" and event.failure_kind == MODEL_REQUEST_ERROR
+    assert event.operation_id and event.attempt_id
+    assert event.failure_reason == MODEL_RESPONSE_TIMEOUT_REASON
+    assert event.details.request_upload_complete is True
+    assert event.foreign_error.exception_type.endswith("TimeoutError")
+
+    (response,) = witness["agent_responses"]
+    assert response["status"] == "failed" and response["error"]
+    final = FailureReport.model_validate(response["failure_report"])
+    assert final.events[final.failure_id].failure_kind == MODEL_POLICY_RESPONSE_TIMEOUT
+    assert final.events[final.failure_id].cause_id == event.event_id
+    (caller_report,) = witness["caller_failure_reports"]
+    (record,) = [json.loads(line) for line in (tmp_path / "rollouts_failures.jsonl").read_text().splitlines()]
+    for report in (FailureReport.model_validate(caller_report), final, FailureReportRow.report(record)):
+        assert not report.omitted and report.events.get(event.event_id) == event
+    assert record.get("reward") is None and record.get("evaluation_completed") is not True
+
+    measured = inspect_episode(scenario, tmp_path, {"returncode": result.returncode, "timed_out": False})
+    checks = {check["id"]: check for check in measured["checks"]}
+    assert checks["timeout.model_events"]["status"] == "pass"
+    if exhausted:
+        assert measured["p0_verdict"] == "fulfilled", measured["issues"]
+        assert measured["verdict"] == "fulfilled", measured["issues"]
+        assert not {key for key, check in checks.items() if check["status"] == "fail"}
+    else:
+        # SimpleAgent stops after one timeout instead of recovering. The fixture
+        # must keep this genuine conformance failure visible.
+        assert measured["verdict"] == "not_fulfilled"
+        assert checks["timeout.attempts"]["status"] == "fail"
+        assert checks["timeout.recovered_outcome"]["status"] == "fail"
 
 
-def case(exhausted):
-    count = 3 if exhausted else 1
+def case(exhausted, count=3):
     events = {
         f"model-{index}": {
             "boundary": "model",
             "failure_kind": "model_request_error",
             "operation": "model_request",
-            "operation_id": "model-operation",
+            "operation_id": f"operation-{index}",
             "attempt_id": f"attempt-{index}",
             "failure_reason": MODEL_RESPONSE_TIMEOUT_REASON,
             "details": {"request_upload_complete": True},
@@ -138,9 +168,14 @@ def case(exhausted):
         "failure_report": final.model_dump(mode="json"),
     }
     witness = {
-        "timeout_attempts": [{"request": {"messages": ["request"]}, "timed_out": True} for _ in range(count)]
-        + ([] if exhausted else [{"request": {"messages": ["request"]}, "timed_out": False}]),
-        "model_server_failure_reports": [model.model_dump(mode="json")],
+        "timeout_attempts": [
+            {"request": {"messages": ["request"]}, "request_id": f"request-{index}", "timed_out": True}
+            for index in range(count)
+        ]
+        + ([] if exhausted else [{"request": {"messages": ["request"]}, "request_id": "success", "timed_out": False}]),
+        "model_server_failure_reports": [
+            FailureReport(events={key: event}, failure_id=key).model_dump(mode="json") for key, event in events.items()
+        ],
         "caller_failure_reports": [model.model_dump(mode="json")],
         "agent_responses": [response],
         "verifications": [],
@@ -161,8 +196,9 @@ def failures(witness, record, *, exhausted):
 
 
 @pytest.mark.parametrize("exhausted", [False, True])
-def test_complete_timeout_evidence(exhausted):
-    assert not failures(*case(exhausted), exhausted=exhausted)
+@pytest.mark.parametrize("count", [1, 3, 5])
+def test_complete_timeout_evidence(exhausted, count):
+    assert not failures(*case(exhausted, count), exhausted=exhausted)
 
 
 @pytest.mark.parametrize("target", ["caller_failure_reports", "model_server_failure_reports"])
@@ -278,3 +314,45 @@ def test_malformed_attempts_fail_without_raising(attempts):
     witness, record = case(False)
     witness["timeout_attempts"] = attempts
     assert "timeout.attempts" in failures(witness, record, exhausted=False)
+
+
+@pytest.mark.parametrize("request_id", [None, "", "request-1"])
+def test_missing_or_reused_request_id_cannot_hide_transport_retries(request_id):
+    witness, record = case(True)
+    witness["timeout_attempts"][0]["request_id"] = request_id
+    assert "timeout.attempts" in failures(witness, record, exhausted=True)
+
+
+def test_missing_earlier_model_reply_fails():
+    witness, record = case(True)
+    witness["model_server_failure_reports"].pop(0)
+    assert "timeout.model_events" in failures(witness, record, exhausted=True)
+
+
+def test_conflicting_repeated_model_event_fails():
+    witness, record = case(True)
+    conflict = deepcopy(witness["model_server_failure_reports"][0])
+    conflict["events"]["model-0"]["foreign_error"]["message"] = "changed"
+    witness["model_server_failure_reports"].append(conflict)
+    assert "timeout.model_events" in failures(witness, record, exhausted=True)
+
+
+def test_repeated_operation_cannot_hide_transport_retries():
+    witness, record = case(True)
+    witness["model_server_failure_reports"][1]["events"]["model-1"]["operation_id"] = "operation-0"
+    assert "timeout.model_events" in failures(witness, record, exhausted=True)
+
+
+def test_terminal_cause_must_select_last_model_call():
+    witness, record = case(True)
+    witness["agent_responses"][0]["failure_report"]["events"]["agent"]["cause_id"] = "model-0"
+    assert "timeout.terminal_outcome" in failures(witness, record, exhausted=True)
+
+
+@pytest.mark.parametrize("exhausted", [False, True])
+def test_multiple_provider_calls_in_one_model_reply_fail(exhausted):
+    witness, record = case(exhausted, 3)
+    first, second, last = [FailureReport.model_validate(value) for value in witness["model_server_failure_reports"]]
+    combined = FailureReport(events=first.events | second.events, failure_id=second.failure_id)
+    witness["model_server_failure_reports"] = [combined.model_dump(mode="json"), last.model_dump(mode="json")]
+    assert "timeout.model_events" in failures(witness, record, exhausted=exhausted)
