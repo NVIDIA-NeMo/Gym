@@ -15,19 +15,37 @@ from nemo_gym.server_runtime.base_resources_server import BaseVerifyResponse
 from nemo_gym.trajectory.trajectory_record import AgentObservationBundle, TrajectoryRecord, VerifierInvocation
 
 
-class SingleAgentTurnTaskInput(BaseModel):
-    """Input loaded for one single-agent turn.
+class SingleAgentTurnAgentContext(BaseModel):
+    """A row's ``agent_context``, keyed by participant role; single_agent_turn has one role, ``agent``.
 
-    ``agent_context`` is this environment's row convenience for its one agent session. Environments with
-    several agents define their own task inputs and construct the context for each session explicitly.
+    Each role's context is what that participant's session receives, so the size limit applies per role.
     """
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent: AgentContext | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def refuse_other_roles(cls, value: object) -> object:
+        if isinstance(value, Mapping) and (others := sorted(set(value) - {"agent"})):
+            raise ValueError(
+                f"agent_context is keyed by participant role, and single_agent_turn has one role, 'agent'; got "
+                f"{others}. Write the agent's context as {{'agent': {{'values': ..., 'artifacts': ...}}}}"
+            )
+        return value
+
+
+class SingleAgentTurnTaskInput(BaseModel):
+    """Input loaded for one single-agent turn."""
 
     model_config = ConfigDict(extra="forbid")
 
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     task_data: dict[str, JsonValue]
-    # What the agent session receives beyond its model input. Kept out of task_data, which the Resources Server gets.
-    agent_context: AgentContext | None = Field(default=None, exclude_if=lambda value: value is None)
+    # What each participant's session receives beyond its model input, by role. Kept out of task_data, which the
+    # Resources Server gets.
+    agent_context: SingleAgentTurnAgentContext | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="before")
     @classmethod
@@ -55,9 +73,18 @@ class SingleAgentTurnTaskInput(BaseModel):
 
     @field_validator("agent_context")
     @classmethod
-    def omit_empty_agent_context(cls, agent_context: AgentContext | None) -> AgentContext | None:
+    def omit_empty_agent_context(
+        cls, agent_context: SingleAgentTurnAgentContext | None
+    ) -> SingleAgentTurnAgentContext | None:
         """An empty context is no context, so the task input dumps and digests as a row without the key."""
-        return agent_context if agent_context is not None and agent_context.fields() else None
+        if agent_context is None or agent_context.agent is None or not agent_context.agent.fields():
+            return None
+        return agent_context
+
+    @property
+    def agent_seed_context(self) -> AgentContext | None:
+        """The context the ``agent`` role's session is seeded with, or None."""
+        return self.agent_context.agent if self.agent_context is not None else None
 
 
 class SingleAgentTurnResult(BaseVerifyResponse):

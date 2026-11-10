@@ -1556,7 +1556,7 @@ class TestRunVerificationPayloads:
     async def test_agent_context_is_omitted_from_native_verify_requests(
         self, monkeypatch: pytest.MonkeyPatch, context_location: str, materialized: bool
     ) -> None:
-        context = {"artifacts": {"media": {"path": "figs/1"}}}
+        context = {"agent": {"artifacts": {"media": {"path": "figs/1"}}}}
         task_input = {
             "responses_create_params": {"input": "q1"},
             "task_data": {"answer": 42},
@@ -1595,7 +1595,7 @@ class TestRunVerificationPayloads:
         row = orjson.loads(materialized.read_bytes())
         row |= {"verifier_metadata": {"answer": "sunny"}, "task_data": {"answer": 42}}
         expected_fields = deepcopy(row)
-        context = {"values": {"tag": "figqa2"}}
+        context = {"agent": {"values": {"tag": "figqa2"}}}
         if context_location in ("top_level", "both"):
             row["agent_context"] = context
         if context_location in ("task_data", "both"):

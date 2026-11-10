@@ -48,7 +48,10 @@ class TestNormalizeTaskFields:
     def test_agent_context_is_not_task_data(self):
         """Schema projection excludes single_agent_turn's context field without promising environment support."""
         fields, _ = normalize_task_fields(
-            {"verifier_metadata": {"label": "safe"}, "agent_context": {"artifacts": {"media": {"path": "figs/1"}}}}
+            {
+                "verifier_metadata": {"label": "safe"},
+                "agent_context": {"agent": {"artifacts": {"media": {"path": "figs/1"}}}},
+            }
         )
         assert fields == {"label": "safe"}
 
@@ -174,7 +177,11 @@ class TestTaskDataValidator:
         """SingleAgentTurnTaskInput lifts context out of task_data, so schema validation skips it there."""
         row = {
             "responses_create_params": {"input": "q"},
-            "task_data": {"question": "q", "expected_answer": "a", "agent_context": {"values": {"tag": "figqa2"}}},
+            "task_data": {
+                "question": "q",
+                "expected_answer": "a",
+                "agent_context": {"agent": {"values": {"tag": "figqa2"}}},
+            },
         }
         v = self._validator()
         v.validate_row(0, row)

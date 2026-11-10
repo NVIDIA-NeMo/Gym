@@ -125,7 +125,7 @@ async def test_the_tasks_agent_context_reaches_the_agent_seed_and_not_the_resour
         {
             "responses_create_params": {"input": "task"},
             "instance_id": "task",
-            "agent_context": {"values": {"tag": "figqa2"}, "artifacts": {"media": {"path": "figs/1"}}},
+            "agent_context": {"agent": {"values": {"tag": "figqa2"}, "artifacts": {"media": {"path": "figs/1"}}}},
         }
     )
 

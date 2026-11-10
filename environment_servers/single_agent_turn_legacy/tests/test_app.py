@@ -215,15 +215,15 @@ def test_legacy_adapter_preserves_task_identity_and_data():
     assert request.episode_id.attempt == 1
 
     # A row's agent_context is the agent's, kept apart from the task data the Resources Server gets.
-    request = adapter._episode_request_from_row({**row, "agent_context": {"values": {"tag": "figqa2"}}})
-    assert request.task.task_input.agent_context == AgentContext(values={"tag": "figqa2"})
+    request = adapter._episode_request_from_row({**row, "agent_context": {"agent": {"values": {"tag": "figqa2"}}}})
+    assert request.task.task_input.agent_seed_context == AgentContext(values={"tag": "figqa2"})
     assert "agent_context" not in request.task.task_input.task_data
 
 
 def test_a_malformed_agent_context_gets_the_typed_runs_final_422() -> None:
     environment_server, client = _environment_server()
     adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
-    context = {"artifacts": {"media": {"path": "../outside"}}}
+    context = {"agent": {"artifacts": {"media": {"path": "../outside"}}}}
     row = {"task_id": "task", "_ng_rollout_id": "rollout", "responses_create_params": {"input": "task"}}
     episode_request = {
         "episode_id": {"rollout_id": "rollout"},
@@ -238,7 +238,7 @@ def test_a_malformed_agent_context_gets_the_typed_runs_final_422() -> None:
     episode = TestClient(adapter.setup_webserver()).post("/run", json=episode_request)
 
     assert typed.status_code == flat.status_code == episode.status_code == 422
-    path_loc = ["task", "task_input", "agent_context", "artifacts", "media", "path"]
+    path_loc = ["task", "task_input", "agent_context", "agent", "artifacts", "media", "path"]
     assert typed.json()["detail"][0]["loc"] == ["body", *path_loc]
     assert flat.json()["detail"][0]["loc"] == episode.json()["detail"][0]["loc"] == path_loc
     assert client.calls == []
