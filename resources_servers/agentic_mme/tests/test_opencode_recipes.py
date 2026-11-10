@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The OpenCode recipes end each episode before the sandbox the resources server lends expires."""
+"""The OpenCode recipes end each episode before the lent sandbox expires, and declare image input."""
 
 from pathlib import Path
 
@@ -44,3 +44,10 @@ def test_the_lent_sandbox_outlives_the_episode(recipe: str) -> None:
     assert deadline is not None and deadline + environment.cleanup_timeout_seconds + MARGIN_S <= ttl
     # OpenCode's own timeout and the session close fit inside the episode, with room for the seed and the judge.
     assert agent["timeout"] + agent["session_close_timeout_seconds"] < deadline
+
+
+@pytest.mark.parametrize("recipe", ["opencode", "opencode_server_tools"])
+def test_the_recipe_declares_image_input_for_tool_images(recipe: str) -> None:
+    # Without it, OpenCode replaces an image a tool returns with an error text when the prompt has no image.
+    agent = load(recipe).agentic_mme_opencode_agent.responses_api_agents.opencode_agent
+    assert agent.image_input is True

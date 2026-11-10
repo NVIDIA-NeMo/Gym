@@ -65,6 +65,10 @@ agentic_mme_opencode_agent:
       # The OpenCode process, inside the environment server's episode deadline.
       timeout: 3600
       session_close_timeout_seconds: 90
+      # The model looks at images that tools return: crops it reads with OpenCode's read tool here, or the MCP image
+      # tools' results in opencode_server_tools.yaml. The prompt holds the task images, which declares image input
+      # anyway; this keeps it declared for any row, so OpenCode never swaps a tool image for an error text.
+      image_input: true
       opencode_config:
         tools:
           webfetch: false
