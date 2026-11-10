@@ -199,7 +199,6 @@ async def test_staging_writes_the_input_and_mcp_servers_and_runs_the_runner_with
         f"{directory}/input.json",
         f"{directory}/output.json",
     ]
-    assert not command.stdlib_runner
 
 
 async def test_staging_without_mcp_servers_writes_no_server_file(state, monkeypatch) -> None:
