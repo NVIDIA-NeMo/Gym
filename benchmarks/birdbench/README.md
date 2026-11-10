@@ -30,19 +30,26 @@ plus per-difficulty (simple / moderate / challenging; `train` has no difficulty 
 None of these are `pyproject.toml` dependencies; install them into the environment you run `gym` from.
 
 ```bash
-uv pip install bm25s nltk        # needed by every `prepare` (BM25 retrieval for sql_context)
+uv pip install bm25s nltk
+python -m nltk.downloader punkt_tab      # tokenizer data used by `prepare`
 ```
+
+`prepare` fails without `punkt_tab`. On a machine without internet access, run the download elsewhere and copy
+`~/nltk_data` over.
 
 **Spark dialect** additionally needs a JDK, plus `pyspark` (runs the model's SQL) and `sqlglot` (checks it is a single
 `SELECT`/`WITH`) in the **server's own venv** (`resources_servers/bird_sql/.venv`, created by `gym` on its first
 start), not the one you run `gym` from. `prepare` itself needs no Java.
 
 ```bash
-# macOS (Homebrew); on Linux install any JDK 17 and set JAVA_HOME. JAVA_HOME must be set in the shell that starts servers.
-brew install openjdk@17
-export JAVA_HOME="$(brew --prefix openjdk@17)/libexec/openjdk.jdk/Contents/Home"
+# Linux (Debian/Ubuntu). Any JDK 17 works, e.g. `conda install -c conda-forge openjdk=17` instead of apt.
+sudo apt install -y openjdk-17-jdk
+export JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(which java)")")")"   # must be set in the shell that starts servers
 uv pip install --python resources_servers/bird_sql/.venv/bin/python "pyspark>=3.5,<4" sqlglot
+java -version                            # should report 17
 ```
+
+On macOS: `brew install openjdk@17`, then `export JAVA_HOME="$(brew --prefix openjdk@17)/libexec/openjdk.jdk/Contents/Home"`.
 
 Spark runs in local mode inside the server process; no cluster is needed. Re-run the `uv pip install` line if `gym`
 rebuilds the server venv.
