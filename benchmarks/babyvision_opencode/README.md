@@ -9,6 +9,12 @@ data.
 Each row is one user message: the image, a visual-reasoning instruction, `---`, the question,
 and "Please answer the question and put the final answer within \boxed{}." A GPT judge grades
 the final answer against the gold answer (see the resources server's README for the scoring).
+`mean/reward` leaves out rows where the judge failed (a failed call, or a reply without a valid
+verdict). Those rows go to the run's failures file, not into the average.
+
+Scores are not comparable to the BabyVision leaderboard. The official scorer gives its judge
+(GPT-5.2 in its run script) only the last `\boxed{}` content. This judge (`gpt-4o-mini` by
+default) also reads the end of the model's text, so an answer without a box can score 1.
 
 [`babyvision_opencode_question_only`](../babyvision_opencode_question_only/README.md) is the same
 benchmark without the instruction.
