@@ -11,8 +11,7 @@ README). Only its episode differs:
 * Cline rows (``cline_xml``) call tools as XML in the text, get all results back in one user message, and get
   Cline's "no tools used" error for a reply without a call.
 
-In an agent session (an Environment Server's episode) both routes go through the session's direct HTTP grant, and the
-first ``/harness`` call carries the row's ``responses_create_params``: the resources server's typed seed has no history.
+In an agent session (an Environment Server's episode) both routes go through the session's direct HTTP grant.
 
 ``response.metadata.stop_reason`` says what ended the turn (the resources server's ``masked_stop_reasons`` match
 these strings; README "What ends the turn" describes each): ``final_message`` (a reply without a tool call;
@@ -318,9 +317,10 @@ class AgenticTurnSimulationAgent(SimpleAgent):
             )
         return state
 
+    # simple_agent's close, unchanged: it returns the session's observations and resources cookies, and the
+    # Environment Server closes the resources session (and the simulator's workspace in it) after verify. Declared
+    # here because an agent that seeds sessions must also define their close (test_session_contract_repo).
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
-        """simple_agent's close: the session's observations and resources cookies. The resources session, and the
-        workspace the simulator keeps in it, is the Environment Server's to close after verify."""
         return await super()._close_agent_session_state(state)
 
     async def _create_episode(
@@ -464,15 +464,11 @@ class AgenticTurnSimulationAgent(SimpleAgent):
         )
 
     async def _row_harness(self, ep: _Episode) -> tuple[list[str], str]:
-        """The row's stop tools and tool-call protocol from /harness. In an agent session the call carries the row's
-        responses_create_params, which the resources server's typed seed did not have. A bare /v1/responses (no
-        resources cookies) has no session there (404): the config's stop tools and native calls. A 404 for cookies
-        that a seed set (the call reached another resources-server worker, with num_workers > 1, or the server
-        restarted) raises, since a Cline row run as native would be scored, not masked."""
-        row = None
-        if ep.tool_access is not None:
-            row = {"responses_create_params": ep.body.model_dump(mode="json", exclude_none=True)}
-        http = await self._resources_post(ep, "/harness", row)
+        """The row's stop tools and tool-call protocol from /harness. A bare /v1/responses (no resources cookies) has
+        no session there (404): the config's stop tools and native calls. A 404 for cookies that a seed set (the call
+        reached another resources-server worker, with num_workers > 1, or the server restarted) raises, since a Cline
+        row run as native would be scored, not masked."""
+        http = await self._resources_post(ep, "/harness", None)
         cookies = ep.resources_cookies
         if http.status == 404:
             if cookies:

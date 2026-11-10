@@ -508,7 +508,8 @@ class TestVerify:
         sent = script(server, [judge_reply(VERDICT), judge_reply(VERDICT)])
         with_session = await server.verify(req(), _verify_body(self.TURN, _metadata("transient")))
         assert "s1" not in server._sessions  # /verify recomputes it from the request alone
-        stateless = await server.verify(req(), _verify_body(self.TURN, _metadata("transient")))
+        # A session nobody seeded: the same request again for "s1" would get the first result back unjudged.
+        stateless = await server.verify(req("unseeded"), _verify_body(self.TURN, _metadata("transient")))
         for out in (with_session, stateless):
             assert out.reward == 1.0 and not getattr(out, MASK_SAMPLE_FIELD) and out.code_gate is None
             assert out.obstacle == self.REPORT

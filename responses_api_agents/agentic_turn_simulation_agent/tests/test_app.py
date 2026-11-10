@@ -909,7 +909,6 @@ class TestAgentSessions:
         with patch(f"{MOD}.http_request", new=AsyncMock(side_effect=grant.request)):
             response, _, _, resources_cookies = await _episode(
                 agent,
-                body=_body(tools=[BASH_TOOL], instructions="Be brief."),
                 resources_server_cookies={"session": "typed"},
                 tool_access=_grant(),
                 in_session=True,
@@ -918,11 +917,10 @@ class TestAgentSessions:
         harness, tool = grant.calls
         assert (harness["url"], tool["url"]) == (f"{GRANT_URL}{HARNESS_PATH}", f"{GRANT_URL}{TOOL_PATH}")
         assert all(c["headers"] == {"x-grant": "g1"} and c["_internal"] for c in grant.calls)
-        # The typed seed had no history: the first /harness call brings the row as the agent was asked to play it.
-        row = harness["json"]["responses_create_params"]
-        assert row["input"] == [{"role": "user", "content": "make the heading blue", "type": "message"}]
-        assert row["instructions"] == "Be brief." and row["tools"][0]["name"] == "bash"
-        assert harness["cookies"] == {"session": "typed"} and tool["json"]["call_id"] == "c1"
+        # The resources server's seed held the row: /harness asks only for its harness, as on /run.
+        assert (
+            harness["json"] is None and harness["cookies"] == {"session": "typed"} and tool["json"]["call_id"] == "c1"
+        )
         # Only the model calls go to Gym's server client; the session's cookies follow the tool replies.
         assert [c["url_path"] for c in script.model_calls] == [MODEL_PATH, MODEL_PATH] and script.harness_calls == []
         assert script.tool_calls == [] and resources_cookies == {"session": "after-tool"}
