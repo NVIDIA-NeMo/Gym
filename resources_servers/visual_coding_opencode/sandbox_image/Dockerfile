@@ -3,8 +3,8 @@
 #
 # Sandbox image for visual coding in OpenCode sandbox sessions (configs/visual_coding_opencode.yaml). The model's shell
 # has a Python image toolkit: Pillow, NumPy, SciPy and OpenCV. OpenCode is preinstalled under /opt/opencode/bin, so a
-# sandbox that reaches only the model server can run it. visual_coding_opencode.yaml pins that binary's SHA-256, so a
-# new OpenCode version here needs a new pin there.
+# sandbox that reaches only the model server can run it. visual_coding_opencode.yaml pins that binary's SHA-256, and
+# the build checks it, so a new OpenCode version here needs a new pin in both places.
 #
 # The image also carries OpenCode's plugin dependencies (/opt/opencode/opencode-1.17.11-plugin-dependencies.tar.gz).
 # opencode_agent always configures a plugin, and OpenCode 1.17.11 then installs @opencode-ai/plugin from npm at each
@@ -52,12 +52,15 @@ ENV OMP_NUM_THREADS=1 \
     VECLIB_MAXIMUM_THREADS=1 \
     OPENCV_FOR_THREADS_NUM=1
 
-# The glibc x86_64 build that opencode_agent's installer picks for this image.
-ARG OPENCODE_VERSION=1.17.11
+# The glibc x86_64 build that opencode_agent's installer picks for this image. The build fails here unless the binary
+# matches the SHA-256 that visual_coding_opencode.yaml pins (sandbox_executable_sha256), so a mismatched image fails at
+# build time instead of at the first episode.
 RUN mkdir -p /opt/opencode/bin \
-    && curl -fsSL "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-x64-baseline.tar.gz" \
+    && curl -fsSL "https://github.com/anomalyco/opencode/releases/download/v1.17.11/opencode-linux-x64-baseline.tar.gz" \
         | tar -xz -C /opt/opencode/bin opencode \
-    && test "$(/opt/opencode/bin/opencode --version)" = "${OPENCODE_VERSION}"
+    && echo "0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded  /opt/opencode/bin/opencode" \
+        | sha256sum -c - \
+    && test "$(/opt/opencode/bin/opencode --version)" = "1.17.11"
 COPY --from=plugin-archive /opencode-1.17.11-plugin-dependencies.tar.gz /opt/opencode/
 
 WORKDIR /workspace

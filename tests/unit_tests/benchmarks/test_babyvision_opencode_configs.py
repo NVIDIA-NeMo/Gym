@@ -101,7 +101,7 @@ def test_episodes_are_admitted_at_the_agent_s_rate_and_end_before_the_sandbox_ex
 
 
 def test_the_sandbox_image_carries_the_pinned_plugin_dependencies():
-    """The image builds OpenCode's plugin dependencies from agentic_if's lockfile, to the digest the config pins."""
+    """The image carries OpenCode's plugin dependencies (from agentic_if's lockfile) and binary, each to its pin."""
     _, config = resolve("resources_servers/visual_coding_opencode/configs/visual_coding_opencode.yaml")
     agent = config["visual_coding_opencode_agent"]["responses_api_agents"]["opencode_agent"]
     image = ROOT / "resources_servers" / "visual_coding_opencode" / "sandbox_image"
@@ -114,3 +114,6 @@ def test_the_sandbox_image_carries_the_pinned_plugin_dependencies():
     assert f"COPY --from=plugin-archive /{Path(archive).name} {Path(archive).parent}/" in dockerfile
     # The build checks the archive against the pin, so the image and the config cannot drift apart.
     assert f"{agent['sandbox_plugin_dependencies_sha256']}  /{Path(archive).name}" in dockerfile
+    # The same holds for the OpenCode binary: the build downloads the pinned version and checks it against the pin.
+    assert f"/download/v{agent['opencode_version']}/" in dockerfile
+    assert f"{agent['sandbox_executable_sha256']}  {agent['sandbox_executable_path']}" in dockerfile
