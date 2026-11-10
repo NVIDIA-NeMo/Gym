@@ -468,3 +468,22 @@ def test_a_model_failure_records_the_http_status_of_its_answer(tmp_path, monkeyp
     assert sandbox_runner.run(payload(tmp_path), tmp_path, tmp_path / "output.json") == 1
     error = json.loads((tmp_path / "output.json").read_text())["error"]
     assert (error["type"], error["status_code"]) == ("APIError", 403)
+
+
+def test_an_mcp_cli_that_fails_to_start_is_stopped(tmp_path, monkeypatch) -> None:
+    stage_fake_mcp(tmp_path, {"task_tools": {"error": "ConnectError: refused"}})
+    started = []
+    popen = subprocess.Popen
+
+    def recorded(*args, **kwargs):
+        started.append(popen(*args, **kwargs))
+        return started[-1]
+
+    monkeypatch.setattr(sandbox_runner.subprocess, "Popen", recorded)
+
+    with pytest.raises(sandbox_runner.MCPUnavailable):
+        sandbox_runner.start_mcp(tmp_path / "mcp_cli.py", required=["task_tools"], log=tmp_path / "mcp.log")
+
+    # The run gets no process to stop, so the CLI and its stdio servers must not outlive it.
+    [process] = [process for process in started if "serve" in process.args]
+    assert process.poll() is not None

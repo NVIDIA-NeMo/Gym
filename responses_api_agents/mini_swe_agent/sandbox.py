@@ -11,7 +11,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from shlex import quote
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
@@ -23,6 +23,7 @@ from nemo_gym.agents import (
     SandboxCommand,
     SandboxPythonRuntime,
     SandboxSession,
+    probe_sandbox_platform,
 )
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import read_text, upload_text
@@ -40,6 +41,12 @@ LOG_TAIL_BYTES = 1024 * 1024
 # The MCP call records cross the provider and go into the response: a larger file is not read, and each call keeps at
 # most this much of its output (the model saw at most mini-SWE's 10,000-character view of it).
 MCP_CALLS_MAX_BYTES = 16 * 1024 * 1024
+# The runtime's interpreter, linked into the session directory under a name without "python". The supervisor's command
+# line carries the runner's argv, so a task's `pkill -9 -f python` would otherwise kill the supervisor itself, leaving no
+# receipt; the runner and the MCP CLI it starts (with sys.executable) also run under this name.
+INTERPRETER_LINK = "bin/mini-swe"
+# LiteLLM's wheels in the runtime lock need glibc 2.28 or newer; an older task image can never run this runtime.
+MIN_GLIBC_MINOR = 28
 MCP_CALL_OUTPUT_MAX_CHARS = 64 * 1024
 _RUNTIME_FILES = Path(__file__).with_name("runtime")
 
@@ -131,6 +138,12 @@ class MiniSWESession(AgentSessionState):
                 prepared.stderr or prepared.stdout or "Failed to prepare the mini-SWE session directory"
             )
         if not await MINI_SWE_RUNTIME.is_installed(sandbox):
+            platform = await probe_sandbox_platform(sandbox)
+            if platform.libc == "gnu" and platform.glibc_minor is not None and platform.glibc_minor < MIN_GLIBC_MINOR:
+                raise AgentSeedRejectedError(
+                    f"mini-SWE's runtime needs glibc 2.{MIN_GLIBC_MINOR} or newer; the sandbox has glibc "
+                    f"2.{platform.glibc_minor}"
+                )
             await MINI_SWE_RUNTIME.install(sandbox, timeout_s=timeout)
         for name in ("sandbox_runner.py", "mcp_cli.py"):
             await sandbox.upload(Path(__file__).with_name(name), f"{directory}/{name}")
@@ -184,9 +197,18 @@ class MiniSWESession(AgentSessionState):
                 self.session.sandbox, path=f"{directory}/mcp_servers.json", text=json.dumps(self.mcp_servers)
             )
         await upload_text(self.session.sandbox, path=f"{directory}/input.json", text=json.dumps(payload))
+        interpreter = f"{directory}/{INTERPRETER_LINK}"
+        linked = await self.session.sandbox.exec(
+            f"mkdir -p {quote(str(PurePosixPath(interpreter).parent))}"
+            f" && ln -sfn {quote(MINI_SWE_RUNTIME.python)} {quote(interpreter)}",
+            cwd="/",
+            timeout_s=30,
+        )
+        if linked.return_code != 0 or linked.error_type is not None:
+            raise RuntimeError(f"Could not link the mini-SWE interpreter: {linked.error_type or linked.stderr}")
         return SandboxCommand(
             argv=[
-                MINI_SWE_RUNTIME.python,
+                interpreter,
                 # Ignore the task's Python settings without changing the environment its commands inherit.
                 "-E",
                 "-s",

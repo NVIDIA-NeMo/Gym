@@ -12,6 +12,7 @@ bash tool call that made it, so the agent server can report it. No model credent
 import asyncio
 import json
 import os
+import signal
 import sys
 import time
 from contextlib import AsyncExitStack
@@ -135,6 +136,9 @@ async def dispatch(connections: dict[str, dict], message: dict) -> object:
 
 
 async def serve() -> None:
+    # The runner stops this process with SIGTERM. Cancelling instead of dying lets each server's session close, and the
+    # SDK then stops the stdio servers it started in sessions of their own, which no group signal reaches.
+    asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, asyncio.current_task().cancel)
     servers = json.loads(SERVERS_FILE.read_text())
     connections = {server["name"]: {} for server in servers}
     ready = [asyncio.Event() for _ in servers]
@@ -164,6 +168,8 @@ async def serve() -> None:
         finally:
             for holder in holders:
                 holder.cancel()
+            # Bounded below the runner's five-second wait after SIGTERM.
+            await asyncio.wait(holders, timeout=4)
 
 
 async def request(message: dict) -> object:
@@ -182,7 +188,10 @@ async def request(message: dict) -> object:
 
 def main(argv: list[str]) -> int:
     if argv[1:2] == ["serve"]:
-        asyncio.run(serve())
+        try:
+            asyncio.run(serve())
+        except asyncio.CancelledError:
+            pass  # Stopped by SIGTERM, after its sessions closed.
         return 0
     if argv[1:2] == ["list"]:
         message = {"operation": "list"}

@@ -63,6 +63,25 @@ def start_mcp(cli: Path, *, required: list[str], log: Path) -> tuple[Any, dict, 
         process = subprocess.Popen(
             [sys.executable, "-E", "-s", str(cli), "serve"], stdin=subprocess.DEVNULL, stdout=output, stderr=output
         )
+    try:
+        return _await_mcp(process, cli, required=required, log=log)
+    except BaseException:
+        # The caller gets no process to stop, so stop the CLI here: its stdio servers must not outlive the run.
+        stop_mcp(process)
+        raise
+
+
+def stop_mcp(process: Any) -> None:
+    """Stop the MCP CLI with SIGTERM, which closes its server sessions, and kill it if it does not exit in time."""
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+
+
+def _await_mcp(process: Any, cli: Path, *, required: list[str], log: Path) -> tuple[Any, dict, list]:
     socket = cli.with_name("mcp.sock")
     deadline = time.monotonic() + MCP_CONNECT_TIMEOUT_S + 30
     while not socket.exists():
@@ -149,12 +168,8 @@ def run(payload: dict[str, Any], session_dir: Path, output_path: Path) -> int:
         exit_code = 1
     finally:
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
-        if mcp_process is not None and mcp_process.poll() is None:
-            mcp_process.terminate()
-            try:
-                mcp_process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                mcp_process.kill()
+        if mcp_process is not None:
+            stop_mcp(mcp_process)
         write_atomic(output_path, output)
     return exit_code
 

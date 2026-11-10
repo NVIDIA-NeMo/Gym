@@ -88,7 +88,13 @@ async def test_install_reuses_a_runtime_that_passes_its_check_and_stages_the_har
     ]
 
 
+def sandbox_platform(monkeypatch, *, libc: str = "gnu", glibc_minor: int | None = 35) -> None:
+    platform = sandbox_python.SandboxPlatform(arch="x86_64", libc=libc, glibc_minor=glibc_minor)
+    monkeypatch.setattr(sandbox_module, "probe_sandbox_platform", AsyncMock(return_value=platform))
+
+
 async def test_install_builds_the_runtime_when_none_passes_its_check(state, monkeypatch) -> None:
+    sandbox_platform(monkeypatch)
     monkeypatch.setattr(type(MINI_SWE_RUNTIME), "is_installed", AsyncMock(return_value=False))
     install = AsyncMock()
     monkeypatch.setattr(type(MINI_SWE_RUNTIME), "install", install)
@@ -99,6 +105,7 @@ async def test_install_builds_the_runtime_when_none_passes_its_check(state, monk
 
 
 async def test_a_failed_runtime_install_fails_the_seed_before_staging(state, monkeypatch) -> None:
+    sandbox_platform(monkeypatch)
     monkeypatch.setattr(type(MINI_SWE_RUNTIME), "is_installed", AsyncMock(return_value=False))
     monkeypatch.setattr(
         type(MINI_SWE_RUNTIME), "install", AsyncMock(side_effect=RuntimeError("no wheel for glibc 2.17"))
@@ -190,9 +197,15 @@ async def test_staging_writes_the_input_and_mcp_servers_and_runs_the_runner_with
     directory = state.session.session_dir
     assert json.loads(uploads[f"{directory}/mcp_servers.json"])[0]["headers"] == {"Authorization": "Bearer t"}
     assert json.loads(uploads[f"{directory}/input.json"]) == {"task": "t"}
+    # The runtime's interpreter, linked under a name without "python": a task's `pkill -9 -f python` must not match
+    # the supervisor, whose command line carries this argv.
+    interpreter = f"{directory}/bin/mini-swe"
+    [link] = [call.args[0] for call in state.session.sandbox.exec.await_args_list if " ln -sfn " in call.args[0]]
+    assert link.endswith(f"ln -sfn {MINI_SWE_RUNTIME.python} {interpreter}")
+    assert not any("python" in word for word in command.argv)
     # -E -s: the task's PYTHON* settings and user site-packages never reach the harness.
     assert command.argv == [
-        MINI_SWE_RUNTIME.python,
+        interpreter,
         "-E",
         "-s",
         f"{directory}/sandbox_runner.py",
@@ -408,3 +421,36 @@ async def test_an_mcp_call_keeps_a_bounded_output(state, monkeypatch) -> None:
     assert call["output"].startswith("x" * sandbox_module.MCP_CALL_OUTPUT_MAX_CHARS)
     assert call["output"].endswith("[10 characters omitted by NeMo Gym]")
     assert not artifacts.mcp_calls_unread
+
+
+@pytest.mark.parametrize(("libc", "glibc_minor"), [("gnu", 27), ("gnu", 17)])
+async def test_a_sandbox_too_old_for_the_runtime_is_a_final_refusal(state, monkeypatch, libc, glibc_minor) -> None:
+    sandbox_platform(monkeypatch, libc=libc, glibc_minor=glibc_minor)
+    monkeypatch.setattr(type(MINI_SWE_RUNTIME), "is_installed", AsyncMock(return_value=False))
+    install = AsyncMock()
+    monkeypatch.setattr(type(MINI_SWE_RUNTIME), "install", install)
+
+    # No attempt can change the image, so the seed is refused once instead of failing every attempt with a 500.
+    with pytest.raises(AgentSeedRejectedError, match=f"glibc 2.{glibc_minor}"):
+        await state.install(timeout=60)
+    install.assert_not_awaited()
+
+
+@pytest.mark.parametrize(("libc", "glibc_minor"), [("gnu", 28), ("gnu", None), ("musl", None)])
+async def test_a_sandbox_that_can_run_the_runtime_installs_it(state, monkeypatch, libc, glibc_minor) -> None:
+    sandbox_platform(monkeypatch, libc=libc, glibc_minor=glibc_minor)
+    monkeypatch.setattr(type(MINI_SWE_RUNTIME), "is_installed", AsyncMock(return_value=False))
+    install = AsyncMock()
+    monkeypatch.setattr(type(MINI_SWE_RUNTIME), "install", install)
+
+    await state.install(timeout=60)
+
+    install.assert_awaited_once()
+
+
+async def test_staging_fails_when_the_interpreter_link_cannot_be_made(state, monkeypatch) -> None:
+    monkeypatch.setattr(sandbox_module, "upload_text", AsyncMock())
+    state.session.sandbox.exec.return_value = result(return_code=1)
+
+    with pytest.raises(RuntimeError, match="link the mini-SWE interpreter"):
+        await state.stage_activation({"task": "t"})

@@ -296,3 +296,46 @@ def test_the_grant_headers_authenticate_discovery_and_calls_over_both_http_trans
         ("call_http", "http", False),
         ("call_sse", "sse", False),
     ]
+
+
+PID_SERVER = SERVER.replace(
+    'server.run("stdio")', 'open(sys.argv[1], "w").write(str(os.getpid()))\nserver.run("stdio")'
+)
+
+
+@needs_runtime
+def test_sigterm_stops_the_stdio_servers_the_cli_started(short_dir) -> None:
+    tmp_path = short_dir
+    shutil.copy(mcp_cli.__file__, tmp_path / "mcp_cli.py")
+    (tmp_path / "server.py").write_text("import os, sys\n" + PID_SERVER)
+    pid_file = tmp_path / "server.pid"
+    servers = [
+        {
+            "name": "weather",
+            "transport": "stdio",
+            "command": RUNTIME_PYTHON,
+            "args": [str(tmp_path / "server.py"), str(pid_file)],
+        }
+    ]
+    (tmp_path / "mcp_servers.json").write_text(json.dumps(servers))
+    serve = subprocess.Popen([RUNTIME_PYTHON, "-E", "-s", str(tmp_path / "mcp_cli.py"), "serve"])
+    try:
+        deadline = time.monotonic() + 60
+        while not (tmp_path / "mcp.sock").exists() or not pid_file.exists():
+            assert serve.poll() is None and time.monotonic() < deadline
+            time.sleep(0.1)
+        server_pid = int(pid_file.read_text())
+        serve.terminate()
+        assert serve.wait(timeout=10) == 0
+    finally:
+        if serve.poll() is None:
+            serve.kill()
+    # The SDK started the server in a session of its own; SIGTERM to the CLI closes its session, which stops it.
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            os.kill(server_pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.1)
+    raise AssertionError(f"stdio MCP server {server_pid} outlived the CLI")

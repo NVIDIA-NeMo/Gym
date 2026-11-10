@@ -3,6 +3,7 @@
 """Agent sessions: seed, one activation, close, and how a mini-SWE run becomes a response."""
 
 import asyncio
+import dataclasses
 import json
 import sys
 import typing
@@ -1178,3 +1179,45 @@ async def test_an_optional_mcp_server_that_did_not_connect_is_a_gap(agent) -> No
 
     [gap] = [gap for gap in state.observations.gaps if gap.code == "mcp_server_unavailable"]
     assert json.loads(gap.detail) == [{"server": "extra", "error": "ConnectError"}]
+
+
+async def test_network_access_restricts_a_sandbox_the_agent_starts(agent, sandbox, monkeypatch) -> None:
+    agent.config.sandbox_provider = "sandbox"
+    agent.config.network_access = "model_and_tools"
+    restricted = []
+
+    def restrict(spec, **policy):
+        restricted.append(policy)
+        return dataclasses.replace(spec, provider_options={"network_policy": "restricted"})
+
+    monkeypatch.setattr(app_module, "restrict_sandbox_network", restrict)
+
+    await agent._seed_agent_session_state(seed(sandbox_access=None, tool_accesses=[mcp_grant(required=True)]))
+
+    [policy] = restricted
+    assert policy["network_access"] == "model_and_tools"
+    assert policy["model_base_url"].startswith("http://10.0.0.5:8000/")
+    assert (policy["tool_urls"], policy["required_tool_urls"]) == (["http://10.0.0.5:9000/mcp"],) * 2
+    (spec,), _ = sandbox.box.start.await_args
+    assert spec.provider_options == {"network_policy": "restricted"}
+
+
+async def test_network_access_cannot_restrict_a_borrowed_sandbox(agent, sandbox) -> None:
+    agent.config.network_access = "model_only"
+
+    with pytest.raises(AgentSeedRejectedError, match="only to a sandbox it starts"):
+        await agent._seed_agent_session_state(seed())
+    sandbox.connect.assert_not_awaited()
+
+
+async def test_a_network_policy_the_provider_cannot_enforce_closes_the_provider(agent, sandbox, monkeypatch) -> None:
+    agent.config.sandbox_provider = "sandbox"
+    agent.config.network_access = "model_only"
+    monkeypatch.setattr(
+        app_module, "restrict_sandbox_network", MagicMock(side_effect=AgentSeedRejectedError("no network policies"))
+    )
+
+    with pytest.raises(AgentSeedRejectedError, match="no network policies"):
+        await agent._seed_agent_session_state(seed(sandbox_access=None))
+    sandbox.provider.aclose.assert_awaited_once()
+    sandbox.box.start.assert_not_awaited()

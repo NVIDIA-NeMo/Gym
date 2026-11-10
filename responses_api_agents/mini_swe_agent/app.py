@@ -51,10 +51,12 @@ from nemo_gym.agents import (
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    SandboxNetworkAccess,
     SandboxSession,
     SimpleResponsesAPIAgent,
     assert_model_url_reachable_from_sandbox,
     resolve_agent_timeout,
+    restrict_sandbox_network,
 )
 from nemo_gym.config import (
     ModelServerRef,
@@ -150,6 +152,14 @@ class MiniSWEAgentConfig(BaseResponsesAPIAgentConfig):
     # An agent-owned sandbox, for an episode whose Resources Server lends none.
     sandbox_provider: Optional[str] = None
     sandbox_config: dict[str, JsonValue] = Field(default_factory=dict)
+    network_access: SandboxNetworkAccess = Field(
+        default="inherit",
+        description=(
+            "Egress of a sandbox mini-SWE starts: `model_only` allows only the Model Server's host, `model_and_tools` "
+            "also each MCP grant's host. A borrowed task sandbox keeps its owner's network, so a session that borrows "
+            "one refuses any value other than `inherit`."
+        ),
+    )
     sandbox_install_timeout_seconds: float = Field(default=900, gt=0, allow_inf_nan=False)
     # The longest a run may take; a task's own agent timeout can only shorten it.
     sandbox_runner_timeout_seconds: float = Field(default=28800, gt=0, allow_inf_nan=False)
@@ -289,6 +299,10 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                 raise AgentSeedRejectedError("mini-SWE supports only direct sandbox connections")
             if access.user is not None:
                 raise AgentSeedRejectedError("mini-SWE runs as the sandbox's default user; a task user is unsupported")
+            if self.config.network_access != "inherit":
+                raise AgentSeedRejectedError(
+                    "mini-SWE network_access applies only to a sandbox it starts, not a borrowed one"
+                )
             provider_ref = access.connection.provider_config_ref
             workdir = access.workdir
         if (
@@ -327,6 +341,20 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             provider = create_provider(provider_config)
         except (TypeError, ValueError) as error:
             raise AgentSeedRejectedError(str(error)) from error
+        if spec is not None:
+            try:
+                spec = restrict_sandbox_network(
+                    spec,
+                    network_access=self.config.network_access,
+                    provider=provider,
+                    model_base_url=self.resolve_model_base_url(self.config.model_server.name, trace_context=False),
+                    tool_urls=[str(access.connection.url) for access in mcp_grants],
+                    # model_only blocks these hosts, so a required grant is refused before the sandbox exists.
+                    required_tool_urls=[str(access.connection.url) for access in mcp_grants if access.required],
+                )
+            except BaseException:
+                await provider.aclose()
+                raise
         try:
             if owns_sandbox:
                 sandbox = AsyncSandbox(provider)
@@ -627,11 +655,14 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
         cancelled = not timed_out and (state.session.closing or output.get("stop_reason") == "cancelled")
         if cleanup["return_code"] == RUNNER_MCP_UNAVAILABLE_EXIT and not timed_out:
             # No model call was made: the episode's tools were unavailable, not the agent's doing.
-            raise RuntimeError(
-                f"mini-SWE task MCP servers are unavailable: {(output.get('error') or {}).get('message')}"
-            )
+            message = str((output.get("error") or {}).get("message"))[:2000]
+            raise RuntimeError(f"mini-SWE task MCP servers are unavailable: {message}")
         if artifacts.trajectory is None and not (timed_out or cancelled):
-            raise RuntimeError(f"mini-SWE saved no trajectory: {output.get('error') or artifacts.log[-2000:]}")
+            # The runner's error message, without its traceback, or else the end of the run's logs.
+            reason = (output.get("error") or {}).get("message") if isinstance(output.get("error"), dict) else None
+            raise RuntimeError(
+                f"mini-SWE saved no trajectory: {str(reason)[:2000] if reason else artifacts.log[-2000:]}"
+            )
 
         projection = project(artifacts.trajectory, artifacts.mcp_calls)
         if projection.invalid_response:

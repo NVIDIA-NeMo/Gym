@@ -84,14 +84,16 @@ refused. The sandbox needs glibc 2.28 or newer, or musl, and about 450 MB under 
 | Seed | Where mini-SWE runs | Cleanup |
 | --- | --- | --- |
 | With `sandbox_access` from the Resources or Environment Server | The lent task sandbox, in its `workdir`. | Close stops mini-SWE and removes the session directory; the owner destroys the sandbox. |
-| Without `sandbox_access`, with `sandbox_provider` set | A sandbox the agent starts from `sandbox_config` (default `workdir` `/app`, TTL = install + run timeouts + 600 s). | Close stops the sandbox. |
+| Without `sandbox_access`, with `sandbox_provider` set | A sandbox the agent starts from `sandbox_config` (default `workdir` `/app`, TTL = install + run timeouts + 600 s). `network_access` limits its egress: `model_only` to the Model Server's host, `model_and_tools` also to each MCP grant's host; `inherit` (the default) keeps the provider's network. | Close stops the sandbox. |
 | Neither | Nowhere: the seed is refused with HTTP 422. | |
 
 There is no host path: `/v1/responses` without an agent session answers HTTP 422. The seed is refused with HTTP 422
 for a required `direct_http` grant, a `SandboxAccess.user` (mini-SWE runs as the sandbox's default user), a relative
 `workdir` or one that is not disjoint from the session directory (such as `/` or `/tmp`), a loopback Model Server URL
-that a remote sandbox cannot reach, and a task context that is not a JSON object or declares an MCP server without a
-name. `SandboxAccess.env` is applied to every bash command.
+that a remote sandbox cannot reach, a task context that is not a JSON object or declares an MCP server without a
+name, a sandbox with glibc older than 2.28 (no attempt can change the image), and a `network_access` other than
+`inherit` for a borrowed sandbox, whose network belongs to its owner. `SandboxAccess.env` is applied to every bash
+command.
 
 ### Installation
 
@@ -112,11 +114,15 @@ The runtime is installed at seed, before the activation, with
   it imports mini-SWE at version 2.4.6 and its LiteLLM and MCP clients. A new one is checked the same way before it is
   published by an atomic rename, so concurrent or interrupted seeds never expose a partial runtime.
 
-The runner ([`sandbox_runner.py`](sandbox_runner.py)) runs with the runtime's `python -E -s`, so the task's
+The runner ([`sandbox_runner.py`](sandbox_runner.py)) runs with the runtime's interpreter and `-E -s`, so the task's
 `PYTHON*` settings and user site-packages never reach mini-SWE, while its bash commands keep the task's environment,
-`HOME` and `XDG_*` directories. mini-SWE's own configuration directory is in the session directory
-(`/tmp/nemo-gym-mini-swe-sessions/<id>`), outside the task repository and `HOME`. Gym's process supervisor runs the
-runner and stops it, its commands and its MCP CLI at the deadline and on close.
+`HOME` and `XDG_*` directories. The interpreter is linked into the session directory as `bin/mini-swe`, and the
+runner and its MCP CLI run under that name: no command line in the supervised tree says `python`, so a task's
+`pkill python`, `pkill -9 -f python` or `killall python3` reaches neither them nor Gym's supervisor. mini-SWE's own
+configuration directory is in the session directory (`/tmp/nemo-gym-mini-swe-sessions/<id>`), outside the task
+repository and `HOME`. Gym's process supervisor runs the runner and stops it, its commands and its MCP CLI at the
+deadline and on close. The MCP CLI closes its server sessions when it is stopped, which also stops the stdio servers a
+task declares.
 
 ### Model calls
 

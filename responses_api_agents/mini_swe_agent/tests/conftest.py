@@ -24,8 +24,11 @@ RUNTIME_INPUTS = ("requirements.in", "requirements.txt", "overrides.txt")
 
 def pytest_configure(config: pytest.Config) -> None:
     uv = shutil.which("uv")
-    if os.environ.get("MINI_SWE_RUNTIME_PYTHON") or uv is None:
+    if os.environ.get("MINI_SWE_RUNTIME_PYTHON"):
         return
+    if uv is None:
+        # The runtime tests would otherwise skip without saying the real mini-SWE runtime was never exercised.
+        raise pytest.UsageError("mini-SWE tests need uv on PATH, or MINI_SWE_RUNTIME_PYTHON set to a 2.4.6 runtime")
     key = hashlib.sha256(b"".join((RUNTIME_FILES / name).read_bytes() for name in RUNTIME_INPUTS)).hexdigest()[:16]
     target = Path(tempfile.gettempdir()) / f"nemo-gym-mini-swe-test-runtime-{key}"
     if not target.exists():
