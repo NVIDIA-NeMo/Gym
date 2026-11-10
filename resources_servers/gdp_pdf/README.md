@@ -258,11 +258,16 @@ Set judge credentials in private `env.yaml`. Keep the other Gym servers on their
 loopback defaults. Docker's internal network blocks internet access, including
 shell requests, while permitting the model proxy at the gateway. Host services
 bound to that gateway are also reachable, so expose only the model proxy there.
-With Docker in a VM, run Gym inside that VM. Other sandbox providers remain
-supported; configure equivalent network isolation in their deployment.
+With Docker in a VM, run Gym inside that VM. Before seeding, the resources server
+checks that the Docker network is internal and rejects extra mounts/run flags.
+Other deployments require the explicit `allow_unisolated_sandbox: true` opt-out
+on the resources server. It is logged and recorded in each verification result;
+those deployments must provide their own filesystem and network isolation.
 OpenCode 1.17.11 and document tools are preinstalled in the image.
 Defaults are eight concurrent episodes, 16,384 output tokens per model call and a
 two-hour timeout, with no episode turn cap.
 
-For your own tasks, override the agent's dataset with GDP.pdf rows (`source_pdf`,
-`prompt`, `criteria` in `verifier_metadata`); never train on benchmark questions.
+For your own tasks, override the agent's dataset with GDP.pdf rows. Required
+`verifier_metadata` fields are `task_id`, `prompt`, `criteria` (each with `index`
+and `criterion`), `source_pdf`, and `document_manifest: ""` for this raw-PDF path.
+`source_pdf` must resolve within `documents_base_dir`. Never train on benchmark questions.

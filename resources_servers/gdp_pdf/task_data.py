@@ -90,14 +90,16 @@ class TaskData(BaseModel):
     )
     document_manifest: str = Field(
         description="Path to the document's prepare-time manifest.json (page text + pre-rendered "
-        "150 DPI page images), relative to the agent's documents_base_dir.",
+        "150 DPI page images), relative to the agent's documents_base_dir. Required for the "
+        "single-turn agent; use an empty string for the raw-PDF OpenCode path.",
         json_schema_extra={"consumed_by": ["prompt"], "legacy_location": "verifier_metadata"},
     )
     source_pdf: Optional[str] = Field(
         default=None,
         description="Path to the original source PDF the manifest was rendered from, relative to "
-        "documents_base_dir. Provenance only -- not read by the agent or verify().",
-        json_schema_extra={"consumed_by": ["provenance"], "legacy_location": "verifier_metadata"},
+        "documents_base_dir. Required by the OpenCode resources server to seed the sandbox; "
+        "optional provenance for the single-turn path.",
+        json_schema_extra={"consumed_by": ["seed_session", "provenance"], "legacy_location": "verifier_metadata"},
     )
     criteria: List[Criterion] = Field(
         description="Atomic rubric criteria for this task (3-30), judged independently. An empty "

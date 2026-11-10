@@ -4,6 +4,7 @@
 
 import asyncio
 import logging
+import subprocess
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,6 +54,7 @@ class GdpPdfSandboxConfig(GdpPdfConfig):
     sandbox_config: SandboxConfig = Field(default_factory=lambda: SandboxConfig(ttl_s=14400))
     documents_base_dir: str = "resources_servers/gdp_pdf/data"
     sandbox_stop_timeout_seconds: float = Field(default=60, gt=0)
+    allow_unisolated_sandbox: bool = False
 
 
 @dataclass
@@ -110,13 +112,43 @@ class GdpPdfSandboxResourcesServer(GdpPdfResourcesServer):
 
     async def verify(self, body: GdpPdfVerifyRequest) -> GdpPdfVerifyResponse:
         criteria = (body.verifier_metadata or {}).get("criteria") or []
-        if body.response.status == "incomplete" and criteria:
+        complete = body.response.status in (None, "completed") and not body.response.incomplete_details
+        if not complete and criteria:
             evaluations = [
                 CriterionEvaluation(index=c.get("index"), criterion=str(c.get("criterion", "")), passed=False)
                 for c in criteria
             ]
-            return self._build_response(body, evaluations)
-        return await super().verify(body)
+            result = self._build_response(body, evaluations)
+        else:
+            result = await super().verify(body)
+        return result.model_copy(update={"allow_unisolated_sandbox": self.config.allow_unisolated_sandbox})
+
+    async def _check_isolation(self, provider: dict) -> None:
+        if self.config.allow_unisolated_sandbox:
+            LOG.warning(
+                "GDP.pdf sandbox isolation explicitly disabled; this opt-out is recorded in verification results"
+            )
+            return
+        create = provider.get("docker", {}).get("create", {})
+        network = create.get("network")
+        options = self.config.sandbox_config.provider_options
+        if not network or create.get("extra_run_args") or options.get("volumes") or options.get("run_args"):
+            raise ResourcesSeedRejectedError(
+                "GDP.pdf requires a Docker internal network and no extra mounts/run flags"
+            )
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                ["docker", "network", "inspect", network, "--format", "{{.Internal}}"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ResourcesSeedRejectedError("Could not verify the Docker internal network") from exc
+        if result.stdout.strip() != "true":
+            raise ResourcesSeedRejectedError("Create the GDP.pdf network with docker network create --internal")
 
     async def seed_session(self, request: Request, body: ResourcesSeedSessionRequest) -> ResourcesSeedSessionResponse:
         session_id = body.resources_session_id
@@ -130,7 +162,9 @@ class GdpPdfSandboxResourcesServer(GdpPdfResourcesServer):
                 await self._stop(session_id)
                 pdf = self._source_pdf(body)
                 global_config = get_global_config_dict()
-                sandbox = AsyncSandbox(resolve_provider_config(self.config.sandbox_provider, global_config))
+                provider = resolve_provider_config(self.config.sandbox_provider, global_config)
+                await self._check_isolation(provider)
+                sandbox = AsyncSandbox(provider)
                 session = _Session(body.model_copy(deep=True), sandbox)
                 self._sessions[session_id] = session
                 spec = self.config.sandbox_config.spec(

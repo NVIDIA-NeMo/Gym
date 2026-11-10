@@ -80,8 +80,6 @@ create an agent-owned sandbox; it is destroyed on close. Verifiers that inspect
 task files must use a Resources-owned sandbox. Missing access and provider is an
 error, never a fallback to local execution.
 
-Set `supports_images: true` for a vision model to retain images read from tool outputs.
-
 `network_access: model_only` limits an agent-owned sandbox's egress to the model
 server's host; `model_and_tools` also allows the host of each MCP grant. Each
 allowed host is open on every port. The OpenSandbox policy is set when the sandbox

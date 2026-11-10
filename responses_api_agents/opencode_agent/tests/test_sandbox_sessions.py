@@ -583,11 +583,9 @@ def test_session_rejects_images_it_cannot_attach(setup, items):
 
 
 @pytest.mark.parametrize("output_budget", [4096, 32000])
-@pytest.mark.parametrize("supports_images", [False, True])
-def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budget, supports_images):
+def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budget):
     agent, sandbox = setup
     agent.config.max_output_tokens = output_budget
-    agent.config.supports_images = supports_images
     with TestClient(agent.setup_webserver()) as client:
         created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
         assert created.status_code == 200, created.text
@@ -609,9 +607,6 @@ def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budge
         assert payload["command"][0].endswith("nemo-gym-opencode-runtime-1.17.11/opencode")
         assert payload["env"]["HOME"] == f"{sandbox.directory}/home"
         config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
-        assert config["provider"]["nemo_gym"]["models"]["dummy_model"].get("modalities") == (
-            {"input": ["text", "image"], "output": ["text"]} if supports_images else None
-        )
         assert config["provider"]["nemo_gym"]["models"]["dummy_model"]["limit"] == {
             "context": 32000,
             "input": 32000,

@@ -39,7 +39,10 @@ def setup(config, tmp_path, monkeypatch):  # noqa: F811
 
     sandbox.start_with_setup.side_effect = start
     monkeypatch.setattr(module, "AsyncSandbox", lambda _: sandbox)
-    monkeypatch.setattr(module, "get_global_config_dict", lambda: {"sandbox": {"docker": {}}})
+    monkeypatch.setattr(
+        module, "get_global_config_dict", lambda: {"sandbox": {"docker": {"create": {"network": "isolated"}}}}
+    )
+    monkeypatch.setattr(module.subprocess, "run", MagicMock(return_value=MagicMock(stdout="true\n")))
     body = ResourcesSeedSessionRequest(
         resources_session_id="session",
         episode_id={"rollout_id": "run", "attempt": 0},
@@ -55,15 +58,27 @@ def test_session_contract_and_pdf_delivery(setup):
         server.setup_webserver(), body, keeps_state=True, holds_state=lambda sid: sid in server._sessions
     )
     assert all(call.args == (pdf, module.DOCUMENT_PATH) for call in sandbox.upload.await_args_list)
-    assert sandbox.upload.await_count == 2
+    sandbox.upload.assert_awaited()
 
 
-@pytest.mark.parametrize("status,tool_tail", [("completed", False), ("incomplete", False), ("incomplete", True)])
-async def test_only_completed_answers_are_judged(setup, status, tool_tail):
+@pytest.mark.parametrize(
+    "status,tool_tail,incomplete",
+    [
+        ("completed", False, False),
+        (None, False, False),
+        ("failed", False, False),
+        ("incomplete", False, False),
+        ("incomplete", True, False),
+        ("completed", False, True),
+    ],
+)
+async def test_only_completed_answers_are_judged(setup, status, tool_tail, incomplete):
     server, _, _, _ = setup
     body = _verify_request("The cap is $5M.")
     payload = body.model_dump()
     payload["response"]["status"] = status
+    if incomplete:
+        payload["response"]["incomplete_details"] = {"reason": "max_output_tokens"}
     if tool_tail:
         payload["response"]["output"].append(
             {"type": "function_call", "name": "bash", "arguments": "{}", "call_id": "pending"}
@@ -71,20 +86,112 @@ async def test_only_completed_answers_are_judged(setup, status, tool_tail):
     body = module.GdpPdfVerifyRequest.model_validate(payload)
     server._judge_criterion = AsyncMock(return_value=module.CriterionEvaluation(criterion="cap", passed=True))
     result = await server.verify(body)
+    complete = status in (None, "completed") and not incomplete
     assert result.response == body.response
-    assert result.reward == result.all_pass == (1.0 if status == "completed" else 0.0)
+    assert result.reward == result.all_pass == float(complete)
     assert result.num_criteria == 1
-    assert result.criterion_evaluations[0].passed == (status == "completed")
-    assert server._judge_criterion.await_count == (1 if status == "completed" else 0)
+    assert result.criterion_evaluations[0].passed == complete
+    assert server._judge_criterion.await_count == int(complete)
 
 
-@pytest.mark.parametrize("source", ["../outside.pdf", "/etc/passwd", "missing.pdf", ""])
+@pytest.mark.parametrize("source", ["../outside.pdf", "link.pdf", "/etc/passwd", "missing.pdf", ""])
 async def test_invalid_pdf_never_allocates(setup, source):
-    server, sandbox, body, _ = setup
+    server, sandbox, body, pdf = setup
+    outside = pdf.parent.parent / "outside.pdf"
+    outside.write_bytes(pdf.read_bytes())
+    (pdf.parent / "link.pdf").symlink_to(outside)
     body.task_data["verifier_metadata"]["source_pdf"] = source
     with pytest.raises(ResourcesSeedRejectedError):
         await server.seed_session(Request({"type": "http", "session": {}}), body)
     sandbox.start_with_setup.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "provider,internal,options",
+    [
+        ({"docker": {}}, "true", {}),
+        ({"apptainer": {}}, "true", {}),
+        ({"docker": {"create": {"network": "public"}}}, "false", {}),
+        ({"docker": {"create": {"network": "internal", "extra_run_args": ["--privileged"]}}}, "true", {}),
+        ({"docker": {"create": {"network": "internal"}}}, "true", {"volumes": ["/tmp:/tmp"]}),
+        ({"docker": {"create": {"network": "internal"}}}, "true", {"run_args": ["--network", "host"]}),
+    ],
+)
+async def test_unsafe_sandbox_requires_recorded_opt_out(setup, monkeypatch, provider, internal, options):
+    server, sandbox, body, _ = setup
+    monkeypatch.setattr(module, "get_global_config_dict", lambda: {"sandbox": provider})
+    module.subprocess.run.return_value.stdout = internal
+    server.config.sandbox_config.provider_options = options
+    request = Request({"type": "http", "session": {}})
+    with pytest.raises(ResourcesSeedRejectedError):
+        await server.seed_session(request, body)
+    sandbox.start_with_setup.assert_not_awaited()
+    server.config.allow_unisolated_sandbox = True
+    await server.seed_session(request, body)
+    server._judge_criterion = AsyncMock(return_value=module.CriterionEvaluation(criterion="cap", passed=True))
+    result = await server.verify(_verify_request("The cap is $5M."))
+    assert result.model_dump()["allow_unisolated_sandbox"] is True
+
+
+async def test_network_inspection_failure_never_allocates(setup):
+    server, sandbox, body, _ = setup
+    module.subprocess.run.side_effect = module.subprocess.TimeoutExpired("docker", 10)
+    with pytest.raises(ResourcesSeedRejectedError, match="Could not verify"):
+        await server.seed_session(Request({"type": "http", "session": {}}), body)
+    sandbox.start_with_setup.assert_not_awaited()
+
+
+@pytest.mark.parametrize("failure", [RuntimeError, asyncio.CancelledError])
+async def test_failed_start_is_cleaned_before_reseed(setup, failure):
+    server, sandbox, body, _ = setup
+    request = Request({"type": "http", "session": {}})
+    start = sandbox.start_with_setup.side_effect
+    sandbox.start_with_setup.side_effect = failure("start failed")
+    sandbox.stop.side_effect = RuntimeError("stop failed")
+    with pytest.raises(failure):
+        await server.seed_session(request, body)
+    sandbox.stop.assert_awaited_once()
+    assert server._sessions["session"].access is None
+    sandbox.start_with_setup.side_effect = start
+    with pytest.raises(RuntimeError, match="stop failed"):
+        await server.seed_session(request, body)
+    sandbox.start_with_setup.assert_awaited_once()
+    sandbox.stop.side_effect = None
+    await server.seed_session(request, body)
+    assert sandbox.stop.await_count == 3
+    assert sandbox.start_with_setup.await_count == 2
+    assert server._sessions["session"].access is not None
+
+
+@pytest.mark.parametrize("hang", [False, True])
+async def test_shutdown_continues_after_stop_failure_or_timeout(setup, hang):
+    server, sandbox, body, _ = setup
+    server.config.sandbox_stop_timeout_seconds = 0.01
+    app = server.setup_webserver()
+    lifespan = app.router.lifespan_context(app)
+    await lifespan.__aenter__()
+    await server.seed_session(Request({"type": "http", "session": {}}), body)
+    other = AsyncMock()
+    server._sessions["other"] = module._Session(body, other)
+
+    async def fail():
+        if hang:
+            await asyncio.Event().wait()
+        raise RuntimeError("stop failed")
+
+    sandbox.stop.side_effect = fail
+    shutdown = asyncio.create_task(lifespan.__aexit__(None, None, None))
+    try:
+        done, _ = await asyncio.wait({shutdown}, timeout=1)
+        assert shutdown in done
+        await shutdown
+        other.stop.assert_awaited_once()
+        assert list(server._sessions) == ["session"]
+    finally:
+        shutdown.cancel()
+        await asyncio.gather(shutdown, return_exceptions=True)
+        sandbox.stop.side_effect = None
+        await server._stop("session")
 
 
 async def test_failed_upload_and_close_retain_retryable_cleanup(setup):

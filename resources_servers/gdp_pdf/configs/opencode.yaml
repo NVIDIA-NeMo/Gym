@@ -37,7 +37,7 @@ gdp_pdf_opencode:
         type: resources_servers
         name: gdp_pdf_sandbox
       opencode_version: 1.17.11
-      supports_images: true
+      image_input: true
       max_output_tokens: 16384
       timeout: 7200
       system_prompt: The source PDF is /workspace/document.pdf. Use the available
