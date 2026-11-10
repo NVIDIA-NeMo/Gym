@@ -19,9 +19,12 @@ import shlex
 from pathlib import Path
 
 from nemo_gym.core.failure_kinds import DRIVER_INSTALL_FAILED
-from nemo_gym.eval.recovery.markers import DRIVER_FAILURE_ENV
 from nemo_gym.orchestration.jobs import EVAL_EXIT_FILENAME, EXPORTS_DIRNAME
 
+
+# The driver step's environment names the file, <job dir>/.gym_driver_failure.<allocation>, where a driver failure
+# that the next segment would repeat leaves its registered kind (see the guard in resume_script.py).
+DRIVER_FAILURE_ENV = "GYM_DRIVER_FAILURE_FILE"
 
 _RAY_PRELUDE = """\
 # Resolve the head node IP for multi-node vLLM services (spanning nodes via Ray).

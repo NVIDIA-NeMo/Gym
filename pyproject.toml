@@ -883,12 +883,10 @@ layers = [
     "nemo_gym.cli.agents : nemo_gym.cli.dataset : nemo_gym.cli.dev : nemo_gym.cli.env : nemo_gym.cli.eval : nemo_gym.cli.general : nemo_gym.cli.legacy : nemo_gym.cli.main : nemo_gym.cli.models : nemo_gym.cli.resources_servers : nemo_gym.cli.utils",
     # environment/
     "nemo_gym.environment",
-    # eval/ (above orchestration, except the recovery policy below)
-    "nemo_gym.eval.comparison : nemo_gym.eval.eval_plan : nemo_gym.eval.rollout_compare : nemo_gym.eval.rollout_reverification",
+    # eval/
+    "nemo_gym.eval",
     # orchestration/
     "nemo_gym.cli._locked_env : nemo_gym.cli._prepare_worker : nemo_gym.orchestration",
-    # eval/recovery/: the recovery policy that orchestration's executors call; it never imports orchestration
-    "nemo_gym.eval.recovery",
     # rollouts/
     "nemo_gym.rollouts",
     # data/

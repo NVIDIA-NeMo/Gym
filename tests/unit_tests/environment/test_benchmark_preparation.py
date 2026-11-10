@@ -403,7 +403,7 @@ def test_a_failed_isolated_preparer_is_a_typed_terminal_stop(tmp_path, monkeypat
 def test_the_cli_exits_76_and_leaves_the_kind_for_the_chain_guard(tmp_path, monkeypatch) -> None:
     from nemo_gym.cli.utils import exit_cleanly_on_config_error
     from nemo_gym.environment.benchmark_preparation import PreparationFailedError
-    from nemo_gym.eval.recovery.markers import DRIVER_FAILURE_ENV
+    from nemo_gym.orchestration.executors.resume_script import DRIVER_FAILURE_ENV
 
     failure_file = tmp_path / ".gym_driver_failure.100"
     monkeypatch.setenv(DRIVER_FAILURE_ENV, str(failure_file))

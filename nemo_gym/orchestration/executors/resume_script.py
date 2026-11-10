@@ -28,6 +28,8 @@ driver step, cancels both when the job finished the run.
 """
 
 import logging
+import os
+from pathlib import Path
 
 from nemo_gym.core.failure_kinds import (
     COLLECTION_RESUME_REFUSED,
@@ -40,6 +42,7 @@ from nemo_gym.core.failure_kinds import (
     SERVER_START_FAILED,
 )
 from nemo_gym.orchestration.api import ResumeConfig
+from nemo_gym.orchestration.executors.script_templates import DRIVER_FAILURE_ENV
 
 
 logger = logging.getLogger(__name__)
@@ -1063,3 +1066,19 @@ def render_resume_epilogue() -> str:
         export_receipt_missing_reason=EXPORT_RECEIPT_MISSING_REASON,
         chain_end_journal_name=CHAIN_END_JOURNAL_NAME,
     )
+
+
+def record_failure_kind(error: BaseException) -> None:
+    """Leave the registered kind ``error`` carries in the failure file the driver step names, for the next guard.
+
+    The driver step of a resumable job names the file in ``DRIVER_FAILURE_ENV``; elsewhere this does nothing.
+    """
+    kind = getattr(error, "failure_kind", None)
+    path = os.environ.get(DRIVER_FAILURE_ENV)
+    if not isinstance(kind, str) or not path:
+        return
+    try:
+        Path(path).write_text(kind + "\n")
+    except OSError as write_error:
+        # The next segment then reads the saved state as it would without the kind.
+        logger.warning("Cannot record failure kind %s in %s: %s", kind, path, write_error)
