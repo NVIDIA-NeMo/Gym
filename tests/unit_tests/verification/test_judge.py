@@ -486,3 +486,41 @@ def test_the_backoff_is_full_jitter_exponential_and_capped(monkeypatch):
         (0, 30.0),
         (0, 30.0),
     ]
+
+
+def test_judge_contracts_preserve_existing_objects_and_context() -> None:
+    from nemo_gym.verification import judge, judge_contracts
+
+    for name in (
+        "JudgeError",
+        "JudgeGrading",
+        "_judge_grading",
+        "JUDGE_FAILURES",
+        "judge_call_failed",
+        "is_judge_failure",
+        "judge_failsafe",
+    ):
+        assert getattr(judge, name) is getattr(judge_contracts, name)
+    grading = judge_contracts.JudgeGrading()
+    token = judge_contracts._judge_grading.set(grading)
+    try:
+        assert judge._judge_grading.get() is grading
+    finally:
+        judge_contracts._judge_grading.reset(token)
+
+
+def test_judge_contracts_import_without_judge_execution() -> None:
+    import subprocess
+    import sys
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; import nemo_gym.verification.judge_contracts; "
+            "assert 'nemo_gym.verification.judge' not in sys.modules",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )

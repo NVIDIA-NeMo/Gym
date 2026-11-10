@@ -37,7 +37,7 @@ from nemo_gym.trajectory.trajectory_record import (
     VerifierInvocation,
     grading_result_binding,
 )
-from nemo_gym.verification.judge import JudgeGrading, _judge_grading
+from nemo_gym.verification.judge_contracts import JudgeGrading, _judge_grading
 
 
 logger = logging.getLogger(__name__)

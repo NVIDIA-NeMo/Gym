@@ -95,7 +95,7 @@ from nemo_gym.server_runtime.request_handling.session_routing import SessionKind
 from nemo_gym.server_runtime.verifier_observability import observe_verifier
 from nemo_gym.telemetry.endpoints import traced_verify_endpoint
 from nemo_gym.trajectory.trajectory_record import VerifierInvocation
-from nemo_gym.verification.judge import judge_failsafe
+from nemo_gym.verification.judge_contracts import judge_failsafe
 
 
 logger = logging.getLogger(__name__)
