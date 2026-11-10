@@ -5,7 +5,11 @@ from unittest.mock import MagicMock
 import pytest
 
 from nemo_gym.client import ServerClient
-from resources_servers.string_match.app import StringMatchResourcesServerConfig, StringMatchVerifyRequest
+from resources_servers.string_match.app import (
+    StringMatchResourcesServer,
+    StringMatchResourcesServerConfig,
+    StringMatchVerifyRequest,
+)
 from resources_servers.string_match.app_passrate import PassrateStringMatchResourcesServer
 
 
@@ -23,12 +27,14 @@ from resources_servers.string_match.app_passrate import PassrateStringMatchResou
         ("a<|im_end|>b", "a<|im_end|>b", True, "a<|im_end|>b", 1.0),
     ],
 )
+@pytest.mark.parametrize("configured", [False, True])
 async def test_verify_preserves_response(
-    text: str, expected_answer: str, case_sensitive: bool, extracted_answer: str, reward: float
+    text: str, expected_answer: str, case_sensitive: bool, extracted_answer: str, reward: float, configured: bool
 ) -> None:
-    server = PassrateStringMatchResourcesServer(
+    server_class = StringMatchResourcesServer if configured else PassrateStringMatchResourcesServer
+    server = server_class(
         config=StringMatchResourcesServerConfig(
-            host="127.0.0.1", port=8080, entrypoint="app_passrate.py", name="test"
+            host="127.0.0.1", port=8080, entrypoint="app_passrate.py", name="test", strip_trailing_eos=configured
         ),
         server_client=MagicMock(spec=ServerClient),
     )
@@ -58,6 +64,11 @@ async def test_verify_preserves_response(
             },
         }
     )
+    default_server = StringMatchResourcesServer(
+        config=StringMatchResourcesServerConfig(host="127.0.0.1", port=8080, entrypoint="app.py", name="plain"),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    assert default_server._grading_text(body) == text.strip()
     original = body.model_dump()
     result = await server.verify(body)
     assert result.reward == reward

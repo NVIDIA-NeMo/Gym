@@ -28,7 +28,7 @@ from nemo_gym.server_runtime import (
 
 
 class StringMatchResourcesServerConfig(BaseResourcesServerConfig):
-    pass
+    strip_trailing_eos: bool = False
 
 
 class StringMatchRunRequest(BaseRunRequest):
