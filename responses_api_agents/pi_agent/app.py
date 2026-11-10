@@ -31,22 +31,29 @@ from uuid import uuid4
 from fastapi import HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
-from nemo_gym.agent_outcome import AgentOutcome
-from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
-from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
+    AGENT_TIMEOUT_METADATA_KEY,
+    HARNESS_RUNNER_FILE,
+    HARNESS_RUNNER_SCRIPT,
     AgentCloseSessionResponse,
+    AgentOutcome,
+    AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    SandboxNetworkAccess,
+    SandboxSession,
     SimpleResponsesAPIAgent,
+    resolve_agent_timeout,
+    restrict_sandbox_network,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.failure_kinds import MODEL_REQUEST_ERROR, MODEL_TRANSPORT_ERROR
-from nemo_gym.openai_utils import (
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
+from nemo_gym.core import (
+    MODEL_REQUEST_ERROR,
+    MODEL_TRANSPORT_ERROR,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -59,8 +66,16 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
 )
-from nemo_gym.responses_converter import ResponsesConverter
-from nemo_gym.rollout_observability import (
+from nemo_gym.models import ChatCompletionsConverter
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    DirectSandboxConnection,
+    SandboxSpec,
+    create_provider,
+    resolve_provider_config,
+)
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse, MCPToolAccess, ToolAccess
+from nemo_gym.trajectory import (
     AgentEpisode,
     AgentInvocation,
     AgentObservationBundle,
@@ -69,11 +84,6 @@ from nemo_gym.rollout_observability import (
     ObservationGap,
     ToolCallObservation,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, create_provider
-from nemo_gym.sandbox.access import DirectSandboxConnection
-from nemo_gym.sandbox.config import resolve_provider_config
-from nemo_gym.server_utils import get_global_config_dict, get_response_json, raise_for_status
-from nemo_gym.tool_access import MCPToolAccess, ToolAccess
 from responses_api_agents.pi_agent.sandbox import PiSandboxSession
 from responses_api_agents.pi_agent.setup_pi import ensure_pi
 
@@ -271,7 +281,7 @@ def parse_pi_events(stdout: str | bytes) -> tuple[list[Any], dict[str, int]]:
                 # Match the other adapters: reasoning belongs in reasoning items,
                 # not in the final text consumed by benchmark verifiers.
                 output_items.extend(
-                    ResponsesConverter(return_token_id_information=False).postprocess_assistant_message_dict(
+                    ChatCompletionsConverter(return_token_id_information=False).postprocess_assistant_message_dict(
                         {"role": "assistant", "content": "\n".join(texts)}
                     )
                 )
@@ -627,6 +637,8 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
     workspace_root: str = "outputs/pi_agent/workspaces"
     thinking: Optional[str] = None
     system_prompt: Optional[str] = None
+    system_prompt_mode: Literal["append", "replace"] = "append"
+    enable_tools: bool = True
     timeout: int = Field(default=900, gt=0)
     bash_timeout: Optional[int] = Field(default=None, gt=0)
     extra_args: list[str] = []
@@ -639,6 +651,23 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
     mcp_servers: dict[str, PiMCPServerConfig] = Field(default_factory=dict)
     sandbox_provider: str | None = None
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
+    network_access: SandboxNetworkAccess = Field(
+        default="inherit",
+        description=(
+            "Egress of a sandbox Pi creates: `model_only` allows only the model server's host, `model_and_tools` "
+            "also each MCP grant's host. A borrowed task sandbox keeps its owner's network, so a session that "
+            "borrows one rejects any other value than `inherit`."
+        ),
+    )
+    sandbox_runtime_dir: Optional[str] = Field(
+        default=None,
+        pattern=r"^/",
+        description=(
+            "Directory inside the sandbox that already holds `node/` and `pi/` as `install_pi_runtime.sh` lays them "
+            "out, for sandboxes that cannot download the runtime. Setup checks that it runs `pi_version` instead of "
+            "installing one."
+        ),
+    )
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     sandbox_bash_timeout_seconds: int = Field(default=900, gt=0)
     sandbox_mcp_timeout_seconds: float = Field(
@@ -660,7 +689,6 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
             "grant that also offers one is left out."
         ),
     )
-    session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
 
     @property
     def command_parts(self) -> list[str]:
@@ -715,6 +743,10 @@ class PiAgent(SimpleResponsesAPIAgent):
         else:
             if not isinstance(body.sandbox_access.connection, DirectSandboxConnection):
                 raise HTTPException(422, "Pi requires direct SandboxAccess")
+            if self.config.network_access != "inherit":
+                raise AgentSeedRejectedError(
+                    "Pi network_access applies only to a sandbox it creates, not a borrowed one"
+                )
             workdir = body.sandbox_access.workdir
             provider_ref = body.sandbox_access.connection.provider_config_ref
         if not isinstance(workdir, str) or not workdir.startswith("/"):
@@ -744,6 +776,28 @@ class PiAgent(SimpleResponsesAPIAgent):
 
         provider = create_provider(resolve_provider_config(provider_ref, get_global_config_dict()))
         if owns_sandbox:
+            try:
+                spec = restrict_sandbox_network(
+                    spec,
+                    network_access=self.config.network_access,
+                    provider=provider,
+                    model_base_url=self.resolve_model_base_url(self.config.model_server.name, trace_context=False),
+                    # Only the grants Pi keeps; activation leaves out the optional ones listed in `problems`.
+                    tool_urls=[
+                        str(access.connection.url)
+                        for access in tool_accesses
+                        if isinstance(access, MCPToolAccess) and access.name not in problems
+                    ],
+                    # A required grant Pi cannot use was refused above, so every one left here is kept.
+                    required_tool_urls=[
+                        str(access.connection.url)
+                        for access in tool_accesses
+                        if isinstance(access, MCPToolAccess) and access.required
+                    ],
+                )
+            except BaseException:
+                await provider.aclose()
+                raise
             sandbox = AsyncSandbox(provider)
         else:
             try:
@@ -752,7 +806,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                 await provider.aclose()
                 raise
         directory = f"/tmp/nemo-gym-pi-sessions/{uuid4().hex}"
-        runtime = f"/tmp/nemo-gym-pi-node-22.19.0-{self.config.pi_version}"
+        runtime = self.config.sandbox_runtime_dir or f"/tmp/nemo-gym-pi-node-22.19.0-{self.config.pi_version}"
         state = PiSandboxSession(
             request=body,
             session=SandboxSession(
@@ -778,24 +832,46 @@ class PiAgent(SimpleResponsesAPIAgent):
                     f"Cannot prepare Pi session (exit {prepared.return_code}, "
                     f"error_type={prepared.error_type}): {details[-16000:]}"
                 )
-            # Install only the agent runtime in the existing task sandbox.
-            # Resources has already prepared the task repository and its dependencies.
-            installer = "install_pi_runtime.sh"
-            await sandbox.upload(Path(__file__).with_name(installer), f"{directory}/{installer}")
-            installed = await sandbox.exec(
-                f"bash {shlex.quote(directory + '/' + installer)} {shlex.quote(runtime)} "
-                f"{shlex.quote(self.config.pi_version)}",
-                cwd=workdir,
-                timeout_s=self.config.sandbox_install_timeout_seconds,
-            )
-            if installed.return_code != 0 or installed.error_type:
-                # Background execution puts the installer log in stdout and may
-                # leave only a generic "exit status 1" in stderr. Preserve both.
-                details = "\n".join(part for part in (installed.stderr, installed.stdout) if part)
-                raise RuntimeError(
-                    f"Pi sandbox installation failed (exit {installed.return_code}, "
-                    f"error_type={installed.error_type}): {details[-16000:]}"
+            if self.config.sandbox_runtime_dir:
+                checked = await sandbox.exec(
+                    f"{shlex.quote(runtime + '/node/bin/node')} "
+                    f"{shlex.quote(runtime + '/pi/node_modules/@earendil-works/pi-coding-agent/dist/cli.js')} --version",
+                    cwd=workdir,
+                    timeout_s=self.config.sandbox_install_timeout_seconds,
                 )
+                reported = (checked.stdout or "").strip()
+                details = "\n".join(part for part in (checked.stderr, checked.stdout) if part)
+                if checked.error_type:
+                    # A transport failure or timeout may pass on another attempt.
+                    raise RuntimeError(
+                        f"Pi could not check the runtime in {runtime} (error_type={checked.error_type}): "
+                        f"{details[-16000:]}"
+                    )
+                if checked.return_code != 0 or reported != self.config.pi_version:
+                    # A missing runtime or another version fails the same way every time: refuse the seed.
+                    raise AgentSeedRejectedError(
+                        f"Pi runtime in {runtime} does not run pi_version {self.config.pi_version} "
+                        f"(exit {checked.return_code}): {details[-16000:]}"
+                    )
+            else:
+                # Install only the agent runtime in the existing task sandbox.
+                # Resources has already prepared the task repository and its dependencies.
+                installer = "install_pi_runtime.sh"
+                await sandbox.upload(Path(__file__).with_name(installer), f"{directory}/{installer}")
+                installed = await sandbox.exec(
+                    f"bash {shlex.quote(directory + '/' + installer)} {shlex.quote(runtime)} "
+                    f"{shlex.quote(self.config.pi_version)}",
+                    cwd=workdir,
+                    timeout_s=self.config.sandbox_install_timeout_seconds,
+                )
+                if installed.return_code != 0 or installed.error_type:
+                    # Background execution puts the installer log in stdout and may
+                    # leave only a generic "exit status 1" in stderr. Preserve both.
+                    details = "\n".join(part for part in (installed.stderr, installed.stdout) if part)
+                    raise RuntimeError(
+                        f"Pi sandbox installation failed (exit {installed.return_code}, "
+                        f"error_type={installed.error_type}): {details[-16000:]}"
+                    )
             await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
         except BaseException as error:
             try:
@@ -900,29 +976,24 @@ class PiAgent(SimpleResponsesAPIAgent):
         models = {
             "providers": {"nemo": self._build_models_config(state.request.episode_id.capture_key)["providers"]["nemo"]}
         }
-        await state.upload_json("home/.pi/agent/models.json", models)
-        await state.upload_json("home/.pi/agent/settings.json", self._build_settings_config())
+        # Staged inside the session's execute, so that close cancels the uploads before it releases the sandbox.
+        files: dict[str, str | Path] = {
+            "home/.pi/agent/models.json": json.dumps(models),
+            "home/.pi/agent/settings.json": json.dumps(self._build_settings_config()),
+        }
         output_limit_extension = "output-limit.mjs"
-        await state.session.sandbox.upload(
-            Path(__file__).with_name(output_limit_extension), f"{state.session.session_dir}/{output_limit_extension}"
-        )
+        files[output_limit_extension] = Path(__file__).with_name(output_limit_extension)
         runtime_guards_extension = "runtime-guards.mjs"
-        await state.session.sandbox.upload(
-            Path(__file__).with_name(runtime_guards_extension),
-            f"{state.session.session_dir}/{runtime_guards_extension}",
-        )
-        await state.session.sandbox.upload(
-            Path(__file__).with_name("outcome.mjs"), f"{state.session.session_dir}/outcome.mjs"
-        )
+        if self.config.enable_tools:
+            files[runtime_guards_extension] = Path(__file__).with_name(runtime_guards_extension)
+        files["outcome.mjs"] = Path(__file__).with_name("outcome.mjs")
         mcp_servers, unusable_grant_gaps = self._session_mcp_servers(state.request)
         mcp_extension = []
         mcp_env = {}
         if mcp_servers:
-            await state.session.sandbox.upload(
-                Path(__file__).with_name("gym_mcp.mjs"), f"{state.session.session_dir}/gym_mcp.mjs"
-            )
+            files["gym_mcp.mjs"] = Path(__file__).with_name("gym_mcp.mjs")
             # The headers carry this episode's tool session token.
-            await state.upload_json("mcp-servers.json", mcp_servers)
+            files["mcp-servers.json"] = json.dumps(mcp_servers)
             mcp_extension = ["--extension", f"{state.session.session_dir}/gym_mcp.mjs"]
             mcp_env["NEMO_GYM_PI_MCP_CONFIG"] = f"{state.session.session_dir}/mcp-servers.json"
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
@@ -940,8 +1011,11 @@ class PiAgent(SimpleResponsesAPIAgent):
             "--no-extensions",
             "--extension",
             f"{state.session.session_dir}/{output_limit_extension}",
-            "--extension",
-            f"{state.session.session_dir}/{runtime_guards_extension}",
+            *(
+                ["--extension", f"{state.session.session_dir}/{runtime_guards_extension}"]
+                if self.config.enable_tools
+                else []
+            ),
             "--extension",
             f"{state.session.session_dir}/outcome.mjs",
             *mcp_extension,
@@ -949,10 +1023,13 @@ class PiAgent(SimpleResponsesAPIAgent):
             "--no-prompt-templates",
             "--no-themes",
         ]
+        if not self.config.enable_tools:
+            command.append("--no-builtin-tools")
         if self.config.thinking:
             command += ["--thinking", self.config.thinking]
         if system:
-            command += ["--append-system-prompt", system]
+            flag = "--system-prompt" if self.config.system_prompt_mode == "replace" else "--append-system-prompt"
+            command += [flag, system]
         env = {
             "PI_CODING_AGENT_DIR": f"{state.session.session_dir}/home/.pi/agent",
             "PI_SKIP_VERSION_CHECK": "1",
@@ -969,6 +1046,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                         prompt=prompt,
                         timeout=timeout,
                         close_timeout=self.config.session_close_timeout_seconds,
+                        files=files,
                     )
                 except TimeoutError:
                     # The supervisor stops Pi at the deadline, and execute returns. If the provider's exec limit
@@ -1281,7 +1359,7 @@ class PiAgent(SimpleResponsesAPIAgent):
         env = self._env(home)
 
         cmd = [*self.config.command_parts, "--print", "--mode", "json", "--no-session"]
-        if self.config.bash_timeout is not None:
+        if self.config.enable_tools and self.config.bash_timeout is not None:
             env["NEMO_GYM_PI_BASH_TIMEOUT"] = str(self.config.bash_timeout)
             cmd += ["--extension", str(Path(__file__).with_name("bash-timeout.mjs"))]
         if self.config.output_token_policy == "remaining_context":
@@ -1296,10 +1374,13 @@ class PiAgent(SimpleResponsesAPIAgent):
             cmd += ["--provider", provider, "--model", model_id]
         else:
             cmd += ["--model", self.config.model]
+        if not self.config.enable_tools:
+            cmd.append("--no-builtin-tools")
         if self.config.thinking:
             cmd += ["--thinking", self.config.thinking]
         if system_prompt:
-            cmd += ["--append-system-prompt", system_prompt]
+            flag = "--system-prompt" if self.config.system_prompt_mode == "replace" else "--append-system-prompt"
+            cmd += [flag, system_prompt]
         cmd += self.config.extra_args
         cmd.append(instruction)
 

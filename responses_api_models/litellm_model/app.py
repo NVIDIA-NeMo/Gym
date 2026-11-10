@@ -34,13 +34,13 @@ from uuid import uuid4
 
 from fastapi import FastAPI
 
-from nemo_gym.base_responses_api_model import Body
-from nemo_gym.openai_utils import (
+from nemo_gym.client import request
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.responses_converter import VLLMConverter, _usage_detail
-from nemo_gym.server_utils import request
+from nemo_gym.models import Body, ChatCompletionsConverter
+from nemo_gym.models.chat_completions_converter import _usage_detail
 from responses_api_models.openai_model.app import SimpleModelServer, SimpleModelServerConfig
 
 
@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 _SENSITIVE_HEADER_RE = re.compile(r"('(?:Authorization|x-litellm-key)': ')[^']*(')", re.IGNORECASE)
 _SENSITIVE_COOKIE_RE = re.compile(r"('(?:Set-)?Cookie': ')[^']*(')", re.IGNORECASE)
 _PROXY_CHECK_TIMEOUT_SECONDS = 5.0
-_CHAT_COMPLETION_CONVERTER = VLLMConverter(
+_CHAT_COMPLETION_CONVERTER = ChatCompletionsConverter(
     return_token_id_information=False,
     uses_reasoning_parser=False,
 )

@@ -50,7 +50,7 @@ def generation(tmp_path, monkeypatch):
                         {
                             "scenario": s.name,
                             "verdict": "not_fulfilled",
-                            "checks": [{"id": "calls.outcome", "kind": "schema", "status": "fail"}],
+                            "checks": [{"id": "calls.outcome", "kind": "schema", "tier": "P0", "status": "fail"}],
                         }
                         for s in scenarios
                     ],
@@ -98,7 +98,7 @@ def test_evidence_failures_publish_commit_runtime_and_test_provenance(generation
     assert text.startswith("Introduction\n") and text.endswith("\nDeprecated C-table\n")
     assert COMMIT in text
     assert "### `pi`" in text and "| **Schema** |" in text and "`calls.outcome` | ✗" in text
-    assert "`hermes` | Not measured | —" in text
+    assert "`hermes` | — | — | —" in text
     assert not (root / "fern/assets").exists()
     report = json.loads((kwargs["output"] / "generation_report.json").read_text())
     assert report["gym_commit"] == COMMIT
@@ -163,14 +163,14 @@ def test_pytest_gate_runs_whole_directory_and_reports_skips(tmp_path, monkeypatc
         assert "PYTEST_ADDOPTS" not in kwargs["env"]
         assert kwargs["env"]["NEMO_GYM_EXTRA_ROOTS"] == str(tmp_path)
         assert kwargs["cwd"] == tmp_path
-        assert command[3] == "tests/unit_tests/harness_capabilities"
+        assert command[3] == "tests/unit_tests/rollouts/harness_capabilities"
         Path(command[-1]).write_text(
             "<testsuites><testsuite><testcase/><testcase><skipped/></testcase></testsuite></testsuites>"
         )
         return subprocess.CompletedProcess(command, 0)
 
     monkeypatch.setattr(table.subprocess, "run", run)
-    result = table.run_tests(tmp_path, tmp_path, name="checker", path="tests/unit_tests/harness_capabilities")
+    result = table.run_tests(tmp_path, tmp_path, name="checker", path="tests/unit_tests/rollouts/harness_capabilities")
     assert result["passed"] == 1 and result["skipped"] == 1
 
 

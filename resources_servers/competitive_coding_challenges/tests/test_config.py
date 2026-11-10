@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 from omegaconf import OmegaConf
 
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]

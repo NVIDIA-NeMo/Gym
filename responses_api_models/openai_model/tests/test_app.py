@@ -27,16 +27,16 @@ from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from nemo_gym import server_utils
-from nemo_gym.base_responses_api_model import CaptureStore, _CaptureMiddleware
-from nemo_gym.observability.model_calls import aggregate_model_call_metrics, read_model_call_records
-from nemo_gym.openai_utils import (
+from nemo_gym.client import PermanentEndpointError, ServerClient
+from nemo_gym.core import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
-    PermanentEndpointError,
 )
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.models import CaptureStore
+from nemo_gym.models.model_call_capture import _CaptureMiddleware
+from nemo_gym.rollouts import aggregate_model_call_metrics, read_model_call_records
+from nemo_gym.telemetry import MeteredSemaphore, concurrency
 from responses_api_models.openai_model import app as openai_model_module
 from responses_api_models.openai_model.app import (
     NeMoGymAsyncOpenAI,
@@ -102,6 +102,10 @@ class TestApp:
     async def test_sanity(self) -> None:
         self._setup_server()
 
+    async def test_session_key_headers_reach_the_upstream_client(self):
+        assert self._setup_server(session_key_headers=["X-Session"])._client.session_key_headers == ["X-Session"]
+        assert self._setup_server()._client.session_key_headers == []
+
     async def test_retry_configuration_is_scoped_to_model_server(self):
         judge = self._setup_server(max_http_attempts=5)
         policy = self._setup_server()
@@ -156,7 +160,7 @@ class TestApp:
     async def test_late_chat_error_preserves_selected_provider_details(
         self, monkeypatch: MonkeyPatch, status: int, propagate: bool, body_format: str
     ) -> None:
-        monkeypatch.setattr("nemo_gym.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.001)
+        monkeypatch.setattr("nemo_gym.models.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.001)
         server = self._setup_server(propagate_upstream_http_status_codes=[status] if propagate else [])
         message = "Provider rejected the request"
         error = ClientResponseError(MagicMock(), (), status=status, message=message)
@@ -752,6 +756,7 @@ class TestApp:
             operation_called = True
             return "completed"
 
+        timeouts_before = sum(concurrency._ADMISSION_TIMEOUTS.values())
         try:
             with pytest.raises(TimeoutError, match="acquiring an upstream provider slot"):
                 await server._call_upstream(operation)
@@ -759,6 +764,34 @@ class TestApp:
             server._semaphore.release()
 
         assert operation_called is False
+        assert sum(concurrency._ADMISSION_TIMEOUTS.values()) - timeouts_before == 1, "the slot limit counts it once"
+
+    @pytest.mark.parametrize(
+        ("config", "expected"),
+        [
+            pytest.param({}, None, id="no limit reports no limit"),
+            pytest.param({"max_concurrent_requests": 4}, (4, None), id="limit without a pool timeout"),
+            pytest.param(
+                {"max_concurrent_requests": 4, "upstream_pool_timeout_seconds": 30.0},
+                (4, 30.0),
+                id="limit with a pool timeout",
+            ),
+        ],
+    )
+    def test_the_upstream_limit_reports_under_the_server_name(
+        self, config: dict, expected: tuple[int, float | None] | None
+    ) -> None:
+        server = self._setup_server(**config)
+
+        if expected is None:
+            assert not isinstance(server._semaphore, MeteredSemaphore)
+            return
+        assert (server._semaphore.limit, server._semaphore.admission_timeout_s) == expected
+        assert server._semaphore.attributes == {
+            "nemo.gym.concurrency.component": "model_server",
+            "nemo.gym.concurrency.limit_name": "upstream_requests",
+            "nemo.gym.server.name": "test_model_server",
+        }
 
     @pytest.mark.asyncio
     async def test_retry_backoff_releases_concurrency_slot(
@@ -934,8 +967,8 @@ class TestApp:
         async def record_sleep(seconds):
             backoff_sleeps.append(seconds)
 
-        monkeypatch.setattr("nemo_gym.openai_utils.request", transport)
-        monkeypatch.setattr("nemo_gym.openai_utils.sleep", AsyncMock())
+        monkeypatch.setattr("nemo_gym.client.openai_client.request", transport)
+        monkeypatch.setattr("nemo_gym.client.openai_client.sleep", AsyncMock())
         monkeypatch.setattr(openai_model_module.asyncio, "sleep", record_sleep)
         server = self._setup_server(
             upstream_max_num_tries=1,
@@ -972,8 +1005,8 @@ class TestApp:
                 status, body = reply.status_code, reply.content
             return SimpleNamespace(status=status, content=SimpleNamespace(read=AsyncMock(return_value=body)))
 
-        monkeypatch.setattr("nemo_gym.openai_utils.request", transport)
-        monkeypatch.setattr("nemo_gym.openai_utils.sleep", AsyncMock())
+        monkeypatch.setattr("nemo_gym.client.openai_client.request", transport)
+        monkeypatch.setattr("nemo_gym.client.openai_client.sleep", AsyncMock())
         receiving_client = NeMoGymAsyncOpenAI(base_url="http://model-server/v1", api_key="dummy", internal=True)
 
         # The first call stops after one model-server reply; the second never reaches the model server.
@@ -1281,7 +1314,7 @@ class TestRefusedProviderConnection:
             return await send(method, url, **kwargs)
 
         session.request = request
-        monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: session)
+        monkeypatch.setattr("nemo_gym.client.http_client.get_global_aiohttp_client", lambda: session)
         yield attempts
         await session.close()
 

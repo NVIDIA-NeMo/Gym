@@ -15,7 +15,7 @@
 """One sample's failure must not abort the whole rollout collection.
 
 `run()` used to log `[browsecomp][abort]` and re-raise. That makes /run return 500, which
-the collector treats as fatal (`raise_for_status` in nemo_gym/rollout_collection.py), so a
+the collector treats as fatal (`raise_for_status` in nemo_gym/rollouts/rollout_collection.py), so a
 single bad sample kills every remaining one. It cost two full multi-node allocations:
 
   * one run died early (malformed tool-call JSON, fixed separately)
@@ -32,8 +32,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputMessage,
@@ -41,8 +43,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.browsecomp_agent.app import (
     BrowsecompAgent,
     BrowsecompAgentConfig,
@@ -52,6 +52,7 @@ from responses_api_agents.browsecomp_agent.app import (
 
 def _make_config(**kwargs) -> BrowsecompAgentConfig:
     defaults = dict(
+        allow_host_execution=True,
         host="0.0.0.0",
         port=8080,
         entrypoint="",
@@ -221,7 +222,7 @@ class TestInfrastructureFailureIsRetryableNotScored:
     the agent was answering ~54s before policy_model finished booting. Every
     remaining sample took a 500 and was written to the MAIN rollouts jsonl as a
     scored zero, where `_load_from_cache` treats it as permanently done -- so no
-    resume could ever retry it. See the contract at nemo_gym/rollout_collection.py.
+    resume could ever retry it. See the contract at nemo_gym/rollouts/rollout_collection.py.
     """
 
     async def test_responses_5xx_is_not_persisted(self) -> None:

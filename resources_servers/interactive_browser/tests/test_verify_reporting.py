@@ -27,9 +27,8 @@ from app import (
     _SessionState,
 )
 
-from nemo_gym.failure_kinds import SESSION_LOST
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
+from nemo_gym.core import SESSION_LOST, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 
 
 class _DeadBackend:
@@ -133,6 +132,7 @@ def test_a_browser_that_died_before_scoring_does_not_abort_the_run():
 
     assert dumped["reward"] == 0.0
     assert "browser unreachable while scoring" in dumped["failure_reason"]
+    assert (dumped["failure_kind"], dumped["mask_sample"]) == ("verifier_error", False)
     assert backend.closed == 1
     assert "rollout-1" not in server._session_id_to_state
 

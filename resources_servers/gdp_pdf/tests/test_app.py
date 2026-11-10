@@ -34,9 +34,9 @@ from benchmarks.gdp_pdf.prepare import (
     restore_original_prompt,
     write_example,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymChatCompletionMessage,
@@ -46,8 +46,9 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
+    NgFailureEvent,
 )
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.verification import JudgeError, is_judge_failure
 from resources_servers.gdp_pdf.app import (
     GdpPdfConfig,
     GdpPdfResourcesServer,
@@ -339,6 +340,49 @@ class TestVerify:
         assert result.criterion_evaluations[0].rationale == "matches"
 
     @pytest.mark.asyncio
+    async def test_a_graded_row_records_its_judge_grading_and_is_not_graded_again(
+        self, server: GdpPdfResourcesServer
+    ) -> None:
+        from nemo_gym.orchestration.recovery import reverification_cause, saved_row_evidence
+        from nemo_gym.server_runtime import verifier_observability
+        from nemo_gym.trajectory import VerifierInvocation, grading_result_binding
+
+        _mock_judge(server, _scored_content("1", "matches"))
+        invocation = VerifierInvocation(invocation_id="verify-1")
+        token = verifier_observability._active_verifier.set(invocation)
+        try:
+            result = await server.verify(
+                _verify_request("The cap is $5M.", criteria=[_criterion(1, "States $5M."), _criterion(2, "Cites it.")])
+            )
+        finally:
+            verifier_observability._active_verifier.reset(token)
+
+        (operation,) = invocation.grading_operations
+        assert (operation.kind, operation.outcome) == ("llm_judge", "completed")
+        assert len(operation.dependencies) == 2  # one judge call per criterion
+        assert operation.result_binding_sha256 == grading_result_binding(result)
+        row = result.model_dump(mode="json") | {
+            "ng_trial_observations": {"verifier_invocations": [invocation.model_dump(mode="json")]}
+        }
+        assert reverification_cause(saved_row_evidence(row)) is None
+
+    @pytest.mark.asyncio
+    async def test_a_criterion_that_needed_a_retry_leaves_the_grading_unknown(
+        self, server: GdpPdfResourcesServer
+    ) -> None:
+        from nemo_gym.server_runtime import verifier_observability
+        from nemo_gym.trajectory import VerifierInvocation
+
+        _mock_judge(server, "not json", _scored_content("1", "matches"))
+        invocation = VerifierInvocation(invocation_id="verify-1")
+        token = verifier_observability._active_verifier.set(invocation)
+        try:
+            await server.verify(_verify_request("The cap is $5M."))
+        finally:
+            verifier_observability._active_verifier.reset(token)
+        assert [operation.outcome for operation in invocation.grading_operations] == ["unknown"]
+
+    @pytest.mark.asyncio
     async def test_one_failing_criterion_uses_mean_reward_and_fails_all_pass(
         self, server: GdpPdfResourcesServer
     ) -> None:
@@ -429,8 +473,9 @@ class TestVerify:
         # wrong answer.
         server.server_client.post = AsyncMock(side_effect=ConnectionError("judge down"))
 
-        with raises(JudgeError):
+        with raises(NgFailureEvent) as failure:
             await server.verify(_verify_request("answer"))
+        assert is_judge_failure(failure.value)
 
     @pytest.mark.asyncio
     async def test_concurrency_semaphore_disabled(self, config: GdpPdfConfig) -> None:
@@ -785,7 +830,7 @@ class TestPrepare:
         # BaseException) when the script is run with its own CLI flags.
         fake_module = MagicMock()
         fake_module.get_hf_token = MagicMock(side_effect=SystemExit(2))
-        monkeypatch.setitem(__import__("sys").modules, "nemo_gym.global_config", fake_module)
+        monkeypatch.setitem(__import__("sys").modules, "nemo_gym.config.global_config", fake_module)
 
         assert _resolve_hf_token() is None
 

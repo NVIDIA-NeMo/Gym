@@ -35,7 +35,16 @@ default stops at ten seconds and a sandbox start routinely takes a minute.
 ``gym.sandbox.create_retry_total`` (counter): one per create attempt a provider retried.
 Retrying is provider-internal, so each provider that retries records it from its own loop.
 
-All four carry ``nemo.gym.sandbox.provider``.
+``gym.sandbox.transfer_duration_ms`` (histogram): wall-clock of one file transfer into or out of a sandbox,
+including the seed files ``AsyncSandbox.start()`` writes after the provider returns the sandbox.
+It carries ``nemo.gym.sandbox.transfer.direction`` (``upload`` or ``download``)
+and ``nemo.gym.sandbox.transfer.outcome`` (``ok``, ``error`` or ``cancelled``).
+Sidecar downloads are not counted.
+
+``gym.sandbox.transfer_bytes_total`` (counter, bytes): the size of each regular file a transfer moved successfully,
+by direction.
+
+All six carry ``nemo.gym.sandbox.provider``.
 
 Server startup
 --------------
@@ -68,24 +77,33 @@ Compare its value with the queue-duration histogram count to calculate the queue
 Rollout outcomes
 ----------------
 ``gym.rollout.completed_total`` (counter): one per rollout attempt the collection driver finished
-handling, recorded after it wrote the attempt or decided to omit it. An attempt is one dispatch of
+handling, recorded after the recovery store accepts the saved outcome. An attempt is one dispatch of
 one row in one collection run; a retry on a later resume run is another attempt, and an HTTP-level
 re-send of ``/run`` inside one dispatch is not. Only ``run_from_config`` (``gym eval run`` with
 serving) records it: ``--no-serve`` initialises no telemetry, and ``run_examples`` callers,
 reverification and the GDPVal multistage driver do not call the recorder.
 
-``nemo.gym.rollout.outcome`` is ``scored`` (main output, masked and forced-zero results included),
-``failed`` (failures sidecar) or ``omitted`` (no-persist, e.g. kill-shaped). Rows drained by the
-dispatch budget never ran and are not counted, unlike the progress metrics, whose ``dropped``
-groups ``failed`` with an ``omitted`` that includes drained rows. A failed ``/run`` is a ``failed``
-attempt with class ``agent_request_failed`` only with ``route_failures_to_sidecar`` on; otherwise
-it aborts the run and is not counted. Coverage comes from the output files, not this counter.
+``nemo.gym.rollout.outcome`` is ``scored`` (main output, including masked, forced-zero and supported
+unscored completions), ``failed`` (saved failures, including kill-shaped) or ``omitted`` (saved
+intentional omissions, including terminal skips and bare no-persist replies). The historical
+``scored`` label does not guarantee a measured reward. Rows drained by the dispatch budget never
+ran and are not counted. Reused cached results do not increment the counter. Request errors count
+only when failure routing saves them: an unavailable server uses class agent_request_failed,
+while an agent that ran and failed uses agent_run_error (including HTTP 500). Otherwise the
+request error aborts collection and is not counted. Coverage comes from the output files.
 
-Attributes are bounded: ``nemo.gym.rollout.dispatch.name`` (the environment server, or the agent
+Attributes include ``nemo.gym.rollout.dispatch.name`` (the environment server, or the agent
 when rows name no environment server) and, on attempts that carry a failure class,
 ``nemo.gym.failure_class``, ``nemo.gym.failure_kind`` (registered or ``<server>:<kind>``
 namespaced, any other value recorded as ``unregistered``) and ``nemo.gym.failure_type`` (exception
-class name). Free-text reasons are never attributes.
+class name). Labels come from the dispatch's original routing fields, before persistence maps
+kinds to sidecar classes. Older legacy producers retain their routing class and exception type;
+these two attributes remain producer-controlled, as on main, and must use stable category names.
+A missing producer kind adds no kind label, even when the saved record uses a class as its fallback.
+Native failures and the legacy Environment Server adapter route by the shared kind, bucketed when
+it also supplies the class. The adapter previously used environment_server_failed without a kind
+label; it now labels failures like native episodes. Free-text kinds and reasons are never promoted
+to class labels, but arbitrary strings supplied directly as legacy class/type fields are retained.
 
 Rollout rewards
 ---------------
@@ -141,7 +159,7 @@ by ``nemo.gym.checkpoint.event``:
 import logging
 import threading
 from collections.abc import Callable, Iterable, Sequence
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 
 logger = logging.getLogger(__name__)
@@ -151,6 +169,12 @@ SANDBOX_ACTIVE_INSTRUMENT = "gym.sandbox.active"
 SANDBOX_STARTUP_INSTRUMENT = "gym.sandbox.startup_duration_ms"
 SANDBOX_EXEC_INSTRUMENT = "gym.sandbox.exec_duration_ms"
 SANDBOX_CREATE_RETRY_INSTRUMENT = "gym.sandbox.create_retry_total"
+SANDBOX_TRANSFER_DURATION_INSTRUMENT = "gym.sandbox.transfer_duration_ms"
+SANDBOX_TRANSFER_BYTES_INSTRUMENT = "gym.sandbox.transfer_bytes_total"
+SANDBOX_TRANSFER_DIRECTION_ATTRIBUTE = "nemo.gym.sandbox.transfer.direction"
+SANDBOX_TRANSFER_OUTCOME_ATTRIBUTE = "nemo.gym.sandbox.transfer.outcome"
+SandboxTransferDirection = Literal["upload", "download"]
+SandboxTransferOutcome = Literal["ok", "error", "cancelled"]
 SERVER_STARTUP_STAGE_INSTRUMENT = "gym.server.startup_stage_duration_ms"
 SERVER_NAME_ATTRIBUTE = "nemo.gym.server.name"
 SERVER_TYPE_ATTRIBUTE = "nemo.gym.server.type"
@@ -199,6 +223,27 @@ SANDBOX_DURATION_BOUNDARIES_MS: tuple[float, ...] = (
     300_000,
     600_000,
     1_800_000,
+)
+
+#: Milliseconds.
+#: Copying a small file into a local container takes tens of milliseconds, while a large file to a remote sandbox
+#: can take minutes, so the boundaries start lower than the lifecycle ones.
+SANDBOX_TRANSFER_DURATION_BOUNDARIES_MS: tuple[float, ...] = (
+    10,
+    25,
+    50,
+    100,
+    250,
+    500,
+    1_000,
+    2_500,
+    5_000,
+    10_000,
+    30_000,
+    60_000,
+    120_000,
+    300_000,
+    600_000,
 )
 
 #: Milliseconds.
@@ -361,6 +406,34 @@ def record_sandbox_create_retry(*, provider: str) -> None:
         "Sandbox-create attempts a provider retried.",
         {SANDBOX_PROVIDER_ATTRIBUTE: provider},
     )
+
+
+def record_sandbox_transfer(
+    duration_ms: float,
+    *,
+    provider: str,
+    direction: SandboxTransferDirection,
+    outcome: SandboxTransferOutcome,
+    size_bytes: int | None,
+) -> None:
+    """Record one file transfer's wall-clock and, when it succeeded, the bytes it moved."""
+    attributes = {SANDBOX_PROVIDER_ATTRIBUTE: provider, SANDBOX_TRANSFER_DIRECTION_ATTRIBUTE: direction}
+    _record_histogram(
+        SANDBOX_TRANSFER_DURATION_INSTRUMENT,
+        "ms",
+        "Wall-clock time to move one file into or out of a sandbox.",
+        duration_ms,
+        {**attributes, SANDBOX_TRANSFER_OUTCOME_ATTRIBUTE: outcome},
+        boundaries=SANDBOX_TRANSFER_DURATION_BOUNDARIES_MS,
+    )
+    if size_bytes is not None:
+        _record_counter(
+            SANDBOX_TRANSFER_BYTES_INSTRUMENT,
+            "Bytes of files moved into or out of sandboxes.",
+            attributes,
+            size_bytes,
+            unit="By",
+        )
 
 
 def _server_attributes(server_name: str, server_type: Optional[str]) -> dict[str, Any]:
@@ -580,3 +653,29 @@ def record_rollout_health(verdict: str, *, outcome: str, flagged_checks: Iterabl
             "Rollouts flagged by a trajectory health check.",
             {HEALTH_CHECK_ATTRIBUTE: check, ROLLOUT_OUTCOME_ATTRIBUTE: outcome},
         )
+
+
+def record_sandbox_resource_sample(values: dict[str, Any], attributes: dict[str, Any]) -> None:
+    """Export execd snapshots as gauges; timestamped raw observations remain on resource spans."""
+    from nemo_gym.telemetry.setup import is_metrics_exporter_active
+
+    if not is_metrics_exporter_active():
+        return
+    meter = _meter()
+    if meter is None:
+        return
+    for field, unit in (
+        ("cpu_count", "{cpu}"),
+        ("cpu_used_percentage", "%"),
+        ("memory_total_mib", "MiBy"),
+        ("memory_used_mib", "MiBy"),
+    ):
+        value = values.get("nemo.gym.sandbox.sample." + field)
+        if value is None:
+            continue
+        name = "gym.sandbox." + field
+        try:
+            gauge = _get_or_create(meter, name, lambda name=name, unit=unit: meter.create_gauge(name, unit=unit))
+            gauge.set(value, attributes=attributes)
+        except Exception:
+            logger.debug("Could not export sandbox resource gauge", exc_info=True)

@@ -35,16 +35,15 @@ from pydantic import Field
 
 from environment_servers.harbor.session import SOLUTION_DIR
 from environment_servers.harbor.verifier import TIMEOUT_WRAPPER_GUARD
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.openai_utils import (
+from nemo_gym.config import get_global_config_dict
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseInputTokensDetails,
@@ -53,11 +52,15 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.sandbox import AsyncSandbox
-from nemo_gym.sandbox.access import DirectSandboxConnection
-from nemo_gym.sandbox.config import resolve_provider_config
-from nemo_gym.sandbox.providers import create_provider
-from nemo_gym.sandbox.transfer import SandboxTransferError, SandboxUnavailableError, exec_as_root
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    DirectSandboxConnection,
+    SandboxTransferError,
+    SandboxUnavailableError,
+    create_provider,
+    exec_as_root,
+    resolve_provider_config,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -73,7 +76,7 @@ ANSWER_FILE = f"{SOLUTION_DIR}/answer.md"
 ANSWER_READ_COMMAND = f"base64 {ANSWER_FILE}"
 # How the oracle leaves the answer in the working directory: a copy of the file inside the sandbox, run as the task
 # user in the session's working directory, so the file is the answer byte for byte whatever its size. The published
-# solve.sh writes the same file with `printf` (`nemo_gym.tasks.harbor.publish.answer_write_command`), which is fine
+# solve.sh writes the same file with `printf` (`nemo_gym.data.tasks.harbor.publish.answer_write_command`), which is fine
 # in a script bash reads from a file; an exec's command, though, is one argument to the provider's shell (the Docker
 # provider runs `docker exec ... sh -c <command>`), and Linux caps a single argument at MAX_ARG_STRLEN (128 KiB on
 # 4 KiB pages), so a command carrying a long answer fails with E2BIG before anything is written.
@@ -172,7 +175,7 @@ class OracleAgent(SimpleResponsesAPIAgent):
     def _session_for(self, request: Request) -> OracleSession:
         session_id = self._agent_session_id_from_request(request)
         if session_id is None:
-            raise HTTPException(404, "Unknown oracle agent session; seed it first")
+            raise HTTPException(404, "No seeded oracle agent session for this request")
         state = self._require_agent_session(session_id)
         if not isinstance(state, OracleSession):
             raise TypeError("Expected an oracle agent session state")
@@ -355,9 +358,6 @@ class OracleAgent(SimpleResponsesAPIAgent):
                 total_tokens=0,
             ),
         )
-
-    async def run(self, body: BaseRunRequest = Body()) -> BaseVerifyResponse:
-        raise HTTPException(501, "The oracle agent runs only through an environment server, not the legacy /run route")
 
 
 if __name__ == "__main__":

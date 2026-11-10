@@ -12,13 +12,17 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
-from nemo_gym.sandbox.providers.base import SandboxExecResult
+from nemo_gym.agents import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
+from nemo_gym.sandbox import SandboxExecResult
 from responses_api_agents.openclaw_agent.sandbox import OpenClawSandboxSession
 from responses_api_agents.openclaw_agent.tests.test_sandbox import seed
 
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux process supervision required")
+
+# These integration tests run real shells and scan /proc on shared CI runners.
+# Tight cancellation deadlines are covered separately by the SandboxSession unit tests.
+CLOSE_TIMEOUT = 10
 
 
 class ExecOnlySandbox:
@@ -109,7 +113,9 @@ async def test_exec_only_supervision_leaves_task_children_for_sandbox_owner(tmp_
         + {"natural": "print('{}')", "crash": "raise SystemExit(7)"}.get(ending, "time.sleep(60)")
     )
     deadline = 3 if ending == "timeout" else 60
-    task = state.task = asyncio.create_task(state.execute(payload(state, code), timeout=deadline, close_timeout=3))
+    task = state.task = asyncio.create_task(
+        state.execute(payload(state, code), timeout=deadline, close_timeout=CLOSE_TIMEOUT)
+    )
     try:
         async with asyncio.timeout(5):
             while not (workdir / "ready").exists():
@@ -119,7 +125,7 @@ async def test_exec_only_supervision_leaves_task_children_for_sandbox_owner(tmp_
             with pytest.raises(asyncio.CancelledError):
                 await task
         elif ending == "close":
-            await state.close(3)
+            await state.close(CLOSE_TIMEOUT)
             await asyncio.gather(task, return_exceptions=True)
         else:
             await task
@@ -134,9 +140,9 @@ async def test_exec_only_supervision_leaves_task_children_for_sandbox_owner(tmp_
         child_pid = int((workdir / "child.pid").read_text())
         assert Path(f"/proc/{child_pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
         assert provider.cancelled_launch is False
-        assert provider.deadline == pytest.approx(deadline + 3 + 30)
-        await state.close(3)
-        await state.close(3)
+        assert provider.deadline == pytest.approx(deadline + CLOSE_TIMEOUT + 30)
+        await state.close(CLOSE_TIMEOUT)
+        await state.close(CLOSE_TIMEOUT)
         assert provider.disconnected
         assert not Path(state.session.session_dir).exists()
         # Resources still owns the detached service after every ending.
@@ -144,7 +150,7 @@ async def test_exec_only_supervision_leaves_task_children_for_sandbox_owner(tmp_
     finally:
         try:
             if not state.session.closed:
-                await state.close(3)
+                await state.close(CLOSE_TIMEOUT)
         finally:
             if (workdir / "child.pid").exists():
                 try:
@@ -157,7 +163,9 @@ async def test_supervisor_and_runner_run_under_neutral_names(tmp_path):
     """A task agent's `pkill -f python3` or `killall python3` must not match the processes above OpenClaw."""
     state, provider, workdir = make_session(tmp_path)
     code = "import pathlib,time; pathlib.Path('ready').touch(); time.sleep(60)"
-    task = state.task = asyncio.create_task(state.execute(payload(state, code), timeout=60, close_timeout=3))
+    task = state.task = asyncio.create_task(
+        state.execute(payload(state, code), timeout=60, close_timeout=CLOSE_TIMEOUT)
+    )
     try:
         async with asyncio.timeout(5):
             while not (workdir / "ready").exists():
@@ -168,7 +176,7 @@ async def test_supervisor_and_runner_run_under_neutral_names(tmp_path):
         cmdline = Path(f"/proc/{supervisor_pid}/cmdline").read_bytes().replace(b"\0", b" ").decode()
         assert "python" not in cmdline and ".py" not in cmdline, cmdline
     finally:
-        await state.close(3)
+        await state.close(CLOSE_TIMEOUT)
         await asyncio.gather(task, return_exceptions=True)
     assert state.session.cleanup["cleanup_confirmed"] is True
     assert provider.disconnected
@@ -178,12 +186,12 @@ async def test_lost_launch_is_fenced_even_after_directory_retirement(tmp_path):
     state, provider, workdir = make_session(tmp_path)
     provider.lost_launch = True
     with pytest.raises(TimeoutError, match="lost launch response"):
-        await state.execute(payload(state, "open('started','w').close()"), timeout=0.5, close_timeout=3)
+        await state.execute(payload(state, "open('started','w').close()"), timeout=0.5, close_timeout=CLOSE_TIMEOUT)
     assert state.session.cleanup["cleanup_confirmed"] is True
     assert state.session.cleanup["return_code"] is None
     assert state.session.cleanup["error"] is None
     assert state.runtime_info is None
-    await state.close(3)
+    await state.close(CLOSE_TIMEOUT)
     provider.lost_launch = False
     await provider.exec(provider.delayed_command, cwd=str(workdir))
     assert not (workdir / "started").exists()
@@ -201,7 +209,7 @@ async def test_terminal_failed_receipt_releases_borrowed_session(tmp_path):
     }
     path = Path(state.session.session_dir) / "cleanup.json"
     path.write_text(json.dumps(receipt))
-    await state.close(3)
+    await state.close(CLOSE_TIMEOUT)
     assert provider.disconnected
     assert state.session.closed
     assert state.session.cleanup is None
@@ -222,7 +230,7 @@ async def test_confirmed_cleanup_cancels_stuck_transport(tmp_path):
     (Path(state.session.session_dir) / "cleanup.json").write_text(json.dumps(receipt))
     state.session._exec_task = asyncio.create_task(asyncio.Event().wait())
     await asyncio.sleep(0)
-    await state.close(0.5)
+    await state.close(CLOSE_TIMEOUT)
     assert state.session._exec_task.cancelled()
     assert state.session.closed and provider.disconnected
     assert not Path(state.session.session_dir).exists()

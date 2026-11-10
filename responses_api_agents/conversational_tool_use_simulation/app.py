@@ -22,23 +22,21 @@ from aiohttp import ClientConnectionError, ClientResponseError
 from fastapi import HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from nemo_gym.base_resources_server import (
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-)
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import (
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import (
     AggregateMetrics,
     AggregateMetricsRequest,
     ModelServerRef,
     ResourcesServerRef,
 )
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
+    AGENT_ROUTE_FAILED,
+    ENVIRONMENT_SERVER_FAILED,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -48,8 +46,12 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputText,
     accumulate_response_usage,
 )
-from nemo_gym.responses_converter import split_responses_input_output_items
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.models import split_responses_input_output_items
+from nemo_gym.server_runtime import (
+    BaseRunRequest,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+)
 from responses_api_agents.conversational_tool_use_simulation.prompt import (
     AGENT_PARALLEL_SYSTEM_MESSAGE_TEMPLATE,
     AGENT_SYSTEM_MESSAGE_TEMPLATE,
@@ -60,6 +62,15 @@ from responses_api_agents.conversational_tool_use_simulation.prompt import (
 
 NG_FAILURE_CLASS_KEY = "_ng_failure_class"
 TRANSIENT_FAILURE_CLASS = "transient"
+FAILURE_REASON_MAX_CHARS = 2000
+# A transient failure in the agent's own /v1/responses route is reported as an agent route failure;
+# one in a resources server call (seed or verify) as an environment server failure. The error alone
+# does not say which component behind the route broke, so nothing more specific is claimed.
+TRANSIENT_FAILURE_KIND_BY_STAGE = {
+    "seed_session": ENVIRONMENT_SERVER_FAILED,
+    "rollout": AGENT_ROUTE_FAILED,
+    "verify": ENVIRONMENT_SERVER_FAILED,
+}
 
 
 class ConversationalToolUseAgentConfig(BaseResponsesAPIAgentConfig):
@@ -793,6 +804,8 @@ class ConversationalToolUseAgent(SimpleResponsesAPIAgent):
                 "error_class": TRANSIENT_FAILURE_CLASS,
                 "error_stage": stage,
                 NG_FAILURE_CLASS_KEY: TRANSIENT_FAILURE_CLASS,
+                "failure_kind": TRANSIENT_FAILURE_KIND_BY_STAGE[stage],
+                "failure_reason": reason[:FAILURE_REASON_MAX_CHARS],
                 "mask_sample": True,
             }
         )

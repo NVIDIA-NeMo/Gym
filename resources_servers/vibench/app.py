@@ -56,7 +56,7 @@ from typing import Any, ClassVar, Dict, List, Optional
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseMultiRewardVerifyResponse,
     BaseResourcesServerConfig,
     BaseRunRequest,
@@ -222,13 +222,18 @@ class VibenchResourcesServer(SimpleResourcesServer):
 
     @property
     def _vibench_python(self) -> str:
-        """ViBench's own interpreter when the checkout has one.
+        """ViBench's own interpreter when the checkout has one, else the Gym component's.
 
-        Its scripts import ViBench's dependencies, which are not in the Gym component venv;
-        prepare.py already resolves the same checkout this way.
+        ViBench 1.0's venv is in v1/ since vibench-public 2.0 and at the root before it;
+        prepare.py resolves the same checkout this way.
         """
-        candidate = self._repo_root / ".venv" / "bin" / "python"
-        return str(candidate) if candidate.exists() else sys.executable
+        for candidate in (
+            self._repo_root / "v1" / ".venv" / "bin" / "python",
+            self._repo_root / ".venv" / "bin" / "python",
+        ):
+            if candidate.exists():
+                return str(candidate)
+        return sys.executable
 
     @property
     def _artifact_root(self) -> Path:

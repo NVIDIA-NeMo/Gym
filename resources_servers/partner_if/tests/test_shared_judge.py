@@ -190,21 +190,21 @@ def test_judge_supplied_quotes_are_rejected():
 
 
 def test_judge_requests_object_mode_through_the_real_gym_converter():
-    from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-    from nemo_gym.responses_converter import ResponsesConverter
+    from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+    from nemo_gym.models import ChatCompletionsConverter
 
     configured = NeMoGymResponseCreateParamsNonStreaming(input=[], max_output_tokens=2048, temperature=0, top_p=0.5)
     payload = llm.request_payload(rubric(), EvidenceBundle(answer="HELLO"), configured)
     assert (payload["max_output_tokens"], payload["temperature"], payload["top_p"]) == (2048, 0, 0.5)
     request = NeMoGymResponseCreateParamsNonStreaming.model_validate(payload)
-    converted = ResponsesConverter(return_token_id_information=False).responses_to_chat_completion_create_params(
+    converted = ChatCompletionsConverter(return_token_id_information=False).responses_to_chat_completion_create_params(
         request
     )
     assert converted.response_format == {"type": "json_object"}
 
 
 def test_the_judge_user_message_ends_with_a_json_cue_serialized_as_the_offline_regrade_sent_it():
-    from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+    from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
     configured = NeMoGymResponseCreateParamsNonStreaming(input=[])
     user = llm.request_payload(rubric(), EvidenceBundle(answer="HÉLLO ✓"), configured)["input"][1]
@@ -220,7 +220,7 @@ def test_the_judge_user_message_ends_with_a_json_cue_serialized_as_the_offline_r
 
 
 def test_the_judge_limit_counts_the_input_as_sent_and_the_artifact_limit_is_separate():
-    from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+    from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
     from resources_servers.partner_if.evidence import MAX_EVIDENCE_CHARS, EvidenceTooLarge
 
     configured = NeMoGymResponseCreateParamsNonStreaming(input=[])

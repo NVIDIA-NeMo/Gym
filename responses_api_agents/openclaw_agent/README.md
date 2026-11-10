@@ -188,7 +188,21 @@ Per-session OpenClaw state/config, prompt, transcript, and supervisor output are
 or creating bootstrap files in the task repository. Task HOME, XDG directories, PATH and
 dependencies are preserved for tools and verification.
 The sandbox adapter enables `read`, `write`, `edit`, `exec`, and `process`; subagent/channel/plugin
-execution and required external HTTP/MCP tools are unsupported. OpenClaw's internal `gateway`
+execution and required direct-HTTP tool grants are unsupported. MCP tool grants become streamable-HTTP
+`mcp.servers` entries, and the model sees their tools as `<grant>__<tool>`; `mcp_tool_timeout_seconds` sets
+their per-request timeout. Before the agent runs, the adapter connects to each grant with
+`openclaw mcp probe <grant> --json`: a required grant that does not connect fails the activation, and an optional
+one is left out and reported as an `mcp_server_skipped` gap. The pinned `probe --json` exits 0 when a connection
+fails, so a grant counts as connected only when the JSON lists it under `servers` with no diagnostic for it.
+Each probe runs under the same process supervisor as the agent, with its own directory and cleanup receipt, so a
+probe that exceeds its 120-second limit is stopped inside the sandbox (some providers stop only their local client on
+an exec timeout). The agent starts only after the probe's termination is confirmed, and session close stops a probe
+that is still running before it releases the sandbox. A grant can pass the probe and still fail when the agent
+starts; OpenClaw then logs `failed to start server "<grant>"` and runs on without its tools. The adapter reads that
+from the run's stderr: a required grant fails the activation with HTTP 502, and an optional one is reported as an
+`mcp_server_skipped` gap. A probe failure in a 502 or a gap names only the error kind, an HTTP status, a bootstrap
+class (such as a missing executable) and the configured server's URL origin; the probe's own output, which can
+echo server responses, stays in its files in the session directory. OpenClaw's internal `gateway`
 exec host refers to the embedded CLI process inside the borrowed sandbox.
 
 Sandbox request support is deliberately explicit:
@@ -221,8 +235,14 @@ Sandbox request support is deliberately explicit:
   same configured-system, request-instructions, input-system order.
 
 Successful and limit-truncated Responses retain reasoning, tool calls/results, and final or partial text.
-Runtime, provider, and upstream model failures raise an error before verification, with transcript
-evidence and failed status retained in the observations returned by close.
+Sandbox sessions forward their invocation ID as `x-session-id`, separately from the rollout URL,
+so capture can attach rejected model attempts without a response ID to the correct invocation.
+
+A terminal assistant model error returns a failed response with its original message, partial
+output, usage, and `ng_agent_outcome`. HTTP errors retain their upstream status as
+`model_request_error`; unrecognized causes remain `unknown`. The environment decides whether
+to verify, retry, or fail using its outcome policy. Runtime, cancellation, and cleanup failures
+still raise errors, with transcript evidence retained by close.
 Usage sums observed assistant model calls, including cache reads/writes and failed final calls.
 Transcript rewrites retaining the same response ID and message count once; synthetic CLI summary
 messages carrying cumulative usage do not count again or override the model's terminal status.
@@ -232,8 +252,8 @@ Auxiliary model calls, such as compaction, are absent from the transcript. A cov
 reported because interrupted compaction need not leave an event. Totals therefore need not equal
 all backend calls. Missing per-call usage and
 unavailable reasoning-token details are also reported as observation gaps; the full branch history is retained.
-An explicit wall or model-output limit returns partial output as `incomplete`; upstream/model errors
-raise HTTP 502 even when a useful patch exists. Do not infer rollout success from reward alone. Close returns the captured observations,
+An explicit wall or model-output limit returns partial output as `incomplete`.
+Do not infer rollout success from reward alone. Close returns the captured observations,
 including salvaged transcript evidence after cancellation.
 
 The supervisor stops live harness-group processes. On timeout or close it also kills, within
@@ -252,17 +272,16 @@ Services must use task-owned files rather than the temporary agent session direc
 adapter-owned file removal, and disconnect before succeeding. Unknown launch outcomes and missing
 or negative termination evidence block verification. Missing evidence remains retryable;
 a final negative receipt permits borrowed connection release while the activation stays failed.
-Successful close receipts remain
-retryable for `session_close_retry_window_seconds` after cleanup (300 seconds by default); traffic
+A successful close fences the session, and a retried close gets the saved reply,
+for `session_close_retry_window_seconds` after cleanup (300 seconds by default); traffic
 and retries do not shorten or extend the window. Stale cookies continue to reject activations after
-receipt expiry and never enter the host CLI path.
+the fence expires and never enter the host CLI path.
 
-The shared `SimpleResponsesAPIAgent` lifecycle owns session identity, serialization, and close
-receipts. `session_lifetime_seconds` has been removed: the episode owner and provider TTL govern
+The shared `SimpleResponsesAPIAgent` lifecycle owns session identity, locks, and fences. `session_lifetime_seconds` has been removed: the episode owner and provider TTL govern
 abandoned-session recovery; there is no adapter timer cancelling active sessions. Setup failures
 whose cleanup fails retain cleanup-only state through `AgentSessionSetupError`.
 `timeout`, `model_timeout_seconds`, `sandbox_install_timeout_seconds`, and `session_close_timeout_seconds` must be positive
-and finite. The shared `session_close_retry_window_seconds` bounds close receipts and tombstones.
+and finite. The shared `session_close_retry_window_seconds` bounds fences and saved replies.
 
 Session state lives in the worker that seeded the session.
 With several agent workers, session routing sends each session's requests to the worker that seeded it.
@@ -282,3 +301,37 @@ It creates a sandbox, runs there, and destroys it on close; the default workdir 
 never triggers a replacement or host execution. With neither access nor a usable
 provider, setup fails. Verifiers that inspect task files must keep using a
 Resources-owned sandbox, since agent-owned sandboxes are gone before verification.
+
+`network_access: model_only` limits an agent-owned sandbox's egress to the model server's host;
+`model_and_tools` also allows the host of each MCP grant. Each allowed host is open on every port. The
+OpenSandbox policy is set when the sandbox is created, so a session that borrows a task sandbox rejects any value
+other than `inherit` (the default, the provider's network), and it cannot be combined with
+`sandbox_config.provider_options.network_policy`. Such a sandbox cannot download the runtime: set
+`sandbox_runtime_dir` to an absolute sandbox path that holds `node/` and `openclaw/` as the installer lays them out.
+Build it into the image with `bash install_openclaw_runtime.sh <dir> <openclaw_version>`; the image also needs `bash`,
+since the session prepare step would otherwise run `apk` or `apt-get`, which the policy blocks. Instead of installing,
+setup checks that the runtime's Node is 22.19.0 or newer, that the CLI runs, and that the package declares
+`openclaw_version` (an exact match), and refuses the seed with a 422 when any of these fails.
+
+Under `model_only`, a required MCP grant is refused at seed with a 422, since the policy would block its host; under
+`model_and_tools`, a grant at an address the sandbox cannot reach, such as loopback, refuses the seed. Under
+`model_only` an optional grant is still written to OpenClaw's configuration and its probe can wait up to 120 seconds
+before it is dropped. The policy is only as strong as the OpenSandbox server's egress mode: in `dns` mode only name
+resolution is filtered, so a hard-coded IP bypasses it; `dns+nft` also enforces it at the IP layer and is needed for
+full isolation. A borrowed sandbox relies on its owner's network policy.
+
+`configs/profiles/benchmark.yaml` is a swappable profile for benchmarks whose Resources server supplies no sandbox,
+such as HLE. It leaves `resources_server.name` unset (`???`), so Gym composes this agent onto the benchmark's own
+agent instance, and each session creates its own sandbox through the `sandbox` provider. That sandbox must reach the
+model server by address, so the profile sets `use_absolute_ip: true` and keeps the head server and the agent itself
+on `127.0.0.1`: the head server's config endpoint is unauthenticated, and an unseeded request to the agent runs the
+harness on the Gym host. The profile sets the sandbox's lifetime (`ttl_s`), which OpenSandbox otherwise ends after
+10 minutes. Supply the image in `sandbox_config.image`; set other `sandbox_config` keys under the profile's own
+instance name, `openclaw_agent.responses_api_agents.openclaw_agent.sandbox_config`.
+It sets `network_access: model_only`, so the sandbox reaches only the model server; a search preset
+overrides it with `model_and_tools`. A restricted sandbox cannot download OpenClaw, so supply
+`sandbox_runtime_dir`.
+
+HLE, HLE Diamond, GPQA and APEX Shortlist need no Environment Server setting: their judges serve no tools, so their
+Environment Servers grant the agent none. This agent rejects a required `direct_http` grant with a 422, so a
+benchmark whose Resources server serves its tools over direct HTTP does not pair with it.

@@ -39,27 +39,27 @@ from typing import List, Literal, Optional, Union
 import yaml
 from pydantic import ConfigDict, Field
 
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-    SimpleResourcesServer,
-)
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError, call_judge
-from nemo_gym.openai_utils import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.reward_profile import (
+from nemo_gym.metrics import (
     compute_pass_majority_metrics,
     compute_subset_metrics,
     highest_k_metrics,
 )
+from nemo_gym.server_runtime import (
+    BaseResourcesServerConfig,
+    BaseRunRequest,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    SimpleResourcesServer,
+)
+from nemo_gym.verification import JudgeError, call_judge
 
 
 _DEFAULT_JUDGE_PROMPT_PATH = str(Path(__file__).parent / "prompts" / "judge.yaml")
@@ -67,7 +67,8 @@ _DEFAULT_JUDGE_PROMPT_PATH = str(Path(__file__).parent / "prompts" / "judge.yaml
 _THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 _THINKING_TAG_RE = re.compile(r"<thinking>.*?</thinking>", re.DOTALL)
 _JUDGEMENT_RE = re.compile(r"Judgement:\s*(YES|NO)", re.IGNORECASE)
-_RUBRIC_VERDICT_RE = re.compile(r"VERDICT:\s*([+-]?(?:\d+(?:\.\d+)?|\.\d+))", re.IGNORECASE)
+_NUMERIC_SCORE_RE = re.compile(r"([+-]?(?:\d+(?:\.\d+)?|\.\d+))")
+_RUBRIC_VERDICT_RE = re.compile(r"VERDICT:\s*" + _NUMERIC_SCORE_RE.pattern, re.IGNORECASE)
 
 
 def _strip_thinking_traces(text: str) -> str:
@@ -114,7 +115,7 @@ def parse_judgement(judge_text: str) -> Optional[str]:
 
 
 def parse_rubric_score(judge_text: str, max_score: float = 10.0) -> Optional[float]:
-    """Parse the paper's final numeric ``VERDICT`` line on the rubric's point scale."""
+    """Parse a final ``VERDICT`` line or a response containing only a numeric score."""
     if not judge_text.strip():
         return None
 
@@ -126,6 +127,8 @@ def parse_rubric_score(judge_text: str, max_score: float = 10.0) -> Optional[flo
     # Ignore presentation around the final verdict, never intermediate scores.
     final_line = lines[-1].strip("`*_ \t.,;")
     match = _RUBRIC_VERDICT_RE.fullmatch(final_line)
+    if match is None:
+        match = _NUMERIC_SCORE_RE.fullmatch(judge_text.strip())
     if match is None:
         return None
     score = float(match.group(1))
