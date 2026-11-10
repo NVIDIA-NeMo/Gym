@@ -36,6 +36,7 @@ instead of being dropped quietly.
 """
 
 import asyncio
+import contextlib
 import logging
 import math
 import os
@@ -297,7 +298,8 @@ class E2BOperationConfig:
     retry_max_delay_s: float = 8.0
     # For this long after create, a sandbox that answers "not found" or
     # "unreachable" is treated as still settling in and the call is retried
-    # (see ``_is_new_sandbox_error``). 0 disables it.
+    # (see ``_is_new_sandbox_error``). Create itself waits, within this
+    # period, until the sandbox answers a health check. 0 disables both.
     new_sandbox_grace_s: float = 15.0
 
     def __post_init__(self) -> None:
@@ -574,7 +576,36 @@ class E2BProvider:
         now = monotonic()
         self._new_until = {sandbox_id: until for sandbox_id, until in self._new_until.items() if until > now}
         self._new_until[sandbox.sandbox_id] = now + self._operations.new_sandbox_grace_s
+        try:
+            await self._wait_until_reachable(sandbox)
+        except BaseException:
+            # Cancelled mid-wait: the caller gets no handle, so nothing else would stop this sandbox.
+            self._new_until.pop(sandbox.sandbox_id, None)
+            with contextlib.suppress(Exception):
+                await sandbox.kill(**self._api_params())
+            raise
         return SandboxHandle(sandbox_id=sandbox.sandbox_id, provider_name=self.name, raw=sandbox)
+
+    async def _wait_until_reachable(self, sandbox: Any) -> None:
+        """Wait for a just-created sandbox to answer envd's health check.
+
+        Create returns once the VM has started, but a guest restored from an
+        image that its node has not cached can refuse connections for several
+        seconds after that. A health check is safe to repeat and a command
+        start is not, so that window is absorbed here, not in the first command.
+        The wait ends with the grace period or on any other error; the first
+        real call then reports the failure.
+        """
+        while self._is_new(sandbox.sandbox_id):
+            try:
+                if await sandbox.is_running(**self._request_params()):
+                    return
+            except Exception as exc:  # noqa: BLE001 - a failed health check must not fail create
+                if not _is_new_sandbox_error(exc, include_unreachable=True):
+                    LOGGER.debug("e2b sandbox %s health check failed after create: %s", sandbox.sandbox_id, exc)
+                    return
+            LOGGER.info("e2b sandbox %s is not reachable yet after create; waiting", sandbox.sandbox_id)
+            await asyncio.sleep(_NEW_SANDBOX_RETRY_INTERVAL_S)
 
     async def _create_with_extension_params(self, e2b: Any, kwargs: dict[str, Any]) -> Any:
         """Create through ``POST /sandboxes``, adding ``customExtensionParams``.

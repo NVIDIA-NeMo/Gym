@@ -117,7 +117,9 @@ sandbox:
       retry_delay_s: 0.5
       retry_max_delay_s: 8.0
       # Seconds after create during which "not found" and "unreachable"
-      # answers from a just-created sandbox are retried. 0 disables it.
+      # answers from a just-created sandbox are retried. Create also waits,
+      # inside this period, for the sandbox to answer a health check.
+      # 0 disables both.
       new_sandbox_grace_s: 15.0
     # Job attribution merged into every sandbox's metadata, so the list API's metadata
     # filter (`GET /v2/sandboxes?metadata=k=v` on E2B and AgentENV) finds a team's, user's
