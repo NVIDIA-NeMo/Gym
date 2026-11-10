@@ -16,7 +16,7 @@ import asyncio
 import logging
 import random
 from contextlib import asynccontextmanager, nullcontext
-from typing import Any, Awaitable, Callable, Dict, Literal, Optional, TypeVar
+from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, TypeVar
 
 from aiohttp import ClientResponseError
 from openai.types.shared import ReasoningEffort
@@ -138,6 +138,14 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
         description="Opt-in HTTP 400 policy-refusal codes represented as refusal content, preserving error evidence and unknown usage.",
     )
     openai_default_headers: Dict[str, str] = Field(default_factory=dict)
+    session_key_headers: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Headers that carry the session key to the upstream endpoint, e.g. for session-affinity routing. "
+            "The key reaches this server only when agents add the rollout prefix: set rollout_correlation, "
+            "observability_enabled or token capture."
+        ),
+    )
     max_http_attempts: int = Field(default=MAX_NUM_TRIES, ge=1)
     max_rate_limit_wait_seconds: float = Field(default=3600.0, ge=0)
 
@@ -260,6 +268,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
             base_url=self.config.openai_base_url,
             api_key=self.config.openai_api_key,
             default_headers=self.config.openai_default_headers,
+            session_key_headers=self.config.session_key_headers,
             max_num_tries=self.config.upstream_max_num_tries,
             # A provider that refuses connections fails the call after max_http_attempts tries, like an HTTP
             # error; left unset, the transport would retry the connection forever.
