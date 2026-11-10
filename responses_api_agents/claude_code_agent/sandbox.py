@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from shlex import quote
 from typing import Any
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
@@ -81,11 +82,14 @@ def parse_artifact_observations(
                 root_duration_ms=run_metadata.get("duration_ms"),
                 root_error_type=error_type,
                 compaction_attempts=run_metadata.get("compaction_attempts"),
+                # One Claude process in this sandbox wrote the collected transcripts.
+                agent_instance=f"claude-code-agent:{uuid4().hex}",
+                clock_domain=f"claude-code-wall:{uuid4().hex}",
             )
     except Exception:
         LOG.warning("Could not parse Claude native observations", exc_info=True)
         observations = AgentObservationBundle(
-            source="claude_code", gaps=[ObservationGap(code="agent_transcript_unavailable")]
+            schema_version="2.0", source="claude_code", gaps=[ObservationGap(code="agent_transcript_unavailable")]
         )
     if model_ref is None:
         observations.gaps.append(ObservationGap(code="model_call_ownership_unavailable"))

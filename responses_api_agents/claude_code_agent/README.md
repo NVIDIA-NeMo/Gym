@@ -84,6 +84,14 @@ ANTHROPIC_BASE_URL=$URL ANTHROPIC_AUTH_TOKEN=local \
 
 The agent runs `claude -p` as an async subprocess for each request. Claude Code handles all tool execution (Bash, file read/write) internally. The agent parses the stream-json output into NeMoGym output items and forwards the response to a resources server for verification.
 
+With rollout observability enabled, the agent imports tool-use and tool-result transcript records
+as v2 observations. Timing uses the `transcript` boundary: it measures the interval between
+persisted messages, not executor runtime. Each collected run gets one agent instance and wall-clock
+domain. Request record identities distinguish reused tool IDs, and exact response references link
+tools to model capture. Partial transcripts retain unfinished calls and explicit failures; ambiguous
+result ownership remains a gap. Trajectory export keeps the shared default v1 projection unless v2 is
+explicitly selected.
+
 Claude Code talks to the model via the Anthropic Messages API (`/v1/messages`). This means it can connect to Anthropic's API directly, to any local endpoint that implements `/v1/messages` (vLLM, Ollama), or — via the agent's `model_server` ref — to any NeMo Gym model server, since every Gym model server now serves `/v1/messages` by mapping Messages ↔ Responses around its own `responses()` backend.
 
 By default the agent runs with `--bare`, which skips auto-discovery of hooks, skills, plugins, MCP servers, memory, and CLAUDE.md so each scripted call starts clean and fast; Claude still has access to Bash, file read, and file edit tools. This isolation is the default because it keeps evals reproducible — a rollout depends only on the model, the task input, and the explicit config, not on ambient state of the host. This is the recommended mode for scripted and SDK calls per [Claude docs](https://code.claude.com/docs/en/headless#start-faster-with-bare-mode). The runtime is configurable via `bare`, `mcp_config`, and `settings` (see [Runtime capabilities](#runtime-capabilities)).

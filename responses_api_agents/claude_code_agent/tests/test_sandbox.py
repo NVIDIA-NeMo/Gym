@@ -377,6 +377,63 @@ async def test_close_returns_gap_without_activation_and_honors_cleanup_error():
     session.close.side_effect = None
     response = await instance._close_agent_session_state(state)
     assert response.agent_observations.gaps[0].code == "agent_activation_interrupted"
+    assert response.agent_observations.schema_version == "2.0"
+
+
+def test_artifact_parsing_mints_one_launch_identity_and_keeps_fallbacks_v2():
+    missing = adapter.parse_artifact_observations(
+        adapter.ClaudeCodeArtifacts("", None), model_ref=None, status="completed", error_type=None, run_metadata={}
+    )
+    assert missing.schema_version == "2.0"
+    assert [gap.code for gap in missing.gaps] == ["agent_transcript_unavailable", "model_call_ownership_unavailable"]
+
+    events = [
+        {
+            "type": "assistant",
+            "sessionId": "captured",
+            "uuid": "request",
+            "timestamp": "2026-10-20T10:00:00Z",
+            "message": {
+                "role": "assistant",
+                "id": "served",
+                "content": [{"type": "tool_use", "id": "toolu", "name": "Bash", "input": {}}],
+            },
+        },
+        {
+            "type": "user",
+            "sessionId": "captured",
+            "uuid": "result",
+            "sourceToolAssistantUUID": "request",
+            "timestamp": "2026-10-20T10:00:01Z",
+            "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu", "content": "ok"}]},
+        },
+    ]
+    native = "".join(json.dumps(event) + "\n" for event in events).encode()
+    archive_bytes = io.BytesIO()
+    with tarfile.open(fileobj=archive_bytes, mode="w:gz") as archive:
+        info = tarfile.TarInfo("projects/work/captured.jsonl")
+        info.size = len(native)
+        archive.addfile(info, io.BytesIO(native))
+    artifacts = adapter.ClaudeCodeArtifacts("", archive_bytes.getvalue())
+    bundles = [
+        adapter.parse_artifact_observations(
+            artifacts, model_ref=None, status="completed", error_type=None, run_metadata={}
+        )
+        for _ in range(2)
+    ]
+    for bundle in bundles:
+        (tool,) = [record for record in bundle.records if record.kind == "tool_call"]
+        (invocation,) = [record for record in bundle.records if record.kind == "agent_invocation"]
+        assert invocation.agent_instance == tool.agent_instance
+        assert tool.agent_instance.startswith("claude-code-agent:")
+        assert tool.timings[0].clock_domain.startswith("claude-code-wall:")
+        assert tool.timings[0].duration_ms == 1000
+        assert "tool_clock_domain_unavailable" not in {gap.code for gap in bundle.gaps}
+    # Each collected run is a separate Claude process and clock.
+    first, second = ([r for r in bundle.records if r.kind == "tool_call"][0] for bundle in bundles)
+    assert first.agent_instance != second.agent_instance
+    assert first.timings[0].clock_domain != second.timings[0].clock_domain
+    assert first.span_id == second.span_id
 
 
 @pytest.mark.asyncio
