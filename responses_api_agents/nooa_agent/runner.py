@@ -25,6 +25,7 @@ from threading import Lock
 from typing import Any, Protocol
 from uuid import uuid4
 
+import aiohttp
 from aiohttp import ClientResponseError
 from nooa.runtime.hooks import hooks_scope
 
@@ -70,6 +71,22 @@ class NOOARunResult:
     termination_error: str | None = None
     trajectory: TrajectoryRecord | None = None
     model_status_code: int | None = None
+    # The error body of the rejected model call (``model_status_code``), as the model endpoint sent it.
+    model_error_body: str | None = None
+    # The run failed on its model's last call, which got no HTTP reply (refused, reset, timed out or cut off).
+    model_transport_error: bool = False
+
+
+def _error_body(error: ClientResponseError) -> str | None:
+    """The endpoint's error body that Gym's HTTP client attached to ``error`` (``response_content``), as text."""
+    content = getattr(error, "response_content", None)
+    if isinstance(content, bytes):
+        return content.decode(errors="replace")
+    return content if isinstance(content, str) else None
+
+
+# Errors of a model call that got no complete HTTP reply.
+_MODEL_TRANSPORT_ERRORS = (aiohttp.ClientConnectionError, aiohttp.ClientPayloadError, TimeoutError, ConnectionError)
 
 
 class NOOARunFailure(RuntimeError):
@@ -244,6 +261,17 @@ class InProcessNOOARunner:
             if termination_reason is NOOATerminationReason.MODEL_REJECTED
             and isinstance(state.fatal_error, ClientResponseError)
             else None,
+            model_error_body=_error_body(state.fatal_error)
+            if termination_reason is NOOATerminationReason.MODEL_REJECTED
+            and isinstance(state.fatal_error, ClientResponseError)
+            else None,
+            # The model client's own record of its last call identifies the model; a resource tool's failure or a
+            # cleanup failure is not one.
+            model_transport_error=isinstance(failure, Exception)
+            and termination_reason is None
+            and dispatcher.fatal_error is None
+            and not cleanup_errors(failure)
+            and isinstance(state.fatal_error, _MODEL_TRANSPORT_ERRORS),
         )
         if failure is not None and termination_reason is None:
             if isinstance(failure, asyncio.CancelledError):

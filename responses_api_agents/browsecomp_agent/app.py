@@ -28,7 +28,6 @@ from fastapi import HTTPException, Request, Response
 from pydantic import ConfigDict, Field, JsonValue, ValidationError
 
 from nemo_gym.agents import (
-    AGENT_OUTCOME_METADATA_KEY,
     AgentCloseSessionResponse,
     AgentOutcome,
     AgentSeedRejectedError,
@@ -37,9 +36,11 @@ from nemo_gym.agents import (
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    RunEvidence,
     SandboxSession,
     SimpleResponsesAPIAgent,
     assert_model_url_reachable_from_sandbox,
+    model_http_error_outcome,
 )
 from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
 from nemo_gym.client import NeMoGymAsyncOpenAI, get_response_json, raise_for_status
@@ -53,7 +54,7 @@ from nemo_gym.config import (
     get_global_config_dict,
 )
 from nemo_gym.core import (
-    MODEL_REQUEST_ERROR,
+    MODEL_TRANSPORT_ERROR,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -239,6 +240,22 @@ class _RolloutDeadline(Exception):
     """A model or tool call was still running when the rollout's wall-clock limit ran out."""
 
 
+class _ModelCallFailed(Exception):
+    """An agent session's model call failed after Gym's client retries; ``response`` holds the trajectory so far."""
+
+    def __init__(
+        self,
+        error: aiohttp.ClientResponseError | aiohttp.ClientConnectionError,
+        *,
+        response: NeMoGymResponse,
+        replied: bool,
+    ) -> None:
+        super().__init__(str(error))
+        self.error = error
+        self.response = response
+        self.replied = replied
+
+
 async def _before_deadline(deadline: Optional[float], awaitable):
     # Bounds a single in-flight call: the per-step check alone cannot stop a call that hangs.
     if deadline is None:
@@ -273,6 +290,16 @@ def _is_infrastructure_failure(exc: BaseException) -> bool:
     if isinstance(exc, aiohttp.ClientResponseError):
         return exc.status >= 500
     return isinstance(exc, (aiohttp.ClientConnectionError, TimeoutError))
+
+
+def _model_error_message(error: aiohttp.ClientResponseError | aiohttp.ClientConnectionError) -> str:
+    """The response error for a failed model call, with a bounded part of the upstream reply."""
+    if not isinstance(error, aiohttp.ClientResponseError):
+        return f"Model transport error: {type(error).__name__}: {error}"[:_ERROR_DETAIL_CHARS]
+    content = getattr(error, "response_content", b"")
+    detail = content.decode(errors="replace") if isinstance(content, bytes) else str(content)
+    # The rollout row carries this message, so an upstream error page stays bounded.
+    return f"Model HTTP {error.status}: {detail[:_ERROR_DETAIL_CHARS] or error.message}"
 
 
 @dataclass
@@ -555,14 +582,28 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             timeout=timeout + 30,
             close_timeout=self.config.session_close_timeout_seconds,
         )
+        state.resources_cookies = _cookie_values(output.get("resources_cookies"))
         if output.get("error"):
             if output.get("traceback"):
                 print(
                     f"[browsecomp][sandbox_error][{state.request.agent_session_id}]\n{output['traceback']}",
                     flush=True,
                 )
-            raise RuntimeError(f"BrowseComp sandbox failed: {output['error']}")
-        state.resources_cookies = _cookie_values(output.get("resources_cookies"))
+            # The loop ended on an exception (including a failed token count) or its supervisor's signal, so the run
+            # left no usable result: the ladder fails it as agent_run_error, which is retried by default.
+            failed = NeMoGymResponse(
+                id=f"resp_{uuid4().hex}",
+                created_at=time.time(),
+                model=body.model or self.config.model_server.name,
+                object="response",
+                output=[],
+                error={"code": "server_error", "message": f"BrowseComp sandbox failed: {output['error']}"},
+                tools=body.tools,
+                tool_choice=body.tool_choice,
+                parallel_tool_calls=body.parallel_tool_calls,
+            )
+            evidence = RunEvidence(has_result=False, timed_out=False, model_replied=None)
+            return self.finish_response(failed, evidence, session=state.session)
         return NeMoGymResponse.model_validate(output["response"])
 
     async def _run_session_loop(
@@ -576,61 +617,54 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         """Run an Environment Server's one activation, with the empty-answer retries run() makes around it.
 
-        Like run(), a retry keeps the session's resources state; it does not seed again. A model call that fails with
-        an HTTP error returns a failed response that names its status, for the Environment Server's outcome policy.
+        Like run(), a retry keeps the session's resources state; it does not seed again. The outcome ladder decides
+        the response: the loop's own deadline is a timeout, and a model call that failed after Gym's client retries
+        ends the run on that error, by its HTTP status or as a transport error, keeping the trajectory so far.
         ``started_at`` is when the activation began, if before this call (``time.monotonic()``).
         """
         attempts = max(1, self.config.max_run_retries)
         # rollout_timeout_s bounds the whole activation, so every retry counts from the activation's start.
         if started_at is None:
             started_at = time.monotonic()
+        # An attempt retried for its empty answer did receive the model's reply.
+        replied = False
         for attempt in range(attempts):
             try:
                 model_response = await self._responses_impl(
                     request, response, body, session=state, started_at=started_at
                 )
-            except aiohttp.ClientResponseError as error:
-                return self._model_request_failure(body, error)
+            except _ModelCallFailed as failure:
+                error = failure.error
+                # The body Gym's client kept names a context overflow by its OpenAI error code.
+                outcome = (
+                    model_http_error_outcome(error.status, error_body=getattr(error, "response_content", None))
+                    if isinstance(error, aiohttp.ClientResponseError)
+                    else AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
+                )
+                failed = failure.response.model_copy(
+                    update={"error": {"code": "server_error", "message": _model_error_message(error)}}
+                )
+                evidence = RunEvidence(
+                    has_result=False, timed_out=False, model_replied=replied or failure.replied, error=outcome
+                )
+                return self.finish_response(failed, evidence)
+            timed_out = bool(getattr(model_response, "timed_out", False))
             answer = re.sub(r"<think>.*?</think>", "", self._last_message_text(model_response), flags=re.DOTALL)
-            if answer.strip() or getattr(model_response, "timed_out", False) or attempt == attempts - 1:
-                return model_response
+            if answer.strip() or timed_out or attempt == attempts - 1:
+                evidence = RunEvidence(
+                    has_result=True,
+                    timed_out=timed_out,
+                    model_replied=replied or bool(model_response.output),
+                    # The final reply stopped at the model's output limit.
+                    model_limit="output" if model_response.status == "incomplete" and not timed_out else None,
+                )
+                return self.finish_response(model_response, evidence)
+            replied = True
             print(
                 f"[browsecomp][retry][{state.request.episode_id.capture_key}] attempt={attempt + 1}/{attempts} "
                 f"reason=empty_output_after_think_strip",
                 flush=True,
             )
-
-    def _model_request_failure(
-        self, body: NeMoGymResponseCreateParamsNonStreaming, error: aiohttp.ClientResponseError
-    ) -> NeMoGymResponse:
-        """A failed response for a model call that answered with an HTTP error.
-
-        run() scored a 4xx 0 and set a 5xx aside as an infrastructure failure. The Environment Server's default
-        outcome policy verifies 400, 413 and 422, retries 408, 425, 429 and 5xx, and fails the episode on the rest.
-        The output is empty, as run() scored no partial answer.
-        """
-        content = getattr(error, "response_content", b"")
-        detail = content.decode(errors="replace") if isinstance(content, bytes) else str(content)
-        # The rollout row carries this message, so an upstream error page stays bounded.
-        detail = detail[:_ERROR_DETAIL_CHARS]
-        return NeMoGymResponse(
-            id=f"resp_{uuid4().hex}",
-            created_at=time.time(),
-            model=body.model or self.config.model_server.name,
-            object="response",
-            output=[],
-            status="failed",
-            error={"code": "server_error", "message": f"Model HTTP {error.status}: {detail or error.message}"},
-            tools=body.tools,
-            tool_choice=body.tool_choice,
-            parallel_tool_calls=body.parallel_tool_calls,
-            metadata={
-                **(body.metadata or {}),
-                AGENT_OUTCOME_METADATA_KEY: AgentOutcome(
-                    failure_kind=MODEL_REQUEST_ERROR, status_code=error.status
-                ).model_dump_json(),
-            },
-        )
 
     async def _responses_impl(
         self,
@@ -661,6 +695,8 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         deadline = loop_started + self.config.rollout_timeout_s if self.config.rollout_timeout_s is not None else None
         timed_out = False
         model_response = None
+        # The model call error an agent session's run ended on.
+        model_error: aiohttp.ClientResponseError | aiohttp.ClientConnectionError | None = None
 
         # --- Progress board state (ported from the reference harness) ---
         # The board lives in the system prompt and is re-rendered only at the
@@ -836,6 +872,13 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             except _RolloutDeadline:
                 print(f"[browsecomp][timeout][{qid}] step={step} in=model_call", flush=True)
                 timed_out = True
+                break
+            except (aiohttp.ClientResponseError, aiohttp.ClientConnectionError) as error:
+                if session is None:
+                    raise
+                # An agent session keeps the trajectory so far; the run ends on the model's error.
+                print(f"[browsecomp][model_error][{qid}] step={step} error={type(error).__name__}", flush=True)
+                model_error = error
                 break
             model_server_cookies = model_response.cookies
             try:
@@ -1182,8 +1225,9 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         for k, v in downstream_cookies:
             response.set_cookie(k, v)
 
+        replied = model_response is not None
         if model_response is None:
-            # The first model call was still running at the limit: there is no response to extend.
+            # The first model call was still running at the limit or failed: there is no response to extend.
             model_response = NeMoGymResponse(
                 id=f"resp_timeout_{qid}",
                 created_at=time.time(),
@@ -1204,6 +1248,8 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         model_response.timed_out = timed_out
         if timed_out:
             model_response.status = "incomplete"
+        if model_error is not None:
+            raise _ModelCallFailed(model_error, response=model_response, replied=replied)
         return model_response
 
     async def run(self, request: Request, body: BrowsecompAgentRunRequest) -> BrowsecompAgentVerifyResponse:

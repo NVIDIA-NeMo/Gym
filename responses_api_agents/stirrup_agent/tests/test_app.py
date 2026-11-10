@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -23,7 +24,12 @@ from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome, OutcomeAct
 from nemo_gym.cli.env import validate_server_configs
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
-from nemo_gym.core import AGENT_INVALID_OUTPUT, MODEL_REQUEST_ERROR, EpisodeId, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import (
+    AGENT_INVALID_OUTPUT,
+    MODEL_REQUEST_REJECTED,
+    EpisodeId,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
 from nemo_gym.server_runtime import DirectHTTPToolAccess
 from responses_api_agents.stirrup_agent.app import StirrupAgentWrapper, StirrupAgentWrapperConfig, _observations
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoAgent, NeMoUserMessage
@@ -116,7 +122,9 @@ async def _run_episode(config, body, report=None, *, execute_error=None, artifac
     wrapper = StirrupAgentWrapper(config=config, server_client=MagicMock(spec=ServerClient))
     state = SimpleNamespace(
         request=SimpleNamespace(episode_id=EpisodeId(rollout_id="rollout", attempt=0)),
-        session=SimpleNamespace(workdir="/root", stop_request_path="/tmp/stop-requested", artifacts=artifacts),
+        session=SimpleNamespace(
+            workdir="/root", stop_request_path="/tmp/stop-requested", artifacts=artifacts, expired=False
+        ),
         tool_access=DirectHTTPToolAccess(name="tools", required=True, base_url="http://resources:8000"),
         resources_cookies={},
         execute=execute,
@@ -244,7 +252,7 @@ class TestApp:
             usages=[usage, usage],
             elapsed_seconds=1.5,
             observations={"status": "incomplete", "model_response_ids": ["chatcmpl-1"]},
-            stop_reason="cancelled",
+            stop_reason="wall_time",
         )
 
         response, _, _ = await _run_episode(
@@ -252,7 +260,11 @@ class TestApp:
         )
 
         assert response.status == "incomplete"
-        assert response.metadata == {"elapsed_seconds": "1.5", "stop_reason": "cancelled"}
+        assert response.metadata == {
+            "elapsed_seconds": "1.5",
+            "stop_reason": "wall_time",
+            "ng_agent_stop_reason": "timeout",
+        }
         assert [item.type for item in response.output] == ["message", "message"]
         assert (response.usage.input_tokens, response.usage.output_tokens, response.usage.total_tokens) == (20, 10, 30)
         assert response.usage.input_tokens_details.cached_tokens == 8
@@ -269,7 +281,7 @@ class TestApp:
         assert AGENT_OUTCOME_METADATA_KEY not in response.metadata
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("status", [400, 413, 422])
+    @pytest.mark.parametrize("status", [400, 401, 413, 422])
     async def test_a_run_ended_by_a_rejected_request_is_a_failed_response_that_used_no_tokens(self, status) -> None:
         report = _report(
             stop_reason="model_error",
@@ -285,12 +297,178 @@ class TestApp:
         assert response.status == "failed"
         assert (response.error.code, response.error.message) == ("server_error", "rejected")
         assert response.metadata["stop_reason"] == "model_error"
+        # Before any model reply, a 4xx other than 408/425/429 is a rejected request (main graded 400/413/422).
         assert AgentOutcome.model_validate_json(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == AgentOutcome(
-            failure_kind=MODEL_REQUEST_ERROR, status_code=status
+            failure_kind=MODEL_REQUEST_REJECTED
         )
+        assert agent_outcome_policy(response) == OutcomeAction.FAIL
         assert (response.usage.input_tokens, response.usage.output_tokens, response.usage.total_tokens) == (0, 0, 0)
         assert response.usage.input_tokens_details.cached_tokens is None
         assert response.usage.output_tokens_details.reasoning_tokens is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "fields,status,outcome,stop_reason",
+        [
+            # main re-raised 401/403/404/429/5xx and transport errors as a 500 that lost the status.
+            (
+                {"model_error": "Error code: 401", "model_error_status": 401},
+                "failed",
+                {"failure_kind": "model_request_error", "status_code": 401},
+                "error",
+            ),
+            (
+                {"model_error": "Error code: 503", "model_error_status": 503},
+                "failed",
+                {"failure_kind": "model_request_error", "status_code": 503},
+                "error",
+            ),
+            (
+                {"model_error": "Connection error.", "model_transport_error": True},
+                "failed",
+                {"failure_kind": "model_transport_error"},
+                "error",
+            ),
+        ],
+    )
+    async def test_a_model_error_after_a_reply_keeps_its_status_or_transport_kind(
+        self, fields, status, outcome, stop_reason
+    ) -> None:
+        report = _report(
+            stop_reason="model_error",
+            observations={"status": "failed", "model_response_ids": ["chatcmpl-1"]},
+            **fields,
+        )
+
+        response, _, _ = await _run_episode(
+            _make_config(), NeMoGymResponseCreateParamsNonStreaming(input="x", model="policy"), report
+        )
+
+        assert response.status == status
+        assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == outcome
+        assert response.metadata["ng_agent_stop_reason"] == stop_reason
+        assert response.error.message == fields["model_error"]
+        # A request that failed in flight may have used tokens.
+        assert response.usage is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "report,status,outcome,stop_reason",
+        [
+            # Stirrup grades a deadline before any reply today; it keeps doing so until capture evidence lands.
+            (
+                _report(stop_reason="wall_time", observations={"status": "incomplete", "model_response_ids": []}),
+                "incomplete",
+                None,
+                "timeout",
+            ),
+            (
+                _report(observations={"status": "incomplete", "model_response_ids": ["chatcmpl-1"]}),
+                "incomplete",
+                None,
+                "agent_limit",
+            ),
+            # The session's close cancelled the run: stopped, without the rollout-stop marker.
+            (
+                _report(stop_reason="cancelled", observations={"status": "incomplete", "model_response_ids": ["c"]}),
+                "incomplete",
+                None,
+                "stopped",
+            ),
+            (
+                {
+                    "error": "HTTPStatusError('Server error 500')",
+                    "traceback": "Traceback ...",
+                    "usages": [],
+                    "observations": {"status": "failed", "model_response_ids": ["chatcmpl-1"]},
+                },
+                "failed",
+                {"failure_kind": "agent_run_error"},
+                "no_result",
+            ),
+        ],
+    )
+    async def test_each_run_end_reaches_its_outcome_ladder_row(self, report, status, outcome, stop_reason) -> None:
+        response, _, state = await _run_episode(
+            _make_config(), NeMoGymResponseCreateParamsNonStreaming(input="x", model="policy"), report
+        )
+
+        assert response.status == status
+        raw = response.metadata.get(AGENT_OUTCOME_METADATA_KEY)
+        assert (json.loads(raw) if raw else None) == outcome
+        assert response.metadata["ng_agent_stop_reason"] == stop_reason
+        assert "ng_rollout_stop" not in response.metadata
+        if outcome == {"failure_kind": "agent_run_error"}:
+            # main answered a runner that failed with a 500; now it is a failed response, retried by default.
+            assert response.error.message == "Stirrup sandbox runner failed: HTTPStatusError('Server error 500')"
+            assert agent_outcome_policy(response) == OutcomeAction.RETRY
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("replied", [False, True], ids=["first-request", "after-a-reply"])
+    async def test_a_context_overflow_is_incomplete_and_graded(self, replied) -> None:
+        """A 400 whose body carries OpenAI's ``context_length_exceeded`` code is a context limit, graded.
+
+        Classified by its status alone it failed: ``model_request_rejected`` (fail) on the first request and
+        ``model_request_error`` 400 after a reply.
+        """
+        body = json.dumps({"error": {"message": "maximum context length", "code": "context_length_exceeded"}})
+        report = _report(
+            stop_reason="model_error",
+            model_error="Error code: 400 - context_length_exceeded",
+            model_error_status=400,
+            model_error_body=body,
+            observations={"status": "failed", "model_response_ids": ["chatcmpl-1"] if replied else []},
+        )
+
+        response, _, _ = await _run_episode(
+            _make_config(), NeMoGymResponseCreateParamsNonStreaming(input="x", model="policy"), report
+        )
+
+        assert response.status == "incomplete"
+        assert response.metadata["ng_agent_stop_reason"] == "context_limit"
+        assert AGENT_OUTCOME_METADATA_KEY not in response.metadata
+        assert agent_outcome_policy(response) == OutcomeAction.VERIFY
+
+    @pytest.mark.asyncio
+    async def test_a_400_whose_body_names_no_context_overflow_stays_a_model_request_error(self) -> None:
+        report = _report(
+            stop_reason="model_error",
+            model_error="Error code: 400 - bad request",
+            model_error_status=400,
+            model_error_body=json.dumps({"error": {"message": "bad request", "code": "invalid_value"}}),
+            observations={"status": "failed", "model_response_ids": ["chatcmpl-1"]},
+        )
+
+        response, _, _ = await _run_episode(
+            _make_config(), NeMoGymResponseCreateParamsNonStreaming(input="x", model="policy"), report
+        )
+
+        assert response.status == "failed"
+        assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == {
+            "failure_kind": "model_request_error",
+            "status_code": 400,
+        }
+
+    @pytest.mark.asyncio
+    async def test_a_runner_that_exited_without_its_report_is_a_failed_run_without_a_result(self) -> None:
+        """The sandbox session returns only the runner's ``error`` for a runner that exited without its output.
+
+        It used to raise, so the agent server answered 500 and the trajectory was dropped.
+        """
+        report = {"error": "exited with status 137 without writing its output"}
+
+        response, _, _ = await _run_episode(
+            _make_config(), NeMoGymResponseCreateParamsNonStreaming(input="x", model="policy"), report
+        )
+
+        assert response.status == "failed"
+        assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == {"failure_kind": "agent_run_error"}
+        assert response.metadata["ng_agent_stop_reason"] == "no_result"
+        assert response.error.message == (
+            "Stirrup sandbox runner failed: exited with status 137 without writing its output"
+        )
+        assert (response.output, response.usage) == ([], None)
+        assert agent_outcome_policy(response) == OutcomeAction.RETRY
 
     @pytest.mark.asyncio
     async def test_a_run_ended_by_unusable_compaction_summaries_is_the_models_invalid_output(self) -> None:
@@ -305,7 +483,8 @@ class TestApp:
         )
 
         assert response.status == "failed"
-        assert response.error is None
+        # Every failed response names its error; this one is the runner's account of the unusable summaries.
+        assert response.error.message == "Compaction summarizer produced no usable text after 3 attempts"
         assert response.metadata["stop_reason"] == "compaction_failed"
         assert AgentOutcome.model_validate_json(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == AgentOutcome(
             failure_kind=AGENT_INVALID_OUTPUT

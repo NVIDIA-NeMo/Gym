@@ -17,8 +17,10 @@ from fastapi.testclient import TestClient
 from nemo_gym.agents import (
     AgentCloseSessionRequest,
     AgentSeedSessionRequest,
+    OutcomeAction,
     SandboxPythonRuntime,
     SandboxSession,
+    agent_outcome_policy,
     agent_tools,
     raises_agent_failure,
 )
@@ -26,12 +28,19 @@ from nemo_gym.agents.utils import sandbox_python
 from nemo_gym.agents.utils.sandbox_python import SandboxPlatform
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
-from nemo_gym.core import EpisodeId, TaskId
+from nemo_gym.core import EpisodeId, NeMoGymResponse, TaskId
 from nemo_gym.sandbox import AsyncSandbox, DirectSandboxConnection, SandboxAccess, SandboxExecResult, SandboxSpec
 from nemo_gym.server_runtime import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
 from responses_api_agents.stirrup_agent import app, sandbox
 from responses_api_agents.stirrup_agent.app import StirrupAgentWrapper, StirrupAgentWrapperConfig
-from responses_api_agents.stirrup_agent.tests.fakes import _TOOLS, _call, _ModelServer, _Resources, _resources_app
+from responses_api_agents.stirrup_agent.tests.fakes import (
+    _TOOLS,
+    CONTEXT_OVERFLOW_ERROR,
+    _call,
+    _ModelServer,
+    _Resources,
+    _resources_app,
+)
 
 
 _EPISODE = EpisodeId(rollout_id="rollout", attempt=0)
@@ -241,16 +250,21 @@ def test_a_failed_episode_still_closes_with_its_evidence(agent, client, root, mo
     tool_access = _TOOL_ACCESS.model_copy(update={"base_url": resources.base_url})
     try:
         _seed(client, sandbox_access=_sandbox_access(str(root)), tool_accesses=[tool_access])
-        with raises_agent_failure(RuntimeError, match="500"):
-            client.post(
-                f"/ng-rollout/{_EPISODE.capture_key}/v1/responses",
-                json={"input": "Write the report.", "model": "policy", "tools": _TOOLS},
-            )
+        response = client.post(
+            f"/ng-rollout/{_EPISODE.capture_key}/v1/responses",
+            json={"input": "Write the report.", "model": "policy", "tools": _TOOLS},
+        )
         closed = _close(client)
     finally:
         model.close()
         resources.close()
 
+    # A task tool's server failing ends the run without a result: 200 failed agent_run_error (main answered 500).
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "failed"
+    assert json.loads(body["metadata"]["ng_agent_outcome"]) == {"failure_kind": "agent_run_error"}
+    assert "500" in body["error"]["message"]
     bundle = closed.json()["agent_observations"]
     (invocation,) = bundle["records"]
     assert invocation["status"] == "failed"
@@ -524,25 +538,88 @@ def test_a_run_that_never_finishes_within_its_turns_answers_incomplete(agent, cl
     assert closed.json()["agent_observations"]["records"][0]["status"] == "incomplete"
 
 
-@pytest.mark.parametrize("output", ["", "{not json"])
-def test_a_runner_that_leaves_no_valid_output_fails_the_activation(agent, client, root, tmp_path, monkeypatch, output):
-    agent.config.finish_tool_names = None
+def _replace_runner(tmp_path: Path, monkeypatch, runner: str) -> None:
+    """Run ``runner`` (shell, with the output path in ``$5``) in place of the Stirrup runner."""
     fake_python = tmp_path / "python"
     # Only the runner is replaced; the supervisor that launches it runs on the real interpreter.
     fake_python.write_text(
         "#!/bin/sh\n"
         '[ "$1" = -c ] && exit 0\n'
         # The runner ignores task Python settings and user site-packages.
-        f"case \"$1 $2 $3\" in '-E -s '*sandbox_runner.py) printf '%s' '{output}' > \"$5\"; exit 0;; esac\n"
+        f"case \"$1 $2 $3\" in '-E -s '*sandbox_runner.py) {runner};; esac\n"
         f'exec {sys.executable} "$@"\n'
     )
     fake_python.chmod(0o755)
     monkeypatch.setattr(sandbox, "SANDBOX_PYTHON", str(fake_python))
     monkeypatch.setattr(StirrupAgentWrapper, "resolve_model_base_url", lambda *_: "http://policy.invalid/v1")
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+@pytest.mark.parametrize("output", ["", "{not json"])
+def test_a_runner_that_leaves_no_valid_output_fails_the_activation(
+    agent, client, root, tmp_path, monkeypatch, output, exit_code
+):
+    """An output file that exists but cannot be parsed is a failed lifecycle step, whatever the runner's exit."""
+    agent.config.finish_tool_names = None
+    _replace_runner(tmp_path, monkeypatch, f"printf '%s' '{output}' > \"$5\"; exit {exit_code}")
     _seed(client, sandbox_access=_sandbox_access(str(root)))
 
     with raises_agent_failure(RuntimeError, match="Stirrup sandbox runner exited without output"):
         _respond(client)
+
+
+@pytest.mark.parametrize("runner", ["kill -KILL $$", "exit 3"], ids=["killed", "exited"])
+def test_a_runner_that_ends_without_its_output_answers_failed_agent_run_error(
+    agent, client, root, tmp_path, monkeypatch, runner
+):
+    """A harness killed, or exiting, before it wrote its output left no result: HTTP 200, retried by default.
+
+    The agent server used to answer 500, which dropped the run's trajectory.
+    """
+    agent.config.finish_tool_names = None
+    _replace_runner(tmp_path, monkeypatch, runner)
+    _seed(client, sandbox_access=_sandbox_access(str(root)))
+
+    reply = _respond(client)
+    closed = _close(client)
+
+    assert reply.status_code == 200, reply.text
+    response = NeMoGymResponse.model_validate(reply.json())
+    assert response.status == "failed"
+    assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "agent_run_error"}
+    assert response.metadata["ng_agent_stop_reason"] == "no_result"
+    exit_status = 137 if runner.startswith("kill") else 3
+    assert response.error.message == (
+        f"Stirrup sandbox runner failed: exited with status {exit_status} without writing its output"
+    )
+    assert agent_outcome_policy(response) == OutcomeAction.RETRY
+    assert closed.status_code == 200, closed.text
+    assert [gap["detail"] for gap in closed.json()["agent_observations"]["gaps"]] == [
+        "the runner reported no observations"
+    ]
+
+
+@pytest.mark.parametrize("replied", [False, True], ids=["first-request", "after-a-reply"])
+def test_a_context_overflow_the_model_server_propagates_answers_incomplete(agent, client, root, monkeypatch, replied):
+    """HTTP 400 with OpenAI's ``context_length_exceeded`` code is a context limit, graded before or after a reply."""
+    agent.config.finish_tool_names = None
+    overflow = (400, CONTEXT_OVERFLOW_ERROR)
+    model = _ModelServer([_call("code_exec", json.dumps({"cmd": "true"})), overflow] if replied else [overflow])
+    monkeypatch.setattr(StirrupAgentWrapper, "resolve_model_base_url", lambda *_: model.base_url)
+    try:
+        _seed(client, sandbox_access=_sandbox_access(str(root)))
+        reply = _respond(client)
+        _close(client)
+    finally:
+        model.close()
+
+    assert reply.status_code == 200, reply.text
+    response = NeMoGymResponse.model_validate(reply.json())
+    assert response.status == "incomplete"
+    assert response.metadata["ng_agent_stop_reason"] == "context_limit"
+    assert "ng_agent_outcome" not in response.metadata
+    assert agent_outcome_policy(response) == OutcomeAction.VERIFY
+    assert "context_length_exceeded" in response.error.message
 
 
 class _FakeSandbox:
