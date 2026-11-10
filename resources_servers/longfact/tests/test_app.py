@@ -317,8 +317,10 @@ def test_safe_variant_records_scoring_settings_and_nonsecret_corpus_identity(bac
     server.config.evaluator_responses_create_params.temperature = 0.1
     server.config.tantivy_index_dir = "/corpus/index-v3"
     server.config.tantivy_corpus_db_path = "/corpus/snapshot-v3.db"
+    # Dummy URI credentials verify that provenance strips userinfo, query and fragment.
     server.config.milvus_uri = (
-        "https://private-user:private-password@milvus.example.test:19530?token=private-query#private-fragment"
+        "https://private-user:private-password@milvus.example.test:19530"  # pragma: allowlist secret
+        "?token=private-query#private-fragment"
     )
     server.config.milvus_token = "private-token"
     server.config.milvus_collection_name = "corpus_snapshot_v3"
