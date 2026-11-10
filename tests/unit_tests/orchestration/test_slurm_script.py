@@ -97,6 +97,31 @@ def test_deeply_nested():
     assert _flatten_run_args({"a": {"b": {"c": 1}}}) == ["+a.b.c=1"]
 
 
+@pytest.mark.parametrize(
+    "items",
+    [
+        pytest.param(["a,b", "c"], id="comma-in-item"),
+        pytest.param([None], id="null"),
+        pytest.param(["1", "true", "null"], id="strings-that-look-like-literals"),
+        pytest.param([1, 2.5, True], id="numbers-and-booleans"),
+        pytest.param(["", "trailing\\"], id="empty-and-trailing-backslash"),
+        pytest.param(["it's", "[x]", "a=b"], id="grammar-characters"),
+        pytest.param([], id="empty-list"),
+    ],
+)
+def test_list_items_reach_hydra_unchanged(items):
+    (arg,) = _flatten_run_args({"run": {"items": items}})
+    (token,) = shlex.split(arg)
+    (override,) = OverridesParser.create().parse_overrides([token])
+    parsed = override.value()
+    assert parsed == items
+    assert [type(v) for v in parsed] == [type(v) for v in items]
+
+
+def test_list_keeps_interpolation_unquoted():
+    assert _flatten_run_args({"paths": ["${oc.env:HOME}/a", "b"]}) == ["'+paths=[${oc.env:HOME}/a,b]'"]
+
+
 # ---------------------------------------------------------------------------
 # _render_pool_directives
 # ---------------------------------------------------------------------------

@@ -21,15 +21,18 @@ from nemo_gym.utils.text import hydra_literal
 
 
 def flatten_run_args(run: dict[str, Any], prefix: str = "") -> list[str]:
-    """Flatten a nested run config dict into shell-quoted ++key.path=value Hydra override tokens."""
+    """Flatten a nested run config dict into shell-quoted `+key.path=value` Hydra override tokens.
+
+    A list is encoded by `hydra_literal`, so each item reaches Hydra as one item with its own type: a string
+    holding a comma stays one string, `"1"` stays a string and `None` stays null.
+    """
     args = []
     for key, value in run.items():
         full_key = f"{prefix}.{key}" if prefix else key
         if isinstance(value, dict):
             args.extend(flatten_run_args(value, full_key))
         elif isinstance(value, list):
-            items = ",".join(str(v) for v in value)
-            args.append(shlex.quote(f"+{full_key}=[{items}]"))
+            args.append(shlex.quote(f"+{full_key}={hydra_literal(value)}"))
         else:
             args.append(shlex.quote(f"+{full_key}={value}"))
     return args
