@@ -163,9 +163,10 @@ concurrency slot. Staging the activation's files, images included, spends it, Op
 for the rest, and a budget that runs out before launch fails the activation.
 Images outside the user task and image URLs are rejected. Saved trajectories keep only the
 text of each message, so they do not contain the images. Request `temperature` and `top_p` are applied to every OpenCode agent
-(see [Owner extensions](#owner-extensions)). A request `max_output_tokens` passes when it is at
-least the configured `max_output_tokens`, because OpenCode's limit for each model call already
-stays within it. NeMo RL sets it on every row. A smaller value returns 422. Other controls, history replay and
+(see [Owner extensions](#owner-extensions)). Gym agents read a request `max_output_tokens` as the
+limit for each model call, as `simple_agent` does, and NeMo RL sets it on every row. It passes when
+it is at least the configured `max_output_tokens`, OpenCode's limit for each call; a smaller value
+returns 422. As in `simple_agent`, nothing limits the sum of output tokens over a session's calls. Other controls, history replay and
 required direct-HTTP tool grants are rejected. MCP tool grants become OpenCode `remote` MCP servers, and the model sees
 their tools as `<grant>_<tool>`. `mcp_tool_timeout_seconds` sets their connection and per-call
 timeout; without it, OpenCode allows 30 seconds to connect and 60 seconds per call. A call still
@@ -244,7 +245,7 @@ stricter, single-activation contract described above. The intentional difference
 | System text | Prepended to the user prompt; request `instructions` is not applied | Config/system/developer text and request `instructions` form an instructions file |
 | Provider name | `nemo` | `nemo_gym` (internal alias for the same Gym model server) |
 | `env`, `extra_args`, custom `command` | Applied | Rejected at seed, not silently ignored |
-| Request controls | Existing local compatibility behavior | `temperature` and `top_p` applied with OpenCode 1.17.11; `max_output_tokens` accepted when at least the configured limit; other controls rejected explicitly |
+| Request controls | Existing local compatibility behavior | `temperature` and `top_p` applied with OpenCode 1.17.11; `max_output_tokens` (a per-call limit) accepted when at least the configured limit; other controls rejected explicitly |
 
 Both paths honor configured `thinking` and declare interleaved `reasoning_content`.
 Different prompt placement can affect results; this integration does not establish

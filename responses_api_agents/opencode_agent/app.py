@@ -1450,8 +1450,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 continue
             if key == "metadata" and value and set(value) <= {AGENT_TIMEOUT_METADATA_KEY}:
                 continue
-            # NeMo RL sets max_output_tokens on every row. It changes nothing when OpenCode's own limit for each
-            # model call (config.max_output_tokens) already stays within it. A tighter limit is refused below.
+            # Gym agents read a request's max_output_tokens as the limit for each model call (simple_agent copies it
+            # into every call), and NeMo RL sets it on every row as its generation limit. OpenCode's own limit for
+            # each call (config.max_output_tokens) already stays within a value at least that large. A tighter one is
+            # refused below. Nothing limits the sum over a session's calls, as in simple_agent.
             if key == "max_output_tokens" and value is not None and value >= self.config.max_output_tokens:
                 continue
             if value != field.get_default(call_default_factory=True):
