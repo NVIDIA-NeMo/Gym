@@ -77,7 +77,8 @@ grade request does not stay in the sandbox.
 
 `sandbox_provider: sandbox` names the provider block that a provider config binds, such as
 `nemo_gym/sandbox/providers/docker/configs/docker.yaml`. The local provider
-(`nemo_gym/sandbox/providers/local/configs/local.yaml`) runs the commands on the host, which the tests use.
+(`nemo_gym/sandbox/providers/local/configs/local.yaml`) runs the commands on the host, which the tests use; the
+server then logs a warning at startup.
 
 A command that the sandbox does not run, such as a provider error, a timeout or a crash of `grading.py`, is an
 infrastructure failure, not the agent's mistake. It runs again on a fresh sandbox up to

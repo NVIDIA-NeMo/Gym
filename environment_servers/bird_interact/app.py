@@ -71,7 +71,7 @@ from nemo_gym.core import (
     NgFailureEvent,
 )
 from nemo_gym.metrics import compute_aggregate_metrics
-from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, resolve_provider_config, resolve_provider_metadata
+from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
 from nemo_gym.server_runtime import (
     BaseEnvironmentServerWithTools,
     BaseEnvironmentServerWithToolsConfig,
@@ -170,9 +170,6 @@ class BirdInteractEnvironmentServerConfig(BaseEnvironmentServerWithToolsConfig):
         description="Holds <db>/<db>.sqlite (or <db>.sql), <db>_schema.txt, <db>_column_meaning_base.json, <db>_kb.jsonl."
     )
     user_model: ModelServerRef
-    sandbox_provider: str | dict[str, Any] = Field(
-        description="A sandbox provider block name, such as `sandbox`, or an inline mapping like `{local: {}}`."
-    )
     sandbox_config: BirdInteractSandboxConfig = Field(default_factory=BirdInteractSandboxConfig)
     # A command that fails for infrastructure reasons runs again on a fresh sandbox this many times.
     inconclusive_verification_retries: NonNegativeInt = 1
@@ -276,6 +273,8 @@ class BirdInteractEpisode:
     """One task's state: its database sandbox, the phase, the budgets and the results so far."""
 
     request: BirdInteractRequest
+    # The episode's cleanup, which stops each sandbox the episode starts.
+    cleanup: CleanupContext
     task: BirdInteractTask
     files: _DatabaseFiles
     sandbox: _EpisodeSandbox
@@ -582,7 +581,7 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
         files = self._database_files(task.selected_database)
         source = self._database_source(task.selected_database)
         try:
-            sandbox = await self._start_sandbox(task, source)
+            sandbox = await self._start_sandbox(request, cleanup, task, source)
         except Exception as error:
             raise _failure(error, stage="seed", terminal=False, name_error_type=True) from error
         coin_budget = None
@@ -591,10 +590,8 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
                 _BASE_COIN_BUDGET + self.config.action_costs["ask"] * task.ambiguity_count + self.config.coin_patience
             )
         episode = BirdInteractEpisode(
-            request=request, task=task, files=files, sandbox=sandbox, coin_budget=coin_budget
+            request=request, cleanup=cleanup, task=task, files=files, sandbox=sandbox, coin_budget=coin_budget
         )
-        # Stops whichever sandbox the episode holds last: a failed command moves it onto a fresh one.
-        cleanup.register_cleanup("database sandbox", lambda: episode.sandbox.sandbox.stop())
         if self.config.mode == "a_interact":
             episode.toolset = TypedToolset(AInteractTools(self, episode))
         return episode
@@ -780,23 +777,27 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
                     await self._replace_sandbox(episode)
             return await self._run_command(episode.sandbox, command, request)
 
-    async def _start_sandbox(self, task: BirdInteractTask, source: Path) -> _EpisodeSandbox:
-        """Start a sandbox holding the task's database with ``preprocess_sql`` applied. A failed setup stops it."""
-        global_config = self.server_client.global_config_dict
+    async def _start_sandbox(
+        self, request: BirdInteractRequest, cleanup: CleanupContext, task: BirdInteractTask, source: Path
+    ) -> _EpisodeSandbox:
+        """Start a sandbox holding the task's database with ``preprocess_sql`` applied.
+
+        The episode's cleanup stops it, and a failed setup stops it at once (see ``start_episode_sandbox``).
+        """
         sandbox_config = self.config.sandbox_config
         spec = SandboxSpec(
             image=sandbox_config.image,
             ttl_s=sandbox_config.ttl_s,
             ready_timeout_s=sandbox_config.ready_timeout_s,
-            metadata=resolve_provider_metadata(self.config.sandbox_provider, global_config)
-            | sandbox_config.metadata
-            | {"nemo_gym_environment": self.config.name[:63], "instance_id": task.instance_id[:63]},
+            metadata=sandbox_config.metadata | {"instance_id": task.instance_id[:63]},
             resources=sandbox_config.resources,
             provider_options=dict(sandbox_config.provider_options),
         )
-        handle = _EpisodeSandbox(AsyncSandbox(resolve_provider_config(self.config.sandbox_provider, global_config)))
+        handle: _EpisodeSandbox | None = None
 
         async def setup(sandbox: AsyncSandbox) -> None:
+            nonlocal handle
+            handle = _EpisodeSandbox(sandbox)
             # The sandbox's working directory: the container's own, or a fresh host directory for the local provider.
             result = await sandbox.exec("pwd", timeout_s=60)
             if result.error_type is not None or result.return_code != 0 or not (result.stdout or "").strip():
@@ -808,7 +809,8 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
                 handle, "setup", {"source": handle.path(source.name), "preprocess_sql": task.preprocess_sql}
             )
 
-        await handle.sandbox.start_with_setup(spec, setup)
+        await self.start_episode_sandbox(request, cleanup, spec, setup, name="database sandbox")
+        assert handle is not None  # setup ran
         return handle
 
     async def _run_command(self, handle: _EpisodeSandbox, command: str, request: dict[str, Any]) -> dict[str, Any]:
@@ -836,14 +838,16 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
 
     async def _replace_sandbox(self, episode: BirdInteractEpisode) -> None:
         try:
-            fresh = await self._start_sandbox(episode.task, self._database_source(episode.task.selected_database))
+            fresh = await self._start_sandbox(
+                episode.request, episode.cleanup, episode.task, self._database_source(episode.task.selected_database)
+            )
         except Exception as error:
             raise SandboxCommandError(f"Could not start a fresh sandbox: {type(error).__name__}: {error}") from error
         stale, episode.sandbox = episode.sandbox, fresh
         try:
             await stale.sandbox.stop()
         except Exception:
-            LOGGER.exception("Could not stop a failed BIRD-Interact sandbox; the provider's ttl_s reclaims it")
+            LOGGER.exception("Could not stop a failed BIRD-Interact sandbox; the episode's cleanup tries again")
 
     # ----- the task's database files ----- #
 
