@@ -313,6 +313,9 @@ def _transport_log_context(request: Request) -> Dict[str, Any]:
                 continue
         else:
             context[field] = value
+    identity = request.scope.get("state", {}).get("nemo_gym_model_call_identity")
+    if isinstance(identity, dict):
+        context.update({key: identity[key] for key in ("rollout_id", "model_call_id")})
     return context
 
 

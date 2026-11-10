@@ -9168,3 +9168,16 @@ async def test_a_context_refusal_after_the_reply_started_propagates() -> None:
 
     assert raised.value is error
     assert [message["status"] for message in sent] == [200]
+
+
+def test_transport_log_uses_capture_identity_over_trace_headers():
+    from starlette.requests import Request
+
+    request = Request(
+        {
+            "type": "http",
+            "headers": [(b"x-nemo-gym-log-rollout-id", b"untrusted")],
+            "state": {"nemo_gym_model_call_identity": {"rollout_id": "0-0", "model_call_id": "unique-call"}},
+        }
+    )
+    assert _transport_log_context(request) == {"rollout_id": "0-0", "model_call_id": "unique-call"}
