@@ -497,11 +497,12 @@ async def test_cancellation_during_cleanup_delays_transport_release_and_verifica
     assert not f.agent._sessions
 
 
-@pytest.mark.parametrize(("legacy_run", "worker"), [(True, False), (False, False), (True, True)])
-def test_only_the_legacy_run_configuration_logs_the_deprecation_once(
+@pytest.mark.parametrize("legacy_run", [True, False])
+@pytest.mark.parametrize("worker", [True, False])
+def test_legacy_and_session_configurations_log_the_adapter_deprecation_once(
     tmp_path, caplog, monkeypatch, legacy_run, worker
 ):
-    """A resources_server selects the deprecated flat /run path; episode sessions start without a warning.
+    """Both paths are superseded; existing configurations still construct successfully.
 
     Workers of a multi-worker server rebuild it after the main process has logged the warning.
     """
@@ -521,11 +522,12 @@ def test_only_the_legacy_run_configuration_logs_the_deprecation_once(
             module.MiniSWESandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
     warnings = [r.getMessage() for r in caplog.records if r.name == module.__name__]
-    assert warnings == ([module.DEPRECATION_WARNING] if legacy_run and not worker else [])
+    assert warnings == ([module.DEPRECATION_WARNING] if not worker else [])
     for phrase in (
-        "legacy /run",
-        "gym eval run terminal_bench_4",
+        "Legacy /run",
+        "--agent mini_swe_agent/mini_swe_agent_sandboxed",
+        "tasks with [agent].user",
         "Terminal-Bench-Science",
-        "README.md#harbor-episodes",
+        "mini_swe_agent/README.md#agent-sessions",
     ):
         assert phrase in module.DEPRECATION_WARNING
