@@ -1,0 +1,28 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# Source: https://gitlab-master.nvidia.com/pritamb/saas-bench/-/blob/31177a7a80040edf588388dd982af4b678d1e544/saas_bench/uid_wrappers/id
+# Copyright: SaaS-Bench Authors; see bundled licenses.
+# Vendored for native benchmark evaluation; original behavior retained.
+# Report a non-root uid so docker entrypoints skip `su`/`gosu` and continue.
+if [ "${SAAS_FAKE_ID:-0}" != "1" ]; then
+  if [ -x /usr/bin/id ]; then
+    exec /usr/bin/id "$@"
+  fi
+  exec /bin/id "$@"
+fi
+# Mark the calling entrypoint shell. When it later execs postgres/mysql, the
+# PID remains unchanged and LD_PRELOAD reports the same non-root uid.
+echo 999 > "/tmp/.saas-euid-${PPID}"
+
+case "${1:-}" in
+  -u|--user)
+    echo 999
+    exit 0
+    ;;
+  -g|--group)
+    echo 999
+    exit 0
+    ;;
+esac
+echo "uid=999(saas) gid=999(saas) groups=999(saas)"
+exit 0

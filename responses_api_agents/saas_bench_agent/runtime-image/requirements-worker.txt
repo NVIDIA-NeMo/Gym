@@ -1,0 +1,8 @@
+browser-use==0.13.7
+playwright==1.62.0
+mcp==1.26.0
+PyMuPDF==1.26.7
+requests==2.33.0
+PyYAML==6.0.3
+Pillow==12.2.0
+pydantic==2.12.5
