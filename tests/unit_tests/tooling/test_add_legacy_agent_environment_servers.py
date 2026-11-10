@@ -1166,6 +1166,10 @@ def test_resolved_instances_deletes_after_all_overlays_merge() -> None:
         ("hle", "opencode", "equivalence_llm_judge", "hle"),
         ("hle", "pi_search", "equivalence_llm_judge", "hle"),
         ("hle", "opencode_search", "equivalence_llm_judge", "hle"),
+        ("hle_diamond", "pi_legacy_agent", "equivalence_llm_judge", "hle_diamond_text"),
+        ("hle_diamond", "opencode_legacy_agent", "equivalence_llm_judge", "hle_diamond_text"),
+        ("hle_diamond", "pi_search_legacy_agent", "equivalence_llm_judge", "hle_diamond_text"),
+        ("hle_diamond", "opencode_search_legacy_agent", "equivalence_llm_judge", "hle_diamond_text"),
         ("apex_shortlist", "pi", "math_with_judge", "apex_shortlist"),
         ("apex_shortlist", "opencode", "math_with_judge", "apex_shortlist"),
     ],
@@ -1177,7 +1181,9 @@ def test_harness_recipes_preserve_routing_and_bindings_across_the_switch(
         monkeypatch.setenv(variable, "test-only")
     parser = GlobalConfigDictParser()
     _, documents = parser.load_extra_config_paths([f"benchmarks/{benchmark}/{recipe}.yaml"])
-    agent_name = f"{benchmark}_{recipe.removesuffix('_search')}_agent"
+    # A relay recipe renamed *_legacy_agent keeps its harness's agent instance name.
+    harness = recipe.removesuffix("_legacy_agent")
+    agent_name = f"{benchmark}_{harness.removesuffix('_search')}_agent"
     server_name = f"{benchmark}_{resources}_environment_server"
     resources_name = f"{benchmark}_{resources}_resources_server"
     resolved = []
@@ -1215,7 +1221,7 @@ def test_harness_recipes_preserve_routing_and_bindings_across_the_switch(
         agent = next(iter(parsed[agent_name].responses_api_agents.values()))
         assert agent.resources_server.name == resources_name
         assert agent.datasets[0].name == dataset
-        if recipe.endswith("_search"):
+        if harness.endswith("_search"):
             assert agent.tool_servers == [{"type": "resources_servers", "name": "tavily"}]
         participants = {}
         for server in parser.filter_for_server_instance_configs(parsed):

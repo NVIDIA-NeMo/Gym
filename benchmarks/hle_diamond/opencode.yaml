@@ -1,6 +1,6 @@
 # OpenCode preset on the 728 text-only HLE-Diamond questions: opencode_agent in an agent session, each session in
 # a sandbox it creates itself (the judge has none to lend), driven by the single_agent_turn_legacy Environment Server.
-# opencode_full.yaml runs the image questions too, still on opencode_sandboxed_agent: agent sessions take text only.
+# opencode_full_legacy_agent.yaml runs the image questions on opencode_sandboxed_agent: agent sessions take text only.
 config_paths:
 - benchmarks/hle_diamond/config.yaml
 - responses_api_agents/opencode_agent/configs/profiles/benchmark.yaml

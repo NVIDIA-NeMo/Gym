@@ -1,9 +1,11 @@
-# OpenCode preset with Tavily search on all 1000 HLE-Diamond questions, image questions included: opencode_full.yaml's
-# sandboxed agent and dataset with opencode_search.yaml's tools, note and network policy. Still on
-# opencode_sandboxed_agent behind the legacy_agent relay, like opencode_full.yaml. Declares no dataset of its own,
-# so like opencode_search.yaml it is selectable with --benchmark but not listed.
+# Deprecated: opencode_sandboxed_agent and its legacy_agent relay will be removed after the Environment Server
+# migration. Agent sessions take text input only, so no session preset covers the image questions yet;
+# opencode_search.yaml runs opencode_agent on the 728 text-only questions.
+# OpenCode preset with Tavily search on all 1000 HLE-Diamond questions, image questions included:
+# opencode_full_legacy_agent.yaml's sandboxed agent and dataset with opencode_search.yaml's tools, note and network
+# policy. Declares no dataset of its own, so like opencode_search.yaml it is selectable with --benchmark but not listed.
 config_paths:
-- benchmarks/hle_diamond/opencode_full.yaml
+- benchmarks/hle_diamond/opencode_full_legacy_agent.yaml
 tavily:
   resources_servers:
     tavily_search:

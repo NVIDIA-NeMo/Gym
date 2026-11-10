@@ -1,18 +1,12 @@
-# OpenCode sandboxed preset on all 1000 HLE-Diamond questions, the 272 image questions included, over the full set
-# materialized by prepare_opencode.py with prompts/opencode.yaml. Each row's single user turn carries the question
-# plus the verbatim HLE instruction and, on image rows, an input_image data URI that the adapter uploads into the
-# sandbox and attaches with `opencode run -f` (README > Sandboxed agents (with tools)). The default set's file
-# (prepare.py) is not reusable here: it bakes the instruction as a system message, which the adapter does not
-# forward. Needs a vision-capable policy model.
-#
-# Still on opencode_sandboxed_agent behind the legacy_agent /run relay: opencode_agent sessions take text only.
-# The agent has its own name so that sandbox_docker_local.yaml can override it and the session agent of
-# opencode.yaml (hle_diamond_opencode_agent) separately. Same knobs as opencode.yaml: reasoning high, the
-# environment note, the permissions, model-only egress.
+# Deprecated: opencode_sandboxed_agent and its legacy_agent relay will be removed after the Environment Server
+# migration. Use opencode.yaml instead, which runs opencode_agent through single_agent_turn_legacy.
+# The two harnesses are configured differently, so do not compare their scores as the same measurement.
+# OpenCode sandboxed preset on the 728 text-only HLE-Diamond questions, mirroring the HLE OpenCode relay preset.
+# opencode_full_legacy_agent.yaml runs the same agent on all 1000 questions, images attached through `opencode run -f`.
 config_paths:
 - benchmarks/hle_diamond/config.yaml
 - responses_api_agents/opencode_sandboxed_agent/configs/benchmark.yaml
-hle_diamond_opencode_full_agent:
+hle_diamond_opencode_agent:
   _inherit_from: opencode_benchmark_agent
   responses_api_agents:
     opencode_sandboxed_agent:
@@ -20,11 +14,11 @@ hle_diamond_opencode_full_agent:
         type: resources_servers
         name: hle_diamond_equivalence_llm_judge_resources_server
       datasets:
-      - name: hle_diamond_opencode_full
+      - name: hle_diamond_text
         type: benchmark
-        jsonl_fpath: benchmarks/hle_diamond/data/hle_diamond_benchmark_opencode_full.jsonl
-        prompt_config: null
-        prepare_script: benchmarks/hle_diamond/prepare_opencode.py
+        jsonl_fpath: benchmarks/hle_diamond/data/hle_diamond_benchmark_text.jsonl
+        prompt_config: benchmarks/hle_diamond/prompts/opencode.yaml
+        prepare_script: benchmarks/hle_diamond/prepare_text.py
         num_repeats: 1
       # Diamond's "reasoning high" on this harness (D4). Gym's ++responses_create_params.reasoning.effort
       # decorates only Gym's run request; OpenCode builds its own chat-completions call inside the
@@ -32,7 +26,7 @@ hle_diamond_opencode_full_agent:
       # this per-model option to reasoning_effort in that request body (verified in a model-call
       # capture). The block is deep-merged into the generated OpenCode config, so the inherited
       # instructions / permission keys stay. Override per run with
-      # ++hle_diamond_opencode_full_agent.responses_api_agents.opencode_sandboxed_agent.opencode_config.provider.nemo_gym.models.dummy_model.options.reasoningEffort=<level>
+      # ++hle_diamond_opencode_agent.responses_api_agents.opencode_sandboxed_agent.opencode_config.provider.nemo_gym.models.dummy_model.options.reasoningEffort=<level>
       opencode_config:
         provider:
           nemo_gym:
@@ -53,4 +47,4 @@ hle_diamond_equivalence_llm_judge_environment_server:
       entrypoint: app.py
       agent_server:
         type: responses_api_agents
-        name: hle_diamond_opencode_full_agent
+        name: hle_diamond_opencode_agent
