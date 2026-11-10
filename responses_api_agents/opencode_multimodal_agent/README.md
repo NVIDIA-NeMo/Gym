@@ -39,8 +39,9 @@ uv sync --locked
 For compatibility configurations, dependency directories are mounted read-only
 inside each episode. Input
 images are available as `input-0.<extension>`, `input-1.<extension>`, and so on
-under `/testbed`. Training converts inputs to PNG; evaluation preserves their
-format and also supports the `image_` filename prefix.
+under `/testbed`. Both training and evaluation preserve image bytes by default. Set
+`preserve_image_format: false` explicitly for RGB PNG preprocessing. Evaluation
+also supports the `image_` filename prefix.
 Session-based configurations use the standard OpenCode prompt-media pipeline:
 shared decoding, image-input declaration, and atomic staging at
 `/tmp/nemo-gym-media/<sha256>.<extension>`. The request accepts one user prompt
@@ -48,7 +49,18 @@ and an optional system or developer message; images must be inline data URIs
 in the user prompt. Remote URLs and host file paths are rejected. Staging runs
 under the activation deadline and is cancelled when the session closes.
 The adapter adds image-count/pixel validation and optional RGB PNG conversion;
-evaluation preserves the original bytes by default.
+the default preserves the original bytes.
+OpenCode attaches images in their input order before the task text. The `detail`
+field is ignored; OpenCode does not expose a corresponding control.
+Text-only tasks are unsupported by this image-specific adapter and rejected;
+use the standard `opencode_agent` for text-only pairings.
+
+Saved rollout inputs retain prompt images. This adapter also restores embedded
+native tool-image attachments in function-call outputs, so its saved Responses
+output can contain image data even though the shared OpenCode transcript parser
+keeps text only. These images can substantially increase artifact sizes. This
+adapter has not been validated with Harbor's text-only ATIF exporter; responses
+with image parts cannot be exported there and would mask the turn.
 
 OpenCode's `read` tool displays images saved by code; printing a filename does
 not display the image to the model.

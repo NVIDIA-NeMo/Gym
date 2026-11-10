@@ -191,7 +191,7 @@ def test_images_staged_losslessly_and_remote_urls_rejected(tmp_path):
             }
         ]
     )
-    with pytest.raises(ValueError, match="remote"):
+    with pytest.raises(ValueError, match="URLs"):
         stage_inputs(remote, tmp_path, max_source_pixels=10, max_images=33)
 
 
@@ -569,3 +569,20 @@ async def test_invalid_run_route_is_permanent_before_network_calls(monkeypatch, 
         await obj.run(MagicMock(cookies={}), run_body)
     assert caught.value.status_code == 422
     obj.server_client.post.assert_not_awaited()
+
+
+def test_compatibility_images_preserve_jpeg_and_reject_host_paths(tmp_path):
+    stream = io.BytesIO()
+    Image.new("RGB", (3, 2), "red").save(stream, format="JPEG")
+    request = body()
+    data = request.model_dump()
+    data["input"][0]["content"][1]["image_url"] = (
+        "data:image/jpeg;base64," + base64.b64encode(stream.getvalue()).decode()
+    )
+    request = type(request).model_validate(data)
+    _, _, images = stage_inputs(request, tmp_path, max_source_pixels=100, max_images=1)
+    assert images[0].suffix == ".jpg"
+    assert images[0].read_bytes() == stream.getvalue()
+    data["input"][0]["content"][1]["image_url"] = "file:///tmp/host-secret.png"
+    with pytest.raises(ValueError, match="URLs"):
+        stage_inputs(type(request).model_validate(data), tmp_path, max_source_pixels=100, max_images=1)

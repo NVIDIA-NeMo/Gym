@@ -215,7 +215,7 @@ def test_preserve_source_jpeg_bytes_and_dimensions(tmp_path):
 def test_training_still_rejects_prompt_override():
     with pytest.raises(ValidationError, match="Keep the runtime default prompt"):
         config(opencode_config={"agent": {"build": {"prompt": "override"}}})
-    assert not config().preserve_image_format
+    assert config().preserve_image_format
 
 
 def test_eval_accepts_native_prompt_and_rejects_duplicate_prefix():

@@ -638,3 +638,19 @@ def test_session_accepts_image_wider_than_previous_resize_threshold(visual_setup
     policy = agent._build_opencode_config()["attachment"]["image"]
     for key, value in UNRESTRICTED_IMAGE_ATTACHMENT["image"].items():
         assert policy[key] == value
+
+
+def test_session_rejects_truncated_image_with_422(visual_setup):
+    from fastapi import HTTPException
+
+    from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+
+    agent, sandbox = visual_setup
+    body = request_body()
+    truncated = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+    body["input"][0]["content"][1]["image_url"] = "data:image/png;base64," + base64.b64encode(truncated).decode()
+    with pytest.raises(HTTPException) as error:
+        agent._session_input(NeMoGymResponseCreateParamsNonStreaming.model_validate(body))
+    assert error.value.status_code == 422
+    assert "Invalid or truncated" in error.value.detail
+    sandbox.launch.assert_not_awaited()

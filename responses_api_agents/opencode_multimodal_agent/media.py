@@ -18,6 +18,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputItem,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    split_text_and_media,
 )
 from nemo_gym.trajectory import AgentInvocation
 from nemo_gym.utils import final_assistant_text
@@ -26,14 +27,17 @@ from responses_api_agents.opencode_agent.artifacts import parse_opencode_observa
 
 def prepare_image(image: MediaFile, *, max_source_pixels: int, preserve_format: bool) -> MediaFile:
     """Apply benchmark pixel limits and optional RGB conversion to decoded media."""
-    with Image.open(io.BytesIO(image.data)) as source:
-        if source.width * source.height > max_source_pixels:
-            raise ValueError("Visual input exceeds max_source_pixels")
-        if preserve_format:
-            return image
-        output = io.BytesIO()
-        source.convert("RGB").save(output, format="PNG")
-        return MediaFile(media_type="image/png", data=output.getvalue())
+    try:
+        with Image.open(io.BytesIO(image.data)) as source:
+            if source.width * source.height > max_source_pixels:
+                raise ValueError("Visual input exceeds max_source_pixels")
+            if preserve_format:
+                return image
+            output = io.BytesIO()
+            source.convert("RGB").save(output, format="PNG")
+            return MediaFile(media_type="image/png", data=output.getvalue())
+    except OSError as error:
+        raise ValueError("Invalid or truncated input image") from error
 
 
 def stage_inputs(
@@ -42,7 +46,7 @@ def stage_inputs(
     *,
     max_source_pixels: int,
     max_images: int | None,
-    preserve_format: bool = False,
+    preserve_format: bool = True,
 ) -> tuple[str, str | None, list[Path]]:
     """Stage initial images without exposing verifier metadata to the runtime.
 
@@ -55,42 +59,50 @@ def stage_inputs(
     for item in body.model_dump()["input"]:
         if item.get("role") not in {"user", "system", "developer"}:
             raise ValueError("OpenCodeMultimodalAgent accepts initial prompts, not replayed trajectories")
-        content = item["content"]
-        parts = [{"type": "input_text", "text": content}] if isinstance(content, str) else content
-        for part in parts:
-            if part["type"] == "input_text":
-                (texts if item["role"] == "user" else systems).append(part["text"])
-                continue
-            if part["type"] != "input_image" or item["role"] != "user":
-                raise ValueError("Only user images and text prompts are supported")
+        text, media = split_text_and_media(item["content"])
+        if media and item["role"] != "user":
+            raise ValueError("Only user images and text prompts are supported")
+        (texts if item["role"] == "user" else systems).append(text)
+        for image in media:
             if max_images is not None and len(paths) >= max_images:
                 raise ValueError("Initial image count exceeds max_images")
-            source = part.get("image_url")
-            if not isinstance(source, str):
-                raise ValueError("Images require image_url, not file_id")
-            if source.startswith("data:"):
-                image_source = io.BytesIO(MediaFile.from_data_uri(source).data)
-            else:
-                if "://" in source and not source.startswith("file://"):
-                    raise ValueError("Stage remote image URLs locally before rollout")
-                image_source = Path(source.removeprefix("file://"))
-            with Image.open(image_source) as image:
-                if image.width * image.height > max_source_pixels:
-                    raise ValueError("Visual input exceeds max_source_pixels")
-                suffix = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp", "GIF": ".gif"}.get(image.format)
-                if preserve_format and suffix:
-                    path = directory / f"input-{len(paths)}{suffix}"
-                    raw = (
-                        image_source.getvalue() if isinstance(image_source, io.BytesIO) else image_source.read_bytes()
-                    )
-                    path.write_bytes(raw)
-                else:
-                    path = directory / f"input-{len(paths)}.png"
-                    image.convert("RGB").save(path)
+            image = prepare_image(image, max_source_pixels=max_source_pixels, preserve_format=preserve_format)
+            path = directory / f"input-{len(paths)}.{image.extension}"
+            path.write_bytes(image.data)
             paths.append(path)
     if not paths:
         raise ValueError("A multimodal task requires an input image")
     return "\n\n".join(texts), "\n\n".join(systems) or None, paths
+
+
+def tool_images(part: dict) -> list[dict]:
+    """Read embedded image attachments from one OpenCode tool part before teardown."""
+    images = []
+    for attachment in (part.get("state") or {}).get("attachments", []):
+        if not attachment.get("mime", "").startswith("image/"):
+            continue
+        url = attachment.get("url", "")
+        if not url.startswith("data:image/"):
+            raise ValueError("Tool images must be inline data URLs before sandbox teardown")
+        MediaFile.from_data_uri(url)
+        images.append({"type": "input_image", "image_url": url, "detail": "auto"})
+    return images
+
+
+def restore_tool_images(output: list[NeMoGymResponseOutputItem], attachments: dict[str, list[dict]]) -> None:
+    """Restore embedded tool images without duplicating existing image parts."""
+    for item in output:
+        if isinstance(item, NeMoGymFunctionCallOutput) and item.call_id in attachments:
+            text = item.output if isinstance(item.output, list) else [{"type": "input_text", "text": item.output}]
+            existing = {
+                part.get("image_url") for part in text if isinstance(part, dict) and part.get("type") == "input_image"
+            }
+            item.output = [
+                *text,
+                *(part for part in attachments.pop(item.call_id) if part["image_url"] not in existing),
+            ]
+    if attachments:
+        raise ValueError("Image attachment has no matching tool result")
 
 
 def parse_visual_session(
@@ -152,21 +164,10 @@ def parse_visual_session(
     for part in parts:
         if part.get("type") != "tool":
             continue
-        images = []
-        for attachment in part.get("state", {}).get("attachments", []):
-            if not attachment.get("mime", "").startswith("image/"):
-                continue
-            url = attachment.get("url", "")
-            if not url.startswith("data:image/"):
-                raise ValueError("Tool images must be inline data URLs before sandbox teardown")
-            images.append({"type": "input_image", "image_url": url, "detail": "auto"})
+        images = tool_images(part)
         if images:
             attachments[part["callID"]] = images
-    for item in output:
-        if isinstance(item, NeMoGymFunctionCallOutput) and item.call_id in attachments:
-            item.output = [{"type": "input_text", "text": item.output}, *attachments.pop(item.call_id)]
-    if attachments:
-        raise ValueError("Native image attachment has no matching tool output")
+    restore_tool_images(output, attachments)
     if not any(part.get("type") in {"text", "reasoning", "tool"} for part in terminal_parts):
         output.append(
             NeMoGymResponseOutputMessage(

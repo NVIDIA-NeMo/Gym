@@ -43,7 +43,7 @@ def test_combined_changes_only_prompt_policy(monkeypatch, tmp_path):
     assert combined == native
     assert cfg.system_prompt is None
     assert cfg.max_turns == 8 and cfg.command_exec_timeout == 300
-    assert not cfg.preserve_image_format
+    assert cfg.preserve_image_format
     obj._write_opencode_config(tmp_path)
     assert (
         "output.system.splice(0, output.system.length, prompt)"

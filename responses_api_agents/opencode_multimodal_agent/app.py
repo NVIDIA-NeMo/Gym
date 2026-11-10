@@ -40,7 +40,11 @@ from responses_api_agents.opencode_agent.protocol import (
     AGENT_TRAJECTORY_KEY,
     OPENCODE_1_17_11_MAX_STEPS,
 )
-from responses_api_agents.opencode_agent.runtime import OBSERVABILITY_PATCH, UNRESTRICTED_IMAGE_ATTACHMENT
+from responses_api_agents.opencode_agent.runtime import (
+    IMAGE_INPUT_MODEL_OPTIONS,
+    OBSERVABILITY_PATCH,
+    UNRESTRICTED_IMAGE_ATTACHMENT,
+)
 from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession
 from responses_api_agents.opencode_multimodal_agent.eval_sandbox import EvalSandboxConfig, sandbox_command
 from responses_api_agents.opencode_multimodal_agent.media import final_answer, parse_visual_session, stage_inputs
@@ -88,7 +92,7 @@ class OpenCodeMultimodalAgentConfig(OpenCodeAgentConfig):
     # Send the exact-token reserve extension only to backends that implement it.
     backend_final_answer_reserve: bool = True
     strip_reasoning_for_grading: bool = True
-    preserve_image_format: bool = False
+    preserve_image_format: bool = True
     image_policy: OpenCodeImageConfig = Field(default_factory=OpenCodeImageConfig)
     # Required in concurrent production recipes. None supports explicitly trusted,
     # unsandboxed local harness tests; a unique cwd does not isolate /tmp.
@@ -313,7 +317,7 @@ class OpenCodeMultimodalAgent(MultimodalSessionMixin, OpenCodeAgent):
         model.update(
             {
                 "attachment": True,
-                "modalities": {"input": ["text", "image"], "output": ["text"]},
+                **copy.deepcopy(IMAGE_INPUT_MODEL_OPTIONS),
                 "tool_call": True,
                 "temperature": True,
             }
@@ -468,14 +472,17 @@ class OpenCodeMultimodalAgent(MultimodalSessionMixin, OpenCodeAgent):
         await self._ensure_local_runtime()
         with TemporaryDirectory(prefix="gym-opencode-multimodal-") as temporary:
             directory = Path(temporary)
-            text, input_system, images = await asyncio.to_thread(
-                stage_inputs,
-                body,
-                directory,
-                max_source_pixels=self.config.max_source_pixels,
-                max_images=self.config.max_images,
-                preserve_format=self.config.preserve_image_format,
-            )
+            try:
+                text, input_system, images = await asyncio.to_thread(
+                    stage_inputs,
+                    body,
+                    directory,
+                    max_source_pixels=self.config.max_source_pixels,
+                    max_images=self.config.max_images,
+                    preserve_format=self.config.preserve_image_format,
+                )
+            except ValueError as error:
+                raise HTTPException(422, str(error)) from error
             system_prompt = "\n\n".join(part for part in [self.config.system_prompt, input_system] if part) or None
             native_config = copy.deepcopy(self.config.opencode_config)
             self._deep_merge(

@@ -23,7 +23,6 @@ from nemo_gym.agents import (
 )
 from nemo_gym.core import (
     MediaFile,
-    NeMoGymFunctionCallOutput,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputItem,
 )
@@ -31,7 +30,7 @@ from nemo_gym.sandbox import SandboxProvider, SandboxSpec
 from nemo_gym.server_runtime import MCPToolAccess
 from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ToolCallObservation
 from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession
-from responses_api_agents.opencode_multimodal_agent.media import prepare_image
+from responses_api_agents.opencode_multimodal_agent.media import prepare_image, restore_tool_images, tool_images
 
 
 _NETWORK_RUNTIME = SandboxPythonRuntime(
@@ -345,28 +344,8 @@ class MultimodalSessionMixin:
             for part in message.get("parts", []):
                 if part.get("type") != "tool":
                     continue
-                images = []
-                for attachment in part.get("state", {}).get("attachments", []):
-                    if not attachment.get("mime", "").startswith("image/"):
-                        continue
-                    url = attachment.get("url", "")
-                    if not url.startswith("data:image/"):
-                        raise ValueError("Tool images must be embedded before sandbox cleanup")
-                    images.append({"type": "input_image", "image_url": url, "detail": "auto"})
+                images = tool_images(part)
                 if images:
                     attachments[call_ids.get(part["callID"], part["callID"])] = images
-        for item in output:
-            if isinstance(item, NeMoGymFunctionCallOutput) and item.call_id in attachments:
-                text = item.output if isinstance(item.output, list) else [{"type": "input_text", "text": item.output}]
-                existing = {
-                    part.get("image_url")
-                    for part in text
-                    if isinstance(part, dict) and part.get("type") == "input_image"
-                }
-                item.output = [
-                    *text,
-                    *(part for part in attachments.pop(item.call_id) if part["image_url"] not in existing),
-                ]
-        if attachments:
-            raise ValueError("Image attachment has no matching tool result")
+        restore_tool_images(output, attachments)
         return output
