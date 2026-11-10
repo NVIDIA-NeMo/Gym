@@ -55,7 +55,7 @@ class Session:
     slots: Any = None
     config: Any = None
     persist: Callable = field(default=lambda: None, repr=False)
-    # Environment Server sessions: the seed request, the SandboxAccess response or the HTTP
+    # Episode sessions: the seed request, the SandboxAccess response or the HTTP
     # error the seed replays, and the first verify body (retries must repeat it exactly).
     resources_request: Any = None
     resources_response: Any = None

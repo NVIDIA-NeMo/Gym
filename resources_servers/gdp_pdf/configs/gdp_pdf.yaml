@@ -15,7 +15,11 @@ gdp_pdf:
         name: judge_model
       judge_chat_create_params:
         messages: []
-        max_tokens: 1024
+        # Artificial Analysis grades GDP.pdf with GPT-5.6 Luna at medium reasoning effort. The token
+        # budget covers the judge's reasoning as well as its JSON verdict: at 1024 tokens the judge
+        # ran out before writing the verdict, and each such criterion failed the whole row.
+        reasoning_effort: medium
+        max_completion_tokens: 16384
       judge_prompt_template_fpath: prompt_templates/judge.txt
       judge_max_attempts: 5
       # 500 rollouts x ~12.8 criteria/rollout is ~6,400 judge calls; at 64 concurrent
