@@ -2705,7 +2705,11 @@ class OpenSandboxProvider:
                     )
                     # One attempt: if the interrupt fails, execd's backstop timer still stops the command.
                     command_deadline = None
-            limits = [value for value in (deadline, status_failure_deadline, command_deadline) if value is not None]
+            limits = [value for value in (deadline, status_failure_deadline) if value is not None]
+            # Wake at Gym's command deadline, but once it has passed (e.g. while status reads fail) it must not
+            # zero the polling and backoff delay.
+            if command_deadline is not None and command_deadline > loop.time():
+                limits.append(command_deadline)
             # Retry caps must not shorten the configured polling cadence, even when the cap is zero.
             delay = max(
                 poll_interval,

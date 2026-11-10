@@ -1590,6 +1590,39 @@ async def test_background_command_finishing_before_gym_deadline_is_not_interrupt
     assert result.stderr == "signal: killed"
 
 
+# A status outage that spans Gym's deadline keeps the polling cadence and backoff; it does not busy-poll.
+async def test_background_status_outage_across_gym_deadline_keeps_polling_cadence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Backend503Error(Exception):
+        status_code = 503
+
+    class OutageCommands(_DeadlineCommands):
+        status_calls = 0
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            self.status_calls += 1
+            if asyncio.get_running_loop().time() - self.submitted >= 0.08:
+                raise Backend503Error("Get command status failed. Status code: 503")
+            return await super().get_command_status(execution_id)
+
+    commands = OutageCommands()
+    provider, handle = _background_provider(
+        monkeypatch,
+        commands,
+        command_timeout_headroom_s=0.5,
+        status_recovery_timeout_s=0.2,
+        retry_delay_s=0.01,
+    )
+
+    with pytest.raises(NgFailureEvent):
+        await provider.exec(handle, "bash solve.sh", timeout_s=0.1)
+
+    assert commands.interrupts == []
+    # ~0.2 s of outage at the 0.01-0.02 s cadence is a few dozen reads at most, not thousands.
+    assert commands.status_calls < 60
+
+
 # A refused interrupt (e.g. the command finished just before it) proves nothing; the reported exit is kept.
 async def test_background_refused_interrupt_keeps_the_reported_exit(monkeypatch: pytest.MonkeyPatch) -> None:
     commands = _DeadlineCommands(runs_s=0.4, interrupt_error=RuntimeError("Interrupt command failed: 404"))
