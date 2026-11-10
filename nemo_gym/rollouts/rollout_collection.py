@@ -131,6 +131,7 @@ from nemo_gym.rollouts.rollout_outcomes import InvalidRolloutResult, RolloutFail
 from nemo_gym.rollouts.rollout_perf import NG_PERF_KEY, DispatchLatencyTracker, _attach_ng_perf
 from nemo_gym.rollouts.rollout_records import (
     RUN_ID_KEY,
+    RolloutRecord,
     coverage_path_for,
     journal_path_for,
     logical_rollout_id,
@@ -4106,11 +4107,12 @@ executions → not run again (left to recovery)
                 completion_servers_by_agent,
             )
             if len(agent_expected_keys) > 1:
-                # A success masked by infrastructure is run again by a resume, so it is not settled until then.
+                # Only a settled outcome counts: a masked success or a retryable failure is run again by a resume.
                 settled_identities = [
                     identity
-                    for identity, _ in store.selected_records("success")
-                    if not store.masked_retryable({ROLLOUT_ID_KEY_NAME: identity})
+                    for disposition in ("success", "failure", "omitted")
+                    for identity, _ in store.selected_records(disposition)
+                    if store.settled({ROLLOUT_ID_KEY_NAME: identity})
                 ]
                 settled_keys = {
                     (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])
@@ -4130,9 +4132,21 @@ executions → not run again (left to recovery)
                         output_fpath=output_fpath,
                         samples=agent_samples,
                         store=store,
+                        config=config,
                     )
                 )
             )
+
+        def settle_rollout(row: Mapping[str, Any], outcome: Mapping[str, Any]) -> None:
+            """Take a just-recorded rollout off its agent's pending set if its outcome is final; complete the agent."""
+            completion_name = completion_group(row)
+            pending_keys = agent_pending_keys.get(completion_name)
+            if pending_keys is None or not store.settled(outcome):
+                return
+            pending_keys.discard((row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]))
+            if not pending_keys:
+                del agent_pending_keys[completion_name]
+                start_agent_complete(completion_name)
 
         start_time = time.time()
         environment_routes = Counter(
@@ -4405,6 +4419,7 @@ executions → not run again (left to recovery)
                     # A returned suppression without a failure is an intentional
                     # omission. Known kill-shaped failures were converted above.
                     store.record_omission(row, str(result.get("error") or "Producer requested no result persistence"))
+                    settle_rollout(row, row)
                     _record_rollout_outcome(metric_result, "omitted", dispatch_name)
                     if batch_tracker is not None:
                         # This attempt supersedes any failure reported before resume.
@@ -4426,6 +4441,7 @@ executions → not run again (left to recovery)
                         f"class={failure_class} execution {row.get(ATTEMPT_INDEX_KEY_NAME, 0)} error={detail}"
                     )
                     store.record_outcome(result)
+                    settle_rollout(row, result)
                     outcome = "omitted" if store.disposition(row) == "omitted" else "failed"
                     _record_rollout_outcome(metric_result, outcome, dispatch_name)
                     # Health eligibility is separate from scoring: typed failures have no score,
@@ -4445,14 +4461,7 @@ executions → not run again (left to recovery)
                     # Success → main jsonl.
                     store.record_outcome(result, sync=capture_build_can_retire(token_capture_build))
                     persisted_success_keys.add((row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]))
-                    completion_name = completion_group(row)
-                    pending_keys = agent_pending_keys.get(completion_name)
-                    # A success masked by infrastructure stays pending: a resume runs it again.
-                    if pending_keys is not None and not store.masked_retryable(result):
-                        pending_keys.discard((row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]))
-                        if not pending_keys:
-                            del agent_pending_keys[completion_name]
-                            start_agent_complete(completion_name)
+                    settle_rollout(row, result)
                     _record_rollout_outcome(result, "scored", dispatch_name)
                     health_outcome = "scored"
                     _record_rollout_shape(row, result)
@@ -4988,18 +4997,20 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         output_fpath: Path,
         samples: Mapping[str, Mapping[str, Any]],
         store: RolloutStore,
+        config: RolloutCollectionConfig,
     ) -> Optional[Path]:
-        """Aggregate one agent whose every expected rollout is scored, and write its completion file.
+        """Aggregate one agent whose every expected rollout is settled, and write its completion file.
 
         The file is written atomically beside the run's rollouts (``agent_complete_dir_for``), so a
-        reader sees it whole or not at all. It holds the entry ``_call_aggregate_metrics`` would give
-        this agent, which is the same because every rollout of the agent is scored: no failure or
+        reader sees it whole or not at all. It holds the entry ``_call_aggregate_metrics`` gives this
+        agent at the end of the run: its scored rows plus the failures the run's policy counts as zero.
+        Every rollout is settled (``RolloutStore.settled``), so no resume changes the entry and no
         missing rollout is left to count. An aggregation failure is recorded in the file as in the
         run-wide aggregate, and the end of the run reports it.
 
-        The agent's rows are the scored rows the store selects for its rollouts (the same selection the
-        end of the run aggregates), whether or not the run keeps results in memory. Only the agent's own
-        lines are read from ``output_fpath``, in a worker thread, from the offsets the store indexed.
+        The agent's rows are the rows the store selects for its rollouts (the same selection the end of
+        the run aggregates), whether or not the run keeps results in memory. Only the agent's own lines
+        are read, in a worker thread, from the offsets the store indexed.
 
         The file is a side channel: any other failure here (a write error, a rollout count that does not
         add up) is logged and returns None. Raised, it would surface only when the run's tasks are
@@ -5010,22 +5021,25 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         agent_name = (samples.get(group_name, {}).get(AGENT_REF_KEY_NAME) or {}).get("name") or group_name
         try:
             # The store's index is updated on the event loop, so it is read here and not in the worker thread.
-            selected = store.selected_records("success")
-            inputs = store.inputs_for([{ROLLOUT_ID_KEY_NAME: identity} for identity, _ in selected])
-            records = [
-                record
-                for record, row in zip(selected.values(), inputs)
-                if (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]) in keys
-            ]
-            results = await asyncio.to_thread(lambda: [record.read() for record in records])
-            # The run-wide aggregate sorts its rows by (task, rollout), and metrics over a task's first repeats
-            # depend on that order. Sort the same way here, so this entry never rests on the order of the store.
-            results.sort(key=_rollout_order_key)
+            def agent_records(disposition: str) -> List[RolloutRecord]:
+                selected = store.selected_records(disposition)
+                inputs = store.inputs_for([{ROLLOUT_ID_KEY_NAME: identity} for identity, _ in selected])
+                return [
+                    record
+                    for record, row in zip(selected.values(), inputs)
+                    if (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]) in keys
+                ]
+
+            success_records = agent_records("success")
+            other_records = agent_records("failure") + agent_records("omitted")
+            results = await asyncio.to_thread(lambda: [record.read() for record in success_records])
+            others = await asyncio.to_thread(lambda: [record.read() for record in other_records])
             scored_keys = {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) for r in results}
-            if scored_keys != keys:
+            failed_keys = {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) for r in others}
+            if scored_keys | failed_keys != keys:
                 raise RuntimeError(
-                    f"Agent '{agent_name}' has every expected rollout persisted, but {output_fpath} holds "
-                    f"{len(scored_keys)} of its {len(keys)} rollouts."
+                    f"Agent '{agent_name}' has every expected rollout settled, but the store holds "
+                    f"{len(scored_keys)} scored and {len(failed_keys)} failed of its {len(keys)} rollouts."
                 )
             # A persisted result may carry no reward (an execute-only or reward-less result): it is valid and
             # stays in the output and the run-wide aggregate, but it is not a scored rollout, so the agent is
@@ -5033,8 +5047,26 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             if any(type(result.get("reward")) not in (int, float) for result in results):
                 logger.info("Agent '%s' has a rollout without a reward, so it gets no completion file.", agent_name)
                 return None
+            # The failures the run's policy counts as zero enter the score as they do at the end of the run
+            # (``store.failures`` leaves intentional omissions out), with their task's dataset fields.
+            counted = _counted_failure_rows(
+                [row for row in others if not row.get("_ng_omitted")], config.count_failure_classes_as_zero
+            )
+            if counted:
+                await asyncio.to_thread(
+                    _fill_task_fields, counted, results, [config.materialized_jsonl_fpath], _routing_identity
+                )
+            rows = results + counted
+            if not rows:
+                logger.info(
+                    "Agent '%s' has no scored rollout to aggregate, so it gets no completion file.", agent_name
+                )
+                return None
+            # The run-wide aggregate sorts its rows by (task, rollout), and metrics over a task's first repeats
+            # depend on that order. Sort the same way here, so this entry never rests on the order of the store.
+            rows.sort(key=_rollout_order_key)
 
-            entries, _ = await self._aggregate_entries(results, results, labels=self._agent_complete_labels(samples))
+            entries, _ = await self._aggregate_entries(rows, rows, labels=self._agent_complete_labels(samples))
             if len(entries) != 1:
                 raise RuntimeError(
                     f"Agent '{agent_name}' aggregated into {len(entries)} environment servers, expected one."
@@ -5050,6 +5082,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     NG_ENVIRONMENT_SERVER_KEY: entry[NG_ENVIRONMENT_SERVER_KEY],
                     "expected_rollouts": len(keys),
                     "completed_rollouts": len(scored_keys),
+                    "failed_rollouts": len(failed_keys),
                     "completed_at": datetime.now(timezone.utc).isoformat(),
                     "aggregation_status": "error" if AGGREGATION_ERROR_KEY in entry else "complete",
                     "aggregate": entry,
@@ -5061,7 +5094,11 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 agent_name,
             )
             return None
-        print(f"Agent '{label}' complete: all {len(keys)} rollouts scored. Completion file: {fpath}", flush=True)
+        print(
+            f"Agent '{label}' complete: {len(scored_keys)} of {len(keys)} rollouts scored, {len(failed_keys)} failed. "
+            f"Completion file: {fpath}",
+            flush=True,
+        )
         return fpath
 
     @staticmethod

@@ -1513,6 +1513,106 @@ class TestRolloutCollection:
         }
         assert alpha["aggregate"] == run_aggregate["alpha"]
 
+    @pytest.mark.parametrize("count_failures_as_zero", [False, True], ids=["failure-left-out", "failure-counted"])
+    async def test_a_final_failure_settles_its_rollout_so_the_agent_completes_during_the_job(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        empty_global_config: MagicMock,
+        count_failures_as_zero: bool,
+    ) -> None:
+        """A failure no resume will retry is settled: its agent is scored under the run's failure policy at once."""
+        # One attempt per rollout, so the failed /run below is final.
+        monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "1")
+        complete_dir = tmp_path / "rollouts_agent_complete"
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(self._write_agent_inputs(tmp_path, ("alpha", "alpha", "beta"))),
+            output_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
+            disable_health_check=True,
+            route_failures_to_sidecar=True,
+            count_failure_classes_as_zero=[AGENT_RUN_ERROR_FAILURE_CLASS] if count_failures_as_zero else [],
+        )
+        alpha_calls = {"n": 0}
+        alpha_file_while_beta_runs: list[bool] = []
+
+        async def post(server_name: str, url_path: str, json, **kwargs) -> FakeResponse:
+            if url_path == "/aggregate_metrics":
+                return FakeResponse(
+                    200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump()
+                )
+            if server_name == "beta_environment_server":
+                for _ in range(50):
+                    if (complete_dir / "alpha.json").exists():
+                        break
+                    await asyncio.sleep(0.01)
+                alpha_file_while_beta_runs.append((complete_dir / "alpha.json").exists())
+                return FakeResponse(200, {"response": {}, "reward": 0.0})
+            alpha_calls["n"] += 1
+            return FakeResponse(200, {"response": {}, "reward": 1.0}) if alpha_calls["n"] == 1 else FakeResponse(500)
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post), agent_names=("alpha", "beta"))
+
+        await RolloutCollectionHelper().run_from_config(config)
+
+        assert alpha_file_while_beta_runs == [True]
+        alpha = orjson.loads((complete_dir / "alpha.json").read_bytes())
+        assert (alpha["expected_rollouts"], alpha["completed_rollouts"], alpha["failed_rollouts"]) == (2, 1, 1)
+        assert alpha["aggregate"]["key_metrics"]["mean/reward"] == (0.5 if count_failures_as_zero else 1.0)
+        run_aggregate = {
+            entry[AGENT_REF_KEY_NAME]["name"]: entry
+            for entry in orjson.loads((tmp_path / "rollouts_aggregate_metrics.json").read_bytes())
+        }
+        assert alpha["aggregate"] == run_aggregate["alpha"]
+
+    async def test_a_retryable_failure_keeps_its_agent_pending_until_a_resume_settles_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        """A failure a resume will retry is not settled, so the agent's file waits for the retry and equals the final."""
+        monkeypatch.delenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", raising=False)
+        complete_dir = tmp_path / "rollouts_agent_complete"
+        input_fpath = self._write_agent_inputs(tmp_path, ("alpha", "alpha", "beta"))
+        alpha_calls = {"n": 0}
+        resumed = {"now": False}
+
+        async def post(server_name: str, url_path: str, json, **kwargs) -> FakeResponse:
+            if url_path == "/aggregate_metrics":
+                return FakeResponse(
+                    200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump()
+                )
+            if server_name == "beta_environment_server":
+                return FakeResponse(200, {"response": {}, "reward": 0.0})
+            if resumed["now"]:
+                return FakeResponse(200, {"response": {}, "reward": 0.5})
+            alpha_calls["n"] += 1
+            return FakeResponse(200, {"response": {}, "reward": 1.0}) if alpha_calls["n"] == 1 else FakeResponse(500)
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post), agent_names=("alpha", "beta"))
+
+        alpha_file_after_job: list[bool] = []
+        for resume in (False, True):
+            resumed["now"] = resume
+            await RolloutCollectionHelper().run_from_config(
+                RolloutCollectionConfig(
+                    input_jsonl_fpath=str(input_fpath),
+                    output_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
+                    disable_health_check=True,
+                    route_failures_to_sidecar=True,
+                    resume_from_cache=resume,
+                    allow_unsafe_resume=resume,
+                )
+            )
+            alpha_file_after_job.append((complete_dir / "alpha.json").exists())
+
+        assert alpha_file_after_job == [False, True]
+        alpha = orjson.loads((complete_dir / "alpha.json").read_bytes())
+        assert (alpha["expected_rollouts"], alpha["completed_rollouts"], alpha["failed_rollouts"]) == (2, 2, 0)
+        assert alpha["aggregate"]["key_metrics"]["mean/reward"] == 0.75
+        run_aggregate = {
+            entry[AGENT_REF_KEY_NAME]["name"]: entry
+            for entry in orjson.loads((tmp_path / "rollouts_aggregate_metrics.json").read_bytes())
+        }
+        assert alpha["aggregate"] == run_aggregate["alpha"]
+
     @pytest.mark.parametrize(
         "resume_from_cache, existing_rollouts",
         [(False, True), (True, True), (True, False)],

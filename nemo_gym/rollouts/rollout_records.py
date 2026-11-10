@@ -882,6 +882,18 @@ class RolloutRecords:
             and self.failure_count(identity) < self.attempt_cap
         )
 
+    def settled(self, identity: str) -> bool:
+        """Whether this rollout's outcome is final: a success no resume reruns, or a failure or omission none retries.
+
+        The complement of ``pending`` for a rollout with an outcome, so a later attempt can never change a settled one.
+        """
+        disposition = self.disposition(identity)
+        if disposition == "success":
+            return not self.masked_retryable(identity)
+        if disposition in ("failure", "omitted"):
+            return not self._retryable(identity) or self.failure_count(identity) >= self.attempt_cap
+        return False
+
     def failure_count(self, identity: str) -> int:
         return self.attempt_counts[identity] + (
             self.overridden_terminal_counts[identity] if self.retry_terminal_timeouts else 0
