@@ -51,7 +51,12 @@ def test_session_uploads_shared_plugin_only_with_model_capture(setup, enabled, t
         config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
         plugin = Path(sandbox.directory) / OBSERVABILITY_PATCH.name
         task_env_plugin = Path(sandbox.directory) / "task_environment.mjs"
-        assert config["plugin"] == ([plugin.as_uri()] if enabled else []) + [task_env_plugin.as_uri()]
+        retry_plugin = Path(sandbox.directory) / "model_retry_limit.mjs"
+        assert config["plugin"] == ([plugin.as_uri()] if enabled else []) + [
+            task_env_plugin.as_uri(),
+            retry_plugin.as_uri(),
+        ]
+        assert sandbox.files[str(retry_plugin)] == Path(__file__).parents[1].joinpath(retry_plugin.name).read_text()
         assert (
             sandbox.files[str(task_env_plugin)]
             == Path(__file__).parents[1].joinpath("task_environment.mjs").read_text()

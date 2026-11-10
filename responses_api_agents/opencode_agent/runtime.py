@@ -3,8 +3,13 @@
 
 """Stock OpenCode plus the same observability patch, locally and in sandboxes."""
 
+import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from nemo_gym.agents import AgentOutcome
+from nemo_gym.core import MODEL_REQUEST_ERROR, MODEL_TRANSPORT_ERROR
 
 
 if TYPE_CHECKING:
@@ -20,6 +25,11 @@ ASSISTANT_MESSAGE_PLUGIN_SOURCE = Path(__file__).with_name("assistant_message_he
 ASSISTANT_MESSAGE_PLUGIN_FILE = ASSISTANT_MESSAGE_PLUGIN_SOURCE.name
 REQUIRED_MCP_PLUGIN_SOURCE = Path(__file__).with_name("required_mcp.mjs")
 REQUIRED_MCP_PLUGIN_FILE = REQUIRED_MCP_PLUGIN_SOURCE.name
+# Holds OpenCode and Kilo Code to Gym's model retry rule; neither CLI has a setting for it.
+MODEL_RETRY_PLUGIN_SOURCE = Path(__file__).with_name("model_retry_limit.mjs")
+MODEL_RETRY_PLUGIN_FILE = MODEL_RETRY_PLUGIN_SOURCE.name
+# The plugin ends a turn with this error once the retry rule allows no more resends.
+_RETRY_LIMIT = re.compile(r"NeMo Gym model retry limit: (?:HTTP (\d{3})\b|no model response)")
 # Retain the import used by the separate opencode_sandboxed_agent adapter.
 OBSERVABILITY_PATCH = ASSISTANT_MESSAGE_PLUGIN_SOURCE
 # Merged into the Gym model's entry in sandbox sessions that declare image input.
@@ -48,3 +58,15 @@ def command_failure_reason(message: str, result: "SandboxExecResult") -> str:
         f"{message[:512]}; return_code={result.return_code}; error_type={str(result.error_type)[:128]}; "
         f"stdout_tail={repr(result.stdout or '')[-400:]}; stderr_tail={repr(result.stderr or '')[-400:]}"
     )
+
+
+def retry_limit_outcome(error: object) -> AgentOutcome | None:
+    """Classify the model retry limit plugin's error, which both CLIs save as an UnknownError; None for others."""
+    data = error.get("data") if isinstance(error, Mapping) and error.get("name") == "UnknownError" else None
+    message = data.get("message") if isinstance(data, Mapping) else None
+    match = _RETRY_LIMIT.search(message) if isinstance(message, str) else None
+    if match is None:
+        return None
+    if match[1] is None:
+        return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
+    return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=int(match[1]))

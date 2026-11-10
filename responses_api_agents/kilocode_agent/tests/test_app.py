@@ -263,6 +263,8 @@ class TestEnv:
         assert env["XDG_DATA_HOME"] == "/tmp/data"
         assert env["XDG_CONFIG_HOME"] == "/tmp/config"
         assert env["KILO_NO_DAEMON"] == "1"
+        # The local run loads no plugins (--pure); Kilo's own count is its only retry bound.
+        assert env["KILO_SESSION_RETRY_LIMIT"] == "2"
         assert env["KILO_DB"] == ":memory:"
         assert env["FOO"] == "bar"
         assert "EMPTY" not in env
