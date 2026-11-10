@@ -30,7 +30,7 @@ from nemo_gym.core import (
 )
 from nemo_gym.sandbox import SandboxProvider, SandboxSpec
 from nemo_gym.server_runtime import MCPToolAccess
-from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle
+from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ToolCallObservation
 from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession
 from responses_api_agents.opencode_multimodal_agent.media import stage_inputs
 
@@ -355,6 +355,16 @@ class MultimodalSessionMixin:
         output = [
             item.model_copy(deep=True) for item in invocation.conversation if getattr(item, "role", None) != "user"
         ]
+        # Qualified observations use normalized IDs; exported attachments retain
+        # native OpenCode IDs. Keep this join local to the exported invocation
+        # so a child reusing a native ID cannot redirect its parent's images.
+        call_ids = {
+            record.native_tool_call_id: record.tool_call_id
+            for record in observations.records
+            if isinstance(record, ToolCallObservation)
+            and record.invocation_id == invocation.invocation_id
+            and record.native_tool_call_id is not None
+        }
         attachments = {}
         for message in export.get("messages", []):
             for part in message.get("parts", []):
@@ -369,7 +379,7 @@ class MultimodalSessionMixin:
                         raise ValueError("Tool images must be embedded before sandbox cleanup")
                     images.append({"type": "input_image", "image_url": url, "detail": "auto"})
                 if images:
-                    attachments[part["callID"]] = images
+                    attachments[call_ids.get(part["callID"], part["callID"])] = images
         for item in output:
             if isinstance(item, NeMoGymFunctionCallOutput) and item.call_id in attachments:
                 text = item.output if isinstance(item.output, list) else [{"type": "input_text", "text": item.output}]

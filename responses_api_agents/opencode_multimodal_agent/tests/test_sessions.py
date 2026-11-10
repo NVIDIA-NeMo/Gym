@@ -540,3 +540,45 @@ def test_session_wrapper_uses_only_effective_mcp_grants(visual_setup, monkeypatc
             else []
         )
         client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+
+
+@pytest.mark.parametrize("qualified", [False, True])
+def test_tool_images_follow_call_identity_without_crossing_invocations(visual_setup, qualified):
+    from nemo_gym.core import NeMoGymFunctionCallOutput
+    from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ToolCallObservation
+
+    agent, sandbox = visual_setup
+    parent_id = "normalized-parent" if qualified else "tool-1"
+    child_id = "normalized-child"
+    parent = AgentInvocation(
+        invocation_id="root",
+        conversation=[NeMoGymFunctionCallOutput(call_id=parent_id, output="parent result")],
+    )
+    child = AgentInvocation(
+        invocation_id="child",
+        conversation=[NeMoGymFunctionCallOutput(call_id=child_id, output="child result")],
+    )
+    observations = AgentObservationBundle(
+        source="opencode",
+        schema_version="2.0" if qualified else "1.0",
+        records=[
+            parent,
+            child,
+            ToolCallObservation(
+                invocation_id="root",
+                tool_call_id=parent_id,
+                native_tool_call_id="tool-1" if qualified else None,
+            ),
+            # Deliberately reuse the native ID after the parent record.
+            ToolCallObservation(invocation_id="child", tool_call_id=child_id, native_tool_call_id="tool-1"),
+        ],
+    )
+    output = agent._session_output(json.loads(sandbox.events), observations)
+    assert len(output) == 1
+    assert output[0].call_id == parent_id
+    assert output[0].output == [
+        {"type": "input_text", "text": "parent result"},
+        {"type": "input_image", "image_url": image_url(), "detail": "auto"},
+    ]
+    assert parent.conversation[0].output == "parent result"
+    assert child.conversation[0].output == "child result"

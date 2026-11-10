@@ -69,7 +69,6 @@ from nemo_gym.config.config_types import (
     maybe_get_server_instance_config,
 )
 from nemo_gym.config.secret_utils import recursively_hide_secrets
-from nemo_gym.orchestration.h2_ping_sidecar.config import H2_PING_SIDECAR_KEY_NAME
 from nemo_gym.sandbox.providers.registry import plugin_distributions
 from nemo_gym.server_runtime._checkpoint.settings import CHECKPOINT_BLOCK
 from nemo_gym.telemetry.setup import (
@@ -114,6 +113,7 @@ USE_ABSOLUTE_IP = "use_absolute_ip"
 ABSOLUTE_IP_SERVER_TYPES_KEY_NAME = "absolute_ip_server_types"
 UV_PIP_SET_PYTHON_KEY_NAME = "uv_pip_set_python"
 SKIP_VENV_IF_PRESENT_KEY_NAME = "skip_venv_if_present"
+H2_PING_SIDECAR_KEY_NAME = "sidecar"
 COMPONENT_EXTRAS_KEY_NAME = "component_extras"
 HF_TOKEN_KEY_NAME = "hf_token"
 RAY_HEAD_NODE_ADDRESS_KEY_NAME = "ray_head_node_address"
@@ -1879,9 +1879,12 @@ Set the keys individually, in a config or as overrides, e.g.:
                 global_config_dict[dir_key_name] = str(Path(dir_value).expanduser().resolve())
 
             # UV related configuration
-            # UV caching directory overrides to local folders, under the cache root.
+            # An explicit `uv_cache_dir` wins, then a UV_CACHE_DIR the user already exported, then a
+            # local folder under the cache root.
+            exported_uv_cache_dir = environ.get("UV_CACHE_DIR", "").strip()
             global_config_dict.setdefault(
-                UV_CACHE_DIR_KEY_NAME, str(Path(global_config_dict[CACHE_DIR_KEY_NAME]) / "uv")
+                UV_CACHE_DIR_KEY_NAME,
+                exported_uv_cache_dir or str(Path(global_config_dict[CACHE_DIR_KEY_NAME]) / "uv"),
             )
             # Runtime subprocesses inherit the configured cache directory.
             if not parse_config.offline:
