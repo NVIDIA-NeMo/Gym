@@ -39,11 +39,11 @@ from nemo_gym.orchestration.executors.otel import otel_active
 from nemo_gym.orchestration.jobs import (
     BenchmarkJob,
     SubmissionRecord,
-    installed_gym_commit,
     new_gym_job_id,
     utc_now,
     utc_timestamp,
 )
+from nemo_gym.utils.gym_commit import installed_gym_commit
 
 
 # Kept in sync with the Slurm executor's benchmark-name check (`slurm.py:_VALID_BENCHMARK_NAME`):

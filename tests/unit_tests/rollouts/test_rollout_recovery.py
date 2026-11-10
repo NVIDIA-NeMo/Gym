@@ -19,7 +19,7 @@ import asyncio
 import json
 import multiprocessing
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from omegaconf import OmegaConf
@@ -967,6 +967,8 @@ async def test_runner_reserves_before_request_and_resumes_only_failed_work(
     monkeypatch.setattr(RolloutCollectionHelper, "_call_aggregate_metrics", AsyncMock(return_value=None))
     monkeypatch.setattr(collection, "get_exporters", lambda: True)
     monkeypatch.setattr(collection, "export_metrics", lambda metrics, **kwargs: exported.append(metrics))
+    recorded = []
+    monkeypatch.setattr(collection, "record_run_summary", lambda summary, run_id: recorded.append((summary, run_id)))
 
     async def post(**kwargs):
         row = kwargs["json"]
@@ -1017,6 +1019,7 @@ async def test_runner_reserves_before_request_and_resumes_only_failed_work(
         "coverage/open": 2,
         "coverage/failure_budget_exhausted": 0,
     }
+    assert recorded == [(exported[-1], report["run_id"])]  # The same run summary goes to OTel.
     progress = [metrics for metrics in exported if "progress/total/rollouts_per_min" in metrics][-1]
     assert progress["progress/my_agent/masked_pct"] == 100.0
     assert progress["progress/my_agent/failed"] == 1
@@ -1049,6 +1052,53 @@ async def test_runner_reserves_before_request_and_resumes_only_failed_work(
     assert exported[-1]["coverage/measured"] == 1 and exported[-1]["coverage/masked"] == 1
     assert exported[-1]["coverage/failed"] == 0
     assert len(list(read_records(collection.failures_path_for(output)))) == 2
+
+
+async def test_run_summary_reaches_otel_without_an_experiment_tracker(runner_config, monkeypatch):
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+    from nemo_gym.telemetry import gym_metrics
+    from nemo_gym.telemetry import setup as telemetry_setup
+
+    reader = InMemoryMetricReader()
+    provider = MeterProvider(metric_readers=[reader])
+
+    class _Handle:
+        is_exporting = True
+        meter = provider.get_meter("run-summary-collection-test")
+
+    monkeypatch.setattr(telemetry_setup, "_TELEMETRY_HANDLE", _Handle())
+    monkeypatch.setattr(telemetry_setup, "_METRICS_EXPORTING", True)
+    gym_metrics._reset_for_testing()
+    runner_config.disable_aggregation = False
+    runner_config.upload_rollouts = False
+    monkeypatch.setattr(RolloutCollectionHelper, "_call_aggregate_metrics", AsyncMock(return_value=None))
+    monkeypatch.setattr(collection, "get_exporters", lambda: [])
+    export_metrics = MagicMock()
+    monkeypatch.setattr(collection, "export_metrics", export_metrics)
+    install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(200, {"reward": 1.0, "response": {}})))
+    try:
+        await RolloutCollectionHelper().run_from_config(runner_config)
+        data = reader.get_metrics_data()
+        metrics = {
+            metric.name: {frozenset(point.attributes.items()): point.value for point in metric.data.data_points}
+            for resource_metric in data.resource_metrics
+            for scope_metric in resource_metric.scope_metrics
+            for metric in scope_metric.metrics
+            if metric.name.startswith("gym.run.")
+        }
+    finally:
+        provider.shutdown()
+        gym_metrics._reset_for_testing()
+
+    report = json.loads(coverage_path_for(Path(runner_config.output_jsonl_fpath)).read_text())
+    run = frozenset({(gym_metrics.RUN_ID_ATTRIBUTE, report["run_id"])})
+    export_metrics.assert_not_called()
+    assert metrics["gym.run.info"] == {run: 1}
+    assert metrics["gym.run.coverage.scored"] == {run: report["scored"]}
+    assert metrics["gym.run.coverage.failed"] == {run: 0}
+    assert report["scored"] > 0
 
 
 @pytest.mark.parametrize("failure_type", ["typed", "legacy", "kill_shaped", "skipped", "suppressed"])
