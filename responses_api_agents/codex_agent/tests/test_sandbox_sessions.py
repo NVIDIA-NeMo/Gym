@@ -3451,6 +3451,13 @@ def test_session_uses_native_call_identity_arguments_and_results(setup, custom):
     bundle = closed["agent_observations"]
     invocation, tool = bundle["records"]
     assert invocation["conversation"][1]["call_id"] == tool["tool_call_id"] == "provider-call"
+    assert invocation["conversation"][2]["call_id"] == tool["tool_call_id"]
+    assert tool["native_tool_call_id"] == "provider-call"
+    # The agent session reports schema 2.0 transcript attempts owned by this run's instance and clock.
+    assert bundle["schema_version"] == "2.0"
+    assert invocation["agent_instance"] == tool["agent_instance"] and tool["agent_instance"].startswith("codex-agent:")
+    assert tool["timings"][0]["boundary"] == "transcript"
+    assert tool["timings"][0]["clock_domain"].startswith("codex-wall:")
     assert invocation["conversation"][1]["input" if custom else "arguments"] == (
         "*** Begin Patch\n*** End Patch" if custom else '{"cmd":"exit 7"}'
     )
@@ -3623,6 +3630,7 @@ def test_later_rejection_preserves_real_tool_output_and_available_usage(setup, u
         assert invocation["status"] == "failed"
         assert observed_tool["status"] == "completed"
         assert invocation["conversation"][1]["call_id"] == observed_tool["tool_call_id"] == "provider-call"
+        assert observed_tool["native_tool_call_id"] == "provider-call"
         assert invocation["conversation"][2]["output"] == native_output
 
 

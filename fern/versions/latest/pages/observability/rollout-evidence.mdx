@@ -114,6 +114,7 @@ Current producer mappings and migration constraints:
 | Producer evidence | Boundary or migration status |
 | --- | --- |
 | OpenCode persisted `state.time.start/end` | `lifecycle`; database delivery is independent of this meaning. V1 retains its `artifact` source label. |
+| Codex session `response_item` call/result timestamps | `transcript` (`codex.response_item`). The tested Codex session records no response ID, so the requesting model call remains unknown with a span-scoped gap. |
 | Pi stdout start/end event receipt | Semantically `event_receipt`. The generic legacy upgrader currently maps `harness` to `lifecycle`; this needs explicit producer qualification. Producer-side timestamps are needed for lifecycle timing. |
 | Simple Agent, compaction agent and agentic turn simulation dispatch wrappers | Legacy `executor` labels are coarse client-side measurements. Qualify their actual dispatch/response boundary before migrating them. |
 | Hermes tool wrapper / hooks | Executor-wrapper / lifecycle scope respectively; preserve the instrumentation's actual endpoints. |
@@ -183,6 +184,13 @@ output retain their native IDs. Interrupted calls with persisted parts retain us
 timing and an explicit completion gap. Missing or unreadable artifacts produce coverage gaps.
 There is no guaranteed recovery of interrupted activity that was never persisted, and no
 streaming recorder is enabled by this change.
+
+Codex reads each persisted call record as one attempt. A request keeps its native call ID unless
+an earlier record used it; a reuse gets an ID qualified by its record position. A result closes the only unfinished call with its native ID. Results for concurrent calls
+that share an ID cannot be attributed: those calls become `unknown` with `tool_output_ambiguous`,
+and an orphaned result keeps only its completion time. A command that returns a live exec session
+keeps an unknown outcome, and later `write_stdin` calls remain separate attempts. Each Codex run
+has its own wall-clock domain.
 
 ## Which Artifact to Read
 
