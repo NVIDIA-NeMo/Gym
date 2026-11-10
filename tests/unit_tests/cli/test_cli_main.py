@@ -1732,7 +1732,8 @@ class TestAgentSelector:
         assert resolved.reflection_agent.responses_api_agents.langgraph_agent.resources_server is None
         environment = resolved.aime24_math_with_judge_environment_server.environment_servers.single_agent_turn_legacy
         assert environment.agent_server.name == "aime24_math_with_judge_simple_agent"
-        assert environment.resources_tool_transports == ["direct_http"]
+        # math_with_judge serves no tools, so its Environment Server grants the agent none.
+        assert environment.get("resources_tool_transports", []) == []
 
     @pytest.mark.parametrize(
         "command",

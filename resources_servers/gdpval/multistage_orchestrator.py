@@ -88,6 +88,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
+from nemo_gym.models import ModelCallCaptureConfig
 from nemo_gym.rollouts import (
     AGENT_REQUEST_FAILED_FAILURE_CLASS,
     ENVIRONMENT_SERVER_FAILURE_CLASS,
@@ -2761,6 +2762,9 @@ async def run_e2e_multistage(
     latency_tracker = DispatchLatencyTracker()
     dispatch_started_at = time.monotonic()
     capture_dirs = model_call_capture_dirs_from_config(global_config_dict)
+    trajectory_schema_version = ModelCallCaptureConfig.model_validate(
+        global_config_dict.get("model_call_capture") or {}
+    ).trajectory_schema_version
 
     def attach_rollout_evidence(
         row: Dict[str, Any], result: Dict[str, Any], rollout_latency_ms: Optional[float]
@@ -2780,7 +2784,7 @@ async def run_e2e_multistage(
                 include_payloads=not _has_observation_gap(result, "multimodal_history_redacted"),
             )
         if "ng_model_call_capture" in result or "ng_agent_observations" in result or NG_TRAJECTORY_KEY in result:
-            _attach_trajectory_record(row, result)
+            _attach_trajectory_record(row, result, schema_version=trajectory_schema_version)
         _attach_ng_perf(result, observability_enabled=observability_enabled, rollout_latency_ms=rollout_latency_ms)
 
     async def verify_cached(
