@@ -17,13 +17,13 @@ from nemo_gym.core import (
     PROVIDER_OOM_KILLED,
     SESSION_LOST,
     VERIFIER_ERROR,
+    EpisodeId,
     FailureBoundary,
     FailureClass,
     NgFailureEvent,
     OutcomeAction,
     RequestFailureLog,
     SandboxFailureDetails,
-    EpisodeId,
     TaskId,
     failure_kinds,
     failure_report_for,
@@ -1744,7 +1744,10 @@ def test_environment_session_follows_the_resources_session_contract(
     )
 
     # The repeated seed lent the same sandbox, and close stopped it once.
-    assert server._create_sandbox.await_args_list[0].kwargs == {"phase": "agent", "session_id": seed.resources_session_id}
+    assert server._create_sandbox.await_args_list[0].kwargs == {
+        "phase": "agent",
+        "session_id": seed.resources_session_id,
+    }
     sandboxes[0].stop.assert_awaited_once()
     assert seed.resources_session_id not in server._episode_agent_sandboxes
 
