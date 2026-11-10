@@ -450,6 +450,27 @@ class TestApp:
         }
 
     @pytest.mark.asyncio
+    async def test_a_runner_that_exited_without_its_report_is_a_failed_run_without_a_result(self) -> None:
+        """The sandbox session returns only the runner's ``error`` for a runner that exited without its output.
+
+        It used to raise, so the agent server answered 500 and the trajectory was dropped.
+        """
+        report = {"error": "exited with status 137 without writing its output"}
+
+        response, _, _ = await _run_episode(
+            _make_config(), NeMoGymResponseCreateParamsNonStreaming(input="x", model="policy"), report
+        )
+
+        assert response.status == "failed"
+        assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == {"failure_kind": "agent_run_error"}
+        assert response.metadata["ng_agent_stop_reason"] == "no_result"
+        assert response.error.message == (
+            "Stirrup sandbox runner failed: exited with status 137 without writing its output"
+        )
+        assert (response.output, response.usage) == ([], None)
+        assert agent_outcome_policy(response) == OutcomeAction.RETRY
+
+    @pytest.mark.asyncio
     async def test_a_run_ended_by_unusable_compaction_summaries_is_the_models_invalid_output(self) -> None:
         report = _report(
             stop_reason="compaction_failed",

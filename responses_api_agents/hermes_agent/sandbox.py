@@ -12,7 +12,13 @@ from shlex import quote
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
-from nemo_gym.agents import AgentSessionState, SandboxCommand, SandboxPythonRuntime, SandboxSession
+from nemo_gym.agents import (
+    HARNESS_COMMAND_NOT_STARTED,
+    AgentSessionState,
+    SandboxCommand,
+    SandboxPythonRuntime,
+    SandboxSession,
+)
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import read_text, upload_text
 from nemo_gym.trajectory import AgentObservationBundle
@@ -155,11 +161,47 @@ class HermesSandboxSession(AgentSessionState):
         )
 
     async def collect_artifacts(self) -> dict[str, JsonValue]:
-        """Copy Hermes output before close removes files, including interrupted output."""
+        """Copy Hermes output before close removes files, including interrupted output.
+
+        A runner that exited or was killed before it wrote ``output.json`` left no result, which is returned as the
+        runner's ``error``. An output that exists but cannot be read or parsed stays a failure, and so does a missing
+        output after a clean exit, a deadline, a supervisor error or a command that could not start.
+        """
         try:
             output = await self.read_json("output.json")
         except Exception as error:
             logs = await self.session.read_output_log()
-            raise RuntimeError(f"Hermes sandbox runner exited without output: {logs}") from error
+            exit_code = await self._exit_without_output()
+            if exit_code is None:
+                raise RuntimeError(f"Hermes sandbox runner exited without output: {logs}") from error
+            LOG.warning("Hermes sandbox runner exited with status %d without output: %s", exit_code, logs)
+            return {"error": f"exited with status {exit_code} without writing its output"}
         self.runtime_info = parse_runtime_info(output.get("runtime"))
         return output
+
+    async def _exit_without_output(self) -> int | None:
+        """The runner's nonzero exit status when its receipt shows it ended on its own and ``output.json`` is absent.
+
+        ``None`` when the receipt shows a clean exit, a deadline, a supervisor error or a command that could not
+        start, or when the probe cannot show that the file is absent (a missing file is a generic transfer error on
+        some providers).
+        """
+        cleanup = self.session.cleanup
+        if (
+            cleanup is None
+            or cleanup["timed_out"]
+            or cleanup["error"]
+            or cleanup["return_code"] in (None, 0, *HARNESS_COMMAND_NOT_STARTED)
+        ):
+            return None
+        path = quote(f"{self.session.session_dir}/output.json")
+        try:
+            probe = await self.session.sandbox.exec(
+                f"if [ -e {path} ]; then echo present; else echo absent; fi", cwd="/", timeout_s=30
+            )
+        except Exception:
+            LOG.warning("Could not check whether Hermes left %s", path, exc_info=True)
+            return None
+        if probe.return_code != 0 or probe.error_type is not None or (probe.stdout or "").strip() != "absent":
+            return None
+        return cleanup["return_code"]

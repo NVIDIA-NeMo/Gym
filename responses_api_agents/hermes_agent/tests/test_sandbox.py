@@ -929,6 +929,123 @@ async def test_runner_error_is_a_run_without_a_result_and_close_keeps_its_eviden
     state.session.sandbox.disconnect.assert_awaited_once()
 
 
+def _output_probe(state) -> str:
+    """The command that checks whether the runner left ``output.json``."""
+    path = shlex.quote(f"{state.session.session_dir}/output.json")
+    return f"if [ -e {path} ]; then echo present; else echo absent; fi"
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [FileNotFoundError("output.json"), RuntimeError("docker cp download failed: no such file")],
+    ids=["file-not-found", "generic-transfer-error"],
+)
+def test_runner_that_exits_without_output_answers_failed_agent_run_error(agent, state, missing):
+    """A runner killed, or exiting, before it wrote ``output.json`` left no result: HTTP 200, retried by default.
+
+    The agent server used to answer 500, which dropped the run's trajectory.
+    """
+    agent._initialize_agent_session_state = AsyncMock(return_value=state)
+    state.upload_json = AsyncMock()
+    state.session.read_output_log = AsyncMock(return_value="Killed")
+    mock_json_download(
+        state.session.sandbox,
+        side_effect=[{"cleanup_confirmed": True, "error": None, "timed_out": False, "return_code": 137}, missing],
+    )
+    probes = []
+
+    async def execute(command, **kwargs):
+        if command == _output_probe(state):
+            probes.append(command)
+            return SimpleNamespace(return_code=0, stdout="absent\n", stderr="", error_type=None)
+        return SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None)
+
+    state.session.sandbox.exec.side_effect = execute
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+        assert client.post("/v1/agent_sessions", json=state.request.model_dump(mode="json")).status_code == 200
+        reply = client.post(f"/ng-rollout/{state.request.episode_id.capture_key}/v1/responses", json={"input": "task"})
+        assert reply.status_code == 200, reply.text
+        response = NeMoGymResponse.model_validate(reply.json())
+        assert response.status == "failed"
+        assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "agent_run_error"}
+        assert response.metadata["ng_agent_stop_reason"] == "no_result"
+        assert response.error.message == (
+            "Hermes sandbox runner failed: exited with status 137 without writing its output"
+        )
+        assert agent_outcome_policy(response) == OutcomeAction.RETRY
+        assert len(probes) == 1
+        close = client.post(
+            "/v1/agent_sessions/close",
+            json={"agent_session_id": "session", "episode_id": state.request.episode_id.model_dump()},
+        )
+        assert close.status_code == 200
+    state.session.sandbox.disconnect.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "receipt,probe",
+    [
+        # The file is there but could not be read: a capture failure, not a run without a result.
+        ({"return_code": 137}, SimpleNamespace(return_code=0, stdout="present\n", error_type=None)),
+        # The probe could not show that the file is absent.
+        ({"return_code": 137}, SimpleNamespace(return_code=-1, stdout=None, error_type="timeout")),
+        ({"return_code": 137}, SimpleNamespace(return_code=2, stdout="", error_type=None)),
+        ({"return_code": 137}, ConnectionError("provider unavailable")),
+        # A clean exit always writes the output, so its absence is a harness contradiction.
+        ({"return_code": 0}, None),
+        # No harness process ran, or its command could not start.
+        ({"return_code": None}, None),
+        ({"return_code": 127}, None),
+        # A deadline is never a run without a result.
+        ({"return_code": 137, "timed_out": True}, None),
+        ({"return_code": 1, "error": "supervisor failed"}, None),
+    ],
+)
+async def test_missing_output_stays_a_failure_unless_the_runner_ended_on_its_own(state, receipt, probe):
+    state.session.cleanup = {"cleanup_confirmed": True, "error": None, "timed_out": False, **receipt}
+    state.session.read_output_log = AsyncMock(return_value="runner log")
+    mock_json_download(state.session.sandbox, side_effect=RuntimeError("download failed"))
+    if isinstance(probe, Exception):
+        state.session.sandbox.exec.side_effect = probe
+    else:
+        state.session.sandbox.exec.return_value = probe
+
+    # The read failure stands, whatever the probe did.
+    with pytest.raises(RuntimeError, match="Hermes sandbox runner exited without output: runner log"):
+        await state.collect_artifacts()
+
+    # The receipt alone rules a run out before any probe.
+    assert state.session.sandbox.exec.await_count == (1 if probe is not None else 0)
+
+
+@pytest.mark.parametrize(
+    "runner,exit_status",
+    [("import os, signal; os.kill(os.getpid(), signal.SIGKILL)", 137), ("raise SystemExit(3)", 3)],
+    ids=["killed", "exited"],
+)
+async def test_runner_that_ends_before_its_output_is_a_run_without_a_result(
+    agent, state, local_runner, monkeypatch, tmp_path, runner, exit_status
+):
+    """The real supervisor and probe: a runner that dies before writing ``output.json`` is answered, not raised."""
+    script = tmp_path / "runner.py"
+    script.write_text(runner + "\n")
+    monkeypatch.setattr(hermes_sandbox, "_SANDBOX_RUNNER", str(script))
+
+    episode = await agent._run_sandbox_episode(
+        body=NeMoGymResponseCreateParamsNonStreaming(input="task"), agent_session_id="session", state=state
+    )
+
+    assert state.session.cleanup["return_code"] == exit_status
+    assert episode.response.status == "failed"
+    assert json.loads(episode.response.metadata["ng_agent_outcome"]) == {"failure_kind": "agent_run_error"}
+    assert agent_outcome_policy(episode.response) == OutcomeAction.RETRY
+    assert episode.response.error.message == (
+        f"Hermes sandbox runner failed: exited with status {exit_status} without writing its output"
+    )
+    await agent._close_agent_session_state(state)
+    state.session.sandbox.disconnect.assert_awaited_once()
+
+
 async def test_invalid_cleanup_diagnostics_do_not_block_close(agent, state):
     state.session.launch_started = True
     mock_json_download(

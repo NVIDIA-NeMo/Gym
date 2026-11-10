@@ -794,7 +794,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
         runner_error = output.get("error")
         result = output.get("result")
         if runner_error is not None:
-            # The runner caught the exception that ended Hermes, so the run left no usable result.
+            # The runner caught the exception that ended Hermes, or exited or was killed before it wrote its output
+            # (``collect_artifacts``), so the run left no usable result.
             LOG.warning("Hermes sandbox runner failed: %s\n%s", runner_error, output.get("traceback", ""))
             result = {"completed": False, "error": f"Hermes sandbox runner failed: {runner_error}", "messages": []}
         elif not isinstance(result, dict):

@@ -443,16 +443,18 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 raise
             state.resources_cookies = artifacts["resources_cookies"]
             output = artifacts
-        model_replied = bool(output["observations"]["model_response_ids"])
-        usage = _usage(output["usages"])
+        # A runner that exited without writing its report left no observations (``StirrupSessionState.execute``).
+        observations = output.get("observations")
+        model_replied = bool(observations["model_response_ids"]) if observations is not None else None
+        usage = _usage(output.get("usages", []))
         status = output.get("model_error_status")
         if usage is None and type(status) is int and status < 500 and not model_replied:
             # The only request was refused before any processing: a known zero. A request that failed in flight
             # (a 5xx or a transport error) may have used tokens, so that case stays unknown.
             usage = _zero_usage()
         if output.get("error") is not None:
-            # The runner caught the exception that ended Stirrup (for example a task tool's server failing), so
-            # the run left no usable result.
+            # The runner caught the exception that ended Stirrup (for example a task tool's server failing), or
+            # exited or was killed before it wrote its report, so the run left no usable result.
             message = f"Stirrup sandbox runner failed: {output['error']}"
             LOG.warning("%s\n%s", message, output.get("traceback", ""))
         else:
@@ -470,7 +472,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 **({"elapsed_seconds": str(output["elapsed_seconds"])} if "elapsed_seconds" in output else {}),
                 **({"stop_reason": output["stop_reason"]} if output.get("stop_reason") else {}),
             },
-            status=output["observations"]["status"],
+            status=observations["status"] if observations is not None else "failed",
             error={"code": "server_error", "message": message} if message else None,
             usage=usage,
         )
@@ -482,15 +484,17 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
         The runner records ``stop_reason="wall_time"`` when the supervisor's deadline signal stopped Stirrup,
         ``cancelled`` when the session's close did, and ends the invocation ``incomplete`` without a stop reason when
         Stirrup ran out of turns. A run that ended on the model's error or on unusable compaction summaries is
-        ``failed``; ``classify_outcome`` names the error.
+        ``failed``; ``classify_outcome`` names the error. A runner that exited without writing its report left no
+        observations and no usable result.
         """
-        status = output["observations"]["status"]
+        observations = output.get("observations")
+        status = observations["status"] if observations is not None else None
         ended_on_error = bool(output.get("model_error") or output.get("invalid_output"))
         return RunEvidence(
             has_result=status == "completed" and output.get("error") is None,
             timed_out=output.get("stop_reason") == "wall_time",
             stopped=output.get("stop_reason") == "cancelled",
-            model_replied=bool(output["observations"]["model_response_ids"]),
+            model_replied=bool(observations["model_response_ids"]) if observations is not None else None,
             model_limit="turns" if status == "incomplete" and output.get("stop_reason") is None else None,
             error=self.classify_outcome(output) if ended_on_error else None,
         )

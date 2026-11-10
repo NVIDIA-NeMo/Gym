@@ -208,11 +208,18 @@ async def test_independent_execution_failure_overrides_gradable_artifact(receipt
     s.files[r.directory + "/result.json"] = final.model_dump_json()
     s.files[r.directory + "/cleanup.json"] = json.dumps(receipt)
     request = payload().request
-    with pytest.raises(NOOARunFailure) as caught:
-        await r.run(request)
-    assert caught.value.result.termination_reason is NOOATerminationReason.INFRASTRUCTURE_ERROR
-    assert caught.value.result.episode.response.status == "failed"
-    assert caught.value.result.episode.response.output == final.response.output
+    if receipt["return_code"] == 7:
+        # A worker that ran and exited nonzero is a run without a usable result, which the agent answers as
+        # agent_run_error; main raised it as a lifecycle failure (500).
+        ended = await r.run(request)
+    else:
+        # The supervisor failed, or no worker ran: a failed lifecycle step.
+        with pytest.raises(NOOARunFailure) as caught:
+            await r.run(request)
+        ended = caught.value.result
+    assert ended.termination_reason is NOOATerminationReason.INFRASTRUCTURE_ERROR
+    assert ended.episode.response.status == "failed"
+    assert ended.episode.response.output == final.response.output
     assert r.artifact.termination_reason is reason
     assert r.observations == final.observations
     assert request.resource_cookies == {"resource": "new"}
@@ -914,14 +921,124 @@ async def test_failed_worker_retains_bounded_diagnostics_gap(receipt: CleanupRec
     complete_files(r, s)
     s.files[r.directory + "/cleanup.json"] = json.dumps(receipt)
     s.files[r.directory + "/output.log"] = "x" * 2500 + "\nImportError: missing module\x00"
-    with pytest.raises(NOOARunFailure) as caught:
-        await r.run(payload().request)
-    gap = next(
-        gap for gap in caught.value.result.episode.observations.gaps if gap.code == "sandbox_worker_diagnostics"
-    )
+    if receipt["error"] is None:
+        # A killed worker is a run without a usable result (agent_run_error), no longer a raise.
+        ended = await r.run(payload().request)
+    else:
+        with pytest.raises(NOOARunFailure) as caught:
+            await r.run(payload().request)
+        ended = caught.value.result
+    gap = next(gap for gap in ended.episode.observations.gaps if gap.code == "sandbox_worker_diagnostics")
     assert len(gap.detail) <= 2000
     assert gap.detail.endswith("\nImportError: missing module")
     assert "\x00" not in gap.detail
+    await r.close()
+
+
+def _missing_result_on_a_provider_with_generic_transfer_errors(r: SandboxNOOARunner, s: MemorySandbox) -> list[str]:
+    """Make a missing file fail its download with a generic error, as Docker does; return the probes it answers."""
+    download = s.download
+    probes = []
+
+    async def generic_download(source: str, destination: Path) -> None:
+        if source not in s.files:
+            raise RuntimeError(f"docker cp download from {source!r} failed: no such file")
+        await download(source, destination)
+
+    async def execute(command: str, **kwargs) -> SandboxExecResult:
+        if command.endswith("then echo present; else echo absent; fi"):
+            probes.append(command)
+            path = command.removeprefix("if [ -e ").partition(" ]")[0].strip("'")
+            return SandboxExecResult("present\n" if path in s.files else "absent\n", "", 0)
+        return SandboxExecResult("", "", 0)
+
+    s.download = generic_download
+    s.exec.side_effect = execute
+    return probes
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("generic_transfer_error", [False, True], ids=["file-not-found", "generic-transfer-error"])
+@pytest.mark.parametrize("has_checkpoint", [False, True])
+@pytest.mark.parametrize("exit_code", [137, 1])
+async def test_worker_that_ends_without_its_result_is_a_run_without_a_result(
+    generic_transfer_error: bool, has_checkpoint: bool, exit_code: int
+) -> None:
+    """A worker killed, or exiting, before it wrote result.json is the run's own failure, with its evidence.
+
+    main raised it (NOOARunFailure with a checkpoint, else RuntimeError), which the agent answered with a 500.
+    """
+    r, s = runner()
+    s.files[r.directory + "/cleanup.json"] = json.dumps(cleanup_receipt(return_code=exit_code))
+    if has_checkpoint:
+        s.files[r.directory + "/checkpoint.json"] = checkpoint_artifact().model_dump_json()
+    probes = _missing_result_on_a_provider_with_generic_transfer_errors(r, s) if generic_transfer_error else []
+    request = payload().request
+
+    ended = await r.run(request)
+
+    assert ended.termination_reason is NOOATerminationReason.INFRASTRUCTURE_ERROR
+    assert ended.termination_error == f"NOOA sandbox worker did not exit successfully (exit {exit_code})"
+    assert ended.model_transport_error is False
+    assert ended.episode.response.status == "failed"
+    assert ended.episode.response.error.message == ended.termination_error
+    assert ended.episode.response.output == (checkpoint_artifact().response.output if has_checkpoint else [])
+    assert r.session.capture_error is None
+    assert "sandbox_result_unavailable" in {gap.code for gap in ended.episode.observations.gaps}
+    if has_checkpoint:
+        assert request.resource_cookies == {"resource": "new"}
+    # Only a provider whose missing file is a generic error needs the probe; the checkpoint read probes too.
+    assert len(probes) == (0 if not generic_transfer_error else 1 if has_checkpoint else 2)
+    await r.close()
+    s.disconnect.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "receipt,result_file,message",
+    [
+        # The result exists but cannot be parsed: a failed capture, whatever the worker's exit.
+        (cleanup_receipt(return_code=137), "invalid-json", "did not exit successfully (exit 137)"),
+        (cleanup_receipt(return_code=137), '{"response":{}}', "did not exit successfully (exit 137)"),
+        # The worker's command could not start.
+        (cleanup_receipt(return_code=127), None, "did not exit successfully (exit 127)"),
+        # A deadline is never a run without a result.
+        (cleanup_receipt(return_code=137, timed_out=True), None, "worker exceeded its execution deadline"),
+    ],
+)
+async def test_worker_exit_without_a_result_stays_a_failure_when_not_the_runs_own(
+    receipt: CleanupReceipt, result_file: str | None, message: str
+) -> None:
+    r, s = runner()
+    s.files[r.directory + "/cleanup.json"] = json.dumps(receipt)
+    if result_file is not None:
+        s.files[r.directory + "/result.json"] = result_file
+    with pytest.raises(RuntimeError) as caught:
+        await r.run(payload().request)
+    assert message in str(caught.value)
+    await r.close()
+
+
+@pytest.mark.asyncio
+async def test_unreadable_result_on_a_provider_with_generic_transfer_errors_stays_a_failure() -> None:
+    """A download error for a result the probe shows is there stays a capture failure."""
+    r, s = runner()
+    s.files[r.directory + "/cleanup.json"] = json.dumps(cleanup_receipt(return_code=137))
+    s.files[r.directory + "/result.json"] = artifact().model_dump_json()
+    probes = _missing_result_on_a_provider_with_generic_transfer_errors(r, s)
+    unreadable = RuntimeError("docker cp download failed: permission denied")
+    download = s.download
+
+    async def failing_download(source: str, destination: Path) -> None:
+        if source.endswith("/result.json"):
+            raise unreadable
+        await download(source, destination)
+
+    s.download = failing_download
+    with pytest.raises(RuntimeError, match="did not exit successfully"):
+        await r.run(payload().request)
+    assert r.session.capture_error is unreadable
+    assert len(probes) == 2
     await r.close()
 
 

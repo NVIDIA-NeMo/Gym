@@ -5,12 +5,19 @@
 import asyncio
 import importlib.metadata
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from shlex import quote
 from typing import Any
 
-from nemo_gym.agents import AgentSessionState, SandboxCommand, SandboxPythonRuntime, SandboxSession
+from nemo_gym.agents import (
+    HARNESS_COMMAND_NOT_STARTED,
+    AgentSessionState,
+    SandboxCommand,
+    SandboxPythonRuntime,
+    SandboxSession,
+)
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import read_text, upload_text
 from nemo_gym.server_runtime import DirectHTTPToolAccess
@@ -31,6 +38,8 @@ SANDBOX_PYTHON = RUNTIME.python
 _PACKAGE_DIR = f"{RUNTIME_DIR}/harness/responses_api_agents/stirrup_agent"
 # The runner and the modules it imports; the rest of this package needs Gym, which the sandbox lacks.
 HARNESS_FILES = ("nemo_agent.py", "nemo_client.py", "stirrup_utils.py", "sandbox_runner.py")
+
+LOG = logging.getLogger(__name__)
 
 
 @dataclass
@@ -57,7 +66,11 @@ class StirrupSessionState(AgentSessionState):
             await upload_text(sandbox, path=f"{package}/__init__.py", text="")
 
     async def execute(self, payload: dict[str, Any], *, timeout: float, close_timeout: float) -> dict[str, Any]:
-        """Run the harness once and return its output; its ``error`` names an exception that ended the runner."""
+        """Run the harness once and return its output.
+
+        Its ``error`` names an exception that ended the runner, or a runner that exited without writing its output,
+        in which case the output carries nothing else.
+        """
         input_path = f"{self.session.session_dir}/input.json"
         output_path = f"{self.session.session_dir}/output.json"
 
@@ -73,7 +86,12 @@ class StirrupSessionState(AgentSessionState):
                 return json.loads(await read_text(self.session.sandbox, path=output_path))
             except Exception as error:
                 logs = await self.session.read_output_log()
-                raise RuntimeError(f"Stirrup sandbox runner exited without output: {logs}") from error
+                exit_code = await self._exit_without_output(output_path)
+                if exit_code is None:
+                    raise RuntimeError(f"Stirrup sandbox runner exited without output: {logs}") from error
+                # The runner exited or was killed before it wrote its report: the run left no result.
+                LOG.warning("Stirrup sandbox runner exited with status %d without output: %s", exit_code, logs)
+                return {"error": f"exited with status {exit_code} without writing its output"}
 
         output = await self.session.execute(
             stage_activation=stage, collect=collect, timeout=timeout, close_timeout=close_timeout
@@ -81,6 +99,32 @@ class StirrupSessionState(AgentSessionState):
         # A runner that failed reports no cookies; the session keeps the ones it has.
         self.resources_cookies = output.get("resources_cookies", self.resources_cookies)
         return output
+
+    async def _exit_without_output(self, output_path: str) -> int | None:
+        """The runner's nonzero exit status when its receipt shows it ended on its own and ``output_path`` is absent.
+
+        ``None`` when the receipt shows a clean exit, a deadline, a supervisor error or a command that could not
+        start, or when the probe cannot show that the file is absent (a missing file is a generic transfer error on
+        some providers). An output that exists but cannot be read or parsed stays a failure.
+        """
+        cleanup = self.session.cleanup
+        if (
+            cleanup is None
+            or cleanup["timed_out"]
+            or cleanup["error"]
+            or cleanup["return_code"] in (None, 0, *HARNESS_COMMAND_NOT_STARTED)
+        ):
+            return None
+        try:
+            probe = await self.session.sandbox.exec(
+                f"if [ -e {quote(output_path)} ]; then echo present; else echo absent; fi", cwd="/", timeout_s=30
+            )
+        except Exception:
+            LOG.warning("Could not check whether Stirrup left %s", output_path, exc_info=True)
+            return None
+        if probe.return_code != 0 or probe.error_type is not None or (probe.stdout or "").strip() != "absent":
+            return None
+        return cleanup["return_code"]
 
     async def close(self, timeout: float) -> None:
         """Stop the harness and release the sandbox before cancelling the HTTP activation."""

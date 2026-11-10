@@ -6,13 +6,15 @@ import asyncio
 import logging
 from dataclasses import replace
 from shlex import quote
+from time import time
 from uuid import uuid4
 
 from pydantic import ValidationError
 
-from nemo_gym.agents import SandboxCommand, SandboxSession, resolve_agent_timeout
+from nemo_gym.agents import HARNESS_COMMAND_NOT_STARTED, SandboxCommand, SandboxSession, resolve_agent_timeout
+from nemo_gym.core import NeMoGymResponse
 from nemo_gym.sandbox import AsyncSandbox, read_text, upload_text
-from nemo_gym.trajectory import AgentObservationBundle, ObservationGap
+from nemo_gym.trajectory import AgentEpisode, AgentObservationBundle, ObservationGap
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig
 from responses_api_agents.nooa_agent.result import is_transient_infrastructure_error, set_response_lifecycle
 from responses_api_agents.nooa_agent.runner import NOOARunFailure, NOOARunRequest, NOOARunResult
@@ -58,6 +60,8 @@ class SandboxNOOARunner:
             owns_sandbox=False,
         )
         self.artifact: SandboxResult | None = None
+        # result.json was there but did not hold a final result; a missing one is a run without a result.
+        self.artifact_malformed = False
         self.checkpoint: SandboxCheckpoint | None = None
         self.observations: AgentObservationBundle | None = None
         self.diagnostics = ""
@@ -138,7 +142,17 @@ class SandboxNOOARunner:
             if cleanup["error"]:
                 raise RuntimeError(f"NOOA sandbox supervisor failed: {cleanup['error']}")
             if cleanup["return_code"] != 0:
-                raise RuntimeError(f"NOOA sandbox worker did not exit successfully (exit {cleanup['return_code']})")
+                detail = f"NOOA sandbox worker did not exit successfully (exit {cleanup['return_code']})"
+                if (
+                    capture_failure is not None
+                    or self.artifact_malformed
+                    or cleanup["return_code"] in (None, *HARNESS_COMMAND_NOT_STARTED)
+                ):
+                    # A result that exists but cannot be read or parsed, or a worker that never ran.
+                    raise RuntimeError(detail)
+                # The worker ran and then exited nonzero or was killed: the run left no usable result, which the
+                # outcome ladder answers as agent_run_error. Its partial evidence is kept.
+                return self._no_result(request, detail)
             if capture_failure is not None:
                 raise capture_failure
             if self.artifact is None:
@@ -177,6 +191,37 @@ class SandboxNOOARunner:
                         raise NOOARunFailure(error, result) from error
             raise
 
+    def _no_result(self, request: NOOARunRequest, detail: str) -> NOOARunResult:
+        """The run of a worker that exited without a usable result, with whatever evidence it left."""
+        evidence = self.artifact or self.checkpoint
+        if evidence is not None and evidence.response is not None:
+            request.model_cookies.update(evidence.model_cookies)
+            request.resource_cookies.update(evidence.resource_cookies)
+            return self._ended_result(evidence, NOOATerminationReason.INFRASTRUCTURE_ERROR, detail)
+        params = request.responses_create_params
+        response = NeMoGymResponse(
+            id=f"nooa-{request.rollout_id}",
+            created_at=time(),
+            model=params.model or self.model_server_name,
+            object="response",
+            output=[],
+            tools=params.tools,
+            tool_choice=params.tool_choice,
+            parallel_tool_calls=params.parallel_tool_calls,
+        )
+        reason = NOOATerminationReason.INFRASTRUCTURE_ERROR
+        return NOOARunResult(
+            episode=AgentEpisode(
+                response=set_response_lifecycle(response, reason, detail),
+                observations=self.observations or AgentObservationBundle(source="nooa"),
+            ),
+            return_value=None,
+            model_cookies=request.model_cookies,
+            resource_cookies=request.resource_cookies,
+            termination_reason=reason,
+            termination_error=detail,
+        )
+
     def _ended_result(self, evidence: SandboxResult, reason: NOOATerminationReason, detail: str) -> NOOARunResult:
         """The run result ``evidence`` holds, ended for ``reason``, with the observations captured so far."""
         result = evidence.run_result()
@@ -204,14 +249,32 @@ class SandboxNOOARunner:
             self.observations = observations
 
     async def _read_artifact(self, name: str) -> str:
+        """Read an activation file; a file the worker never wrote raises ``FileNotFoundError`` on every provider."""
+        path = f"{self.directory}/{name}"
         # The shared session bounds the entire capture, including this one retry.
         try:
-            return await read_text(self.sandbox, path=f"{self.directory}/{name}")
+            return await read_text(self.sandbox, path=path)
+        except FileNotFoundError:
+            raise
         except Exception as error:
+            # Some providers report a missing file as a generic transfer error.
+            if await self._absent(path):
+                raise FileNotFoundError(path) from error
             if not is_transient_infrastructure_error(error):
                 raise
             LOGGER.warning("Retrying NOOA %s capture after %s", name, type(error).__name__)
-        return await read_text(self.sandbox, path=f"{self.directory}/{name}")
+        return await read_text(self.sandbox, path=path)
+
+    async def _absent(self, path: str) -> bool:
+        """Whether ``path`` is absent from the sandbox; a probe that fails shows nothing, so the read error stands."""
+        try:
+            probe = await self.sandbox.exec(
+                f"if [ -e {quote(path)} ]; then echo present; else echo absent; fi", cwd="/", timeout_s=30
+            )
+        except Exception:
+            LOGGER.warning("Could not check whether NOOA's %s exists", path, exc_info=True)
+            return False
+        return probe.return_code == 0 and probe.error_type is None and (probe.stdout or "").strip() == "absent"
 
     async def _collect_artifacts(self) -> None:
         """Prefer terminal evidence; recovered checkpoints can never establish completion."""
@@ -219,6 +282,7 @@ class SandboxNOOARunner:
         try:
             artifact = SandboxResult.model_validate_json(await self._read_artifact("result.json"))
         except (FileNotFoundError, ValidationError) as error:
+            self.artifact_malformed = isinstance(error, ValidationError)
             unavailable = f"missing or malformed ({type(error).__name__})"
         except Exception as error:
             capture_error = error
@@ -229,6 +293,7 @@ class SandboxNOOARunner:
                 self.checkpoint = None
                 self.observations = artifact.observations
                 return
+            self.artifact_malformed = True
             unavailable = "missing or malformed (neither a response nor an error)"
 
         gap = ObservationGap(

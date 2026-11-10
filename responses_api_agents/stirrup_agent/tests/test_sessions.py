@@ -538,25 +538,65 @@ def test_a_run_that_never_finishes_within_its_turns_answers_incomplete(agent, cl
     assert closed.json()["agent_observations"]["records"][0]["status"] == "incomplete"
 
 
-@pytest.mark.parametrize("output", ["", "{not json"])
-def test_a_runner_that_leaves_no_valid_output_fails_the_activation(agent, client, root, tmp_path, monkeypatch, output):
-    agent.config.finish_tool_names = None
+def _replace_runner(tmp_path: Path, monkeypatch, runner: str) -> None:
+    """Run ``runner`` (shell, with the output path in ``$5``) in place of the Stirrup runner."""
     fake_python = tmp_path / "python"
     # Only the runner is replaced; the supervisor that launches it runs on the real interpreter.
     fake_python.write_text(
         "#!/bin/sh\n"
         '[ "$1" = -c ] && exit 0\n'
         # The runner ignores task Python settings and user site-packages.
-        f"case \"$1 $2 $3\" in '-E -s '*sandbox_runner.py) printf '%s' '{output}' > \"$5\"; exit 0;; esac\n"
+        f"case \"$1 $2 $3\" in '-E -s '*sandbox_runner.py) {runner};; esac\n"
         f'exec {sys.executable} "$@"\n'
     )
     fake_python.chmod(0o755)
     monkeypatch.setattr(sandbox, "SANDBOX_PYTHON", str(fake_python))
     monkeypatch.setattr(StirrupAgentWrapper, "resolve_model_base_url", lambda *_: "http://policy.invalid/v1")
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+@pytest.mark.parametrize("output", ["", "{not json"])
+def test_a_runner_that_leaves_no_valid_output_fails_the_activation(
+    agent, client, root, tmp_path, monkeypatch, output, exit_code
+):
+    """An output file that exists but cannot be parsed is a failed lifecycle step, whatever the runner's exit."""
+    agent.config.finish_tool_names = None
+    _replace_runner(tmp_path, monkeypatch, f"printf '%s' '{output}' > \"$5\"; exit {exit_code}")
     _seed(client, sandbox_access=_sandbox_access(str(root)))
 
     with raises_agent_failure(RuntimeError, match="Stirrup sandbox runner exited without output"):
         _respond(client)
+
+
+@pytest.mark.parametrize("runner", ["kill -KILL $$", "exit 3"], ids=["killed", "exited"])
+def test_a_runner_that_ends_without_its_output_answers_failed_agent_run_error(
+    agent, client, root, tmp_path, monkeypatch, runner
+):
+    """A harness killed, or exiting, before it wrote its output left no result: HTTP 200, retried by default.
+
+    The agent server used to answer 500, which dropped the run's trajectory.
+    """
+    agent.config.finish_tool_names = None
+    _replace_runner(tmp_path, monkeypatch, runner)
+    _seed(client, sandbox_access=_sandbox_access(str(root)))
+
+    reply = _respond(client)
+    closed = _close(client)
+
+    assert reply.status_code == 200, reply.text
+    response = NeMoGymResponse.model_validate(reply.json())
+    assert response.status == "failed"
+    assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "agent_run_error"}
+    assert response.metadata["ng_agent_stop_reason"] == "no_result"
+    exit_status = 137 if runner.startswith("kill") else 3
+    assert response.error.message == (
+        f"Stirrup sandbox runner failed: exited with status {exit_status} without writing its output"
+    )
+    assert agent_outcome_policy(response) == OutcomeAction.RETRY
+    assert closed.status_code == 200, closed.text
+    assert [gap["detail"] for gap in closed.json()["agent_observations"]["gaps"]] == [
+        "the runner reported no observations"
+    ]
 
 
 @pytest.mark.parametrize("replied", [False, True], ids=["first-request", "after-a-reply"])
