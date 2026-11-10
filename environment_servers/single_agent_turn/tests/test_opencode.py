@@ -20,7 +20,7 @@ async def test_session_lifecycle_shapes_reward_and_preserves_training_response(
     if explicit_config:
         client.global_config_dict.agent.responses_api_agents.test.tool_rewards = config.model_dump()
     call = {"type": "function_call", "call_id": "bash-1", "name": "bash", "arguments": '{"command":"ls"}'}
-    tools = score_opencode_tools({"bash-1": ("bash", "completed", 0)}, [call], [], 0.0, config)
+    tools = score_opencode_tools({"bash-1": ("bash", "completed", 0)}, [call], 0.0, config)
     response = _agent_response().model_dump(mode="json")
     response["output"][0]["content"][0]["text"] = "<think>analysis</think>\\boxed{answer}"
     response["opencode_evidence"] = {"turns_used": 2, "finished_naturally": True, "tool_reward": tools.model_dump()}
@@ -69,7 +69,7 @@ def test_http_bridge_preserves_reward_and_training_tokens(wire_format):
     base, client = _environment_server(token_capture=True)
     config = OpenCodeToolRewardConfig()
     call = {"type": "function_call", "call_id": "bash-1", "name": "bash", "arguments": '{"command":"ls"}'}
-    tools = score_opencode_tools({"bash-1": ("bash", "completed", 0)}, [call], [], 0.0, config)
+    tools = score_opencode_tools({"bash-1": ("bash", "completed", 0)}, [call], 0.0, config)
     response = _agent_response().model_dump(mode="json")
     response["opencode_evidence"] = {"turns_used": 2, "finished_naturally": True, "tool_reward": tools.model_dump()}
     client.responses[2] = _Response(response)
@@ -114,7 +114,7 @@ async def test_incomplete_finalized_trace_preserves_reward_shaping_and_tokens(ba
     response["status"] = "incomplete"
     response["incomplete_details"] = {"reason": "max_output_tokens"}
     call = {"type": "function_call", "call_id": "bash-1", "name": "bash", "arguments": '{"command":"ls"}'}
-    tools = score_opencode_tools({"bash-1": ("bash", "completed", 0)}, [call], [], 0.0, OpenCodeToolRewardConfig())
+    tools = score_opencode_tools({"bash-1": ("bash", "completed", 0)}, [call], 0.0, OpenCodeToolRewardConfig())
     response["opencode_evidence"] = {"turns_used": 1, "finished_naturally": False, "tool_reward": tools.model_dump()}
     client.responses[2] = _Response(response)
     verified = json.loads(client.responses[4].body)

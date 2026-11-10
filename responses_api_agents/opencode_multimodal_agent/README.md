@@ -130,8 +130,7 @@ leave it false for text-only models.
 
 Image prompts enforce `max_images` and `max_source_pixels` (150 million pixels by
 default). Exceeding a limit rejects the
-request. Valid images preserve their bytes by default. Explicit
-`preserve_image_format: false` converts prompt images to RGB PNG.
+request. Valid images always preserve their bytes.
 
 Main decodes inline images, rejects URLs/file IDs and system/developer images,
 and stages content-named files atomically inside the activation deadline. Images

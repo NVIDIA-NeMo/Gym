@@ -84,11 +84,10 @@ def _identity(item: dict) -> tuple[str, str]:
 def score_opencode_tools(
     execution_records: dict[str, tuple[str, str, int | None]],
     output: list[dict],
-    initial_input: list[dict],
     base_reward: float,
     config: OpenCodeToolRewardConfig,
 ) -> OpenCodeToolReward:
-    """Score live main-trajectory calls; replay and child calls are not rewarded.
+    """Score main-trajectory calls; child calls are not rewarded.
 
     A completed bash tool can still have a nonzero process exit code. Use the
     native state/exit metadata, never model-visible output text, to distinguish
@@ -97,9 +96,6 @@ def score_opencode_tools(
     """
     calls = [item for item in output if item.get("type") == "function_call"]
     previous = None
-    for item in initial_input:
-        if item.get("type") == "function_call":
-            previous = _identity(item)
     records = execution_records
     if len({item["call_id"] for item in calls}) != len(calls):
         raise ValueError("Repeated call ID in the live OpenCode trajectory")

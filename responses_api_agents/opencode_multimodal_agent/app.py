@@ -40,7 +40,6 @@ class OpenCodeMultimodalAgentConfig(OpenCodeAgentConfig):
     final_answer_reserve: int | None = Field(default=2048, gt=0)
     backend_final_answer_reserve: bool = True
     strip_reasoning_for_grading: bool = True
-    preserve_image_format: bool = True
     max_source_pixels: int = Field(default=150_000_000, gt=0)
     max_images: int | None = Field(default=33, gt=0)
     command_exec_timeout: int = Field(default=300, gt=0)
@@ -115,7 +114,6 @@ class OpenCodeMultimodalAgent(OpenCodeAgent):
                 prepare_image(
                     image,
                     max_source_pixels=self.config.max_source_pixels,
-                    preserve_format=self.config.preserve_image_format,
                 )
                 for image in media
             ]
@@ -254,7 +252,6 @@ class OpenCodeMultimodalAgent(OpenCodeAgent):
             tools = score_opencode_tools(
                 records,
                 [item.model_dump() for item in response.output],
-                [],
                 0.0,
                 self.config.tool_rewards,
             )
