@@ -1103,6 +1103,8 @@ class TestConfigYaml:
         assert inner.get("token_id_capture", False) is False
         assert inner["concurrency"] == 32
         assert inner["max_turns"] == 30
+        # Restricting egress is opt-in: the shipped default leaves the provider's network alone.
+        assert inner["network_access"] == "inherit"
 
 
 class TestCaptureFriendlyTranscript:
