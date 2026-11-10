@@ -6,8 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome, AgentOutcomePolicyConfig
-from nemo_gym.core import FailureReport, NgFailureEvent
-from nemo_gym.core.failure_transport import FailureHeader, FailureReportRow
+from nemo_gym.core import FailureHeader, FailureReport, FailureReportRow, NgFailureEvent
 from nemo_gym.rollouts.rollout_collection import _episode_record
 from tests.helpers.single_agent_turn import _agent_response, _environment_server, _request, _Response
 
