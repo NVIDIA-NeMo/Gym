@@ -19,10 +19,9 @@ from nemo_gym.config import AggregateMetricsRequest
 from nemo_gym.config.secret_utils import recursively_hide_secrets
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, maybe_rollout_id_from_run_body
 from nemo_gym.models import CaptureStore
-from nemo_gym.orchestration import jobs
 from nemo_gym.rollouts import rollout_collection, run_health_checks
 from nemo_gym.rollouts.harness_capabilities import EvidenceScope, inspect_record
-from nemo_gym.utils import materialized_path_for
+from nemo_gym.utils import gym_commit, materialized_path_for
 from resources_servers.agentic_if_realworld.app import ResourcesConfig, ResourcesServer, Verifier, VerifyRequest
 from resources_servers.agentic_if_realworld.benchmark import core
 from resources_servers.agentic_if_realworld.benchmark.runner import run_cell
@@ -48,7 +47,7 @@ from responses_api_agents.simple_agent.tests.test_app import _make_agent, _mock_
 def test_adaptive_capture_selected_parameters_and_resume(
     tmp_path, monkeypatch, complete_stage, fail_last_dispatch, interrupted, fresh_resume, multiple, reasoning_effort
 ):
-    monkeypatch.setattr(jobs, "installed_gym_commit", lambda: "runtime-revision")
+    monkeypatch.setattr(gym_commit, "installed_gym_commit", lambda: "runtime-revision")
     # Other CI component workers can change unrelated files in the shared checkout.
     # Keep dispatch scenarios fixed, then exercise the real identity checks on resume.
     runtime = core.runtime_identity()
@@ -473,7 +472,7 @@ def test_adaptive_capture_selected_parameters_and_resume(
     config.resume_from_cache = True
     # Another component's generated output must not invalidate a completed run.
     monkeypatch.setattr(rollout_driver, "runtime_identity", core.runtime_identity)
-    monkeypatch.setattr(jobs, "installed_gym_commit", lambda: "runtime-revision-dirty")
+    monkeypatch.setattr(gym_commit, "installed_gym_commit", lambda: "runtime-revision-dirty")
     asyncio.run(rollout_driver.run_rollout_collection(config, settings))
     assert inventory_path.read_bytes() == inventory_bytes
     assert len(calls) == last_stage + 1 and len(judge_calls) == int(complete_stage is not None)
@@ -546,16 +545,16 @@ def test_adaptive_capture_selected_parameters_and_resume(
 
 @pytest.mark.parametrize("revision", [None, "runtime-revision", "runtime-revision-dirty"])
 def test_runtime_fingerprint_normalizes_only_checkout_dirtiness(monkeypatch, revision):
-    monkeypatch.setattr(jobs, "installed_gym_commit", lambda: revision)
+    monkeypatch.setattr(gym_commit, "installed_gym_commit", lambda: revision)
     before = core.runtime_identity()
     assert before["gym_commit"] == ("runtime-revision" if revision is not None else None)
-    monkeypatch.setattr(jobs, "installed_gym_commit", lambda: "different-revision-dirty")
+    monkeypatch.setattr(gym_commit, "installed_gym_commit", lambda: "different-revision-dirty")
     assert core.runtime_identity() != before
 
 
 @pytest.mark.parametrize("source", ["simple_agent/app.py", "nemo_gym/rollouts/rollout_collection.py"])
 def test_runtime_fingerprint_covers_active_agent_and_core(monkeypatch, source):
-    monkeypatch.setattr(jobs, "installed_gym_commit", lambda: "runtime-revision")
+    monkeypatch.setattr(gym_commit, "installed_gym_commit", lambda: "runtime-revision")
     before = core.runtime_identity()
     assert before["gym_commit"] == "runtime-revision"
     assert before["source_gym_commit"] == core.read(core.ROOT / "source_manifest.json")["gym_commit"]
@@ -578,7 +577,7 @@ def test_pending_resume_binds_runtime_inputs(tmp_path, monkeypatch, change):
     benchmark = tmp_path / "Gym/resources_servers/agentic_if_realworld/benchmark"
     shutil.copytree(core.ROOT, benchmark)
     monkeypatch.setattr(core, "ROOT", benchmark)
-    monkeypatch.setattr(jobs, "installed_gym_commit", lambda: "runtime-revision")
+    monkeypatch.setattr(gym_commit, "installed_gym_commit", lambda: "runtime-revision")
     before = core.runtime_identity()
     schema = benchmark / "policy/judge_output.schema.json"
     assert before["sources"]["policy/judge_output.schema.json"] == core.digest(schema)
@@ -612,7 +611,7 @@ def test_pending_resume_binds_runtime_inputs(tmp_path, monkeypatch, change):
         source.write_text("# Another component's generated checkout\n")
     else:
         (benchmark / "generated-output.txt").write_text("Unrelated workspace output")
-    monkeypatch.setattr(jobs, "installed_gym_commit", lambda: "runtime-revision-dirty")
+    monkeypatch.setattr(gym_commit, "installed_gym_commit", lambda: "runtime-revision-dirty")
     after = core.runtime_identity()
     args["settings"] = {"runtime": after}
     if change in {"judge_schema", "active_python"}:
