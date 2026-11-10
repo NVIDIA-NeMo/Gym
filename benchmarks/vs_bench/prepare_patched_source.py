@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """Create a checksum-verified VS-Bench source export with the KAZ fix.
 
 The input is a clean export of the pinned upstream revision. The input and any
