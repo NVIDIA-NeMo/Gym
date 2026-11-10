@@ -21,6 +21,7 @@ from benchmarks.healthbench.prepare_common import (
 )
 from benchmarks.healthbench_professional.prepare import HF_REVISION as HBP_REVISION
 from benchmarks.healthbench_professional.prepare import prepare as prepare_hbp
+from resources_servers.healthbench_rubric.task_data import TaskData
 
 
 def source():
@@ -44,6 +45,75 @@ def test_preserves_native_conversation_and_rubrics():
     assert row["rubrics"] == data["rubrics"]
     assert row["uuid"] == to_gym_row(data, 2, benchmark_name="healthbench")["uuid"]
     assert row["uuid"] != to_gym_row(data, 1, benchmark_name="healthbench_professional")["uuid"]
+    assert TaskData.model_validate(row).rubrics == data["rubrics"]
+
+
+@pytest.mark.parametrize("prepare", [prepare_hb, prepare_hbp])
+def test_prepared_rows_share_the_verifier_task_contract(tmp_path, prepare):
+    p = tmp_path / "source.jsonl"
+    p.write_text(json.dumps(source()) + "\n")
+    row = list(load_jsonl(prepare(p, tmp_path / "out.jsonl")))[0]
+    assert TaskData.model_validate(row).conversation == source()["prompt"]
+    assert TaskData.model_validate(row).rubrics[0]["tags"] == ["synthetic"]
+
+
+def test_collation_uses_the_shared_task_schema():
+    from nemo_gym.data import TaskDataValidator, load_task_data_schema
+
+    adapter = load_task_data_schema(Path("resources_servers/healthbench_rubric"))
+    assert adapter is not None
+    validator = TaskDataValidator("healthbench_rubric", adapter, "synthetic.jsonl")
+    row = to_gym_row(source(), 1, benchmark_name="healthbench")
+    validator.validate_row(1, row)
+    validator.validate_row(2, {key: value for key, value in row.items() if key != "rubrics"})
+    assert validator.report.rows == 2
+    assert validator.report.error_rows == 1
+    assert not validator.report.unknown_keys
+
+
+@pytest.mark.parametrize("missing", ["source_id", "conversation", "rubrics"])
+def test_missing_required_task_fields_fail_schema_and_runtime(missing):
+    from pydantic import ValidationError
+
+    from nemo_gym.verification import load_verifier_fixture
+    from resources_servers.healthbench_rubric.app import VERIFIER_FIXTURE, HealthBenchRubricVerifyRequest
+
+    row = to_gym_row(source(), 1, benchmark_name="healthbench")
+    row.pop(missing)
+    with pytest.raises(ValidationError):
+        TaskData.model_validate(row)
+    body = load_verifier_fixture(VERIFIER_FIXTURE.cases_path)[0].request
+    body.pop(missing)
+    with pytest.raises(ValidationError):
+        HealthBenchRubricVerifyRequest.model_validate(body)
+
+
+@pytest.mark.parametrize("points", [True, float("inf"), float("nan"), -1])
+def test_invalid_task_points_fail_schema_and_runtime(points):
+    from pydantic import ValidationError
+
+    from nemo_gym.verification import load_verifier_fixture
+    from resources_servers.healthbench_rubric.app import VERIFIER_FIXTURE, HealthBenchRubricVerifyRequest
+
+    row = to_gym_row(source(), 1, benchmark_name="healthbench")
+    row["rubrics"][0]["points"] = points
+    with pytest.raises(ValidationError):
+        TaskData.model_validate(row)
+    body = load_verifier_fixture(VERIFIER_FIXTURE.cases_path)[0].request
+    body["rubrics"][0]["points"] = points
+    with pytest.raises(ValidationError):
+        HealthBenchRubricVerifyRequest.model_validate(body)
+
+
+def test_professional_default_output_is_under_callers_cwd(tmp_path, monkeypatch):
+    import benchmarks.healthbench_professional.prepare as module
+
+    p = tmp_path / "source.jsonl"
+    p.write_text(json.dumps(source()) + "\n")
+    monkeypatch.chdir(tmp_path)
+    output = module.prepare(p, limit=1)
+    assert output.resolve() == tmp_path / module.OUTPUT_FPATH
+    assert output.exists()
 
 
 @pytest.mark.parametrize("prepare", [prepare_hb, prepare_hbp])
@@ -175,7 +245,7 @@ def test_variant_config_prepares_and_selects_the_same_dataset(tmp_path, subset, 
         if other != subset:
             Path(destination).write_text("do not overwrite\n")
     with patch("huggingface_hub.hf_hub_download", return_value=str(local_source)) as download:
-        _multiprocess_benchmark_prepare_fn((datasets[0], "benchmarks.healthbench.prepare", args))
+        _multiprocess_benchmark_prepare_fn((datasets[0], "benchmarks.healthbench.prepare", args, None))
     assert download.call_args.kwargs["filename"] == SOURCE_FILENAMES[subset]
     row = list(load_jsonl(Path(destinations[subset])))[0]
     assert row["metadata"]["healthbench_subset"] == subset

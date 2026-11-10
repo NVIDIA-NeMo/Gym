@@ -13,6 +13,8 @@ from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
+from resources_servers.healthbench_rubric.task_data import TaskData
+
 
 try:
     from tqdm import tqdm
@@ -141,7 +143,7 @@ def to_gym_row(record: dict[str, Any], row_number: int, *, benchmark_name: str) 
     metadata["source_id"] = source_id
     metadata["benchmark_name"] = benchmark_name
 
-    return {
+    row = {
         "uuid": str(uuid.uuid5(uuid.NAMESPACE_URL, f"{benchmark_name}/{source_id}")),
         "source_id": source_id,
         "conversation": conversation,
@@ -153,6 +155,8 @@ def to_gym_row(record: dict[str, Any], row_number: int, *, benchmark_name: str) 
             "tools": [],
         },
     }
+    TaskData.model_validate(row)
+    return row
 
 
 def write_gym_jsonl(

@@ -2,14 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
-from unittest.mock import AsyncMock, patch
+import os
+import subprocess
+import sys
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 from pydantic import ValidationError
 
-from nemo_gym.judge import JudgeError, judge_failsafe
-from nemo_gym.openai_utils import NeMoGymChatCompletion
-from nemo_gym.verifier_fixture import exercise_verifier_fixture, load_verifier_fixture
+from nemo_gym.core import FailureReportRow, NeMoGymChatCompletion
+from nemo_gym.trajectory import grading_result_binding
+from nemo_gym.verification import JudgeError, exercise_verifier_fixture, judge_failsafe, load_verifier_fixture
 from resources_servers.healthbench_rubric.app import (
     VERIFIER_FIXTURE,
     HealthBenchRubricVerifyRequest,
@@ -183,6 +188,29 @@ def test_last_answer_and_exact_whitespace():
     assert _extract_last_assistant_text(body) == ""
 
 
+async def test_refusal_only_is_judged_as_answer_text():
+    data = request().model_dump(mode="json")
+    data["response"]["output"][0]["content"] = [{"type": "refusal", "refusal": "Please seek emergency care."}]
+    body = HealthBenchRubricVerifyRequest.model_validate(data)
+    server = make_server()
+    with patch("resources_servers.healthbench_rubric.app.call_judge", AsyncMock(return_value=completion())) as judge:
+        result = await server.verify(body)
+    assert "Please seek emergency care." in judge.call_args.kwargs["json"].messages[-1]["content"]
+    assert result.overall_score == 1
+    assert result.grades
+
+
+def test_mixed_text_and_refusal_keeps_content_order():
+    data = request().model_dump(mode="json")
+    data["response"]["output"][0]["content"] = [
+        {"type": "output_text", "text": " first ", "annotations": []},
+        {"type": "refusal", "refusal": "second"},
+        {"type": "output_text", "text": " third\n", "annotations": []},
+    ]
+    body = HealthBenchRubricVerifyRequest.model_validate(data)
+    assert _extract_last_assistant_text(body) == " first second third\n"
+
+
 def test_length_adjustment_reference_formula():
     server = make_server(length_adjustment_center=2000, length_adjustment_penalty_per_500_chars=0.0147)
     assert server._calculate_length_adjusted_score(0.6, "x" * 2500) == pytest.approx(0.5853)
@@ -256,3 +284,143 @@ async def test_reverify_clears_previous_failure_fields_and_replaces_scores():
     assert result.evaluation_completed and not result.mask_sample
     assert result.failure_kind is None
     assert "_ng_failure_class" not in result.model_dump()
+
+
+def _judge_http_reply(payload: dict | None = None, *, status: int = 200):
+    from aiohttp import ClientResponseError, RequestInfo
+    from multidict import CIMultiDict, CIMultiDictProxy
+    from yarl import URL
+
+    body = json.dumps(payload or {"error": "judge unavailable"}).encode()
+    reply = MagicMock(ok=status < 400, status=status)
+    reply.read = AsyncMock(return_value=body)
+    reply.content.read = AsyncMock(return_value=body)
+    url = URL("http://judge.example.invalid/v1/responses")
+    info = RequestInfo(url=url, method="POST", headers=CIMultiDictProxy(CIMultiDict()), real_url=url)
+    reply.raise_for_status = MagicMock(side_effect=ClientResponseError(info, (), status=status, message="judge error"))
+    return reply
+
+
+async def _verify_route(server, body):
+    server.server_client.global_config_dict = {"observability_enabled": True}
+    transport = ASGITransport(app=server.setup_webserver())
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/ng-rollout/healthbench-test/verify", json=body.model_dump(mode="json"))
+    assert response.status_code == 200
+    return response.json()
+
+
+def _judge_payload(text: str, *, responses_api: bool, response_id: str) -> dict:
+    if responses_api:
+        payload = request(text).response.model_dump(mode="json")
+        payload["id"] = response_id
+        return payload
+    payload = completion(text).model_dump(mode="json")
+    payload["id"] = response_id
+    return payload
+
+
+@pytest.mark.parametrize("responses_api", [False, True])
+@pytest.mark.parametrize("criteria_met", [False, True])
+async def test_route_records_bound_judge_grading(responses_api, criteria_met):
+    server = make_server(
+        **({"judge_responses_create_params": {"input": [], "max_output_tokens": 4096}} if responses_api else {})
+    )
+    body = request()
+    body.rubrics = [
+        {"criterion": "Positive", "points": 7},
+        {"criterion": "Negative", "points": -8},
+    ]
+    verdict = json.dumps({"criteria_met": criteria_met})
+    payloads = [_judge_payload(verdict, responses_api=responses_api, response_id=f"judge-{i}") for i in (1, 2)]
+    server.server_client.post = AsyncMock(side_effect=[_judge_http_reply(payload) for payload in payloads])
+    row = await _verify_route(server, body)
+    expected = -1 / 7 if criteria_met else 0
+    assert row["overall_score"] == pytest.approx(expected)
+    assert row["reward"] == 0
+    assert row["response"] == body.response.model_dump(mode="json")
+    [invocation] = row["ng_verifier_invocations"]
+    [operation] = invocation["grading_operations"]
+    assert operation["kind"] == "llm_judge"
+    assert operation["outcome"] == "completed"
+    assert operation["result_binding_sha256"] == grading_result_binding(row)
+    assert [item["response_id"] for item in operation["dependencies"]] == ["judge-1", "judge-2"]
+    assert [grade["judgement_id"] for grade in row["grades"]] == ["judge-1", "judge-2"]
+
+
+@pytest.mark.parametrize("responses_api", [False, True])
+async def test_route_malformed_reply_then_valid_records_completed_grade(responses_api):
+    server = make_server(
+        **({"judge_responses_create_params": {"input": [], "max_output_tokens": 4096}} if responses_api else {})
+    )
+    payloads = [
+        _judge_payload("not JSON", responses_api=responses_api, response_id="rejected"),
+        _judge_payload('{"criteria_met":true}', responses_api=responses_api, response_id="accepted"),
+    ]
+    server.server_client.post = AsyncMock(side_effect=[_judge_http_reply(payload) for payload in payloads])
+    row = await _verify_route(server, request())
+    assert row["overall_score"] == 1
+    [operation] = row["ng_verifier_invocations"][0]["grading_operations"]
+    assert operation["outcome"] == "completed"
+    assert operation["result_binding_sha256"] == grading_result_binding(row)
+    assert [item["response_id"] for item in operation["dependencies"]] == ["rejected", "accepted"]
+    assert row["grades"][0]["judgement_id"] == "accepted"
+
+
+async def test_professional_route_binds_length_adjusted_score():
+    server = make_server(
+        judge_responses_create_params={"input": [], "max_output_tokens": 4096},
+        length_adjustment_center=2000,
+        length_adjustment_penalty_per_500_chars=0.0147,
+        reward_metric="overall_score_length_adjusted",
+    )
+    payload = _judge_payload('{"criteria_met":true}', responses_api=True, response_id="pro-judge")
+    server.server_client.post = AsyncMock(return_value=_judge_http_reply(payload))
+    row = await _verify_route(server, request())
+    assert row["overall_score"] == 1
+    assert row["overall_score_length_adjusted"] > 1
+    assert row["reward"] == 1
+    [operation] = row["ng_verifier_invocations"][0]["grading_operations"]
+    assert operation["outcome"] == "completed"
+    assert operation["result_binding_sha256"] == grading_result_binding(row)
+    assert operation["dependencies"][0]["response_id"] == "pro-judge"
+
+
+@pytest.mark.parametrize("status,attempts", [(401, 1), (503, 3)])
+async def test_route_typed_judge_failures_keep_completion_and_http_cause(status, attempts):
+    server = make_server()
+    server.server_client.post = AsyncMock(side_effect=[_judge_http_reply(status=status) for _ in range(attempts)])
+    with patch("nemo_gym.verification.judge._judge_retry_wait_s", return_value=0):
+        body = request()
+        row = await _verify_route(server, body)
+    assert server.server_client.post.await_count == attempts
+    assert row["evaluation_completed"] is False
+    assert row["mask_sample"] is True
+    assert row["response"] == body.response.model_dump(mode="json")
+    report = FailureReportRow.report(row)
+    selected = report.events[report.failure_id]
+    assert selected.failure_kind == "judge_failed"
+    assert selected.http_status == status
+    [operation] = row["ng_verifier_invocations"][0]["grading_operations"]
+    assert operation["outcome"] == "failed"
+
+
+@pytest.mark.parametrize("worker", [False, True])
+def test_worker_entrypoint_exports_app_only_for_workers(worker):
+    root = Path(__file__).resolve().parents[3]
+    env = os.environ.copy()
+    env["NEMO_GYM_EXTRA_ROOTS"] = str(root)
+    env["IS_NEMO_GYM_FASTAPI_ENTRYPOINT"] = "resources_servers/healthbench_rubric/app.py"
+    env["NEMO_GYM_FASTAPI_NUM_WORKERS"] = "2"
+    if worker:
+        env["IS_NEMO_GYM_FASTAPI_WORKER"] = "1"
+    else:
+        env.pop("IS_NEMO_GYM_FASTAPI_WORKER", None)
+    code = """
+from nemo_gym.server_runtime import SimpleResourcesServer
+SimpleResourcesServer.run_webserver = classmethod(lambda cls: 'worker-app')
+import resources_servers.healthbench_rubric.app as module
+assert getattr(module, 'app', None) == ('worker-app' if WORKER else None)
+""".replace("WORKER", str(worker))
+    result = subprocess.run([sys.executable, "-c", code], cwd=root, env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr

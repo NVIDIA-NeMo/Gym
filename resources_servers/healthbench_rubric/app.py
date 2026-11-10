@@ -14,22 +14,34 @@ from typing import Any, ClassVar, Literal, Optional
 
 from pydantic import ConfigDict, Field, model_validator
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
+    FailureReportRow,
+    NeMoGymChatCompletion,
+    NeMoGymChatCompletionCreateParamsNonStreaming,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    report_for_current_request,
+)
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
+    observe_llm_judge_grading,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError, call_judge
-from nemo_gym.openai_utils import (
-    NeMoGymChatCompletion,
-    NeMoGymChatCompletionCreateParamsNonStreaming,
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import (
+    JUDGE_FAILURES,
+    JudgeError,
+    VerifierFixture,
+    call_judge,
+    is_judge_failure,
+    record_parsed_judge_verdict,
+    record_rejected_judge_reply,
 )
-from nemo_gym.verifier_fixture import VerifierFixture
+from resources_servers.healthbench_rubric.task_data import TaskData
 
 
 # Grader prompt from OpenAI simple-evals (MIT); see prompts/LICENSE and README.md.
@@ -60,28 +72,8 @@ class HealthBenchRubricResourcesServerConfig(BaseResourcesServerConfig):
         return self
 
 
-class HealthBenchRubricVerifyRequest(BaseVerifyRequest):
-    model_config = ConfigDict(extra="allow")
-
-    source_id: str
-    conversation: list[dict[str, str]]
-    rubrics: list[dict[str, Any]] = Field(min_length=1)
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-    @model_validator(mode="after")
-    def validate_rubrics(self) -> "HealthBenchRubricVerifyRequest":
-        """Reject malformed rubric data before any paid judge call."""
-        for rubric in self.rubrics:
-            if not isinstance(rubric.get("criterion"), str) or not rubric["criterion"].strip():
-                raise ValueError("Each rubric requires non-empty criterion text")
-            points = rubric.get("points")
-            if isinstance(points, bool) or not isinstance(points, (int, float)) or not math.isfinite(points):
-                raise ValueError("Rubric points must be finite numbers")
-        if not any(rubric["points"] > 0 for rubric in self.rubrics):
-            raise ValueError("Rubrics have no positive points")
-        if not self.conversation or self.conversation[-1].get("role") != "user":
-            raise ValueError("Conversation must end with a user message")
-        return self
+class HealthBenchRubricVerifyRequest(TaskData, BaseVerifyRequest):
+    """A policy answer and the same task fields validated during preparation."""
 
 
 class HealthBenchRubricVerifyResponse(BaseVerifyResponse):
@@ -101,7 +93,11 @@ def _extract_last_assistant_text(body: BaseVerifyRequest) -> str:
     for output in reversed(body.response.output):
         if getattr(output, "type", None) != "message" or getattr(output, "role", None) != "assistant":
             continue
-        return "".join(item.text for item in output.content if getattr(item, "type", None) == "output_text")
+        return "".join(
+            item.text if getattr(item, "type", None) == "output_text" else item.refusal
+            for item in output.content
+            if getattr(item, "type", None) in {"output_text", "refusal"}
+        )
     return ""
 
 
@@ -191,9 +187,47 @@ class HealthBenchRubricResourcesServer(SimpleResourcesServer):
                 )
             )
         conversation = _conversation_text(body.conversation, response_text)
-        try:
+
+        async def grade() -> HealthBenchRubricVerifyResponse:
             grades = [await self._grade_rubric(conversation, rubric) for rubric in body.rubrics]
-        except JudgeError as error:
+            score = _calculate_score(body.rubrics, grades)
+            length_adjusted_score = self._calculate_length_adjusted_score(score, response_text)
+
+            metrics = {
+                "overall_score": score,
+                "overall_score_length_adjusted": length_adjusted_score,
+            }
+            if self.config.reward_metric not in metrics:
+                raise ValueError(
+                    f"Unknown reward metric {self.config.reward_metric!r}; available metrics: {sorted(metrics)}"
+                )
+            reward_value = metrics[self.config.reward_metric]
+            if reward_value is None:
+                raise ValueError(f"Reward metric {self.config.reward_metric!r} is not available")
+
+            return HealthBenchRubricVerifyResponse(
+                **(
+                    body.model_dump(exclude={"_ng_failure_class", "_ng_failure_judge_error"})
+                    | {
+                        "reward": max(0.0, min(1.0, _finite_reward(float(reward_value)))),
+                        "overall_score": score,
+                        "overall_score_length_adjusted": length_adjusted_score,
+                        "response_chars": len(response_text),
+                        "n_rubrics": len(body.rubrics),
+                        "grades": grades,
+                        "evaluation_completed": True,
+                        "mask_sample": False,
+                        "failure_kind": None,
+                        "failure_reason": None,
+                    }
+                )
+            )
+
+        try:
+            return await observe_llm_judge_grading(grade)
+        except JUDGE_FAILURES as error:
+            if not is_judge_failure(error):
+                raise
             reason = str(error)[:2000]
             return HealthBenchRubricVerifyResponse(
                 **(
@@ -212,41 +246,9 @@ class HealthBenchRubricResourcesServer(SimpleResourcesServer):
                         "_ng_failure_class": "judge_failed",
                         "_ng_failure_judge_error": reason,
                     }
+                    | FailureReportRow.fields(report_for_current_request(error))
                 )
             )
-
-        score = _calculate_score(body.rubrics, grades)
-        length_adjusted_score = self._calculate_length_adjusted_score(score, response_text)
-
-        metrics = {
-            "overall_score": score,
-            "overall_score_length_adjusted": length_adjusted_score,
-        }
-        if self.config.reward_metric not in metrics:
-            raise ValueError(
-                f"Unknown reward metric {self.config.reward_metric!r}; available metrics: {sorted(metrics)}"
-            )
-        reward_value = metrics[self.config.reward_metric]
-        if reward_value is None:
-            raise ValueError(f"Reward metric {self.config.reward_metric!r} is not available")
-
-        return HealthBenchRubricVerifyResponse(
-            **(
-                body.model_dump(exclude={"_ng_failure_class", "_ng_failure_judge_error"})
-                | {
-                    "reward": max(0.0, min(1.0, _finite_reward(float(reward_value)))),
-                    "overall_score": score,
-                    "overall_score_length_adjusted": length_adjusted_score,
-                    "response_chars": len(response_text),
-                    "n_rubrics": len(body.rubrics),
-                    "grades": grades,
-                    "evaluation_completed": True,
-                    "mask_sample": False,
-                    "failure_kind": None,
-                    "failure_reason": None,
-                }
-            )
-        )
 
     def _calculate_length_adjusted_score(self, score: float, response_text: str) -> float | None:
         center = self.config.length_adjustment_center
@@ -295,6 +297,7 @@ class HealthBenchRubricResourcesServer(SimpleResourcesServer):
                 parsed = _parse_json_object(_completion_content(judge_response))
                 if not isinstance(parsed.get("criteria_met"), bool):
                     raise ValueError("Judge JSON did not include boolean criteria_met")
+                record_parsed_judge_verdict()
                 return {
                     "criteria_met": parsed["criteria_met"],
                     "explanation": str(parsed.get("explanation", "")),
@@ -302,6 +305,7 @@ class HealthBenchRubricResourcesServer(SimpleResourcesServer):
                     "usage": judge_response.usage.model_dump() if judge_response.usage is not None else None,
                 }
             except (ValueError, IndexError) as error:
+                record_rejected_judge_reply()
                 if attempt + 1 == self.config.judge_max_attempts:
                     raise JudgeError("HealthBench judge returned unusable grades after bounded retries") from error
         raise AssertionError("judge_max_attempts must be positive")
@@ -345,3 +349,5 @@ VERIFIER_FIXTURE = VerifierFixture(
 
 if __name__ == "__main__":
     HealthBenchRubricResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = HealthBenchRubricResourcesServer.run_webserver()  # noqa: F401

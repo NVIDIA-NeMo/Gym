@@ -18,9 +18,7 @@ if __name__ == "__main__" and __package__ is None:
 from benchmarks.healthbench.prepare_common import iter_local_records, write_gym_jsonl
 
 
-BENCHMARK_DIR = Path(__file__).parent
-DATA_DIR = BENCHMARK_DIR / "data"
-OUTPUT_FPATH = DATA_DIR / "healthbench_professional_benchmark.jsonl"
+OUTPUT_FPATH = Path("benchmarks/healthbench_professional/data/healthbench_professional_benchmark.jsonl")
 
 HF_DATASET = "openai/healthbench-professional"
 DEFAULT_SOURCE_FILENAME = "healthbench_professional_eval.jsonl"
