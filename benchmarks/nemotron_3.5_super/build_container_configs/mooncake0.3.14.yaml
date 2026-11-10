@@ -14,6 +14,8 @@ mooncake:
     branch: bxyu/v0.3.14-mooncakemetricstry2
     cpus_per_task: 96
     build_parallel_level: 96
+    extra_apt_packages:
+      - cuda-cudart-dev-13-0
 
 shared_run_warmup_env_vars:
   MODEL: ${oc.env:PWD}/results/Nemotron-3.5-Super-VL-120B-A12B-GA-candidate-MTP-boosted-20261001
