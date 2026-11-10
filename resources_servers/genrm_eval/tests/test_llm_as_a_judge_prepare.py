@@ -3,6 +3,7 @@
 
 import json
 from importlib import import_module
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -76,6 +77,92 @@ def test_prepare_and_config(tmp_path, monkeypatch, benchmark, cached):
     assert config.responses_create_params.temperature == 1.0
     assert config.responses_create_params.top_p == 0.95
     assert config.responses_create_params.max_output_tokens == 32768
+
+
+def test_text_blocks_match_string_conversations(tmp_path: Path) -> None:
+    strings = [
+        {"role": "system", "content": "Be helpful."},
+        {"role": "user", "content": "First question?"},
+        {"role": "assistant", "content": "First answer.\nMore detail."},
+        {"role": "user", "content": "Follow-up?"},
+    ]
+    blocks = [
+        {"role": "system", "content": [{"type": "input_text", "text": "Be helpful."}]},
+        {"role": "user", "content": [{"type": "input_text", "text": "First question?"}]},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "output_text", "text": "First answer.\n"},
+                {"type": "output_text", "text": "More detail."},
+            ],
+        },
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": "Follow-"}, {"type": "input_text", "text": "up?"}],
+        },
+    ]
+    prompts = []
+    for name, turns in (("strings", strings), ("blocks", blocks)):
+        source = tmp_path / f"{name}.jsonl"
+        row = {
+            "id": "pair-1",
+            "responses_create_params": {
+                "input": turns,
+                "metadata": {"response_1": "Answer A", "response_2": "Answer B"},
+                "temperature": 0.7,
+                "top_p": 0.9,
+                "max_output_tokens": 1234,
+            },
+            "verifier_metadata": {"pair_id": "pair-1", "label": "B>A", "flipped": True},
+        }
+        original = json.dumps(row) + "\n"
+        source.write_text(original)
+        output = prepare_llm_input(source=source, output=tmp_path / f"{name}-llm.jsonl")
+        result = json.loads(output.read_text())
+        assert result["id"] == row["id"]
+        assert result["verifier_metadata"] == row["verifier_metadata"]
+        messages = result["responses_create_params"].pop("input")
+        assert len(messages) == 1
+        assert messages[0]["role"] == "user"
+        assert result["responses_create_params"] == {"temperature": 0.7, "top_p": 0.9, "max_output_tokens": 1234}
+        prompts.append(messages[0]["content"])
+        assert source.read_text() == original
+    assert prompts[0] == prompts[1]
+    assert (
+        "System: Be helpful.\nUser: First question?\nAssistant: First answer.\nMore detail.\nUser: Follow-up?"
+        in prompts[1]
+    )
+    assert "[The Start of Response 1]\nAnswer A\n[The End of Response 1]" in prompts[1]
+    assert "[The Start of Response 2]\nAnswer B\n[The End of Response 2]" in prompts[1]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        [{"type": "input_image", "image_url": "https://example.com/image.png"}],
+        [{"type": "input_text", "text": "Question?"}, {"type": "input_image", "image_url": "example.png"}],
+        [{"type": "input_text", "text": 123}],
+        [{"type": "input_audio"}],
+    ],
+)
+def test_reject_non_text_preserves_destination(tmp_path: Path, content: object) -> None:
+    source = tmp_path / "source.jsonl"
+    output = tmp_path / "llm.jsonl"
+    row = {
+        "responses_create_params": {
+            "input": [{"role": "user", "content": "Valid first row"}],
+            "metadata": {"response_1": "A", "response_2": "B"},
+        },
+    }
+    original = json.dumps(row) + "\n"
+    row["responses_create_params"]["input"][0]["content"] = content
+    original += json.dumps(row) + "\n"
+    source.write_text(original)
+    output.write_text("existing dataset")
+    with pytest.raises(ValueError, match="LLM preparation requires text conversation messages"):
+        prepare_llm_input(source=source, output=output)
+    assert output.read_text() == "existing dataset"
+    assert source.read_text() == original
 
 
 def test_reject_overwrite_and_bad_input(tmp_path):

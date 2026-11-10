@@ -10,6 +10,19 @@ import yaml
 from resources_servers.genrm_eval.prepare import atomic_output
 
 
+def _conversation_text(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list) and all(
+        isinstance(part, dict)
+        and part.get("type") in {"input_text", "output_text"}
+        and isinstance(part.get("text"), str)
+        for part in content
+    ):
+        return "".join(part["text"] for part in content)
+    raise ValueError("LLM preparation requires text conversation messages")
+
+
 def prepare_llm_input(*, source: Path, output: Path) -> Path:
     if output.resolve() == source.resolve():
         raise ValueError("LLM preparation must not overwrite the GenRM input")
@@ -23,7 +36,7 @@ def prepare_llm_input(*, source: Path, output: Path) -> Path:
             row = json.loads(line)
             params = row["responses_create_params"]
             turns = params["input"]
-            if not turns or any(not isinstance(turn.get("content"), str) for turn in turns):
+            if not turns:
                 raise ValueError("LLM preparation requires text conversation messages")
             candidates = params.pop("metadata")
             # Keep labels and order unchanged; only the model-facing request is reformatted.
@@ -31,7 +44,9 @@ def prepare_llm_input(*, source: Path, output: Path) -> Path:
                 {
                     "role": "user",
                     "content": template.format(
-                        conversation="\n".join(f"{turn['role'].capitalize()}: {turn['content']}" for turn in turns),
+                        conversation="\n".join(
+                            f"{turn['role'].capitalize()}: {_conversation_text(turn.get('content'))}" for turn in turns
+                        ),
                         response_1=candidates["response_1"],
                         response_2=candidates["response_2"],
                     ),
