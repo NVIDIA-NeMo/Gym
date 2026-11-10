@@ -583,12 +583,20 @@ def project_chain_to_output_items(chain: Chain) -> list[dict]:
     Each generated item's prompt extends the previous generated item.
     Preserve text for downstream scoring.
     Create a token-only item only when a call has no captured content items.
+
+    Before each later call's items, emit the images its prompt added after the previous call
+    (``TokenEntry.interstitial_images``) as one image-only user message without token fields.
+    The prompt tokens carry only those images' placeholders, so a vision trainer takes the pixels
+    from this item, binned to the next generated item. The root call's images are the rollout's
+    input, which a trainer already reads from the request, so they are not repeated.
     """
     items: list[dict] = []
     cumulative = list(chain.root_prompt)
     for step, link in enumerate(chain.links):
         cumulative = cumulative + (link.interstitial if step > 0 else [])
         entry = link.entry
+        if step > 0 and entry.interstitial_images:
+            items.append(_interstitial_image_item(entry.interstitial_images))
         content_items = [dict(item) for item in (entry.output_items or [])]
         index = entry.token_item_index
         if index is not None and 0 <= index < len(content_items):
@@ -605,8 +613,7 @@ def project_chain_to_output_items(chain: Chain) -> list[dict]:
                 item["prompt_token_ids"] = list(cumulative)
                 item["generation_token_ids"] = list(entry.generation_token_ids)
                 item["generation_log_probs"] = list(entry.generation_log_probs)
-                if entry.routed_experts is not None:
-                    item["routed_experts"] = entry.routed_experts
+                _put_optional_token_fields(item, entry)
             items.extend(content_items)
         else:
             item = {
@@ -615,11 +622,28 @@ def project_chain_to_output_items(chain: Chain) -> list[dict]:
                 "generation_token_ids": list(entry.generation_token_ids),
                 "generation_log_probs": list(entry.generation_log_probs),
             }
-            if entry.routed_experts is not None:
-                item["routed_experts"] = entry.routed_experts
+            _put_optional_token_fields(item, entry)
             items.append(item)
         cumulative = cumulative + list(entry.generation_token_ids)
     return items
+
+
+def _put_optional_token_fields(item: dict, entry: TokenEntry) -> None:
+    """Copy a call's optional per-token arrays onto the item that carries its generation."""
+    if entry.routed_experts is not None:
+        item["routed_experts"] = entry.routed_experts
+    if entry.sampler_topk_token_ids is not None and entry.sampler_topk_logprobs is not None:
+        item["sampler_topk_token_ids"] = [list(row) for row in entry.sampler_topk_token_ids]
+        item["sampler_topk_logprobs"] = [list(row) for row in entry.sampler_topk_logprobs]
+
+
+def _interstitial_image_item(sources: list[str]) -> dict:
+    """An image-only user message for the images a call's prompt added after the previous call."""
+    return {
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_image", "image_url": source, "detail": "auto"} for source in sources],
+    }
 
 
 def _engine_refusal_ended_the_chain(refusal: EngineRefusalRecord, terminal: TokenEntry, out: BuildOutput) -> bool:

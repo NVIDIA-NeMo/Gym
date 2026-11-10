@@ -41,9 +41,20 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 NAMESPACE_TOOL_DELIMITER = "__"
 
 
+# The sampler's top-k candidates at each generated position, ``[generated tokens][k]``: token ids
+# and their log probabilities. Present when the request asked the engine for ``top_logprobs`` > 0
+# (score centering and sampler replay read them). NeMo RL's data plane uses the same names.
+SAMPLER_TOPK_FIELDS = ("sampler_topk_token_ids", "sampler_topk_logprobs")
+
 # These fields carry token metadata on a served response.
-# ``routed_experts`` is optional for MoE backends.
-TOKEN_FIELDS = ("prompt_token_ids", "generation_token_ids", "generation_log_probs", "routed_experts")
+# ``routed_experts`` is optional for MoE backends, and the sampler top-k fields are optional.
+TOKEN_FIELDS = (
+    "prompt_token_ids",
+    "generation_token_ids",
+    "generation_log_probs",
+    "routed_experts",
+    *SAMPLER_TOPK_FIELDS,
+)
 
 # Writers and readers may run in different processes or repositories.
 # Records may outlive a deployment.
@@ -129,6 +140,34 @@ def compute_digest(token_ids: list[int]) -> str:
     return hashlib.sha256(_DIGEST_DOMAIN + encode_token_ids(token_ids)).hexdigest()
 
 
+def validate_sampler_topk(token_ids: Any, logprobs: Any, generated_len: int) -> None:
+    """Require a ``[generated tokens][k]`` top-k pair, or neither half.
+
+    Both halves have one row per generated token, and every row has the same ``k`` >= 1 entries,
+    so a trainer can stack them as tensors without padding. Raise ``ValueError`` otherwise.
+    """
+    if token_ids is None and logprobs is None:
+        return
+    if token_ids is None or logprobs is None:
+        raise ValueError("sampler top-k needs both sampler_topk_token_ids and sampler_topk_logprobs")
+    if len(token_ids) != generated_len or len(logprobs) != generated_len:
+        raise ValueError(
+            f"sampler top-k must have one row per generated token ({generated_len}), "
+            f"got {len(token_ids)} id rows and {len(logprobs)} log-probability rows"
+        )
+    if not generated_len:
+        return
+    width = len(token_ids[0])
+    if width == 0:
+        raise ValueError("sampler top-k rows must not be empty")
+    for position, (id_row, logprob_row) in enumerate(zip(token_ids, logprobs)):
+        if len(id_row) != width or len(logprob_row) != width:
+            raise ValueError(
+                f"sampler top-k row {position} has {len(id_row)} ids and {len(logprob_row)} log "
+                f"probabilities; every row must have {width}"
+            )
+
+
 class EngineRefusalRecord(BaseModel):
     """One model call the engine refused, so the rollout has no record for it.
 
@@ -180,6 +219,17 @@ class TokenEntry(BaseModel):
     generation_token_ids: list[int]
     generation_log_probs: list[float]
     routed_experts: Any | None = None
+    # The sampler's top-k candidates at each generated position (``SAMPLER_TOPK_FIELDS``).
+    # Row ``t`` holds the ``k`` candidate token ids and log probabilities for generated token ``t``.
+    # Both are ``None`` when the request did not ask for top-k or the record predates these fields.
+    sampler_topk_token_ids: list[list[int]] | None = None
+    sampler_topk_logprobs: list[list[float]] | None = None
+    # The images the request added after the model turn it continues: tool results and user turns
+    # since the last model-authored item, as image URLs or data URLs in request order. Their
+    # placeholder tokens are in the interstitial between the parent's sequence and this prompt.
+    # ``None`` when the request has no model-authored history (a root call, whose images are the
+    # rollout's input) or the record predates this field.
+    interstitial_images: list[str] | None = None
     # Preserve response output items without token arrays.
     output_items: list[dict] = Field(default_factory=list)
     # This index identifies the item that carried token arrays.
@@ -272,6 +322,7 @@ class TokenEntry(BaseModel):
                 "generation_token_ids and generation_log_probs must have the same length "
                 f"(got {len(self.generation_token_ids)} and {len(self.generation_log_probs)})"
             )
+        validate_sampler_topk(self.sampler_topk_token_ids, self.sampler_topk_logprobs, len(self.generation_token_ids))
         if self.token_item_index is not None and not 0 <= self.token_item_index < len(self.output_items):
             raise ValueError(
                 f"token_item_index {self.token_item_index} is outside output_items of length {len(self.output_items)}"
@@ -366,6 +417,60 @@ def response_to_output_items(payload: dict) -> list[dict]:
         item.setdefault("role", "assistant")
         items.append(item)
     return items
+
+
+# Request items the model produced: assistant messages in every dialect, and the roleless
+# Responses tool-call and reasoning items that belong to an assistant turn.
+_MODEL_AUTHORED_ITEM_TYPES = frozenset({"function_call", "custom_tool_call", "reasoning"})
+# Image content parts: Responses ``input_image`` and Chat ``image_url`` (``image`` for processors
+# that name the part that way).
+_IMAGE_PART_TYPES = frozenset({"input_image", "image_url", "image"})
+
+
+def _content_image_sources(content: Any) -> list[str]:
+    """Return the URL or data URL of each image part of a message's content, in order."""
+    if not isinstance(content, list):
+        return []
+    sources: list[str] = []
+    for part in content:
+        if not isinstance(part, dict) or part.get("type") not in _IMAGE_PART_TYPES:
+            continue
+        source = part.get("image_url") or part.get("image") or part.get("url")
+        if isinstance(source, dict):
+            source = source.get("url")
+        if isinstance(source, str) and source:
+            sources.append(source)
+    return sources
+
+
+def interstitial_image_sources(request_items: list[dict]) -> list[str] | None:
+    """Return the images a request adds after its last model-authored item, in request order.
+
+    These are the images of the turns since the model turn the request continues: an agent's
+    crops, plots or screenshots returned in a tool message or a following user message. A request
+    that resolves its parent echoes that parent's output as its last model turn, so these are the
+    images whose placeholder tokens sit between the parent's sequence and this call's prompt.
+    Earlier images were already in the parent's prompt.
+
+    Only image parts of message content count. An image part inside a Responses tool output
+    (``function_call_output``) reaches the engine as an image only when the model server inlines
+    tool-output images; by default the server sends a text placeholder in its place. Capture
+    cannot see that choice, so such parts are not recorded, and a plain-string tool output is text.
+
+    Return ``None`` when the request has no model-authored item: a root call, whose images are
+    the rollout's input.
+    """
+    items = [item for item in request_items or [] if isinstance(item, dict)]
+    last_model_item = None
+    for position, item in enumerate(items):
+        if item.get("role") == "assistant" or item.get("type") in _MODEL_AUTHORED_ITEM_TYPES:
+            last_model_item = position
+    if last_model_item is None:
+        return None
+    sources: list[str] = []
+    for item in items[last_model_item + 1 :]:
+        sources.extend(_content_image_sources(item.get("content")))
+    return sources
 
 
 # The ``incomplete_details.reason`` of a Responses payload whose generation stopped at a token

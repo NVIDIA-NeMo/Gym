@@ -6965,6 +6965,185 @@ class TestTopLogprobsHandling:
         message = response.json()["choices"][0]["message"]
         assert message["routed_experts"] == routed_experts
 
+    def _serve_capture_chat(self, model: VLLMModel, completion: dict, request_body: dict) -> tuple[Any, dict]:
+        """Serve one chat completion through the capture path; return the response and the vLLM request."""
+        sent: dict[str, Any] = {}
+
+        async def mock_create_chat_completion(**kwargs):
+            sent.update(kwargs)
+            return completion
+
+        async def mock_create_tokenize(**kwargs):
+            return {"tokens": [10, 20]}
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        mock_client.create_tokenize = AsyncMock(side_effect=mock_create_tokenize)
+        model._clients = [mock_client]
+        return TestClient(model.setup_webserver()).post("/v1/chat/completions", json=request_body), sent
+
+    def test_capture_path_reads_requested_top_logprobs_as_sampler_topk(self) -> None:
+        """``sampling_overrides.top_logprobs`` beats the capture path's zero default, and each
+        position's candidates come back as one ``[tokens][k]`` sampler top-k pair."""
+        model = _make_top_logprobs_model(return_token_id_information=True, sampling_overrides={"top_logprobs": 2})
+        completion = self._capture_chat_completion_dict(
+            logprobs={
+                "content": [
+                    {
+                        "token": "token_id:123",
+                        "logprob": -0.1,
+                        "bytes": None,
+                        "top_logprobs": [
+                            {"token": "token_id:123", "logprob": -0.1, "bytes": None},
+                            {"token": "token_id:7", "logprob": -2.5, "bytes": None},
+                        ],
+                    },
+                    {
+                        "token": "token_id:456",
+                        "logprob": -0.2,
+                        "bytes": None,
+                        "top_logprobs": [
+                            {"token": "token_id:456", "logprob": -0.2, "bytes": None},
+                            {"token": "token_id:8", "logprob": -1.9, "bytes": None},
+                        ],
+                    },
+                ]
+            }
+        )
+
+        response, sent = self._serve_capture_chat(model, completion, {"messages": [{"role": "user", "content": "hi"}]})
+
+        assert response.status_code == 200
+        assert sent["top_logprobs"] == 2
+        message = response.json()["choices"][0]["message"]
+        assert message["generation_token_ids"] == [123, 456]
+        assert message["sampler_topk_token_ids"] == [[123, 7], [456, 8]]
+        assert message["sampler_topk_logprobs"] == [[-0.1, -2.5], [-0.2, -1.9]]
+
+    def test_capture_path_records_no_sampler_topk_unless_requested(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True)
+        completion = self._capture_chat_completion_dict(
+            logprobs={"content": [{"token": "token_id:123", "logprob": -0.1, "bytes": None, "top_logprobs": []}]}
+        )
+
+        response, sent = self._serve_capture_chat(model, completion, {"messages": [{"role": "user", "content": "hi"}]})
+
+        assert response.status_code == 200
+        assert sent["top_logprobs"] == 0
+        message = response.json()["choices"][0]["message"]
+        # Unset like ``routed_experts``: the training message serializes absent fields as null.
+        assert message["sampler_topk_token_ids"] is None
+        assert message["sampler_topk_logprobs"] is None
+
+    def test_capture_path_keeps_the_sampler_topk_a_server_attaches_to_the_message(self) -> None:
+        """A server that attaches the sampler's own top-k (NeMo RL's names) wins over the logprobs block."""
+        model = _make_top_logprobs_model(return_token_id_information=True, sampling_overrides={"top_logprobs": 1})
+        completion = self._capture_chat_completion_dict(
+            logprobs={
+                "content": [
+                    {
+                        "token": "token_id:123",
+                        "logprob": -0.1,
+                        "bytes": None,
+                        "top_logprobs": [{"token": "token_id:9", "logprob": -0.05, "bytes": None}],
+                    }
+                ]
+            },
+            message_extra={"sampler_topk_token_ids": [[123]], "sampler_topk_logprobs": [[-0.1]]},
+        )
+
+        response, _ = self._serve_capture_chat(model, completion, {"messages": [{"role": "user", "content": "hi"}]})
+
+        assert response.status_code == 200
+        message = response.json()["choices"][0]["message"]
+        assert message["sampler_topk_token_ids"] == [[123]]
+        assert message["sampler_topk_logprobs"] == [[-0.1]]
+
+    def test_capture_path_reads_requested_top_logprobs_beside_a_message_bundle(self) -> None:
+        """A server that returns the token bundle on the message but no top-k of its own still gets
+        the candidates the request asked for from the logprobs block."""
+        model = _make_top_logprobs_model(return_token_id_information=True, sampling_overrides={"top_logprobs": 1})
+        completion = self._capture_chat_completion_dict(
+            logprobs={
+                "content": [
+                    {
+                        "token": "token_id:123",
+                        "logprob": -0.1,
+                        "bytes": None,
+                        "top_logprobs": [{"token": "token_id:123", "logprob": -0.1, "bytes": None}],
+                    }
+                ]
+            },
+            message_extra={
+                "prompt_token_ids": [10, 20],
+                "generation_token_ids": [123],
+                "generation_log_probs": [-0.1],
+            },
+        )
+
+        response, _ = self._serve_capture_chat(model, completion, {"messages": [{"role": "user", "content": "hi"}]})
+
+        assert response.status_code == 200
+        message = response.json()["choices"][0]["message"]
+        assert message["sampler_topk_token_ids"] == [[123]]
+        assert message["sampler_topk_logprobs"] == [[-0.1]]
+
+    def test_capture_path_message_bundle_without_a_logprobs_block_records_no_topk(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True, sampling_overrides={"top_logprobs": 4})
+        completion = self._capture_chat_completion_dict(
+            logprobs=None,
+            message_extra={
+                "prompt_token_ids": [10, 20],
+                "generation_token_ids": [123],
+                "generation_log_probs": [-0.1],
+            },
+        )
+
+        response, _ = self._serve_capture_chat(model, completion, {"messages": [{"role": "user", "content": "hi"}]})
+
+        assert response.status_code == 200
+        message = response.json()["choices"][0]["message"]
+        assert message["generation_token_ids"] == [123]
+        assert message["sampler_topk_token_ids"] is None
+
+    def test_capture_path_rejects_ragged_sampler_topk(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True)
+        completion = self._capture_chat_completion_dict(
+            logprobs=None,
+            message_extra={
+                "prompt_token_ids": [10, 20],
+                "generation_token_ids": [123, 456],
+                "generation_log_probs": [-0.1, -0.2],
+                "sampler_topk_token_ids": [[123, 7], [456]],
+                "sampler_topk_logprobs": [[-0.1, -2.5], [-0.2]],
+            },
+        )
+
+        with raises(RuntimeError, match="invalid sampler top-k"):
+            self._serve_capture_chat(model, completion, {"messages": [{"role": "user", "content": "hi"}]})
+
+    def test_echoed_sampler_topk_never_reaches_the_engine(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True)
+        echoed_turn = {
+            "role": "assistant",
+            "content": "hi",
+            "prompt_token_ids": [10, 20],
+            "generation_token_ids": [123],
+            "generation_log_probs": [-0.1],
+            "sampler_topk_token_ids": [[123, 7]],
+            "sampler_topk_logprobs": [[-0.1, -2.5]],
+        }
+
+        result = model._preprocess_chat_completion_create_params(
+            MagicMock(),
+            {"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}, echoed_turn]},
+        )
+
+        sent_turn = result["messages"][1]
+        assert sent_turn["generation_token_ids"] == [123]
+        assert "sampler_topk_token_ids" not in sent_turn
+        assert "sampler_topk_logprobs" not in sent_turn
+
     def test_capture_path_raises_when_logprobs_missing(self) -> None:
         """If capture is on but vLLM returns no logprobs, fail loudly with an actionable
         error instead of an opaque TypeError or silently empty training data."""

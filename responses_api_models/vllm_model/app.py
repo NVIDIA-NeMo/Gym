@@ -73,6 +73,7 @@ from nemo_gym.models.model_call_capture import note_finish_reason
 from nemo_gym.models.token_capture import (
     CAPTURE_REFUSAL_HEADER,
     CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
+    SAMPLER_TOPK_FIELDS,
     CaptureAdmissionError,
     CaptureContext,
     CaptureInputError,
@@ -82,6 +83,7 @@ from nemo_gym.models.token_capture import (
     resolve_parent,
     set_token_sink,
     token_capture_config,
+    validate_sampler_topk,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_models.vllm_model.tar_audio import TarAudioReader, resolve_archive_path, validate_relative_path
@@ -1305,6 +1307,13 @@ class VLLMModel(SimpleResponsesAPIModel):
         """
         self._strip_hosted_only_tool_fields(body_dict)
 
+        # An echoed assistant turn may carry the sampler top-k it was served with. That is captured
+        # training output, not conditioning, so it never goes back to the engine.
+        for message_dict in body_dict.get("messages") or []:
+            if isinstance(message_dict, dict):
+                for field_name in SAMPLER_TOPK_FIELDS:
+                    message_dict.pop(field_name, None)
+
         if self.config.replace_developer_role_with_system:
             for message_dict in body_dict["messages"]:
                 if message_dict.get("role") == "developer":
@@ -1873,6 +1882,12 @@ class VLLMModel(SimpleResponsesAPIModel):
                         or message_bundle["generation_token_ids"] != response_generation_token_ids
                     ):
                         raise RuntimeError("Message-level token metadata disagrees with vLLM response token IDs.")
+                if not any(field_name in message_bundle for field_name in SAMPLER_TOPK_FIELDS):
+                    # The server attached no top-k of its own; read the candidates the request asked for.
+                    message_bundle = self._validate_token_bundle(
+                        {**message_bundle, **self._extract_choice_sampler_topk(choice_dict, body_dict)},
+                        "choice.message",
+                    )
                 message_dict.update(message_bundle)
             else:
                 logprob_token_ids, generation_log_probs = self._extract_choice_logprobs(choice_dict)
@@ -1890,6 +1905,13 @@ class VLLMModel(SimpleResponsesAPIModel):
                     )
                     generation_token_ids = logprob_token_ids
 
+                # A server that attaches the sampler's own top-k to the message wins over the
+                # candidates the OpenAI logprobs block lists.
+                sampler_topk = {
+                    field_name: message_dict[field_name]
+                    for field_name in SAMPLER_TOPK_FIELDS
+                    if message_dict.get(field_name) is not None
+                } or self._extract_choice_sampler_topk(choice_dict, body_dict)
                 message_dict.update(
                     self._validate_token_bundle(
                         {
@@ -1901,6 +1923,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                                 if message_dict.get("routed_experts") is not None
                                 else {}
                             ),
+                            **sampler_topk,
                         },
                         "vLLM token transport",
                     )
@@ -1963,6 +1986,9 @@ class VLLMModel(SimpleResponsesAPIModel):
         }
         if "routed_experts" in bundle:
             normalized["routed_experts"] = bundle["routed_experts"]
+        for field_name in SAMPLER_TOPK_FIELDS:
+            if bundle.get(field_name) is not None:
+                normalized[field_name] = bundle[field_name]
 
         if len(normalized["generation_token_ids"]) != len(normalized["generation_log_probs"]):
             raise RuntimeError(
@@ -1970,6 +1996,14 @@ class VLLMModel(SimpleResponsesAPIModel):
                 f"{len(normalized['generation_token_ids'])} token IDs and "
                 f"{len(normalized['generation_log_probs'])} log probabilities."
             )
+        try:
+            validate_sampler_topk(
+                normalized.get("sampler_topk_token_ids"),
+                normalized.get("sampler_topk_logprobs"),
+                len(normalized["generation_token_ids"]),
+            )
+        except (TypeError, ValueError) as e:
+            raise RuntimeError(f"{source} returned invalid sampler top-k: {e}") from e
 
         return normalized
 
@@ -2037,6 +2071,50 @@ class VLLMModel(SimpleResponsesAPIModel):
             generation_log_probs.append(float(log_prob))
 
         return generation_token_ids, generation_log_probs
+
+    def _extract_choice_sampler_topk(
+        self, choice_dict: Dict[str, Any], body_dict: Dict[str, Any]
+    ) -> Dict[str, List[List[Any]]]:
+        """Read each generated position's ``top_logprobs`` candidates when the request asked for them.
+
+        A request asks with ``top_logprobs`` > 0, typically through ``sampling_overrides`` (applied
+        after the capture path's zero default). Candidates keep vLLM's order and values: vLLM reports
+        them in its configured ``logprobs_mode``, so a trainer that needs the distribution the sampler
+        drew from (score centering) runs vLLM with ``processed_logprobs``. Returns no fields when the
+        request asked for none or the choice carries no per-token logprobs.
+        """
+        requested = body_dict.get("top_logprobs")
+        logprobs_block = choice_dict.get("logprobs")
+        content = logprobs_block.get("content") if isinstance(logprobs_block, dict) else None
+        if not isinstance(requested, int) or isinstance(requested, bool) or requested <= 0 or not content:
+            return {}
+        token_id_rows: List[List[int]] = []
+        log_prob_rows: List[List[float]] = []
+        for index, entry in enumerate(content):
+            candidates = entry.get("top_logprobs") if isinstance(entry, dict) else None
+            if not isinstance(candidates, list) or not candidates:
+                raise RuntimeError(
+                    f"`{self.config.name}` requested top_logprobs={requested}, but "
+                    f"choice.logprobs.content[{index}].top_logprobs is empty."
+                )
+            token_id_row: List[int] = []
+            log_prob_row: List[float] = []
+            for rank, candidate in enumerate(candidates):
+                where = f"choice.logprobs.content[{index}].top_logprobs[{rank}]"
+                token = candidate.get("token") if isinstance(candidate, dict) else None
+                if not isinstance(token, str) or not token.startswith("token_id:"):
+                    raise RuntimeError(f"{where}.token must use the `token_id:<int>` format.")
+                try:
+                    token_id_row.append(int(token.removeprefix("token_id:")))
+                except ValueError as e:
+                    raise RuntimeError(f"{where}.token must use the `token_id:<int>` format.") from e
+                log_prob = candidate.get("logprob")
+                if not isinstance(log_prob, (int, float)) or isinstance(log_prob, bool):
+                    raise RuntimeError(f"{where}.logprob must be numeric.")
+                log_prob_row.append(float(log_prob))
+            token_id_rows.append(token_id_row)
+            log_prob_rows.append(log_prob_row)
+        return {"sampler_topk_token_ids": token_id_rows, "sampler_topk_logprobs": log_prob_rows}
 
     @classmethod
     def _get_tokenize_chat_body(cls, body_dict: Dict[str, Any]) -> Dict[str, Any]:

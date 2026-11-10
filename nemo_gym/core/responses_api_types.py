@@ -207,6 +207,11 @@ class TokenIDLogProbMixin(BaseModel):
     generation_token_ids: List[int]
     generation_log_probs: List[float]
     routed_experts: Optional[RoutedExperts] = None
+    # The sampler's top-k candidates at each generated position, [tokens][k], when the request asked
+    # for top_logprobs > 0 (score centering, sampler replay). Training data only: a request that
+    # echoes them back never sends them to the engine.
+    sampler_topk_token_ids: Optional[List[List[int]]] = None
+    sampler_topk_logprobs: Optional[List[List[float]]] = None
 
 
 class TokenIDLogProbTypedDictMixin(TypedDict):
@@ -214,6 +219,8 @@ class TokenIDLogProbTypedDictMixin(TypedDict):
     generation_token_ids: List[int]
     generation_log_probs: List[float]
     routed_experts: NotRequired[RoutedExperts]
+    sampler_topk_token_ids: NotRequired[List[List[int]]]
+    sampler_topk_logprobs: NotRequired[List[List[float]]]
 
 
 REQUIRED_TOKEN_METADATA_FIELDS = frozenset(
@@ -223,7 +230,11 @@ REQUIRED_TOKEN_METADATA_FIELDS = frozenset(
         "generation_log_probs",
     }
 )
-TOKEN_METADATA_FIELDS = REQUIRED_TOKEN_METADATA_FIELDS | {"routed_experts"}
+TOKEN_METADATA_FIELDS = REQUIRED_TOKEN_METADATA_FIELDS | {
+    "routed_experts",
+    "sampler_topk_token_ids",
+    "sampler_topk_logprobs",
+}
 
 
 def _validate_atomic_token_metadata(value: Any) -> Any:

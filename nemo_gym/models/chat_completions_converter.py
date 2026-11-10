@@ -149,6 +149,11 @@ def chat_completion_usage_to_response_usage(usage: Optional[CompletionUsage]) ->
     )
 
 
+# Token metadata an echoed assistant turn carries that never goes back to the engine: the
+# sampler's top-k is captured output for training, and conditioning needs only the token ids.
+_ECHO_EXCLUDED_TOKEN_FIELDS = frozenset({"sampler_topk_token_ids", "sampler_topk_logprobs"})
+
+
 class ChatCompletionsConverterState(BaseModel):
     return_token_id_information: bool
 
@@ -179,7 +184,8 @@ class ChatCompletionsConverterState(BaseModel):
         if self.return_token_id_information and self.token_information is not None:
             message = NeMoGymChatCompletionAssistantMessageForTrainingParam(
                 **shared_params,
-                **self.token_information.model_dump(exclude_none=True),
+                # The sampler's top-k is training output; the engine conditions only on token ids.
+                **self.token_information.model_dump(exclude_none=True, exclude=_ECHO_EXCLUDED_TOKEN_FIELDS),
             )
         else:
             message = NeMoGymChatCompletionAssistantMessageParam(**shared_params)

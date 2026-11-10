@@ -18,7 +18,9 @@ import asyncio
 import threading
 
 import pytest
+from pydantic import TypeAdapter
 
+from nemo_gym.core.responses_api_types import NeMoGymResponseOutputItem
 from nemo_gym.models.token_capture.builder import (
     assert_prefix_contiguity,
     prefix_merging,
@@ -166,6 +168,102 @@ def test_projection_falls_back_for_records_without_a_carrier_index():
     projected = project_chain_to_output_items(prefix_merging([entry]).chains[0])
     assert projected[1]["prompt_token_ids"] == [1, 2, 3]
     assert "prompt_token_ids" not in projected[0]
+
+
+def test_projection_carries_each_calls_sampler_topk_on_its_generated_item():
+    """Top-k rows are per call: each generated item carries its own call's rows, aligned with its tokens."""
+    first = _entry("c1", [1, 2, 3], [10, 11])
+    first.sampler_topk_token_ids = [[10, 4], [11, 5]]
+    first.sampler_topk_logprobs = [[-0.1, -2.0], [-0.2, -3.0]]
+    second = _entry("c2", [1, 2, 3, 10, 11, 4, 5], [12], parent="c1")
+    second.sampler_topk_token_ids = [[12, 6]]
+    second.sampler_topk_logprobs = [[-0.3, -1.5]]
+    second.output_items = [{"type": "message", "role": "assistant", "content": "done"}]
+    second.token_item_index = 0
+
+    response = project_main_chain_response("t0-r0", prefix_merging([first, second]), model="m")
+
+    generated = [item for item in response["output"] if item.get("generation_token_ids")]
+    assert [item["sampler_topk_token_ids"] for item in generated] == [[[10, 4], [11, 5]], [[12, 6]]]
+    assert [item["sampler_topk_logprobs"] for item in generated] == [[[-0.1, -2.0], [-0.2, -3.0]], [[-0.3, -1.5]]]
+    for item in generated:
+        assert len(item["sampler_topk_token_ids"]) == len(item["generation_token_ids"])
+    assert_prefix_contiguity(response)
+
+
+def test_projection_without_sampler_topk_adds_no_topk_fields():
+    response = project_main_chain_response("t0-r0", prefix_merging(APPEND_ONLY), model="m")
+    for item in response["output"]:
+        assert "sampler_topk_token_ids" not in item
+        assert "sampler_topk_logprobs" not in item
+
+
+def _images_per_generated_turn(output: list[dict]) -> list[list[str]]:
+    """Bin images the way a vision trainer reads a projection (NeMo RL's ``_index_per_turn_images``).
+
+    Images on non-assistant items wait for the next item that carries generated tokens.
+    """
+    per_turn: list[list[str]] = []
+    pending: list[str] = []
+    for item in output:
+        if item.get("generation_token_ids"):
+            per_turn.append(pending)
+            pending = []
+        elif item.get("role") != "assistant":
+            pending += [part["image_url"] for part in item.get("content") or [] if part.get("type") == "input_image"]
+    return per_turn
+
+
+def test_projection_puts_a_later_calls_tool_images_before_its_generation():
+    """A multi-call chain in which a tool adds an image between calls.
+
+    The root's images are the rollout input and stay out of the projection. The crop the second
+    call saw lands right before that call's generated item, so a trainer bins its pixels to the
+    turn whose prompt holds its placeholder tokens. A call that added no image adds no item.
+    """
+    crop = "data:image/png;base64,Y3JvcA=="
+    first = _entry("c1", [1, 2, 3], [10, 11])
+    first.output_items = [{"type": "function_call", "name": "crop", "arguments": "{}", "call_id": "t1"}]
+    first.token_item_index = 0
+    second = _entry("c2", [1, 2, 3, 10, 11, 4, 5], [12], parent="c1")
+    second.interstitial_images = [crop]
+    second.output_items = [{"type": "function_call", "name": "zoom", "arguments": "{}", "call_id": "t2"}]
+    second.token_item_index = 0
+    third = _entry("c3", [1, 2, 3, 10, 11, 4, 5, 12, 6], [13, 14], parent="c2")
+    third.interstitial_images = []
+    third.output_items = [{"type": "message", "role": "assistant", "content": "answer"}]
+    third.token_item_index = 0
+
+    response = project_main_chain_response("t0-r0", prefix_merging([first, second, third]), model="m")
+
+    output = response["output"]
+    assert [item.get("role") or item["type"] for item in output] == [
+        "function_call",
+        "user",
+        "function_call",
+        "assistant",
+    ]
+    assert output[1] == {
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_image", "image_url": crop, "detail": "auto"}],
+    }
+    assert "prompt_token_ids" not in output[1]
+    assert _images_per_generated_turn(output) == [[], [crop], []]
+    # The image item is a valid Responses output item, and the token sequence stays contiguous.
+    item_adapter = TypeAdapter(NeMoGymResponseOutputItem)
+    for item in output:
+        item_adapter.validate_python(item)
+    assert_prefix_contiguity(response)
+    assert response["usage"] == {"input_tokens": 3, "output_tokens": 5}
+
+
+def test_projection_never_repeats_the_root_calls_images():
+    """Images a root call's request carries are the rollout input, which a trainer reads from the request."""
+    root = _entry("c1", [1, 2, 3], [10])
+    root.interstitial_images = ["data:image/png;base64,aW5wdXQ="]
+    projected = project_chain_to_output_items(prefix_merging([root]).chains[0])
+    assert [item for item in projected if item.get("role") == "user"] == []
 
 
 def test_contiguity_assert_catches_a_gap():
