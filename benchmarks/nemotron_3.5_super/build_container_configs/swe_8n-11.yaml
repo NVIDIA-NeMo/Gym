@@ -35,6 +35,7 @@ run:
     --config resources_servers/swemer_v1/configs/swemer_v1_opencode.yaml \
     --config resources_servers/swemer_v2/configs/swemer_v2_opencode.yaml \
     --config resources_servers/swe_next/configs/swe_next_opencode.yaml \
+    ++input_jsonl_fpath=data/swe_8n-11.jsonl \
     ++swe_rebench_opencode_sandboxed_agent.responses_api_agents.opencode_sandboxed_agent.sandbox_timeout=3600 \
     ++scale_swe_opencode_sandboxed_agent.responses_api_agents.opencode_sandboxed_agent.sandbox_timeout=3600 \
     ++swemer_v1_opencode_sandboxed_agent.responses_api_agents.opencode_sandboxed_agent.sandbox_timeout=3600 \
