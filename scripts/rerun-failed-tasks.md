@@ -2,7 +2,7 @@
 
 `rerun_failed_tasks.py` selects original **task input rows** and invokes their original NeMo Gym agents and configured graders. It delegates tool execution, reference handling, grading, and model calls to those existing integrations. It does not construct prompts, generate rubrics, or implement a replacement scorer.
 
-Use a private original dataset and the original benchmark checkout, configs, reference assets, and scorer services. A saved rollout is a baseline result: it can omit task fields required by the original grader and is not a substitute for the original task dataset. If those dependencies cannot be recovered, preparation must remain blocked until they are supplied. Pinning an available checkout does not establish that it was the historical evaluation version.
+Use the original benchmark checkout, registrations, reference assets, and scorer services. Original datasets can be downloaded from their existing registrations and cached locally; no second copy needs to be uploaded or registered. A saved rollout is a baseline result: it can omit task fields required by the original grader and is not a substitute for the original task dataset. If those dependencies cannot be recovered, preparation must remain blocked until they are supplied. Pinning an available checkout does not establish that it was the historical evaluation version.
 
 ## Prepare the selection
 
@@ -16,7 +16,64 @@ The selection JSONL contains one row per failed **attempt**, including repeated 
 
 `dataset_row_index` is the zero-based position in the original task dataset, not an index into saved rollouts. Its canonical digest is produced by the script's `canonical_sha256`: UTF-8 JSON with sorted keys, compact separators, `ensure_ascii=False`, and no nonfinite numbers. Verify this binding against original run provenance before preparing a selection. Original failure verdicts are selection evidence, not reference answers for fresh outputs.
 
-The private routes JSON declares each original dataset and agent/configuration:
+## Download existing registered datasets
+
+Use `download_failed_task_sources.py` for any number of benchmark routes. Each route identifies its original agent, dataset declaration and registry version. The helper uses the original Gym registry reader and `TrainDataProcessor`; it does not fetch a separately published failure dataset. Only the small failure index above is supplied locally. Original task datasets do not contain the historical checkpoint's reward or failure-analysis labels, so those selection identities must come from its saved results.
+
+A portable download catalog contains config paths relative to the original Gym checkout, rather than local original-dataset locations:
+
+```json
+{
+  "schema_version": "original-task-download/routes/v1",
+  "gym_revision": "<full-40-character-original-checkout-commit>",
+  "benchmarks": {
+    "fictional_workflow": {
+      "config_paths": ["resources_servers/fictional_backend/configs/original.yaml"],
+      "agent_name": "original_workflow_agent",
+      "dataset_name": "original_validation",
+      "dataset_type": "validation",
+      "registry_identifier": {
+        "backend": "gitlab",
+        "dataset_name": "original_workflow",
+        "version": "0.0.1",
+        "artifact_fpath": "validation.jsonl"
+      }
+    }
+  }
+}
+```
+
+The original declaration must match this registry identifier. GitLab and Hugging Face identifiers are supported through their existing native backends. Registry credentials come from the original runtime's configured environment, are held only in memory, and are not copied into catalog/worker/receipt files. Data preparation projects only registry settings; it does not require the policy model or grader service configuration to resolve.
+
+```bash
+python scripts/download_failed_task_sources.py prepare \
+  --selection /private/failed-attempt-index.jsonl \
+  --routes /private/original-downloads.json \
+  --gym-root /path/to/original-gym-checkout \
+  --python /path/to/original-gym-checkout/.venv/bin/python \
+  --output-dir /private/failed-task-workspace
+```
+
+This command performs original dataset downloads, validates and caches complete task rows, binds the selected failures by their full row digests, and creates `/private/failed-task-workspace/prepared/prepared_manifest.json`. References, rubrics, tools and unknown fields are preserved. Every failed attempt remains represented, including repeated attempts at the same task; native dataset repetition is normalized to one before the failure index supplies its intended multiplicity. Repeating this command with identical bindings revalidates and reuses the completed cache without new downloads. A failed or incomplete transfer is never published as a valid cache.
+
+Original auxiliary assets can be downloaded through the same catalog's optional `registry_assets` list. Each entry supplies `name`, `registry_identifier`, the original artifact `sha256`, and its native configuration location `config_key`. Regular file assets become hash-pinned original location overrides. For an archive, add `archive: {"format":"tar.gz","strip_prefix":"original_tasks","select_prefixes":["task-a"]}`. Only declared regular files/directories are extracted after the complete archive hash is verified. Set `runtime_copy: true` when the original integration modifies task mirrors; the existing runner then supplies a fresh writable copy for each job.
+
+A route may include explicit `config_overrides` as a JSON object for provenance-supported original sampling settings or service-variable bindings. Binding writes these to a private, hash-pinned overlay; it does not invent endpoints, credentials or grading rules. Actual model execution remains a separate step:
+
+```bash
+python scripts/rerun_failed_tasks.py run \
+  --manifest /private/failed-task-workspace/prepared/prepared_manifest.json \
+  --gym-root /path/to/original-gym-checkout \
+  --policy-config /private/checkpoint.json \
+  --python /path/to/original-gym-checkout/.venv/bin/python \
+  --output-dir /private/checkpoint-run
+```
+
+Add `--execute` to the run command only when the checkpoint and original scorer services are ready. Preparation never starts a policy, agent or grader, and makes no inference calls. Source data and generated subsets stay in the local workspace; no new registry upload occurs. The lower-level `download` command prints a plan by default (`--execute` fetches data only), and `bind` can attach a selection to an already downloaded source manifest.
+
+## Prepare from existing local task files
+
+The private routes JSON below is an optional alternative when original task files are already available. The download workflow generates this local binding automatically:
 
 ```json
 {
