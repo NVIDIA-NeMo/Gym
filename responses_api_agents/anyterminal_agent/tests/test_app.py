@@ -1048,7 +1048,8 @@ class TestInnerResponses:
 
         response = await self._inner_response(tmp_path, saved)
 
-        assert response.usage.model_dump(mode="json") == usage
+        expected_usage = usage | {"input_tokens_details": {"cached_tokens": 4096, "cache_write_tokens": None}}
+        assert response.usage.model_dump(mode="json") == expected_usage
         assert response.output[0].content[0].text == "done"
 
     async def test_usage_is_unknown_without_a_saved_response(self, tmp_path: Path) -> None:

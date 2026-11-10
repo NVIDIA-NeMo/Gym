@@ -561,8 +561,8 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     forward_unvalidated_reasoning_effort: bool = Field(
         default=False,
         description=(
-            "Forward a Responses `reasoning.effort` that the pinned OpenAI SDK does not list (for example "
-            "`max`, which the Codex CLI sends when its model catalog offers it) verbatim as the chat "
+            "Forward a Responses `reasoning.effort` that the pinned OpenAI SDK does not list "
+            "verbatim as the chat "
             "`reasoning_effort`, instead of refusing the request with 422. The engine validates the value. "
             "Efforts the SDK lists keep their existing path. Requires `is_responses_native: false` and "
             "`use_completions_api: false`."
