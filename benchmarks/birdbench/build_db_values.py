@@ -1,8 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-### BM25 usage is inspired by OmniSQL code: https://github.com/RUCKBReasoning/OmniSQL/blob/main/train_and_evaluate/process_dataset.py
-### which is released under Apache 2.0 license as shown here: https://github.com/RUCKBReasoning/OmniSQL/issues/25
+### Code provenance: the word n-gram query construction and the BM25 retrieval of column values are adapted from OmniSQL
+### (RUCKBReasoning/OmniSQL), train_and_evaluate/process_dataset.py at commit a66d732010c89fac4353488d1c59e0b06f92b742:
+### https://github.com/RUCKBReasoning/OmniSQL/blob/a66d732010c89fac4353488d1c59e0b06f92b742/train_and_evaluate/process_dataset.py
+### License: Apache-2.0. The OmniSQL repository has no LICENSE file; its maintainers state the code is Apache-2.0 in
+### https://github.com/RUCKBReasoning/OmniSQL/issues/25#issuecomment-2820187402
 
 """Schema introspection, BM25 retrieval, and ``sql_context`` rendering for ``prepare.py``.
 
