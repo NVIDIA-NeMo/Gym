@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-FileCopyrightText: Copyright 2026 Vision2Code Authors
 # SPDX-License-Identifier: Apache-2.0
-# Judge recovery adapted from https://gitlab-master.nvidia.com/asohrabizade/vision2code_internal
-# Source: vision2code/benchmark/run_benchmark.py; revision e86d3ccbd4e2d16c9f33e3b6a525750e419eff49.
+# Judge recovery adapted from https://github.com/image2code/vision2code
+# Source: vision2code/benchmark/run_benchmark.py; revision 000f2e162dd62fac5637c718e018d7123b3aff1e.
 # License: Apache-2.0; see NOTICE.
 """Stateless verification of reference image → Python → Enroot render → rubric reward."""
 

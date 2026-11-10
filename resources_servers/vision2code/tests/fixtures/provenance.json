@@ -13,8 +13,8 @@
   "image_metrics_golden": "image-metrics-golden.json: upstream image_metrics and apply_blend_a outputs for test_image_metrics.write_images cases",
   "original_doc_eee_fixture": "original-doc-eee.json: unmodified public source definitions and scoring; historical DocVQA/EEE-Bench fixtures validate -v2 variants",
   "judge_recovery_source": {
-    "repository": "https://gitlab-master.nvidia.com/asohrabizade/vision2code_internal",
-    "revision": "e86d3ccbd4e2d16c9f33e3b6a525750e419eff49",
+    "repository": "https://github.com/image2code/vision2code",
+    "revision": "000f2e162dd62fac5637c718e018d7123b3aff1e",
     "license": "Apache-2.0",
     "files": [
       "vision2code/evaluation/dataset_rubrics.py",

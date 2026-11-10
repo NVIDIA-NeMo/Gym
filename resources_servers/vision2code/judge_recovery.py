@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-FileCopyrightText: Copyright 2026 Vision2Code Authors
 # SPDX-License-Identifier: Apache-2.0
-# Adapted from https://gitlab-master.nvidia.com/asohrabizade/vision2code_internal (Apache-2.0).
-# Revision: e86d3ccbd4e2d16c9f33e3b6a525750e419eff49 (v1).
+# Adapted from https://github.com/image2code/vision2code (Apache-2.0).
+# Revision: 000f2e162dd62fac5637c718e018d7123b3aff1e.
 # Sources: vision2code/evaluation/dataset_rubrics.py, vision2code/evaluation/generic_rubric.py,
 # and vision2code/benchmark/run_benchmark.py. See NOTICE.
 """Bounded judge recovery using the original images and selected rubric."""

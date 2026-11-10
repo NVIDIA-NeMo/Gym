@@ -119,7 +119,9 @@ def test_capture_stdin_and_environment(tmp_path, monkeypatch):
 def test_task_descendants_survive_until_owner_teardown(tmp_path, ending):
     try:
         # A completed tool leaves its detached service, which no longer descends from Codex at the stop.
-        tool = "setsid sleep 60 </dev/null >/dev/null 2>&1 & echo $! > child.pid"
+        (tmp_path / "service.sh").write_text("echo $$ > child.pid\nexec sleep 60\n")
+        # Publish the PID from inside the detached session before letting the tool exit.
+        tool = "setsid bash service.sh </dev/null >/dev/null 2>&1 & while [ ! -s child.pid ]; do sleep 0.01; done"
         script = f"bash -c '{tool}'; touch ready; " + ("sleep 60" if ending != "natural" else "true")
         process = launch(tmp_path, ["bash", "-c", script])
         if ending == "cancel":

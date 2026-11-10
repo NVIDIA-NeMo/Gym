@@ -62,13 +62,14 @@ and EEE-Bench-v2, with their modified prompts and weights preserved. The existin
 historical golden fixtures now validate those variants; original-doc-eee.json
 independently records original definitions, prompts, weights, and caps.
 
-Judge recovery prompts/schema in judge_recovery.py and orchestration in app.py
-are adapted from the Apache-2.0 Vision2Code internal v1 checkout:
-https://gitlab-master.nvidia.com/asohrabizade/vision2code_internal
-Exact revision: e86d3ccbd4e2d16c9f33e3b6a525750e419eff49
+Judge repair prompts in judge_recovery.py and retry orchestration in app.py
+are adapted from the Apache-2.0 public Vision2Code repository:
+https://github.com/image2code/vision2code
+Exact revision: 000f2e162dd62fac5637c718e018d7123b3aff1e
 Copyright 2026 Vision2Code Authors
 Sources: vision2code/evaluation/dataset_rubrics.py,
 vision2code/evaluation/generic_rubric.py, vision2code/benchmark/run_benchmark.py.
-Gym exposes repair and fresh schema-constrained rejudging through configuration,
+Gym adds bounded recovery schemas and fresh rejudging prompts, exposes both
+repair and schema-constrained rejudging through configuration,
 extends recovery to invalid category scores, and preserves bounded retries and
 failure masking. No upstream transport or process orchestration is copied.

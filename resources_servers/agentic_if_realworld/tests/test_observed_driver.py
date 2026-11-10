@@ -44,6 +44,10 @@ from responses_api_models.agentic_if_text.app import TextModel, TextModelConfig
 def test_http_resume_and_connection_recovery(
     tmp_path, monkeypatch, observed, connection_failures, incomplete_first, text, stream_failure
 ):
+    # Other server workers can install sources or change checkout status during this test.
+    # Source-change rejection is covered by test_runtime_fingerprint_covers_active_agent_and_core.
+    runtime = core.runtime_identity()
+    monkeypatch.setattr(rollout_driver, "runtime_identity", lambda: runtime)
     create(tmp_path / "data")
     dataset = core.Dataset(tmp_path / "data", synthetic=True)
     prepared = tmp_path / "prepared.jsonl"
