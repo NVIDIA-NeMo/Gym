@@ -7,10 +7,12 @@ target (one pool) and selects the ``db_id`` per query with ``search_path``; a da
 connection pool per database (11 for dev, 69 for train). Column types follow ``setup_bird_spark`` exactly (same
 ``_typed_tables``): numeric when the data converts cleanly, else ``TEXT``; date/datetime columns stay ``TEXT``.
 ``TEXT`` columns use the ``"C"`` collation so ordering and comparison are bytewise, as in SQLite, rather than the
-server's locale. Identifiers keep BIRD's original names (mixed case, spaces) and are always quoted.
+server's locale. Tables keep BIRD's names; column names are lower-cased (``postgres_column_name``), so an unquoted
+column name finds its column, as any spelling does in SQLite. The loader quotes every identifier (some have spaces).
 
-A ``db_id`` is loaded in one transaction and recorded, with its string-fallback columns, in ``_bird_meta.loaded``;
-an already-recorded ``db_id`` is skipped. The loader also creates the read-only login role the grader connects as
+A ``db_id`` is loaded in one transaction and recorded, with its string-fallback columns and the layout version, in
+``_bird_meta.loaded``. An already-recorded ``db_id`` is skipped; one recorded with an older layout is an error until
+it is dropped and loaded again. The loader also creates the read-only login role the grader connects as
 (the user and password of ``reader_dsn``): ``SELECT`` on the BIRD schemas only, read-only transactions by default.
 Requires ``psycopg`` and ``pandas``.
 """
@@ -19,7 +21,7 @@ import json
 import logging
 import math
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import pandas as pd
 import psycopg
@@ -34,10 +36,24 @@ logger = logging.getLogger(__name__)
 _META_SCHEMA = "_bird_meta"
 _PG_TYPE_BY_DTYPE = {"Int64": "BIGINT", "float64": "DOUBLE PRECISION"}
 _TEXT_TYPE = 'TEXT COLLATE "C"'
+# Version of the schema layout, recorded per db_id in _bird_meta.loaded. Layout 2 lower-cases column names; loads made
+# before the version was recorded kept BIRD's column names and read as NULL.
+_LAYOUT = 2
+
+
+def postgres_column_name(column: str) -> str:
+    """The name ``load_sqlite_db`` gives a BIRD column: lower case, which an unquoted name folds to in PostgreSQL.
+
+    SQLite column names are case-insensitive, so two columns of one table can't map to the same name.
+    """
+    return column.lower()
 
 
 def postgres_column_types(sqlite_path: Path) -> Dict[str, Dict[str, str]]:
-    """``{table: {column: PostgreSQL type}}`` exactly as ``load_sqlite_db`` stores them (collation not shown)."""
+    """``{table: {column: PostgreSQL type}}`` as ``load_sqlite_db`` stores them (collation not shown).
+
+    Keyed by BIRD's column names; the loaded column is ``postgres_column_name(column)``.
+    """
     return {
         table: {column: _PG_TYPE_BY_DTYPE.get(str(dtype), "TEXT") for column, dtype in df.dtypes.items()}
         for table, df, _fallbacks in _typed_tables(sqlite_path)
@@ -65,7 +81,7 @@ def load_sqlite_db(conn: psycopg.Connection, db_id: str, sqlite_path: Path) -> L
         conn.execute(sql.SQL("CREATE SCHEMA {}").format(schema))
         for table, df, fallbacks in _typed_tables(sqlite_path):
             table_ref = sql.Identifier(db_id, table)
-            columns = [sql.Identifier(c) for c in df.columns]
+            columns = [sql.Identifier(postgres_column_name(c)) for c in df.columns]
             column_defs = [
                 sql.SQL("{} {}").format(col, sql.SQL(_PG_TYPE_BY_DTYPE.get(str(dtype), _TEXT_TYPE)))
                 for col, dtype in zip(columns, df.dtypes)
@@ -81,8 +97,10 @@ def load_sqlite_db(conn: psycopg.Connection, db_id: str, sqlite_path: Path) -> L
             conn.execute(sql.SQL("ANALYZE {}").format(table_ref))
             all_fallbacks += fallbacks
         conn.execute(
-            sql.SQL("INSERT INTO {}.loaded (db_id, fallbacks) VALUES (%s, %s)").format(sql.Identifier(_META_SCHEMA)),
-            (db_id, json.dumps(all_fallbacks)),
+            sql.SQL("INSERT INTO {}.loaded (db_id, fallbacks, layout) VALUES (%s, %s, %s)").format(
+                sql.Identifier(_META_SCHEMA)
+            ),
+            (db_id, json.dumps(all_fallbacks), _LAYOUT),
         )
     return all_fallbacks
 
@@ -107,20 +125,40 @@ def _ensure_reader_role(conn: psycopg.Connection, reader_dsn: str, db_ids: List[
             conn.execute(sql.SQL("GRANT SELECT ON ALL TABLES IN SCHEMA {} TO {}").format(sql.Identifier(schema), role))
 
 
+def _loaded_layouts(conn: psycopg.Connection) -> Dict[str, Optional[int]]:
+    """``{db_id: layout}`` for every recorded ``db_id``.
+
+    Read through ``to_jsonb`` so a meta table from before the layout column existed reads as NULL instead of failing.
+    """
+    query = sql.SQL("SELECT db_id, (to_jsonb(l) ->> 'layout')::int FROM {}.loaded AS l").format(
+        sql.Identifier(_META_SCHEMA)
+    )
+    return dict(conn.execute(query).fetchall())
+
+
+def _check_layout(loaded: Dict[str, Optional[int]], db_ids: List[str]) -> None:
+    """Raise if any of ``db_ids`` was loaded with another layout: the grader would look up names it doesn't have."""
+    stale = sorted(db_id for db_id in db_ids if db_id in loaded and loaded[db_id] != _LAYOUT)
+    if stale:
+        raise RuntimeError(
+            f"BIRD db_ids loaded into PostgreSQL with an older layout (this code needs layout {_LAYOUT}, lower-case "
+            f"column names): {stale}. Drop their schemas and their rows in {_META_SCHEMA}.loaded, or use a new "
+            "database, then load again"
+        )
+
+
 def check_bird_postgres(databases_dir: Path, reader_dsn: str) -> List[str]:
-    """Raise unless every ``db_id`` under ``databases_dir`` is recorded as loaded. Returns the db_ids.
+    """Raise unless every ``db_id`` under ``databases_dir`` is recorded as loaded, with this layout. Returns the db_ids.
 
     For a grader that only reads: loading needs an admin DSN (see ``ensure_bird_postgres``).
     """
     db_ids = [p.parent.name for p in sorted(databases_dir.glob("*/[!.]*.sqlite"))]
     with psycopg.connect(reader_dsn) as conn:
-        loaded = {
-            db_id
-            for (db_id,) in conn.execute(sql.SQL("SELECT db_id FROM {}.loaded").format(sql.Identifier(_META_SCHEMA)))
-        }
-    missing = sorted(set(db_ids) - loaded)
+        loaded = _loaded_layouts(conn)
+    missing = sorted(set(db_ids) - set(loaded))
     if missing:
         raise RuntimeError(f"BIRD db_ids not loaded into PostgreSQL: {missing}; set postgres_admin_dsn to load them")
+    _check_layout(loaded, db_ids)
     return db_ids
 
 
@@ -137,11 +175,13 @@ def ensure_bird_postgres(databases_dir: Path, admin_dsn: str, reader_dsn: str) -
                 "CREATE TABLE IF NOT EXISTS {}.loaded (db_id TEXT PRIMARY KEY, fallbacks JSONB, loaded_at TIMESTAMPTZ DEFAULT now())"
             ).format(sql.Identifier(_META_SCHEMA))
         )
-        loaded = {
-            db_id
-            for (db_id,) in conn.execute(sql.SQL("SELECT db_id FROM {}.loaded").format(sql.Identifier(_META_SCHEMA)))
-        }
-        for sqlite_path in sorted(databases_dir.glob("*/[!.]*.sqlite")):
+        conn.execute(
+            sql.SQL("ALTER TABLE {}.loaded ADD COLUMN IF NOT EXISTS layout INT").format(sql.Identifier(_META_SCHEMA))
+        )
+        loaded = _loaded_layouts(conn)
+        sqlite_paths = sorted(databases_dir.glob("*/[!.]*.sqlite"))
+        _check_layout(loaded, [p.parent.name for p in sqlite_paths])
+        for sqlite_path in sqlite_paths:
             db_id = sqlite_path.parent.name
             db_ids.append(db_id)
             if db_id in loaded:

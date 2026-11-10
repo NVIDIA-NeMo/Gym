@@ -437,28 +437,38 @@ class TestDbHandleSpark:
     reason="requires bm25s, nltk, pandas and psycopg",
 )
 class TestDbHandlePostgres:
-    def test_sql_context_is_qualified_double_quoted_and_uses_loaded_postgres_types(self, tmp_path):
+    def test_sql_context_is_qualified_double_quoted_and_uses_loaded_postgres_names_and_types(self, tmp_path):
         db_path = tmp_path / "school" / "school.sqlite"
         db_path.parent.mkdir()
         conn = sqlite3.connect(str(db_path))
-        conn.execute("CREATE TABLE Students (student_id INTEGER PRIMARY KEY, name TEXT, `Free Meal (K-12)` REAL)")
+        conn.execute("CREATE TABLE Students (StudentID INTEGER PRIMARY KEY, Name TEXT, `Free Meal (K-12)` REAL)")
         conn.execute(
-            "CREATE TABLE notes (student_id INTEGER, dirty INTEGER, FOREIGN KEY (student_id) REFERENCES Students(student_id))"
+            "CREATE TABLE notes (StudentID INTEGER, dirty INTEGER, FOREIGN KEY (StudentID) REFERENCES Students(StudentID))"
         )
+        # No referenced column: SQLite's foreign_key_list reports None for a key on the parent's primary key.
+        conn.execute("CREATE TABLE grades (StudentID INTEGER REFERENCES Students)")
         conn.execute("INSERT INTO Students VALUES (1, 'Alice', 1.5)")
         conn.execute("INSERT INTO notes VALUES (1, 'oops')")  # non-numeric data in an INTEGER column
         conn.commit()
+        (tmp_path / "Students.csv").write_text(
+            "original_column_name,column_name,column_description,value_description\nName,,the student's name,\n"
+        )
 
         handle = build_db_values.DbHandle(conn.cursor(), tmp_path, dialect="postgres", db_id="school")
         context = handle.sql_context_for_question("What is Alice's meal count?")
         conn.close()
 
-        assert '- "school"."Students":' in context and '- "school"."notes":' in context  # case kept
-        assert '  - "Free Meal (K-12)":\n      data_type: DOUBLE PRECISION' in context
-        assert '  - "student_id":\n      data_type: BIGINT (primary key)' in context
-        assert '  - "name":\n      data_type: TEXT' in context
+        assert '- "school"."Students":' in context and '- "school"."notes":' in context  # table names keep their case
+        # Column names are lower-cased, as loaded; the primary key, description and values still line up with them.
+        assert '  - "studentid":\n      data_type: BIGINT (primary key)' in context
+        assert (
+            '  - "name":\n      data_type: TEXT\n      description: the student\'s name.\n      values:\n      - Alice'
+            in context
+        )
+        assert '  - "free meal (k-12)":\n      data_type: DOUBLE PRECISION' in context
         assert '  - "dirty":\n      data_type: TEXT' in context  # fell back to text when loaded
-        assert '- "school"."notes"."student_id" = "school"."Students"."student_id"' in context
+        assert '- "school"."notes"."studentid" = "school"."Students"."studentid"' in context
+        assert '- "school"."grades"."studentid" = "school"."Students".' in context
 
 
 def test_collect_column_values_limit_per_column_caps_the_scan(tmp_path):

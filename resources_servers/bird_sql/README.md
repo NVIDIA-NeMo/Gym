@@ -63,7 +63,11 @@ The grader connects with `postgres_dsn`, a read-only role. When `postgres_admin_
 startup loads any missing `db_id` from the SQLite files (Spark's column typing; text columns
 use the `"C"` collation so ordering matches SQLite) and creates that role from
 `postgres_dsn`'s user and password. Without it, startup only checks that the data is
-loaded. `psycopg` and `psycopg_pool` are dependencies of this server (`pyproject.toml`); the default SQLite
+loaded. Tables keep BIRD's names; column names are lower-cased, so an unquoted column
+name works as it does in SQLite, while mixed-case table names (17 tables in 4 dev
+databases) still need double quotes. Each loaded `db_id` records its layout version, and
+startup stops with an error on one loaded with mixed-case column names until it is dropped
+and loaded again. `psycopg` and `psycopg_pool` are dependencies of this server (`pyproject.toml`); the default SQLite
 dialect never imports them.
 
 ## Example usage

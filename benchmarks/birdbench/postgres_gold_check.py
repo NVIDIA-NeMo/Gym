@@ -11,10 +11,10 @@ on SQLite. As a proxy for a correct PostgreSQL answer, this script transpiles ea
 Each gold is graded twice:
 
 - ``raw``: ``sqlglot.transpile`` output as is.
-- ``fixed``: the same, plus three mechanical fixes a PostgreSQL author would make anyway: identifiers get the
-  catalog's case and are quoted (PostgreSQL folds unquoted names to lower case, SQLite ignores case); a
-  double-quoted name that is not in the catalog becomes a string literal (SQLite's fallback); ``REAL`` becomes
-  ``DOUBLE PRECISION`` (SQLite's ``REAL`` is 8 bytes, PostgreSQL's 4).
+- ``fixed``: the same, plus three mechanical fixes a PostgreSQL author would make anyway: identifiers are spelled as
+  loaded (tables in BIRD's case, columns in lower case) and quoted (PostgreSQL folds unquoted names to lower case,
+  SQLite ignores case); a double-quoted name that is not in the catalog becomes a string literal (SQLite's
+  fallback); ``REAL`` becomes ``DOUBLE PRECISION`` (SQLite's ``REAL`` is 8 bytes, PostgreSQL's 4).
 
 Writes ``results.jsonl`` (statuses: match / mismatch / pg_error / pg_timeout / transpile_error / sqlite_gold_error,
 with the PostgreSQL error message) and prints match rates. Needs a PostgreSQL server loaded by
@@ -37,12 +37,16 @@ from psycopg import sql as pgsql
 from sqlglot import exp
 
 from resources_servers.bird_sql.eval_utils import PostgresPool, execute_and_compare_postgres
-from resources_servers.bird_sql.setup_bird_postgres import check_bird_postgres, ensure_bird_postgres
+from resources_servers.bird_sql.setup_bird_postgres import (
+    check_bird_postgres,
+    ensure_bird_postgres,
+    postgres_column_name,
+)
 from resources_servers.bird_sql.setup_bird_sql import ensure_bird_sql
 
 
 def catalog_names(sqlite_path: Path) -> Dict[str, Dict[str, str]]:
-    """``{"table"|"column": {lower-case name: catalog spelling}}`` for one database.
+    """``{"table"|"column": {lower-case name: name as loaded into PostgreSQL}}`` for one database.
 
     Tables and columns are kept apart: a table and a column can share a name in different case (``tags`` vs
     ``posts.Tags`` in codebase_community).
@@ -55,7 +59,9 @@ def catalog_names(sqlite_path: Path) -> Dict[str, Dict[str, str]]:
         ]
         columns = {}
         for t in tables:
-            columns.update({row[1].lower(): row[1] for row in conn.execute(f"PRAGMA table_info('{t}')")})
+            columns.update(
+                {row[1].lower(): postgres_column_name(row[1]) for row in conn.execute(f"PRAGMA table_info('{t}')")}
+            )
         return {"table": {t.lower(): t for t in tables}, "column": columns}
     finally:
         conn.close()

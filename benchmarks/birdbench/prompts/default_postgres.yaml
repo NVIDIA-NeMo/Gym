@@ -1,6 +1,6 @@
 # Prompt used for text-to-SQL, PostgreSQL dialect. Same as benchmarks/birdbench/prompts/default_spark.yaml except for the
 # engine and one sentence: PostgreSQL folds unquoted names to lower case, so the prompt asks for every name double-quoted
-# exactly as shown.
+# exactly as shown (table names keep BIRD's case; column names are loaded in lower case).
 
 ### Code provenance: part of this prompt is adapted from OmniSQL (RUCKBReasoning/OmniSQL), the `input_prompt_template` in
 ### train_and_evaluate/process_dataset.py at commit a66d732010c89fac4353488d1c59e0b06f92b742:

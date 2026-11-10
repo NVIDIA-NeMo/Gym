@@ -155,7 +155,7 @@ def postgres_env(tmp_path_factory):
     conn = sqlite3.connect(str(dev / DB_ID / f"{DB_ID}.sqlite"))
     conn.execute("CREATE TABLE t (x INTEGER)")
     conn.executemany("INSERT INTO t VALUES (?)", [(1,), (2,), (3,)])
-    conn.execute('CREATE TABLE "Mixed Case" ("Col Name" TEXT, n INTEGER, r REAL, dirty INTEGER, d DATE)')
+    conn.execute('CREATE TABLE "Mixed Case" ("Col Name" TEXT, N INTEGER, r REAL, dirty INTEGER, d DATE)')
     conn.executemany(
         'INSERT INTO "Mixed Case" VALUES (?, ?, ?, ?, ?)',
         [("a", 1, 1.5, 1, "2020-01-01"), ("B", None, 2.5, "oops", "2020-01-02")],
@@ -187,8 +187,8 @@ class TestLoader:
                 0
             ]
             rows = conn.execute(f'SELECT dirty, d FROM "{DB_ID}"."Mixed Case" ORDER BY d').fetchall()
-        assert types == {
-            "Col Name": "text C",
+        assert types == {  # column names lower-cased, the table name kept
+            "col name": "text C",
             "n": "bigint",
             "r": "double precision",
             "dirty": "text C",  # INTEGER column with non-numeric data falls back to text
@@ -229,6 +229,28 @@ class TestLoader:
             conn.execute("SET default_transaction_read_only = off")
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
                 conn.execute(f'INSERT INTO "{DB_ID}".t VALUES (9)')
+
+    def test_a_load_with_an_older_layout_must_be_reloaded(self, postgres_env):
+        import psycopg
+
+        from resources_servers.bird_sql.setup_bird_postgres import (
+            _LAYOUT,
+            check_bird_postgres,
+            ensure_bird_postgres,
+        )
+
+        set_layout = "UPDATE _bird_meta.loaded SET layout = %s WHERE db_id = %s"
+        with psycopg.connect(ADMIN_DSN, autocommit=True) as conn:
+            conn.execute(set_layout, (None, DB_ID))  # as recorded before layouts had a version
+        try:
+            with pytest.raises(RuntimeError, match=f"older layout.*{DB_ID}"):
+                check_bird_postgres(postgres_env.dev_dir, READER_DSN)
+            with pytest.raises(RuntimeError, match=f"older layout.*{DB_ID}"):
+                ensure_bird_postgres(postgres_env.dev_dir, ADMIN_DSN, READER_DSN)
+        finally:
+            with psycopg.connect(ADMIN_DSN, autocommit=True) as conn:
+                conn.execute(set_layout, (_LAYOUT, DB_ID))
+        assert check_bird_postgres(postgres_env.dev_dir, READER_DSN) == [DB_ID]
 
     def test_check_reports_missing_db_ids(self, postgres_env, tmp_path):
         from resources_servers.bird_sql.setup_bird_postgres import check_bird_postgres
@@ -288,12 +310,13 @@ class TestExecuteAndComparePostgres:
         assert (match, err) == (True, None)
 
     @pytest.mark.asyncio
-    async def test_mixed_case_identifiers_must_be_quoted(self, postgres_env):
-        gold = 'SELECT "Col Name" FROM "mixed case"'  # SQLite ignores identifier case
-        quoted = await self._compare(postgres_env, gold, 'SELECT "Col Name" FROM "Mixed Case"')
-        lowered = await self._compare(postgres_env, gold, 'SELECT "col name" FROM "Mixed Case"')
-        assert (quoted[0], quoted[3]) == (True, None)
-        assert lowered[3] == "pred_sql_error"
+    async def test_column_names_are_lower_case_and_table_names_keep_their_case(self, postgres_env):
+        gold = 'SELECT "Col Name", N FROM "mixed case"'  # SQLite ignores identifier case
+        for pred in ('SELECT "col name", n FROM "Mixed Case"', 'SELECT "col name", N FROM "Mixed Case"'):
+            match, _gold, _pred, err = await self._compare(postgres_env, gold, pred)  # unquoted N folds to n
+            assert (match, err) == (True, None)
+        for pred in ('SELECT "Col Name", n FROM "Mixed Case"', 'SELECT "col name", n FROM "mixed case"'):
+            assert (await self._compare(postgres_env, gold, pred))[3] == "pred_sql_error"
 
     @pytest.mark.asyncio
     async def test_text_sorts_bytewise_as_in_sqlite(self, postgres_env):
@@ -301,7 +324,7 @@ class TestExecuteAndComparePostgres:
         match, _gold, pred, err = await self._compare(
             postgres_env,
             'SELECT "Col Name" FROM "Mixed Case" ORDER BY 1 LIMIT 1',
-            'SELECT "Col Name" FROM "Mixed Case" ORDER BY 1 LIMIT 1',
+            'SELECT "col name" FROM "Mixed Case" ORDER BY 1 LIMIT 1',
         )
         assert (match, pred, err) == (True, [("B",)], None)
 

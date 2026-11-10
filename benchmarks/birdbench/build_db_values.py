@@ -463,7 +463,8 @@ class DbHandle:
     ):
         """``dialect="spark"`` (needs ``db_id``) renders the schema for Spark SQL: schema-qualified, backtick-quoted
         table headings and column names, and the Spark column types the ``bird_sql`` server will actually load.
-        ``dialect="postgres"`` does the same with double quotes and the PostgreSQL column types.
+        ``dialect="postgres"`` does the same with double quotes, the PostgreSQL column types and the column names as
+        loaded (lower case; see ``setup_bird_postgres.postgres_column_name``).
         ``corpus_limit_per_column`` bounds the BM25 corpus scan per column (see ``_collect_column_values``).
         """
         if dialect not in ("sqlite", "spark", "postgres"):
@@ -473,6 +474,7 @@ class DbHandle:
         self.cur = cur
         self.dialect = dialect
         self.db_id = db_id
+        self._column_name: Callable[[str], str] = lambda column: column
         self.table_names = _table_names(cur)
         self.column_types_by_table = {t: _column_types(cur, t) for t in self.table_names}
         if dialect == "spark":
@@ -483,10 +485,13 @@ class DbHandle:
             self.column_types_by_table = spark_column_types(sqlite_path)
         elif dialect == "postgres":
             # Imported here: only the PostgreSQL dialect needs pandas/psycopg.
-            from resources_servers.bird_sql.setup_bird_postgres import postgres_column_types
+            from resources_servers.bird_sql.setup_bird_postgres import postgres_column_name, postgres_column_types
 
             sqlite_path = Path(cur.execute("PRAGMA database_list").fetchall()[0][2])
             self.column_types_by_table = postgres_column_types(sqlite_path)
+            # foreign_key_list gives no column (None) for a key on the parent's primary key; it stays as the other
+            # dialects render it.
+            self._column_name = lambda column: column if column is None else postgres_column_name(column)
         dscp_fields = parse_dscp_fields(dscp)
         self.descriptions_by_table = {
             t: _column_descriptions(description_dir, t, dscp_fields) for t in self.table_names
@@ -502,7 +507,7 @@ class DbHandle:
 
     def _column_ref(self, table: str, column: str) -> str:
         if self.dialect != "sqlite":
-            return f"{self._quote(self.db_id)}.{self._quote(table)}.{self._quote(column)}"
+            return f"{self._quote(self.db_id)}.{self._quote(table)}.{self._quote(self._column_name(column))}"
         return f"{table}.{column}"
 
     def relevant_hits_for_question(self, question: str) -> List[Dict[str, str]]:
@@ -525,6 +530,6 @@ class DbHandle:
         if self.dialect != "sqlite":
             return {
                 "table_label": lambda table: f"{self._quote(self.db_id)}.{self._quote(table)}",
-                "column_label": self._quote,
+                "column_label": lambda column: self._quote(self._column_name(column)),
             }
         return {}

@@ -67,7 +67,7 @@ export BIRD_PG_DSN=postgresql://bird_reader:<reader password>@127.0.0.1:5432/bir
 | | sqlite | spark | postgres |
 |---|---|---|---|
 | Prompt | `prompts/default_sqlite.yaml` | `prompts/default_spark.yaml` | `prompts/default_postgres.yaml` |
-| `sql_context` rendered as | SQLite schema | Spark schema: `` `db_id`.`table` `` names, backtick-quoted identifiers, Spark column types | PostgreSQL schema: `"db_id"."table"` names, double-quoted identifiers, the loaded column types |
+| `sql_context` rendered as | SQLite schema | Spark schema: `` `db_id`.`table` `` names, backtick-quoted identifiers, Spark column types | PostgreSQL schema: `"db_id"."table"` names, double-quoted identifiers, column names in lower case as loaded, the loaded column types |
 | Model's SQL runs on | the SQLite databases | a local PySpark copy (Parquet under `resources_servers/bird_sql/.bird_sql/spark_warehouse[_train]/`, built on first start) | a PostgreSQL server you provide (one schema per `db_id`, loaded on first start when `BIRD_PG_ADMIN_DSN` is set) |
 
 | | dev | train |
@@ -88,8 +88,11 @@ export BIRD_PG_DSN=postgresql://bird_reader:<reader password>@127.0.0.1:5432/bir
   `"C"` collation so ordering matches SQLite. The model's query runs as one prepared statement (so `COMMIT; ...` cannot
   leave the transaction) in a read-only transaction as the read-only role, with `statement_timeout`, `search_path` set
   to the `db_id`, and parallel query off (a parallel float `SUM` changes from run to run), on one of `max_concurrency`
-  pooled connections per server process; size the server's `max_connections` for all of them. Identifiers keep BIRD's
-  original case, so the model must double-quote mixed-case names. `postgres_gold_check.py` grades sqlglot transpiles of
+  pooled connections per server process; size the server's `max_connections` for all of them. Tables keep BIRD's
+  names and column names are lower-cased, so an unquoted column name works as in SQLite; mixed-case table names
+  (17 tables in 4 dev databases) still need double quotes. BIRD's evidence, shown with the question, spells columns in
+  their original case: a model that copies such a name inside double quotes names a column that doesn't exist (61 of
+  1,534 dev questions quote one, or name one that needs quotes anyway). `postgres_gold_check.py` grades sqlglot transpiles of
   the golds: 91% match after three mechanical fixes (identifier case, double-quoted strings, `REAL`).
 - **Caveat.** Because the gold is the answer under SQLite semantics, a correct Spark query can differ from it when the
   gold relies on SQLite behavior (bare `GROUP BY` columns, integer division, case-insensitive `LIKE`, loose
