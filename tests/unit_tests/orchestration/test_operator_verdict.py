@@ -248,3 +248,142 @@ def test_the_outcome_carries_the_verdict_in_both_places():
         with_operator_verdict(RecoveryOutcome(decision=decision, ok=False, dispatched=None)).operator_verdict["state"]
         == "unknown"
     )
+
+
+def test_a_proven_health_failure_is_kept_when_the_score_is_also_unread():
+    verdict, task, _ = _verdict(_run(97, settled={"model_transport_error": 3}))
+    assert any(e.startswith("score unavailable") for e in task["errors"])
+    assert task["evaluation_health"]["status"] == "FAIL"
+    assert verdict == {
+        "state": "needs_action",
+        "reason": "3 of 100 trials failed on the evaluation side (model_transport_error 3)",
+        "action": "fix the failing infrastructure then `gym eval submit` again",
+    }
+
+
+def test_an_unread_score_with_a_failed_summary_validity_is_not_score_only_unknown():
+    collected = _run(100)
+    collected.quality["artifacts"]["healthy"] = False
+    verdict, task, _ = _verdict(collected)
+    assert any(e.startswith("score unavailable") for e in task["errors"]) and len(task["errors"]) > 1
+    assert verdict["state"] == "needs_action"
+
+
+def _spent(reason, counts):
+    return _decision(RecoveryAction.STOP, reason, counts)
+
+
+def test_exhausted_attempts_name_the_extension_not_a_fresh_submit():
+    decision = _spent(
+        "2 identity(ies) used every attempt since the last resubmit, so a resume would run nothing",
+        {IdentityState.SCORED: 8, IdentityState.EXHAUSTED: 2},
+    )
+    verdict = operator_verdict(_failed_task(), decision)
+    assert verdict["state"] == "needs_action"
+    assert "`gym eval resubmit --recover --extend-attempts N`" in verdict["action"]
+    assert "completed work is kept" in verdict["action"] and "submit" not in verdict["action"].replace("resubmit", "")
+
+
+def test_spent_infra_retries_and_walltime_name_their_options():
+    retries = _spent(
+        "the stored infra-retry budget is used (3 of 3)", {IdentityState.SCORED: 8, IdentityState.RETRYABLE: 2}
+    )
+    action = operator_verdict(_failed_task(), retries)["action"]
+    assert "--extend-retries N" in action and "--max-walltime" not in action and "--extend-attempts" not in action
+    walltime = _spent(
+        "the stored walltime budget is used (3600 of 3600 s)", {IdentityState.SCORED: 8, IdentityState.RETRYABLE: 2}
+    )
+    action = operator_verdict(_failed_task(), walltime)["action"]
+    assert "--max-walltime HH:MM:SS --walltime-reason TEXT" in action and "--extend-retries" not in action
+    both = _spent(
+        "the stored infra-retry budget is used (3 of 3), and the stored walltime budget is used (3600 of 3600 s; "
+        "less than a minute is left): raise both in one call",
+        {IdentityState.SCORED: 8, IdentityState.RETRYABLE: 2},
+    )
+    action = operator_verdict(_failed_task(), both)["action"]
+    assert "--extend-retries N --max-walltime" in action and "same call" in action
+    assert "fresh" not in action and "`gym eval submit`" not in action
+
+
+def test_non_budget_stops_keep_their_fix_then_submit_actions():
+    decision = _decision(
+        RecoveryAction.STOP, "10 failure(s) typed provider_credentials_rejected", {IdentityState.TERMINAL: 10}
+    )
+    assert operator_verdict(_failed_task(), decision)["action"].endswith("then `gym eval submit` again")
+
+
+def _refused_outcome(refusal):
+    decision = _decision(
+        RecoveryAction.RESUBMIT, "2 failures can retry", {IdentityState.SCORED: 8, IdentityState.RETRYABLE: 2}
+    )
+    task = {"status": "FAILED", "expected_samples": 10, "errors": [], "warnings": []}
+    outcome = RecoveryOutcome(decision=decision, ok=False, dispatched=None, gate_task=task, scheduler_refusal=refusal)
+    return with_operator_verdict(outcome)
+
+
+def test_a_definite_scheduler_refusal_is_not_a_recover_now_plan():
+    refusal = {"scheduler_text": "sbatch: error: Invalid time limit", "job_dir_restored": True, "chain_marker": None}
+    outcome = _refused_outcome(refusal)
+    verdict = outcome.operator_verdict
+    assert verdict["state"] == "needs_action"
+    assert "sbatch: error: Invalid time limit" in verdict["reason"]
+    assert "recover` now" not in verdict["action"] and "correct" in verdict["action"]
+    assert outcome.gate_task["operator_verdict"] == verdict
+    assert outcome.decision.action == RecoveryAction.RESUBMIT and outcome.scheduler_refusal == refusal
+
+
+def test_an_ambiguous_scheduler_refusal_asks_for_reconciliation_first():
+    refusal = {
+        "scheduler_text": "sbatch: error: Socket timed out",
+        "job_dir_restored": False,
+        "chain_marker": "accounting unknown",
+    }
+    verdict = _refused_outcome(refusal).operator_verdict
+    assert "unknown" in verdict["reason"] and "queued" in verdict["reason"]
+    assert "reconcile" in verdict["action"] and "recover` now" not in verdict["action"]
+
+
+def test_a_walltime_refusal_before_the_evidence_read_is_not_a_reader_failure():
+    decision = _decision(RecoveryAction.STOP, "walltime raise refused: partition batch MaxTime 2:00:00 is low", {})
+    plan = {"refused": "partition batch MaxTime 2:00:00 is below the run's segment walltime 04:00:00"}
+    outcome = with_operator_verdict(RecoveryOutcome(decision=decision, ok=False, dispatched=None, walltime_plan=plan))
+    verdict = outcome.operator_verdict
+    assert outcome.gate_task is None
+    assert verdict["state"] == "needs_action" and plan["refused"] in verdict["reason"]
+    assert "reader" not in verdict["action"] and "inspect again" not in verdict["action"]
+    # A genuinely missing reader stays unknown.
+    unread = with_operator_verdict(RecoveryOutcome(decision=decision, ok=False, dispatched=None))
+    assert unread.operator_verdict["state"] == "unknown"
+
+
+def _two_rows():
+    collected = _ready(_run(2))
+    collected.quality["source_matches"] = False
+    return collected
+
+
+def test_an_explicit_zero_unobserved_count_is_not_a_missing_grading_count():
+    collected = _two_rows()
+    collected.failures = [_judge_failure(0, 401)]
+    decision, _, task = _gate(collected)
+    cause = task.get("unverified_cause")
+    assert cause is not None and "no recorded grading" not in cause["reason"]
+
+
+def test_recovered_judge_history_does_not_displace_an_unrelated_current_cause():
+    collected = _two_rows()
+    collected.results[1]["ng_trial_observations"]["verifier_invocations"][0]["grading_operations"] = None
+    collected.failures = [_judge_failure(0, 401)]
+    _, _, task = _gate(collected)
+    assert task["unverified_cause"]["kind"] == "grading_unobserved"
+    assert task["unverified_cause"]["reason"].startswith("1 of 2 rows have no recorded grading")
+    # The same history on the identity whose grading is unresolved is the judge cause, counted once.
+    collected = _two_rows()
+    collected.results[0]["ng_trial_observations"]["verifier_invocations"][0]["grading_operations"] = None
+    collected.failures = [_judge_failure(0, 401), _judge_failure(0, 401)]
+    _, _, task = _gate(collected)
+    assert task["unverified_cause"] == {
+        "kind": "judge_rejudged",
+        "reason": "1 of 2 rows were re-judged after a judge failure (401 from the judge model server); "
+        "1 rows have no recorded grading",
+    }

@@ -2758,8 +2758,11 @@ def test_a_mixed_run_reports_observed_healthy_unhealthy_and_unobserved_trials(tm
         "unobserved": 99,
     }
     [health] = [w for w in unowned["warnings"] if w.startswith("response/trial health")]
-    assert "trial: UNOBSERVED 99 of 100 expected trials" in health
-    assert "observed healthy 0, unhealthy 1" in health
+    # The warning names the cause; the full trial reason stays in the health detail.
+    assert "99 of 100 rows have no recorded grading" in health
+    detail = unowned["evaluation_health"]["detail"]
+    assert "trial: UNOBSERVED 99 of 100 expected trials" in detail
+    assert "observed healthy 0, unhealthy 1" in detail
 
 
 _CURRENT_RECEIPT = {
