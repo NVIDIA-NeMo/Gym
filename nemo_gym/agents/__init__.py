@@ -36,6 +36,7 @@ if TYPE_CHECKING:
         confirmed_policy_response_timeout,
         decide_outcome,
         failure_outcome_policy,
+        model_http_error_outcome,
     )
     from nemo_gym.agents.agent_tools import (
         restricted_network_policy,
@@ -153,6 +154,7 @@ _PUBLIC_API = {
     "harness_termination_failure": "utils.supervisor_client",
     "is_harness_termination_failure": "utils.supervisor_client",
     "lifecycle_observation": "utils.sandbox_observation",
+    "model_http_error_outcome": "agent_outcome",
     "parse_cleanup_receipt": "utils.supervisor_client",
     "raises_agent_failure": "testing.failure_assertions",
     "resolve_agent_timeout": "utils.task_timeout",

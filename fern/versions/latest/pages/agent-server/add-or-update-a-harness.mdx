@@ -703,7 +703,11 @@ An adapter keeps two things of its own:
   receipt) into a `RunEvidence`.
 - **`classify_outcome(native_result) -> AgentOutcome`** for the error the run ended on. Use a structured status where
   the runtime gives one, and match text only against a pinned, tested runtime version. The default classifier
-  returns `unknown`.
+  returns `unknown`. For a model request that failed with an HTTP status, return
+  `model_http_error_outcome(status, error_body=...)` and pass the endpoint's error body when the harness exposes it.
+  Gym's model servers answer a context overflow they propagate with a 400 whose body carries the OpenAI code
+  `context_length_exceeded`, and the helper reports that as `model_context_limit`, so the run is graded as
+  `incomplete` even before the first reply.
 
 Then it returns `self.finish_response(response, evidence, session=session)` with HTTP 200. `finish_response` sets the
 status, writes `ng_agent_outcome` on a failed response only, names the deciding row in `ng_agent_stop_reason`, and
