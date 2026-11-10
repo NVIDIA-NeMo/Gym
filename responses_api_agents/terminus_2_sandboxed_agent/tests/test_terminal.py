@@ -14,6 +14,7 @@ import pytest
 
 from nemo_gym.core import NgFailureEvent
 from responses_api_agents.terminus_2_sandboxed_agent.terminal import (
+    ShellExitedError,
     TerminusJSONParser,
     TerminusTmuxSession,
     TerminusXMLParser,
@@ -80,7 +81,8 @@ async def test_failed_input_drain_does_not_claim_interrupt_was_delivered():
 
     with pytest.raises(RuntimeError, match="terminal disappeared"):
         await session(SimpleNamespace(exec=execute)).send_keys("C-c\n")
-    assert sum("timeout 0.2 cat" in command for command in calls) == 1
+    # The interrupt script sends Ctrl-C itself, only after the drain succeeds.
+    assert sum(command.startswith("bash -c") for command in calls) == 1
     assert not any(command.startswith("tmux send-keys") for command in calls)
 
 
@@ -94,11 +96,10 @@ async def test_controls_preserve_command_order():
         return SimpleNamespace(return_code=0, stdout="0\n", stderr="")
 
     await session(SimpleNamespace(exec=execute)).send_keys(["sleep 60\n", "C-c\n", "echo alive\n"])
-    assert len(calls) == 4
+    assert len(calls) == 3
     assert "sleep 60" in calls[0]
-    assert "timeout 0.2 cat" in calls[1]
-    assert calls[2].endswith(" C-c")
-    assert "echo alive" in calls[3]
+    assert calls[1].startswith("bash -c") and calls[1].endswith(" interrupt test")
+    assert "echo alive" in calls[2]
 
 
 @pytest.mark.asyncio
@@ -332,3 +333,125 @@ async def test_provider_failure_from_the_exec_layer_passes_through_the_terminal_
     with pytest.raises(NgFailureEvent) as error:
         await session(SimpleNamespace(exec=execute)).send_keys("C-c\n")
     assert error.value is event
+
+
+class LocalTmuxEnvironment:
+    """Runs sandbox commands on this host; ``shims`` prefixes PATH for commands sent after the server starts."""
+
+    session_id = "interrupt"
+
+    def __init__(self, tmp_path: Path) -> None:
+        self.tmp_path = tmp_path
+        self.shims: Path | None = None
+
+    async def exec(self, command: str, **kwargs) -> SimpleNamespace:
+        env = {**os.environ, "TMUX_TMPDIR": str(self.tmp_path)}
+        if self.shims is not None:
+            env["PATH"] = f"{self.shims}:{env['PATH']}"
+        process = await asyncio.create_subprocess_exec(
+            "bash",
+            "-c",
+            command,
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+        return SimpleNamespace(
+            return_code=process.returncode,
+            stdout=stdout.decode(errors="replace"),
+            stderr=stderr.decode(errors="replace"),
+        )
+
+    async def pane(self, field: str) -> str:
+        return (await self.exec(f"tmux display-message -p -t test '#{{{field}}}'")).stdout.strip()
+
+
+def write_shim(directory: Path, name: str, body: str) -> None:
+    directory.mkdir(exist_ok=True)
+    shim = directory / name
+    shim.write_text(f"#!/bin/bash\n{body}\n")
+    shim.chmod(0o755)
+
+
+async def start_job_behind_paste(environment: LocalTmuxEnvironment, *, lines: int) -> tuple[TerminusTmuxSession, Path]:
+    """Run ``sleep`` in the pane, then paste shell text that it never reads."""
+    terminal = TerminusTmuxSession("test", environment, environment.tmp_path / "pane.log", None, None)
+    await terminal.start()
+    forbidden = environment.tmp_path / "must-not-execute"
+    pending = environment.tmp_path / "queued.txt"
+    pending.write_text(f"touch {forbidden}\n" * lines)
+    await terminal.send_keys("sleep 120\n")
+    await eventually(lambda: environment.pane("pane_current_command"), lambda command: command == "sleep")
+    result = await environment.exec(f"tmux load-buffer -b queued {pending} && tmux paste-buffer -d -b queued -t test")
+    assert result.return_code == 0, result.stderr
+    return terminal, forbidden
+
+
+@pytest.mark.skipif(sys.platform != "linux" or shutil.which("tmux") is None, reason="requires Linux tmux")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["slow_reader_start", "slow_reader", "stalled_tmux"])
+async def test_ctrl_c_reaches_a_job_behind_pending_input_despite_slow_draining(tmp_path, caplog, fault):
+    """Slow process start-up, input that keeps arriving, and a stalled tmux must not lose Ctrl-C.
+
+    A 0-byte read window that included process start-up once counted as quiet while the kernel queue
+    was full; a fixed five-second budget gave up on a paste that was still draining; and tmux can hold
+    input after the kernel queue empties, which leaves Ctrl-C queued behind it.
+    """
+    caplog.set_level(logging.INFO, logger="harbor.utils.logger")
+    environment = LocalTmuxEnvironment(tmp_path)
+    cat = shutil.which("cat")
+    # Fit the slow-reader paste in the kernel queue so its pace is the reader's; overflow tmux otherwise.
+    terminal, forbidden = await start_job_behind_paste(environment, lines=1024 if fault == "slow_reader" else 32768)
+    try:
+        if fault == "slow_reader_start":
+            write_shim(tmp_path / "shims", "cat", f'sleep 0.5; exec {cat} "$@"')
+            environment.shims = tmp_path / "shims"
+        elif fault == "slow_reader":
+            write_shim(
+                tmp_path / "shims",
+                "cat",
+                f'[ $# -eq 0 ] || exec <"$1"\nwhile :; do {shutil.which("head")} -c 256 || exit; sleep 0.05; done',
+            )
+            environment.shims = tmp_path / "shims"
+        else:
+            # The interrupt reads the terminal settings once it knows the pane, so stop tmux there for 3
+            # seconds: the kernel queue drains, and the rest of the paste stays in tmux until it resumes.
+            server = await environment.pane("pid")
+            write_shim(
+                tmp_path / "shims",
+                "stty",
+                f"kill -STOP {server}; (sleep 3; kill -CONT {server}) </dev/null >/dev/null 2>&1 &\n"
+                f'exec {shutil.which("stty")} "$@"',
+            )
+            environment.shims = tmp_path / "shims"
+        await terminal.send_keys("C-c")
+        environment.shims = None
+        assert await environment.pane("pane_current_command") != "sleep"
+        await terminal.send_keys("echo TERMINAL_RECOVERED\n", min_timeout_sec=0.3)
+        await eventually(terminal.capture_pane, lambda pane: "\nTERMINAL_RECOVERED\n" in pane)
+        assert not forbidden.exists()
+    finally:
+        environment.shims = None
+        await environment.exec("tmux kill-server")
+
+
+@pytest.mark.skipif(sys.platform != "linux" or shutil.which("tmux") is None, reason="requires Linux tmux")
+@pytest.mark.asyncio
+async def test_ctrl_c_that_never_reaches_the_job_is_a_terminal_failure(tmp_path, caplog):
+    """A job that SIGINT would kill but that keeps running after Ctrl-C means the interrupt was lost."""
+    caplog.set_level(logging.INFO, logger="harbor.utils.logger")
+    environment = LocalTmuxEnvironment(tmp_path)
+    terminal, _ = await start_job_behind_paste(environment, lines=16)
+    try:
+        # Drop Ctrl-C on its way to tmux.
+        tmux = shutil.which("tmux")
+        write_shim(tmp_path / "shims", "tmux", f'case " $* " in *" C-c "*) exit 0 ;; esac\nexec {tmux} "$@"')
+        environment.shims = tmp_path / "shims"
+        with pytest.raises(RuntimeError, match="Ctrl-C did not reach the foreground job") as error:
+            await terminal.send_keys("C-c")
+        assert not isinstance(error.value, ShellExitedError)
+        environment.shims = None
+        assert await environment.pane("pane_current_command") == "sleep"
+    finally:
+        await environment.exec("tmux kill-server")
