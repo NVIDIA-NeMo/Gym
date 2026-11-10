@@ -24,7 +24,7 @@ import shlex
 import shutil
 import tempfile
 from asyncio import Semaphore
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from shlex import quote
@@ -66,6 +66,7 @@ from nemo_gym.core import (
     MODEL_CONTEXT_LIMIT,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
+    MediaFile,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -78,7 +79,9 @@ from nemo_gym.core import (
     NeMoGymResponseUsage,
     NgFailureEvent,
     SandboxFailureDetails,
+    UnsupportedContentError,
     observe_failure,
+    split_text_and_media,
 )
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -87,7 +90,6 @@ from nemo_gym.sandbox import (
     SandboxSpec,
     create_provider,
     resolve_provider_config,
-    upload_text,
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse, MCPToolAccess
 from nemo_gym.trajectory import (
@@ -119,13 +121,14 @@ from responses_api_agents.opencode_agent.pinned import (
 from responses_api_agents.opencode_agent.runtime import (
     ASSISTANT_MESSAGE_PLUGIN_FILE,
     ASSISTANT_MESSAGE_PLUGIN_SOURCE,
+    IMAGE_INPUT_MODEL_OPTIONS,
     OPENCODE_VERSION,
     REQUIRED_MCP_PLUGIN_FILE,
-    REQUIRED_MCP_PLUGIN_SOURCE,
     RUNTIME_INSTALLER_FILE,
     RUNTIME_INSTALLER_SOURCE,
     TASK_ENVIRONMENT_PLUGIN_FILE,
     TASK_ENVIRONMENT_PLUGIN_SOURCE,
+    UNRESTRICTED_IMAGE_ATTACHMENT,
     apply_observability_patch,
     command_failure_reason,
 )
@@ -331,6 +334,14 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     workspace_root: str = "outputs/opencode_agent/workspaces"
     repo_dir: Optional[str] = None
     thinking: bool = True
+    image_input: bool = Field(
+        default=False,
+        description=(
+            "Declare image input on the Gym model in sandbox sessions even when the prompt has no images, so that "
+            "OpenCode sends the model images its tools return, such as task files it reads. A prompt with images "
+            "always declares it, for that activation and every later one in the session."
+        ),
+    )
     system_prompt: Optional[str] = None
     system_prompt_mode: Literal["append", "replace"] = "append"
     timeout: int = 900
@@ -787,11 +798,13 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 return response
             if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
                 raise HTTPException(409, "OpenCode activation does not match the seeded session and rollout")
-            prompt, system = self._session_input(body)
             if state.task is None:
+                # Parse only for a new activation: a retry is compared with the stored request instead,
+                # so its media are never decoded again.
+                prompt, system, media = self._session_input(body)
                 state.activation_request = body.model_copy(deep=True)
                 state.task = asyncio.create_task(
-                    self._session_response(state, state.activation_request, prompt=prompt, system=system)
+                    self._session_response(state, state.activation_request, prompt=prompt, system=system, media=media)
                 )
             elif body != state.activation_request:
                 raise HTTPException(409, "OpenCode sandbox sessions support one activation; retry the same request")
@@ -940,10 +953,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise HTTPException(
                 422, "OpenCode sandbox max_output_tokens must be positive and not exceed context_window"
             )
-        unsupported = self.config.opencode_config.keys() - {"permission", "tools"}
+        unsupported = self.config.opencode_config.keys() - {"permission", "tools", "attachment"}
         if unsupported:
             raise HTTPException(
-                422, f"OpenCode sandbox config supports permission/tools only; unsupported: {sorted(unsupported)}"
+                422,
+                f"OpenCode sandbox config supports permission/tools/attachment only; unsupported: {sorted(unsupported)}",
             )
         if self.config.env or self.config.extra_args or self.config.command != "opencode":
             raise HTTPException(422, "env, extra_args and command overrides are supported only by local OpenCode")
@@ -1298,7 +1312,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             cleanup_confirmed=state.session.cleanup_confirmed if state.is_continuation else None,
         )
 
-    def _session_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
+    def _session_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str, list[MediaFile]]:
+        """Return the user prompt, the system instructions and the prompt's media files."""
         # Sampling is applied to every OpenCode agent (see _session_response); other controls are rejected.
         supported = {"input", "instructions", "model", "temperature", "top_p"}
         sampled = [name for name in ("temperature", "top_p") if getattr(body, name) is not None]
@@ -1332,22 +1347,23 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         roles = [getattr(item, "role", None) for item in items]
         if roles not in (["user"], ["system", "user"], ["developer", "user"]):
             raise HTTPException(
-                422, "OpenCode sandbox execution accepts one user text prompt and optional system/developer message"
+                422, "OpenCode sandbox execution accepts one user prompt and an optional system or developer message"
             )
         texts = []
+        media: list[MediaFile] = []
         for item in items:
-            if isinstance(item.content, str):
-                texts.append(item.content)
-            else:
-                parts = [part if isinstance(part, dict) else part.model_dump() for part in item.content]
-                if any(part.get("type") != "input_text" for part in parts):
-                    raise HTTPException(422, "OpenCode sandbox execution supports text input only")
-                texts.append("\n".join(part["text"] for part in parts))
+            try:
+                text, item_media = split_text_and_media(item.content)
+            except UnsupportedContentError as error:
+                raise HTTPException(422, f"OpenCode sandbox execution: {error}") from error
+            if item_media and item is not items[-1]:
+                raise HTTPException(422, "OpenCode sandbox execution accepts media only in the user prompt")
+            texts.append(text)
+            media = item_media
         if not texts[-1].strip():
             raise HTTPException(422, "OpenCode sandbox execution requires a nonempty user prompt")
-        return texts[-1], "\n\n".join(
-            text for text in [self.config.system_prompt, body.instructions, *texts[:-1]] if text
-        )
+        system = "\n\n".join(text for text in [self.config.system_prompt, body.instructions, *texts[:-1]] if text)
+        return texts[-1], system, media
 
     def _session_output(
         self, export: dict[str, Any], observations: AgentObservationBundle
@@ -1443,7 +1459,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         self, state: AgentSessionState, body: NeMoGymResponseCreateParamsNonStreaming
     ) -> None:
         assert isinstance(state, OpenCodeSandboxSession)
-        _, system = self._session_input(body)
+        prompt, system, media = self._session_input(body)
+        # The base class passes this same request object to _activate_agent_session_state,
+        # which reuses the result so the media are decoded once.
+        state.validated_input = (body, prompt, system, media)
         supplied_instructions = body.instructions is not None or (
             not isinstance(body.input, str)
             and any(getattr(item, "role", None) in {"system", "developer"} for item in body.input)
@@ -1456,7 +1475,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         """Run a delta under one budget, including preparation and the concurrency queue."""
         assert isinstance(state, OpenCodeSandboxSession)
-        prompt, system = self._session_input(body)
+        validated, state.validated_input = state.validated_input, None
+        if validated is not None and validated[0] is body:
+            _, prompt, system, media = validated
+        else:
+            # Another request validated after this one, so its result does not apply here.
+            prompt, system, media = self._session_input(body)
         if state.system_instructions is None:
             state.system_instructions = system
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
@@ -1473,6 +1497,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 body,
                 prompt=prompt,
                 system=state.system_instructions,
+                media=media,
                 timeout=timeout,
                 deadline=deadline,
             )
@@ -1591,11 +1616,16 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         *,
         prompt: str,
         system: str,
+        media: Sequence[MediaFile] = (),
         timeout: float | None = None,
         deadline: float | None = None,
     ) -> NeMoGymResponse:
         timeout = timeout if timeout is not None else resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         started = monotonic()
+        # A text-only deployment rejects a request that carries an image, so image input is declared only for prompt
+        # images or when the configuration asks for it. A resumed session keeps declaring it, because OpenCode resends
+        # earlier images with the history and would otherwise replace them with its error text.
+        state.declares_image_input = state.declares_image_input or bool(media) or self.config.image_input
         previous_session_id = state.harness_session_id
         base_url = self.resolve_model_base_url(self.config.model_server.name, state.request.episode_id.capture_key)
         config = {
@@ -1604,6 +1634,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             "enabled_providers": ["nemo_gym"],
             "autoupdate": False,
             "share": "disabled",
+            # A session's opencode_config "attachment" replaces this, so a run on an endpoint with image limits can
+            # restore one.
+            **({"attachment": copy.deepcopy(UNRESTRICTED_IMAGE_ATTACHMENT)} if state.declares_image_input else {}),
             "provider": {
                 "nemo_gym": {
                     "npm": "@ai-sdk/openai-compatible",
@@ -1630,6 +1663,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                                 "input": self.config.context_window,
                                 "output": self.config.max_output_tokens,
                             },
+                            **(copy.deepcopy(IMAGE_INPUT_MODEL_OPTIONS) if state.declares_image_input else {}),
                         }
                     },
                 }
@@ -1645,17 +1679,6 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         mcp_servers, mcp_grants = self._granted_mcp_servers(state.request)
         if mcp_servers:
             config["mcp"] = mcp_servers
-            directory = state.session.session_dir
-            # Staging spends the activation's budget; an expiry here is a pre-launch timeout.
-            async with asyncio.timeout_at(deadline):
-                await state.session.sandbox.upload(
-                    REQUIRED_MCP_PLUGIN_SOURCE, f"{directory}/{REQUIRED_MCP_PLUGIN_FILE}"
-                )
-                await upload_text(
-                    state.session.sandbox, path=f"{directory}/mcp-grants.json", text=json.dumps(mcp_grants)
-                )
-                # null until the plugin checks the grants before the first model call of this activation.
-                await upload_text(state.session.sandbox, path=f"{directory}/mcp-status.json", text=json.dumps(None))
         # System instructions are separate from the user's task and applied to every OpenCode model turn.
         if system:
             if self.config.system_prompt_mode == "replace":
@@ -1687,6 +1710,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             "cwd": state.session.workdir,
             "command": command,
             "prompt": prompt,
+            "mcp_grants": mcp_grants if mcp_servers else None,
             "env": {
                 **_private_directories(state.persistent_directory),
                 **({"NEMO_GYM_OPENCODE_ACTIVATION_ID": state.invocation_prefix} if state.is_continuation else {}),
@@ -1706,8 +1730,13 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             async with asyncio.timeout_at(deadline):
                 await self.sem.acquire()
             try:
+                if deadline is None:
+                    # A first activation's budget starts once it holds a slot, as Pi's does: staging spends it,
+                    # and OpenCode runs for what remains.
+                    deadline = monotonic() + timeout
                 await state.execute(
                     payload,
+                    media=media,
                     timeout=timeout,
                     close_timeout=self.config.session_close_timeout_seconds,
                     deadline=deadline,

@@ -144,9 +144,28 @@ its private HOME. The adapter requires a fresh successful-initialization receipt
 the task environment hook before accepting a gradable result. A missing or invalid
 receipt fails the activation even if the CLI ignored a plugin-loading error.
 
-The session path accepts one text task, optional system/developer text and
-`instructions`. Request `temperature` and `top_p` are applied to every OpenCode agent
-(see [Owner extensions](#owner-extensions)). Other controls, images, history replay and
+The session path accepts one user task, optional system/developer text and
+`instructions`. The user task may include images as base64 data-URI `input_image` parts,
+alongside nonempty text. The adapter writes each image to `/tmp/nemo-gym-media/<sha256>.<ext>`
+with `nemo_gym.sandbox.stage_media` and attaches it with `opencode run --file`. OpenCode shows
+that path to the model, so naming the file by its content keeps the prompt the same across
+rollouts of a task. In a borrowed sandbox these files remain after the session closes. OpenCode places the images, in order, before the task text and does
+not use the `detail` setting. A session declares image input on the Gym model when the prompt has images or
+when the agent configuration sets `image_input: true`. With image input declared, OpenCode also sends the model
+images its tools return, such as task files it reads, and a text-only deployment rejects those requests. Without it,
+OpenCode replaces such an image with an error text telling the model it cannot read images. Once an activation
+declares image input, later activations of the session keep declaring it, because OpenCode resends earlier images
+with the session history. Set `image_input: true` for a vision model whose tasks keep their images in the sandbox,
+where the prompt has none. A session that declares image input also lifts OpenCode's image limits, so the model
+gets each image's own bytes: by default OpenCode shrinks or re-encodes an image over 2000 px on a side or 5 MiB of
+base64. A run on an endpoint with image limits can restore them with `attachment` in `opencode_config`, which
+replaces the lifted limits; a limit it leaves out returns to OpenCode's default.
+In a single-activation session, the timeout budget starts once the activation holds a
+concurrency slot. Staging the activation's files, images included, spends it, OpenCode runs
+for the rest, and a budget that runs out before launch fails the activation.
+Images outside the user task and image URLs are rejected. Saved trajectories keep only the
+text of each message, so they do not contain the images. Request `temperature` and `top_p` are applied to every OpenCode agent
+(see [Owner extensions](#owner-extensions)). Other controls, history replay and
 required direct-HTTP tool grants are rejected. MCP tool grants become OpenCode `remote` MCP servers, and the model sees
 their tools as `<grant>_<tool>`. `mcp_tool_timeout_seconds` sets their connection and per-call
 timeout; without it, OpenCode allows 30 seconds to connect and 60 seconds per call. A call still
@@ -158,7 +177,7 @@ also fails, because nothing confirms its required tools; a run that failed for a
 that cause. `context_window` and `max_output_tokens` are independent
 config settings; leave room for the prompt in the served model's context. Request-level overrides
 are not silently ignored.
-Session `opencode_config` permits only `permission` and `tools`, preserving Gym capture.
+Session `opencode_config` permits only `permission`, `tools` and `attachment`, preserving Gym capture.
 OpenCode turns a `tools` map into base permission rules and merges `permission` on top,
 so a later `permission` rule such as `"*": "allow"` re-enables tools that `tools`
 disabled. Set `tools: null` (or `{}`) to make `permission` the only rule source; the
@@ -243,8 +262,9 @@ Only the new user input is sent on each call. The adapter resumes the same OpenC
 session, retaining HOME, OpenCode history and compaction state. Runtime installation
 happens once at seed using the existing installer. Identical retries join or replay
 the original response; conflicting inputs, skipped indices and concurrent new
-activations fail. Input validation runs before an index is consumed. A timeout
-before the first process launch leaves the next activation able to start the conversation.
+activations fail. Input validation runs before an index is consumed. When the activation's
+budget runs out before the first process launch, the next activation can still start the
+conversation. A sandbox error while staging prompt images fails the activation instead.
 Retry state is process-local and retained for the session lifetime, without crash recovery.
 
 The existing `metadata.agent_timeout_sec` budget is capped by the configured timeout.
