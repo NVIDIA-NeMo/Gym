@@ -86,17 +86,9 @@ instance name, `pi_agent.responses_api_agents.pi_agent.sandbox_config`. Like `pi
 `model_and_tools`. A restricted sandbox cannot download Pi, so supply `sandbox_runtime_dir`, or set it to `null` for
 an image prebaked at the default path.
 
-The pairing also needs one Environment Server setting. HLE's Environment Server, like those of HLE Diamond, GPQA and
-APEX Shortlist, grants the agent its Resources server over `direct_http`, which this agent cannot use, so every seed
-fails with a 422. The judge offers the agent no tools, so load this alongside the benchmark, the profile and the
-model config, under the benchmark's own Environment Server name (`gym env resolve` shows it):
-
-```yaml
-hle_equivalence_llm_judge_environment_server:
-  environment_servers:
-    single_agent_turn_legacy:
-      resources_tool_transports: []
-```
+HLE, HLE Diamond, GPQA and APEX Shortlist need no Environment Server setting: their judges serve no tools, so their
+Environment Servers grant the agent none. This agent rejects a required `direct_http` grant with a 422, so a
+benchmark whose Resources server serves its tools over direct HTTP does not pair with it.
 
 ## Runtime and model requirements
 
@@ -169,10 +161,32 @@ extra-argument, and environment overrides; those remain available on the local p
 
 ## Requests and settings
 
-Sandbox session input is one text user message, optionally preceded by a system message. Both sandbox
+Sandbox session input is one user message, optionally preceded by a system message. The user message
+may include images as base64 data-URI `input_image` parts. The adapter stages each image at
+`/tmp/nemo-gym-media/<sha256>.<extension>`, a path named by the image's content, and passes it to Pi as an
+`@file` argument, so the same task gives Pi the same prompt in every sandbox. Staging is part of the
+activation: it spends the agent timeout, and closing the session stops it. Staged images stay in a
+borrowed sandbox after the session ends. A session declares image input on the Gym model when the prompt
+has images or when the agent configuration sets `image_input: true`. With image input declared, Pi also sends the
+model images its tools return, such as task files it reads, and a text-only deployment rejects those requests.
+Without it, Pi replaces such an image with a note saying it was omitted. Set `image_input: true` for a vision model
+whose tasks keep their images in the sandbox, where the prompt has none.
+Images in the system message and image URLs are rejected. Both sandbox
 and local execution combine the configured system prompt, request `instructions`, and input
 system message in that order. Sampling and chat-template settings belong on the Gym Model Server.
 Sandbox sessions reject unsupported request controls before execution.
+
+Pi decides how to send each attached file:
+
+- Pi adds a `<file name="<sandbox path>">` tag to the end of the prompt text for each file, and sends the
+  images after all the text, so the order of text and images in the request is not kept.
+- Pi recognizes an image from its leading bytes, not from the declared media type. Pi inlines a file it
+  does not recognize as an image, such as an animated PNG, into the prompt as text.
+- Sessions turn off Pi's image resizing (`images.autoResize` in `settings.json`), so images reach the model
+  as the environment sent them, both prompt images and images the read tool returns.
+- The `detail` field of an `input_image` part has no effect.
+
+Saved trajectories record the user prompt's text but not its images.
 
 Set the agent configuration's `max_output_tokens` for a per-model-call output cap, including
 reasoning tokens. An adapter-owned Pi extension applies it as `max_tokens`, preserving any

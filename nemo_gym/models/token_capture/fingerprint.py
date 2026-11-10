@@ -52,6 +52,11 @@ FINGERPRINT_VERSION = 4
 _FINGERPRINT_DOMAIN = b"nemo-gym-lineage"
 _CONTEXT_DOMAIN = b"nemo-gym-lineage-context"
 _INSTRUCTION_ROLES = frozenset({"system", "developer"})
+# The tool OpenCode substitutes, in the history it sends back, for a call to a tool it does not offer.
+_UNAVAILABLE_TOOL_PLACEHOLDER = "invalid"
+# A lookup reads each placeholder-shaped call in an echoed turn either way, which is 2**n keys for n such calls.
+# Beyond this many, the whole-turn fallback abstains instead of deciding from an incomplete set of readings.
+_MAX_INDEPENDENT_PLACEHOLDERS = 6
 
 
 def assistant_fingerprint(messages: list[dict]) -> str:
@@ -310,7 +315,26 @@ def _update_field(hasher: Any, tag: bytes, value: str) -> None:
     hasher.update(encoded)
 
 
-def tool_call_turn_fingerprint(items: list[dict]) -> str:
+def _served_tool_name(name: str, arguments: str) -> str:
+    """Return the tool name the model was served, undoing OpenCode's unavailable-tool placeholder.
+
+    OpenCode echoes a call to a tool it does not offer as a call to its ``invalid`` tool with the
+    same ID and ``{"tool": <the served name>, "error": <message>}`` as arguments. Any other call
+    keeps its name, so a renamed call still cannot match.
+    """
+    if name != _UNAVAILABLE_TOOL_PLACEHOLDER:
+        return name
+    try:
+        payload = json.loads(arguments)
+    except (TypeError, ValueError):
+        return name
+    if not isinstance(payload, dict) or set(payload) != {"tool", "error"}:
+        return name
+    served = payload["tool"]
+    return served if isinstance(served, str) and served and isinstance(payload["error"], str) else name
+
+
+def tool_call_turn_fingerprint(items: list[dict], *, read_placeholders: frozenset[str] = frozenset()) -> str:
     """Fingerprint a complete model turn while tolerating rewritten tool arguments.
 
     Every tool ID and name, their order, and all non-tool assistant content must
@@ -319,6 +343,19 @@ def tool_call_turn_fingerprint(items: list[dict]) -> str:
     fields as the strict fingerprint. Empty assistant items remain accounted for.
     This fallback key supplements the versioned content fingerprint and the
     request-context digest in both in-memory and durable lineage indexes.
+
+    Tool names are compared without case: OpenCode renames a call whose lowercase name is a
+    known tool to that lowercase name, and echoes it that way in every later request. The
+    call IDs, their order, the content and the request-context digest still have to agree.
+
+    ``read_placeholders`` names the tool-call IDs whose call, if it has the shape of
+    OpenCode's unavailable-tool placeholder, counts as the call the model was served
+    (``_served_tool_name``). Only a lookup of a harness's echoed history sets it
+    (``echoed_tool_call_turn_fingerprints``). Keys of served output never set it.
+
+    Stored keys lowercase the served names too. A key that an older Gym stored, before names
+    were lowercased, still matches when the turn's served names had no capital letters; a turn
+    served with a capitalized name then resolves only through the strict fingerprint.
     """
     hasher = hashlib.sha256(b"nemo-gym-tool-call-turn")
     seen_ids: set[str] = set()
@@ -334,13 +371,43 @@ def tool_call_turn_fingerprint(items: list[dict]) -> str:
         for content_type, payload in content:
             _update_field(hasher, b"\x00", content_type)
             _update_field(hasher, b"\x01", payload)
-        for call_id, name, _arguments in tools:
+        for call_id, name, arguments in tools:
             if not call_id or not name or call_id in seen_ids:
                 return ""
             seen_ids.add(call_id)
             _update_field(hasher, b"\x02", call_id)
-            _update_field(hasher, b"\x03", name)
+            served = _served_tool_name(name, arguments) if call_id in read_placeholders else name
+            # Without case: OpenCode renames a call whose lowercase name is a known tool to that name.
+            _update_field(hasher, b"\x03", served.lower())
     return hasher.hexdigest() if seen_ids else ""
+
+
+def echoed_tool_call_turn_fingerprints(items: list[dict]) -> list[str]:
+    """The fallback keys an echoed model turn can match, the turn as echoed first.
+
+    Each placeholder-shaped call is read both ways, independently: OpenCode's rewrite of an
+    unavailable tool and a call the model itself made to ``invalid`` look the same, and one
+    turn can hold both. A lookup pools the candidates of every key before it decides
+    uniqueness, so the keys must cover every reading. A turn with more than
+    ``_MAX_INDEPENDENT_PLACEHOLDERS`` such calls gets no keys: the fallback abstains, and the
+    request can resolve only through the strict fingerprint.
+    """
+    placeholder_ids = [
+        call_id
+        for item in items or []
+        if isinstance(item, dict) and _is_assistant_authored(item)
+        for call_id, name, arguments in _tools_of(item)
+        if call_id and _served_tool_name(name, arguments) != name
+    ]
+    if len(placeholder_ids) > _MAX_INDEPENDENT_PLACEHOLDERS:
+        return []
+    keys: list[str] = []
+    for mask in range(1 << len(placeholder_ids)):
+        read_placeholders = frozenset(call_id for bit, call_id in enumerate(placeholder_ids) if mask >> bit & 1)
+        key = tool_call_turn_fingerprint(items, read_placeholders=read_placeholders)
+        if key and key not in keys:
+            keys.append(key)
+    return keys
 
 
 def trailing_assistant_turn(messages: list[dict]) -> list[dict]:

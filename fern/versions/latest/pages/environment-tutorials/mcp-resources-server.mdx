@@ -194,6 +194,28 @@ The pattern behind the two query-parameter rows: anything FastAPI would read fro
 
 Beyond signatures, startup also refuses: **non-Gym middleware** installed on the app (direct dispatch would silently skip it); **multiple parameterized catch-all routes**; a tool name outside `[A-Za-z0-9_-]+`; and a server that **already serves `/mcp`** (a hand-rolled MCP mount conflicts with the auto-exposed one).
 
+### Return images from a tool
+
+A tool can return images next to its JSON reply. List them under `tool_output_images`. Each entry is a `ToolOutputImage`: a base64 `data:` URL (PNG, JPEG, GIF or WebP) and an optional `label`.
+
+```python
+from nemo_gym.core import TOOL_OUTPUT_IMAGES_KEY, ToolOutputImage
+
+async def rotate(self, body: RotateRequest) -> dict:
+    image_url = "data:image/png;base64," + rotated_png_base64
+    return {"ok": True, TOOL_OUTPUT_IMAGES_KEY: [ToolOutputImage(image_url=image_url, label="Image 2").model_dump()]}
+```
+
+Who reads the key, and what the model gets:
+
+| Reader | What the model gets |
+|---|---|
+| The `/mcp` endpoint | The rest of the reply as text, then each label and image as MCP image content. A result with images has no `structuredContent` unless the tool declares an output schema. |
+| `simple_agent` (HTTP tools) | The rest of the reply as the tool output, then each image in a user message after the turn's tool outputs. |
+| An agent that does not read the key, such as `simple_agent_with_compaction` | The whole reply as text, base64 data included. |
+
+A reply without the key, or with `null`, has no images. A malformed list is an error of the tool. Each image is checked as prompt images are (`MediaFile`): the base64 must be valid and hold a PNG, JPEG, GIF or WebP image. The `data:` URL then names the type the content has, so a JPEG labeled `image/png` reaches the model as `image/jpeg`. An agent that puts the images inside its tool output, such as Codex, needs `inline_tool_output_images: true` on `vllm_model`; with the default setting, `vllm_model` refuses such a request.
+
 ---
 
 ## Wiring the agent (Claude Code)

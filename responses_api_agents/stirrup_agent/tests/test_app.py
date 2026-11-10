@@ -19,11 +19,11 @@ from omegaconf import OmegaConf
 from pydantic import ValidationError
 from stirrup.core.models import AssistantMessage, TokenUsage, ToolCall, UserMessage
 
-from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
+from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome, OutcomeAction, agent_outcome_policy
 from nemo_gym.cli.env import validate_server_configs
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
-from nemo_gym.core import MODEL_REQUEST_ERROR, EpisodeId, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import AGENT_INVALID_OUTPUT, MODEL_REQUEST_ERROR, EpisodeId, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_runtime import DirectHTTPToolAccess
 from responses_api_agents.stirrup_agent.app import StirrupAgentWrapper, StirrupAgentWrapperConfig, _observations
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoAgent, NeMoUserMessage
@@ -291,6 +291,26 @@ class TestApp:
         assert (response.usage.input_tokens, response.usage.output_tokens, response.usage.total_tokens) == (0, 0, 0)
         assert response.usage.input_tokens_details.cached_tokens is None
         assert response.usage.output_tokens_details.reasoning_tokens is None
+
+    @pytest.mark.asyncio
+    async def test_a_run_ended_by_unusable_compaction_summaries_is_the_models_invalid_output(self) -> None:
+        report = _report(
+            stop_reason="compaction_failed",
+            invalid_output="Compaction summarizer produced no usable text after 3 attempts",
+            observations={"status": "failed", "model_response_ids": ["chatcmpl-1"]},
+        )
+
+        response, _, _ = await _run_episode(
+            _make_config(), NeMoGymResponseCreateParamsNonStreaming(input="x", model="policy"), report
+        )
+
+        assert response.status == "failed"
+        assert response.error is None
+        assert response.metadata["stop_reason"] == "compaction_failed"
+        assert AgentOutcome.model_validate_json(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == AgentOutcome(
+            failure_kind=AGENT_INVALID_OUTPUT
+        )
+        assert agent_outcome_policy(response) == OutcomeAction.VERIFY
 
     @pytest.mark.asyncio
     async def test_a_run_killed_before_any_model_response_has_unknown_usage_and_no_error(self) -> None:

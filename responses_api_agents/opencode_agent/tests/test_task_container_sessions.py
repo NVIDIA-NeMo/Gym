@@ -61,12 +61,14 @@ def run_session(agent, sandbox, body=None, request=None):
     return response, payload, closed.json()
 
 
-def test_direct_endpoint_session_calls_the_configured_endpoint(setup):
+@pytest.mark.parametrize("sampling", [{}, {"temperature": 0.2, "top_p": 0.9}])
+@pytest.mark.parametrize("image_input", [False, True])
+def test_direct_endpoint_session_calls_the_configured_endpoint(setup, sampling, image_input):
     agent, sandbox = setup
-    configure_direct(agent)
+    configure_direct(agent, image_input=image_input)
     # Gym capture is on, but calls to a direct endpoint never pass through Gym: no correlation plugin.
     agent.server_client.global_config_dict["observability_enabled"] = True
-    response, payload, _ = run_session(agent, sandbox)
+    response, payload, _ = run_session(agent, sandbox, request={"input": "Fix the code", **sampling})
     assert response.status_code == 200, response.text
     assert response.json()["model"] == "deepseek-flash"
     config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
@@ -78,6 +80,12 @@ def test_direct_endpoint_session_calls_the_configured_endpoint(setup):
         "timeout": False,
     }
     assert list(provider["models"]) == ["deepseek-flash"]
+    model = provider["models"]["deepseek-flash"]
+    if sampling:
+        assert model["temperature"] is True
+        assert config["agent"]["build"]["temperature"] == 0.2
+        assert config["agent"]["build"]["top_p"] == 0.9
+    assert ("image" in model.get("modalities", {}).get("input", [])) is image_input
     assert not any(OBSERVABILITY_PATCH.name in plugin for plugin in config["plugin"])
     assert not any(path.endswith(OBSERVABILITY_PATCH.name) for path in sandbox.files)
     agent.server_client.post.assert_not_called()

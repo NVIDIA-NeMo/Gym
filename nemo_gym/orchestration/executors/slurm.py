@@ -104,7 +104,6 @@ from nemo_gym.orchestration.jobs import (
     ROLLOUTS_FILENAME,
     BenchmarkJob,
     SubmissionRecord,
-    installed_gym_commit,
     new_gym_job_id,
     utc_now,
     utc_timestamp,
@@ -145,6 +144,7 @@ from nemo_gym.orchestration.recovery import (
     select_managed_evidence,
     stopped_followup,
 )
+from nemo_gym.utils.gym_commit import installed_gym_commit
 from nemo_gym.utils.path_utils import attempt_extension_path_for
 
 
@@ -1832,8 +1832,11 @@ class SlurmExecutor(BaseExecutor):
                 "trap _gym_release_rejudge_lock EXIT",
                 *_chain_live_check(evidence.job_chain, "an original allocation is still live"),
                 f"python3 -c {shlex.quote(check)} {shlex.quote(json.dumps(expected))} || fail 'accounting changed or exhausted'",
-                "umask 077",
-                f"printf %s {shlex.quote(script)} > {shlex.quote(str(script_path))} || fail 'cannot stage judge driver'",
+                # Only the staged driver script is owner-only. The umask of the rest of the dispatch is the caller's:
+                # sbatch hands it to the job, so the job's output directory and files, and the journals and markers
+                # written below, are readable by the run's other readers like the run's other artifacts.
+                f"(umask 077; printf %s {shlex.quote(script)} > {shlex.quote(str(script_path))}) "
+                "|| fail 'cannot stage judge driver'",
                 "_gym_submit_started=1",
                 _sbatch_command(benchmark, script_path).replace("sbatch --parsable", "sbatch --no-requeue --parsable"),
                 'if [ "$rc" != 0 ]; then fail "judge allocation not admitted"; fi',
@@ -2092,8 +2095,11 @@ class SlurmExecutor(BaseExecutor):
             ),
             f"python3 -c {shlex.quote(check)} {shlex.quote(json.dumps(expected))} "
             "|| fail 'saved sources or accounting changed since the evidence was collected; collect it again'",
-            "umask 077",
-            f"printf %s {shlex.quote(script)} > {shlex.quote(str(script_path))} || fail 'cannot stage the judge driver'",
+            # Only the staged driver script is owner-only. The umask of the rest of the dispatch is the caller's: sbatch
+            # hands it to the job, so the job's output directory and files (the reverification folder, its receipt), and
+            # the journals written below, are readable by the run's other readers like the run's other artifacts.
+            f"(umask 077; printf %s {shlex.quote(script)} > {shlex.quote(str(script_path))}) "
+            "|| fail 'cannot stage the judge driver'",
             _sbatch_command(benchmark, script_path).replace("sbatch --parsable", "sbatch --no-requeue --parsable"),
             'if [ "$rc" != 0 ]; then fail "judge allocation not admitted"; fi',
             "jid=$(printf '%s' \"$out\" | awk '{print $NF}' | cut -d';' -f1)",
