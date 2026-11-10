@@ -17,6 +17,7 @@ from nemo_gym.agents.agent_outcome import (
     RunEvidence,
     agent_outcome_policy,
     decide_outcome,
+    model_http_error_outcome,
 )
 from nemo_gym.agents.base_responses_api_agent import (
     ROLLOUT_STOP_METADATA_KEY,
@@ -338,3 +339,47 @@ def test_harbor_style_override_grades_no_result():
     # The other defaults survive the partial override.
     assert config.by_failure_kind[MODEL_REQUEST_REJECTED] == OutcomeAction.FAIL
     assert config.by_failure_kind[MODEL_CONTEXT_LIMIT] == OutcomeAction.VERIFY
+
+
+# The model server's OpenAI error envelope for a context overflow it propagates.
+CONTEXT_OVERFLOW_BODY = json.dumps(
+    {
+        "error": {
+            "message": "This model's maximum context length is 32768 tokens.",
+            "type": "invalid_request_error",
+            "param": None,
+            "code": "context_length_exceeded",
+        }
+    }
+)
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "expected"),
+    [
+        (400, CONTEXT_OVERFLOW_BODY, AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT)),
+        (400, CONTEXT_OVERFLOW_BODY.encode(), AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT)),
+        # Only a 400 with that code is a context limit.
+        (413, CONTEXT_OVERFLOW_BODY, AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=413)),
+        (
+            400,
+            '{"error": {"code": "invalid_request"}}',
+            AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=400),
+        ),
+        (400, '{"error": {"code": 400}}', AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=400)),
+        (400, '["context_length_exceeded"]', AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=400)),
+        (400, "Bad Request", AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=400)),
+        (400, None, AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=400)),
+        (503, None, AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=503)),
+    ],
+)
+def test_model_http_error_outcome_reads_the_context_overflow_code(status, body, expected):
+    assert model_http_error_outcome(status, error_body=body) == expected
+
+
+@pytest.mark.parametrize("model_replied", [False, True, None])
+def test_a_context_overflow_400_is_graded_incomplete_even_before_the_first_reply(model_replied):
+    # Decision 1 wins over decision 4: the overflow is a context limit, not a rejected request.
+    error = model_http_error_outcome(400, error_body=CONTEXT_OVERFLOW_BODY)
+    evidence = RunEvidence(has_result=False, timed_out=False, model_replied=model_replied, error=error)
+    assert decide_outcome(evidence) == RunDecision("incomplete", "context_limit")
