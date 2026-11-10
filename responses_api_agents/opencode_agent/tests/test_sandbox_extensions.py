@@ -454,6 +454,19 @@ def launch_config(sandbox):
 BUILTIN_AGENTS = {"build", "plan", "general", "explore", "compaction", "title", "summary"}
 
 
+@pytest.mark.parametrize("effort", [None, "high"])
+@pytest.mark.parametrize("model_id", ["dummy_model", "gpt-5.5"])
+async def test_sandbox_reasoning_effort_reaches_the_model_options(setup, effort, model_id):
+    agent, sandbox = setup
+    agent.config.sandbox_model_id = model_id
+    agent.config.sandbox_reasoning_effort = effort
+    response, _ = await episode(agent, sandbox)
+    assert response.status == "completed"
+    _, config = launch_config(sandbox)
+    model = config["provider"]["nemo_gym"]["models"][model_id]
+    assert model.get("options", {}) == ({"reasoningEffort": effort} if effort is not None else {})
+
+
 async def test_request_sampling_reaches_every_builtin_agent_and_enables_temperature(setup):
     agent, sandbox = setup
     response, _ = await episode(agent, sandbox, temperature=1.0, top_p=0.95)

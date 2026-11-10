@@ -115,8 +115,8 @@ Beyond the families, the protocol's own refusals:
   configured, by the checkpoint controller retiring the attempt that seeded the session
   (`retire_session_state` releases every session of that attempt, whether an episode seed or an agent-run
   seed created it, and does not fence the ID). A session an Agent seeds
-  with its run body, which is how the OpenCode preset seeds, is otherwise never closed, so held sessions add up over
-  the server's life, and a rollout's question is forgotten once 10,000 later sessions are seeded on the same
+  with its run body, as the older `opencode_sandboxed_agent` does, is otherwise never closed, so held
+  sessions add up over the server's life, and a rollout's question is forgotten once 10,000 later sessions are seeded on the same
   server while that rollout is still running, however few rollouts are open at once. For a harness that
   closes its sessions, the cap must exceed the peak number of sessions open at once. A forgotten session
   that an agent-run seed created is not fenced, and neither is an episode session's ID against a later
@@ -226,15 +226,18 @@ says so through `multiple_workers_unsupported_reason`, so a launch with `num_wor
 uvicorn starts, dry runs included (`<instance name> needs num_workers=1: ...`, for the Diamond preset
 `hle_tools needs num_workers=1: the module defines no module-level app for uvicorn workers, ...`).
 
-`verify` is a stub: this is a tool server. A preset pairs it through the agent's `tool_servers` and
-grades the rollout with its own `resources_server` (for HLE-Diamond, the equivalence judge). Should
+`verify` is a stub: this is a tool server. A preset pairs it through the Environment Server's
+`tool_servers` and grades the rollout with the environment's `resources_server` (for HLE-Diamond,
+the equivalence judge). Should
 `verify` be called anyway it returns reward 0 with `mask_sample: true` and a `failure_reason` saying so.
 
 ## Use in a preset
 
-`benchmarks/hle_diamond/opencode_hle_tools.yaml` runs the OpenCode harness with this server as its only
-tool server. Live runs of that preset need `TAVILY_API_KEY` in the environment of the process that starts
-the servers; see that benchmark's README.
+`benchmarks/hle_diamond/opencode_hle_tools.yaml` and `pi_hle_tools.yaml` use `opencode_agent` and
+`pi_agent` with this server as their only auxiliary tool server. The Environment Server seeds an
+episode session here, supplies its MCP grant to the selected agent, and closes the session when the
+episode ends. Switching harnesses retains the same tool policy and HLE judge. Live runs need
+`TAVILY_API_KEY` in the environment of the process that starts the servers; see that benchmark's README.
 
 ## Example data
 
