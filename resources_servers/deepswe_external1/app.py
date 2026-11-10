@@ -598,11 +598,12 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer, SandboxSessionReso
             if agent_sandbox is not None:
                 if not await self._release_sandbox(agent_sandbox, task_id=task_id, phase="agent"):
                     cleanup_errors.append("agent")
-            if verifier_sandbox is not None:
-                if mode == "agent":
-                    if not await self._stop_session_verifier(session_id, task_id=task_id):
-                        cleanup_errors.append("verifier")
-                elif not await self._release_sandbox(verifier_sandbox, task_id=task_id, phase="verifier"):
+            if mode == "agent":
+                # Setup may fail before _create_sandbox returns its already registered sandbox.
+                if not await self._stop_session_verifier(session_id, task_id=task_id):
+                    cleanup_errors.append("verifier")
+            elif verifier_sandbox is not None:
+                if not await self._release_sandbox(verifier_sandbox, task_id=task_id, phase="verifier"):
                     cleanup_errors.append("verifier")
 
         response = DeepsweExternal1VerifyResponse.model_validate(

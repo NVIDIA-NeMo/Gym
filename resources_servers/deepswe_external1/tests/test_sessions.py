@@ -454,7 +454,14 @@ async def test_setup_failure_keeps_real_sandbox_owned_until_cleanup(
             with pytest.raises(RuntimeError, match="stop failed"):
                 await run()
         else:
-            await run()
+            body = DeepsweExternal1VerifyRequest.model_validate(verify_body(task))
+            response = await server.verify(request, body)
+            assert response.mask_sample and not response.evaluation_completed
+            assert response.failure_stage == "verifier_setup"
+            assert response.cleanup_errors == ["verifier"]
+            result = response.model_dump(mode="json")
+            assert (await server.verify(request, body)).model_dump(mode="json") == result
+            assert json.loads((Path(response.log_dir) / "result.json").read_text()) == result
         owned = server._session_id_to_sandbox if phase == "agent" else server._verifier_sandboxes
         assert isinstance(owned["resources-session"], AsyncSandbox)
         assert not closed
