@@ -39,7 +39,14 @@ def configure_cache(root: str) -> Path:
         path = cache / suffix
         path.mkdir(parents=True, exist_ok=True)
         os.environ[variable] = str(path)
-    os.environ["PATH"] = str(cache / "npm-prefix/bin") + os.pathsep + os.environ.get("PATH", "")
+    helper = os.environ.get("SAAS_ENROOT_RUNTIME_DIR")
+    paths = [str(cache / "npm-prefix/bin")]
+    if helper:
+        paths.extend(str(Path(helper) / directory) for directory in ("usr/bin", "usr/sbin"))
+        libraries = str(Path(helper) / "usr/lib/x86_64-linux-gnu")
+        existing_libraries = os.environ.get("LD_LIBRARY_PATH", "")
+        os.environ["LD_LIBRARY_PATH"] = libraries + (os.pathsep + existing_libraries if existing_libraries else "")
+    os.environ["PATH"] = os.pathsep.join(paths) + os.pathsep + os.environ.get("PATH", "")
     # Native refresh sockets must fit Linux's 108-byte Unix socket limit.
     # Browser profiles and sockets are transient; persistent caches stay above.
     os.environ["TMPDIR"] = "/tmp"

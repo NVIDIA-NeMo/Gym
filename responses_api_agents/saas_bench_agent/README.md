@@ -53,7 +53,7 @@ All paths below are beneath:
 | Evaluation image | `serving_containers/saas-bench-eval-browser-use-0.13.7-opencode-1.17.11-svg-amd64.sqsh` | driver image |
 | Task data | `artifacts/datasets/saas_bench_eval_task_data_31177a7/` | `/saas-data:ro` |
 | App images (31 SQSH files) | `assets/enroot_images/` | `/saas-images:ro` |
-| Rootless network helpers | `runtime/enroot/` | `/saas-enroot-runtime:ro` |
+| Rootless network and SquashFS helpers | `runtime/enroot/` | `/saas-enroot-runtime:ro` |
 | Chromium and ffmpeg | `runtime/saas-bench-playwright-1.62.0-amd64/` | `/saas-browsers:ro` |
 
 Bind a writable user-owned workspace cache to `/cache`, retain it in the mount
@@ -92,3 +92,10 @@ The vendored implementation is excluded from auto-fix linting to preserve source
 semantics. Adapter, preparation, lifecycle, and protocol tests run on the actual
 Gym response schemas; the benchmark is experimental until a full reference
 score has been reproduced and reviewed.
+
+The helper release also provides `ip`, `unsquashfs`, `mksquashfs`, and libraries
+missing from the base image. Runtime setup prepends its `usr/bin` and `usr/sbin`
+to PATH and its library directory to LD_LIBRARY_PATH. Exact tool hashes are in
+`runtime/enroot/saas-eval-tools.json`. To recreate these additions on SVG, run
+`runtime-image/provision-helpers.py --destination <helper-release> --image-rootfs
+<extracted-evaluation-image>`; it refuses to replace conflicting existing files.

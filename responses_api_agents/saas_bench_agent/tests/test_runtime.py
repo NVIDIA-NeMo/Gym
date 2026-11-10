@@ -173,3 +173,19 @@ def test_long_workspace_caches_keep_native_socket_paths_short(tmp_path, monkeypa
         with tempfile.TemporaryDirectory(prefix="saas-visual-", dir=os.environ["TMPDIR"]) as directory:
             with socket.socket(socket.AF_UNIX) as sock:
                 sock.bind(str(Path(directory) / "browser.sock"))
+
+
+def test_staged_runtime_tools_are_available_to_native_workers(tmp_path, monkeypatch):
+    import os
+
+    helper = tmp_path / "helpers"
+    monkeypatch.setenv("SAAS_ENROOT_RUNTIME_DIR", str(helper))
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/existing-libs")
+    runtime.configure_cache(str(tmp_path / "cache"))
+    assert str(helper / "usr/bin") in os.environ["PATH"].split(os.pathsep)
+    assert str(helper / "usr/sbin") in os.environ["PATH"].split(os.pathsep)
+    assert os.environ["LD_LIBRARY_PATH"].split(os.pathsep) == [
+        str(helper / "usr/lib/x86_64-linux-gnu"),
+        "/existing-libs",
+    ]
