@@ -816,7 +816,10 @@ def test_preflight_covers_staged_harness_assets(assets, codex_catalog, name):
 @pytest.mark.parametrize("gpus", [4, 8])
 @pytest.mark.parametrize("dry_run", [True, False])
 @pytest.mark.parametrize("config_readable", [True, False])
-def test_launcher_reads_allocation_and_stops_when_config_cannot_be_loaded(tmp_path, gpus, dry_run, config_readable):
+@pytest.mark.parametrize("collect", [True, False])
+def test_launcher_reads_allocation_and_stops_when_config_cannot_be_loaded(
+    tmp_path, gpus, dry_run, config_readable, collect
+):
     # Simulate reading the configured GPU count; input validation is not a launch gate.
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -843,6 +846,7 @@ def test_launcher_reads_allocation_and_stops_when_config_cannot_be_loaded(tmp_pa
             "bash",
             str(recipe.ROOT / "scripts/launch_swe_single_agent_turn_training.sh"),
             *(["--dry-run"] if dry_run else []),
+            *(["--collect-trajectories"] if collect else []),
         ],
         env=env,
         check=False,
@@ -856,7 +860,12 @@ def test_launcher_reads_allocation_and_stops_when_config_cannot_be_loaded(tmp_pa
     assert result.returncode == 0, result.stderr
     assert "--nodes=1" in result.stdout and "--exclusive" in result.stdout
     assert f"--gres=gpu:{gpus}" in result.stdout
-    assert "run_grpo_single_controller.py" in result.stdout
+    if collect:
+        assert "examples/nemo_gym/run_grpo_nemo_gym.py" in result.stdout
+        assert "is_trajectory_collection=true" in result.stdout
+        assert "run_grpo_single_controller.py" not in result.stdout
+    else:
+        assert "run_grpo_single_controller.py" in result.stdout
     assert "check_swe_training_recipe.py" not in result.stdout
     assert "not-a-real-key" not in result.stdout
     if dry_run:

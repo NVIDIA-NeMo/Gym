@@ -37,7 +37,7 @@ Choose a Hugging Face snapshot directory ending in the selected commit:
 | `4b` | `nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16` | `dfaf35de3e30f1867dd8dbc38a7fc9fb52d3914f` |
 | `30b` | `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16` | `bf77c3174f68ad409e1c2aa60daeb46e32d1c606` |
 
-For example, `hf download nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16 --revision dfaf35de3e30f1867dd8dbc38a7fc9fb52d3914f` prints the downloaded snapshot path. Preparation reads Hub file hashes without downloading weights. Launch checks the actual local bytes against those hashes, including configuration and tokenizer files.
+For example, `hf download nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16 --revision dfaf35de3e30f1867dd8dbc38a7fc9fb52d3914f` prints the downloaded snapshot path. Preparation reads Hub file hashes without downloading weights. The experimental launcher starts the program directly; it does not rehash model files before each run.
 
 ## Prepare one arm
 
@@ -74,7 +74,7 @@ The catalog deliberately omits `context_window`, `max_context_window` and `auto_
 
 Atom requires the reviewed NOOA SDK change that supports `context_error_policy=raise`, together with the adapter’s `settings_file` transport. This stops context-error recovery from archiving history; `summarization.policy=none` separately disables automatic summarization. Keep the shared RL setting `token_capture.forest_training=false`. Recipe and schema checks alone do not establish runtime enforcement, capture correctness or training success.
 
-Prepared Claude settings, Codex files and Atom settings are included in the launcher's existing content-hash checks. Prepared conformance probes also hash Atom's `settings_file` and reject changes before importing the runtime. Keep the entire output directory on the shared mount; moving or editing individual files invalidates the prepared configuration.
+Keep prepared Claude settings, Codex files and Atom settings on the shared mount at the recorded paths. Treat each running snapshot as fixed. Experimental launches do not repeat preparation inventories or conformance probes.
 
 ## Build and identify the runtime
 
@@ -90,7 +90,7 @@ docker buildx build --platform linux/arm64 --target release \
 
 Record the resulting immutable image reference as `registry/repository@sha256:...`, then convert that exact image to the cluster's SquashFS format using its supported Enroot workflow. The launcher requires a build receipt JSON with `image`, `platform` (`linux/arm64`), `gym_commit`, `rl_commit`, `gym_lock_sha256`, `rl_lock_sha256` and `squashfs_sha256`. Obtain these from the actual build checkout, lockfiles, image registry and SquashFS bytes. A receipt describes a completed build; copying expected recipe values into a receipt is not build evidence.
 
-The launcher compares that receipt with preparation, hashes the SquashFS, and checks production source files again inside the image. It imports Gym and RL from the image's checked paths. Source mounts do not replace the installed dependencies. A successful preflight still does not prove optimizer, weight-refit or checkpoint behavior.
+The launcher records the supplied image path and build identity without hashing the image or inventorying its contents. A compatible Python change can use `--source-mount --gym-root "$GYM_ROOT"` with a fixed source snapshot; installed compiled dependencies remain in the image. Actual startup, rollouts, optimizer updates, refits and checkpoints establish runtime behavior.
 
 ## Submit one four-GPU node
 
@@ -106,10 +106,94 @@ bash scripts/launch_swe_single_agent_turn_training.sh --dry-run
 bash scripts/launch_swe_single_agent_turn_training.sh
 ```
 
-The dry run performs host checks and prints the command without submitting. The real invocation uses the selected RL `ray.sub`, one node, and `examples/run_grpo_single_controller.py`. `SLURM_QOS`, `WALLTIME` and `EXP_NAME` are optional. Prepare another arm to change training settings; the launcher accepts no hidden configuration overrides.
+The dry run prints the command without submitting or running extra preflight checks. The real invocation uses the selected RL `ray.sub`, one node, and `examples/run_grpo_single_controller.py`. `SLURM_QOS`, `WALLTIME` and `EXP_NAME` are optional. Prepare another arm to change training settings; the launcher accepts no hidden configuration overrides.
 
 ## Inspect the evidence
 
 Before training, run the gold, empty-patch and infrastructure-failure verifier controls through the selected routes. Keep incomplete verification masked and report unknown termination causes honestly. During training, preserve full rollout records, token/logprob captures, training masks, retry and cleanup evidence. This recipe uses RL's ordinary receipt mode (`forest_training=false`): a reconstructed training row is overlong when its token count reaches the training sequence limit. Inspect the actual consumed records, including separate harness and capture failure masks.
 
 Require nonempty trainable tokens, finite loss and gradients, actual optimizer updates, successful refits and step-10/20 model and optimizer checkpoints for the full run. Compare rewards over complete four-update task cycles, per harness and task, with actual throughput and collection time. Checkpoints from the five-update qualification do not satisfy the full-run checkpoint requirement. Neither preparing this recipe nor passing its unit tests is a learning result.
+
+
+## Larger runs from prepared inputs
+
+Reuse a resolved config for the intended model, harness and route. Keep its referenced
+harness files, Harbor tasksets and image metadata available. Supply a frozen JSONL
+with one materialized row per distinct task. This path does not repeat task conversion,
+registry lookups, model downloads or checkpoint inspection.
+
+```bash
+python -m scripts.prepare_swe_single_agent_turn_recipe experiment train \
+  --template "$PREPARED/config.yaml" --inputs "$FROZEN_TRAIN_JSONL" \
+  --output "$NEW_RUN" --policy opencode-pi-harbor \
+  --steps 100 --tasks-per-step 16 --generations 4 --checkpoint-period 25
+```
+
+With 512 distinct rows, this plans 6,400 episodes and checkpoints at steps 25, 50,
+75 and 100, retaining four checkpoints. The fast configuration uses 128 rows,
+`--steps 40 --tasks-per-step 8 --checkpoint-period 10`. Other scientific settings,
+including the original model, sampling and optimizer, come from the supplied template.
+Logs, caches, checkpoints and Pi sandboxed artifact exports receive fresh output
+paths. This starts a fresh run; use `continue` for a checkpoint continuation.
+
+For a matched 50:50 mixture, use the same task order as the single-harness arm and
+assign alternate rows to OpenCode and Pi. The maintained materializer accepts
+`task_harnesses=["opencode", "pi"] * (len(rows) // 2)` together with
+`harnesses=["opencode", "pi"]`. It emits one row per task; four generation siblings
+stay on that task's assigned harness. Without `task_harnesses`, the materializer's
+existing behavior repeats every task across every requested harness. Do not use
+that cross-product as a substitute for a matched distinct-task mixture.
+
+The template determines concurrency, resources and route wiring. The command does
+not choose a dataset split, authorize compute, or establish scientific comparability.
+Record the frozen train/held-out split, exclusions, source snapshot and image identity
+alongside the generated `EXPERIMENT.json` and configuration.
+
+## Raw held-out evaluation
+
+Use an evaluation template already wired for one harness and its benchmark, plus
+one materialized row per held-out task. Taskset names must end in the selected
+harness name, such as `swe_next_opencode`. The command expands every task into three
+identical trial rows and writes `EVALUATION.json`, `evaluation.jsonl` and `config.yaml`.
+
+```bash
+python -m scripts.prepare_swe_single_agent_turn_recipe experiment evaluate \
+  --template "$EVAL_TEMPLATE" --inputs "$HELD_OUT_JSONL" \
+  --output "$EVAL_OUTPUT" --policy original --harness opencode --trials 3
+
+export CONFIG_PATH="$EVAL_OUTPUT/config.yaml"
+bash scripts/launch_swe_single_agent_turn_training.sh --collect-trajectories
+```
+
+To evaluate a trained policy, additionally pass `--step 25 --weights
+"$TRAIN_RUN/checkpoints/step_25/policy/weights"` and an appropriate policy label.
+Choose an explicitly published checkpoint; do not pass `tmp_step_*` or select
+`latest` implicitly. The configuration uses `megatron_bridge` weights, disables
+checkpoint writing and starts with fresh controller state. It does not resume the
+training optimizer or export/copy the checkpoint. Normal model loading must establish
+that the chosen weights can be restored.
+
+This requires the companion RL raw collector. It refits the generation workers and
+calls the production Gym environment without reconstructing training tokens. Each
+completed result or infrastructure-failure sidecar is appended immediately with a
+global row index, so a later transport failure preserves earlier rows. Collection
+performs no optimizer updates. The ordinary training path retains its capture checks.
+
+```bash
+python -m scripts.summarize_swe_evaluation \
+  --run original "$BASELINE/EVALUATION.json" "$BASELINE/logs/exp_001/trajectory_collection.jsonl" \
+  --run candidate "$CANDIDATE/EVALUATION.json" "$CANDIDATE/logs/exp_001/trajectory_collection.jsonl" \
+  --baseline original --output comparison.json
+```
+
+Scores use all trials per task, then average across tasks; they are not best-of-three.
+Missing, duplicate, malformed or infrastructure-incomplete rows withhold the score.
+Complete matched runs use a paired bootstrap over tasks, preserving their repeated
+trials. Comparisons require the same harness and exact evaluation input bytes; this
+check does not independently establish matched scientific settings. External test
+results must not select a checkpoint or tune the recipe.
+
+Original-model OpenCode and Pi collection has completed through this raw path with
+384/384 valid results per harness and final logger sync. Trained-checkpoint evaluation
+and the portable preparation command still require their own runtime qualification;
+those baseline results do not establish learning or checkpoint restore correctness.

@@ -31,9 +31,11 @@ from __future__ import annotations
 import argparse
 import ast
 import base64
+import errno
 import hashlib
 import importlib.util
 import json
+import os
 import re
 import shlex
 import shutil
@@ -538,7 +540,15 @@ def write_task(
             path.chmod(0o755)
     shutil.copyfile(GRADER_SOURCE, task_dir / "tests/nemo_gym/grade.py")
     if grader_python_archive is not None:
-        shutil.copyfile(grader_python_archive, task_dir / "tests/nemo_gym/python.tar.gz")
+        archive_path = task_dir / "tests/nemo_gym/python.tar.gz"
+        # A frozen runtime is identical across tasks; avoid duplicating it for
+        # every task on shared storage. Neither preparation nor grading edits it.
+        try:
+            os.link(grader_python_archive, archive_path)
+        except OSError as error:
+            if error.errno != errno.EXDEV:
+                raise
+            shutil.copyfile(grader_python_archive, archive_path)
     for relative, source_path in plan.vendored.items():
         target = task_dir / "tests/nemo_gym" / relative
         target.parent.mkdir(parents=True, exist_ok=True)

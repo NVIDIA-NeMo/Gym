@@ -7,6 +7,7 @@ export PYTHONDONTWRITEBYTECODE=1
 dry_run=0
 source_mount=0
 reuse_swe_rebench_venv=0
+collect_trajectories=0
 gym_root_override=
 excluded_nodes=
 wandb_project=
@@ -17,6 +18,7 @@ while (( $# )); do
         --dry-run) dry_run=1 ;;
         --source-mount) source_mount=1 ;;
         --reuse-swe-rebench-venv) reuse_swe_rebench_venv=1 ;;
+        --collect-trajectories) collect_trajectories=1 ;;
         --exclude) excluded_nodes=${2:?Pass the excluded node list}; shift ;;
         --walltime) WALLTIME=${2:?Pass the Slurm time limit}; shift ;;
         --wandb-project) wandb_project=${2:?Pass the W&B project}; shift ;;
@@ -72,6 +74,10 @@ fi
 export OMP_NUM_THREADS=16
 export NRL_VLLM_ASYNC_TIMEOUT_SECONDS=1800
 driver=(uv run --no-sync examples/run_grpo_single_controller.py --config "$CONFIG_PATH")
+if (( collect_trajectories )); then
+    driver=(uv run --no-sync examples/nemo_gym/run_grpo_nemo_gym.py --config "$CONFIG_PATH"
+        "++env.nemo_gym.is_trajectory_collection=true")
+fi
 if [[ -n "$wandb_project" ]]; then
     driver+=("++logger.wandb_enabled=true" "++logger.wandb.project=$wandb_project"
         "++logger.wandb.mode=online"

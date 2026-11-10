@@ -4,6 +4,7 @@
 
 import asyncio
 import base64
+import errno
 import importlib.util
 import json
 import re
@@ -141,15 +142,25 @@ REBENCH_ROW = {
 UNSUPPORTED_ROW = {"instance_id": "delivery__iceberg-1", "source_server": "swemer_v1"}
 
 
-def test_conversion_delivers_supplied_grader_archive_only_with_hidden_tests(tmp_path: Path) -> None:
+@pytest.mark.parametrize("cross_device", [False, True])
+def test_conversion_delivers_supplied_grader_archive_only_with_hidden_tests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cross_device: bool
+) -> None:
     source = tmp_path / "rows.jsonl"
     source.write_text(json.dumps(SCALE_ROW) + "\n")
     archive = tmp_path / "supplied-python.tar.gz"
     archive.write_bytes(b"supplied runtime archive")
+    if cross_device:
+
+        def cannot_link(*args, **kwargs):
+            raise OSError(errno.EXDEV, "Cross-device link")
+
+        monkeypatch.setattr(convert.os, "link", cannot_link)
     output = tmp_path / "tasks"
     manifest = convert.convert(source, output, dataset_name="test/private-grader", grader_python_archive=archive)
     task = output / manifest["converted"][0]["task"]
     assert (task / "tests/nemo_gym/python.tar.gz").read_bytes() == archive.read_bytes()
+    assert ((task / "tests/nemo_gym/python.tar.gz").stat().st_ino == archive.stat().st_ino) is not cross_device
     assert not list((task / "environment").glob("*.tar.gz"))
     assert (task / "instruction.md").read_bytes() == SCALE_ROW["responses_create_params"]["input"][0][
         "content"

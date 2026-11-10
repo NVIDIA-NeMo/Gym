@@ -336,13 +336,24 @@ def materialize_training_rows(
     route: str,
     prepared: PreparedTaskset | None = None,
     source_server: str = "swe_rebench",
+    task_harnesses: list[str] | None = None,
 ) -> list[dict]:
-    """Keep task-major order across harnesses and preserve each route's actual request contract."""
+    """Preserve task order and route contracts, optionally assigning one harness to each task.
+
+    Without an assignment, each task is repeated across the requested harnesses.
+    An explicit assignment emits exactly one row per task; generation siblings
+    then stay on that row's harness without changing the task batch membership.
+    """
     validate_harnesses(harnesses, route=route)
+    if task_harnesses is not None:
+        if len(task_harnesses) != len(rows):
+            raise ValueError("Supply exactly one harness assignment per task row")
+        if any(harness not in harnesses for harness in task_harnesses):
+            raise ValueError("Every task assignment must use a requested harness")
     by_id = {task.task_id: task for task in prepared.tasks} if prepared else {}
     materialized = []
-    for row in rows:
-        for harness in harnesses:
+    for index, row in enumerate(rows):
+        for harness in [task_harnesses[index]] if task_harnesses is not None else harnesses:
             taskset = f"{source_server}_{harness}"
             if route == "old-run":
                 record = row | {
@@ -578,6 +589,11 @@ def prepare(args: argparse.Namespace) -> dict:
 
 
 def main() -> None:
+    if sys.argv[1:2] == ["experiment"]:
+        from scripts.prepare_swe_experiment import main as experiment_main
+
+        experiment_main(sys.argv[2:])
+        return
     if sys.argv[1:2] == ["continue"]:
         from scripts.swe_training_continuation import main as continue_main
 
