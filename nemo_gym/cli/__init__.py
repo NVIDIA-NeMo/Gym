@@ -25,7 +25,7 @@ __getattr__ = moved_attr_getter(
     __name__,
     {
         # Server orchestration + run/test entry points (old `nemo_gym/cli.py`)
-        "RunHelper": "nemo_gym.orchestration.server_supervisor",
+        "RunHelper": "nemo_gym.server_runtime.supervisor.server_supervisor",
         "RunConfig": "nemo_gym.cli.env",
         "TestConfig": "nemo_gym.cli.env",
         "TestAllConfig": "nemo_gym.cli.env",

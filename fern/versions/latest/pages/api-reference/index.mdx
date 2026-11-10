@@ -65,12 +65,12 @@ Read the diagram top to bottom, and left to right within a group: each package m
 | `cli` | The `gym` command line. |
 | `environment` | Authoring environments and benchmarks: manifests, registries, scaffolding, and validation. Also running a benchmark from Python: `plan_benchmark` and `TaskRunner`. |
 | `eval` | Evaluation on top of collected rollouts. |
-| `orchestration` | Starting servers, submitting jobs to clusters, and recovering a submitted run from its saved evidence. |
+| `orchestration` | Submitting jobs to clusters, tracking them, and recovering a submitted run from its saved evidence. |
 | `rollouts` | Collecting rollouts and checking the results. |
 | `data` | Datasets and task data. |
 | `agents` | The shared base for agent servers. |
 | `models` | The shared base for model servers, and converters between model API formats. |
-| `server_runtime` | What runs inside every server, including the resources server and environment server bases. |
+| `server_runtime` | What runs inside every server, including the resources server and environment server bases. The `supervisor` subpackage starts the servers of a run and sets up their venvs; nothing that runs inside a server imports it. |
 | `artifacts` | The files a run writes and exports. |
 | `metrics` | Rollout metrics, such as reward profiles and pass@k. |
 | `verification` | Helpers resources servers share for verification, such as LLM judges. |
