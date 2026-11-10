@@ -27,9 +27,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import FrameType
 
-from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, _augment_sys_path, component_search_roots
+from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, _augment_sys_path
+from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.artifacts.exporter_registry import DEFAULT_RUN_EXPORTER, RUN_EXPORTERS
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
+from nemo_gym.environment.assets import asset_config_path
 from nemo_gym.utils.text import did_you_mean
 from nemo_gym.utils.text import hydra_quote as _hydra_quote
 
@@ -371,117 +373,6 @@ REWARD_DIRECTION = Flag(
 )
 
 
-# Asset selector flag -> (parent dir, configs subdir, default config flavor). All accept `name` or `name/flavor`,
-# resolving to `<parent>/<server>/[<subdir>/]<flavor>.yaml`. A None default flavor falls back to the server name.
-_ASSETS = {
-    "benchmark": ("benchmarks", "", "config"),
-    "environment": ("environments", "", "config"),
-    "resources-server": ("resources_servers", "configs", None),
-    "model-type": ("responses_api_models", "configs", None),
-    "agent-type": ("responses_api_agents", "configs", None),
-}
-
-
-def _asset_config_path(flag: str, value: str) -> str:
-    """Map a named asset (`name` or `name/flavor`) to its config path.
-
-    Searches the roots from :func:`~nemo_gym.environment.discovery.component_search_roots` (``NEMO_GYM_EXTRA_ROOTS`` +
-    cwd + install root), the same helper that backs `gym list`/`gym search`, so config resolution and
-    discovery agree on where components live. On a name collision across roots the highest-priority root wins
-    (as in `gym list`), with a warning. ``--search-dir`` reaches here via ``NEMO_GYM_EXTRA_ROOTS`` (set
-    in ``main``). Searching the install root is what lets built-ins resolve by name from an arbitrary cwd
-    (e.g. a wheel install), not just inside the repo checkout.
-    """
-    parent, subdir, default_flavor = _ASSETS[flag]
-    server_name, _, config_flavor = value.partition("/")
-    config_flavor = config_flavor or default_flavor or server_name
-    config_dir = f"{parent}/{server_name}/{subdir}".rstrip("/")
-    path = f"{config_dir}/{config_flavor}.yaml"
-
-    roots = component_search_roots()
-    matches: list[Path] = []
-
-    if "/" in value and flag in {"benchmark", "environment"}:
-        nested_matches: list[Path] = []
-        for root in roots:
-            candidate = root / parent / value / "config.yaml"
-            resolved = candidate.resolve()
-            if candidate.is_file() and resolved not in nested_matches:
-                nested_matches.append(resolved)
-        if nested_matches:
-            if len(nested_matches) > 1:
-                shadowed = ", ".join(f"`{path}`" for path in nested_matches[1:])
-                logger.warning(
-                    f"`--{flag} {value}` matches multiple configs; using `{nested_matches[0]}` from the "
-                    f"highest-priority root and ignoring {shadowed}. Pass `--config <path>` to select a different one."
-                )
-            return str(nested_matches[0])
-
-    for root in roots:
-        candidate = root / path
-        if candidate.exists():
-            resolved = candidate.resolve()
-            if resolved not in matches:
-                matches.append(resolved)
-
-    if len(matches) > 1:
-        shadowed = ", ".join(f"`{m}`" for m in matches[1:])
-        logger.warning(
-            f"`--{flag} {value}` matches multiple configs; using `{matches[0]}` from the highest-priority root "
-            f"and ignoring {shadowed}. Pass `--config <path>` to select a different one."
-        )
-    if matches:
-        return str(matches[0])
-
-    # No match: build a "did you mean?" hint and the roots searched
-    if flag == "benchmark":
-        # Benchmarks need special handling because some use non-standard config paths (arbitrary nesting), so
-        # the generic one-level flavor/sibling search below can't see them.
-        # Enumerate their real config names (the same values `gym list benchmarks` prints) instead.
-        from nemo_gym.environment.benchmarks import _benchmark_config_name, _benchmark_config_paths
-
-        config_names = {
-            _benchmark_config_name(p.relative_to(root / parent))
-            for root in roots
-            for p in _benchmark_config_paths(root / parent)
-        }
-        # A bare directory that only groups benchmarks (e.g. `livecodebench`) is not itself selectable, so point
-        # at the config names under it; otherwise fall back to a fuzzy match across every token.
-        under_dir = sorted(config_name for config_name in config_names if config_name.startswith(f"{value}/"))
-        hint = f" Did you mean `{min(under_dir, key=len)}`?" if under_dir else did_you_mean(value, config_names)
-        available = ", ".join(sorted(f"`{(root / parent).resolve()}`" for root in roots if (root / parent).is_dir()))
-    else:
-        # Suggest the closest real name across all roots: a config flavor when the server exists, else a server
-        # name, reporting the full paths that were searched in each case.
-        available = ", ".join(
-            set(f"`{(root / config_dir).resolve()}`" for root in roots if (root / config_dir).is_dir())
-        )
-        typo = config_flavor
-        candidates = [p.stem for root in roots for p in (root / config_dir).glob("*.yaml")]
-
-        if len(candidates) == 0:
-            available = ", ".join(set(f"`{(root / parent).resolve()}`" for root in roots if (root / parent).is_dir()))
-            typo = server_name
-            candidates = [
-                child.name
-                for root in roots
-                if (root / parent).is_dir()
-                for child in (root / parent).iterdir()
-                if child.is_dir()
-            ]
-            if server_name in candidates:
-                # The folder exists but has no YAML configs, so the problem is the missing config,
-                # not the name. Suggesting a different server here would point the user elsewhere.
-                candidates = []
-
-        hint = did_you_mean(typo, candidates)
-
-    raise ValueError(
-        f"`--{flag} {value}` was specified which implies config `{path}`, which does not exist.{hint} "
-        f"See available {flag} configs in {available}."
-    )
-
-
 def _asset_selector(flag: str, *, repeatable: bool = False) -> Flag:
     """A `--<flag> NAME` selector that resolves the named asset to a config and adds it to +config_paths.
 
@@ -494,7 +385,7 @@ def _asset_selector(flag: str, *, repeatable: bool = False) -> Flag:
         if not selected:
             return []
         names = selected if isinstance(selected, list) else [selected]
-        return [f"+config_paths=[{','.join(_asset_config_path(flag, name) for name in names)}]"]
+        return [f"+config_paths=[{','.join(asset_config_path(flag, name) for name in names)}]"]
 
     return Flag(
         register=lambda p: p.add_argument(
@@ -541,7 +432,7 @@ def _translate_agent_type(args: argparse.Namespace) -> list[str]:
             "`--agent-type` chooses which agent runs the task, which is settled once the servers are "
             "running, so it cannot be combined with `--no-serve`. Use `--agent` to name one of them."
         )
-    config_path = _asset_config_path("agent-type", name)
+    config_path = asset_config_path("agent-type", name)
     overrides = [f"+config_paths=[{config_path}]"]
     if name.split("/", 1)[0] == "langgraph_agent":
         # Null-bound LangGraph configs also serve independently wired session agents. Only an explicit
@@ -1000,9 +891,10 @@ def _eval_status(args: argparse.Namespace, overrides: list[str]) -> None:
     if overrides != expected_overrides:
         args._parser.error("status does not accept Hydra overrides")
     from nemo_gym.cli.eval import eval_status
+    from nemo_gym.orchestration.jobs import benchmark_artifact_dirs
 
     try:
-        eval_status(args.run, json_output=args.json)
+        eval_status(args.run, json_output=args.json, job_artifact_dirs=benchmark_artifact_dirs)
     except (OSError, ValueError) as exc:
         args._parser.error(str(exc))
 
@@ -2121,7 +2013,7 @@ COMMANDS = {
                     "--max-unhealthy-fraction",
                     type=float,
                     metavar="FRACTION",
-                    help="With --recover: the per-rollout health criterion, reported in warnings; it does not change the verdict.",
+                    help="With --recover: the rollout quality criterion, reported in warnings; it does not change the verdict.",
                 ),
             ),
             Flag(
@@ -2169,7 +2061,7 @@ COMMANDS = {
     ),
     "eval compare": Command(
         target="nemo_gym.cli.eval:compare",
-        summary="Compare a baseline eval run against candidate runs.",
+        summary="Compare baseline and candidate runs, optionally pooling independent repeats.",
         flags=(
             _value_flag(
                 "baseline",
@@ -2183,6 +2075,18 @@ COMMANDS = {
                 "Candidate run's rollouts JSONL. Comma-separated list; one candidate is supported today.",
                 metavar="PATH[,PATH...]",
             ),
+            _comma_list_flag(
+                "baseline-runs",
+                "baseline_rollouts_jsonl_fpaths",
+                "Pool independent baseline runs into one repeat sample. Use instead of --baseline.",
+                metavar="PATH[,PATH...]",
+            ),
+            _comma_list_flag(
+                "candidate-runs",
+                "pooled_candidate_rollouts_jsonl_fpaths",
+                "Pool independent candidate runs into one repeat sample. Use instead of --candidates.",
+                metavar="PATH[,PATH...]",
+            ),
             _value_flag(
                 "baseline-agg-metrics",
                 "baseline_aggregate_metrics_fpath",
@@ -2190,9 +2094,15 @@ COMMANDS = {
                 quote=True,
             ),
             _comma_list_flag(
+                "baseline-runs-agg-metrics",
+                "baseline_aggregate_metrics_fpaths",
+                "Aggregate-metrics overrides, one per --baseline-runs source in the same order.",
+                metavar="PATH[,PATH...]",
+            ),
+            _comma_list_flag(
                 "candidates-agg-metrics",
                 "candidate_aggregate_metrics_fpaths",
-                "Candidates' aggregate-metrics JSON, in --candidates order, when not siblings of --candidates.",
+                "Candidate aggregate-metrics overrides, in --candidates or --candidate-runs order.",
                 metavar="PATH[,PATH...]",
             ),
             _value_flag("agent", "agent_name", "Agent to compare on both sides (default: all shared agents)."),
@@ -2200,19 +2110,50 @@ COMMANDS = {
                 "confidence-level",
                 "confidence_level",
                 "Delta confidence level as a fraction between 0 and 1 (default: 0.95). "
-                "Baseline/candidate intervals remain the recorded 95%% intervals.",
+                "Side intervals stay at 95%% and are recomputed for pooled sides.",
             ),
             _value_flag("baseline-agent", "baseline_agent_name", "Agent to read from the baseline's metrics."),
             _comma_list_flag(
+                "baseline-agents",
+                "baseline_agent_names",
+                "Agent to read from each pooled baseline source, in --baseline-runs order.",
+                metavar="NAME[,NAME...]",
+            ),
+            _comma_list_flag(
                 "candidate-agents",
                 "candidate_agent_names",
-                "Agent to read from each candidate's metrics, in --candidates order.",
+                "Agent to read from each candidate source, in --candidates or --candidate-runs order.",
                 metavar="NAME[,NAME...]",
             ),
             _value_flag(
                 "output-dir",
                 "output_dirpath",
-                "Where to write the report (default: the candidate run's own directory).",
+                "Where to write the report (default: the last candidate source's directory).",
+                aliases=("-o",),
+                quote=True,
+            ),
+            _value_flag(
+                "report-format",
+                "report_format",
+                "Report artifacts to write (default: both).",
+                choices=("md", "json", "both"),
+            ),
+        ),
+    ),
+    "eval compare-suite": Command(
+        target="nemo_gym.cli.eval:compare_suite",
+        summary="Compare baseline and candidate runs across a configured benchmark and model suite.",
+        flags=(
+            _value_flag("suite", "suite_fpath", "Path to the benchmark and model suite YAML (required).", quote=True),
+            _value_flag(
+                "confidence-level",
+                "confidence_level",
+                "Confidence level as a fraction between 0 and 1 (default: 0.90).",
+            ),
+            _value_flag(
+                "output-dir",
+                "output_dirpath",
+                "Where to write the reports (default: the suite YAML's directory).",
                 aliases=("-o",),
                 quote=True,
             ),
@@ -2491,3 +2432,6 @@ def main() -> None:
                 dispatch(command.target, overrides)
         except ValidationError as exc:
             _handle_pydantic_validation_error(exc, getattr(args, "_parser", parser))
+
+
+__getattr__ = moved_names_getattr(__name__)

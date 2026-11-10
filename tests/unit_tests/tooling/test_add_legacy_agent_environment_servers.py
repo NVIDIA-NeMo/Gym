@@ -982,7 +982,7 @@ def test_switch_refuses_a_parent_relay_without_its_children(
     [
         (None, True),
         ("async def seed_session(self, body: ResourcesSeedSessionRequest | BaseSeedSessionRequest): ...", True),
-        # Reads the raw request and answers a typed seed with its resources_session_id.
+        # Reads the raw request and answers an episode seed with its resources_session_id.
         ("async def seed_session(self, request: Request):\n        return request['resources_session_id']", True),
         ("async def seed_session(self, request: Request, body: BaseSeedSessionRequest): ...", False),
     ],

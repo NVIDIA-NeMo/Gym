@@ -6,13 +6,7 @@ name = "gym-resources-servers-scicode"
 version = "0.0.0"
 requires-python = ">=3.13.14"
 dependencies = [
-    "nemo-gym[dev]",
-    "scipy>=1.14.1",
-    "numpy",
-    "matplotlib",
-    "h5py",
-    "sympy",
-    "networkx==3.5",
+    "nemo-gym[dev,sandbox]",
 ]
 
 [tool.uv]

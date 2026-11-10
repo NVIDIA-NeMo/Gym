@@ -88,9 +88,11 @@ def test_a_suite_that_did_not_complete_is_rejected(repo: str, body: str) -> None
     assert not failure_only_suite_completed(repo, _test_output(body))
 
 
-def test_only_the_test_output_section_counts() -> None:
-    log = f"{CHROME_DONE}\n" + _test_output(CHROME_GAVE_UP)
-    assert not failure_only_suite_completed("chartjs/Chart.js", log)
+def test_a_summary_on_stdout_counts_when_the_markers_are_on_stderr() -> None:
+    # A sandbox returns stdout, then stderr: the runner's summary comes before bash's trace, which holds the markers.
+    trace = "+ : '>>>>> Start Test Output'\n+ ./node_modules/.bin/jasmine\n+ : '>>>>> End Test Output'\n"
+    assert failure_only_suite_completed("markedjs/marked", f"{JASMINE_DONE}\n{trace}")
+    assert not failure_only_suite_completed("markedjs/marked", f"Started\n\n\n0 specs, 0 failures\n{trace}")
 
 
 def test_every_failure_only_repository_has_a_check() -> None:

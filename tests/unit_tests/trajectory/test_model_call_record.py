@@ -301,12 +301,101 @@ _USAGE_SHAPES = {
         120,
         None,
     ),
+    # OpenAI cache writes are part of input_tokens / prompt_tokens: reported separately, never added again.
+    "responses nothing cached": (
+        {
+            "input_tokens": 100,
+            "input_tokens_details": {"cache_write_tokens": 0, "cached_tokens": 0},
+            "output_tokens": 20,
+        },
+        100,
+        120,
+        0,
+    ),
+    "responses cache read and write": (
+        {
+            "input_tokens": 12000,
+            "input_tokens_details": {
+                "cached_tokens": 4000,
+                "cache_write_tokens": 7000,
+                "cache_write_tokens_details": {"ttl_30m_tokens": 3000, "ttl_12h_tokens": 4000},
+            },
+            "output_tokens": 20,
+            "total_tokens": 12020,
+        },
+        12000,
+        12020,
+        7000,
+    ),
+    "responses malformed cache write": (
+        {"input_tokens": 100, "input_tokens_details": {"cache_write_tokens": "60"}, "output_tokens": 20},
+        100,
+        120,
+        None,
+    ),
+    # Anthropic's top-level field wins when both are present, an explicit 0 included.
+    "anthropic zero cache write wins over the openai detail": (
+        {
+            "input_tokens": 100,
+            "cache_creation_input_tokens": 0,
+            "input_tokens_details": {"cache_write_tokens": 60},
+            "output_tokens": 20,
+        },
+        100,
+        120,
+        0,
+    ),
+    "anthropic cache write wins over the openai detail": (
+        {
+            "input_tokens": 100,
+            "cache_creation_input_tokens": 30,
+            "input_tokens_details": {"cache_write_tokens": 60},
+            "output_tokens": 20,
+        },
+        130,
+        150,
+        30,
+    ),
+    "responses negative cache write": (
+        {"input_tokens": 100, "input_tokens_details": {"cache_write_tokens": -5}, "output_tokens": 20},
+        100,
+        120,
+        None,
+    ),
+    "responses boolean cache write": (
+        {"input_tokens": 100, "input_tokens_details": {"cache_write_tokens": True}, "output_tokens": 20},
+        100,
+        120,
+        None,
+    ),
+    "chat completions negative cache write": (
+        {"prompt_tokens": 100, "prompt_tokens_details": {"cache_write_tokens": -1}, "completion_tokens": 20},
+        100,
+        120,
+        None,
+    ),
+    "chat completions boolean cache write": (
+        {"prompt_tokens": 100, "prompt_tokens_details": {"cache_write_tokens": True}, "completion_tokens": 20},
+        100,
+        120,
+        None,
+    ),
     "chat completions": ({"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}, 100, 120, None),
     "chat completions cached subset": (
         {"prompt_tokens": 100, "prompt_tokens_details": {"cached_tokens": 80}, "completion_tokens": 20},
         100,
         120,
         None,
+    ),
+    "chat completions cache read and write": (
+        {
+            "prompt_tokens": 100,
+            "prompt_tokens_details": {"cached_tokens": 30, "cache_write_tokens": 60},
+            "completion_tokens": 20,
+        },
+        100,
+        120,
+        60,
     ),
     "anthropic messages with cache": (
         {"input_tokens": 20, "cache_read_input_tokens": 70, "cache_creation_input_tokens": 10, "output_tokens": 20},
@@ -385,3 +474,23 @@ def test_extract_token_stats_openai_cached_not_double_counted():
     assert stats["tokens_in"] == 10
     assert stats["tokens_total"] == 15
     assert stats["cache_creation_tokens"] is None
+
+
+@pytest.mark.parametrize(
+    ("response", "exchange_finish_reason", "expected"),
+    [
+        # A completed Responses call has no reason of its own; the adapter's note fills it.
+        ({"status": "completed"}, "stop", "stop"),
+        ({"status": "completed"}, None, None),
+        # What the payload itself reports stays first.
+        (
+            {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}},
+            "length",
+            "max_output_tokens",
+        ),
+    ],
+)
+def test_build_model_call_record_falls_back_to_the_adapters_finish_reason(response, exchange_finish_reason, expected):
+    exchange = {"response": response, "finish_reason": exchange_finish_reason}
+
+    assert build_model_call_record(exchange, call_index=0).finish_reason == expected
