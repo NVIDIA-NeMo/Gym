@@ -26,7 +26,6 @@ ANSWER = {"object": "response", "id": "resp_saved", "status": "completed", "outp
 
 def _run(
     tmp_path: Path, *, judge_failures: int, rollouts: int = 3, evidence: dict | None = None
-
 ) -> tuple[Path, list[dict]]:
     """A managed run of ``rollouts`` rollouts: the first ``judge_failures`` failed to judge, the others scored 1.0."""
     rows = [{"_ng_task_index": i, "_ng_rollout_index": 0, "agent_ref": {"name": "agent"}} for i in range(rollouts)]
