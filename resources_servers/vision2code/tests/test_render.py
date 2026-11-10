@@ -31,6 +31,7 @@ def fake_sandbox(monkeypatch):
             self.uploads = {}
             self.commands = []
             self.stopped = False
+            self.stop_calls = 0
             self.downloaded = False
             self.entered = asyncio.Event()
             self.stop_entered = asyncio.Event()
@@ -93,10 +94,11 @@ def fake_sandbox(monkeypatch):
                     Path(local_path).write_bytes(data)
 
         async def stop(self):
+            self.stop_calls += 1
             self.stop_entered.set()
             if self.stop_gate is not None:
                 await self.stop_gate.wait()
-            if self.mode == "stop_failure":
+            if self.mode == "stop_failure" or (self.mode == "transient_stop_failure" and self.stop_calls == 1):
                 raise RuntimeError("failed to stop")
             self.stopped = True
 
@@ -254,6 +256,53 @@ async def test_cancellation_during_stop_is_recorded(fake_sandbox, tmp_path):
         await task
     assert instances[0].stopped
     assert json.loads((tmp_path / "execution.json").read_text())["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_transient_cleanup_failure_preserves_render(fake_sandbox, tmp_path):
+    cls, instances = fake_sandbox
+    cls.mode = "transient_stop_failure"
+    pending = {}
+    result = await attempt(tmp_path, pending_cleanup=pending)
+    assert result.status == "ok" and result.diagnostics["stopped"]
+    assert instances[0].stop_calls == 2 and instances[0].stopped
+    assert result.diagnostics["cleanup_errors"] == ["RuntimeError: failed to stop"]
+    assert not pending
+
+
+@pytest.mark.asyncio
+async def test_failed_cleanup_retains_same_handle_for_later_retry(fake_sandbox, tmp_path):
+    cls, instances = fake_sandbox
+    cls.mode = "stop_failure"
+    pending = {}
+    result = await attempt(tmp_path, pending_cleanup=pending)
+    assert result.status == "infrastructure_failure" and not result.diagnostics["stopped"]
+    assert pending == {tmp_path: instances[0]} and instances[0].stop_calls == 2
+    cls.mode = "ok"
+    diagnostics = {}
+    assert await module.stop_sandbox(pending[tmp_path], attempts=2, diagnostics=diagnostics)
+    assert instances[0].stopped and diagnostics["stopped"]
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_failed_cleanup_retains_handle(fake_sandbox, tmp_path):
+    cls, instances = fake_sandbox
+    cls.mode = "stop_failure"
+    cls.stop_gate = asyncio.Event()
+    pending = {}
+    task = asyncio.create_task(attempt(tmp_path, pending_cleanup=pending))
+    while not instances:
+        await asyncio.sleep(0)
+    await instances[0].stop_entered.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    cls.stop_gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert pending[tmp_path] is instances[0]
+    saved = json.loads((tmp_path / "execution.json").read_text())
+    assert saved["status"] == "cancelled" and not saved["diagnostics"]["stopped"]
 
 
 @pytest.mark.parametrize("image_format", ["PNG", "JPEG", "WEBP", "GIF", "TIFF", "BMP"])

@@ -25,6 +25,12 @@ vision2code:
       sandbox_image: ${oc.env:VISION2CODE_SQSH}
       execution_timeout: 60
       render_concurrency: 8
+      # Pixel workers run independently of rendering; their limit also holds through cancellation.
+      image_metrics_concurrency: 2
+      # Additional fresh-sandbox attempts, only after infrastructure failures with confirmed cleanup.
+      inconclusive_verification_retries: 1
+      # Attempts on the same handle; unresolved handles are retained for shutdown cleanup.
+      sandbox_cleanup_attempts: 2
       reward_power: 2.0
       # Opt in to reference Blend A / 5; uses raw LLM scores and ignores reward_power.
       # 0.1 * foreground_RGB + 0.2 * foreground_F1 + 0.2 * edge_F1 + 0.5 * raw_LLM/5.

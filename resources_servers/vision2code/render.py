@@ -4,6 +4,7 @@
 
 import asyncio
 import json
+import logging
 import os
 import re
 import shlex
@@ -20,6 +21,7 @@ from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
 
 MAX_BYTES = 32 * 1024 * 1024
 MAX_PIXELS = 25_000_000
+LOGGER = logging.getLogger(__name__)
 # A fresh PID namespace kills script descendants when its Python init exits,
 # including children that would otherwise race validation/download.
 ISOLATED = (
@@ -80,16 +82,51 @@ async def finish_task(task: asyncio.Task[T]) -> T:
             await asyncio.shield(task)
         except asyncio.CancelledError:
             cancelled = True
-    result = task.result()
+        except Exception:
+            if not cancelled:
+                raise
     if cancelled:
+        if not task.cancelled():
+            task.exception()  # Retrieve a failure that happened while waiting for cancellation-safe completion.
         raise asyncio.CancelledError
-    return result
+    return task.result()
+
+
+async def stop_sandbox(sandbox: AsyncSandbox, *, attempts: int, diagnostics: dict[str, JsonValue]) -> bool:
+    """Retry teardown on the same handle; the owner retains it when all attempts fail."""
+    if attempts < 1:
+        raise ValueError("Sandbox cleanup attempts must be positive")
+    errors = []
+    diagnostics["cleanup_errors"] = errors
+    for attempt in range(attempts):
+        try:
+            await sandbox.stop()
+            diagnostics["stopped"] = True
+            return True
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            errors.append(error)
+            LOGGER.warning("Sandbox teardown attempt %s/%s failed: %s", attempt + 1, attempts, error)
+    diagnostics["stopped"] = False
+    diagnostics["cleanup_error"] = errors[-1]
+    return False
 
 
 async def render(
-    *, code: str, width: int, height: int, image: str, provider: dict[str, dict], artifact_dir: Path, timeout: float
+    *,
+    code: str,
+    width: int,
+    height: int,
+    image: str,
+    provider: dict[str, dict],
+    artifact_dir: Path,
+    timeout: float,
+    cleanup_attempts: int = 2,
+    pending_cleanup: dict[Path, AsyncSandbox] | None = None,
 ) -> RenderResult:
-    """Render and download before stopping, persisting diagnostics on every path."""
+    """Render and stop; register failed teardown handles in the owner's pending_cleanup mapping."""
+    if cleanup_attempts < 1:
+        raise ValueError("Sandbox cleanup attempts must be positive")
     result = RenderResult()
     artifact_dir.mkdir(parents=True, exist_ok=True)
     code_path = artifact_dir / "code.py"
@@ -222,16 +259,27 @@ async def render(
     finally:
         try:
             if sandbox is not None:
+                if pending_cleanup is not None:
+                    pending_cleanup[artifact_dir] = sandbox
                 stop_start = time.perf_counter()
-                stop_task = asyncio.create_task(sandbox.stop())
-                await finish_task(stop_task)
+                stop_task = asyncio.create_task(
+                    stop_sandbox(sandbox, attempts=cleanup_attempts, diagnostics=result.diagnostics)
+                )
+                stopped = await finish_task(stop_task)
                 result.timings["cleanup_s"] = time.perf_counter() - stop_start
-                result.diagnostics["stopped"] = True
+                if stopped:
+                    if pending_cleanup is not None:
+                        pending_cleanup.pop(artifact_dir, None)
+                else:
+                    result.status = "infrastructure_failure"
         except asyncio.CancelledError:
             result.status = "cancelled"
-            result.diagnostics["stopped"] = (
-                stop_task.done() and not stop_task.cancelled() and stop_task.exception() is None
+            stopped = (
+                stop_task.done() and not stop_task.cancelled() and stop_task.exception() is None and stop_task.result()
             )
+            result.diagnostics["stopped"] = bool(stopped)
+            if stopped and pending_cleanup is not None:
+                pending_cleanup.pop(artifact_dir, None)
             raise
         except Exception as exc:
             result.status = "infrastructure_failure"

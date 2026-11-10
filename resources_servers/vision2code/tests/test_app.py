@@ -3,7 +3,9 @@
 import asyncio
 import hashlib
 import json
+import threading
 from pathlib import Path
+from types import SimpleNamespace
 from typing import get_args
 from unittest.mock import AsyncMock, MagicMock
 
@@ -549,3 +551,222 @@ async def test_final_judge_rating_rounds_weighted_score(setup):
     assert result.rubric_result["raw_score_0_to_5"] == 4.03
     assert result.rubric_result["final_rating_0_to_5"] == 4.0
     assert result.reward == pytest.approx(0.64)
+
+
+@pytest.mark.parametrize("retries", [0, 1, 2])
+async def test_render_infrastructure_retry_budget_and_artifacts(setup, retries):
+    server, body, renderer, judge = setup
+    server.config.inconclusive_verification_retries = retries
+
+    async def failure(**kwargs):
+        directory = kwargs["artifact_dir"]
+        directory.mkdir(exist_ok=True)
+        (directory / "code.py").write_text(kwargs["code"])
+        result = RenderResult(
+            status="infrastructure_failure", diagnostics={"error": f"failure {renderer.await_count}"}
+        )
+        (directory / "execution.json").write_text(result.model_dump_json())
+        return result
+
+    renderer.side_effect = failure
+    result = await server.verify(body)
+    assert renderer.await_count == retries + 1
+    assert result.mask_sample and result.failure_kind == "provider_unavailable"
+    assert len(result.render_attempts) == retries + 1
+    directories = [Path(attempt["directory"]) for attempt in result.render_attempts]
+    assert len(set(directories)) == retries + 1
+    for number, directory in enumerate(directories, 1):
+        assert json.loads((directory / "execution.json").read_text())["diagnostics"]["error"] == f"failure {number}"
+    assert result.artifacts["execution"] == str(directories[-1] / "execution.json")
+    judge.assert_not_awaited()
+
+
+async def test_render_recovery_uses_same_program_and_scores_successful_artifact(setup):
+    server, body, renderer, judge = setup
+    successful_render = renderer.side_effect
+    calls = []
+
+    async def render(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            return RenderResult(status="infrastructure_failure")
+        kwargs["artifact_dir"].mkdir()
+        return await successful_render(**kwargs)
+
+    renderer.side_effect = render
+    judge.return_value = judge_result("ChartQA")
+    result = await server.verify(body)
+    assert not result.mask_sample and result.reward == pytest.approx(0.64)
+    assert renderer.await_count == 2 and judge.await_count == 1
+    for key in ("code", "width", "height", "image", "provider", "timeout"):
+        assert calls[0][key] == calls[1][key]
+    assert Path(result.artifacts["image"]).parent == calls[1]["artifact_dir"]
+    assert result.render.status == "ok" and len(result.render_attempts) == 2
+
+
+@pytest.mark.parametrize("status", ["code_error", "timeout", "missing_output", "invalid_output"])
+async def test_model_render_failures_are_not_retried(setup, status):
+    server, body, renderer, judge = setup
+    renderer.side_effect = None
+    renderer.return_value = RenderResult(status=status)
+    result = await server.verify(body)
+    assert not result.mask_sample and result.reward == 0
+    assert renderer.await_count == 1
+    judge.assert_not_awaited()
+
+
+async def test_unresolved_cleanup_prevents_fresh_sandbox_retry_and_runs_at_shutdown(setup):
+    server, body, renderer, judge = setup
+    sandbox = SimpleNamespace(stop=AsyncMock(side_effect=[RuntimeError("busy"), None]))
+
+    async def failure(**kwargs):
+        kwargs["pending_cleanup"][kwargs["artifact_dir"]] = sandbox
+        return RenderResult(status="infrastructure_failure", diagnostics={"stopped": False})
+
+    renderer.side_effect = failure
+    result = await server.verify(body)
+    assert result.mask_sample and renderer.await_count == 1
+    assert len(server._pending_cleanup) == 1
+    judge.assert_not_awaited()
+    application = server.setup_webserver()
+    async with application.router.lifespan_context(application):
+        assert len(server._pending_cleanup) == 1
+    assert not server._pending_cleanup and sandbox.stop.await_count == 2
+    diagnostics = json.loads((Path(result.artifacts["directory"]) / "shutdown-cleanup.json").read_text())
+    assert diagnostics["stopped"] and diagnostics["cleanup_errors"] == ["RuntimeError: busy"]
+
+
+async def test_shutdown_cleanup_exhaustion_retains_handle(setup, tmp_path):
+    server, _, _, _ = setup
+    sandbox = SimpleNamespace(stop=AsyncMock(side_effect=RuntimeError("unavailable")))
+    server._pending_cleanup[tmp_path] = sandbox
+    await server._cleanup_sandboxes()
+    assert server._pending_cleanup[tmp_path] is sandbox
+    assert sandbox.stop.await_count == server.config.sandbox_cleanup_attempts
+    assert not json.loads((tmp_path / "shutdown-cleanup.json").read_text())["stopped"]
+
+
+async def test_shutdown_waits_for_render_before_collecting_failed_cleanup(setup):
+    server, body, renderer, _ = setup
+    entered, release = asyncio.Event(), asyncio.Event()
+    sandbox = SimpleNamespace(stop=AsyncMock())
+
+    async def failure(**kwargs):
+        entered.set()
+        await release.wait()
+        kwargs["pending_cleanup"][kwargs["artifact_dir"]] = sandbox
+        return RenderResult(status="infrastructure_failure")
+
+    renderer.side_effect = failure
+    verify_task = asyncio.create_task(server.verify(body))
+    await entered.wait()
+    cleanup_task = asyncio.create_task(server._cleanup_sandboxes())
+    await asyncio.sleep(0)
+    assert not cleanup_task.done()
+    release.set()
+    result, _ = await asyncio.gather(verify_task, cleanup_task)
+    assert result.mask_sample and not server._pending_cleanup
+    sandbox.stop.assert_awaited_once()
+
+
+async def test_cancellation_during_render_recovery_does_not_start_another_attempt(setup):
+    server, body, renderer, _ = setup
+    entered = asyncio.Event()
+
+    async def cancel(**kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    renderer.side_effect = cancel
+    task = asyncio.create_task(server.verify(body))
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert renderer.await_count == 1
+
+
+async def test_pixel_concurrency_remains_bounded_through_cancellation(setup, monkeypatch):
+    server, _, _, _ = setup
+    loop = asyncio.get_running_loop()
+    entered = asyncio.Event()
+    release = threading.Event()
+    lock = threading.Lock()
+    active = peak = started = 0
+
+    def metrics(*args):
+        nonlocal active, peak, started
+        with lock:
+            active += 1
+            started += 1
+            peak = max(peak, active)
+            if active == 2:
+                loop.call_soon_threadsafe(entered.set)
+        try:
+            assert release.wait(timeout=10)
+            return {"rgb_overlap": 1.0}
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(app, "image_metrics", metrics)
+    tasks = [asyncio.create_task(server._compute_image_metrics(Path("ref"), Path("candidate"))) for _ in range(4)]
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        tasks[0].cancel()
+        await asyncio.sleep(0)
+        tasks[0].cancel()
+        await asyncio.sleep(0)
+        assert not tasks[0].done() and started == 2
+    finally:
+        release.set()
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+    assert isinstance(results[0], asyncio.CancelledError)
+    assert all(result == {"rgb_overlap": 1.0} for result in results[1:])
+    assert peak == 2 and started == 4 and active == 0
+
+
+async def test_pixel_worker_failure_releases_slot(setup, monkeypatch):
+    server, _, _, _ = setup
+    monkeypatch.setattr(app, "image_metrics", MagicMock(side_effect=ValueError("broken image")))
+    for _ in range(3):
+        with pytest.raises(ValueError, match="broken image"):
+            await asyncio.wait_for(server._compute_image_metrics(Path("ref"), Path("candidate")), timeout=5)
+
+
+async def test_pixel_cancellation_remains_cancellation_when_worker_fails(setup, monkeypatch):
+    server, _, _, _ = setup
+    loop = asyncio.get_running_loop()
+    entered, release = asyncio.Event(), threading.Event()
+
+    def metrics(*args):
+        loop.call_soon_threadsafe(entered.set)
+        assert release.wait(timeout=10)
+        raise ValueError("failed after cancellation")
+
+    monkeypatch.setattr(app, "image_metrics", metrics)
+    task = asyncio.create_task(server._compute_image_metrics(Path("ref"), Path("candidate")))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        task.cancel()
+        await asyncio.sleep(0)
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=5)
+
+
+@pytest.mark.parametrize(
+    "setting,value",
+    [
+        ("image_metrics_concurrency", 0),
+        ("image_metrics_concurrency", True),
+        ("inconclusive_verification_retries", -1),
+        ("inconclusive_verification_retries", 1.5),
+        ("sandbox_cleanup_attempts", 0),
+    ],
+)
+def test_invalid_resource_limits(setup, setting, value):
+    server, _, _, _ = setup
+    with pytest.raises(ValidationError):
+        app.Vision2CodeConfig.model_validate({**server.config.model_dump(), setting: value})

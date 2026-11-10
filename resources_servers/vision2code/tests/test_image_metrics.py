@@ -5,10 +5,11 @@
 import json
 from pathlib import Path
 
+import numpy as np
 import pytest
 from PIL import Image, ImageDraw
 
-from resources_servers.vision2code.image_metrics import apply_blend_a, image_metrics
+from resources_servers.vision2code.image_metrics import _background_and_overlap, apply_blend_a, image_metrics
 
 
 CASES = (
@@ -110,3 +111,30 @@ def test_capped_blend_render_failure_stays_zero():
     )
     assert result["final_rating_0_to_5"] == 0
     assert result["scoring_method"] == "blend_a_capped"
+
+
+def test_background_histogram_ties_and_even_medians():
+    # Both bins occur four times: the lower bin wins, with independent channel medians.
+    pixels = np.array([[[0, 1, 7], [1, 3, 6], [6, 4, 1], [7, 6, 0]], [[255, 255, 255]] * 4], dtype=np.uint8)
+    image = Image.fromarray(pixels)
+    background, overlap = _background_and_overlap(image, image)
+    np.testing.assert_array_equal(background, [3.5, 3.5, 3.5])
+    assert overlap == 1
+
+
+@pytest.mark.parametrize("candidate_size", [(1000, 600), (700, 500), (1100, 700)])
+def test_chunked_statistics_match_full_resolution_calculation(candidate_size):
+    rng = np.random.default_rng(137)
+    pixels = rng.integers(0, 256, (600, 1000, 3), dtype=np.uint8)
+    # Give one bin many distinct values, including across chunk boundaries.
+    pixels[::2] %= 8
+    reference = Image.fromarray(pixels)
+    candidate = reference.crop((0, 0, *candidate_size))
+    actual_background, actual_overlap = _background_and_overlap(reference, candidate)
+    bins = pixels.astype(np.int32) // 8
+    labels = bins[..., 0] * 1024 + bins[..., 1] * 32 + bins[..., 2]
+    peak = np.bincount(labels.ravel(), minlength=32768).argmax()
+    np.testing.assert_array_equal(actual_background, np.median(pixels[labels == peak], axis=0))
+    other = np.asarray(candidate)
+    h, w = min(other.shape[0], pixels.shape[0]), min(other.shape[1], pixels.shape[1])
+    assert actual_overlap == np.all(pixels[:h, :w] == other[:h, :w], axis=2).mean()

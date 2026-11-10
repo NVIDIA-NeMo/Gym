@@ -9,17 +9,21 @@
 import asyncio
 import hashlib
 import json
+import logging
 import time
 import uuid
+from contextlib import asynccontextmanager
 from io import BytesIO
 from pathlib import Path
 from typing import Literal
 
+from fastapi import FastAPI
 from PIL import Image
 from pydantic import ConfigDict, Field, JsonValue, PrivateAttr, model_validator
 
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent
+from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
@@ -38,9 +42,12 @@ from resources_servers.vision2code.image_metrics import apply_blend_a, image_met
 from resources_servers.vision2code.judge_recovery import REJUDGE_PROMPT, recovery_schema, repair_prompt
 from resources_servers.vision2code.judge_transport import request_judgment
 from resources_servers.vision2code.prepare import PreparationConfig, Reference, read_reference
-from resources_servers.vision2code.render import RenderResult, render
+from resources_servers.vision2code.render import RenderResult, finish_task, render, stop_sandbox
 from resources_servers.vision2code.rubrics import encode_image_to_data_url, inspect_candidate_image, parse_json_object
 from resources_servers.vision2code.tests.verifier_fixture import VERIFIER_FIXTURE as VERIFIER_FIXTURE
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class Vision2CodeConfig(BaseResourcesServerConfig):
@@ -55,6 +62,9 @@ class Vision2CodeConfig(BaseResourcesServerConfig):
     sandbox_provider: dict[str, dict] = Field(default_factory=lambda: {"enroot": {}})
     execution_timeout: float = Field(default=60, gt=0)
     render_concurrency: int = Field(default=8, ge=1)
+    image_metrics_concurrency: int = Field(default=2, ge=1, strict=True)
+    inconclusive_verification_retries: int = Field(default=1, ge=0, strict=True)
+    sandbox_cleanup_attempts: int = Field(default=2, ge=1, strict=True)
     reward_power: float = Field(default=2.0, ge=1, allow_inf_nan=False)
     use_blended_reward: bool = Field(
         default=False,
@@ -99,6 +109,7 @@ class Vision2CodeVerifyResponse(BaseVerifyResponse):
     rendered_image: str | None = None
     pixel_scores: dict[str, JsonValue] | None = None
     render: RenderResult | None = None
+    render_attempts: list[dict[str, JsonValue]] = Field(default_factory=list)
     rubric_result: dict[str, JsonValue] | None = None
     reward_power: float = 2.0
     use_blended_reward: bool = False
@@ -135,10 +146,58 @@ def mask_failure(result: Vision2CodeVerifyResponse, *, kind: str, reason: str) -
 class Vision2CodeServer(SimpleResourcesServer):
     config: Vision2CodeConfig
     _render_slots: asyncio.Semaphore = PrivateAttr()
+    _image_metrics_slots: asyncio.Semaphore = PrivateAttr()
+    _pending_cleanup: dict[Path, AsyncSandbox] = PrivateAttr(default_factory=dict)
+    _render_tasks: set[asyncio.Task[RenderResult]] = PrivateAttr(default_factory=set)
+    _shutting_down: bool = PrivateAttr(default=False)
 
     def model_post_init(self, context: object) -> None:
         self._render_slots = asyncio.Semaphore(self.config.render_concurrency)
+        self._image_metrics_slots = asyncio.Semaphore(self.config.image_metrics_concurrency)
         super().model_post_init(context)
+
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+        parent_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def lifespan(app: FastAPI):
+            try:
+                async with parent_lifespan(app) as state:
+                    yield state
+            finally:
+                await finish_task(asyncio.create_task(self._cleanup_sandboxes()))
+
+        app.router.lifespan_context = lifespan
+        return app
+
+    async def _cleanup_sandboxes(self) -> None:
+        self._shutting_down = True
+        # Request cancellation can still be waiting for bounded startup/exec/stop operations.
+        # Drain them before taking the snapshot of handles needing another teardown attempt.
+        await asyncio.gather(*list(self._render_tasks), return_exceptions=True)
+
+        async def cleanup(directory: Path, sandbox: AsyncSandbox) -> None:
+            diagnostics: dict[str, JsonValue] = {}
+            async with self._render_slots:
+                stopped = await stop_sandbox(
+                    sandbox, attempts=self.config.sandbox_cleanup_attempts, diagnostics=diagnostics
+                )
+            if stopped:
+                self._pending_cleanup.pop(directory, None)
+            else:
+                LOGGER.error("Sandbox cleanup remains unresolved; diagnostics: %s/shutdown-cleanup.json", directory)
+            try:
+                (directory / "shutdown-cleanup.json").write_text(json.dumps(diagnostics, indent=2))
+            except OSError:
+                LOGGER.exception("Could not persist shutdown cleanup diagnostics for %s: %s", directory, diagnostics)
+
+        await asyncio.gather(*(cleanup(path, sandbox) for path, sandbox in list(self._pending_cleanup.items())))
+
+    async def _compute_image_metrics(self, reference: Path, candidate: Path) -> dict[str, JsonValue]:
+        # Cancellation cannot stop a thread: retain its slot until the work has actually finished.
+        async with self._image_metrics_slots:
+            return await finish_task(asyncio.create_task(asyncio.to_thread(image_metrics, reference, candidate)))
 
     async def verify(self, body: Vision2CodeVerifyRequest) -> Vision2CodeVerifyResponse:
         ref = body.verifier_metadata
@@ -162,6 +221,7 @@ class Vision2CodeServer(SimpleResourcesServer):
             result.model_extra["instance_config"] = {**instance, "mask_sample": False}
         result.artifacts = {"directory": str(directory), "result": str(directory / "result.json")}
         stage = "reference"
+        render_directory = directory
         start = time.perf_counter()
         try:
             reference_path = Path(ref.image_path)
@@ -182,18 +242,41 @@ class Vision2CodeServer(SimpleResourcesServer):
                     source.save(source_path, format="PNG")
             result.artifacts["source_image"] = str(source_path)
             stage = "render"
-            async with self._render_slots:
-                result.render = await render(
-                    code=response_text(body.response),
-                    width=ref.width,
-                    height=ref.height,
-                    image=self.config.sandbox_image,
-                    provider=self.config.sandbox_provider,
-                    artifact_dir=directory,
-                    timeout=self.config.execution_timeout,
+            for attempt in range(self.config.inconclusive_verification_retries + 1):
+                render_directory = directory if attempt == 0 else directory / f"render-attempt-{attempt + 1}"
+                async with self._render_slots:
+                    if self._shutting_down:
+                        raise asyncio.CancelledError("Resources server is shutting down")
+                    render_task = asyncio.create_task(
+                        render(
+                            code=response_text(body.response),
+                            width=ref.width,
+                            height=ref.height,
+                            image=self.config.sandbox_image,
+                            provider=self.config.sandbox_provider,
+                            artifact_dir=render_directory,
+                            timeout=self.config.execution_timeout,
+                            cleanup_attempts=self.config.sandbox_cleanup_attempts,
+                            pending_cleanup=self._pending_cleanup,
+                        )
+                    )
+                    self._render_tasks.add(render_task)
+                    try:
+                        result.render = await render_task
+                    finally:
+                        self._render_tasks.discard(render_task)
+                result.render_attempts.append(
+                    {"directory": str(render_directory), "render": result.render.model_dump(mode="json")}
                 )
+                # Do not accumulate abandoned sandboxes while recovering an infrastructure failure.
+                if (
+                    result.render.status != "infrastructure_failure"
+                    or render_directory in self._pending_cleanup
+                    or self._shutting_down
+                ):
+                    break
             result.artifacts.update(
-                {"code": str(directory / "code.py"), "execution": str(directory / "execution.json")}
+                {"code": str(render_directory / "code.py"), "execution": str(render_directory / "execution.json")}
             )
             if result.render.status == "infrastructure_failure":
                 mask_failure(result, kind="provider_unavailable", reason=json.dumps(result.render.diagnostics))
@@ -205,7 +288,7 @@ class Vision2CodeServer(SimpleResourcesServer):
                         result.rubric_result, apply_judge_caps=result.blended_reward_apply_judge_caps
                     )
                 return result
-            candidate = directory / "output.png"
+            candidate = render_directory / "output.png"
             result.artifacts["image"] = str(candidate)
             if body.include_rendered_image:
                 result.rendered_image = encode_image_to_data_url(candidate)
@@ -299,7 +382,7 @@ class Vision2CodeServer(SimpleResourcesServer):
                 result.timings["judge_s"] = time.perf_counter() - judge_start
             if result.use_blended_reward or body.include_pixel_scores:
                 stage = "image_metrics"
-                result.pixel_scores = await asyncio.to_thread(image_metrics, reference_path, candidate)
+                result.pixel_scores = await self._compute_image_metrics(reference_path, candidate)
             if result.use_blended_reward:
                 stage = "image_metrics"
                 result.rubric_result = apply_blend_a(
@@ -327,10 +410,14 @@ class Vision2CodeServer(SimpleResourcesServer):
             return result
         finally:
             result.timings["total_s"] = time.perf_counter() - start
-            execution_path = directory / "execution.json"
-            if result.render is None and execution_path.exists():
+            execution_path = render_directory / "execution.json"
+            if stage == "render" and execution_path.exists():
                 result.render = RenderResult.model_validate_json(execution_path.read_text())
-                result.artifacts.update({"code": str(directory / "code.py"), "execution": str(execution_path)})
+                result.artifacts.update({"code": str(render_directory / "code.py"), "execution": str(execution_path)})
+                if not result.render_attempts or result.render_attempts[-1]["directory"] != str(render_directory):
+                    result.render_attempts.append(
+                        {"directory": str(render_directory), "render": result.render.model_dump(mode="json")}
+                    )
             (directory / "judge.json").write_text(json.dumps(result.judge_diagnostics, indent=2))
             result.artifacts["judge"] = str(directory / "judge.json")
             # Avoid duplicating base64 reference images and full policy inputs.
