@@ -308,38 +308,10 @@ def sanitize_test(test_case: str) -> str:
     return "\n".join(lines)
 
 
-# scipy 1.14 removed `scipy.integrate.simps`, the deprecated alias of `simpson`. SciCode's own dependency
-# header for problems 2 and 28 is `from scipy.integrate import simps`, and a few solutions call it, so on a
-# current scipy those programs end in an ImportError before any model code runs. When the alias is missing
-# this prelude restores it as the call scipy 1.13 made (`simps` forwarded to `simpson`, bit-identical results
-# on odd and even sample counts, with and without `x`/`dx`/`axis`); it does nothing when scipy still has it.
-# The removed `even` argument is not accepted, as in `simpson` itself.
-SCIPY_COMPAT_PRELUDE = """import scipy.integrate as _scicode_integrate
-if not hasattr(_scicode_integrate, "simps"):
-    def simps(y, x=None, dx=1.0, axis=-1):
-        from scipy.integrate import simpson
-        return simpson(y, x=x, dx=dx, axis=axis)
-    _scicode_integrate.simps = simps
-    del simps
-del _scicode_integrate
-"""
-
-
-def build_test_program(
-    full_generation: str,
-    h5_path: str,
-    step_number: str,
-    sanitized_tests: list[str],
-    *,
-    scipy_compat: bool = False,
-) -> str:
-    """Assemble one sub-step's program: solution + helpers + targets + assertions.
-
-    `scipy_compat` puts SCIPY_COMPAT_PRELUDE in front of the solution (whose first lines are the problem's
-    own dependency header), so that header can import `scipy.integrate.simps` on a scipy that removed it."""
+def build_test_program(full_generation: str, h5_path: str, step_number: str, sanitized_tests: list[str]) -> str:
+    """Assemble one sub-step's program: solution + helpers + targets + assertions."""
     header = f"import h5py\nimport scipy\nH5PY_FILE = {json.dumps(h5_path)}\n"
-    prelude = SCIPY_COMPAT_PRELUDE if scipy_compat else ""
-    program = f"{prelude}{full_generation}\n{header}{_EVAL_HELPERS}\n"
+    program = f"{full_generation}\n{header}{_EVAL_HELPERS}\n"
     program += f"targets = process_hdf5_to_tuple('{step_number}', {len(sanitized_tests)})\n"
     for idx, test in enumerate(sanitized_tests):
         program += f"target = targets[{idx}]\n\n{test}\n"

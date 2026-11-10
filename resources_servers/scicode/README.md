@@ -58,13 +58,6 @@ Default step outputs use the environment name `scicode`. Grading fixes can
 change scores for problems that previously failed due to scientific API
 incompatibilities, including problems 2 and 28.
 
-`provide_removed_scipy_aliases` (default `false`; `benchmarks/scicode/config.yaml` sets it `true`)
-restores `scipy.integrate.simps`, removed in scipy 1.14, at the top of every grading program when the
-installed scipy lacks it. SciCode's dependency header for problems 2 and 28 imports it, so without the
-option those problems end in an `ImportError` before any model code runs on the scipy this server
-installs. It forwards to `simpson` (bit-identical to scipy 1.13's `simps`) and does nothing when scipy
-still has `simps`.
-
 **Scoring notes** (mirroring nemo-skills):
 - Sub-steps absent from `solutions` (prefilled reference steps) are excluded from the denominator.
 - Out-of-context sentinels (`_ran_out_of_context_`) are counted as failed sub-steps.

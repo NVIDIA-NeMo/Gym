@@ -8,8 +8,6 @@ scicode_benchmark_resources_server:
       allowed_agents: [scicode_agent]
       # Manually staged SciCode test_data.h5 (see benchmarks/scicode/README.md).
       test_data_fpath: benchmarks/scicode/data/test_data.h5
-      # Problems 2 and 28 import scipy.integrate.simps, which the server's scipy (>=1.14) no longer has.
-      provide_removed_scipy_aliases: true
 
 scicode_benchmark_agent:
   _inherit_from: scicode_agent
