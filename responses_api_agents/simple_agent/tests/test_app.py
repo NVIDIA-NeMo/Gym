@@ -42,6 +42,7 @@ from nemo_gym.agents import (
     AgentCloseSessionRequest,
     AgentOutcome,
     AgentSeedSessionRequest,
+    SimpleResponsesAPIAgent,
     check_agent_seed_rejected,
     raises_agent_failure,
 )
@@ -100,8 +101,9 @@ from nemo_gym.server_runtime import (
     RolloutIdRequiredError,
     SimpleResourcesServer,
     StaleAttemptError,
+    seed_restarts,
 )
-from nemo_gym.trajectory import TrajectoryRecord
+from nemo_gym.trajectory import AgentObservationBundle, TrajectoryRecord
 from responses_api_agents.simple_agent.app import (
     POLICY_TIMEOUT_OPERATION,
     ModelServerRef,
@@ -3884,26 +3886,40 @@ class TestContinuationSessions:
         ]
         assert all(invocation.duration_ms is not None for invocation in trajectory.invocations)
 
-    async def test_a_later_activation_cannot_replace_the_session_tools(self) -> None:
+    @pytest.mark.parametrize(
+        "changed, field",
+        [
+            pytest.param({"tools": [{"type": "function", "name": "x", "parameters": {}, "strict": True}]}, "tools"),
+            pytest.param({"tool_choice": "none"}, "tool_choice"),
+            pytest.param({"temperature": 0.0}, "temperature"),
+        ],
+    )
+    async def test_a_later_activation_cannot_change_the_session_settings(
+        self, changed: dict[str, Any], field: str
+    ) -> None:
+        """Every activation runs with the first one's settings, so a changed one is refused, not silently dropped."""
         server, server_client = _make_agent(False)
         server_client.post = AsyncMock(return_value=_message_response("resp-1"))
         client = TestClient(server.setup_webserver())
         _seed_continuation(client)
         client.post(
             "/v1/responses",
-            json={"input": "first?", "tools": []},
+            json={"input": "first?", "tools": [], "temperature": 1.0},
             headers={AGENT_ACTIVATION_HEADER: "1"},
         )
 
-        replaced = client.post(
+        refused = client.post(
+            "/v1/responses", json={"input": "second?"} | changed, headers={AGENT_ACTIVATION_HEADER: "2"}
+        )
+        same = client.post(
             "/v1/responses",
-            json={"input": "second?", "tools": [{"type": "function", "name": "x", "parameters": {}, "strict": True}]},
+            json={"input": "second?", "tools": [], "temperature": 1.0},
             headers={AGENT_ACTIVATION_HEADER: "2"},
         )
 
-        assert replaced.status_code == 422
-        assert "cannot replace session tools" in replaced.json()["detail"]
-        assert server_client.post.await_count == 1
+        assert refused.status_code == 422 and f"cannot change session {field}" in refused.json()["detail"]
+        assert same.status_code == 200
+        assert server_client.post.await_count == 2
 
     async def test_a_retried_activation_gets_its_reply_without_another_model_call(self) -> None:
         server, server_client = _make_agent(False)
@@ -3919,17 +3935,136 @@ class TestContinuationSessions:
         assert [reply.json()["id"] for reply in replies] == ["resp-1", "resp-1"]
         assert server_client.post.await_count == 1
 
-    async def test_checkpointing_refuses_a_continuation_seed(self) -> None:
+    async def test_with_checkpointing_a_continuation_seed_is_accepted_and_restarts_its_episode(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        """A checkpoint does not export the conversation, so the seed reply makes the episode a restart."""
         server, _ = _make_agent(False)
         server._checkpoint_participant = MagicMock()
+        seeded = AsyncMock(return_value=MagicMock())
+        monkeypatch.setattr(SimpleResponsesAPIAgent, "seed_agent_session", seeded)
         body = AgentSeedSessionRequest(
             agent_session_id="agent-session",
             episode_id=EpisodeId(rollout_id="rollout", attempt=0),
             task_id=TaskId(taskset="example", task_id="0"),
             continuation={"observations": ["trajectory"]},
         )
+        one_turn = body.model_copy(update={"continuation": None})
+        replies = [Response(), Response()]
 
-        with pytest.raises(HTTPException, match="partial-rollout checkpoints") as refused:
-            server._new_session_state(body)
+        server._new_session_state(body)
+        await server.seed_agent_session(MagicMock(), body, replies[0])
+        await server.seed_agent_session(MagicMock(), one_turn, replies[1])
 
-        assert refused.value.status_code == 422
+        assert [seed_restarts(reply.headers) for reply in replies] == [True, False]
+
+    async def test_a_session_restored_without_its_conversation_refuses_its_next_activation(self) -> None:
+        server, _ = _make_agent(False)
+        state = server._new_session_state(
+            AgentSeedSessionRequest(
+                agent_session_id="agent-session",
+                episode_id=EpisodeId(rollout_id="rollout", attempt=0),
+                task_id=TaskId(taskset="example", task_id="0"),
+                continuation={"observations": ["trajectory"]},
+            )
+        )
+        state.activations = 1
+
+        with pytest.raises(HTTPException) as refused:
+            server._validate_agent_activation(state, NeMoGymResponseCreateParamsNonStreaming(input="second?"))
+
+        assert refused.value.status_code == 409
+
+    async def test_without_observability_the_close_still_returns_the_trajectory(self) -> None:
+        """The seed confirms the trajectory and timing, so a continuation session collects them regardless."""
+        server, server_client = _make_agent(False)
+        server_client.post = AsyncMock(side_effect=[_message_response("resp-1"), _message_response("resp-2")])
+        client = TestClient(server.setup_webserver())
+        _seed_continuation(client)
+        for index, text in enumerate(("first?", "second?"), start=1):
+            client.post("/v1/responses", json={"input": text}, headers={AGENT_ACTIVATION_HEADER: str(index)})
+
+        close = client.post(
+            "/v1/agent_sessions/close",
+            json={"agent_session_id": "agent-session", "episode_id": {"rollout_id": "rollout", "attempt": 0}},
+        )
+
+        trajectory = TrajectoryRecord.model_validate(close.json()["trajectory"])
+        assert [invocation.activation_id for invocation in trajectory.invocations] == [1, 2]
+        assert [turn.activation_id for turn in trajectory.turns] == [1, 2]
+        # Each invocation keeps only its own activation's input and output, so the payload grows linearly.
+        assert [
+            [_drop_nulls(item.model_dump(mode="json")).get("content") for item in invocation.conversation]
+            for invocation in trajectory.invocations
+        ] == [
+            ["first?", [{"annotations": [], "text": "Done.", "type": "output_text"}]],
+            ["second?", [{"annotations": [], "text": "Done.", "type": "output_text"}]],
+        ]
+        assert any(
+            record.kind == "agent_invocation"
+            for record in AgentObservationBundle.model_validate(close.json()["agent_observations"]).records
+        )
+
+    async def test_a_failed_activation_stays_in_the_trajectory(self) -> None:
+        server, server_client = _make_agent(False)
+        server_client.post = AsyncMock(side_effect=[_message_response("resp-1"), RuntimeError("model down")])
+        client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+        _seed_continuation(client)
+        client.post("/v1/responses", json={"input": "first?"}, headers={AGENT_ACTIVATION_HEADER: "1"})
+        failed = client.post("/v1/responses", json={"input": "second?"}, headers={AGENT_ACTIVATION_HEADER: "2"})
+
+        close = client.post(
+            "/v1/agent_sessions/close",
+            json={"agent_session_id": "agent-session", "episode_id": {"rollout_id": "rollout", "attempt": 0}},
+        )
+
+        assert failed.status_code >= 500
+        trajectory = TrajectoryRecord.model_validate(close.json()["trajectory"])
+        assert [(i.invocation_id, i.status, i.error_type) for i in trajectory.invocations] == [
+            ("root", "completed", None),
+            ("activation-2", "failed", "RuntimeError"),
+        ]
+        assert ("agent_activation_interrupted", "activation-2") in {
+            (gap.code, gap.invocation_id) for gap in trajectory.gaps
+        }
+
+    async def test_a_later_activation_resends_the_earlier_token_ids_and_model_cookies(self) -> None:
+        """Multi-turn training needs the earlier turns' token IDs, and the model server its session cookie."""
+        server, server_client = _make_agent(False)
+        first = _message_response("resp-1")
+        payload = json.loads(first.read.return_value)
+        payload["output"][0] |= {
+            "prompt_token_ids": [10, 11],
+            "generation_token_ids": [12, 13],
+            "generation_log_probs": [-0.1, -0.2],
+        }
+        first.read = AsyncMock(return_value=json.dumps(payload))
+        first.cookies = {"model_session": MagicMock(value="model-cookie")}
+        server_client.post = AsyncMock(side_effect=[first, _message_response("resp-2")])
+        client = TestClient(server.setup_webserver())
+        _seed_continuation(client)
+        for index, text in enumerate(("first?", "second?"), start=1):
+            client.post("/v1/responses", json={"input": text}, headers={AGENT_ACTIVATION_HEADER: str(index)})
+
+        second_call = server_client.post.await_args_list[1].kwargs
+        earlier_output = second_call["json"].model_dump(mode="json")["input"][1]
+        assert (
+            earlier_output["prompt_token_ids"],
+            earlier_output["generation_token_ids"],
+            earlier_output["generation_log_probs"],
+        ) == ([10, 11], [12, 13], [-0.1, -0.2])
+        assert second_call["cookies"] == {"model_session": "model-cookie"}
+
+    async def test_a_subclass_supports_continuation_only_if_it_says_so(self) -> None:
+        """A subclass may replace the turn loop, as DeepAgentsAgent replaces responses()."""
+
+        class _Replaced(SimpleAgent):
+            pass
+
+        class _Kept(SimpleAgent):
+            continuation_supported = True
+
+        assert _make_agent(False, _Replaced)[0]._agent_continuation_capabilities() is None
+        assert _make_agent(False, _Kept)[0]._agent_continuation_capabilities() is not None
+        replaced, _ = _make_agent(False, _Replaced)
+        assert _seed_continuation(TestClient(replaced.setup_webserver())).status_code == 422
