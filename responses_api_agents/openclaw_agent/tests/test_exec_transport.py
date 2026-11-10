@@ -27,6 +27,9 @@ CLOSE_TIMEOUT = 10
 
 
 class ExecOnlySandbox:
+    # File copies do not wait for the supervised exec in this local provider.
+    uploads_independent_of_execs = True
+
     def __init__(self):
         self.cancelled_launch = False
         self.lost_launch = False
@@ -98,7 +101,8 @@ def payload(state, code):
 
 
 @pytest.mark.parametrize("ending", ["natural", "crash", "timeout", "cancel", "close"])
-async def test_exec_only_supervision_leaves_task_children_for_sandbox_owner(tmp_path, ending):
+@pytest.mark.parametrize("startup_delay", [0, 0.6])
+async def test_exec_only_supervision_leaves_task_children_for_sandbox_owner(tmp_path, ending, startup_delay):
     state, provider, workdir = make_session(tmp_path)
     # Complete the tool before interruption so its detached service is already adopted.
     tool = (
@@ -109,18 +113,25 @@ async def test_exec_only_supervision_leaves_task_children_for_sandbox_owner(tmp_
     )
     code = (
         "import os,subprocess,sys,time,pathlib; "
+        f"time.sleep({startup_delay}); "
         f"subprocess.run([sys.executable,'-c',{tool!r}],check=True); "
         "pathlib.Path('ready').touch(); "
         + {"natural": "print('{}')", "crash": "raise SystemExit(7)"}.get(ending, "time.sleep(60)")
     )
-    deadline = 3 if ending == "timeout" else 60
+    # Expire only after the detached child is ready; startup speed is not under test.
+    deadline = 60
     task = state.task = asyncio.create_task(
         state.execute(payload(state, code), timeout=deadline, close_timeout=CLOSE_TIMEOUT)
     )
     try:
-        async with asyncio.timeout(5):
+        async with asyncio.timeout(30):
             while not (workdir / "ready").exists():
+                if task.done():
+                    await task
+                    pytest.fail("Harness exited before its detached child was ready")
                 await asyncio.sleep(0.01)
+        if ending == "timeout":
+            assert await state.session.expire(timeout=CLOSE_TIMEOUT)
         if ending == "cancel":
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
@@ -168,7 +179,7 @@ async def test_supervisor_and_runner_run_under_neutral_names(tmp_path):
         state.execute(payload(state, code), timeout=60, close_timeout=CLOSE_TIMEOUT)
     )
     try:
-        async with asyncio.timeout(5):
+        async with asyncio.timeout(30):
             while not (workdir / "ready").exists():
                 await asyncio.sleep(0.01)
         supervisor_pid = int((Path(state.session.session_dir) / "supervisor.pid").read_text())
@@ -188,7 +199,7 @@ async def test_lost_launch_is_fenced_before_and_after_directory_retirement(tmp_p
     state, provider, workdir = make_session(tmp_path)
     provider.lost_launch = True
     with pytest.raises(TimeoutError, match="lost launch response"):
-        await state.execute(payload(state, "open('started','w').close()"), timeout=0.5, close_timeout=CLOSE_TIMEOUT)
+        await state.execute(payload(state, "open('started','w').close()"), timeout=10, close_timeout=CLOSE_TIMEOUT)
     assert state.session.cleanup["cleanup_confirmed"] is True
     assert state.session.cleanup["return_code"] is None
     assert state.session.cleanup["error"] is None
