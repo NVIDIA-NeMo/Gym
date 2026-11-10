@@ -720,6 +720,11 @@ class HermesAgent(SimpleResponsesAPIAgent):
             "model_base_url": self.resolve_model_base_url(
                 self.config.model_server.name, state.request.episode_id.capture_key
             ),
+            # Compression is a side call that token capture does not deliver, so no training framework trains it: it
+            # keeps its own sampling.
+            "compression_model_base_url": self.resolve_model_base_url(
+                self.config.model_server.name, state.request.episode_id.capture_key, trained=False
+            ),
             "terminal_timeout": self.config.terminal_timeout,
         }
         timeout = self._agent_timeout_sec(body)
