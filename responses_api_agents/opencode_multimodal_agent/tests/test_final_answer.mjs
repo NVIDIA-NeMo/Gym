@@ -82,3 +82,17 @@ test("eight-turn cap works without the backend reserve extension", async () => {
   await expect(hooks["experimental.chat.messages.transform"]({}, messages("legacy", 8))).rejects.toThrow("already consumed");
   expect(sent).toHaveLength(8);
 });
+
+
+test("uses the shared session provider without a compatibility alias", async () => {
+  const hooks = await module.default();
+  await hooks["experimental.chat.messages.transform"]({}, messages("main", 0));
+  let sent;
+  const upstream = async (_url, init) => { sent = JSON.parse(init.body); return {}; };
+  const config = {model: "nemo_gym/dummy_model", provider: {nemo_gym: {options: {fetch: upstream}}}};
+  await hooks.config(config);
+  await config.provider.nemo_gym.options.fetch("http://model", {
+    headers: {"x-nemo-visual-session": "main"}, body: JSON.stringify({messages: []}),
+  });
+  expect(JSON.parse(sent.metadata.extra_body).nemo_final_answer_reserve).toBe(policy.reserve);
+});

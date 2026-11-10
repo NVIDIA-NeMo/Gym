@@ -1,27 +1,17 @@
-# Local compatibility runs with OpenCode
+# OpenCode benchmark onboarding
 
-For new evaluations, use the provider-backed `<benchmark>/opencode.yaml` recipes
-in the [catalog guide](README.md). This page documents the existing local
-Bubblewrap relay path for historical runs and training. Bubblewrap and Enroot
-use private PID/procfs and network namespaces, with the validating proxy
-protecting Gym control services. Owned OpenSandbox sessions use the provider's
-process isolation and egress policy; Gym control services must be separately
-inaccessible from task sandboxes. Deployment qualification is still required; see
-the [network policy](../../responses_api_agents/opencode_multimodal_agent/network-policy.md).
-Do not change an existing run's runtime while resuming it.
-
-Evaluate visual tasks with `opencode_multimodal_agent`. The benchmark configurations
-prepare Gym task rows, run the agent, and score its answers through the
-`opencode_multimodal_benchmarks` resources server.
+All recipes use the shared OpenCode session path and owned OpenSandbox. See the
+[catalog guide](README.md) and [agent setup](../../responses_api_agents/opencode_multimodal_agent/README.md).
+Do not change runtime revisions while resuming historical runs.
 
 ## Supported benchmarks
 
 | Configuration | Data | Scoring |
 |---|---|---|
-| `vstar/opencode_relay.yaml` | VStar TSV and images | Multiple-choice accuracy |
-| `hrbench8k/opencode_relay.yaml` | HRBench8K TSV and images | Mean accuracy across cycles |
-| `vtcbench/opencode_relay.yaml` | VTCBench TSV and images | Rule matching with LLM fallback |
-| `zerobench/opencode_relay.yaml` | Official main-split Parquet with embedded images | Case-insensitive exact answer accuracy |
+| `vstar/opencode.yaml` | VStar TSV and images | Multiple-choice accuracy |
+| `hrbench8k/opencode.yaml` | HRBench8K TSV and images | Mean accuracy across cycles |
+| `vtcbench/opencode.yaml` | VTCBench TSV and images | Rule matching with LLM fallback |
+| `zerobench/opencode.yaml` | Official main-split Parquet with embedded images | Case-insensitive exact answer accuracy |
 
 ## Prepare data
 
@@ -52,7 +42,7 @@ Download `data/zerobench-00000-of-00001.parquet` at revision
 question IDs, preserves image bytes, and keeps answers outside policy input.
 Do not check the gated dataset or its answers into source control.
 
-Compose `zerobench/opencode_relay.yaml` with `opencode_eval_agent.yaml` for evaluation without a
+Compose `zerobench/opencode.yaml` with `opencode_eval_agent.yaml` for evaluation without a
 judge. The public question suffix requests a final answer in curly braces. The
 scorer follows the [public example](https://github.com/jonathan-roberts1/zerobench#code),
 including last-brace extraction and whitespace behavior. The default is five repeats;
@@ -64,8 +54,7 @@ including last-brace extraction and whitespace behavior. The default is five rep
 Compose the selected benchmark YAML with [`opencode_eval.yaml`](opencode_eval.yaml)
 and your policy model configuration. See the
 [agent setup guide](../../responses_api_agents/opencode_multimodal_agent/README.md)
-for installing OpenCode, Bubblewrap, the Python image libraries, and plugin dependencies.
-Update the runtime paths in the evaluation profile for your installation.
+for the task image, pinned offline runtime assets, and provider configuration.
 
 The example profile uses OpenCode 1.17.11, a 131072-token context/output ceiling,
 and 55 regular turns plus 10 grace turns. It retains reasoning history, disables
@@ -103,9 +92,8 @@ score zero.
 Unresolved judge failures need rejudging before reporting a complete benchmark
 score. For agent sessions, the Environment Server's `agent_outcome_policy`
 determines whether a failed attempt is verified, retried or left ungraded.
-The OpenCode compatibility evaluation `/run` path scores established model-caused
-failures as zero. Provider 429/5xx, transport, runtime setup and unclassified process
-failures retain the retry/failure-sidecar path rather than settling tasks as wrong.
+Configure that typed outcome policy explicitly when changing model-failure scoring.
+Provider and runtime failures must retain the retry/failure-sidecar path.
 
 Source implementations are linked beside the scoring code in the
 [resources server](../../resources_servers/opencode_multimodal_benchmarks/).
@@ -116,13 +104,6 @@ Start with a small `limit`. Inspect the resolved configuration, input images,
 tool results, final answers, and verifier output. Check model-call evidence and
 `quality_summary.json`, then run the complete dataset with the same settings.
 
-To check the harness itself, provision its runtime using the
-[conformance setup](../../scripts/harness_conformance/README.md#run-diagnostic-probes)
-and run:
-
-```bash
-python scripts/run_harness_conformance.py --harness opencode_multimodal \
-  --output /tmp/visual-conformance
-```
-
-Use a fresh output directory and inspect `conformance_report.md` for the results.
+The shared OpenCode conformance suite covers the common harness. Run the visual
+adapter's unit tests and qualify real OpenSandbox rollouts separately, including
+image fidelity, network enforcement, cleanup, and training capture.

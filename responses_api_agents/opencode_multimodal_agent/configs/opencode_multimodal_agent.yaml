@@ -1,71 +1,25 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 # Multimodal training with token capture and per-episode filesystem isolation.
+config_paths:
+- responses_api_agents/opencode_multimodal_agent/configs/train_sessions.yaml
 opencode_multimodal_agent:
   responses_api_agents:
     opencode_multimodal_agent:
       entrypoint: app.py
-      # Inherits the capture endpoint. Stock 1.17.11 does not emit the assistant
-      # message correlation header; training uses verified content lineage.
-      token_id_capture: true
-      model_server: {type: responses_api_models, name: policy_model}
-      resources_server: {type: resources_servers, name: string_match}
-      model: ???
-      # Same npm installer, CLI, provider and dependency stack as opencode_agent.
-      opencode_version: 1.17.11
-      command: opencode
-      # Keep the model API reachable, but block other harness/tool network access.
-      network_access: model_only
-      # Concurrent runs need a private filesystem per episode. Install these
-      # read-only dependencies and expose their paths in the outer container.
-      sandbox:
-        bwrap_command: ["???"]
-        python_env: ???  # Python with Pillow/numpy/scipy/OpenCV
-        plugin_dependencies: ???  # node_modules/@opencode-ai/plugin
-      # Match upstream unrestricted limits to preserve prompt and read-tool images.
-      # Lower limits explicitly for endpoints that require smaller images.
-      image_policy:
-        auto_resize: true
-        max_width: 2147483647
-        max_height: 2147483647
-        max_base64_bytes: 2147483647
-      concurrency: 256
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
       context_window: 49152
       max_output_tokens: 49152
-      # The local plugin forces the last answer and blocks tools/extra turns.
-      # The exact-token worker cap retains this context budget before that turn.
-      final_answer_reserve: 2048 # Reserve context and force a tool-free terminal answer.
       max_turns: 8
-      # Input limits only; stock OpenCode does not prune accumulated tool images.
+      final_answer_reserve: 2048
       max_source_pixels: 150000000
       max_images: 33
-      subagents_enabled: true
-      command_exec_timeout: 300
+      concurrency: 256
       timeout: 1800
-      # system_prompt defaults to prompts/visual_prefix.txt. As in the parent,
-      # this and optional task system text are prepended to the USER message.
-      # Override system_prompt to customize the prefix, or null to omit it.
-      # OpenCode selects its unchanged default system prompt (default.txt for policy).
-      tool_rewards:
-        correct_only: false
-        correct_bash_call_penalties: [0.0]
-        invalid_tool_call_names: null
-      resources_server_by_agent:
-        string_match_simple_agent: string_match
-        math_with_judge_simple_agent: math_with_judge
-        mcqa_simple_agent: mcqa
-
-# Normalize only the known stock 1.17.11 final-turn harness directive before
-# lineage resolution. Pair with the usual vllm_model_for_training config.
 policy_model:
   responses_api_models:
     vllm_model:
       entrypoint: app_opencode.py
-
-opencode_multimodal_agent_environment_server:
-  environment_servers:
-    legacy_agent:
-      entrypoint: app.py
-      agent_server:
-        type: responses_api_agents
-        name: opencode_multimodal_agent

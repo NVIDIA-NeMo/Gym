@@ -23,7 +23,7 @@ from responses_api_agents.opencode_multimodal_agent.rewards import (
 )
 
 
-class OpenCodeTrainingEnvironmentServer(SingleAgentTurnEnvironmentServer):
+class OpenCodeEnvironmentServer(SingleAgentTurnEnvironmentServer):
     """Keep lifecycle and verification in main, adding answer-dependent tool rewards."""
 
     def _agent_options(self) -> dict[str, Any]:
@@ -61,6 +61,18 @@ class OpenCodeTrainingEnvironmentServer(SingleAgentTurnEnvironmentServer):
         observations: AgentObservationBundle | None,
         trajectory: TrajectoryRecord | None = None,
     ) -> SingleAgentTurnResult:
+        if agent_response.status == "failed":
+            # Main has already selected VERIFY from the typed outcome policy. Never judge partial answers.
+            return SingleAgentTurnResult.model_validate(
+                super()._verify_body(request, agent_response)
+                | {
+                    "reward": 0.0,
+                    "resolved": False,
+                    "evaluation_completed": True,
+                    "scorer": "agent-failure",
+                    "finished_naturally": False,
+                }
+            )
         result = await super()._verify(
             request, handles, self._scoring_response(agent_response), observations, trajectory
         )
@@ -85,7 +97,7 @@ class OpenCodeTrainingEnvironmentServer(SingleAgentTurnEnvironmentServer):
 
 
 if __name__ == "__main__":
-    OpenCodeTrainingEnvironmentServer.run_webserver()
+    OpenCodeEnvironmentServer.run_webserver()
 
 elif is_nemo_gym_fastapi_entrypoint(__file__):
-    app = OpenCodeTrainingEnvironmentServer.run_webserver()  # noqa: F401
+    app = OpenCodeEnvironmentServer.run_webserver()  # noqa: F401

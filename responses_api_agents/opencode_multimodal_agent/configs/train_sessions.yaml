@@ -4,7 +4,6 @@
 config_paths:
 - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 use_absolute_ip: true
-# Only the model gateway is exposed to remote task sandboxes.
 head_server:
   host: 127.0.0.1
 string_match:
@@ -21,7 +20,6 @@ opencode_multimodal_agent:
       host: 127.0.0.1
       num_workers: 1
       command: opencode
-      # Host tool paths from compatibility recipes do not exist in remote sandboxes.
       _delete_key: env
       sandbox: null
       sandbox_provider: sandbox
@@ -29,15 +27,20 @@ opencode_multimodal_agent:
         image: ???
         workdir: /testbed
         ttl_s: 3600
-      # Restricted sessions need a preinstalled runtime or a pinned offline bundle.
       network_access: model_only
       token_id_capture: true
 opencode_multimodal_agent_environment_server:
   environment_servers:
-    _delete_key: legacy_agent
     single_agent_turn:
-      entrypoint: opencode_training.py
+      entrypoint: opencode.py
       host: 127.0.0.1
       cleanup_timeout_seconds: 180
-      resources_server: {type: resources_servers, name: string_match}
-      agent_server: {type: responses_api_agents, name: opencode_multimodal_agent}
+      resources_server:
+        type: resources_servers
+        name: string_match
+      agent_server:
+        type: responses_api_agents
+        name: opencode_multimodal_agent
+      agent_outcome_policy:
+        by_failure_kind:
+          provider_oom_killed: retry

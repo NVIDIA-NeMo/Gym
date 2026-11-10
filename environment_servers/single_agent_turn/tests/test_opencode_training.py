@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from environment_servers.single_agent_turn.opencode_training import OpenCodeTrainingEnvironmentServer
+from environment_servers.single_agent_turn.opencode import OpenCodeEnvironmentServer
 from responses_api_agents.opencode_multimodal_agent.rewards import OpenCodeToolRewardConfig, score_opencode_tools
 from tests.helpers.single_agent_turn import _agent_response, _environment_server, _request, _Response
 
@@ -20,7 +20,7 @@ async def test_session_lifecycle_shapes_reward_and_preserves_training_response(
     if explicit_config:
         client.global_config_dict.agent.responses_api_agents.test.tool_rewards = config.model_dump()
     call = {"type": "function_call", "call_id": "bash-1", "name": "bash", "arguments": '{"command":"ls"}'}
-    tools = score_opencode_tools(None, [call], [], 0.0, config, execution_records={"bash-1": ("bash", "completed", 0)})
+    tools = score_opencode_tools({"bash-1": ("bash", "completed", 0)}, [call], [], 0.0, config)
     response = _agent_response().model_dump(mode="json")
     response["output"][0]["content"][0]["text"] = "<think>analysis</think>\\boxed{answer}"
     response["opencode_evidence"] = {"turns_used": 2, "finished_naturally": True, "tool_reward": tools.model_dump()}
@@ -28,7 +28,7 @@ async def test_session_lifecycle_shapes_reward_and_preserves_training_response(
     payload = json.loads(client.responses[4].body)
     payload["reward"] = base_reward
     client.responses[4] = _Response(payload)
-    server = OpenCodeTrainingEnvironmentServer(config=base.config, server_client=client)
+    server = OpenCodeEnvironmentServer(config=base.config, server_client=client)
     result = await server.run_request(_request())
     assert result.result.reward == pytest.approx(base_reward + auxiliary)
     saved = result.result.model_dump(mode="json")["response"]
@@ -44,3 +44,19 @@ async def test_session_lifecycle_shapes_reward_and_preserves_training_response(
         "/close_session",
     ]
     assert saved["output"][0]["generation_token_ids"] == [3, 4]
+
+
+async def test_failed_response_selected_for_verification_is_zero_without_judging_partial_answer():
+    from environment_servers.single_agent_turn.app import SessionHandles
+
+    base, client = _environment_server()
+    server = OpenCodeEnvironmentServer(config=base.config, server_client=client)
+    response = _agent_response().model_copy(
+        update={"status": "failed", "error": {"code": "server_error", "message": "limit"}}
+    )
+    result = await server._verify(
+        _request(), SessionHandles(resources_session_id="resource", agent_session_id="agent"), response, None
+    )
+    assert result.reward == 0.0
+    assert result.response.output == response.output
+    assert client.calls == []

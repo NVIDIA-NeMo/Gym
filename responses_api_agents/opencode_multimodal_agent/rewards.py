@@ -4,9 +4,6 @@
 
 import json
 import re
-import sqlite3
-from contextlib import closing
-from pathlib import Path
 from typing import Annotated
 
 from pydantic import BaseModel, Field, field_validator
@@ -85,13 +82,11 @@ def _identity(item: dict) -> tuple[str, str]:
 
 
 def score_opencode_tools(
-    database: Path | None,
+    execution_records: dict[str, tuple[str, str, int | None]],
     output: list[dict],
     initial_input: list[dict],
     base_reward: float,
     config: OpenCodeToolRewardConfig,
-    *,
-    execution_records: dict[str, tuple[str, str, int | None]] | None = None,
 ) -> OpenCodeToolReward:
     """Score live main-trajectory calls; replay and child calls are not rewarded.
 
@@ -105,25 +100,9 @@ def score_opencode_tools(
     for item in initial_input:
         if item.get("type") == "function_call":
             previous = _identity(item)
-    records = dict(execution_records or {})
-    if calls and execution_records is None:
-        if database is None:
-            raise ValueError("Native tool execution records are required for reward shaping")
-        with closing(sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
-            rows = connection.execute(
-                "SELECT json_extract(data, '$.callID'), json_extract(data, '$.tool'), "
-                "json_extract(data, '$.state.status'), json_extract(data, '$.state.metadata.exit') "
-                "FROM part WHERE json_extract(data, '$.type') = 'tool'"
-            )
-            wanted = {item["call_id"] for item in calls}
-            if len(wanted) != len(calls):
-                raise ValueError("Repeated call ID in the live OpenCode trajectory")
-            for call_id, tool, status, exit_code in rows:
-                if call_id not in wanted:
-                    continue
-                if call_id in records:
-                    raise ValueError(f"Ambiguous OpenCode tool record: {call_id}")
-                records[call_id] = (tool, status, exit_code)
+    records = execution_records
+    if len({item["call_id"] for item in calls}) != len(calls):
+        raise ValueError("Repeated call ID in the live OpenCode trajectory")
 
     exploration = penalties = 0.0
     successes = errors = duplicates = 0

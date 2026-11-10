@@ -1,56 +1,38 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+import json
 
-from pathlib import Path
-from unittest.mock import MagicMock
+from fastapi.testclient import TestClient
 
-import pytest
-from pydantic import ValidationError
-
-from nemo_gym.client import ServerClient
 from responses_api_agents.opencode_multimodal_agent.combined import (
     OpenCodeCombinedPromptAgent,
     OpenCodeCombinedPromptConfig,
 )
-from responses_api_agents.opencode_multimodal_agent.tests.test_app import agent
+from responses_api_agents.opencode_multimodal_agent.tests.test_sessions import (  # noqa: F401
+    body,
+    close_body,
+    opencode_setup,
+    seed,
+    visual_setup,
+)
 
 
-def combined_config(monkeypatch, tmp_path, **updates):
-    native = agent(monkeypatch)
-    return OpenCodeCombinedPromptConfig.model_validate(
-        native.config.model_dump()
-        | {
-            "system_prompt": None,
-            "entrypoint": "combined.py",
-            "sandbox": {
-                "bwrap_command": ["bwrap"],
-                "python_env": tmp_path,
-                "plugin_dependencies": tmp_path,
-            },
-        }
-        | updates
+def test_combined_prompt_uses_shared_replacement_and_keeps_literal_braces(visual_setup):
+    native, sandbox = visual_setup
+    prompt = "Use {literal} and {env:DO_NOT_SUBSTITUTE} without changing them."
+    cfg = OpenCodeCombinedPromptConfig.model_validate(
+        native.config.model_dump() | {"system_prompt_mode": "replace", "system_prompt": prompt}
     )
-
-
-def test_combined_changes_only_prompt_policy(monkeypatch, tmp_path):
-    cfg = combined_config(monkeypatch, tmp_path)
-    obj = OpenCodeCombinedPromptAgent(config=cfg, server_client=MagicMock(spec=ServerClient))
-    native = agent(monkeypatch)._build_opencode_config("r")
-    combined = obj._build_opencode_config("r")
-    expected = (Path(__file__).parents[1] / "prompts/combined.txt").read_text()
-    assert combined["agent"]["build"].pop("prompt") == expected
-    assert combined.pop("plugin") == ["file:///testbed/.combined-system-prompt.mjs"]
-    assert combined == native
-    assert cfg.system_prompt is None
-    assert cfg.max_turns == 8 and cfg.command_exec_timeout == 300
-    assert cfg.preserve_image_format
-    obj._write_opencode_config(tmp_path)
-    assert (
-        "output.system.splice(0, output.system.length, prompt)"
-        in (tmp_path / ".combined-system-prompt.mjs").read_text()
-    )
-
-
-def test_combined_rejects_user_prefix(monkeypatch, tmp_path):
-    with pytest.raises(ValidationError):
-        combined_config(monkeypatch, tmp_path, system_prompt="duplicate prefix")
+    agent = OpenCodeCombinedPromptAgent(config=cfg, server_client=native.server_client)
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json=body().model_dump(mode="json"))
+        assert result.status_code == 200, result.text
+        raw = sandbox.params()["env"]["OPENCODE_CONFIG_CONTENT"]
+        assert "{env:DO_NOT_SUBSTITUTE}" not in raw
+        assert prompt in json.loads(raw)["agent"]["build"]["prompt"]
+        assert (
+            client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).status_code
+            == 200
+        )

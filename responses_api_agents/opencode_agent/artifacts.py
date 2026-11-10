@@ -734,7 +734,3 @@ def parse_opencode_export(
             raise NotImplementedError(message)
 
     return messages
-
-
-# Public observation parser for harness adapters; keep the established private name for callers.
-parse_opencode_observations = _parse_opencode_session

@@ -1,27 +1,28 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Compose after one catalog config, plus model and sandbox-provider configurations.
 config_paths:
 - benchmarks/opencode_multimodal_benchmarks/opencode_eval_agent.yaml
-visual_opencode:
+- nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+use_absolute_ip: true
+head_server:
+  host: 127.0.0.1
+opencode_multimodal_benchmarks:
+  resources_servers:
+    opencode_multimodal_benchmarks:
+      host: 127.0.0.1
+visual_agent:
   responses_api_agents:
     opencode_multimodal_agent:
       network_access: model_only
-visual_agent:
-  _inherit_from: visual_opencode
-  responses_api_agents:
-    _delete_key: simple_agent
-    opencode_multimodal_agent:
+      host: 127.0.0.1
       num_workers: 1
-      command: opencode
-      sandbox: null
-      env:
-        PATH: ""
-      sandbox_provider: sandbox
-      sandbox_config:
-        image: ???
-        workdir: /testbed
-        ttl_s: 18000
-
-# Replace the compatibility relay inherited from the runtime profile.
-visual_opencode_environment_server: null
+    _delete_key: simple_agent
+visual_environment:
+  environment_servers:
+    single_agent_turn:
+      entrypoint: opencode.py
+      host: 127.0.0.1
+      cleanup_timeout_seconds: 180
+      agent_outcome_policy:
+        by_failure_kind:
+          provider_oom_killed: retry

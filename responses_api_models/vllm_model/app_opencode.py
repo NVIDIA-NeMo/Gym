@@ -10,9 +10,9 @@ from fastapi import Request
 from pydantic import Field
 
 from nemo_gym.models import Body
+from nemo_gym.models.token_capture import OPENCODE_MAX_STEPS_PROMPT as OPENCODE_1_17_11_MAX_STEPS
 from nemo_gym.models.token_capture import current_capture_context
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
-from responses_api_agents.opencode_agent.protocol import OPENCODE_1_17_11_MAX_STEPS as OPENCODE_1_17_11_MAX_STEPS
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 from responses_api_models.vllm_model.image_guard import limit_request_images
 

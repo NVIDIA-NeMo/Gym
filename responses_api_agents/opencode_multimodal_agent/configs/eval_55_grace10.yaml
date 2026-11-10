@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Enforce the shared turn budget at the model gateway.
 # OpenCode advisory steps are removed; prompt and sampling are configured separately.
-visual_opencode:
+visual_agent:
   responses_api_agents:
     opencode_multimodal_agent:
       entrypoint: eval.py
@@ -26,10 +26,5 @@ policy_model:
         grace_tool_turns: 2
         grace_tool_calls: 2
 
-visual_opencode_environment_server:
-  environment_servers:
-    legacy_agent:
-      entrypoint: app.py
-      agent_server:
-        type: responses_api_agents
-        name: visual_opencode
+# Budget counters require rollout identity even when model-call observability is disabled.
+rollout_correlation: true

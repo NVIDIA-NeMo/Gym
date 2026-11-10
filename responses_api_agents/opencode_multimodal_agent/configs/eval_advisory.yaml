@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Advisory 20-step threshold with trajectory validation at 20 turns.
 # Prompt, sampling and serving settings are supplied by the caller.
-visual_opencode:
+visual_agent:
   responses_api_agents:
     opencode_multimodal_agent:
       entrypoint: eval.py
@@ -17,11 +17,3 @@ policy_model:
       entrypoint: visual_eval.py
       max_images: 33
       turn_budget: null
-
-visual_opencode_environment_server:
-  environment_servers:
-    legacy_agent:
-      entrypoint: app.py
-      agent_server:
-        type: responses_api_agents
-        name: visual_opencode

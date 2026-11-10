@@ -38,7 +38,8 @@ export default async () => {
       if (state(input.sessionID).final) throw new Error("No tools are available on the final-answer turn");
     },
     config: async (config) => {
-      const options = config.provider.nemo.options;
+      const provider = config.model?.split("/")[0] ?? Object.keys(config.provider)[0];
+      const options = config.provider[provider].options;
       const upstreamFetch = options.fetch ?? globalThis.fetch;
       options.fetch = async (url, init) => {
         const headers = new Headers(init?.headers);
@@ -61,6 +62,7 @@ export default async () => {
         }
         return upstreamFetch(url, {...init, body: JSON.stringify(body)});
       };
+      if (policy.receipt_path) await Bun.write(policy.receipt_path, "ready\n");
     },
   };
 };

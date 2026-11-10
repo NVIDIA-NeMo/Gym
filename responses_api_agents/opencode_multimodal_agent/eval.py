@@ -1,76 +1,42 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-
-"""Multimodal evaluation with configurable prompts, budgets and failure evidence."""
+"""Evaluation policies over the same OpenCode sessions used for training."""
 
 import json
-import shutil
 from pathlib import Path
-from time import time
-from typing import Any, Literal
-from uuid import uuid4
+from typing import Any
 
-from aiohttp import ClientResponseError
-from fastapi import HTTPException, Request
 from pydantic import Field, model_validator
 
-from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseUsage
-from nemo_gym.trajectory import AgentEpisode, AgentObservationBundle, TrajectoryRecord
-from responses_api_agents.opencode_agent.artifacts import parse_opencode_observations, parse_opencode_session
-from responses_api_agents.opencode_agent.observability import scope_opencode_trajectory
-from responses_api_agents.opencode_multimodal_agent.app import (
-    OpenCodeMultimodalAgent,
-    OpenCodeMultimodalAgentConfig,
-    OpenCodeMultimodalRunRequest,
-    OpenCodeMultimodalVerifyResponse,
-)
-from responses_api_agents.opencode_multimodal_agent.eval_budget import EvalTurnBudget
-from responses_api_agents.opencode_multimodal_agent.eval_failures import episode_failure_kind, terminal_model_result
-from responses_api_agents.opencode_multimodal_agent.eval_sandbox import EvalSandboxConfig
+from nemo_gym.agents import EvalTurnBudget
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.sandbox import upload_text
+from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession
+from responses_api_agents.opencode_multimodal_agent.app import OpenCodeMultimodalAgent, OpenCodeMultimodalAgentConfig
 from responses_api_agents.opencode_multimodal_agent.rewards import OpenCodeToolRewardConfig
-from responses_api_agents.opencode_multimodal_agent.system_prompt import system_prompt_plugin
 
 
 class OpenCodeMultimodalEvalConfig(OpenCodeMultimodalAgentConfig):
-    """Opt-in eval policy; training defaults remain on the native entrypoint."""
-
     tool_rewards: OpenCodeToolRewardConfig | None = None
     final_answer_reserve: int | None = Field(default=None, gt=0)
     strip_reasoning_for_grading: bool = False
-    build_system_prompt: str | None = Field(default=None, min_length=1)
-    # Evaluation may omit the turn cap; training keeps its required positive budget.
     max_turns: int | None = Field(default=8, gt=0)
-    max_images: int | None = Field(default=33, gt=0)
-    # Reserve room for a final answer after the stock soft step threshold.
-    # Zero places the advisory threshold at the full trajectory limit.
     final_answer_turn_headroom: int = Field(default=2, ge=0)
-    sandbox: EvalSandboxConfig | None = None
-    # Optional image naming convention for checkpoints trained with image_0.png.
-    input_image_prefix: Literal["input-", "image_"] = "input-"
-    command_exec_timeout: int = Field(default=120, gt=0)
-    compaction_auto: bool = False
-    use_default_image_resize: bool = False
     turn_budget: EvalTurnBudget | None = None
-    capture_message_ids: bool = False
 
     @model_validator(mode="after")
-    def validate_prompt_mode(self) -> "OpenCodeMultimodalEvalConfig":
-        if self.build_system_prompt is not None and self.system_prompt is not None:
-            raise ValueError("A build system prompt override must omit the user-message prefix")
+    def validate_eval_budget(self) -> "OpenCodeMultimodalEvalConfig":
         if self.turn_budget is not None and self.max_turns != self.turn_budget.hard_limit:
-            raise ValueError("max_turns must equal regular_turns + grace_turns for an enforced eval budget")
+            raise ValueError("max_turns must equal regular_turns + grace_turns")
         return self
 
 
 class OpenCodeMultimodalEvalAgent(OpenCodeMultimodalAgent):
-    """Reuse native execution, artifact parsing and verification in a private filesystem."""
-
     config: OpenCodeMultimodalEvalConfig
 
-    def model_post_init(self, __context: Any) -> None:
+    def model_post_init(self, context: Any) -> None:
+        super().model_post_init(context)
         self._validate_turn_budget_gateway()
-        super().model_post_init(__context)
 
     def _validate_turn_budget_gateway(self) -> None:
         budget = self.config.turn_budget
@@ -88,199 +54,32 @@ class OpenCodeMultimodalEvalAgent(OpenCodeMultimodalAgent):
         if gateway.get("turn_state_idle_timeout_seconds", 3600) <= self.config.timeout:
             raise ValueError("Gateway turn-state idle timeout must exceed the agent episode timeout")
 
-    def _web_tool_environment(self) -> dict[str, str]:
-        websearch = self.config.opencode_config.get("tools", {}).get("websearch", False)
-        return {"OPENCODE_ENABLE_EXA": "1" if websearch else "0"}
-
-    async def _create_episode(self, body: NeMoGymResponseCreateParamsNonStreaming, **kwargs: Any) -> AgentEpisode:
-        if self.config.sandbox is None:
-            raise HTTPException(
-                409, "Local evaluation requires sandbox; session evaluation uses the Environment Server"
+    async def _prepare_session_launch(
+        self, state: OpenCodeSandboxSession, body: NeMoGymResponseCreateParamsNonStreaming, payload: dict[str, Any]
+    ) -> None:
+        await super()._prepare_session_launch(state, body, payload)
+        config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
+        if self.config.turn_budget is not None:
+            plugin = f"{state.session.session_dir}/eval-budget-headers.mjs"
+            await upload_text(
+                state.session.sandbox,
+                path=plugin,
+                text=Path(__file__).with_name("eval_budget_headers.mjs").read_text(),
             )
-        return await super()._create_episode(body, **kwargs)
-
-    async def _run_opencode(
-        self,
-        instruction: str,
-        system_prompt: str | None,
-        *,
-        rollout_id: str | None = None,
-        collect_observations: bool = True,
-        trajectory: TrajectoryRecord | None = None,
-        artifact_path: Path | None = None,
-        timeout: float | None = None,
-    ) -> tuple[list[Any], dict[str, int], str, AgentObservationBundle]:
-        try:
-            return await super()._run_opencode(
-                instruction,
-                system_prompt,
-                rollout_id=rollout_id,
-                collect_observations=collect_observations,
-                trajectory=trajectory,
-                artifact_path=artifact_path,
-                timeout=timeout,
-            )
-        except RuntimeError as error:
-            if not self.config.capture_failure_artifacts or episode_failure_kind(str(error)) is None:
-                raise
-            detail: dict[str, Any] = {"failure_reason": str(error)}
-            if artifact_path is not None and artifact_path.is_file():
-                # Use persisted provider evidence, never HTTP-like text in tool output.
-                # A timeout or process crash must not inherit an earlier provider error.
-                if str(error).startswith("OpenCode failed (timeout=False, exit=1):"):
-                    native_result = terminal_model_result(artifact_path)
-                    cleanup = {"return_code": 1, "timed_out": False, "error": None}
-                    if self._reported_model_error(native_result, cleanup):
-                        outcome = self.classify_outcome(native_result)
-                        if outcome.failure_kind != "unknown":
-                            detail[AGENT_OUTCOME_METADATA_KEY] = outcome.model_dump_json()
-                failed_trajectory = TrajectoryRecord(task_id="unscoped", rollout_id=rollout_id or "unscoped")
-                observations = parse_opencode_observations(
-                    artifact_path,
-                    rollout_id or "multimodal",
-                    failed_trajectory,
-                    model_ref=self.config.model_server,
-                )
-                _, usage = parse_opencode_session(artifact_path)
-                detail["usage"] = NeMoGymResponseUsage(
-                    input_tokens=usage["input_tokens"],
-                    output_tokens=usage["output_tokens"],
-                    total_tokens=usage["input_tokens"] + usage["output_tokens"],
-                    input_tokens_details={"cached_tokens": 0},
-                    output_tokens_details={"reasoning_tokens": usage.get("reasoning_tokens", 0)},
-                ).model_dump(mode="json")
-                detail["ng_agent_observations"] = observations.model_dump(mode="json")
-                detail["ng_trajectory"] = failed_trajectory.model_dump(mode="json")
-            # A structured error survives the HTTP self-call. FastAPI's generic
-            # 500 body otherwise loses both the failure diagnosis and its evidence.
-            raise HTTPException(status_code=500, detail=detail) from error
-
-    async def run(self, request: Request, body: OpenCodeMultimodalRunRequest) -> OpenCodeMultimodalVerifyResponse:
-        try:
-            return await super().run(request, body)
-        except ClientResponseError as exc:
-            # Only the agent self-call can produce a scored failure here. A failed
-            # seed/verify request must still reach the retryable failures sidecar.
-            path = str(exc.request_info.real_url).split("?", 1)[0]
-            reason = getattr(exc, "response_content", b"").decode(errors="replace")
-            evidence = {}
-            usage = None
-            metadata = None
-            if self.config.capture_failure_artifacts and reason.startswith("{"):
-                parsed = json.loads(reason).get("detail")
-                if isinstance(parsed, dict) and isinstance(parsed.get("failure_reason"), str):
-                    reason = parsed["failure_reason"]
-                    usage = parsed.get("usage")
-                    if AGENT_OUTCOME_METADATA_KEY in parsed:
-                        outcome = AgentOutcome.model_validate_json(parsed[AGENT_OUTCOME_METADATA_KEY])
-                        metadata = {AGENT_OUTCOME_METADATA_KEY: outcome.model_dump_json()}
-                    if "ng_agent_observations" in parsed:
-                        evidence["ng_agent_observations"] = parsed["ng_agent_observations"]
-                    rollout_id = self.rollout_id_from_run(body)
-                    if "ng_trajectory" in parsed and rollout_id is not None:
-                        evidence["ng_trajectory"] = scope_opencode_trajectory(
-                            TrajectoryRecord.model_validate(parsed["ng_trajectory"]),
-                            body,
-                            rollout_id,
-                        ).model_dump(mode="json")
-            kind = episode_failure_kind(reason)
-            if exc.status != 500 or not path.endswith("/v1/responses") or kind is None:
-                raise
-            if metadata is not None:
-                outcome = AgentOutcome.model_validate_json(metadata[AGENT_OUTCOME_METADATA_KEY])
-                if outcome.failure_kind == "model_context_limit" or (
-                    outcome.failure_kind == "model_request_error" and outcome.status_code in (400, 413, 422)
-                ):
-                    kind = outcome.failure_kind
-                else:
-                    raise
-            elif kind == "agent_timeout":
-                pass
-            elif "Missing assistant turns or exceeded max_turns" in reason:
-                kind = "agent_limit"
-            elif "Unfinished OpenCode assistant turn" in reason:
-                kind = "agent_invalid_output"
-            else:
-                # A process crash, setup failure or absent/corrupt artifact does
-                # not establish that the model supplied an incorrect answer.
-                raise
-            response = NeMoGymResponse(
-                id=f"resp_failed_{uuid4().hex}",
-                created_at=int(time()),
-                model=self.config.model,
-                object="response",
-                output=[],
-                status="failed",
-                error={"code": "server_error", "message": reason},
-                usage=usage,
-                metadata=metadata,
-                tool_choice=body.responses_create_params.tool_choice,
-                tools=body.responses_create_params.tools,
-                parallel_tool_calls=body.responses_create_params.parallel_tool_calls,
-            )
-            # Only established model failures settle a task as an incorrect answer.
-            # Infrastructure failures above retain the collector's retry/sidecar path.
-            return OpenCodeMultimodalVerifyResponse.model_validate(
-                body.model_dump()
-                | {
-                    "response": response,
-                    "reward": 0.0,
-                    "resolved": False,
-                    "mask_sample": False,
-                    "failure_kind": kind,
-                    "failure_reason": reason,
-                    "scorer": "agent-failure",
-                    "finished_naturally": False,
-                }
-                | evidence
-            )
-
-    def _build_opencode_config(self, rollout_id: str | None = None) -> dict[str, Any]:
-        config = super()._build_opencode_config(rollout_id)
-        policy = json.loads(Path(__file__).with_name("eval-policy.json").read_text())
-        config.update(policy)
-        for tool in ("webfetch", "websearch"):
-            enabled = self.config.opencode_config.get("tools", {}).get(tool, False)
-            config["tools"][tool] = enabled
-            config["permission"][tool] = "allow" if enabled else "deny"
-        config["compaction"] = {"auto": self.config.compaction_auto, "prune": False}
-        if self.config.use_default_image_resize:
-            config.pop("attachment", None)
-        build = config["agent"]["build"]
+            config.setdefault("plugin", []).append(Path(plugin).as_uri())
+        build = config.setdefault("agent", {}).setdefault("build", {})
         if self.config.max_turns is None or self.config.turn_budget is not None:
-            # With an enforced budget the model gateway owns warnings, tool
-            # restrictions and the hard stop. Stock steps is only a soft hint.
             build.pop("steps", None)
-            build.pop("maxSteps", None)
         else:
-            # Stock OpenCode can make an additional assistant call after its
-            # steps threshold. Leave room for the text-only final response;
-            # the session parser still enforces the full max_turns budget.
             build["steps"] = max(1, self.config.max_turns - self.config.final_answer_turn_headroom)
-            build.pop("maxSteps", None)
-        build.pop("permission", None)
-        if not self.config.subagents_enabled:
-            config["tools"]["task"] = False
-            config["permission"]["task"] = "deny"
-        if self.config.build_system_prompt is not None:
-            build["prompt"] = self.config.build_system_prompt
-            config["plugin"] = ["file:///testbed/.eval-system-prompt.mjs"]
-        if self.config.capture_message_ids or self.config.turn_budget is not None:
-            config.setdefault("plugin", []).append("file:///testbed/.eval-correlation.mjs")
-        config["provider"]["nemo"]["options"].update({"timeout": False, "chunkTimeout": 600000})
-        return config
+        # Assistant-message correlation remains owned by main; the extra header keys budget counters.
+        from responses_api_agents.opencode_agent.app import _serialize_replacement_config
 
-    def _write_opencode_config(self, work_dir: Path, rollout_id: str | None = None) -> None:
-        super()._write_opencode_config(work_dir, rollout_id)
-        if self.config.capture_message_ids or self.config.turn_budget is not None:
-            shutil.copyfile(Path(__file__).with_name("eval-correlation.mjs"), work_dir / ".eval-correlation.mjs")
-        if self.config.build_system_prompt is None:
-            return
-        # Stock agent.prompt alone still appends environment/model identity text.
-        (work_dir / ".eval-system-prompt.mjs").write_text(system_prompt_plugin(self.config.build_system_prompt))
-
-    def _input_image_name(self, source: Path, index: int) -> str:
-        return f"{self.config.input_image_prefix}{index}{source.suffix}"
+        payload["env"]["OPENCODE_CONFIG_CONTENT"] = (
+            _serialize_replacement_config(config)
+            if self.config.system_prompt_mode == "replace"
+            else json.dumps(config)
+        )
 
 
 if __name__ == "__main__":
