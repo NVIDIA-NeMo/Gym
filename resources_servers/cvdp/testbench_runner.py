@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import posixpath
+import re
 import shlex
 import tarfile
 import tempfile
