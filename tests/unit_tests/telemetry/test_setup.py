@@ -35,6 +35,7 @@ from nemo_gym.telemetry.setup import (
     shutdown_telemetry,
 )
 from tests.unit_tests.telemetry.conftest import import_without_lens, no_lens, requires_lens
+from tests.unit_tests.telemetry.test_sandbox_active import collected_metrics  # noqa: F401 - fixture
 
 
 #: These exercise the telemetry-enabled path, which needs nemo-lens. The absent-lens path
@@ -482,6 +483,119 @@ def test_shutdown_leaves_providers_gym_does_not_own(lens_initialised_elsewhere, 
 
     def must_not_shutdown(*args, **kwargs):
         raise AssertionError("Gym shut down providers it does not own")
+
+    monkeypatch.setattr(handle, "shutdown", must_not_shutdown)
+    shutdown_telemetry()
+
+
+# --------------------------------------------------------------------------- #
+# Another library installed an OpenTelemetry SDK provider in this process (nemo-lens not initialised)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def sdk_provider_elsewhere(enabled_console_env, monkeypatch):
+    """Stand in for a worker bootstrap that installed an SDK meter provider before Gym.
+
+    Returns the owner's in-memory reader, so a test can see what reaches the owner's exporter.
+    """
+    pytest.importorskip("opentelemetry.sdk.metrics")
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+    reader = InMemoryMetricReader()
+    provider = MeterProvider(metric_readers=[reader], shutdown_on_exit=False)
+    monkeypatch.setattr("opentelemetry.metrics.get_meter_provider", lambda: provider)
+    monkeypatch.setattr("nemo.lens.get_meter", lambda name="nemo.lens": provider.get_meter(name))
+    enabled_console_env.setenv("NEMO_GYM_OTEL_RUN_ID", "run-7")
+    return reader
+
+
+def _owner_points(reader, name):
+    data = reader.get_metrics_data()
+    return [
+        point
+        for resource_metric in (data.resource_metrics if data is not None else ())
+        for scope_metric in resource_metric.scope_metrics
+        for metric in scope_metric.metrics
+        if metric.name == name
+        for point in metric.data.data_points
+    ]
+
+
+def test_init_attaches_to_an_installed_sdk_provider_instead_of_registering_its_own(
+    sdk_provider_elsewhere, monkeypatch
+):
+    def own_setup(*args, **kwargs):
+        raise AssertionError("Gym must not register providers next to an installed SDK provider")
+
+    monkeypatch.setattr("nemo.lens.setup_telemetry", own_setup)
+
+    handle = init_telemetry(server_name="weather")
+
+    assert handle is not None and handle.is_exporting is True
+    assert get_telemetry() is handle
+    assert is_metrics_exporter_active() is True
+    assert telemetry_setup.attached_run_id() == "run-7"
+
+
+def test_metrics_gym_records_while_attached_reach_the_owners_exporter_with_the_run_id(sdk_provider_elsewhere):
+    from nemo_gym.telemetry import gym_metrics
+
+    init_telemetry(server_name="weather")
+    gym_metrics.record_rollout_completed("scored", dispatch_name="agent")
+    gym_metrics.record_rollout_reward(1.0, dispatch_name="agent", masked=False)
+
+    for name in (gym_metrics.ROLLOUT_COMPLETED_INSTRUMENT, gym_metrics.ROLLOUT_REWARDED_INSTRUMENT):
+        (point,) = _owner_points(sdk_provider_elsewhere, name)
+        assert point.attributes[gym_metrics.RUN_ID_ATTRIBUTE] == "run-7"
+        assert point.attributes[gym_metrics.DISPATCH_NAME_ATTRIBUTE] == "agent"
+
+
+def test_metrics_gym_records_with_its_own_providers_carry_no_run_id_attribute(collected_metrics):  # noqa: F811
+    from nemo_gym.telemetry import gym_metrics
+
+    gym_metrics.record_rollout_completed("scored", dispatch_name="agent")
+
+    (point,) = collected_metrics()[gym_metrics.ROLLOUT_COMPLETED_INSTRUMENT]
+    assert gym_metrics.RUN_ID_ATTRIBUTE not in point.attributes
+    assert telemetry_setup.attached_run_id() is None
+
+
+def test_gym_registers_its_own_providers_when_none_is_installed(enabled_console_env):
+    init_telemetry(server_name="weather")
+
+    assert telemetry_setup.attached_run_id() is None
+
+
+def test_attached_gym_still_enables_its_span_groups(sdk_provider_elsewhere):
+    from nemo_gym.telemetry._fallbacks import is_span_group_enabled
+
+    init_telemetry(server_name="weather")
+
+    assert is_span_group_enabled("server") is True
+
+
+@pytest.mark.parametrize("owner_traces", [True, False])
+def test_attached_gym_exports_traces_only_with_an_sdk_tracer_provider(
+    sdk_provider_elsewhere, monkeypatch, owner_traces
+):
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.trace import NoOpTracerProvider
+
+    provider = TracerProvider(shutdown_on_exit=False) if owner_traces else NoOpTracerProvider()
+    monkeypatch.setattr("opentelemetry.trace.get_tracer_provider", lambda: provider)
+
+    init_telemetry(server_name="weather")
+
+    assert is_trace_exporter_active() is owner_traces
+
+
+def test_shutdown_leaves_an_attached_provider_to_its_owner(sdk_provider_elsewhere, monkeypatch):
+    handle = init_telemetry(server_name="weather")
+
+    def must_not_shutdown(*args, **kwargs):
+        raise AssertionError("Gym shut down a provider it does not own")
 
     monkeypatch.setattr(handle, "shutdown", must_not_shutdown)
     shutdown_telemetry()

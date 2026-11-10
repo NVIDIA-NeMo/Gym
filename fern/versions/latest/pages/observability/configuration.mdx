@@ -194,6 +194,18 @@ of them identically — the collision the instance id exists to break. Code that
 Gym can still pass its own id programmatically as a resource attribute, which takes
 precedence.
 
+## Embedding Gym in a Process That Already Has Telemetry
+
+OpenTelemetry keeps the first SDK provider a process registers and ignores later ones. If the process that
+calls `init_telemetry` already has an SDK meter or tracer provider (for example a worker that sets up its own
+telemetry before it opens Gym), Gym does not register a second set. It records into the providers that exist, so its
+spans and metrics leave through the owner's exporters, with the owner's resource attributes and sampling, and the
+span groups still follow `span_groups`. Gym does not shut those providers down.
+
+The owner's resource cannot carry Gym's run id, so Gym adds `nemo.run.id` to each metric it records in that process
+instead. Metrics from Gym's own servers still carry it as a resource attribute, as above. Processes that do not
+embed Gym this way are unchanged.
+
 ## Verify That It Works
 
 Enable telemetry with the console exporter and drive one rollout. Each server process

@@ -101,6 +101,25 @@ def import_without_lens(module_name: str) -> ModuleType:
             setattr(parent, child_name, saved_attr)
 
 
+def _reset_otel_global_providers():
+    """Forget the SDK providers an earlier test registered with OpenTelemetry.
+
+    OpenTelemetry keeps the first provider a process registers, and Gym attaches to an installed SDK provider
+    instead of registering its own. Without this, the first test that sets up telemetry would make every later
+    one look like a process whose provider belongs to someone else.
+    """
+    try:
+        from opentelemetry import trace
+        from opentelemetry.metrics import _internal as metrics_internal
+        from opentelemetry.util._once import Once
+    except ImportError:
+        return
+    metrics_internal._METER_PROVIDER = None
+    metrics_internal._METER_PROVIDER_SET_ONCE = Once()
+    trace._TRACER_PROVIDER = None
+    trace._TRACER_PROVIDER_SET_ONCE = Once()
+
+
 def _reset_all_telemetry_state():
     """Reset Gym's process-globals and nemo-lens's one-shot init guard.
 
@@ -110,6 +129,7 @@ def _reset_all_telemetry_state():
     """
     telemetry_setup._reset_for_testing()
     telemetry_metrics._reset_verify_tally_for_testing()
+    _reset_otel_global_providers()
     try:
         from nemo.lens import handle as lens_handle
         from nemo.lens.state import set_enabled_span_groups

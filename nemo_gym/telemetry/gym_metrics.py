@@ -187,6 +187,7 @@ HTTP_CONNECTION_POOL_CONNECT_OUTCOME_ATTRIBUTE = "nemo.gym.http.connection_pool.
 HTTP_CONNECTION_POOL_QUEUE_CONSTRAINT_ATTRIBUTE = "nemo.gym.http.connection_pool.queue_constraint"
 HTTP_CONNECTION_POOL_QUEUE_OUTCOME_ATTRIBUTE = "nemo.gym.http.connection_pool.queue_outcome"
 HTTP_DESTINATION_SERVER_NAME_ATTRIBUTE = "nemo.gym.http.destination.server.name"
+RUN_ID_ATTRIBUTE = "nemo.run.id"
 ROLLOUT_COMPLETED_INSTRUMENT = "gym.rollout.completed_total"
 ROLLOUT_OUTCOME_ATTRIBUTE = "nemo.gym.rollout.outcome"
 FAILURE_CLASS_ATTRIBUTE = "nemo.gym.failure_class"
@@ -303,6 +304,17 @@ def _meter() -> Optional[Any]:
         return None
 
 
+def _with_run_id(attributes: dict[str, Any]) -> dict[str, Any]:
+    """Add the run id to a measurement when Gym attached to providers it does not own.
+
+    With its own providers the run id is a resource attribute, so a measurement needs nothing more.
+    """
+    from nemo_gym.telemetry.setup import attached_run_id
+
+    run_id = attached_run_id()
+    return attributes if run_id is None else {**attributes, RUN_ID_ATTRIBUTE: run_id}
+
+
 def _get_or_create(meter: Any, name: str, factory: Callable[[], Any]) -> Any:
     key = id(meter)
     with _INSTRUMENT_LOCK:
@@ -331,7 +343,7 @@ def _record_histogram(
         if boundaries is not None:
             kwargs["explicit_bucket_boundaries_advisory"] = list(boundaries)
         instrument = _get_or_create(meter, name, lambda: meter.create_histogram(name, **kwargs))
-        instrument.record(value, attributes=attributes)
+        instrument.record(value, attributes=_with_run_id(attributes))
     except Exception:
         logger.debug("nemo-lens: failed to record %s", name, exc_info=True)
 
@@ -346,7 +358,7 @@ def _record_counter(
         instrument = _get_or_create(
             meter, name, lambda: meter.create_counter(name, unit=unit, description=description)
         )
-        instrument.add(amount, attributes=attributes)
+        instrument.add(amount, attributes=_with_run_id(attributes))
     except Exception:
         logger.debug("nemo-lens: failed to record %s", name, exc_info=True)
 
@@ -359,7 +371,7 @@ def _record_up_down_counter(name: str, unit: str, description: str, delta: int, 
         instrument = _get_or_create(
             meter, name, lambda: meter.create_up_down_counter(name, unit=unit, description=description)
         )
-        instrument.add(delta, attributes=attributes)
+        instrument.add(delta, attributes=_with_run_id(attributes))
     except Exception:
         logger.debug("nemo-lens: failed to record %s", name, exc_info=True)
 
@@ -676,6 +688,6 @@ def record_sandbox_resource_sample(values: dict[str, Any], attributes: dict[str,
         name = "gym.sandbox." + field
         try:
             gauge = _get_or_create(meter, name, lambda name=name, unit=unit: meter.create_gauge(name, unit=unit))
-            gauge.set(value, attributes=attributes)
+            gauge.set(value, attributes=_with_run_id(attributes))
         except Exception:
             logger.debug("Could not export sandbox resource gauge", exc_info=True)

@@ -71,6 +71,10 @@ _INITIALISED = False
 #: False when ``_TELEMETRY_HANDLE`` wraps providers another library set up in this
 #: process. Shutting those down would end that library's telemetry too.
 _OWNS_PROVIDERS = False
+#: The run id Gym puts on the metrics it records when it attached to providers that another library installed. Gym's
+#: own providers carry it as a resource attribute; providers it does not own cannot be given one, so it travels with
+#: each measurement instead. ``None`` when Gym owns the providers.
+_ATTACHED_RUN_ID: Optional[str] = None
 _INIT_LOCK = threading.Lock()
 
 #: ``NemoLensConfig.from_env`` reads ``NEMO_GYM_OTEL_<KEY>`` first, then ``NEMO_LENS_<KEY>``.
@@ -510,11 +514,13 @@ def init_telemetry(
 
     Returns:
         The :class:`TelemetryHandle`, or ``None`` when nemo-lens is absent or telemetry is
-        disabled. When another library already initialised nemo-lens in this process, a
-        handle over its providers; Gym's service name and resource attributes do not apply
-        then. Never raises: a telemetry failure must not take a server down.
+        disabled. When another library already initialised nemo-lens, or installed an
+        OpenTelemetry SDK provider, in this process, a handle over those providers; Gym's
+        service name and resource attributes do not apply then, and Gym adds its run id to
+        the metrics it records instead. Never raises: a telemetry failure must not take a
+        server down.
     """
-    global _TELEMETRY_HANDLE, _METRICS_EXPORTING, _TRACES_EXPORTING, _INITIALISED, _OWNS_PROVIDERS
+    global _TELEMETRY_HANDLE, _METRICS_EXPORTING, _TRACES_EXPORTING, _INITIALISED, _OWNS_PROVIDERS, _ATTACHED_RUN_ID
     # The whole check-and-set plus the actual setup_telemetry() call is one critical
     # section: without the lock, two threads can both observe `_INITIALISED is False`
     # before either sets it and both call setup_telemetry, which nemo-lens raises on for
@@ -565,6 +571,11 @@ def init_telemetry(
 
         if not config.enabled:
             return None
+
+        # OpenTelemetry keeps the first provider a process registers and ignores later ones, so registering Gym's
+        # next to an existing SDK provider would only put Gym's instruments on the other one without its resource.
+        if _sdk_meter_provider_installed() or _sdk_tracer_provider_installed():
+            return _attach_to_installed_providers(config, server_name)
 
         # service.name per server, so a backend's service map shows three named Gym
         # services rather than three copies of one. The unsuffixed name is kept as a
@@ -619,6 +630,41 @@ def init_telemetry(
             config.span_groups,
         )
         return handle
+
+
+def _attach_to_installed_providers(config: Any, server_name: Optional[str]) -> Optional["TelemetryHandle"]:
+    """Use the SDK providers this process already has instead of registering Gym's.
+
+    Gym still registers its span groups and records into the process's meter and tracer, so its spans and
+    metrics leave through the owner's exporters with the owner's resource. Gym's run id is added to each metric it
+    records (:func:`attached_run_id`), because that resource is not Gym's to change. Called with ``_INIT_LOCK`` held.
+    """
+    global _TELEMETRY_HANDLE, _METRICS_EXPORTING, _TRACES_EXPORTING, _OWNS_PROVIDERS, _ATTACHED_RUN_ID
+    from nemo.lens import TelemetryHandle, get_meter, get_tracer
+    from nemo.lens.handle import ensure_run_id
+    from nemo.lens.state import set_span_group_spec
+
+    run_id = ensure_run_id(config)
+    set_span_group_spec(config.span_groups)
+    _TELEMETRY_HANDLE = TelemetryHandle(tracer=get_tracer(), meter=get_meter(), is_exporting=True)
+    _OWNS_PROVIDERS = False
+    _ATTACHED_RUN_ID = run_id
+    _METRICS_EXPORTING = bool(config.metrics_enabled and _sdk_meter_provider_installed())
+    _TRACES_EXPORTING = bool(config.traces_enabled and _sdk_tracer_provider_installed())
+    logger.info(
+        "an OpenTelemetry SDK provider is already installed in this process; Gym records into it "
+        "(server=%s, run_id=%s, metrics=%s, traces=%s)",
+        server_name,
+        run_id,
+        _METRICS_EXPORTING,
+        _TRACES_EXPORTING,
+    )
+    return _TELEMETRY_HANDLE
+
+
+def attached_run_id() -> Optional[str]:
+    """The run id Gym adds to the metrics it records, or ``None`` when its own providers carry it as a resource attribute."""
+    return _ATTACHED_RUN_ID
 
 
 def get_telemetry() -> Optional["TelemetryHandle"]:
@@ -681,7 +727,8 @@ def _reset_for_testing() -> None:
     Test-only. Production code has exactly one init per process, which is what
     ``_INITIALISED`` enforces.
     """
-    global _TELEMETRY_HANDLE, _METRICS_EXPORTING, _TRACES_EXPORTING, _INITIALISED, _OWNS_PROVIDERS
+    global _TELEMETRY_HANDLE, _METRICS_EXPORTING, _TRACES_EXPORTING, _INITIALISED, _OWNS_PROVIDERS, _ATTACHED_RUN_ID
+    _ATTACHED_RUN_ID = None
     _TELEMETRY_HANDLE = None
     _METRICS_EXPORTING = False
     _TRACES_EXPORTING = False
