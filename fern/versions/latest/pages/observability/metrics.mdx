@@ -252,6 +252,21 @@ Transfers include `upload()`, `download()`, and the seed files in `SandboxSpec.f
 
 A transfer that raises is an `error`, including a download that probes for a file that may not exist yet. A transfer cut short by cancellation is `cancelled`, including one the caller abandons when its own deadline (for example `asyncio.timeout`) expires; a timeout inside the provider is an `error`.
 
+### Run Summary Metrics
+
+When a collection or an aggregation of shards finishes, the run's coverage and retry counts are recorded as gauges, the same numbers sent to MLflow or W&B. They are recorded whether or not an experiment tracker is configured, so a dashboard reading OpenTelemetry sees them too.
+
+Each key becomes one gauge: `coverage/scored` is `gym.run.coverage.scored`, and `retries/at_cap` is `gym.run.retries.at_cap`. Failures by class, `coverage/failed/<class>`, become one gauge, `gym.run.coverage.failed`, with the class in `nemo.gym.run.bucket`. A class that is not a registered failure kind (or `skipped`, or `unknown`) is counted under `unregistered`, so the attribute stays bounded.
+
+`gym.run.coverage.failed` holds two views of the same failures: the total, `coverage/failed`, as a point without `nemo.gym.run.bucket`, and one point per class with it. A run with one failure reports 1 for each, so summing every point counts it twice. Select one view:
+
+- The total: keep the points where `nemo.gym.run.bucket` is not set.
+- The breakdown: keep the points where it is set, and group by it.
+
+`gym.run.info` is 1 for each finished run. Points carry `nemo.gym.run.id`, the run id from the run's records. An aggregation has a run id only when it reads a single shard with attempt history; otherwise it leaves the attribute off, and the `nemo.run.id` resource attribute identifies the job.
+
+A key is recorded only when the run reports it. An unknown count is left out rather than recorded as 0: an aggregation of shards without attempt history, for example, has no `gym.run.coverage.expected`.
+
 ### Memory Metrics
 
 Memory metrics are emitted only when `telemetry.memory_profiling.enabled` is true. Server points carry `nemo.gym.server.name`, `nemo.gym.server.type`, and the root `process.pid`; server memory gauges also carry `memory.type`, which is `rss` or `pss`. Host points rely on the existing `host.name` resource attribute and carry no per-sample attributes.
