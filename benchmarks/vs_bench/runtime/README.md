@@ -2,9 +2,10 @@
 
 The evaluator runs separately from Gym and the model server. The candidate
 builder targets Linux ARM64 and Python 3.10, matching the HSG runs. It is based
-on the hash-locked dependency inputs and build procedure used by those runs;
-this extracted builder has not yet been qualified on a clean cluster image.
-Other platforms need their own lock and validation.
+on the hash-locked dependency inputs and build procedure used by those runs.
+The extracted builder completed on an HSG ARM64 Gym runtime image, followed by
+scorer and real-model smoke checks. Other platforms need their own lock and
+validation.
 
 Inside a disposable build allocation with network access, install `uv`, a
 C++17 compiler, `git`, `pkg-config`, SDL2 and zlib development headers. Choose
@@ -28,7 +29,7 @@ container identity, build logs, `installed.txt`, and lock digest with releases.
 The Python interpreter and venv paths must be visible inside the evaluation and
 Bubblewrap environments. Separately prepare the pinned author source, dataset,
 and KAZ scorer variant as described in the parent README. Perception also
-requires the deployment's approved Bubblewrap executable and user namespaces.
+requires a working Bubblewrap executable and user namespaces on the deployment.
 Run real gameplay, scorer, and containment checks on the target image before
 using this runtime for a reported result.
 
