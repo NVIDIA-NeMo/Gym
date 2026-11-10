@@ -52,8 +52,6 @@ ALLOWED_IMPORTERS = {CORE / "cli" / "main.py"}
 KNOWN_VIOLATIONS = {
     ("nemo_gym/cli/eval.py", "nemo_gym.orchestration.recovery"),
     ("nemo_gym/eval/rollout_reverification.py", "nemo_gym.orchestration.recovery"),
-    ("resources_servers/agentic_if_realworld/benchmark/core.py", "nemo_gym.orchestration.jobs"),
-    ("resources_servers/agentic_if_realworld/tests/test_driver.py", "nemo_gym.orchestration"),
     ("resources_servers/agentic_turn_simulation/tests/test_app.py", "nemo_gym.orchestration.recovery"),
     ("resources_servers/bbq/tests/test_app.py", "nemo_gym.orchestration.recovery"),
     ("resources_servers/deepswe/tests/test_app.py", "nemo_gym.orchestration.recovery"),
