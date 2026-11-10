@@ -59,13 +59,29 @@ fi
 
 gym eval prepare --benchmark critpt
 
+# Preserve the active revision's dataset fields: the report pin uses prompt_config,
+# while newer revisions prepare both messages before collection.
+DATASETS=$(python - "${CRITPT_REPEATS:-5}" <<'PY'
+import sys
+from pathlib import Path
+
+import yaml
+
+config = yaml.safe_load(Path("benchmarks/critpt/config.yaml").read_text())
+datasets = config["critpt_benchmark_agent"]["responses_api_agents"]["critpt_agent"]["datasets"]
+for dataset in datasets:
+    dataset["num_repeats"] = int(sys.argv[1])
+print(yaml.safe_dump(datasets, default_flow_style=True, width=10000).strip())
+PY
+) || exit 1
+
 gym eval run \
   --benchmark critpt \
   --model-type vllm_model \
   --split benchmark \
   ${RESUME:+--resume} \
   --output "${OUT:-./results/critpt}/evaluator_rollouts.jsonl" \
-  "++$AGENT.datasets=[{name: critpt, type: benchmark, jsonl_fpath: benchmarks/critpt/data/critpt_benchmark.jsonl, prompt_config: benchmarks/critpt/prompts/turn1.yaml, prepare_script: benchmarks/critpt/prepare.py, num_repeats: ${CRITPT_REPEATS:-5}}]" \
+  "++$AGENT.datasets=$DATASETS" \
   "++artificial_analysis_api_key=$ARTIFICIAL_ANALYSIS_API_KEY" \
   "++$CRITPT.verify_timeout_seconds=21600" \
   "++$POLICY.chat_template_kwargs={enable_thinking: true}" \

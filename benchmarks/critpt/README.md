@@ -10,7 +10,8 @@ code template; the model must produce a precise numerical answer.
 
 The agent runs two LLM turns per problem:
 1. **Turn 1** (`prompts/turn1.yaml`): step-by-step derivation ending in `Final Answer:`
-2. **Turn 2**: populate the code template with the answer (the model sees its Turn 1 reasoning)
+2. **Turn 2**: populate the code template with the answer (the model sees the Turn 1 answer with
+   `<think>` / `<thinking>` blocks removed)
 
 Turn 2's output is submitted to the AA API by `CritPtResourcesServer.verify()`.
 
@@ -78,8 +79,17 @@ gym eval prepare --benchmark critpt
 ```
 
 This invokes `benchmarks/critpt/prepare.py` (declared as `prepare_script` in `config.yaml`),
-which downloads the dataset and writes the full 70-problem flat-field JSONL to
-`benchmarks/critpt/data/critpt_benchmark.jsonl` (gitignored).
+which downloads the dataset and writes the full 70-problem JSONL to
+`benchmarks/critpt/data/critpt_benchmark.jsonl` (gitignored). Each row includes
+`responses_create_params.input` with the solve prompt followed by a deferred formatting user message.
+The agent inserts its solve answer before that final message during the second model call.
+
+Re-run preparation when upgrading from data containing only flat problem fields or a single solve
+prompt. With `+use_cached_prepared_benchmarks=true`, `prepare.py` marks such a cached file out of
+date and regenerates it. The one-shot `gym eval run` below instead reuses
+`<output>/preprocessed_datasets/benchmark.jsonl` when `++reuse_existing_data_preparation=true` is
+set, so delete that file (or drop the flag once) after upgrading. Prepared rows must not be combined
+with a rollout-time `prompt_config`.
 
 ## Run servers
 
@@ -92,9 +102,7 @@ that reports live batch-fill progress (e.g. `{"pending_batches":[47],"batch_size
 
 ## Collect rollouts
 
-With `gym env start` already up, point `gym eval run --no-serve` at the flat-field JSONL and pass the
-Turn 1 prompt config so the framework materializes `responses_create_params.input` at
-rollout time.
+With `gym env start` already up, point `gym eval run --no-serve` at the prepared JSONL.
 
 ```bash
 gym eval run --no-serve \
@@ -102,7 +110,6 @@ gym eval run --no-serve \
     --input benchmarks/critpt/data/critpt_benchmark.jsonl \
     --output results/critpt_rollouts.jsonl \
     --num-repeats 1 \
-    --prompt-config benchmarks/critpt/prompts/turn1.yaml \
     --temperature 0.0
 ```
 

@@ -20,7 +20,8 @@ CritPt uses a **custom two-turn agent** — `simple_agent` will not work:
 - `resources_servers/critpt` (this server)
 
 The full wiring lives in `benchmarks/critpt/config.yaml`, which chains all three plus the
-dataset and Turn 1 / Turn 2 prompt configs.
+dataset. Both prompts are rendered into each row by `benchmarks/critpt/prepare.py`
+(`benchmarks/critpt/prompts/turn1.yaml` and `turn2.yaml`).
 
 ## Batched Verification (unique to CritPt)
 
@@ -73,19 +74,19 @@ Real runs send full batches of 70 real submissions only; a smoke run never calls
 
 ## Dataset Format
 
-Two JSONL files coexist with different shapes:
+Both JSONL files contain prepared model input:
 
 - **`benchmarks/critpt/data/critpt_benchmark.jsonl`** (full 70-row dataset, gitignored;
-  produced by `prepare.py`). **Flat-field**: each row has `problem_id`, `problem` (Markdown
-  question), `code_template` (Python stub), and `uuid`. Prompt templating happens at
-  rollout time via the dataset entry's `prompt_config:
-  benchmarks/critpt/prompts/turn1.yaml`.
+  produced by `prepare.py`). Each row has `problem_id`, `problem` (Markdown question),
+  `code_template` (Python stub), `uuid`, and `responses_create_params.input` containing both
+  the solve prompt and the deferred formatting user message.
 - **`resources_servers/critpt/data/example.jsonl`** (5-row hand-curated fixture,
   committed). **Pre-materialized**: same flat fields plus `responses_create_params.input`
-  already filled in from the Turn 1 template, matching the convention of every other
-  paired server's example fixture. Because it's pre-materialized, callers must NOT pass
-  `+prompt_config` when running rollouts against this file (the framework rejects rows
-  that have both).
+  containing both turns. The agent withholds the final user message until the solve call
+  completes, then inserts the cleaned solve answer before the formatting prompt.
+
+Re-prepare old benchmark data after upgrading. Do not pass `prompt_config` for either file;
+the framework rejects rows that already contain input when a prompt config is also supplied.
 
 ## Observability
 

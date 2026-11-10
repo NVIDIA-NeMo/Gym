@@ -894,18 +894,20 @@ async def test_shutdown_retries_a_verifier_stop_that_failed(server, grading, san
     assert not server._session_id_to_verifier_sandboxes and not server._session_id_to_sandbox
 
 
-async def test_shutdown_stops_a_busy_session_after_a_bounded_wait(server, sandboxes):
-    server.config.sandbox_stop_timeout_seconds = 0.01
+async def test_shutdown_stops_a_busy_session_when_lock_wait_times_out(server, sandboxes, monkeypatch):
     app = server.setup_webserver()
     lifespan = app.router.lifespan_context(app)
     await lifespan.__aenter__()
     await server.seed_session(SimpleNamespace(session={}), seed())
     session_lock = server._resources_sessions["attempt"].lock
     await session_lock.acquire()  # A request still in progress on the session.
+    # Force the lock-wait timeout without imposing a tiny deadline on the independent sandbox stop.
+    acquire = AsyncMock(side_effect=TimeoutError)
+    monkeypatch.setattr(session_lock, "acquire", acquire)
     try:
-        started = monotonic()
         await asyncio.wait_for(lifespan.__aexit__(None, None, None), timeout=5)
-        assert monotonic() - started < 2
+        acquire.assert_awaited_once()
+        assert session_lock.locked()
         sandboxes[0].stop.assert_awaited_once()
         assert not server._session_id_to_sandbox
     finally:
