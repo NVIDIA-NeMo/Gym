@@ -417,9 +417,10 @@ def extract_claude_code_observations(
     Transcript IDs and timestamps are used directly. Missing or ambiguous evidence
     is reported as a gap; the extractor never joins calls by text or proximity.
     ``transcripts``, when given, are those already read from ``config_dir``.
-    Tool attempts are identified by their persisted record identity, so a native ID
-    reused across responses stays a separate attempt. Pass ``clock_domain`` only when
-    one Claude process wrote the transcript timestamps.
+    Tool calls get observation call IDs from their persisted record identity, so a
+    native ID reused across responses stays a separate attempt; ``native_tool_call_id``
+    keeps Claude's ID. Pass ``clock_domain`` only when one Claude process wrote the
+    transcript timestamps.
     """
 
     gaps: list[ObservationGap] = []
@@ -467,6 +468,7 @@ def extract_claude_code_observations(
     starts: dict[tuple[str, str], list[tuple[ToolCallObservation, float | None]]] = defaultdict(list)
     finishes: dict[tuple[str, str], list[_ToolResult]] = defaultdict(list)
     parents: dict[str, tuple[str, str, str, int, str]] = {}
+    result_items: dict[str, list[NeMoGymFunctionCallOutput]] = defaultdict(list)
     ambiguous_parents: set[str] = set()
     conversations: dict[str, list[Any]] = defaultdict(list)
     model_calls: dict[str, list[ModelCallRef]] = defaultdict(list)
@@ -570,14 +572,14 @@ def extract_claude_code_observations(
                         tool_name = block.get("name") if isinstance(block.get("name"), str) else ""
                         # Persisted record identity distinguishes reused native IDs.
                         operation_key = _record_key(event, record_id, block_index, "tool_use")
-                        items.append(_tool_call(tool_call_id, block))
+                        items.append(_tool_call(f"call:{operation_key}", block))
                         message_uuid = event.get("uuid")
                         starts[(invocation_id, tool_call_id)].append(
                             (
                                 ToolCallObservation(
                                     invocation_id=invocation_id,
                                     agent_instance=agent_instance,
-                                    tool_call_id=tool_call_id,
+                                    tool_call_id=f"call:{operation_key}",
                                     native_tool_call_id=tool_call_id,
                                     producer_id=SOURCE,
                                     span_id=tool_attempt_id(
@@ -625,7 +627,9 @@ def extract_claude_code_observations(
                             continue
                         tool_status = _status(block, result_metadata)
                         result_id = _record_key(event, record_id, block_index, "tool_result")
-                        items.append(_tool_result(block, tool_status))
+                        # The call ID is assigned once the result is attributed to one request.
+                        result_items[result_id].append(_tool_result(block, tool_status))
+                        items.append(result_items[result_id][-1])
                         source = event.get("sourceToolAssistantUUID")
                         source = source if isinstance(source, str) and source else None
                         fallback = event.get("parentUuid")
@@ -743,6 +747,8 @@ def extract_claude_code_observations(
                 if completed_at is None:
                     add_tool_gap("tool_result_timestamp_missing")
                 result_tools[result.record_id] = tool
+                for item in result_items[result.record_id]:
+                    item.call_id = tool.tool_call_id
             # Transcript record timestamps, not executor timing.
             timing, timing_gaps = normalize_operation_timing(
                 boundary="transcript",
@@ -774,7 +780,7 @@ def extract_claude_code_observations(
             tool = ToolCallObservation(
                 invocation_id=invocation_id,
                 agent_instance=agent_instance,
-                tool_call_id=tool_call_id,
+                tool_call_id=f"call:{result.record_id}",
                 native_tool_call_id=tool_call_id,
                 producer_id=SOURCE,
                 span_id=tool_attempt_id(
@@ -794,7 +800,15 @@ def extract_claude_code_observations(
         if parent is not None and parent[4] in result_tools:
             tool.parent_span_id = result_tools[parent[4]].span_id
 
-    parent_by_invocation = {child_id: parent[:3] for child_id, parent in parents.items()}
+    # A spawn references the observation call ID of the Agent tool attempt whose result names the child.
+    parent_by_invocation = {
+        child_id: (
+            parent[0],
+            result_tools[parent[4]].tool_call_id if parent[4] in result_tools else parent[1],
+            parent[2],
+        )
+        for child_id, parent in parents.items()
+    }
     for child_id, parent in parents.items():
         if child_id not in events_by_invocation:
             first_seen[child_id] = parent[3]

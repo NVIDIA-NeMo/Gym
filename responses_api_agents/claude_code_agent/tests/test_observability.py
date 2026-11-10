@@ -186,9 +186,10 @@ def test_extracts_nested_tree_model_refs_and_parallel_tool_timing(tmp_path: Path
     assert root_invocation.status == "completed"
     assert root_invocation.duration_ms == 5000
     assert child_invocation.parent_invocation_id == session
-    assert child_invocation.spawned_by_tool_call_id == "tool-child"
+    timings = {tool.native_tool_call_id: tool for tool in _records(bundle, ToolCallObservation)}
+    assert child_invocation.spawned_by_tool_call_id == timings["tool-child"].tool_call_id
     assert grandchild_invocation.parent_invocation_id == child
-    assert grandchild_invocation.spawned_by_tool_call_id == "tool-grandchild"
+    assert grandchild_invocation.spawned_by_tool_call_id == timings["tool-grandchild"].tool_call_id
     assert grandchild_invocation.status == "incomplete"
     assert [reference.response_id for reference in root_invocation.model_calls] == ["msg-root"]
     assert [reference.response_id for reference in child_invocation.model_calls] == ["msg-child"]
@@ -210,15 +211,29 @@ def test_extracts_nested_tree_model_refs_and_parallel_tool_timing(tmp_path: Path
     ]
     assert grandchild_result.status == "incomplete"
 
-    timings = {tool.tool_call_id: tool for tool in _records(bundle, ToolCallObservation)}
+    calls = [item.call_id for item in root_invocation.conversation if hasattr(item, "call_id")]
+    assert calls == [timings[name].tool_call_id for name in ("tool-fast", "tool-child", "tool-fast", "tool-child")]
+    assert all(call.startswith("call:") for call in calls)
     assert timings["tool-fast"].timings[0].duration_ms == pytest.approx(1000)
     assert timings["tool-child"].timings[0].duration_ms == pytest.approx(3000)
     assert timings["tool-grandchild"].timings[0].duration_ms == pytest.approx(1000)
     assert timings["tool-grandchild"].status == "timeout"
+    # The v1 projection restores Claude's IDs in tools, conversations and spawn references.
     legacy = bundle.model_copy(update={"schema_version": "1.0"}).model_dump(mode="json")
     legacy_tools = {record["tool_call_id"]: record for record in legacy["records"] if record["kind"] == "tool_call"}
+    assert set(legacy_tools) == {"tool-fast", "tool-child", "tool-grandchild"}
     assert legacy_tools["tool-fast"]["duration_ms"] == pytest.approx(1000)
     assert all(tool["timing_source"] == "artifact" for tool in legacy_tools.values())
+    legacy_invocations = {r["invocation_id"]: r for r in legacy["records"] if r["kind"] == "agent_invocation"}
+    assert legacy_invocations[child]["spawned_by_tool_call_id"] == "tool-child"
+    assert legacy_invocations[grandchild]["spawned_by_tool_call_id"] == "tool-grandchild"
+    assert [item["call_id"] for item in legacy_invocations[session]["conversation"] if "call_id" in item] == [
+        "tool-fast",
+        "tool-child",
+        "tool-fast",
+        "tool-child",
+    ]
+    assert "call:" not in json.dumps(legacy)
     assert not bundle.gaps
     assert {tool.timings[0].clock_domain for tool in timings.values()} == {"claude-code-wall:a"}
     assert {tool.agent_instance for tool in timings.values()} == {"claude-code-agent:a"}
@@ -734,6 +749,7 @@ def test_reused_ids_keep_exact_response_attempts_and_replay(tmp_path: Path) -> N
         )
         result = _tool_result("root", str(11 + index * 2), "reused", is_error=failed)
         result.update(uuid=f"result-{index}", sourceToolAssistantUUID=f"{response_id}-event")
+        result["message"]["content"][0]["content"] = f"output-{index}"
         events.append(result)
     # Numeric epoch values are legitimate transcript timestamps.
     for event in events:
@@ -763,6 +779,10 @@ def test_reused_ids_keep_exact_response_attempts_and_replay(tmp_path: Path) -> N
         invocations=_records(bundle, AgentInvocation),
     )
     assert [tool.model_call_id for tool in normalized] == ["capture-0", "capture-1"]
+    # Observation call IDs keep each reused native ID's output on its own attempt.
+    assert len({tool.tool_call_id for tool in normalized}) == 2
+    assert {tool.native_tool_call_id for tool in normalized} == {"reused"}
+    assert [tool.output for tool in normalized] == ["output-0", "output-1"]
     assert "tool_failure_detail_unavailable" in {gap.code for gap in gaps}
     replay = AgentObservationBundle.model_validate_json(bundle.model_dump_json())
     assert replay.model_dump() == bundle.model_dump()
@@ -827,14 +847,15 @@ def test_parent_completion_does_not_complete_child_and_partial_identity_is_stabl
     )
     _write(child, start, '{"truncated":')
     bundle = extract_claude_code_observations(tmp_path, model_ref=MODEL_REF, root_status="completed")
-    tools = {tool.tool_call_id: tool for tool in _records(bundle, ToolCallObservation)}
+    tools = {tool.native_tool_call_id: tool for tool in _records(bundle, ToolCallObservation)}
     assert tools["spawn"].status == "completed"
     assert tools["pending"].status == "incomplete"
     assert tools["pending"].timings[0].completed_at is None
     assert tools["pending"].parent_span_id == tools["spawn"].span_id
     _write(child, start, _tool_result("root", "2026-07-22T10:00:04Z", "pending", agent="child"))
     complete = extract_claude_code_observations(tmp_path, model_ref=MODEL_REF)
-    completed = {tool.tool_call_id: tool for tool in _records(complete, ToolCallObservation)}
+    completed = {tool.native_tool_call_id: tool for tool in _records(complete, ToolCallObservation)}
+    assert completed["pending"].tool_call_id == tools["pending"].tool_call_id
     assert completed["pending"].span_id == tools["pending"].span_id
     assert completed["pending"].timings[0].duration_ms == 2000
 
@@ -880,12 +901,13 @@ def test_result_with_different_exact_assistant_reference_stays_unmatched(tmp_pat
     assert orphan.model_call_ref is None
 
 
-async def test_default_v1_export_keeps_claude_ids_and_is_replay_stable(tmp_path: Path) -> None:
+@pytest.mark.parametrize("reused", [False, True])
+async def test_default_v1_export_restores_claude_ids_only_when_unambiguous(tmp_path: Path, reused: bool) -> None:
     from nemo_gym.rollouts import enrich_run_result
 
     events = []
     for index in range(2):
-        tool_id = f"tool-{index}"
+        tool_id = "reused" if reused else f"tool-{index}"
         events.append(
             _assistant(
                 "root",
@@ -914,13 +936,20 @@ async def test_default_v1_export_keeps_claude_ids_and_is_replay_stable(tmp_path:
         assert [tool["output"] for tool in tools] == ["output-0", "output-1"]
         assert all("span_id" not in tool and "timings" not in tool for tool in tools)
         assert all(tool["duration_ms"] == 1000 for tool in tools)
-        assert [tool["tool_call_id"] for tool in tools] == ["tool-0", "tool-1"]
-        assert [item["call_id"] for item in conversation if "call_id" in item] == [
-            "tool-0",
-            "tool-0",
-            "tool-1",
-            "tool-1",
-        ]
+        gaps = {gap["code"] for gap in trajectory["gaps"]}
+        if reused:
+            # v1 has one namespace per invocation, so reused IDs keep their observation IDs with a gap.
+            assert all(tool["tool_call_id"].startswith("call:") for tool in tools)
+            assert "tool_native_identity_unrepresentable" in gaps
+        else:
+            assert [tool["tool_call_id"] for tool in tools] == ["tool-0", "tool-1"]
+            assert [item["call_id"] for item in conversation if "call_id" in item] == [
+                "tool-0",
+                "tool-0",
+                "tool-1",
+                "tool-1",
+            ]
+            assert "call:" not in json.dumps(record)
         if first is None:
             first = copy.deepcopy(trajectory)
         assert trajectory == first
@@ -960,7 +989,9 @@ async def test_split_parallel_records_without_uuid_stay_separate_attempts(tmp_pa
     tools = _records(bundle, ToolCallObservation)
     assert len({tool.span_id for tool in tools}) == 2
     trajectory = await _enriched_trajectory(tmp_path, bundle, schema)
-    assert sorted(tool["tool_call_id"] for tool in trajectory["tool_calls"]) == ["t1", "t2"]
+    # V2 keeps Claude's IDs as native IDs; v1 restores them because each is unique.
+    key = "tool_call_id" if schema == "1.0" else "native_tool_call_id"
+    assert sorted(tool[key] for tool in trajectory["tool_calls"]) == ["t1", "t2"]
     assert sorted(tool["output"] for tool in trajectory["tool_calls"]) == ["a", "b"]
     assert "tool_attempt_identity_conflict" not in {gap["code"] for gap in trajectory["gaps"]}
 
@@ -977,7 +1008,7 @@ def test_split_parallel_records_join_exact_assistant_references(tmp_path: Path) 
         events.append(result)
     _write(tmp_path / "projects" / "work" / "root.jsonl", *events)
     bundle = extract_claude_code_observations(tmp_path, model_ref=MODEL_REF)
-    tools = {tool.tool_call_id: tool for tool in _records(bundle, ToolCallObservation)}
+    tools = {tool.native_tool_call_id: tool for tool in _records(bundle, ToolCallObservation)}
     assert [tools[name].timings[0].duration_ms for name in ("t1", "t2")] == [3000, 1000]
     assert {tool.source_message_id for tool in tools.values()} == {"a1", "a2"}
     assert {tool.model_call_ref.response_id for tool in tools.values()} == {"msg-1"}
@@ -1053,13 +1084,16 @@ async def test_default_v1_keeps_reused_id_attempts_with_explicit_gaps(tmp_path: 
     bundle = extract_claude_code_observations(tmp_path / "config", model_ref=MODEL_REF, root_status="completed")
     trajectory = await _enriched_trajectory(tmp_path, bundle, "1.0")
     tools = trajectory["tool_calls"]
-    # V1 has one call ID per invocation, so both attempts keep Claude's ID without an output.
-    assert [tool["tool_call_id"] for tool in tools] == ["reused", "reused"]
+    # V1 cannot restore a reused Claude ID, so each attempt keeps its record-qualified ID and its own output.
+    assert [tool["tool_call_id"] for tool in tools] == [
+        "call:response-0-event:tool_use:0",
+        "call:response-1-event:tool_use:0",
+    ]
     assert [tool["status"] for tool in tools] == ["completed", "completed"]
-    assert all(tool["output"] is None and tool["duration_ms"] == 1000 for tool in tools)
-    assert {"tool_native_identity_unrepresentable", "tool_output_ambiguous"} <= {
-        gap["code"] for gap in trajectory["gaps"]
-    }
+    assert all(tool["output"] == "result" and tool["duration_ms"] == 1000 for tool in tools)
+    codes = {gap["code"] for gap in trajectory["gaps"]}
+    assert "tool_native_identity_unrepresentable" in codes
+    assert "tool_output_ambiguous" not in codes
 
 
 @pytest.mark.parametrize("schema", ["1.0", "2.0"])
@@ -1077,7 +1111,7 @@ async def test_copied_transcript_keeps_one_attempt_with_its_output(tmp_path: Pat
     trajectory = await _enriched_trajectory(tmp_path, copied, schema)
     [tool] = trajectory["tool_calls"]
     assert tool["output"] == "ok"
-    assert tool["tool_call_id"] == "toolu"
+    assert tool["tool_call_id" if schema == "1.0" else "native_tool_call_id"] == "toolu"
     [invocation] = trajectory["invocations"]
     assert [item["type"] for item in invocation["conversation"]] == ["function_call", "function_call_output"]
     if schema == "2.0":
@@ -1135,5 +1169,6 @@ def test_one_result_record_links_the_subagent_even_when_replayed(tmp_path: Path)
     assert child_tool.parent_span_id == spawn.span_id
     invocations = {invocation.invocation_id: invocation for invocation in _records(bundle, AgentInvocation)}
     assert invocations["child"].parent_invocation_id == "root"
-    assert invocations["child"].spawned_by_tool_call_id == "spawn"
+    assert spawn.tool_call_id != "spawn"
+    assert invocations["child"].spawned_by_tool_call_id == spawn.tool_call_id
     assert "conflicting_subagent_parent" not in {gap.code for gap in bundle.gaps}

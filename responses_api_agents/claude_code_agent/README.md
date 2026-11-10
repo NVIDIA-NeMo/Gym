@@ -87,10 +87,11 @@ The agent runs `claude -p` as an async subprocess for each request. Claude Code 
 With rollout observability enabled, the agent imports tool-use and tool-result transcript records
 as v2 observations. Timing uses the `transcript` boundary: it measures the interval between
 persisted messages, not executor runtime. Each collected run gets one agent instance and wall-clock
-domain. Request record identities distinguish reused tool IDs, and exact response references link
-tools to model capture. Partial transcripts retain unfinished calls and explicit failures; ambiguous
-result ownership remains a gap. Trajectory export keeps the shared default v1 projection unless v2 is
-explicitly selected.
+domain. Observation call IDs come from the persisted request record, so reused tool IDs stay separate
+attempts with their own outputs, and exact response references link tools to model capture. Partial
+transcripts retain unfinished calls and explicit failures; ambiguous result ownership remains a gap.
+Trajectory export keeps the shared default v1 projection, which restores Claude's tool IDs where they
+are unambiguous, unless v2 is explicitly selected.
 
 Claude Code talks to the model via the Anthropic Messages API (`/v1/messages`). This means it can connect to Anthropic's API directly, to any local endpoint that implements `/v1/messages` (vLLM, Ollama), or — via the agent's `model_server` ref — to any NeMo Gym model server, since every Gym model server now serves `/v1/messages` by mapping Messages ↔ Responses around its own `responses()` backend.
 
