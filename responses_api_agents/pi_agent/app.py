@@ -626,6 +626,7 @@ class PiMCPServerConfig(BaseModel):
 
 
 class PiAgentConfig(BaseResponsesAPIAgentConfig):
+    history_delta_enabled: bool = False
     # Only the direct /run compatibility path calls Resources. Sandbox sessions
     # receive SandboxAccess from EnvironmentServer instead.
     resources_server: Optional[ResourcesServerRef] = None
@@ -1041,6 +1042,14 @@ class PiAgent(SimpleResponsesAPIAgent):
             async with self.sem:
                 try:
                     raw = await state.execute(
+                        history_transport=(
+                            {
+                                "base_url": self._resolve_model_base_url(state.request.episode_id.capture_key),
+                                "timeout": timeout,
+                            }
+                            if self.config.history_delta_enabled
+                            else None
+                        ),
                         command=command,
                         env=env,
                         prompt=prompt,

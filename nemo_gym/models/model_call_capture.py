@@ -36,10 +36,10 @@ from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 import orjson
-from fastapi import Request, Response
+from fastapi import FastAPI, Request, Response
 from pydantic import BaseModel, model_validator
 
-from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT
+from nemo_gym.config.config_types import DEFAULT_UVICORN_BACKLOG, ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT
 from nemo_gym.core.episode_context import VERIFIER_INVOCATION_HEADER, rollout_context
 from nemo_gym.core.failure_transport import FailureHeader, RequestFailureLog
 from nemo_gym.core.responses_api_types import SSE_KEEPALIVE
@@ -47,6 +47,7 @@ from nemo_gym.models._checkpoint import (
     attach_capture_context,
     ledger_removal_refusal,
 )
+from nemo_gym.models.history_delta import HistoryBuffer, HistoryTransportProtocol
 from nemo_gym.models.responses_streaming import (
     is_responses_lifecycle_chunk,
 )
@@ -64,6 +65,7 @@ from nemo_gym.models.token_capture.records import UNCOMMITTED_CALL_REASON
 from nemo_gym.models.token_capture.sink import CaptureContext, reset_token_sink, set_token_sink
 from nemo_gym.models.token_capture.store import make_token_store
 from nemo_gym.server_runtime.request_handling.rollout_context import scope_with_routed_path
+from nemo_gym.server_runtime.request_handling.session_routing import RolloutRouter, install_rollout_routing
 
 
 logger = logging.getLogger(__name__)
@@ -368,6 +370,55 @@ _ROLLOUT_PATH_RE = re.compile(
     rf"(?:/(?P<token_capture>{re.escape(TOKEN_CAPTURE_PATH_SEGMENT)}))?"
     rf"(?P<rest>/.*)$"
 )
+
+
+class _RolloutRoutingMiddleware:
+    """Route model calls to their rollout's owner before admission and capture."""
+
+    def __init__(
+        self,
+        app: Any,
+        *,
+        router: RolloutRouter,
+        non_generating_requests: frozenset[tuple[str, str]] = frozenset(),
+    ) -> None:
+        self._app = app
+        self._router = router
+        self._non_generating_requests = non_generating_requests
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope.get("type") == "http" and scope.get("method") == "POST":
+            match = _ROLLOUT_PATH_RE.match(scope.get("path", ""))
+            if match is not None:
+                path = match.group("rest")
+                if path in _OBSERVED_PATHS and ("POST", path) not in self._non_generating_requests:
+                    rollout_id = match.group("rollout_id")
+                    receive = await self._router.route(rollout_id, scope, receive, send)
+                    if receive is None:
+                        return
+                    # Hold ownership through admission, inference, streaming, and
+                    # capture finalization, even if this request's history is evicted.
+                    with self._router.claims.serving(rollout_id):
+                        await self._app(scope, receive, send)
+                    return
+        await self._app(scope, receive, send)
+
+
+def install_model_rollout_routing(
+    app: FastAPI,
+    *,
+    socket_dir: str,
+    backlog: int = DEFAULT_UVICORN_BACKLOG,
+    non_generating_requests: frozenset[tuple[str, str]] = frozenset(),
+) -> None:
+    """Install delta rollout routing after admission/capture so it executes before them."""
+    buffer = getattr(app.state, "nemo_gym_history_buffer", None)
+    if buffer is None:
+        raise ValueError("Model rollout routing requires an installed history buffer")
+    router = install_rollout_routing(app, socket_dir=socket_dir, holds=buffer.retains_rollout, backlog=backlog)
+    buffer.on_rollout_evicted = router.claims.release
+    app.state.nemo_gym_rollout_router = router
+    app.add_middleware(_RolloutRoutingMiddleware, router=router, non_generating_requests=non_generating_requests)
 
 
 def make_capture_store(config: ModelCallCaptureConfig) -> Optional[CaptureStore]:
@@ -773,6 +824,9 @@ class _CaptureMiddleware:
         delta_records: bool = False,
         external_staging: bool = False,
         parent_resolution_mode: ParentResolutionMode = "fingerprint",
+        history_delta_enabled: bool = False,
+        history_buffer: HistoryBuffer | None = None,
+        history_transport_protocol: HistoryTransportProtocol | None = None,
         token_capture_enabled: bool = False,
         assistant_message_header: bytes | None = None,
         non_generating_requests: frozenset[tuple[str, str]] = frozenset(),
@@ -791,6 +845,12 @@ class _CaptureMiddleware:
         self._delta_records = delta_records
         # A framework inference worker owns record staging; the lineage store
         # doubles as the per-rollout capture ledger.
+        self._history_buffer = history_buffer
+        if history_delta_enabled and self._history_buffer is None:
+            self._history_buffer = HistoryBuffer()
+        self._history_transport_protocol = (
+            history_transport_protocol if history_transport_protocol is not None else HistoryTransportProtocol()
+        )
         self._external_staging = external_staging
         self._parent_resolution_mode = parent_resolution_mode
         self._capture_ledger: CaptureLedger | None = (
@@ -822,6 +882,24 @@ class _CaptureMiddleware:
         method = str(scope.get("method") or "").upper()
         dialect = _OBSERVED_PATHS.get(path)
         known_non_generating = (method, path) in self._non_generating_requests
+
+        if (
+            rollout_from_path
+            and method == "POST"
+            and dialect in {"chat", "responses"}
+            and self._history_transport_protocol.matches_request(scope)
+        ):
+            reconstructed = await self._history_transport_protocol.reconstruct_request(
+                self._history_buffer,
+                scope,
+                receive,
+                send,
+                rollout_from_path,
+                history_field="input" if dialect == "responses" else "messages",
+            )
+            if reconstructed is None:
+                return
+            scope, receive = reconstructed
 
         # State is shared with the handler even through middleware scope copies.
         request_state = scope.setdefault("state", {})
@@ -1164,6 +1242,7 @@ def install_model_call_capture(
     global_config_dict: Any = None,
     num_workers: int | None = None,
     non_generating_requests: frozenset[tuple[str, str]] = frozenset(),
+    history_transport_protocol: HistoryTransportProtocol | None = None,
 ) -> CaptureLedger | None:
     """Install model-call capture middleware and return the capture ledger when staging is external.
 
@@ -1243,6 +1322,12 @@ def install_model_call_capture(
                 await _close_capture_endpoints()
 
         app.router.lifespan_context = _capture_lifespan
+    history_delta_enabled = bool(
+        global_config_dict is not None and global_config_dict.get("history_delta_enabled", False)
+    )
+    # Routing and reconstruction must observe the same worker-local cache.
+    history_buffer = HistoryBuffer() if history_delta_enabled else None
+    app.state.nemo_gym_history_buffer = history_buffer
     app.add_middleware(
         _CaptureMiddleware,
         store=make_capture_store(config),
@@ -1256,6 +1341,9 @@ def install_model_call_capture(
         parent_resolution_mode=(
             capture_settings.token_id_capture.parent_resolution if capture_settings is not None else "fingerprint"
         ),
+        history_delta_enabled=history_delta_enabled,
+        history_buffer=history_buffer,
+        history_transport_protocol=history_transport_protocol,
         token_capture_enabled=capture_settings.enabled if capture_settings is not None else False,
         non_generating_requests=non_generating_requests,
     )

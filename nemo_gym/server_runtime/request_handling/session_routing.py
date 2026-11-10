@@ -84,6 +84,7 @@ A cookie or MCP token from before the restore names only the session ID, so its 
 """
 
 import asyncio
+import errno
 import fcntl
 import hashlib
 import heapq
@@ -261,11 +262,42 @@ class SessionOwners:
         """The worker that owns the ID, or None if nobody does."""
         if session_id in self._mine:
             return self.routing_id
+        return self._owner_on_disk(session_id)
+
+    def _owner_on_disk(self, session_id: str) -> Optional[str]:
         try:
             with open(self._path(session_id), encoding="ascii") as owner_file:
                 return _valid_routing_id(owner_file.read())
         except FileNotFoundError:
             return None
+
+    def replace_if_owner(self, session_id: str, expected_owner: str) -> Optional[str]:
+        """Take over only if the on-disk owner still matches; return the resulting owner.
+
+        Model routing uses this after a confirmed pre-dispatch connection failure.
+        The lock coordinates competing recoveries, releases, and checkpoint rewrites;
+        atomic replacement leaves no gap in which a third worker can claim the ID.
+        """
+        path = self._path(session_id)
+        temporary = f"{path}.{self.routing_id}.{secrets.token_hex(8)}.tmp"
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            try:
+                os.write(fd, self.routing_id.encode("ascii"))
+            finally:
+                os.close(fd)
+            with self._exclusive():
+                owner = self._owner_on_disk(session_id)
+                if owner != expected_owner:
+                    return owner
+                os.replace(temporary, path)
+                self._mine.add(session_id)
+                return self.routing_id
+        finally:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
 
     def acquire(self, session_id: str) -> Optional[str]:
         """Make this worker the ID's owner unless another worker already owns it; return the owner.
@@ -588,7 +620,174 @@ class _AgentSessionLifetimes:
         return []
 
 
-class SessionRoutingMiddleware:
+class _OwnerConnectionFailed(Exception):
+    def __init__(self, body: bytes) -> None:
+        super().__init__("Model owner socket is unavailable before dispatch")
+        self.body = body
+
+
+class WorkerForwarder:
+    """Relay a request to a worker's private socket and stream its response unchanged."""
+
+    def __init__(self, socket_dir: Optional[str], *, clients: Optional[dict[str, ClientSession]] = None) -> None:
+        self.socket_dir = socket_dir
+        self.clients = clients if clients is not None else {}
+
+    def _client(self, owner: str) -> ClientSession:
+        client = self.clients.get(owner)
+        if client is None:
+            client = self.clients[owner] = ClientSession(
+                connector=UnixConnector(
+                    worker_socket_path(self.socket_dir, owner), limit=0, keepalive_timeout=_FORWARD_KEEPALIVE_SECONDS
+                ),
+                cookie_jar=DummyCookieJar(),
+                # Pass the reply's bytes through exactly as the owner encoded them.
+                auto_decompress=False,
+                # The owner's handler takes as long as it takes; the caller holds its own timeout.
+                timeout=ClientTimeout(total=None),
+            )
+        return client
+
+    async def forward(
+        self, owner: str, scope: Scope, receive: Receive, send: Send, *, body: Optional[bytes] = None
+    ) -> None:
+        if body is None:
+            body = await _read_body(receive)
+            if body is None:
+                return
+
+        headers = CIMultiDict(
+            (name.decode("latin-1"), value.decode("latin-1"))
+            for name, value in scope["headers"]
+            if name.decode("latin-1").lower() not in _HOP_BY_HOP_HEADERS
+        )
+        raw_path = scope.get("raw_path") or scope["path"].encode("utf-8")
+        query = scope.get("query_string", b"")
+        target = raw_path + (b"?" + query if query else b"")
+        url = URL("http://localhost" + target.decode("latin-1"), encoded=True)
+
+        client = self._client(owner)
+        try:
+            response = await client.request(
+                scope["method"],
+                url,
+                headers=headers,
+                data=body,
+                allow_redirects=False,
+                # Send only the caller's headers.
+                skip_auto_headers=("User-Agent", "Accept", "Accept-Encoding", "Content-Type"),
+            )
+        except ClientConnectorError as error:
+            # The owner's socket is gone or refuses connections: the worker that held this session exited.
+            await self._discard_client(owner)
+            if self._can_recover_owner(error):
+                raise _OwnerConnectionFailed(body) from error
+            await JSONResponse(
+                {
+                    "detail": (
+                        "The server worker that held this session is no longer running, so its state is lost. "
+                        "Start a new session."
+                    )
+                },
+                status_code=410,
+            )(scope, receive, send)
+            return
+        except ClientError as error:
+            await JSONResponse(
+                {"detail": f"Could not reach the server worker that holds this session: {error!r}"}, status_code=502
+            )(scope, receive, send)
+            return
+
+        async with response:
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": response.status,
+                    "headers": [
+                        (name, value)
+                        for name, value in response.raw_headers
+                        if name.decode("latin-1").lower() not in {"connection", "keep-alive", "transfer-encoding"}
+                    ],
+                }
+            )
+            async for chunk in response.content.iter_any():
+                await send({"type": "http.response.body", "body": chunk, "more_body": True})
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+    def _can_recover_owner(self, error: ClientConnectorError) -> bool:
+        return False  # Stateful agent/resource sessions retain their HTTP 410 contract.
+
+    async def _discard_client(self, owner: str) -> None:
+        client = self.clients.pop(owner, None)
+        if client is not None:
+            await client.close()
+
+
+class RolloutRouter(WorkerForwarder):
+    """Claim a rollout on its first model call and forward later calls to that worker."""
+
+    def __init__(self, socket_dir: str, *, holds: Callable[[str], bool]) -> None:
+        super().__init__(socket_dir)
+        self.claims = SessionOwners(socket_dir, uuid4().hex, holds=holds)
+
+    def _can_recover_owner(self, error: ClientConnectorError) -> bool:
+        # Never take over after timeouts, permission errors, or uncertain execution.
+        return error.os_error.errno in {errno.ENOENT, errno.ECONNREFUSED}
+
+    async def route(self, rollout_id: str, scope: Scope, receive: Receive, send: Send) -> Optional[Receive]:
+        """Return a body reader for local dispatch, or None after forwarding/refusal."""
+        body = None
+        for _ in range(2):
+            owner = self.claims.acquire(rollout_id)
+            if owner == self.claims.routing_id:
+                return _replay_body(body, receive) if body is not None else receive
+            if owner is None or scope.get(_FORWARDED_SCOPE_KEY):
+                # A forwarded request must never bounce between workers.
+                await _conflict(
+                    "The rollout's worker ownership changed while routing the request.", scope, receive, send
+                )
+                return None
+            try:
+                await self.forward(owner, scope, receive, send, body=body)
+                return None
+            except _OwnerConnectionFailed as error:
+                body = error.body
+                # The failed connect sent no HTTP bytes. Only replace the owner
+                # we checked; another recovery or restore may have won meanwhile.
+                replacement = self.claims.replace_if_owner(rollout_id, owner)
+                if replacement == self.claims.routing_id:
+                    return _replay_body(body, receive)
+        # Repeated worker loss must not turn into an unbounded internal retry loop.
+        await JSONResponse({"detail": "Model ownership changed repeatedly during recovery"}, status_code=503)(
+            scope, receive, send
+        )
+        return None
+
+
+def install_rollout_routing(
+    app: FastAPI, *, socket_dir: str, holds: Callable[[str], bool], backlog: int = DEFAULT_UVICORN_BACKLOG
+) -> RolloutRouter:
+    """Serve forwarded model requests on this worker's private socket for the app's lifetime."""
+    router = RolloutRouter(socket_dir, holds=holds)
+    original_lifespan = app.router.lifespan_context
+
+    @asynccontextmanager
+    async def lifespan_with_private_socket(application: FastAPI) -> AsyncIterator[Any]:
+        try:
+            async with original_lifespan(application) as state:
+                async with serve_private_socket(
+                    application, worker_socket_path(socket_dir, router.claims.routing_id), backlog=backlog
+                ):
+                    yield state
+        finally:
+            await asyncio.gather(*(client.close() for client in router.clients.values()))
+            router.clients.clear()
+
+    app.router.lifespan_context = lifespan_with_private_socket
+    return router
+
+
+class SessionRoutingMiddleware(WorkerForwarder):
     """Find a request's session ID, and forward the request to the worker that owns the session.
 
     It sits outside SessionMiddleware and reads the cookie by decoding it with the same secret.
@@ -617,16 +816,13 @@ class SessionRoutingMiddleware:
         mcp_token_serializer: Optional[itsdangerous.URLSafeSerializer] = None,
         mcp_path: str = "/mcp",
     ) -> None:
+        super().__init__(socket_dir, clients=clients)
         self.app = app
         self.kind = kind
         self.body_paths = kind.body_paths
         self.session_cookie = session_cookie
         self.signer = itsdangerous.TimestampSigner(secret_key)
         self.routing_id = routing_id
-        self.socket_dir = socket_dir
-        # One connection pool per owner socket, kept for the life of this worker and closed at its shutdown.
-        # Not Gym's shared aiohttp client: each pool needs a UnixConnector bound to its owner's socket.
-        self.clients = clients if clients is not None else {}
         self.owners = owners
         self.lifetimes = lifetimes
         self.mcp_token_header = mcp_token_header
@@ -681,13 +877,13 @@ class SessionRoutingMiddleware:
             if key_owner is None or key_owner == self.routing_id:
                 await self.app(scope, receive, send)
             else:
-                await self._forward(key_owner, scope, receive, send, body=body)
+                await self.forward(key_owner, scope, receive, send, body=body)
             return
         if session_id is None:
             owner = _valid_routing_id(HTTPConnection(scope).headers.get(SESSION_OWNER_HEADER))
             if owner is not None and owner != self.routing_id and not forwarded:
                 # A request that belongs to one worker without a session, such as an agent's call to itself.
-                await self._forward(owner, scope, receive, send, body=body)
+                await self.forward(owner, scope, receive, send, body=body)
                 return
             if not self.kind.cookie_session:
                 await self.app(scope, receive, send)
@@ -734,7 +930,7 @@ class SessionRoutingMiddleware:
                 send,
             )
         else:
-            await self._forward(owner, scope, receive, send, body=body)
+            await self.forward(owner, scope, receive, send, body=body)
 
     async def _serve_owned(
         self, owners: SessionOwners, session_id: str, scope: Scope, receive: Receive, send: Send
@@ -765,90 +961,6 @@ class SessionRoutingMiddleware:
         session = cookie_session(cookie, signer=self.signer) if cookie is not None else None
         session_id = session.get(self.kind.cookie_key) if session is not None else None
         return session_id if isinstance(session_id, str) else None
-
-    def _client(self, owner: str) -> ClientSession:
-        client = self.clients.get(owner)
-        if client is None:
-            client = self.clients[owner] = ClientSession(
-                connector=UnixConnector(
-                    worker_socket_path(self.socket_dir, owner), limit=0, keepalive_timeout=_FORWARD_KEEPALIVE_SECONDS
-                ),
-                cookie_jar=DummyCookieJar(),
-                # Pass the reply's bytes through exactly as the owner encoded them.
-                auto_decompress=False,
-                # The owner's handler takes as long as it takes; the caller holds its own timeout.
-                timeout=ClientTimeout(total=None),
-            )
-        return client
-
-    async def _forward(
-        self, owner: str, scope: Scope, receive: Receive, send: Send, *, body: Optional[bytes] = None
-    ) -> None:
-        if body is None:
-            body = await _read_body(receive)
-            if body is None:
-                return
-
-        headers = CIMultiDict(
-            (name.decode("latin-1"), value.decode("latin-1"))
-            for name, value in scope["headers"]
-            if name.decode("latin-1").lower() not in _HOP_BY_HOP_HEADERS
-        )
-        raw_path = scope.get("raw_path") or scope["path"].encode("utf-8")
-        query = scope.get("query_string", b"")
-        target = raw_path + (b"?" + query if query else b"")
-        url = URL("http://localhost" + target.decode("latin-1"), encoded=True)
-
-        client = self._client(owner)
-        try:
-            response = await client.request(
-                scope["method"],
-                url,
-                headers=headers,
-                data=body,
-                allow_redirects=False,
-                # Send only the caller's headers.
-                skip_auto_headers=("User-Agent", "Accept", "Accept-Encoding", "Content-Type"),
-            )
-        except ClientConnectorError:
-            # The owner's socket is gone or refuses connections: the worker that held this session exited.
-            await self._discard_client(owner)
-            await JSONResponse(
-                {
-                    "detail": (
-                        "The server worker that held this session is no longer running, so its state is lost. "
-                        "Start a new session."
-                    )
-                },
-                status_code=410,
-            )(scope, receive, send)
-            return
-        except ClientError as error:
-            await JSONResponse(
-                {"detail": f"Could not reach the server worker that holds this session: {error!r}"}, status_code=502
-            )(scope, receive, send)
-            return
-
-        async with response:
-            await send(
-                {
-                    "type": "http.response.start",
-                    "status": response.status,
-                    "headers": [
-                        (name, value)
-                        for name, value in response.raw_headers
-                        if name.decode("latin-1").lower() not in {"connection", "keep-alive", "transfer-encoding"}
-                    ],
-                }
-            )
-            async for chunk in response.content.iter_any():
-                await send({"type": "http.response.body", "body": chunk, "more_body": True})
-            await send({"type": "http.response.body", "body": b"", "more_body": False})
-
-    async def _discard_client(self, owner: str) -> None:
-        client = self.clients.pop(owner, None)
-        if client is not None:
-            await client.close()
 
 
 async def _conflict(detail: str, scope: Scope, receive: Receive, send: Send) -> None:

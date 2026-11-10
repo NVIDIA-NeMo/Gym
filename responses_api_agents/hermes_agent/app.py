@@ -314,6 +314,7 @@ class HermesAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_runner_timeout_seconds: float = Field(default=21600, gt=0, allow_inf_nan=False)
     session_close_timeout_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
     system_prompt: Optional[str] = None
+    history_delta_enabled: bool = False
     compression_enabled: bool = True
     compression_threshold: float = 0.85
     # The model's context window, as Hermes' `model.context_length`. Compression triggers at
@@ -706,6 +707,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             # A restricted tool list would otherwise hide the tools this episode was granted.
             enabled_toolsets = [*enabled_toolsets, *(access.name for access in mcp_accesses)]
         payload = {
+            "history_delta_enabled": self.config.history_delta_enabled,
             "agent_session_id": agent_session_id,
             "chat_template_kwargs_enabled": self.config.chat_template_kwargs_enabled,
             "config_yaml": self._build_config(mcp_accesses),

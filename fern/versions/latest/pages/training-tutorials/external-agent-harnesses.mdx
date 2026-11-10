@@ -419,3 +419,22 @@ row["_ng_rollout_id"] = f"step{step}.{task_index}-{rollout_index}"
 
 The id may contain letters, digits, dots, dashes, and underscores, and it must begin with a letter or digit.
 It must not end with `-a` followed by a positive number, such as `-a2`: that suffix names an attempt of a rollout, and rollout collection rejects dataset rows that use it.
+
+## Experimental history-delta transport
+
+For sandboxed OpenCode, Pi, Codex, and Hermes, set the agent's
+`history_delta_enabled: true` and the Gym global flag
+`history_delta_enabled: true`. Both default to `false`. Delta transport currently
+requires exactly one model-proxy worker because histories are stored in process
+memory. OpenCode, Pi, and Codex also require Python 3 in the task sandbox.
+
+The default protocol is selected by `x-gym-history-transport: v1`. Requests
+without that header bypass transport body inspection. Model integrations can
+override `history_transport_protocol()` to supply a `HistoryTransportProtocol`
+with custom request detection and reconstruction for a native harness protocol.
+
+Gym reconstructs full history before validation, training capture, and inference.
+History edits or compaction send full history. If Gym rejects a missing or stale
+history base before inference, the client resends full history once. The delta
+transport does not retry model errors, timeouts, or interrupted streams; native
+client retry policies still apply.

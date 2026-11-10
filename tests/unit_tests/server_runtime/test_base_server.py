@@ -1201,6 +1201,7 @@ class TestRunWebserverProxyKwargs:
         ray_enabled: bool | None = None,
         is_worker: bool = False,
         routes_sessions: bool = False,
+        routes_rollouts: bool = False,
         server_reuse_port: bool | None = None,
         unsupported_reason: str | None = None,
     ) -> dict:
@@ -1244,10 +1245,15 @@ class TestRunWebserverProxyKwargs:
             uvicorn_reuse_port=server_reuse_port,
         )
         ray_setting = ray_enabled
+        routing_setup = self.rollout_routing_setup = MagicMock()
 
         class TestSimpleServer(SimpleServer):
             ray_enabled = ray_setting
             routes_sessions_to_owner = routes_sessions
+            routes_rollouts_to_owner = routes_rollouts
+
+            def setup_rollout_routing(self, app, *, socket_dir: str, backlog: int) -> None:
+                routing_setup(app, socket_dir=socket_dir, backlog=backlog)
 
             def owned_session_routing(self) -> dict:
                 return {}
@@ -1366,6 +1372,49 @@ class TestRunWebserverProxyKwargs:
         kwargs = self._capture_uvicorn_kwargs(monkeypatch, {"uvicorn_reuse_port": True}, num_workers=1)
 
         assert kwargs["port"] == 8000
+
+    @mark.parametrize("history_enabled,num_workers", [(True, 2), (False, 2), (True, 1)])
+    def test_rollout_routing_is_installed_only_in_delta_model_workers(
+        self, monkeypatch: MonkeyPatch, tmp_path, history_enabled: bool, num_workers: int
+    ) -> None:
+        from nemo_gym.server_runtime.request_handling.session_routing import SESSION_SOCKET_DIR_ENV
+
+        monkeypatch.setenv(SESSION_SOCKET_DIR_ENV, str(tmp_path))
+        self._capture_uvicorn_kwargs(
+            monkeypatch,
+            {"history_delta_enabled": history_enabled, "uvicorn_backlog": 123},
+            num_workers=num_workers,
+            is_worker=True,
+            routes_rollouts=True,
+        )
+
+        if history_enabled and num_workers > 1:
+            self.rollout_routing_setup.assert_called_once()
+            assert self.rollout_routing_setup.call_args.kwargs == {"socket_dir": str(tmp_path), "backlog": 123}
+        else:
+            self.rollout_routing_setup.assert_not_called()
+
+    @mark.parametrize("history_enabled", [False, True])
+    def test_model_worker_socket_directory_is_created_only_for_history_transport(
+        self, monkeypatch: MonkeyPatch, tmp_path, history_enabled: bool
+    ) -> None:
+        from nemo_gym.server_runtime.request_handling.session_routing import SESSION_SOCKET_DIR_ENV
+
+        monkeypatch.delenv(SESSION_SOCKET_DIR_ENV, raising=False)
+        create_directory = MagicMock(return_value=str(tmp_path))
+        monkeypatch.setattr(nemo_gym.server_runtime.base_server, "create_session_socket_dir", create_directory)
+
+        kwargs = self._capture_uvicorn_kwargs(
+            monkeypatch, {"history_delta_enabled": history_enabled}, num_workers=2, routes_rollouts=True
+        )
+
+        assert kwargs["workers"] == 2
+        if history_enabled:
+            create_directory.assert_called_once_with()
+            assert os.environ[SESSION_SOCKET_DIR_ENV] == str(tmp_path)
+        else:
+            create_directory.assert_not_called()
+            assert SESSION_SOCKET_DIR_ENV not in os.environ
 
     def test_proxy_headers_disabled_by_default_single_worker(self, monkeypatch: MonkeyPatch) -> None:
         kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=1)

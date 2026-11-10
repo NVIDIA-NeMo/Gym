@@ -98,13 +98,15 @@ direct HTTP grants are rejected. The task sandbox supplies isolation, so `sandbo
 With several agent workers, session routing sends each session's requests to the worker that seeded it.
 
 The installer accepts Linux x86_64/aarch64 glibc and x86_64 musl/Alpine images; the task image needs bash
-but no Python. POSIX sh installs a missing bash using apt-get or apk when running as root,
+but no Python with the default settings. POSIX sh installs a missing bash using apt-get or apk when running as root,
 before invoking the Bash runtime installer; otherwise the image must provide it.
 The pinned Node 22.19.0 build has no arm64 musl binary.
 Older Alpine images use a checksum-verified private C++ library for Node. Runtime files live
 under `/tmp/nemo-gym-codex-node-*`, and private `CODEX_HOME` configuration lives under
 `/tmp/nemo-gym-codex-sessions/*`. Task HOME, XDG directories, Python, Node, libraries,
 and PATH are preserved.
+With `history_delta_enabled: true`, the shared Python history helper wraps the Node launcher;
+this opt-in mode requires `python3` and its standard library in the task image.
 By default Codex gets only `PATH`, `LANG`, `LC_ALL`, `HOME` and the XDG directories from the
 sandbox. `inherit_sandbox_environment: true` instead passes the sandbox's whole environment,
 as a harness started in the task container sees it (task variables such as `VIRTUAL_ENV` or
@@ -412,7 +414,7 @@ other than `inherit` (the default, the provider's network), and it cannot be com
 `sandbox_runtime_dir` to an absolute sandbox path that holds `node/` and `codex/` as the installer lays them out.
 Build it into the image with `bash install_codex_runtime.sh <dir> <codex_version>`. The image also needs `bash`,
 since the session prepare step would otherwise run `apt-get` or `apk`, which a restricted sandbox cannot reach.
-Task-image Python is not required. Setup checks that the directory reports `codex-cli <codex_version>` (an exact match)
+Task-image Python is not required unless history delta is enabled. Setup checks that the directory reports `codex-cli <codex_version>` (an exact match)
 instead of installing, and refuses the seed with a 422 when it does not. `sandbox_runtime_dir` applies to a borrowed
 sandbox too: it is checked there in the same way, and a borrowed sandbox is never stopped.
 

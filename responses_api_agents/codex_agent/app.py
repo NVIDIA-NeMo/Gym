@@ -599,6 +599,7 @@ def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
 
 
 class CodexAgentConfig(BaseResponsesAPIAgentConfig):
+    history_delta_enabled: bool = False
     resources_server: Optional[ResourcesServerRef] = None
     # When model_server is set, the Codex model provider's base_url is resolved from the Gym model
     # server's URL (every Gym model server speaks the streaming Responses dialect on /v1/responses).
@@ -1078,6 +1079,11 @@ class CodexAgent(SimpleResponsesAPIAgent):
             f"{state.runtime}/codex/node_modules/@openai/codex/bin/codex.js",
         ]
         payload = {
+            **(
+                {"history_transport": {"base_url": base_url, "timeout": timeout}}
+                if self.config.history_delta_enabled
+                else {}
+            ),
             "directory": state.session.session_dir,
             "command": command,
             "model_base_url": base_url,

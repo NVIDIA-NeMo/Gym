@@ -25,6 +25,7 @@ from nemo_gym.agents import (
     SandboxSession,
     shell_assignments,
 )
+from nemo_gym.agents.utils.model_history_transport import stage_cli_transport
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import MediaFile, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxExecResult, read_text, stage_media, upload_text
@@ -369,6 +370,9 @@ class OpenCodeSandboxSession(AgentSessionState):
         if media:
             for path in await stage_media(self.session.sandbox, media):
                 command.extend(["--file", path])
+        command = await stage_cli_transport(
+            self.session.sandbox, {**payload, "directory": directory, "command": command}, harness="opencode"
+        )
         env = payload["env"]
         params = {
             "cwd": payload["cwd"],
