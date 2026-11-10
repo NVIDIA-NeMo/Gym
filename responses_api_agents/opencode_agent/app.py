@@ -386,24 +386,48 @@ def _build_step_limit(opencode_config: Mapping[str, Any]) -> int | None:
     return steps if type(steps) is int and steps > 0 else None
 
 
-def reached_step_limit(export: Mapping[str, Any], steps: int | None) -> bool:
-    """Whether the last prompt of an OpenCode export used every model call that ``steps`` allows.
+def _continues_the_prompt(messages: Sequence[Mapping[str, Any]], index: int) -> bool:
+    """Whether the user message at ``index`` is one that OpenCode's compaction adds, not a new prompt."""
+    if any(part.get("type") == "compaction" for part in messages[index].get("parts") or []):
+        return True
+    # After an automatic compaction's summary, OpenCode continues the prompt with a user message: a synthetic
+    # "Continue if you have next steps" text, or a replay of the prompt when the compaction was for an overflow.
+    return index > 0 and messages[index - 1]["info"].get("summary") is True
 
-    OpenCode 1.17.11 saves one assistant message per model call of a prompt. ``opencode run`` runs the session loop in
-    packages/opencode/src/session/prompt.ts, which sets ``isLastStep = step >= maxSteps``: from call number ``steps`` on
-    it appends MAX_STEPS_PROMPT as an assistant message but still offers the tools and leaves toolChoice unset. So the
-    note asks for a final answer and does not force one, and the model may keep calling tools. ``steps`` or more
-    assistant messages after the last user message mean the prompt reached the limit, whatever the model did after
-    the note.
+
+def reached_step_limit(export: Mapping[str, Any], steps: int | None) -> bool:
+    """Whether the last prompt of an OpenCode export reached the step limit that ``steps`` sets.
+
+    OpenCode 1.17.11's ``opencode run`` runs the session loop in packages/opencode/src/session/prompt.ts. Its counter
+    ``step`` grows by one on each pass of the loop, and ``isLastStep = step >= maxSteps``: from that pass on, each
+    build call appends MAX_STEPS_PROMPT as an assistant message but still offers the tools and leaves toolChoice
+    unset. So the note asks for a final answer and does not force one, and the model may keep calling tools.
+
+    Compaction does not reset the counter, and its passes count too (packages/opencode/src/session/compaction.ts).
+    A build call and a compaction's summary call each take a pass and save an assistant message. A pass can also
+    only start a compaction, when the last finished call overflowed; it saves a user message with a compaction part
+    and no ``overflow`` field. A compaction that a build call starts sets ``overflow`` and takes no pass of its own.
+    The user messages that compaction adds are not new prompts (``_continues_the_prompt``).
     """
     if steps is None:
         return False
     messages = export.get("messages") or []
-    last_user = max(
-        (index for index, message in enumerate(messages) if message["info"].get("role") == "user"), default=-1
+    prompt = max(
+        (
+            index
+            for index, message in enumerate(messages)
+            if message["info"].get("role") == "user" and not _continues_the_prompt(messages, index)
+        ),
+        default=-1,
     )
-    calls = sum(1 for message in messages[last_user + 1 :] if message["info"].get("role") == "assistant")
-    return calls >= steps
+    passes = 0
+    for message in messages[prompt + 1 :]:
+        parts = message.get("parts") or []
+        if message["info"].get("role") == "assistant" or any(
+            part.get("type") == "compaction" and "overflow" not in part for part in parts
+        ):
+            passes += 1
+    return passes >= steps
 
 
 class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):

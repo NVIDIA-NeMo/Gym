@@ -1122,6 +1122,43 @@ def test_step_limit_counts_only_the_last_prompt():
     assert not reached_step_limit(export, None)
 
 
+# Message shapes OpenCode 1.17.11 saves around an automatic compaction (packages/opencode/src/session/compaction.ts).
+_PROMPT = {"info": {"role": "user"}, "parts": [{"type": "text", "text": "task"}]}
+_BUILD = {"info": {"role": "assistant", "finish": "tool-calls"}}
+_ANSWER = {"info": {"role": "assistant", "finish": "stop"}}
+_SUMMARY = {"info": {"role": "assistant", "summary": True, "mode": "compaction"}}
+_CONTINUE = {
+    "info": {"role": "user"},
+    "parts": [{"type": "text", "synthetic": True, "metadata": {"compaction_continue": True}, "text": "Continue"}],
+}
+
+
+def _compaction(**part: object) -> dict:
+    return {"info": {"role": "user"}, "parts": [{"type": "compaction", "auto": True, **part}]}
+
+
+@pytest.mark.parametrize(
+    ("messages", "passes"),
+    [
+        # The loop starts a compaction in a pass of its own when the last finished call overflowed: no overflow field.
+        ([_PROMPT, _BUILD, _BUILD, _compaction(), _SUMMARY, _CONTINUE, _ANSWER], 5),
+        # A build call that overflows starts the compaction itself (overflow set), and replays the prompt afterwards.
+        ([_PROMPT, _BUILD, _BUILD, _compaction(overflow=True), _SUMMARY, _PROMPT, _ANSWER], 4),
+        ([_PROMPT, _BUILD, _BUILD, _compaction(overflow=False), _SUMMARY, _CONTINUE, _ANSWER], 4),
+        # Without a continuing user message, as in an older OpenCode.
+        ([_PROMPT, _BUILD, _compaction(), _SUMMARY, _ANSWER], 4),
+        # A new prompt after a compacted one starts the count again.
+        ([_PROMPT, _BUILD, _compaction(), _SUMMARY, _CONTINUE, _ANSWER, _PROMPT, _ANSWER], 1),
+    ],
+)
+def test_step_limit_counts_compaction_passes_and_keeps_the_prompt(messages, passes):
+    """OpenCode's step counter counts compaction passes and does not restart at the user messages compaction adds."""
+    from responses_api_agents.opencode_agent.app import reached_step_limit
+
+    assert reached_step_limit({"messages": messages}, passes)
+    assert not reached_step_limit({"messages": messages}, passes + 1)
+
+
 @pytest.mark.parametrize(
     ("opencode_config", "detail"),
     [
