@@ -49,6 +49,7 @@ from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NgFailureEvent,
+    RequestFailureLog,
     rebuild_failure,
 )
 from nemo_gym.server_runtime import (
@@ -587,7 +588,14 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             response_cookies = _cookies(agent_http_response)
             if response_cookies:
                 handles.agent_cookies = response_cookies
-            return NeMoGymResponse.model_validate(await get_response_json(agent_http_response))
+            response = NeMoGymResponse.model_validate(await get_response_json(agent_http_response))
+            # Capture body-carried observations before close or outcome policy can bypass verification.
+            # They are diagnostics, not a selection of the episode's terminal failure.
+            saved = (response.model_extra or {}).get("failure_report")
+            log = RequestFailureLog.current()
+            if saved is not None and log is not None:
+                log.add_saved(saved)
+            return response
         except Exception as error:
             raise dependency_failure(
                 error,
