@@ -4106,9 +4106,17 @@ executions → not run again (left to recovery)
                 completion_servers_by_agent,
             )
             if len(agent_expected_keys) > 1:
-                agent_pending_keys = {
-                    name: keys - persisted_success_keys for name, keys in agent_expected_keys.items()
+                # A success masked by infrastructure is run again by a resume, so it is not settled until then.
+                settled_identities = [
+                    identity
+                    for identity, _ in store.selected_records("success")
+                    if not store.masked_retryable({ROLLOUT_ID_KEY_NAME: identity})
+                ]
+                settled_keys = {
+                    (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])
+                    for row in store.inputs_for([{ROLLOUT_ID_KEY_NAME: identity} for identity in settled_identities])
                 }
+                agent_pending_keys = {name: keys - settled_keys for name, keys in agent_expected_keys.items()}
 
         def completion_group(row: Mapping[str, Any]) -> str:
             return _metrics_group(row, lambda: completion_servers_by_agent) or self._dispatch_name(row)
@@ -4439,7 +4447,8 @@ executions → not run again (left to recovery)
                     persisted_success_keys.add((row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]))
                     completion_name = completion_group(row)
                     pending_keys = agent_pending_keys.get(completion_name)
-                    if pending_keys is not None:
+                    # A success masked by infrastructure stays pending: a resume runs it again.
+                    if pending_keys is not None and not store.masked_retryable(result):
                         pending_keys.discard((row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]))
                         if not pending_keys:
                             del agent_pending_keys[completion_name]

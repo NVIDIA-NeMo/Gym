@@ -1428,6 +1428,91 @@ class TestRolloutCollection:
         written = {orjson.loads(path.read_bytes())[AGENT_REF_KEY_NAME]["name"] for path in complete_dir.iterdir()}
         assert written == {"alpha beta", "alpha_beta"}
 
+    # A result the Environment Server masked because its provider failed: saved, but a resume runs it again.
+    _PROVIDER_MASKED = {"response": {}, "reward": 0.0, "mask_sample": True, "failure_kind": "provider_unavailable"}
+
+    async def test_no_agent_completion_file_while_a_masked_rollout_awaits_its_rerun(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        """A rollout masked by infrastructure is saved but not settled, so its agent is not complete in this job."""
+        complete_dir = tmp_path / "rollouts_agent_complete"
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(self._write_agent_inputs(tmp_path, ("alpha", "alpha", "beta"))),
+            output_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
+            disable_health_check=True,
+        )
+        alpha_replies = iter([{"response": {}, "reward": 1.0}, self._PROVIDER_MASKED])
+        alpha_file_while_beta_runs: list[bool] = []
+
+        async def post(server_name: str, url_path: str, json, **kwargs) -> FakeResponse:
+            if url_path == "/aggregate_metrics":
+                return FakeResponse(
+                    200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump()
+                )
+            if server_name == "beta_environment_server":
+                for _ in range(50):
+                    if (complete_dir / "alpha.json").exists():
+                        break
+                    await asyncio.sleep(0.01)
+                alpha_file_while_beta_runs.append((complete_dir / "alpha.json").exists())
+                return FakeResponse(200, {"response": {}, "reward": 0.0})
+            return FakeResponse(200, next(alpha_replies))
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post), agent_names=("alpha", "beta"))
+
+        await RolloutCollectionHelper().run_from_config(config)
+
+        assert alpha_file_while_beta_runs == [False]
+        assert sorted(path.name for path in complete_dir.iterdir()) == ["beta.json"]
+        # The masked result itself is kept in the output.
+        assert len((tmp_path / "rollouts.jsonl").read_bytes().splitlines()) == 3
+
+    async def test_masked_rollout_rerun_by_a_resume_completes_its_agent_with_the_final_score(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        """A resume re-runs a masked rollout before its agent is complete, so the file equals the run-wide entry."""
+        complete_dir = tmp_path / "rollouts_agent_complete"
+        input_fpath = self._write_agent_inputs(tmp_path, ("alpha", "alpha", "beta"))
+        first_job_replies = iter([{"response": {}, "reward": 1.0}, self._PROVIDER_MASKED])
+        resumed = {"now": False}
+        alpha_file_during_rerun: list[bool] = []
+
+        async def post(server_name: str, url_path: str, json, **kwargs) -> FakeResponse:
+            if url_path == "/aggregate_metrics":
+                return FakeResponse(
+                    200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump()
+                )
+            if server_name == "beta_environment_server":
+                return FakeResponse(200, {"response": {}, "reward": 0.0})
+            if not resumed["now"]:
+                return FakeResponse(200, next(first_job_replies))
+            alpha_file_during_rerun.append((complete_dir / "alpha.json").exists())
+            return FakeResponse(200, {"response": {}, "reward": 0.0})
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post), agent_names=("alpha", "beta"))
+
+        for resume in (False, True):
+            resumed["now"] = resume
+            await RolloutCollectionHelper().run_from_config(
+                RolloutCollectionConfig(
+                    input_jsonl_fpath=str(input_fpath),
+                    output_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
+                    disable_health_check=True,
+                    resume_from_cache=resume,
+                    allow_unsafe_resume=resume,
+                )
+            )
+
+        assert alpha_file_during_rerun == [False]
+        alpha = orjson.loads((complete_dir / "alpha.json").read_bytes())
+        assert (alpha["expected_rollouts"], alpha["completed_rollouts"]) == (2, 2)
+        assert alpha["aggregate"]["key_metrics"]["mean/reward"] == 0.5
+        run_aggregate = {
+            entry[AGENT_REF_KEY_NAME]["name"]: entry
+            for entry in orjson.loads((tmp_path / "rollouts_aggregate_metrics.json").read_bytes())
+        }
+        assert alpha["aggregate"] == run_aggregate["alpha"]
+
     @pytest.mark.parametrize(
         "resume_from_cache, existing_rollouts",
         [(False, True), (True, True), (True, False)],

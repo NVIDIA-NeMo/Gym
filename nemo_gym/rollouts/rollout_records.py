@@ -870,6 +870,18 @@ class RolloutRecords:
             and self.disposition(identity) == "success"
         }
 
+    def masked_retryable(self, identity: str) -> bool:
+        """Whether this rollout's selected success is masked by infrastructure and still within its attempt cap.
+
+        A resume runs such a rollout again and a later attempt supersedes it, so it is selected but not complete.
+        """
+        return (
+            self.disposition(identity) == "success"
+            and self.payloads[(identity, self.latest[identity])].masked_infrastructure
+            and self._retryable(identity)
+            and self.failure_count(identity) < self.attempt_cap
+        )
+
     def failure_count(self, identity: str) -> int:
         return self.attempt_counts[identity] + (
             self.overridden_terminal_counts[identity] if self.retry_terminal_timeouts else 0
@@ -984,13 +996,7 @@ class RolloutRecords:
             not self._retryable(identity) or self.failure_count(identity) >= max_attempts for identity, _ in failures
         )
         # Masked by infrastructure and still within its attempt cap: a resume runs it again, so it is not complete.
-        masked_retryable = sum(
-            self.payloads[(identity, self.latest[identity])].masked_infrastructure
-            and self._retryable(identity)
-            and self.failure_count(identity) < max_attempts
-            for identity in self.expected
-            if self.disposition(identity) == "success"
-        )
+        masked_retryable = sum(self.masked_retryable(identity) for identity in self.expected)
         settled = counts["success"] - masked_retryable + final_zeros
         return {
             "schema_version": 2,
