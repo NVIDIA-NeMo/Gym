@@ -172,16 +172,21 @@ not list this agent yet, so start its servers with `--allow-unsupported-pairing`
   outside `workdir`.
 - **Time limit and stop.** The run's limit is `sandbox_runner_timeout_seconds`, or a task's shorter
   `metadata.agent_timeout_sec`. At the limit Gym's process supervisor stops the runner, which reports the messages
-  finished so far: the response is `incomplete` with `metadata.stop_reason: wall_time`, and it is still verified. A
-  rollout stop (`POST /rollouts/<id>/stop`) ends the run the same way and adds `ng_rollout_stop`; while the graph
+  finished so far: the response is `incomplete` with `metadata.stop_reason: wall_time`, and it is still verified. If
+  no model reply had arrived by then, the Model Server never answered: the response is `failed` with
+  `model_transport_error`, which the Environment Server retries. The runner writes its report before it waits for
+  any tool thread, and a stop during its startup still leaves an empty report. A
+  rollout stop (`POST /rollouts/<id>/stop`) ends the run as at the limit and adds `ng_rollout_stop`; while the graph
   runs, it needs a provider whose uploads never wait for running commands (Local, or OpenSandbox with background
-  exec). Reaching deepagents' step limit also returns `incomplete`, with `stop_reason: max_iterations`.
+  exec). A stop that the supervisor's receipt does not show as the limit, such as a task command `pkill python3`
+  that reaches the runner, ends the run `failed` with `agent_run_error`. Reaching deepagents' step limit also
+  returns `incomplete`, with `stop_reason: max_iterations`.
 - **Activation** runs the graph once per session. An identical retry joins that run, and a different request or a
   request for another rollout answers 409. A client that disconnects does not cancel the run.
 - **Close** stops the graph through the supervisor, then disconnects from a borrowed sandbox without stopping it:
   the resources server that lent it stops it after `/verify`. The observation bundle has a `sandbox` record whose
-  outcome says how the run ended (`completed`, `failed`, `timeout` or `cancelled`), and the same two gaps as the
-  in-process agent.
+  outcome says how the run ended (`completed`, `failed`, `timeout` or `cancelled`; `oom` or `unknown` for a run that
+  left no report after it launched), and the same two gaps as the in-process agent.
 - **Usage** is the sum over the run's model calls when every call returned usage; otherwise it is unknown.
 
 ## Tool ownership: agent vs. resources server

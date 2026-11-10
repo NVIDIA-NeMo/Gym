@@ -8,6 +8,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -324,3 +325,58 @@ async def test_success_body_interruption_keeps_usage_unknown_after_recovery(monk
         )
     assert model.calls == 2
     assert model.usages == [USAGE, USAGE]
+
+
+def test_a_runner_stopped_before_its_graph_starts_reports_an_empty_stop(workdir, monkeypatch):
+    model = ModelServer([[text("never")]])
+    session = workdir.parent / "session"
+    input_path, output_path = session / "input.json", session / "output.json"
+    input_path.write_text(json.dumps(_payload(model, workdir)))
+    # As if SIGTERM arrived while the runner was still importing deepagents.
+    monkeypatch.setattr(sandbox_runner, "_terminated_before_start", True)
+    try:
+        sandbox_runner.main(str(input_path), str(output_path))
+    finally:
+        model.close()
+
+    output = json.loads(output_path.read_text())
+    assert (output["status"], output["stop_reason"], output["messages"]) == ("incomplete", "wall_time", [])
+    assert (output["model_calls"], model.requests) == (0, [])
+
+
+def test_a_sigterm_while_the_runner_starts_still_leaves_a_report(workdir):
+    model = ModelServer([None])
+    session = workdir.parent / "session"
+    input_path, output_path = session / "input.json", session / "output.json"
+    input_path.write_text(json.dumps(_payload(model, workdir)))
+    process = subprocess.Popen([sys.executable, sandbox_runner.__file__, str(input_path), str(output_path)])
+    try:
+        # Usually still importing deepagents; a later signal must leave a report too.
+        time.sleep(0.5)
+        process.send_signal(signal.SIGTERM)
+        assert process.wait(60) == 0
+    finally:
+        if process.poll() is None:
+            process.kill()
+        model.close()
+
+    output = json.loads(output_path.read_text())
+    assert (output["status"], output["stop_reason"]) == ("incomplete", "wall_time")
+
+
+def test_the_report_is_written_without_waiting_for_file_tool_threads(workdir, monkeypatch):
+    async def run_leaving_a_thread(payload: dict, scratch: Path) -> dict:
+        # deepagents runs file tools in threads that its own timeouts do not stop.
+        asyncio.get_running_loop().run_in_executor(None, time.sleep, 5)
+        return {"status": "completed", "stop_reason": None, "model_error": None, "messages": []}
+
+    monkeypatch.setattr(sandbox_runner, "run", run_leaving_a_thread)
+    session = workdir.parent / "session"
+    input_path, output_path = session / "input.json", session / "output.json"
+    input_path.write_text(json.dumps({"stop_request_path": str(session / "stop.request")}))
+
+    started = time.monotonic()
+    sandbox_runner.main(str(input_path), str(output_path))
+
+    assert time.monotonic() - started < 3
+    assert json.loads(output_path.read_text())["status"] == "completed"

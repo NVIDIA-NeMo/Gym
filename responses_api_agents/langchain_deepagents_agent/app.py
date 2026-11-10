@@ -51,6 +51,7 @@ from nemo_gym.agents import (
 )
 from nemo_gym.config import get_global_config_dict
 from nemo_gym.core import (
+    AGENT_RUN_ERROR,
     MODEL_CONTEXT_LIMIT,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
@@ -235,6 +236,40 @@ def _final_model_refusal(error: ClientResponseError) -> bool:
         return False
     report = FailureHeader.decode(error.headers)
     return report is None or not report.omitted
+
+
+def _settle_wall_time(output: dict[str, Any], *, deadline_reached: bool, rollout_stopped: bool) -> None:
+    """Keep the runner's `wall_time` stop only when it is the run's deadline and some model reply had arrived.
+
+    The runner takes any SIGTERM without a close request for its deadline. When the supervisor's receipt shows no
+    timeout, a task command (such as `pkill python3`) stopped the harness, so the run failed. A deadline before any
+    model reply means the Model Server never answered, so the run is a transport failure, which the outcome policy
+    retries, not the model's empty answer; a rollout stop stays a graded stop. Updates the runner's report in place,
+    so the close record agrees.
+    """
+    if output.get("stop_reason") != "wall_time":
+        return
+    if not deadline_reached:
+        output.update(
+            status="failed",
+            stop_reason=None,
+            run_error="The DeepAgents runner was stopped by a signal that was not its deadline",
+            harness_terminated=True,
+        )
+    elif not rollout_stopped and not output.get("usages"):
+        output.update(
+            status="failed",
+            stop_reason=None,
+            model_error="No Model Server reply arrived before the run's deadline",
+            model_transport_error=True,
+        )
+
+
+def _unreported_outcome(session: SandboxSession) -> str:
+    """How a run that left no report ended: it never started, the provider killed the sandbox, or it is unknown."""
+    if not session.launch_started:
+        return "cancelled"
+    return "oom" if session.execution_oom is not None else "unknown"
 
 
 def _model_error_type(output: Mapping[str, Any]) -> Optional[str]:
@@ -442,8 +477,7 @@ class DeepAgentsAgent(SimpleAgent):
             role="agent",
             provider=state.sandbox_provider,
             sandbox_id=state.sandbox_id,
-            # A session closed before its run reported anything was cancelled.
-            outcome=_SANDBOX_OUTCOMES.get(ending, "unknown") if output else "cancelled",
+            outcome=_SANDBOX_OUTCOMES.get(ending, "unknown") if output else _unreported_outcome(state.session),
             error_type=_model_error_type(output),
         )
         return AgentObservationBundle(
@@ -459,7 +493,8 @@ class DeepAgentsAgent(SimpleAgent):
         )
 
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
-        """The Model Server's HTTP status, or a transport failure, that ended the run, as the runner reported it."""
+        """What ended the run, as the runner reported it: the Model Server's HTTP status, a transport failure, or a
+        signal that stopped the runner before its deadline."""
         if native_result.get("model_context_limit"):
             return AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT)
         status = native_result.get("model_error_status")
@@ -467,6 +502,8 @@ class DeepAgentsAgent(SimpleAgent):
             return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
         if native_result.get("model_transport_error"):
             return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
+        if native_result.get("harness_terminated"):
+            return AgentOutcome(failure_kind=AGENT_RUN_ERROR)
         return super().classify_outcome(native_result)
 
     async def _run_in_sandbox(
@@ -506,6 +543,8 @@ class DeepAgentsAgent(SimpleAgent):
                 timeout=resolve_agent_timeout(body.metadata, ceiling=self.config.sandbox_runner_timeout_seconds),
                 close_timeout=self.config.session_close_timeout_seconds,
             )
+            cleanup = state.session.cleanup
+            deadline_reached = bool(cleanup and cleanup["timed_out"])
         except TimeoutError as failure:
             # The runner normally stops at the deadline and writes its partial report. If the supervisor overran
             # too, the episode is still a timeout when that report is there, and an infrastructure failure when not.
@@ -522,6 +561,9 @@ class DeepAgentsAgent(SimpleAgent):
             )
             state.provider_wait_failure.__cause__ = failure
             observe_failure(state.provider_wait_failure)
+            deadline_reached = True
+        _settle_wall_time(output, deadline_reached=deadline_reached, rollout_stopped=state.session.expired)
+        error = output["model_error"] or output.get("run_error")
         response = to_responses(messages_from_dict(output["messages"]), self.config.model_server.name)
         response.update(
             id=f"deepagents-{capture_key}",
@@ -529,7 +571,7 @@ class DeepAgentsAgent(SimpleAgent):
             status=output["status"],
             usage=_usage(output),
             metadata={"stop_reason": output["stop_reason"]} if output["stop_reason"] else None,
-            error={"code": "server_error", "message": output["model_error"]} if output["model_error"] else None,
+            error={"code": "server_error", "message": error} if error else None,
         )
         response = self.report_rollout_stop(NeMoGymResponse.model_validate(response), state.session)
         return self.report_outcome(response, output)

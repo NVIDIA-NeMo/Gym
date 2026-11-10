@@ -29,6 +29,8 @@ SANDBOX_PYTHON = RUNTIME.python
 _PACKAGE_DIR = f"{RUNTIME.directory}/harness/responses_api_agents/langchain_deepagents_agent"
 # The runner and the module it imports; the rest of this package needs Gym, which the sandbox lacks.
 HARNESS_FILES = ("responses_chat_model.py", "sandbox_runner.py")
+# The tail of the runner's output log, or of its error, kept in a failure's message.
+_MAX_ERROR_CHARS = 4000
 
 
 @dataclass
@@ -83,14 +85,15 @@ class DeepAgentsSandboxSession(AgentSessionState):
             try:
                 return json.loads(await read_text(self.session.sandbox, path=output_path))
             except Exception as error:
-                logs = await self.session.read_output_log()
+                logs = (await self.session.read_output_log())[-_MAX_ERROR_CHARS:]
                 raise RuntimeError(f"DeepAgents sandbox runner exited without output: {logs}") from error
 
         output = await self.session.execute(
             stage_activation=stage, collect=collect, timeout=timeout, close_timeout=close_timeout
         )
         if output.get("traceback") is not None:
-            raise RuntimeError(f"DeepAgents sandbox runner failed: {output['error']}\n{output['traceback']}")
+            error, trace = str(output.get("error"))[:_MAX_ERROR_CHARS], str(output["traceback"])[-_MAX_ERROR_CHARS:]
+            raise RuntimeError(f"DeepAgents sandbox runner failed: {error}\n{trace}")
         return output
 
     async def close(self, timeout: float) -> None:
