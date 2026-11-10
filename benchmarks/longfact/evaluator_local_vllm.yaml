@@ -17,11 +17,11 @@ longfact_evaluator_model:
         enable_thinking: false
       extra_body:
         top_k: ${oc.env:LONGFACT_QWEN_JUDGE_TOP_K,20}
-        presence_penalty: ${oc.env:LONGFACT_QWEN_JUDGE_PRESENCE_PENALTY,1.5}
       # Pinned on this server rather than in the resources server's request params, so an
       # evaluator overlay for another endpoint does not inherit them.
       sampling_overrides:
-        temperature: ${oc.decode:${oc.env:LONGFACT_QWEN_JUDGE_TEMPERATURE,0.7}}
+        # SAFE's pinned eval/safe/config.py uses model_temp = 0.1.
+        temperature: ${oc.decode:${oc.env:LONGFACT_QWEN_JUDGE_TEMPERATURE,0.1}}
         top_p: ${oc.decode:${oc.env:LONGFACT_QWEN_JUDGE_TOP_P,0.8}}
       default_headers: {}
 

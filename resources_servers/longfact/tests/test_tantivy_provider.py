@@ -7,7 +7,7 @@ from contextlib import closing
 import pytest
 import tantivy
 
-from resources_servers.longfact.tantivy_provider import TantivyProvider
+from resources_servers.longfact.tantivy_provider import TantivyProvider, TantivyProviderError
 
 
 @pytest.fixture
@@ -90,6 +90,58 @@ async def test_search_matches_text_and_url_and_preserves_stored_display_fields(t
     assert [(item.title, item.url, item.snippet) for item in evidence] == [
         ("Stored Grace title", "https://index.example.test/displayoverride", "Grace wrote a compiler.")
     ]
+
+
+@pytest.mark.parametrize("missing_docids", [("1",), ("1", "2")])
+def test_startup_probe_rejects_partly_or_fully_mismatched_corpus(tantivy_index_and_corpus, missing_docids):
+    index_dir, corpus_path = tantivy_index_and_corpus
+    with closing(sqlite3.connect(corpus_path)) as corpus:
+        corpus.executemany("DELETE FROM corpus WHERE docid = ?", [(docid,) for docid in missing_docids])
+        corpus.commit()
+
+    with pytest.raises(TantivyProviderError, match="startup hydration probe failed.*no corpus rows"):
+        TantivyProvider(
+            index_dir=str(index_dir),
+            corpus_db_path=str(corpus_path),
+            max_results=1,
+            candidate_pool=2,
+            max_result_chars=1000,
+        )
+
+
+@pytest.mark.parametrize("missing_docids", [("1",), ("2",), ("1", "2")])
+@pytest.mark.asyncio
+async def test_search_rejects_any_missing_corpus_row_even_beyond_result_limit(
+    tantivy_index_and_corpus, missing_docids
+):
+    index_dir, corpus_path = tantivy_index_and_corpus
+    provider = TantivyProvider(
+        index_dir=str(index_dir),
+        corpus_db_path=str(corpus_path),
+        max_results=1,
+        candidate_pool=2,
+        max_result_chars=1000,
+    )
+    with closing(sqlite3.connect(corpus_path)) as corpus:
+        corpus.executemany("DELETE FROM corpus WHERE docid = ?", [(docid,) for docid in missing_docids])
+        corpus.commit()
+
+    with pytest.raises(TantivyProviderError, match="Tantivy search failed.*no corpus rows"):
+        await provider.search("Ada OR Grace")
+
+
+@pytest.mark.asyncio
+async def test_no_matching_index_hits_is_a_valid_empty_search(tantivy_index_and_corpus):
+    index_dir, corpus_path = tantivy_index_and_corpus
+    provider = TantivyProvider(
+        index_dir=str(index_dir),
+        corpus_db_path=str(corpus_path),
+        max_results=2,
+        candidate_pool=2,
+        max_result_chars=1000,
+    )
+
+    assert await provider.search("unmatchedkeyword") == []
 
 
 def test_document_value_normalizes_tantivy_scalar_and_list_fields():

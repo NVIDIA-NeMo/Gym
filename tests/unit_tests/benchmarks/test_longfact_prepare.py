@@ -23,9 +23,10 @@ from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDi
 from nemo_gym.data.task_materialization import materialize_task
 
 
-@pytest.mark.parametrize("pairing", ["native", "gymnasium"])
+@pytest.mark.parametrize("hosted_card", [False, True])
 @pytest.mark.parametrize("benchmark", [False, True])
-def test_published_configs_resolve_example_data_and_hosted_judge(monkeypatch, pairing, benchmark):
+@pytest.mark.parametrize("milvus", [False, True])
+def test_published_configs_resolve_example_data_and_judge(monkeypatch, hosted_card, benchmark, milvus):
     root = Path(__file__).resolve().parents[3]
     for key in tuple(os.environ):
         if key.startswith("LONGFACT_"):
@@ -39,24 +40,25 @@ def test_published_configs_resolve_example_data_and_hosted_judge(monkeypatch, pa
         "TAVILY_API_KEY": "offline-placeholder",
     }.items():
         monkeypatch.setenv(key, value)
-    if benchmark:
-        selected = "benchmarks/longfact/config.yaml" if pairing == "native" else "benchmarks/longfact/gymnasium.yaml"
-    else:
-        selected = (
-            "resources_servers/longfact/configs/longfact_single_agent_turn.yaml"
-            if pairing == "native"
-            else "resources_servers/longfact/configs/longfact.yaml"
+    selected = (
+        "benchmarks/longfact/config.yaml"
+        if benchmark
+        else "resources_servers/longfact/configs/longfact_single_agent_turn.yaml"
+    )
+    config_paths = [str(root / selected), str(root / "benchmarks/longfact/evaluator_local_vllm.yaml")]
+    if hosted_card:
+        config_paths.extend(
+            str(root / path)
+            for path in ("benchmarks/longfact/evaluator_openai.yaml", "benchmarks/longfact/gpt5_card.yaml")
         )
+    if milvus:
+        config_paths.append(str(root / "benchmarks/longfact/milvus.yaml"))
+    config_paths.append(str(root / "responses_api_models/openai_model/configs/openai_model.yaml"))
     resolved = GlobalConfigDictParser().parse(
         GlobalConfigDictParserConfig(
             initial_global_config_dict=OmegaConf.create(
                 {
-                    "config_paths": [
-                        str(root / selected),
-                        str(root / "benchmarks/longfact/evaluator_openai.yaml"),
-                        str(root / "benchmarks/longfact/gpt5_card.yaml"),
-                        str(root / "responses_api_models/openai_model/configs/openai_model.yaml"),
-                    ],
+                    "config_paths": config_paths,
                     "policy_base_url": "https://offline.invalid/v1",
                     "policy_api_key": "offline-placeholder",
                     "policy_model_name": "offline-policy",
@@ -68,10 +70,9 @@ def test_published_configs_resolve_example_data_and_hosted_judge(monkeypatch, pa
             skip_exporters=True,
         )
     )
-    agent_type = "simple_agent" if pairing == "native" else "gymnasium_agent"
     prefix = "longfact_longfact" if benchmark else "longfact"
-    agent_name = f"{prefix}_{agent_type}"
-    agent = resolved[agent_name]["responses_api_agents"][agent_type]
+    agent_name = f"{prefix}_simple_agent"
+    agent = resolved[agent_name]["responses_api_agents"]["simple_agent"]
     [dataset] = agent["datasets"]
     dataset = OmegaConf.to_container(dataset, resolve=True)
     if benchmark:
@@ -87,14 +88,27 @@ def test_published_configs_resolve_example_data_and_hosted_judge(monkeypatch, pa
     assert agent["model_server"]["name"] == "policy_model"
     assert agent["resources_server"]["name"] == (f"{prefix}_resources_server" if benchmark else "longfact")
     resources = resolved[agent["resources_server"]["name"]]["resources_servers"]["longfact"]
-    assert resources["evaluator_model_server"]["name"] == "longfact_openai_evaluator_model"
-    assert resources["fact_check_mode"] == "gpt5_card_batch"
-    assert (
-        resolved["longfact_openai_evaluator_model"]["responses_api_models"]["openai_model"]["openai_model"]
-        == "offline-o3"
-    )
-    environment_type = "single_agent_turn_legacy" if pairing == "native" else "legacy_agent"
-    environment = resolved[f"{prefix}_environment_server"]["environment_servers"][environment_type]
+    if hosted_card:
+        assert resources["evaluator_model_server"]["name"] == "longfact_openai_evaluator_model"
+        assert resources["fact_check_mode"] == "gpt5_card_batch"
+        assert resources["claim_extraction_prompt"] == "claim_listing_v1"
+        assert (
+            resolved["longfact_openai_evaluator_model"]["responses_api_models"]["openai_model"]["openai_model"]
+            == "offline-o3"
+        )
+    else:
+        assert resources["evaluator_model_server"]["name"] == "longfact_evaluator_model"
+        assert resources["claim_extraction_prompt"] == "safe_v1"
+        judge = resolved["longfact_evaluator_model"]["responses_api_models"]["vllm_model"]
+        assert judge["sampling_overrides"]["temperature"] == 0.1
+        assert "presence_penalty" not in judge["extra_body"]
+    if milvus:
+        assert resources["search_backend"] == "milvus"
+        assert resolved["component_extras"]["resources_servers/longfact"] == ["milvus"]
+    else:
+        assert resources["search_backend"] == "tavily"
+        assert not resolved.get("component_extras", {}).get("resources_servers/longfact")
+    environment = resolved[f"{prefix}_environment_server"]["environment_servers"]["single_agent_turn_legacy"]
     assert environment["agent_server"]["name"] == agent_name
 
 
@@ -109,13 +123,17 @@ def test_topic_order_matches_case_sensitive_source_file_sort():
 
 
 def test_parse_rows_requires_thirty_valid_prompts():
-    payload = b"".join(json.dumps({"prompt": f"prompt {index}"}).encode() + b"\n" for index in range(30))
-    assert len(_parse_rows(payload, "fixture.jsonl")) == 30
+    source_rows = [{"prompt": f"prompt {index}", "canary": f"fixture canary {index}"} for index in range(30)]
+    payload = b"".join(json.dumps(row).encode() + b"\n" for row in source_rows)
+    assert _parse_rows(payload, "fixture.jsonl") == source_rows
     with pytest.raises(ValueError, match="Expected 30"):
         _parse_rows(
-            b"".join(json.dumps({"prompt": f"prompt {index}"}).encode() + b"\n" for index in range(29)),
+            b"".join(json.dumps(row).encode() + b"\n" for row in source_rows[:29]),
             "fixture.jsonl",
         )
+    source_rows[0].pop("canary")
+    with pytest.raises(ValueError, match="upstream canary"):
+        _parse_rows(b"".join(json.dumps(row).encode() + b"\n" for row in source_rows), "fixture.jsonl")
 
 
 def test_build_rows_preserves_subset_topic_and_row_order(tmp_path, monkeypatch):
@@ -127,7 +145,10 @@ def test_build_rows_preserves_subset_topic_and_row_order(tmp_path, monkeypatch):
         path = tmp_path / "longfact" / "concepts"
         path.mkdir(parents=True, exist_ok=True)
         (path / f"longfact-concepts_{topic}.jsonl").write_text(
-            "".join(json.dumps({"prompt": f"{topic} {index}"}) + "\n" for index in range(30)),
+            "".join(
+                json.dumps({"prompt": f"{topic} {index}", "canary": f"fixture canary {topic} {index}"}) + "\n"
+                for index in range(30)
+            ),
             encoding="utf-8",
         )
 
@@ -138,6 +159,9 @@ def test_build_rows_preserves_subset_topic_and_row_order(tmp_path, monkeypatch):
     assert rows[30]["id"] == "longfact-concepts-beta-00"
     assert all(row["benchmark_variant"] == BENCHMARK_VARIANT for row in rows)
     assert all(row["task_id"] == row["id"] for row in rows)
+    assert [row["canary"] for row in rows] == [
+        f"fixture canary {topic} {index}" for topic in ("alpha", "beta") for index in range(30)
+    ]
     original = [materialize_task(row, taskset="longfact") for row in rows]
     reordered = [materialize_task(row, taskset="longfact") for row in reversed(rows)]
     assert {task["task_id"]["task_id"] for task in original} == {row["id"] for row in rows}
@@ -175,14 +199,19 @@ def test_preparation_worker_writes_under_the_callers_directory(tmp_path, monkeyp
         directory = source_dir / "longfact" / "concepts"
         directory.mkdir(parents=True, exist_ok=True)
         (directory / f"longfact-concepts_{topic}.jsonl").write_text(
-            "".join(json.dumps({"prompt": f"{topic} {index}"}) + "\n" for index in range(30)),
+            "".join(
+                json.dumps({"prompt": f"{topic} {index}", "canary": f"fixture canary {topic} {index}"}) + "\n"
+                for index in range(30)
+            ),
             encoding="utf-8",
         )
     working = tmp_path / "working"
     working.mkdir()
     monkeypatch.chdir(working)
+    monkeypatch.setenv("LONGFACT_SAMPLE_SIZE", "1")
+    monkeypatch.setenv("LONGFACT_SAMPLE_SEED", "unexpected")
     output = Path("custom/output.jsonl" if custom_output else "benchmarks/longfact/data/longfact_benchmark.jsonl")
-    args = {"source_dir": source_dir, "sample_size": 0}
+    args = {"source_dir": source_dir}
     if custom_output:
         args["output_fpath"] = output
     benchmark = SimpleNamespace(name="longfact", dataset=SimpleNamespace(jsonl_fpath=output))
@@ -197,6 +226,9 @@ def test_preparation_worker_writes_under_the_callers_directory(tmp_path, monkeyp
     assert [row["id"] for row in rows[:2]] == ["longfact-concepts-alpha-00", "longfact-concepts-alpha-01"]
     assert rows[30]["id"] == "longfact-concepts-beta-00"
     assert all(row["task_id"] == row["id"] for row in rows)
+    assert [row["canary"] for row in rows] == [
+        f"fixture canary {topic} {index}" for topic in ("alpha", "beta") for index in range(30)
+    ]
     assert [row["prompt"] for row in rows] == [
         f"{topic} {index}" for topic in ("alpha", "beta") for index in range(30)
     ]

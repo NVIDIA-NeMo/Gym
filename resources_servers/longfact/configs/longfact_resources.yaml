@@ -14,8 +14,8 @@ longfact:
       evaluator_responses_create_params:
         input: []
       # Version the extraction prompt so resumed runs never silently mix
-      # claim definitions. Legacy remains the compatibility default.
-      claim_extraction_prompt: ${oc.env:LONGFACT_CLAIM_EXTRACTION_PROMPT,legacy_v1}
+      # claim definitions. SAFE-style extraction is the default.
+      claim_extraction_prompt: ${oc.env:LONGFACT_CLAIM_EXTRACTION_PROMPT,safe_v1}
       # Distinguish explicit contradictions from insufficient evidence by
       # default; binary mode remains available for historical comparisons.
       claim_verdict_mode: ${oc.env:LONGFACT_CLAIM_VERDICT_MODE,three_way}

@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Select Milvus retrieval and install its optional component dependencies.
+# Add after the benchmark config; connection settings come from LONGFACT_MILVUS_*.
+component_extras:
+  resources_servers/longfact: [milvus]
+
+longfact:
+  resources_servers:
+    longfact:
+      search_backend: milvus

@@ -12,10 +12,21 @@ or `LONGFACT_SEARCH_BACKEND=milvus` for retrieval from a compatible vector
 collection. Backend endpoints and credentials must be supplied at runtime.
 
 The primary benchmark pairs `simple_agent` with the standard one-turn
-environment server and stateless `/verify` endpoint. Verification returns the
-saved policy response, reward and claim diagnostics together with the native
-grading observations. `benchmarks/longfact/gymnasium.yaml` retains the original
-`gymnasium_agent` pairing and `/reset` plus `/step` protocol.
+environment server and stateless Resources Server `/verify` endpoint.
+Verification returns the saved policy response, reward and claim diagnostics
+together with the grading observations.
+
+This server and its held-out prompts are for evaluation only. Like upstream
+SAFE, scoring does not deduplicate extracted claims; repeated claims can
+inflate F1@100 when extracted more than once, making this reward unsuitable
+for RL training. Prepared and vendored prompts retain their upstream canary
+and must not enter training corpora.
+
+For Milvus, add `'+config_paths=[benchmarks/longfact/milvus.yaml]'` to select
+the backend and install its optional dependencies through
+`component_extras: {resources_servers/longfact: [milvus]}`. The default Tantivy
+and Tavily configurations do not install that extra. See the
+[benchmark guide](../../benchmarks/longfact/README.md#milvus) for backend setup.
 
 Its reward and aggregate metric use LongFact SAFE's F1@100 calculation. This
 is not the official SAFE implementation: SAFE used Serper/Google Search and

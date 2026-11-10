@@ -60,6 +60,25 @@ def test_free_form_json_parser_repairs_invalid_latex_escape():
     assert parsed.search_query == r"pressure \alpha relation"
 
 
+@pytest.mark.parametrize("command", [r"\frac{1}{2}", r"\upsilon", r"\underline{x}", r"\nu", r"\theta", r"\beta"])
+def test_free_form_json_parser_preserves_latex_control_words(command):
+    parsed = JsonEvaluator._parse_json(
+        SearchDecision,
+        '{"reasoning":"Find the equation","search_query":"' + command + '"}',
+    )
+
+    assert parsed.search_query == command
+
+
+def test_escape_repair_preserves_valid_json_escapes_and_literal_backslashes():
+    payload = r'{"reasoning":"Quoted \"text\" and slash \/","search_query":"line\nnext, tab\ttext, Greek \u03b1, literal \\frac{1}{2}, \\upsilon"}'
+
+    parsed = JsonEvaluator._parse_json(SearchDecision, payload)
+
+    assert parsed.search_query == "line\nnext, tab\ttext, Greek α, literal \\frac{1}{2}, \\upsilon"
+    assert parsed.reasoning == 'Quoted "text" and slash /'
+
+
 def test_free_form_json_parser_rejects_unfenced_commentary():
     with pytest.raises(ValueError, match="parseable JSON"):
         JsonEvaluator._parse_json(
@@ -412,6 +431,8 @@ def _retrieval_failure_server(mode, error_type):
     judge = JudgeTransport()
     server.server_client = judge
     server.config.fact_check_mode = mode
+    if mode == "gpt5_card_batch":
+        server.config.claim_extraction_prompt = "claim_listing_v1"
     server._evaluator = JsonEvaluator(
         server_client=judge,
         model_server=server.config.evaluator_model_server,
@@ -461,13 +482,6 @@ def test_known_retrieval_failure_recovers_the_saved_answer_without_policy_genera
             assert failed["failure_kind"] == failed["_ng_failure_class"] == "judge_failed"
             assert failed["response"] == body["response"]
             assert failed["source_provenance"] == body["source_provenance"]
-            reset = await client.post("/reset", json={key: value for key, value in body.items() if key != "response"})
-            assert reset.status_code == 200
-            legacy_step = await client.post("/step", json=body)
-            assert legacy_step.status_code == 500
-            close = await client.post("/close", json={})
-            assert close.status_code == 200
-
             source = {key: value for key, value in body.items() if key != "response"}
             source |= {"_ng_task_index": 0, "_ng_rollout_index": 0, "agent_ref": {"name": "agent"}}
             settled_input = source | {"_ng_task_index": 1, "id": "settled-task", "task_id": "settled-task"}

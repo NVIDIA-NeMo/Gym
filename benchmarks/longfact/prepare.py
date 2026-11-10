@@ -3,15 +3,14 @@
 
 """Materialize the checksum-recorded LongFact prompt suite.
 
-LongFact data is not vendored: the upstream prompt files carry a benchmark
-canary and are fetched only when a user explicitly prepares this benchmark.
+Preparation fetches the full upstream suite and preserves its benchmark canary.
+The example and hard-200 subsets are vendored with the same canary and provenance.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-import os
 import random
 from pathlib import Path
 from urllib.request import Request, urlopen
@@ -90,6 +89,8 @@ def _parse_rows(payload: bytes, path: str) -> list[dict]:
         raise ValueError(f"Expected 30 LongFact prompts in {path}, received {len(rows)}")
     if not all(isinstance(row, dict) and isinstance(row.get("prompt"), str) and row["prompt"].strip() for row in rows):
         raise ValueError(f"Every LongFact row in {path} must contain a non-empty prompt")
+    if not all(isinstance(row.get("canary"), str) and row["canary"].strip() for row in rows):
+        raise ValueError(f"Every LongFact row in {path} must contain its upstream canary")
     return rows
 
 
@@ -101,6 +102,7 @@ def _format_row(
     source_sha256: str,
     source_index: int,
     prompt: str,
+    canary: str,
 ) -> dict:
     prompt = prompt.strip()
     return {
@@ -110,6 +112,7 @@ def _format_row(
         "subset": subset,
         "topic": topic,
         "prompt": prompt,
+        "canary": canary,
         "source_provenance": {
             "repository": UPSTREAM_REPOSITORY,
             "commit": UPSTREAM_COMMIT,
@@ -139,6 +142,7 @@ def build_rows(source_dir: str | Path | None = None) -> list[dict]:
                         source_sha256=digest,
                         source_index=index,
                         prompt=row["prompt"],
+                        canary=row["canary"],
                     )
                 )
     return output
@@ -156,13 +160,9 @@ def select_rows(rows: list[dict], sample_size: int, sample_seed: int) -> list[di
 def prepare(
     source_dir: str | Path | None = None,
     output_fpath: str | Path = OUTPUT_FPATH,
-    sample_size: int | None = None,
-    sample_seed: int | None = None,
+    sample_size: int = 0,
+    sample_seed: int = 42,
 ) -> Path:
-    if sample_size is None:
-        sample_size = int(os.environ.get("LONGFACT_SAMPLE_SIZE", "0"))
-    if sample_seed is None:
-        sample_seed = int(os.environ.get("LONGFACT_SAMPLE_SEED", "42"))
     rows = select_rows(build_rows(source_dir), sample_size, sample_seed)
     output = Path(output_fpath)
     output.parent.mkdir(parents=True, exist_ok=True)

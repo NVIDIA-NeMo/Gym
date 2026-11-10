@@ -226,7 +226,7 @@ def test_browse_off_sentences_follow_the_card():
     assert BROWSE_OFF_FACT_CHECK in check.split("### Connection of claims")[0]
     assert "did not have access to the web" not in plain
     with pytest.raises(ValueError, match="claim_listing_v1"):
-        build_claim_extraction_request("legacy_v1", "P", "R", browse_off=True)
+        build_claim_extraction_request("safe_v1", "P", "R", browse_off=True)
 
 
 def test_card_mode_requires_three_way_verdicts():
@@ -240,10 +240,36 @@ def test_card_mode_requires_three_way_verdicts():
         search_backend="tavily",
         tavily_api_key="unused",
         fact_check_mode="gpt5_card_batch",
+        claim_extraction_prompt="claim_listing_v1",
         claim_verdict_mode="binary",
     )
 
     with pytest.raises(ValueError, match="three_way"):
+        LongFactSafeServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"browse_off_instructions": True},
+        {"fact_check_mode": "gpt5_card_batch"},
+    ],
+)
+def test_question_aware_modes_reject_safe_extraction_at_startup(options):
+    config = LongFactConfig(
+        host="",
+        port=0,
+        entrypoint="",
+        name="longfact",
+        evaluator_model_server={"type": "responses_api_models", "name": "judge"},
+        evaluator_responses_create_params={"input": []},
+        search_backend="tavily",
+        tavily_api_key="unused",
+        claim_extraction_prompt="safe_v1",
+        **options,
+    )
+
+    with pytest.raises(ValueError, match="claim_extraction_prompt=claim_listing_v1"):
         LongFactSafeServer(config=config, server_client=MagicMock(spec=ServerClient))
 
 

@@ -22,6 +22,8 @@ under [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/). The pinned
 [upstream license statement](https://github.com/google-deepmind/long-form-factuality/blob/9d27158d198ced0a9d8271a80147cae580614601/README.md#license-and-disclaimer)
 distinguishes the prompt materials from its Apache-2.0 software. Preparation
 adds NeMo Gym fields; the hard-200 set also selects and reorders prompts.
+Prepared and vendored rows retain the upstream training-contamination canary.
+These prompts are held out for evaluation and must not enter training corpora.
 
 The `longfact` dataset contains all 2,280 upstream prompts. It is downloaded
 from a pinned upstream commit by the preparation script:
@@ -30,8 +32,8 @@ from a pinned upstream commit by the preparation script:
 gym eval prepare --benchmark longfact
 ```
 
-The `longfact_hard200` dataset is checked in at
-`benchmarks/longfact/data/hard200.jsonl`. It contains 100 Objects and 100
+The stress set is checked in at `benchmarks/longfact/data/hard200.jsonl`.
+It contains 100 Objects and 100
 Concepts prompts selected using contradiction counts from an earlier model
 evaluation. The selection manifest and provenance are in the same directory.
 Use this dataset when a stable 200-prompt stress test is desired.
@@ -40,10 +42,8 @@ Use this dataset when a stable 200-prompt stress test is desired.
 
 `manifest.yaml` declares the primary `simple_agent` and
 `single_agent_turn_legacy` environment pairing, with prepared prompts. The
-environment runs one policy turn and calls the native resources `/verify`
-endpoint. `benchmarks/longfact/gymnasium.yaml` separately preserves the original
-`gymnasium_agent` pairing and `/reset` plus `/step` protocol; select one pairing
-per run, and do not mix their rollout files. The manifest's
+environment runs one policy turn and calls the Resources Server `/verify`
+endpoint. The manifest's
 `full-objects-and-concepts` split names the union of all 2,280 upstream Objects
 and Concepts prompts. The default is one repeat
 and one policy answer per prompt; the model sees the source prompt and has
@@ -57,9 +57,15 @@ aggregate averages per-prompt F1; pooled claim metrics are reported
 separately. Contradicted and unsure claims both count as unsupported in
 F1. Judge/search failures fail the rollout for recovery; a failed judge masks
 the row and retains its original policy answer rather than assigning a model
-zero. The default configuration uses `legacy_v1` extraction,
+zero. The default configuration uses `safe_v1` extraction,
 three-way per-claim verdicts and Tantivy; the card overlay below changes
 this protocol and is not interchangeable with that default.
+
+This server is for evaluation only. Like upstream SAFE, scoring does not
+deduplicate extracted claims. Repeated claims can inflate F1@100 if the judge
+lists them more than once, so this reward is unsuitable for RL training.
+The optional `claim_listing_v1` prompt asks the judge to list each claim once;
+that instruction is not a scoring-level deduplication guarantee.
 
 Policy sampling, context and token budgets come from the configured model
 and run, so record them alongside the resolved configuration, judge identity,
@@ -69,16 +75,16 @@ seconds, with their configured bounded retries. The agent's 60-second
 environment-cleanup timeout is a separate bound.
 
 Grading follows path A of the benchmark onboarding contract: the resources
-server wraps the complete native verification in `observe_llm_judge_grading`,
+server wraps the complete verification in `observe_llm_judge_grading`,
 calls the judge through `call_judge`, and accepts a reply only after parsing
 and, for card batches, exact claim-ID validation. The returned observation
 binds the original policy response and F1 reward to the judge dependencies.
 Rejected or malformed received replies remain unaccepted even when a later
 retry succeeds, so that attempt has unknown grading coverage; it is not
-reported as complete evidence. Native verification uses only its request and
+reported as complete evidence. Resources Server verification uses only its request and
 configuration (`ReverifyMode.STATELESS`), without legacy reset state. A
 re-judge must preserve the saved answer, task provenance and scoring settings.
-The offline fixture exercises this production native scorer with scripted
+The offline fixture exercises this production scorer with scripted
 external judge/search transports. It does not certify a live runtime run.
 
 Complete the manifest-backed local checks after preparation:
@@ -103,7 +109,9 @@ Configure the policy and evaluator model servers in the usual NeMo Gym way,
 then select a retrieval backend with `LONGFACT_SEARCH_BACKEND`.
 
 The benchmark config uses a vLLM-served Qwen judge
-(`benchmarks/longfact/evaluator_local_vllm.yaml`). For an OpenAI-compatible
+(`benchmarks/longfact/evaluator_local_vllm.yaml`). Its default temperature is
+`0.1`, matching [pinned SAFE's fact-checking temperature](https://github.com/google-deepmind/long-form-factuality/blob/9d27158d198ced0a9d8271a80147cae580614601/eval/safe/config.py#L33-L35),
+and it applies no presence penalty. For an OpenAI-compatible
 endpoint instead, add `'+config_paths=[benchmarks/longfact/evaluator_openai.yaml]'`.
 Both read `LONGFACT_EVALUATOR_BASE_URL`, `LONGFACT_EVALUATOR_API_KEY` and
 `LONGFACT_EVALUATOR_MODEL`. With the OpenAI-compatible judge, set
@@ -131,6 +139,21 @@ export LONGFACT_MILVUS_URI=https://milvus.example.com
 export LONGFACT_MILVUS_COLLECTION_NAME=documents
 export LONGFACT_MILVUS_EMBEDDING_MODEL=google/embeddinggemma-300m
 ```
+
+Add `'+config_paths=[benchmarks/longfact/milvus.yaml]'` when starting or
+running the benchmark. This overlay selects Milvus and requests its optional
+dependencies through the supported component mapping:
+
+```yaml
+component_extras:
+  resources_servers/longfact: [milvus]
+```
+
+NeMo Gym forwards this to the component's locked environment as `--extra milvus`.
+Setting only `LONGFACT_SEARCH_BACKEND=milvus` does not install the extra.
+For a manually managed component environment, use
+`uv sync --project resources_servers/longfact --locked --extra milvus`.
+Tantivy and Tavily do not need this extra.
 
 If the deployment requires authentication, provide
 `LONGFACT_MILVUS_TOKEN` through the environment or your secret manager. The
@@ -220,8 +243,8 @@ gym eval run --no-serve --agent longfact_longfact_simple_agent \
   --output results/longfact-hard200/rollouts.jsonl
 ```
 
-The default claim extraction prompt is `legacy_v1` for compatibility with
-historical runs. The prompt-aware extraction contract used for hard-200 can be
+The default claim extraction prompt is `safe_v1`. The prompt-aware extraction
+contract used for hard-200 can be
 selected with:
 
 ```bash

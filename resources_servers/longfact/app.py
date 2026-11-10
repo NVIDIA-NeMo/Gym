@@ -13,14 +13,13 @@ from __future__ import annotations
 import asyncio
 from collections import Counter
 from collections.abc import Coroutine
-from typing import Any, Callable, ClassVar, Literal, Optional
+from typing import Any, Callable, ClassVar, Literal
+from urllib.parse import urlsplit
 
-from fastapi import FastAPI, Request
 from pydantic import BaseModel, Field, PrivateAttr, RootModel, field_validator
 
-from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import ModelServerRef
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
@@ -31,7 +30,7 @@ from nemo_gym.server_runtime import (
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import JudgeError, record_parsed_judge_verdict
-from resources_servers.gymnasium import GymnasiumServer, extract_text
+from resources_servers.gymnasium import extract_text
 from resources_servers.longfact.card_fact_check import (
     CARD_LABELS,
     BatchSearchPlan,
@@ -121,7 +120,7 @@ class LongFactConfig(BaseResourcesServerConfig):
     evaluator_model_server: ModelServerRef
     evaluator_model_identity: str = "unknown"
     evaluator_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
-    claim_extraction_prompt: ClaimExtractionPrompt = "legacy_v1"
+    claim_extraction_prompt: ClaimExtractionPrompt = "safe_v1"
     claim_verdict_mode: Literal["binary", "three_way"] = "three_way"
     # per_claim: SAFE-style relevance, queries and verdict per claim. gpt5_card_batch: the GPT-5 system card's
     # batched fact-check (card_fact_check.py); needs three_way verdicts.
@@ -172,16 +171,11 @@ class LongFactVerifyResponse(BaseVerifyResponse):
     info: dict[str, Any]
 
 
-class LongFactSafeServer(GymnasiumServer):
+class LongFactSafeServer(SimpleResourcesServer):
     config: LongFactConfig
-    checkpoint_session_starts: ClassVar[tuple[str, ...]] = ("/reset", "/seed_session")
 
     _evaluator: JsonEvaluator = PrivateAttr()
     _search_provider: TantivyProvider | TavilyProvider | MilvusProvider = PrivateAttr()
-
-    def register_protocol_routes(self, app: FastAPI) -> None:
-        SimpleResourcesServer.register_protocol_routes(self, app)
-        GymnasiumServer.register_protocol_routes(self, app)
 
     async def verify(self, body: LongFactVerifyRequest) -> LongFactVerifyResponse:
         async def calculate() -> LongFactVerifyResponse:
@@ -201,6 +195,13 @@ class LongFactSafeServer(GymnasiumServer):
         return await observe_llm_judge_grading(calculate)
 
     def model_post_init(self, context: Any) -> None:
+        if self.config.browse_off_instructions and self.config.claim_extraction_prompt != "claim_listing_v1":
+            raise ValueError("browse_off_instructions needs claim_extraction_prompt=claim_listing_v1")
+        if (
+            self.config.fact_check_mode == "gpt5_card_batch"
+            and self.config.claim_extraction_prompt != "claim_listing_v1"
+        ):
+            raise ValueError("fact_check_mode=gpt5_card_batch needs claim_extraction_prompt=claim_listing_v1")
         if self.config.fact_check_mode == "gpt5_card_batch" and self.config.claim_verdict_mode != "three_way":
             raise ValueError("fact_check_mode=gpt5_card_batch needs claim_verdict_mode=three_way (true/false/unsure)")
         self._evaluator = JsonEvaluator(
@@ -261,52 +262,6 @@ class LongFactSafeServer(GymnasiumServer):
                 cache_size=self.config.milvus_cache_size,
             )
         super().model_post_init(context)
-
-    async def reset(self, metadata: dict, session_id: Optional[str] = None) -> tuple[Optional[str], dict]:
-        prompt = str(metadata.get("prompt") or "").strip()
-        if metadata.get("benchmark_variant") != self.config.benchmark_variant:
-            raise ValueError("LongFact benchmark_variant does not match this resource server")
-        if not prompt:
-            raise ValueError("LongFact row is missing prompt")
-        provenance = metadata.get("source_provenance")
-        if not isinstance(provenance, dict):
-            raise ValueError("LongFact row is missing source_provenance")
-        key = self._session_key(session_id, metadata)
-        state = {
-            "task_id": str(metadata.get("id") or key),
-            "subset": str(metadata.get("subset") or "unknown"),
-            "topic": str(metadata.get("topic") or "unknown"),
-            "prompt": prompt,
-            "source_provenance": dict(provenance),
-        }
-        self.session_state[key] = state
-        # A failed step raises before the step route closes the session, so the agent closes it via /close.
-        return None, self._info(state) | {"supports_explicit_close": True}
-
-    async def _close_endpoint(self, request: Request) -> dict[str, bool]:
-        await self.close_session(request.session.get(SESSION_ID_KEY))
-        self.checkpoint_session_ended(request)
-        return {"ok": True}
-
-    def setup_webserver(self) -> FastAPI:
-        app = super().setup_webserver()
-        app.post("/close")(self._close_endpoint)
-        return app
-
-    async def step(
-        self, action: NeMoGymResponse, metadata: dict, session_id: Optional[str] = None
-    ) -> tuple[Optional[str], float, bool, bool, dict]:
-        key = self._session_key(session_id, metadata)
-        state = self.session_state.get(key)
-        if state is None:
-            raise RuntimeError("LongFact session is missing; /reset must precede /step")
-        response = extract_text(action)
-        # Judge and search failures propagate and fail the rollout, so resume runs it again.
-        evaluation = await self._evaluate(state["prompt"], response)
-        self._require_checked_claims(evaluation)
-        state["response"] = response
-        state.update(evaluation)
-        return None, float(evaluation["f1_at_k"]), True, False, self._info(state)
 
     @staticmethod
     def _require_checked_claims(evaluation: dict[str, Any]) -> None:
@@ -500,6 +455,7 @@ class LongFactSafeServer(GymnasiumServer):
             "relevant": prepared.relevant,
             "queries": prepared.queries,
             "searches": [],
+            "evidence": [],
         }
         if not prepared.relevant:
             trace["label"] = "IRRELEVANT"
@@ -508,8 +464,8 @@ class LongFactSafeServer(GymnasiumServer):
 
         queries = prepared.queries or [prepared.self_contained_fact]
         query_results = await _gather_checked(*(self._search_provider.search(query) for query in queries))
-        evidence: list[dict[str, Any]] = []
         for query, sources in zip(queries, query_results, strict=True):
+            start = len(trace["evidence"])
             evidence = [
                 {
                     "title": source.title,
@@ -519,8 +475,8 @@ class LongFactSafeServer(GymnasiumServer):
                 }
                 for source in sources
             ]
-            trace["searches"].append({"query": query, "results": evidence})
-            trace.setdefault("evidence", []).extend(evidence)
+            trace["evidence"].extend(evidence)
+            trace["searches"].append({"query": query, "evidence_indices": list(range(start, len(trace["evidence"])))})
 
         judgment = await self._judge_fact(
             prepared.self_contained_fact,
@@ -611,9 +567,7 @@ RETRIEVED EVIDENCE:
                 return result
             except ValueError as exc:
                 last_error = exc
-        # Preserve a distinct failure type so verdict callers can map an
-        # exhausted judge refusal to UNSURE without hiding transport or model
-        # identity failures.
+        # Distinguish exhausted parsing from transport or model identity failures.
         raise EvaluatorParseError(
             f"Evaluator returned malformed JSON {self.config.evaluator_max_attempts} times: {last_error}"
         )
@@ -641,6 +595,28 @@ RETRIEVED EVIDENCE:
                 "browse_off_instructions": self.config.browse_off_instructions,
                 "original_search_provider": "serper",
                 "f1_max_claims": self.config.f1_max_claims,
+                "max_claims": self.config.max_claims,
+                "max_queries": self.config.max_queries,
+                "max_search_results": self.config.max_search_results,
+                "fact_check_batch_size": self.config.fact_check_batch_size,
+                "tavily_search_depth": self.config.tavily_search_depth,
+                "evaluator_model_identity": self.config.evaluator_model_identity,
+                "evaluator_model_server": self.config.evaluator_model_server.model_dump(mode="json"),
+                "evaluator_constrain_json_schema": self.config.evaluator_constrain_json_schema,
+                "evaluator_sampling": self.config.evaluator_responses_create_params.model_dump(
+                    mode="json",
+                    exclude_none=True,
+                    include={
+                        "temperature",
+                        "top_p",
+                        "max_output_tokens",
+                        "presence_penalty",
+                        "frequency_penalty",
+                        "seed",
+                        "reasoning",
+                    },
+                ),
+                "retrieval_corpus": self._retrieval_corpus(),
             },
         }
         for key in (
@@ -667,9 +643,30 @@ RETRIEVED EVIDENCE:
             info["tavily_cache_stats"] = self._search_provider.cache_stats
         return info
 
-    @staticmethod
-    def _session_key(session_id: Optional[str], metadata: dict[str, Any]) -> str:
-        return session_id or f"local:{metadata.get('id', 'unknown')}"
+    def _retrieval_corpus(self) -> dict[str, Any]:
+        if self.config.search_backend == "tantivy":
+            return {
+                "index_dir": self.config.tantivy_index_dir,
+                "corpus_db_path": self.config.tantivy_corpus_db_path,
+                "candidate_pool": self.config.tantivy_candidate_pool,
+                "max_result_chars": self.config.tantivy_max_result_chars,
+            }
+        if self.config.search_backend == "milvus":
+            # Credentials, query parameters and fragments are never part of the recorded endpoint identity.
+            endpoint = urlsplit(self.config.milvus_uri)
+            return {
+                "endpoint_scheme": endpoint.scheme or "local",
+                "endpoint_host": endpoint.hostname,
+                "endpoint_port": endpoint.port,
+                "local_database_path": endpoint.path if not endpoint.scheme else None,
+                "collection_name": self.config.milvus_collection_name,
+                "embedding_model": self.config.milvus_embedding_model,
+                "anns_field": self.config.milvus_anns_field,
+                "search_list": self.config.milvus_search_list,
+                "candidate_multiplier": self.config.milvus_candidate_multiplier,
+                "max_result_chars": self.config.milvus_max_result_chars,
+            }
+        return {"source": "live_web"}
 
     def compute_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
         records = [rollout.get("info", {}) for task in tasks for rollout in task]

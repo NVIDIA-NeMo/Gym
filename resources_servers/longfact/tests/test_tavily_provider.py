@@ -2,7 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import fcntl
 import json
+import os
+import threading
+from pathlib import Path
 
 import pytest
 from aiohttp import ClientTimeout
@@ -291,6 +295,150 @@ async def test_identical_concurrent_requests_are_coalesced(tmp_path):
     assert provider.cache_stats["inflight_hits"] == 11
     assert provider.cache_stats["live_fetches"] == 1
     assert provider.cache_stats["effective_hit_rate"] == pytest.approx(11 / 12)
+
+
+@pytest.mark.parametrize("filesystem_operation", ["read", "publish", "quarantine"])
+@pytest.mark.asyncio
+async def test_slow_cache_filesystem_allows_event_loop_progress(tmp_path, monkeypatch, filesystem_operation):
+    client = FakeTavilyClient()
+    writer = _provider(tmp_path, client)
+    query = "slow filesystem"
+    await writer.search(query)
+    cache_path = next(tmp_path.glob("search-*.json"))
+    if filesystem_operation == "publish":
+        cache_path.unlink()
+    elif filesystem_operation == "quarantine":
+        cache_path.write_text("invalid json", encoding="utf-8")
+    provider = _provider(tmp_path, client, cache_mode="replay" if filesystem_operation == "read" else "read_write")
+    io_started = threading.Event()
+    loop_progress = threading.Event()
+    progress_during_io = []
+
+    def slow_filesystem():
+        io_started.set()
+        progress_during_io.append(loop_progress.wait(timeout=1))
+
+    if filesystem_operation == "read":
+        original_read = Path.read_text
+
+        def read(path, *args, **kwargs):
+            if path == cache_path:
+                slow_filesystem()
+            return original_read(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", read)
+    elif filesystem_operation == "publish":
+        original_fsync = os.fsync
+
+        def fsync(fileno):
+            slow_filesystem()
+            return original_fsync(fileno)
+
+        monkeypatch.setattr(os, "fsync", fsync)
+    else:
+        original_replace = os.replace
+
+        def replace(source, target):
+            if source == cache_path:
+                slow_filesystem()
+            return original_replace(source, target)
+
+        monkeypatch.setattr(os, "replace", replace)
+
+    async def observe_progress():
+        while not io_started.is_set():
+            await asyncio.sleep(0.001)
+        loop_progress.set()
+
+    evidence, _ = await asyncio.wait_for(asyncio.gather(provider.search(query), observe_progress()), timeout=5)
+
+    assert progress_during_io == [True]
+    assert evidence[0].snippet == "Relevant snippet"
+    assert client.search_calls == (1 if filesystem_operation == "read" else 2)
+    assert provider.cache_stats["corruptions"] == (1 if filesystem_operation == "quarantine" else 0)
+    assert await _provider(tmp_path, cache_mode="replay").search(query) == evidence
+
+
+@pytest.mark.parametrize("publication_fails", [False, True])
+@pytest.mark.asyncio
+async def test_cancelled_waiter_keeps_cache_publication_locked_and_replayable(
+    tmp_path, monkeypatch, publication_fails
+):
+    first_client = FakeTavilyClient()
+    second_client = FakeTavilyClient()
+    first_provider = _provider(tmp_path, first_client)
+    second_provider = _provider(tmp_path, second_client)
+    publication_started = asyncio.Event()
+    release_publication = threading.Event()
+    loop = asyncio.get_running_loop()
+    original_fsync = os.fsync
+    original_link = os.link
+    publication_error = OSError("cache publication failed") if publication_fails else None
+    link_calls = 0
+
+    def fsync(fileno):
+        loop.call_soon_threadsafe(publication_started.set)
+        if not release_publication.wait(timeout=5):
+            raise TimeoutError("test did not release cache publication")
+        return original_fsync(fileno)
+
+    def link(source, target):
+        nonlocal link_calls
+        link_calls += 1
+        if link_calls == 1 and publication_error is not None:
+            raise publication_error
+        return original_link(source, target)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "link", link)
+    waiter = asyncio.create_task(first_provider.search("cancelled cache waiter"))
+    publication = None
+    follower = None
+    cancellation = None
+    try:
+        await asyncio.wait_for(publication_started.wait(), timeout=5)
+        [publication] = first_provider._inflight.values()
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        publication.cancel("first publication cancellation")
+        await asyncio.sleep(0)
+        publication.cancel("second publication cancellation")
+        await asyncio.sleep(0)
+
+        follower = asyncio.create_task(second_provider.search("cancelled cache waiter"))
+
+        async def wait_for_cache_miss():
+            while second_provider.cache_stats["initial_misses"] == 0:
+                await asyncio.sleep(0.001)
+
+        await asyncio.wait_for(wait_for_cache_miss(), timeout=5)
+        assert not publication.done()
+        lock_path = next((tmp_path / ".locks").glob("*.lock"))
+        with lock_path.open("a+b") as lock:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert not follower.done()
+        assert second_client.search_calls == 0
+    finally:
+        release_publication.set()
+        if publication is not None:
+            try:
+                await asyncio.wait_for(publication, timeout=5)
+            except asyncio.CancelledError as exc:
+                cancellation = exc
+        if follower is not None:
+            evidence = await asyncio.wait_for(follower, timeout=5)
+
+    assert cancellation is not None
+    assert cancellation.args == ("first publication cancellation",)
+    assert cancellation.__cause__ is publication_error
+    assert first_client.search_calls == 1
+    assert second_client.search_calls == int(publication_fails)
+    assert second_provider.cache_stats["writes"] == int(publication_fails)
+    assert second_provider.cache_stats["cross_process_hits"] == int(not publication_fails)
+    assert await _provider(tmp_path, cache_mode="replay").search("cancelled cache waiter") == evidence
+    assert not list(tmp_path.glob("*.tmp"))
 
 
 @pytest.mark.asyncio

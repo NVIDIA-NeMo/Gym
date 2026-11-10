@@ -230,12 +230,40 @@ class JsonEvaluator:
 
     @staticmethod
     def _sanitize_json_string(text: str) -> str:
-        """Escape invalid backslashes commonly produced in LaTeX-rich claims."""
+        """Repair LaTeX control words while preserving escaped backslashes and JSON character escapes."""
+
+        ambiguous_latex_commands = {
+            "begin",
+            "beta",
+            "bar",
+            "boxed",
+            "binom",
+            "frac",
+            "nu",
+            "nabla",
+            "neq",
+            "not",
+            "rightarrow",
+            "rho",
+            "right",
+            "rangle",
+            "theta",
+            "tau",
+            "text",
+            "times",
+            "tfrac",
+            "tilde",
+            "top",
+        }
 
         def fix_escape(match: re.Match[str]) -> str:
-            character = match.group(1)
-            if character in {'"', "\\", "/", "b", "f", "n", "r", "t", "u"}:
+            token = match.group(1)
+            if token in ambiguous_latex_commands:
+                return "\\\\" + token
+            if token.startswith("u"):
+                return match.group(0) if re.fullmatch(r"u[0-9a-fA-F]{4}", token) else "\\\\" + token
+            if token[0] in {'"', "\\", "/", "b", "f", "n", "r", "t"}:
                 return match.group(0)
-            return "\\\\" + character
+            return "\\\\" + token
 
-        return re.sub(r"\\(.)", fix_escape, text)
+        return re.sub(r"\\(u[0-9a-fA-F]{4}|[A-Za-z]+|.)", fix_escape, text)

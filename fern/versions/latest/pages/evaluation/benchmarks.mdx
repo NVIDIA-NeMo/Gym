@@ -96,6 +96,12 @@ LongFact measures factuality in long-form answers. The benchmark prepares all
 a policy model, an evaluator model and a retrieval backend (Tantivy, Milvus or
 Tavily) before running. Hosted evaluators need their endpoint, API key and model
 identity; Tavily needs its API key except when replaying an existing cache.
+Milvus also needs the optional component dependencies selected by
+`'+config_paths=[benchmarks/longfact/milvus.yaml]'`.
+
+The prompts retain their upstream training-contamination canary and are held
+out for evaluation. The verifier does not deduplicate extracted claims, so
+repetition can inflate F1@100; this reward is unsuitable for RL training.
 
 ```bash
 gym eval prepare --benchmark longfact

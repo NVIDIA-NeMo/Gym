@@ -86,7 +86,8 @@ def test_entrypoint_import_constructs_only_the_app_requested_by_the_launcher(tmp
                 app = module.app
             assert isinstance(app, FastAPI), "the entrypoint must construct the real configured app"
             paths = {route.path for route in app.routes}
-            assert {"/verify", "/seed_session", "/close_session", "/reset", "/step"} <= paths
+            assert {"/verify", "/seed_session", "/close_session"} <= paths
+            assert not {"/reset", "/step", "/close"} & paths
             with TestClient(app) as client:
                 reply = client.get("/health")
                 assert reply.status_code == 200
@@ -157,7 +158,193 @@ def test_onboarding_fixture_exercises_stateless_native_f1_at_100_scoring():
     assert scored["reward"] == 1.0
     assert scored["info"]["safe_variant"]["f1_max_claims"] == 100
     assert scored["info"]["num_extracted_claims"] == scored["info"]["supported_claims"] == 100
-    assert server.session_state == {}
+
+
+@pytest.mark.parametrize(
+    ("max_claims", "expected_counts", "expected_precision", "expected_reward", "expected_searches"),
+    [
+        (0, (30, 10, 10, 5), 0.6, 0.4, 50),
+        (35, (30, 5, 0, 0), 30 / 35, 60 / 135, 35),
+    ],
+)
+def test_verify_scores_mixed_verdicts_and_caps_claims_before_search(
+    max_claims, expected_counts, expected_precision, expected_reward, expected_searches
+):
+    from resources_servers.longfact.verifier_fixture import LongFactFixtureRequest, _server_factory, invoke_fixture
+
+    async def run():
+        server = _server_factory()
+        server.config.max_claims = max_claims
+        row = await invoke_fixture(
+            server,
+            LongFactFixtureRequest(
+                prompt="Question",
+                response_text="A saved answer with relevant and irrelevant facts.",
+                claim_labels=["SUPPORTED"] * 30 + ["CONTRADICTED"] * 10 + ["UNSURE"] * 10 + ["IRRELEVANT"] * 5,
+            ),
+        )
+        return server.server_client, row
+
+    transport, row = asyncio.run(asyncio.wait_for(run(), timeout=10))
+
+    info = row["info"]
+    assert (
+        tuple(info[key] for key in ("supported_claims", "contradicted_claims", "unsure_claims", "irrelevant_claims"))
+        == expected_counts
+    )
+    assert info["num_extracted_claims"] == sum(expected_counts)
+    assert info["error_claims"] == 0
+    assert info["not_supported_claims"] == expected_counts[1] + expected_counts[2]
+    assert info["precision"] == pytest.approx(expected_precision)
+    assert row["reward"] == info["f1_at_k"] == pytest.approx(expected_reward)
+    assert len(transport.searches) == expected_searches
+    assert sum(request["schema"] == "ThreeWayClaimJudgment" for request in transport.requests) == expected_searches
+    assert info["safe_variant"]["max_claims"] == max_claims
+    assert [trace["atomic_fact"] for trace in info["traces"]] == [
+        f"Fixture fact {index}." for index in range(sum(expected_counts))
+    ]
+    assert all(
+        not trace["evidence"] and not trace["searches"] for trace in info["traces"] if trace["label"] == "IRRELEVANT"
+    )
+
+
+def test_verify_scores_card_true_false_and_unsure_with_fixture_transports():
+    from resources_servers.longfact.verifier_fixture import LongFactFixtureRequest, _server_factory, invoke_fixture
+
+    async def run():
+        server = _server_factory()
+        server.config.claim_extraction_prompt = "claim_listing_v1"
+        server.config.fact_check_mode = "gpt5_card_batch"
+        row = await invoke_fixture(
+            server,
+            LongFactFixtureRequest(
+                prompt="Question",
+                response_text="A saved answer with three factual claims.",
+                claim_labels=["SUPPORTED", "CONTRADICTED", "UNSURE"],
+            ),
+        )
+        return server.server_client, row
+
+    transport, row = asyncio.run(asyncio.wait_for(run(), timeout=10))
+
+    info = row["info"]
+    assert (info["supported_claims"], info["contradicted_claims"], info["unsure_claims"]) == (1, 1, 1)
+    assert info["num_extracted_claims"] == 3
+    assert info["not_supported_claims"] == 2
+    assert info["precision"] == pytest.approx(1 / 3)
+    assert row["reward"] == info["f1_at_k"] == pytest.approx(2 / 103)
+    assert len(transport.searches) == 3
+    assert [request["schema"] for request in transport.requests] == [
+        "AtomicFacts",
+        "BatchSearchPlan",
+        "CardBatchVerdicts",
+    ]
+    assert [trace["label"] for trace in info["traces"]] == ["SUPPORTED", "CONTRADICTED", "UNSURE"]
+
+
+def test_search_traces_reference_one_unclipped_evidence_list(monkeypatch):
+    import json as jsonlib
+
+    from resources_servers.longfact.verifier_fixture import (
+        LongFactFixtureRequest,
+        _JudgeResponse,
+        _response,
+        _server_factory,
+        invoke_fixture,
+    )
+
+    async def run():
+        server = _server_factory()
+        server.config.max_queries = 2
+        transport = server.server_client
+        original_post = transport.post
+        judged_prompts = []
+        searched = []
+        excerpts = {query: f"{query} evidence " + "x" * 7000 for query in ("first", "second")}
+
+        async def judge_reply(*, json, **kwargs):
+            schema = json.text["format"]["name"]
+            if schema == "PreparedFact":
+                payload = {
+                    "self_contained_fact": "Fixture fact 0.",
+                    "relevant": True,
+                    "queries": ["first", "second", "capped"],
+                }
+                return _JudgeResponse(_response(jsonlib.dumps(payload)).model_dump_json().encode())
+            if schema == "ThreeWayClaimJudgment":
+                judged_prompts.append(json.input[-1].content)
+            return await original_post(json=json, **kwargs)
+
+        async def search_reply(*, query, **_kwargs):
+            searched.append(query)
+            return {"results": [{"title": query, "url": f"https://example.test/{query}", "content": excerpts[query]}]}
+
+        monkeypatch.setattr(transport, "post", judge_reply)
+        monkeypatch.setattr(server._search_provider._client, "search", search_reply)
+        row = await invoke_fixture(
+            server,
+            LongFactFixtureRequest(prompt="Question", response_text="One saved claim.", claim_labels=["SUPPORTED"]),
+        )
+        return row, searched, excerpts, judged_prompts
+
+    row, searched, excerpts, judged_prompts = asyncio.run(asyncio.wait_for(run(), timeout=10))
+
+    (trace,) = row["info"]["traces"]
+    assert sorted(searched) == ["first", "second"]
+    assert trace["searches"] == [
+        {"query": "first", "evidence_indices": [0]},
+        {"query": "second", "evidence_indices": [1]},
+    ]
+    assert [item["text"] for item in trace["evidence"]] == list(excerpts.values())
+    assert len(judged_prompts) == 1
+    for excerpt in excerpts.values():
+        assert json.dumps(trace).count(excerpt) == 1
+        assert judged_prompts[0].count(excerpt) == 1
+    assert row["reward"] == pytest.approx(2 / 101)
+
+
+@pytest.mark.parametrize("backend", ["tantivy", "tavily", "milvus"])
+def test_safe_variant_records_scoring_settings_and_nonsecret_corpus_identity(backend):
+    from resources_servers.longfact.verifier_fixture import _server_factory
+
+    server = _server_factory()
+    server.config.search_backend = backend
+    server.config.max_claims = 5
+    server.config.max_queries = 2
+    server.config.max_search_results = 4
+    server.config.tavily_search_depth = "basic"
+    server.config.evaluator_model_identity = "pinned-judge-snapshot"
+    server.config.evaluator_responses_create_params.temperature = 0.1
+    server.config.tantivy_index_dir = "/corpus/index-v3"
+    server.config.tantivy_corpus_db_path = "/corpus/snapshot-v3.db"
+    server.config.milvus_uri = (
+        "https://private-user:private-password@milvus.example.test:19530?token=private-query#private-fragment"
+    )
+    server.config.milvus_token = "private-token"
+    server.config.milvus_collection_name = "corpus_snapshot_v3"
+
+    info = server._info({"task_id": "t", "subset": "objects", "topic": "x", "source_provenance": {}})
+
+    variant = info["safe_variant"]
+    assert variant["max_claims"] == 5
+    assert variant["max_queries"] == 2
+    assert variant["max_search_results"] == 4
+    assert variant["tavily_search_depth"] == "basic"
+    assert variant["evaluator_model_identity"] == "pinned-judge-snapshot"
+    assert variant["evaluator_model_server"] == {"type": "responses_api_models", "name": "offline_judge"}
+    assert variant["evaluator_sampling"]["temperature"] == 0.1
+    corpus = variant["retrieval_corpus"]
+    if backend == "tantivy":
+        assert corpus["index_dir"] == "/corpus/index-v3"
+        assert corpus["corpus_db_path"] == "/corpus/snapshot-v3.db"
+    elif backend == "milvus":
+        assert corpus["endpoint_host"] == "milvus.example.test"
+        assert corpus["endpoint_port"] == 19530
+        assert corpus["collection_name"] == "corpus_snapshot_v3"
+        assert corpus["embedding_model"] == server.config.milvus_embedding_model
+    else:
+        assert corpus == {"source": "live_web"}
+    assert "private-" not in json.dumps(info)
 
 
 def test_claim_listing_prompt_includes_question_response_and_raw_json_contract():
@@ -173,26 +360,14 @@ def test_claim_listing_prompt_includes_question_response_and_raw_json_contract()
     assert "without Markdown fences" in request
 
 
-def test_legacy_claim_prompt_does_not_change_or_include_question():
-    server = SimpleNamespace(
-        config=SimpleNamespace(claim_extraction_prompt="legacy_v1", browse_off_instructions=False)
-    )
+def test_safe_claim_prompt_does_not_change_or_include_question():
+    server = SimpleNamespace(config=SimpleNamespace(claim_extraction_prompt="safe_v1", browse_off_instructions=False))
 
     request = LongFactSafeServer._claim_extraction_request(server, "SECRET QUESTION", "A factual response.")
 
     assert request.startswith("Break the RESPONSE")
     assert "A factual response." in request
     assert "SECRET QUESTION" not in request
-
-
-def test_reset_rejects_missing_or_wrong_contract():
-    server = SimpleNamespace(config=SimpleNamespace(benchmark_variant=BENCHMARK_VARIANT), session_state={})
-    server._session_key = LongFactSafeServer._session_key
-    server._info = lambda state: state
-    with pytest.raises(ValueError, match="benchmark_variant"):
-        import asyncio
-
-        asyncio.run(LongFactSafeServer.reset(server, {"prompt": "Question", "source_provenance": {}}, "s"))
 
 
 def test_compute_metrics_reports_safe_prompt_mean_and_micro_diagnostic():
@@ -320,7 +495,7 @@ def test_unverdicted_claim_propagates_its_typed_judge_failure():
             max_claims=0,
             f1_max_claims=100,
             claim_verdict_mode="three_way",
-            claim_extraction_prompt="legacy_v1",
+            claim_extraction_prompt="safe_v1",
             fact_check_mode="per_claim",
         ),
         _generate_json=extract,
@@ -439,63 +614,6 @@ def test_compute_metrics_reports_three_way_diagnostics():
     assert metrics["longfact_safe/micro_decisive_precision"] == pytest.approx(2 / 3)
 
 
-def _step_server(evaluate):
-    state = {"prompt": "Question", "task_id": "t", "subset": "objects", "topic": "x", "source_provenance": {}}
-    server = SimpleNamespace(session_state={"s": state}, _evaluate=evaluate)
-    server._session_key = LongFactSafeServer._session_key
-    server._info = lambda state: {"f1_at_k": state.get("f1_at_k")}
-    server._require_checked_claims = LongFactSafeServer._require_checked_claims
-    return server
-
-
-def _run_step(server):
-    action = SimpleNamespace(output=[])
-    return asyncio.run(LongFactSafeServer.step(server, action, {}, "s"))
-
-
-def test_step_fails_the_rollout_when_search_fails(monkeypatch):
-    from resources_servers.longfact import app
-    from resources_servers.longfact.tavily_provider import TavilyProviderError
-
-    monkeypatch.setattr(app, "extract_text", lambda _action: "Response")
-
-    async def search_down(*_args):
-        raise TavilyProviderError("quota exhausted")
-
-    with pytest.raises(TavilyProviderError, match="quota exhausted"):
-        _run_step(_step_server(search_down))
-
-
-def test_step_fails_the_rollout_with_unchecked_claims(monkeypatch):
-    from resources_servers.longfact import app
-
-    monkeypatch.setattr(app, "extract_text", lambda _action: "Response")
-
-    async def one_claim_errored(*_args):
-        return {
-            "f1_at_k": 0.02,
-            "num_extracted_claims": 2,
-            "error_claims": 1,
-            "traces": [{"label": "SUPPORTED"}, {"label": "ERROR", "fact_error": "TimeoutError()"}],
-        }
-
-    with pytest.raises(app.LongFactClaimCheckError, match=r"1 of 2 claim\(s\).*TimeoutError\(\)"):
-        _run_step(_step_server(one_claim_errored))
-
-
-def test_step_scores_a_fully_checked_episode(monkeypatch):
-    from resources_servers.longfact import app
-
-    monkeypatch.setattr(app, "extract_text", lambda _action: "Response")
-
-    async def all_checked(*_args):
-        return {"f1_at_k": 0.5, "num_extracted_claims": 1, "error_claims": 0, "traces": [{"label": "SUPPORTED"}]}
-
-    _obs, reward, terminated, _truncated, info = _run_step(_step_server(all_checked))
-
-    assert (reward, terminated, info["f1_at_k"]) == (0.5, True, 0.5)
-
-
 def test_compute_metrics_names_f1_by_k():
     server = SimpleNamespace(config=SimpleNamespace(f1_max_claims=64))
     server._f1_at_k = LongFactSafeServer._f1_at_k
@@ -520,70 +638,6 @@ def test_micro_f1_does_not_grow_with_repeated_identical_episodes():
 
     assert one["longfact_safe/micro_f1_at_100"] == pytest.approx(0.4)
     assert two["longfact_safe/micro_f1_at_100"] == pytest.approx(0.4)
-
-
-def _http_server():
-    from unittest.mock import MagicMock
-
-    from nemo_gym.client import ServerClient
-    from resources_servers.longfact.app import LongFactConfig
-
-    config = LongFactConfig(
-        host="",
-        port=0,
-        entrypoint="",
-        name="longfact",
-        evaluator_model_server={"type": "responses_api_models", "name": "judge"},
-        evaluator_responses_create_params={"input": []},
-        search_backend="tavily",
-        tavily_api_key="unused",
-    )
-    return LongFactSafeServer(config=config, server_client=MagicMock(spec=ServerClient))
-
-
-def test_failed_step_session_is_released_by_close():
-    import httpx
-
-    server = _http_server()
-
-    async def judge_down(*_args):
-        raise EvaluatorParseError("judge down")
-
-    server._evaluate = judge_down
-    row = {
-        "responses_create_params": {"input": []},
-        "id": "t",
-        "benchmark_variant": BENCHMARK_VARIANT,
-        "prompt": "Tell me about the Eiffel Tower.",
-        "source_provenance": {"path": "x"},
-    }
-    response = {
-        "id": "r",
-        "created_at": 0.0,
-        "model": "m",
-        "object": "response",
-        "output": [],
-        "parallel_tool_calls": True,
-        "tool_choice": "auto",
-        "tools": [],
-    }
-
-    async def main():
-        transport = httpx.ASGITransport(app=server.setup_webserver(), raise_app_exceptions=False)
-        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-            reset = await client.post("/reset", json=row)
-            step = await client.post("/step", json={"responses_create_params": {"input": []}, "response": response})
-            open_sessions = len(server.session_state)
-            close = await client.post("/close", json={})
-        return reset, step, open_sessions, close
-
-    reset, step, open_sessions, close = asyncio.run(main())
-
-    assert reset.json()["info"]["supports_explicit_close"] is True
-    assert step.status_code == 500
-    assert open_sessions == 1
-    assert close.status_code == 200
-    assert server.session_state == {}
 
 
 @pytest.mark.parametrize(("label", "reward", "supported"), [("SUPPORTED", 1.0, 100), ("CONTRADICTED", 0.0, 0)])
@@ -638,7 +692,6 @@ def test_native_verify_binds_the_original_answer_reward_and_task_metadata(label,
         dependency["model_ref"] == {"type": "responses_api_models", "name": "offline_judge"}
         for dependency in operation["dependencies"]
     )
-    assert server.session_state == {}
 
 
 class _CardJudgeTransport:
@@ -732,6 +785,7 @@ def _card_http_verification(fault=None):
         transport = _CardJudgeTransport(fault)
         server.server_client = transport
         server.config.fact_check_mode = "gpt5_card_batch"
+        server.config.claim_extraction_prompt = "claim_listing_v1"
         server.config.fact_check_batch_size = 1
         server.config.evaluator_max_attempts = 2
         server._evaluator = JsonEvaluator(
@@ -757,7 +811,7 @@ def _card_http_verification(fault=None):
         assert response.status_code == 200
         return body, response.json(), transport
 
-    return asyncio.run(run())
+    return asyncio.run(asyncio.wait_for(run(), timeout=10))
 
 
 def test_concurrent_card_batches_bind_every_accepted_judge_dependency():

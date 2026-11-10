@@ -21,10 +21,14 @@ if TYPE_CHECKING:
     from resources_servers.longfact.app import LongFactSafeServer
 
 
+FixtureLabel = Literal["SUPPORTED", "CONTRADICTED", "UNSURE", "IRRELEVANT"]
+
+
 class LongFactFixtureRequest(BaseModel):
     prompt: str
     response_text: str = Field(pattern=r"\S")
-    judge_label: Literal["SUPPORTED", "CONTRADICTED"]
+    judge_label: Literal["SUPPORTED", "CONTRADICTED", "UNSURE"] = "SUPPORTED"
+    claim_labels: list[FixtureLabel] | None = None
 
 
 def _response(text: str) -> NeMoGymResponse:
@@ -60,21 +64,55 @@ class _JudgeResponse:
 
 class _JudgeTransport:
     def __init__(self) -> None:
-        self.label: Literal["SUPPORTED", "CONTRADICTED"] | None = None
+        self.label: Literal["SUPPORTED", "CONTRADICTED", "UNSURE"] | None = None
+        self.claim_labels: list[FixtureLabel] | None = None
         self.requests: list[dict[str, object]] = []
+        self.searches: list[str] = []
         self.global_config_dict = {"observability_enabled": True}
 
-    async def post(self, *, json: NeMoGymResponseCreateParamsNonStreaming, **kwargs: object) -> _JudgeResponse:
+    def _label_for(self, fact: str) -> FixtureLabel:
+        if self.claim_labels is not None:
+            return self.claim_labels[int(fact.removeprefix("Fixture fact ").removesuffix("."))]
         if self.label is None:
             raise RuntimeError("Offline judge case must be configured before verification")
+        return self.label
+
+    async def post(self, *, json: NeMoGymResponseCreateParamsNonStreaming, **kwargs: object) -> _JudgeResponse:
+        if self.label is None and self.claim_labels is None:
+            raise RuntimeError("Offline judge case must be configured before verification")
         schema_name = json.text["format"]["name"]
+        prompt = json.input[-1].content
         if schema_name == "AtomicFacts":
-            payload = [f"Fixture fact {index}." for index in range(100)]
+            count = len(self.claim_labels) if self.claim_labels is not None else 100
+            payload = [f"Fixture fact {index}." for index in range(count)]
         elif schema_name == "PreparedFact":
-            fact = json.input[-1].content.rsplit("ATOMIC FACT:\n", 1)[1].strip()
-            payload = {"self_contained_fact": fact, "relevant": True, "queries": ["fixture evidence"]}
+            fact = prompt.rsplit("ATOMIC FACT:\n", 1)[1].strip()
+            payload = {
+                "self_contained_fact": fact,
+                "relevant": self._label_for(fact) != "IRRELEVANT",
+                "queries": [fact],
+            }
         elif schema_name == "ThreeWayClaimJudgment":
-            payload = {"label": self.label, "explanation": "Scripted external judge response."}
+            fact = prompt.split("ATOMIC FACT:\n", 1)[1].split("\n\nRETRIEVED EVIDENCE:", 1)[0]
+            payload = {"label": self._label_for(fact), "explanation": "Scripted external judge response."}
+        elif schema_name in {"BatchSearchPlan", "CardBatchVerdicts"}:
+            claims = jsonlib.loads(prompt.rsplit("Claims:\n", 1)[1].split("\n\nSearch results:", 1)[0])
+            if schema_name == "BatchSearchPlan":
+                payload = {"claims": [{"claim_id": item["claim_id"], "queries": [item["claim"]]} for item in claims]}
+            else:
+                answers = {"SUPPORTED": "true", "CONTRADICTED": "false", "UNSURE": "unsure"}
+                payload = {
+                    "verdicts": [
+                        {
+                            "claim_id": item["claim_id"],
+                            "claim": item["claim"],
+                            "answer": answers[self._label_for(item["claim"])],
+                            "reasoning": "Scripted external card verdict.",
+                            "supporting_evidence": [],
+                        }
+                        for item in claims
+                    ]
+                }
         else:
             raise ValueError(f"Unexpected offline judge schema: {schema_name}")
         response = _response(jsonlib.dumps(payload))
@@ -84,7 +122,11 @@ class _JudgeTransport:
 
 
 class _SearchTransport:
-    async def search(self, **_kwargs: object) -> dict[str, list[dict[str, str]]]:
+    def __init__(self, searches: list[str]) -> None:
+        self.searches = searches
+
+    async def search(self, *, query: str, **_kwargs: object) -> dict[str, list[dict[str, str]]]:
+        self.searches.append(query)
         return {
             "results": [
                 {
@@ -118,7 +160,7 @@ def _server_factory() -> LongFactSafeServer:
                 max_concurrency=self.config.tavily_max_concurrency,
                 search_max_attempts=self.config.tavily_search_max_attempts,
                 cache_mode="live",
-                client=_SearchTransport(),
+                client=_SearchTransport(self.server_client.searches),
             )
 
     config = LongFactConfig(
@@ -142,6 +184,7 @@ async def invoke_fixture(server: object, body: BaseModel) -> dict[str, object]:
     if not isinstance(transport, _JudgeTransport):
         raise TypeError("LongFact fixture requires the offline judge transport")
     transport.label = body.judge_label
+    transport.claim_labels = body.claim_labels
     result = await server.verify(
         LongFactVerifyRequest(
             responses_create_params={"input": []},

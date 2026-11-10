@@ -1147,13 +1147,15 @@ version = "0.0.0"
 source = { virtual = "." }
 dependencies = [
     { name = "nemo-gym", extra = ["dev"] },
-    { name = "pymilvus" },
-    { name = "sentence-transformers" },
     { name = "tantivy" },
     { name = "tavily-python" },
 ]
 
 [package.optional-dependencies]
+milvus = [
+    { name = "pymilvus" },
+    { name = "sentence-transformers" },
+]
 telemetry = [
     { name = "nemo-gym", extra = ["telemetry"] },
 ]
@@ -1162,12 +1164,12 @@ telemetry = [
 requires-dist = [
     { name = "nemo-gym", extras = ["dev"], editable = "../../" },
     { name = "nemo-gym", extras = ["telemetry"], marker = "extra == 'telemetry'", editable = "../../" },
-    { name = "pymilvus", specifier = "==3.0.1" },
-    { name = "sentence-transformers", specifier = ">=5.1,<6" },
+    { name = "pymilvus", marker = "extra == 'milvus'", specifier = "==3.0.1" },
+    { name = "sentence-transformers", marker = "extra == 'milvus'", specifier = ">=5.1,<6" },
     { name = "tantivy" },
     { name = "tavily-python", specifier = "==0.7.21" },
 ]
-provides-extras = ["telemetry"]
+provides-extras = ["milvus", "telemetry"]
 
 [[package]]
 name = "h11"

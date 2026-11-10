@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""LongFact task fields consumed by native verification and legacy reset."""
+"""LongFact task fields consumed by Resources Server verification."""
 
 from typing import Any, Literal
 
@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 class TaskData(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    # reset falls back to the session key without an ID, but every prepared row carries one.
+    # Every prepared row carries stable IDs for task provenance.
     id: str | None = Field(default=None, json_schema_extra={"consumed_by": ["provenance"]})
     task_id: str | None = Field(default=None, json_schema_extra={"consumed_by": ["provenance"]})
     benchmark_variant: Literal["longfact-safe-v1"]

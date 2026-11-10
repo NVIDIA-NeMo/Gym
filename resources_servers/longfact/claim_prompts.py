@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: Apache-2.0 AND CC-BY-4.0
 
 # claim_listing_v1 prompt text: OpenAI, GPT-5 System Card, Appendix 2, arXiv:2601.03267v1, CC-BY-4.0.
 # Source: https://arxiv.org/html/2601.03267v1 ; license: https://creativecommons.org/licenses/by/4.0/
@@ -14,7 +14,7 @@ from typing import Literal
 from resources_servers.longfact.card_fact_check import BROWSE_OFF_CLAIM_LISTING
 
 
-ClaimExtractionPrompt = Literal["legacy_v1", "claim_listing_v1"]
+ClaimExtractionPrompt = Literal["safe_v1", "claim_listing_v1"]
 
 
 def build_claim_extraction_request(
@@ -77,7 +77,7 @@ Response:
 {response}
 """
 
-    if version != "legacy_v1":
+    if version != "safe_v1":
         raise ValueError(f"Unknown claim extraction prompt: {version}")
     return f"""Break the RESPONSE into atomic, independently verifiable factual claims.
 Exclude opinions, advice, formatting statements, and purely conversational text.

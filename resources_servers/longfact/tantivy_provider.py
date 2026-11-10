@@ -58,7 +58,17 @@ class TantivyProvider:
             uri=True,
             check_same_thread=False,
         )
-        self._db.execute("PRAGMA query_only=ON")
+        try:
+            self._db.execute("PRAGMA query_only=ON")
+            probe = self._searcher.search(tantivy.Query.all_query(), self._candidate_pool, count=False)
+            if not probe.hits:
+                raise TantivyProviderError("Tantivy index contains no documents")
+            self._fetch_rows(
+                [self._value(self._searcher.doc(address).to_dict(), "docid") for _, address in probe.hits]
+            )
+        except Exception as exc:
+            self._db.close()
+            raise TantivyProviderError(f"Tantivy startup hydration probe failed: {exc}") from exc
 
     async def search(self, query: str) -> list[TantivyEvidence]:
         return await asyncio.to_thread(self._search, query)
@@ -86,9 +96,8 @@ class TantivyProvider:
 
         evidence: list[TantivyEvidence] = []
         for score, document in documents:
-            row = rows.get(self._value(document, "docid"))
-            if row is not None and len(evidence) < self._max_results:
-                url, text = row
+            if len(evidence) < self._max_results:
+                url, text = rows[self._value(document, "docid")]
                 evidence.append(
                     TantivyEvidence(
                         title=self._value(document, "title") or url,
@@ -100,7 +109,6 @@ class TantivyProvider:
         return evidence
 
     def _fetch_rows(self, docids: list[str]) -> dict[str, tuple[str, str]]:
-        docids = [docid for docid in docids if docid]
         if not docids:
             return {}
         placeholders = ",".join("?" for _ in docids)
@@ -109,4 +117,10 @@ class TantivyProvider:
                 f"SELECT docid, url, substr(text, 1, ?) FROM corpus WHERE docid IN ({placeholders})",
                 [self._max_result_chars, *docids],
             ).fetchall()
-        return {str(docid): (str(url), str(text)) for docid, url, text in rows}
+        hydrated = {str(docid): (str(url), str(text)) for docid, url, text in rows}
+        missing = sorted(set(docids) - hydrated.keys())
+        if missing:
+            raise TantivyProviderError(
+                f"Tantivy index hits have no corpus rows for {len(missing)} docids: {missing[:10]!r}"
+            )
+        return hydrated

@@ -18,7 +18,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Any, AsyncIterator, Literal
+from typing import Any, AsyncIterator, Callable, Literal
 
 from resources_servers.tavily_search.app import TavilySearchAIOHTTPClient
 
@@ -202,7 +202,8 @@ class TavilyProvider:
         self._cache_lookups += 1
 
         try:
-            cached = self._read_cache(
+            cached = await self._cache_io(
+                self._read_cache,
                 cache_path,
                 operation,
                 payload,
@@ -280,9 +281,9 @@ class TavilyProvider:
             # Recheck while holding a cross-process lock. This prevents two
             # evaluations sharing Lustre from paying for the same cache miss.
             try:
-                cached = self._read_cache(cache_path, operation, payload, require_checksum=True)
+                cached = await self._cache_io(self._read_cache, cache_path, operation, payload, require_checksum=True)
             except TavilyCacheCorruptionError as exc:
-                quarantined = self._quarantine_cache(cache_path)
+                quarantined = await self._cache_io(self._quarantine_cache, cache_path)
                 if quarantined is not None:
                     self._cache_corruptions += 1
                 location = f" to {quarantined}" if quarantined is not None else ""
@@ -305,15 +306,34 @@ class TavilyProvider:
                 CACHE_RESPONSE_KEY: data,
             }
             try:
-                if self._publish_cache(cache_path, document):
+                if await self._cache_io(self._publish_cache, cache_path, document):
                     self._cache_writes += 1
             except OSError as exc:
                 raise TavilyProviderError(f"Could not write Tavily cache entry {cache_path}: {exc}") from exc
 
-            cached = self._read_cache(cache_path, operation, payload, require_checksum=True)
+            cached = await self._cache_io(self._read_cache, cache_path, operation, payload, require_checksum=True)
             if cached is None:  # pragma: no cover - requires external deletion after publication.
                 raise TavilyProviderError(f"Tavily cache entry disappeared after publication: {cache_path}")
             return cached
+
+    @staticmethod
+    async def _cache_io[T](operation: Callable[..., T], *args: Any, **kwargs: Any) -> T:
+        task = asyncio.create_task(asyncio.to_thread(operation, *args, **kwargs))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError as cancelled:
+            # A filesystem operation must finish before its enclosing file lock can be released.
+            try:
+                while not task.done():
+                    try:
+                        await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        # Defer repeated cancellation until the worker has finished.
+                        pass
+                task.result()
+            except Exception as exc:
+                raise cancelled from exc
+            raise cancelled
 
     def _clear_inflight(self, cache_key: str, completed: asyncio.Task[dict[str, Any]]) -> None:
         if self._inflight.get(cache_key) is completed:
