@@ -206,8 +206,9 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             if self.config.model_server is not None
             else self.config.model_base_url
         )
+        # A training framework trains the agent, not the judge, which keeps its own sampling.
         judge_base_url = (
-            self.resolve_model_base_url(self.config.judge_model_server.name, rollout_id)
+            self.resolve_model_base_url(self.config.judge_model_server.name, rollout_id, trained=False)
             if self.config.judge_model_server is not None
             else self.config.judge_base_url
         )
