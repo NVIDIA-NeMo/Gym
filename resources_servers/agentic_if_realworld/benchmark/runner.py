@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import json
+import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
@@ -23,22 +25,24 @@ async def run_cell(
     validate_only: bool = False,
 ) -> dict | None:
     """Validate saved state before resuming; validation never creates or dispatches work."""
-    fingerprint = judge.sha(
-        {
-            "dataset": dataset.report,
-            "settings": settings,
-            "policy": judge.VERSION,
-            "phases": PHASES,
-        }
-    )
+    fingerprint_inputs = {
+        "dataset": dataset.report,
+        "settings": settings,
+        "policy": judge.VERSION,
+        "phases": PHASES,
+    }
+    fingerprint = judge.sha(fingerprint_inputs)
     path = directory / "cells" / (judge.sha(identifier) + ".json")
     if path.exists():
         if not resume:
             raise ValueError("Existing journal requires explicit resume")
         state = read(path)
         if state["item_id"] != identifier or state["fingerprint"] != fingerprint:
+            _diag_report_mismatch(str(path), fingerprint_inputs)
             raise ValueError("Resume configuration fingerprint mismatch")
     else:
+        _DIAG_FINGERPRINT_INPUTS[str(path)] = json.loads(json.dumps(fingerprint_inputs, default=str))
+    if not path.exists():
         if validate_only:
             return None
         state = {"item_id": identifier, "fingerprint": fingerprint, "attempts": []}
@@ -137,3 +141,36 @@ async def run_cell(
     state["result_sha256"] = judge.sha(result)
     write(path, state)
     return result
+
+
+# TEMPORARY DIAGNOSTIC (Gym #5839 CI): print which fingerprint inputs differ on a resume mismatch.
+_DIAG_FINGERPRINT_INPUTS: dict[str, dict] = {}
+
+
+def _diag_diff(before, after, where: str, out: list[str]) -> list[str]:
+    if isinstance(before, dict) and isinstance(after, dict):
+        for key in sorted(set(before) | set(after), key=str):
+            if key not in before:
+                out.append(f"{where}/{key}: added {str(after[key])[:160]}")
+            elif key not in after:
+                out.append(f"{where}/{key}: removed {str(before[key])[:160]}")
+            else:
+                _diag_diff(before[key], after[key], f"{where}/{key}", out)
+    elif isinstance(before, list) and isinstance(after, list) and len(before) == len(after):
+        for index, (left, right) in enumerate(zip(before, after)):
+            _diag_diff(left, right, f"{where}[{index}]", out)
+    elif before != after:
+        out.append(f"{where}: {str(before)[:160]} -> {str(after)[:160]}")
+    return out
+
+
+def _diag_report_mismatch(path: str, inputs: dict) -> None:
+    before = _DIAG_FINGERPRINT_INPUTS.get(path)
+    after = json.loads(json.dumps(inputs, default=str))
+    if before is None:
+        print(f"DIAG5839 no stored fingerprint inputs for {path}", file=sys.stderr, flush=True)
+        return
+    changes = _diag_diff(before, after, "", [])
+    print(f"DIAG5839 fingerprint inputs differ in {len(changes)} places:", file=sys.stderr, flush=True)
+    for line in changes[:60]:
+        print(f"DIAG5839   {line}", file=sys.stderr, flush=True)
