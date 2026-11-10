@@ -551,3 +551,22 @@ async def test_incomplete_judge_body_keeps_existing_fail_default():
     with pytest.raises(NgFailureEvent):
         await call_judge(client, server_name="judge", url_path="/v1/responses", json={}, response_model=_Verdict)
     assert client.post.await_count == 1
+
+
+@pytest.mark.parametrize("kind", ["provider_quota_exhausted", "provider_credentials_rejected"])
+@pytest.mark.parametrize("action", ["verify", "fail"])
+async def test_provider_stop_retains_kind_and_applies_final_judge_policy(kind, action):
+    from nemo_gym.verification.judge import JudgeFailureOutcomePolicyConfig, judge_provider_stopped
+
+    failure = judge_provider_stopped("provider unavailable", failure_kind=kind, operation="judge.verify")
+
+    async def verify(body):
+        raise failure
+
+    wrapped = judge_failsafe(verify, failure_policy=JudgeFailureOutcomePolicyConfig(by_failure_kind={kind: action}))
+    row = orjson.loads((await wrapped(_Req(response={"saved": "answer"}))).body)
+    assert row["failure_kind"] == kind
+    assert row["failure_outcome_action"] == action
+    assert row.get("_ng_failure_terminal", False) is (action == "fail")
+    assert row["response"] == {"saved": "answer"}
+    assert row["mask_sample"] is True

@@ -69,7 +69,6 @@ from nemo_gym.core.failure_kinds import (
     TRANSPORT_PEER_DROP,
     FailureClassificationConfig,
     classify_failure,
-
 )
 from nemo_gym.core.failure_records import FailureBoundary, SdkErrorDetails
 from nemo_gym.core.failure_transport import FailureReportRow, observe_failure, report_for_current_request
@@ -429,6 +428,5 @@ def judge_failsafe(
                 return JSONResponse(content=jsonable_encoder(data))
         finally:
             _judge_call_policy.reset(token)
-
 
     return wrapper
