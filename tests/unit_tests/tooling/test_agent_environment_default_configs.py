@@ -249,3 +249,21 @@ def test_agent_session_capable_overlay_keeps_inherited_resources(tmp_path: Path,
     resolved = _parse(base, overlay, strict=True)
     assert _environment_servers_by_agent(resolved) == {"renamed_agent": ["my_environment_server"]}
     assert resolved.renamed_agent.responses_api_agents[agent_type].resources_server.name == "my_resources"
+
+
+def test_default_copilot_composes_with_exactly_one_session_environment(tmp_path: Path) -> None:
+    config = tmp_path / "agent.yaml"
+    default = SCRIPT.parents[1] / "responses_api_agents/copilot_agent/configs/copilot_agent.yaml"
+    config.write_text(default.read_text())
+    composition = tmp_path / "run.yaml"
+    composition.write_text(
+        "policy_model_name: test-model\n"
+        + _server_fronting("copilot_agent", name="session_environment", server_type="single_agent_turn")
+    )
+    before = config.read_text()
+
+    assert migration.main([str(config)]) == 0
+    assert config.read_text() == before
+    resolved = _parse(config, composition, strict=True)
+    assert _environment_servers_by_agent(resolved) == {"copilot_agent": ["session_environment"]}
+    assert resolved.copilot_agent.responses_api_agents.copilot_agent.resources_server is None
