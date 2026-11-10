@@ -146,14 +146,23 @@ jobs:
         env:
           AWS_REGION: us-east-1
 
-      # Runs after failed tests too: a failing assertion still downloaded its dependencies.
-      # The revision annotation lets the offline-image job reject a tag left by an earlier commit.
+      # Runs after failed tests too: a failing assertion still downloaded its dependencies. A failed
+      # venv install leaves the cache incomplete, so this shard's venvs (the union of its workers')
+      # are set up once more into the same cache: a transient failure completes it, and a persistent
+      # one fails here before anything is published. The revision annotation lets the offline-image
+      # job reject a tag left by an earlier commit.
       - name: Publish dependency cache layer
         if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
         env:
           REPOSITORY: ${{ steps.ecr.outputs.registry }}/gym
           SHARD: ${{ matrix.shard }}
         run: |
+          source .venv/bin/activate
+          export UV_CACHE_DIR="${RUNNER_TEMP}/gym-offline-cache/opt/nemo-gym/cache/uv"
+          export XDG_CACHE_HOME="${RUNNER_TEMP}/gym-offline-cache/opt/nemo-gym/cache/xdg"
+          export npm_config_cache="${XDG_CACHE_HOME}/npm"
+          ng_test_all +setup_only=true +delete_venvs_after_each_test=true \
+            "+num_shards=${NUM_SHARDS}" "+shard_index=${SHARD}"
           curl -fsSL "$CRANE_URL" -o "$RUNNER_TEMP/crane.tar.gz"
           echo "$CRANE_SHA256  $RUNNER_TEMP/crane.tar.gz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/crane.tar.gz" -C "$RUNNER_TEMP" crane
@@ -201,28 +210,46 @@ jobs:
         env:
           AWS_REGION: us-east-1
 
-      # A shard that failed before publishing leaves an earlier commit's cache under its tag.
-      # Shards download shared wheels (torch, CUDA libraries) into separate uv archives. Each
-      # shard's links replace the previous shard's, and pruning drops the archives left unlinked.
-      - name: Merge this commit's shard caches
+      # A shard that failed before publishing leaves an earlier commit's cache under its tag. That
+      # shard's own failure is reported and classified for retry, so this job publishes nothing
+      # instead of failing too; re-running the failed shard re-runs this dependent job as well.
+      - name: Check this commit's shard caches
+        id: shards
         shell: bash
         env:
           REPOSITORY: ${{ steps.ecr.outputs.registry }}/gym
+          SERVER_SUITE_RESULT: ${{ needs.server-suite.result }}
         run: |
           curl -fsSL "$CRANE_URL" -o "$RUNNER_TEMP/crane.tar.gz"
           echo "$CRANE_SHA256  $RUNNER_TEMP/crane.tar.gz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/crane.tar.gz" -C "$RUNNER_TEMP" crane
-          curl -LsSf "$UV_INSTALL_URL" | env UV_UNMANAGED_INSTALL="$RUNNER_TEMP/uv" sh
-          crane="$RUNNER_TEMP/crane"
+          stale=()
           for shard in $(seq 0 $((NUM_SHARDS - 1))); do
-            "$crane" manifest "$REPOSITORY:main-cache-$shard" > "$RUNNER_TEMP/main-cache-$shard.json"
+            "$RUNNER_TEMP/crane" manifest "$REPOSITORY:main-cache-$shard" > "$RUNNER_TEMP/main-cache-$shard.json"
             revision="$(python3 -c 'import json, sys; print(json.load(sys.stdin).get("annotations", {}).get(sys.argv[1], ""))' \
               org.opencontainers.image.revision < "$RUNNER_TEMP/main-cache-$shard.json")"
-            if [[ "$revision" != "$GITHUB_SHA" ]]; then
-              echo "::error::main-cache-$shard holds the cache of '$revision', not of $GITHUB_SHA."
-              exit 1
-            fi
+            [[ "$revision" == "$GITHUB_SHA" ]] || stale+=("$shard")
           done
+          if ((${#stale[@]} == 0)); then
+            echo "current=true" | tee -a "$GITHUB_OUTPUT"
+          elif [[ "$SERVER_SUITE_RESULT" == "success" ]]; then
+            echo "::error::Shards ${stale[*]} passed but their main-cache tags hold another commit's cache."
+            exit 1
+          else
+            echo "::warning::Shards ${stale[*]} did not publish this commit's cache; gym:main-offline keeps its previous image."
+            echo "current=false" | tee -a "$GITHUB_OUTPUT"
+          fi
+
+      # Shards download shared wheels (torch, CUDA libraries) into separate uv archives. Each
+      # shard's links replace the previous shard's, and pruning drops the archives left unlinked.
+      - name: Merge this commit's shard caches
+        if: steps.shards.outputs.current == 'true'
+        shell: bash
+        env:
+          REPOSITORY: ${{ steps.ecr.outputs.registry }}/gym
+        run: |
+          curl -LsSf "$UV_INSTALL_URL" | env UV_UNMANAGED_INSTALL="$RUNNER_TEMP/uv" sh
+          crane="$RUNNER_TEMP/crane"
           merged="$RUNNER_TEMP/merged"
           mkdir -p "$merged"
           for shard in $(seq 0 $((NUM_SHARDS - 1))); do
@@ -238,6 +265,7 @@ jobs:
       # onto that image keeps its source and locks in step with the caches; another commit's image
       # could miss dependencies its own locks need, so publication waits for the next run instead.
       - name: Publish onto this commit's gym image
+        if: steps.shards.outputs.current == 'true'
         shell: bash
         env:
           REPOSITORY: ${{ steps.ecr.outputs.registry }}/gym
