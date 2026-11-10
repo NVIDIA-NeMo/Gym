@@ -608,6 +608,7 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 
     # Opt-in backend affinity; use the rollout identity, never the child invocation ID.
     forward_session_id_header: bool = False
+    session_id_header_prefix: Optional[str] = None
 
     # Optional path to a file that publishes the current backend base_url.
     # Used for shared serving jobs that move hosts when they restart.
@@ -1606,7 +1607,16 @@ class VLLMModel(SimpleResponsesAPIModel):
     def _backend_session_options(self, request: Request) -> Dict[str, Any]:
         if not self.config.forward_session_id_header:
             return {}
-        session_id = request.session.get(SESSION_ID_KEY)
+        rollout_id = current_rollout_id()
+        if rollout_id:
+            prefix = self.config.session_id_header_prefix
+            if not prefix:
+                raise ValueError(
+                    "Correlated session forwarding requires a stable run-specific session_id_header_prefix"
+                )
+            session_id = f"{prefix}/{rollout_id}"
+        else:
+            session_id = request.session.get(SESSION_ID_KEY)
         if not session_id:
             raise ValueError("forward_session_id_header requires a Gym session identity")
         return {"_request_headers": {"X-Session-ID": str(session_id)}}

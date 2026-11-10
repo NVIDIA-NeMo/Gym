@@ -1891,7 +1891,7 @@ class TestApp:
             assert "_request_headers" not in captured_kwargs
 
     @mark.parametrize("forward", [False, True])
-    def test_backend_session_header_uses_cookie_not_child_capture(self, monkeypatch, forward):
+    def test_backend_session_header_uses_rollout_not_cookie_or_child_capture(self, monkeypatch, forward):
         from nemo_gym.core.episode_context import rollout_context
 
         server = self._setup_server(monkeypatch)
@@ -1899,9 +1899,10 @@ class TestApp:
         request = MagicMock()
         request.session = {SESSION_ID_KEY: "unique-rollout-session"}
         request.headers = {"x-session-id": "child-invocation"}
+        server.config.session_id_header_prefix = "unique-run"
         with rollout_context("0-0"):
             options = server._backend_session_options(request)
-        assert options == ({"_request_headers": {"X-Session-ID": "unique-rollout-session"}} if forward else {})
+        assert options == ({"_request_headers": {"X-Session-ID": "unique-run/0-0"}} if forward else {})
         request.session = {}
         if forward:
             with raises(ValueError, match="Gym session identity"):
@@ -9190,3 +9191,23 @@ async def test_a_context_refusal_after_the_reply_started_propagates() -> None:
 
     assert raised.value is error
     assert [message["status"] for message in sent] == [200]
+
+
+def test_session_header_survives_cookie_changes_and_separates_runs(monkeypatch):
+    from nemo_gym.core.episode_context import rollout_context
+
+    server = TestApp()._setup_server(monkeypatch)
+    server.config.forward_session_id_header = True
+    request = MagicMock()
+    for prefix in ["run-a", "run-b"]:
+        server.config.session_id_header_prefix = prefix
+        for rollout in ["0-0", "0-1", "0-0"]:
+            with rollout_context(rollout):
+                for cookie in ["cookie-one", "cookie-two"]:
+                    request.session = {SESSION_ID_KEY: cookie}
+                    assert server._backend_session_options(request) == {
+                        "_request_headers": {"X-Session-ID": f"{prefix}/{rollout}"}
+                    }
+    server.config.session_id_header_prefix = None
+    with rollout_context("0-0"), raises(ValueError, match="run-specific"):
+        server._backend_session_options(request)

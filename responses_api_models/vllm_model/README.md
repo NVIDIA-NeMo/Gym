@@ -170,8 +170,9 @@ agent retry budget. Agent-level retries remain separately configured.
 ### Backend session affinity
 
 Set `forward_session_id_header: true` only for backends that route on
-`X-Session-ID`. Each generation request forwards the Gym session cookie identity,
-which stays stable across turns and HTTP retries; child capture invocation IDs
-do not replace it. This applies to both Chat Completions and Completions mode.
+`X-Session-ID`. Set `session_id_header_prefix` to a unique run identity and preserve it on resume.
+Correlated generation calls send `<prefix>/<rollout-id>`, stable across turns and
+HTTP retries even when each request has a fresh cookie. Child capture invocation
+IDs do not replace the rollout identity. Uncorrelated calls use the Gym cookie. This applies to both Chat Completions and Completions mode.
 The option defaults to false and does not change the JSON request body.
 Do not also configure a static `X-Session-ID` in `default_headers`.
