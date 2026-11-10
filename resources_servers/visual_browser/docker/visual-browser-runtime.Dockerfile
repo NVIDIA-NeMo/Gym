@@ -16,7 +16,7 @@
 # which sends only the files this image needs as the build context.
 
 ARG PLAYWRIGHT_IMAGE=mcr.microsoft.com/playwright/python:v1.55.0-noble@sha256:640d578aae63cfb632461d1b0aecb01414e4e020864ac3dd45a868dc0eff3078
-ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.11.32
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.13.4
 
 FROM ${UV_IMAGE} AS uv
 

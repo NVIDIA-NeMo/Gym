@@ -14,6 +14,9 @@
 # (the root uv.lock version) instead of 2.2.0, since main now requires huggingface-hub<2.
 # Pins of packages a component no longer installs (ray and its dependencies moved to an
 # extra) have no effect. Editable Gym packages (nemo-gym) are not pinned.
+# Additional core dependencies for main 099832fa7 (2026-11-10): pytz, regex, tiktoken,
+# tzdata are pinned from root uv.lock. requests 2.34.2 also needs certifi>=2026.10.19;
+# certifi follows main's 2026.10.23 pin. Browser, graphics and model-adapter pins are retained.
 aiohappyeyeballs==2.7.1
 aiohttp==3.14.4
 aiohttp-cors==0.8.1
@@ -26,7 +29,7 @@ anyio==4.15.1
 ast-serialize==0.12.1
 asttokens==2.4.1
 attrs==26.1.0
-certifi==2026.7.22
+certifi==2026.10.23
 cffi==2.1.1
 cfgv==3.5.0
 charset-normalizer==3.5.2
@@ -137,9 +140,11 @@ python-dotenv==1.2.4
 python-multipart==0.0.32
 python3-xlib==0.15
 pytweening==1.2.0
+pytz==2025.2
 pyyaml==6.0.3
 ray==2.58.0
 referencing==0.37.0
+regex==2026.7.19
 requests==2.34.2
 requests-mock==1.12.1
 rich==15.0.0
@@ -151,10 +156,12 @@ smart-open==8.0.2
 sniffio==1.3.1
 sse-starlette==3.5.0
 starlette==1.7.0
+tiktoken==0.14.0
 tqdm==4.70.1
 truststore==0.10.4
 typing-extensions==4.16.0
 typing-inspection==0.4.4
+tzdata==2025.2
 urllib3==2.8.0
 uvicorn==0.54.0
 uvloop==0.23.0
