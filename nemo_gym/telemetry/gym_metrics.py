@@ -77,11 +77,14 @@ Compare its value with the queue-duration histogram count to calculate the queue
 Rollout outcomes
 ----------------
 ``gym.rollout.completed_total`` (counter): one per rollout attempt the collection driver finished
-handling, recorded after the recovery store accepts the saved outcome. An attempt is one dispatch of
+handling, recorded (for the collection driver) after the recovery store accepts the saved outcome. An attempt is one dispatch of
 one row in one collection run; a retry on a later resume run is another attempt, and an HTTP-level
-re-send of ``/run`` inside one dispatch is not. Only ``run_from_config`` (``gym eval run`` with
-serving) records it: ``--no-serve`` initialises no telemetry, and ``run_examples`` callers,
-reverification and the GDPVal multistage driver do not call the recorder.
+re-send of ``/run`` inside one dispatch is not. Two producers record it. The collection driver is
+``run_from_config`` (``gym eval run`` with serving): ``--no-serve`` initialises no telemetry, and ``run_examples``
+callers, reverification and the GDPVal multistage driver do not call the recorder. ``TaskRunner.run_task``, the
+in-process API, also records each rollout outcome it returns, without a recovery-store write: for it ``failed``
+means the outcome has a failure (labeled with its kind only), ``scored`` a reward and no failure, and ``unscored``
+neither. ``gym.rollout.rewarded_total`` counts only the finite rewards of scored rollouts, masked ones included.
 
 ``nemo.gym.rollout.outcome`` is ``scored`` (main output, including masked, forced-zero and supported
 unscored completions), ``failed`` (saved failures, including kill-shaped) or ``omitted`` (saved
