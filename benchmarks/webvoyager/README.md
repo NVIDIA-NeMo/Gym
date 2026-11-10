@@ -139,10 +139,18 @@ uv run --project resources_servers/visual_browser playwright install chromium
 ./.venv/bin/gym eval prepare --benchmark webvoyager
 ```
 
-The component servers run from their own venvs, which `uv sync --frozen` does
-not cover: they are resolved when Gym first builds them. To build them with the
-package versions of the scored WebVoyager runs, pass the component constraints
-to uv when the venvs are created:
+The component servers run from their own venvs. Current Gym prepares the
+repository-managed components from each component's committed `uv.lock` with
+`uv sync --locked`; the root sync does not prepare those environments. Their
+locks inherit the same shared resolver policy as other Gym components and were
+seeded with the existing WebVoyager reference versions. Pillow remains 12.3.0
+and the visual browser remains Playwright 1.55.0. Update and check them with the
+repository's `scripts/component_locks.py`, as for other managed components.
+
+The constraints below retain the scored-runtime contract for older Gym setup
+paths and direct `uv pip` image builds. They do not replace the managed component
+locks. For those legacy installs, pass the component constraints when creating
+the venvs:
 
 ```bash
 export UV_CONSTRAINT="$PWD/benchmarks/webvoyager/component-constraints.txt"
