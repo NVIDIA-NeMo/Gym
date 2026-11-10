@@ -45,7 +45,7 @@ from nemo_gym.server_runtime.episode_tokens import (
 )
 from nemo_gym.server_runtime.episode_tools import EpisodeToolset, ToolArgumentsError, ToolCallRecord, ToolSpec
 from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
-from nemo_gym.server_runtime.tool_access import DirectHTTPToolAccess, ToolAccess
+from nemo_gym.server_runtime.tool_access import TOOL_ERROR_HEADER, DirectHTTPToolAccess, ToolAccess
 from nemo_gym.telemetry.concurrency import MeteredSemaphore
 
 
@@ -732,7 +732,7 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
                 return _refusal(410, f"Episode {claims.episode_id.capture_key} is not running on this server")
             episode.running = asyncio.ensure_future(self._call_tool(episode, tool_name, arguments))
             try:
-                status, output = await episode.running
+                status, output, is_error = await episode.running
             except asyncio.CancelledError:
                 if asyncio.current_task().cancelling():
                     raise
@@ -740,9 +740,11 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
                 return _refusal(410, f"Episode {claims.episode_id.capture_key} ended while the call ran")
             finally:
                 episode.running = None
-        return JSONResponse(status_code=status, content=output)
+        return JSONResponse(
+            status_code=status, content=output, headers={TOOL_ERROR_HEADER: "true"} if is_error else None
+        )
 
-    async def _call_tool(self, episode: _OpenEpisode, name: str, arguments: Any) -> tuple[int, JsonValue]:
+    async def _call_tool(self, episode: _OpenEpisode, name: str, arguments: Any) -> tuple[int, JsonValue, bool]:
         """Run one call, under the episode's rollout, and record it, including a call to a tool it does not have."""
         started = perf_counter()
         status, is_error = 200, False
@@ -781,7 +783,7 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
             status, is_error = 500, True
             output = {"detail": f"Tool {name!r} returned a value that is not JSON, such as NaN or Infinity"}
         record(output)
-        return status, output
+        return status, output, is_error
 
 
 def _is_json(value: JsonValue) -> bool:

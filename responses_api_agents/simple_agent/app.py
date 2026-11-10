@@ -93,6 +93,7 @@ from nemo_gym.rollouts.health.timeouts import TimeoutEvent
 from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
     SESSION_OWNER_HEADER,
+    TOOL_ERROR_HEADER,
     Activation,
     ActivationOutOfOrderError,
     BaseRunRequest,
@@ -774,8 +775,11 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     resources_server_cookies.update(_cookies(api_response))
                     if collect_trajectory:
                         completed = 200 <= api_response.status < 400
-                        tool_status = "completed" if completed else "failed"
-                        error_type = None if completed else f"http_{api_response.status}"
+                        error_result = api_response.headers.get(TOOL_ERROR_HEADER) == "true"
+                        tool_status = "completed" if completed and not error_result else "failed"
+                        error_type = (
+                            f"http_{api_response.status}" if not completed else "tool_error" if error_result else None
+                        )
 
                 if collect_trajectory:
                     tool_records.append(
