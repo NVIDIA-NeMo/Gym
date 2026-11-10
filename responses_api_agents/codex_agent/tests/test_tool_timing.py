@@ -5,6 +5,7 @@
 
 import asyncio
 import json
+import random
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from pathlib import Path
@@ -349,6 +350,8 @@ def test_local_cli_path_emits_v2_bundle_with_run_identity(tmp_path: Path):
         return FakeProc()
 
     with (
+        # Local execution installs Codex lazily; this test must never install on the host.
+        patch("responses_api_agents.codex_agent.app.ensure_codex", return_value=None),
         patch("responses_api_agents.codex_agent.app.Path.home", return_value=tmp_path),
         patch.object(type(agent), "resolve_model_base_url", return_value="http://model:9000/v1"),
         patch("responses_api_agents.codex_agent.app.asyncio.create_subprocess_exec", fake_exec),
@@ -359,3 +362,73 @@ def test_local_cli_path_emits_v2_bundle_with_run_identity(tmp_path: Path):
     invocation, tool = bundle.records
     assert invocation.agent_instance == tool.agent_instance and tool.agent_instance.startswith("codex-agent:")
     assert tool.timings[0].clock_domain.startswith("codex-wall:") and tool.status == "completed"
+
+
+def test_detached_results_never_take_a_persisted_native_id():
+    bundle = _parse(
+        _transcript(
+            (1, _call("t:record-3")),
+            (2, _call("t")),
+            (2, _call("t")),
+            (3, _result("t", "ambiguous output")),
+            (4, _call("t:record-4")),
+            (5, _result("t", "second ambiguous output")),
+            (6, _call("t")),
+            (7, _call("t:record-6")),
+        )
+    )
+    unrelated, twin, twin_again, other, reused, later_native = _tools(bundle)
+    ids = [tool.tool_call_id for tool in _tools(bundle)]
+    assert len(set(ids)) == len(ids)
+    assert (unrelated.tool_call_id, other.tool_call_id, later_native.tool_call_id) == (
+        "t:record-3",
+        "t:record-4",
+        "t:record-6",
+    )
+    # Allocated IDs avoid every persisted ID, including one first seen later in the stream.
+    assert twin_again.tool_call_id == "t:record-2" and reused.tool_call_id == "t:record-6.1"
+    results = [item.call_id for item in bundle.records[0].conversation if item.type == "function_call_output"]
+    assert results == ["t:record-3.1", "t:record-5"]
+    assert not set(results) & set(ids)
+
+
+def _generated_stream(rng):
+    natives = ["a", "b", "a:record-1", "a:record-2", "a:record-3", "a:record-2.1", "b:record-4"]
+    records, payloads = [], []
+    for index in range(rng.randint(1, 12)):
+        native = rng.choice(natives)
+        kind = rng.choice(["call", "call", "result", "search"])
+        if kind == "call":
+            payload = _call(native)
+        elif kind == "result":
+            payload = _result(native, f"out|{native}|{index}")
+        else:
+            payload = {"type": "web_search_call", "id": native, "status": "completed"}
+        records.append((index, payload))
+        payloads.append(payload)
+    return _transcript(*records), payloads
+
+
+async def test_generated_streams_attach_outputs_only_to_their_native_request():
+    rng = random.Random(5935)
+    row = {"_ng_task_index": 0, "_ng_rollout_index": 0}
+    for _ in range(60):
+        transcript, payloads = _generated_stream(rng)
+        bundle = _parse(transcript)
+        raw = _tools(bundle)
+        call_ids = [tool.tool_call_id for tool in raw if tool.tool_name != "web_search"]
+        assert len(set(call_ids)) == len(call_ids)
+        result = {"ng_agent_observations": bundle.model_dump(mode="json")}
+        await enrich_run_result(
+            row, result, capture_dirs=[], observability_enabled=True, trajectory_schema_version="2.0"
+        )
+        for tool in result["ng_trajectory"]["tool_calls"]:
+            if tool["output"] is not None:
+                assert tool["output"].split("|")[1] == tool["native_tool_call_id"], (transcript, tool)
+        legacy = {"ng_agent_observations": bundle.model_dump(mode="json")}
+        await enrich_run_result(row, legacy, capture_dirs=[], observability_enabled=True)
+        natives = [tool.native_tool_call_id for tool in raw]
+        v1_ids = [tool["tool_call_id"] for tool in legacy["ng_trajectory"]["tool_calls"]]
+        for native, v1_id in zip(natives, v1_ids):
+            if natives.count(native) == 1:
+                assert v1_id == native, (transcript, v1_ids)
