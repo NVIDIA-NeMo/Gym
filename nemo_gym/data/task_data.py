@@ -65,9 +65,9 @@ RESERVED_ROW_KEYS = frozenset(
         "responses_create_params",
         # A multi-turn row's requests, one per turn beside ``task_data`` (the Harbor materializer's ``turns``).
         "turns",
-        # What the agent session receives (nemo_gym.server_runtime.agent_context).
-        # single_agent_turn keeps it from the Resources Server.
-        # On an agent's legacy /run it is one more row field, which the agent may forward.
+        # single_agent_turn routes this to its agent, outside the Resources Server's TaskData.
+        # Reserving it for schema projection does not declare support in other environments:
+        # validation preserves the input row, and each environment validates its own task input.
         AGENT_CONTEXT_KEY_NAME,
         "agent_ref",
         "task_source",
@@ -153,7 +153,7 @@ def normalize_task_fields(row: Dict[str, Any]) -> tuple[Dict[str, Any], List[str
         if isinstance(container, dict):
             for key, value in container.items():
                 if container_key == TASK_DATA_ROW_KEY and key == AGENT_CONTEXT_KEY_NAME:
-                    # The task input lifts agent_context out of task_data too, so it is not a task field there.
+                    # single_agent_turn also accepts the context here; its TaskData excludes it in either form.
                     continue
                 if key in fields and fields[key] != value:
                     conflicts.append(key)

@@ -1,9 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
+from pathlib import Path
+
 import pytest
 from pydantic import BaseModel, ValidationError
 
+from environment_servers.nemo_user_sim.episode_contracts import UserSimEpisodeRequest
+from nemo_gym.data.task_materialization import materialize_task
 from nemo_gym.server_runtime._checkpoint.environment import task_digest
 from nemo_gym.server_runtime.agent_context import AGENT_CONTEXT_MAX_BYTES, AgentContext, AgentContextArtifact
 from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnTaskInput
@@ -107,11 +112,11 @@ def test_a_row_without_agent_context_dumps_as_before() -> None:
     [
         (
             {"responses_create_params": {"input": "Hi"}, "verifier_metadata": {"answer": "a"}, "id": "1"},
-            "071fa6aff13c98228af9549d8ca4f1e8f803be48875cd3e578f5b8b811ec9291",
+            "071fa6aff13c98228af9549d8ca4f1e8f803be48875cd3e578f5b8b811ec9291",  # pragma: allowlist secret
         ),
         (
             {"responses_create_params": {"input": "Hi"}, "task_data": {"id": "1", "answer": "a"}},
-            "7a1bc8b4b123e2a362911dfed752d30838e14515467c5bbb917c423775523de2",
+            "7a1bc8b4b123e2a362911dfed752d30838e14515467c5bbb917c423775523de2",  # pragma: allowlist secret
         ),
     ],
 )
@@ -147,3 +152,19 @@ def test_agent_context_in_the_canonical_task_data_container_is_lifted_too() -> N
 
     assert task_input.agent_context == AgentContext(values={"tag": "figqa2"})
     assert task_input.task_data == {"id": "1"}
+
+
+@pytest.mark.parametrize("context", [None, {}, {"values": {"tag": "figure"}}])
+def test_usersim_task_input_rejects_unsupported_agent_context_after_materialization(context: object) -> None:
+    path = Path(__file__).resolve().parents[3] / "resources_servers/nemo_user_sim/data/example.jsonl"
+    row = json.loads(path.read_text().splitlines()[0])
+    row["agent_context"] = context
+    task = materialize_task(row, taskset="nemo_user_sim:example", task_index=0)
+
+    with pytest.raises(ValidationError) as error:
+        UserSimEpisodeRequest.model_validate({"episode_id": {"rollout_id": "user-context"}, "task": task})
+
+    assert any(
+        item["loc"] == ("task", "task_input", "agent_context") and item["type"] == "extra_forbidden"
+        for item in error.value.errors()
+    )
