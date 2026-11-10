@@ -151,7 +151,8 @@ jobs:
       # are set up once more into the same cache: a transient failure completes it, and a persistent
       # one fails here before anything is published. Assets that tests fetch at runtime (Chromium,
       # datasets) are captured only when a test reaches the download, so a test that already fails
-      # before it at this commit may also miss that asset offline. The revision annotation lets the
+      # before it at this commit may also miss that asset offline. As in docker/Dockerfile, Ray's
+      # unused Java worker jar is dropped from the cache. The revision annotation lets the
       # offline-image job reject a tag left by an earlier commit.
       - name: Publish dependency cache layer
         if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
@@ -165,6 +166,7 @@ jobs:
           export npm_config_cache="${XDG_CACHE_HOME}/npm"
           ng_test_all +setup_only=true +delete_venvs_after_each_test=true \
             "+num_shards=${NUM_SHARDS}" "+shard_index=${SHARD}"
+          find "$RUNNER_TEMP/gym-offline-cache" -name ray_dist.jar -delete
           curl -fsSL "$CRANE_URL" -o "$RUNNER_TEMP/crane.tar.gz"
           echo "$CRANE_SHA256  $RUNNER_TEMP/crane.tar.gz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/crane.tar.gz" -C "$RUNNER_TEMP" crane
@@ -215,6 +217,7 @@ jobs:
       # A shard that failed before publishing leaves an earlier commit's cache under its tag, or no
       # tag at all. That shard's own failure is reported and classified for retry, so this job
       # publishes nothing instead of failing too; re-running the failed shard re-runs this job.
+      # Only the registry's MANIFEST_UNKNOWN means absent: any other lookup error fails the job.
       - name: Check this commit's shard caches
         id: shards
         shell: bash
@@ -227,7 +230,10 @@ jobs:
           tar -xzf "$RUNNER_TEMP/crane.tar.gz" -C "$RUNNER_TEMP" crane
           stale=()
           for shard in $(seq 0 $((NUM_SHARDS - 1))); do
-            if ! "$RUNNER_TEMP/crane" manifest "$REPOSITORY:main-cache-$shard" > "$RUNNER_TEMP/main-cache-$shard.json"; then
+            if ! "$RUNNER_TEMP/crane" manifest "$REPOSITORY:main-cache-$shard" \
+              > "$RUNNER_TEMP/main-cache-$shard.json" 2> "$RUNNER_TEMP/lookup.err"; then
+              cat "$RUNNER_TEMP/lookup.err" >&2
+              grep -q MANIFEST_UNKNOWN "$RUNNER_TEMP/lookup.err" || exit 1
               stale+=("$shard")
               continue
             fi
@@ -269,6 +275,7 @@ jobs:
       # cicd-main's schedule builds gym:<commit> on the same cron, once its unit tests pass. Layering
       # onto that image keeps its source and locks in step with the caches; another commit's image
       # could miss dependencies its own locks need, so publication waits for the next run instead.
+      # As for the shard tags, only MANIFEST_UNKNOWN means the image is not there yet.
       - name: Publish onto this commit's gym image
         if: steps.shards.outputs.current == 'true'
         shell: bash
@@ -277,7 +284,9 @@ jobs:
         run: |
           base="$REPOSITORY:$GITHUB_SHA"
           for attempt in $(seq 45); do
-            "$RUNNER_TEMP/crane" digest "$base" && break
+            "$RUNNER_TEMP/crane" digest "$base" 2> "$RUNNER_TEMP/lookup.err" && break
+            cat "$RUNNER_TEMP/lookup.err" >&2
+            grep -q MANIFEST_UNKNOWN "$RUNNER_TEMP/lookup.err" || exit 1
             if ((attempt == 45)); then
               echo "::warning::gym:$GITHUB_SHA was not built; gym:main-offline keeps its previous image."
               exit 0
