@@ -87,6 +87,16 @@ def _apply_substitutions(content: str, config: "CVDPResourcesServerConfig") -> s
 
 def _normalize_build_file(path: str, content: str, config: "CVDPResourcesServerConfig") -> str:
     content = _apply_substitutions(content, config)
+    if posixpath.basename(path).startswith("Dockerfile") and config.cocotb_bus_version:
+        content = re.sub(
+            r"(?m)^(RUN\s+pip3?\s+install\s+)([^\n]*cocotb[-_]bus[^\n]*)$",
+            lambda match: (
+                match.group(0)
+                if "cocotb==" in match.group(2)
+                else f"{match.group(1)}cocotb=={config.cocotb_bus_version} {match.group(2)}"
+            ),
+            content,
+        )
     if (
         posixpath.basename(path).startswith("Dockerfile")
         and config.oss_pnr_image.startswith("ghcr.io/hdl/impl/pnr")

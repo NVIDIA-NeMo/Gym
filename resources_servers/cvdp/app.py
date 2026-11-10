@@ -68,6 +68,7 @@ class CVDPResourcesServerConfig(BaseResourcesServerConfig):
     oss_sim_image: str = "ghcr.io/hdl/sim/osvb"
     oss_pnr_image: str = "ghcr.io/hdl/impl/pnr"
     eda_sim_image: str = ""  # Set to a commercial EDA image (e.g. Cadence Xcelium)
+    cocotb_bus_version: str | None = None  # Pin legacy cocotb.runner users in prepared task images.
     container_timeout: int = 600
     num_processes: int = 4  # Max concurrent verifier sandboxes
     inconclusive_verification_retries: int = Field(default=1, ge=0)
