@@ -39,7 +39,7 @@ sending the request to the model. Other tags always keep image rendering even if
 `verifier_metadata.media_dir` against the configured `media_base_dir`.
 
 Under an agent session (`single_agent_turn` or `single_agent_turn_legacy`), the agent reads the same
-media from the row's `agent_context` instead: `artifacts.media` is the media directory and `values.tag`
+media from the row's `agent_context.agent` instead: `artifacts.media` is the media directory and `values.tag`
 the subtask tag. It resolves the directory at seed, embeds the media in the session's episode, and refuses a
 session whose row has no `agent_context`, no `values.tag`, or no media directory (HTTP 422), so a session
 never runs without its images or with another prompt than `/run`. Images are removed from the session's
@@ -74,8 +74,8 @@ Each JSONL row contains:
 - `verifier_metadata.media_dir`: relative path to the directory containing the
   image or PDF for this question (e.g. `media/figs/imgs/<uuid>` or
   `test_media/figs/imgs/<uuid>`), resolved against the agent's `media_base_dir`.
-- `agent_context`: what an agent session receives, written by `prepare_data.py`:
-  `{"values": {"tag": <tag>}, "artifacts": {"media": {"path": <media_dir>}}}`. The shipped configs run the
+- `agent_context`: what an agent session receives, keyed by participant role and written by `prepare_data.py`:
+  `{"agent": {"values": {"tag": <tag>}, "artifacts": {"media": {"path": <media_dir>}}}}`. The shipped configs run the
   agent in an agent session (`single_agent_turn_legacy`), so a row without this key is refused with HTTP 422.
   Data prepared before the key existed, including the v0.0.1 validation JSONL from `gitlab_identifier`, lacks
   it: run `prepare_data.py` again.

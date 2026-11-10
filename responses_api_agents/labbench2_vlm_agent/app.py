@@ -23,8 +23,8 @@ is ``protocolqa2`` (so mixed JSONLs can use one run: text for protocols, images
 for figqa2/tableqa2). Non-protocol rows always use the image path when
 ``media_mode=text`` is set.
 
-An agent session gets the same media from the task's ``agent_context`` (``artifacts.media`` and ``values.tag``)
-and embeds it in the episode it creates; the agent loop stays Simple Agent's.
+An agent session gets the same media from its ``agent_context`` (``artifacts.media`` and ``values.tag``), the
+``agent`` role's context in the task row, and embeds it in the episode it creates; the agent loop stays Simple Agent's.
 """
 
 from dataclasses import dataclass, fields

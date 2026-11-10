@@ -184,11 +184,13 @@ def _files_to_text(files_dir: Path) -> str:
 
 
 def _agent_context(verifier_metadata: dict) -> dict:
-    """The row's ``agent_context``: what an agent session needs to embed the media, as ``run()`` reads it from
-    ``verifier_metadata`` on the legacy path."""
+    """The row's ``agent_context``, keyed by participant role: what the ``agent`` session needs to embed the media,
+    as ``run()`` reads it from ``verifier_metadata`` on the legacy path."""
     return {
-        "values": {"tag": verifier_metadata["tag"]},
-        "artifacts": {"media": {"path": verifier_metadata["media_dir"]}},
+        "agent": {
+            "values": {"tag": verifier_metadata["tag"]},
+            "artifacts": {"media": {"path": verifier_metadata["media_dir"]}},
+        }
     }
 
 

@@ -23,7 +23,7 @@ from nemo_gym.agents import AgentCloseSessionRequest, AgentSeedSessionRequest
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import EpisodeId, TaskId
-from nemo_gym.server_runtime import AgentContext
+from nemo_gym.server_runtime import AgentContext, SingleAgentTurnTaskInput
 from responses_api_agents.labbench2_vlm_agent import app as labbench_agent_app
 from responses_api_agents.labbench2_vlm_agent.app import (
     LabbenchVLMAgent,
@@ -210,7 +210,9 @@ def test_an_agent_session_sends_the_model_the_same_request_as_run(tag: str, medi
 
     session_agent, session_requests = _recording_agent(media_mode)
     client = TestClient(session_agent.setup_webserver())
-    seed = _seed(None).model_copy(update={"agent_context": AgentContext.model_validate(row["agent_context"])})
+    # The seed carries the context single_agent_turn takes from the row, as in a real episode.
+    agent_context = SingleAgentTurnTaskInput.model_validate(row).agent_seed_context
+    seed = _seed(None).model_copy(update={"agent_context": agent_context})
     assert client.post("/v1/agent_sessions", json=seed.model_dump(mode="json")).status_code == 200
     assert client.post("/ng-rollout/rollout/v1/responses", json=row["responses_create_params"]).status_code == 200
 
