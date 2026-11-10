@@ -17,7 +17,7 @@ vllm:
 
 shared_run_warmup_env_vars:
   MODEL: ${oc.env:PWD}/results/Nemotron-3.5-Super-VL-120B-A12B-GA-candidate-MTP-boosted-20261001
-  VLLM_CONFIG: benchmarks/nemotron_3.5_super/vllm_configs/nemotron_3.5_super.sh
+  VLLM_CONFIG: benchmarks/nemotron_3.5_super/vllm_configs/nemotron_3.5_super_flashstate_lookup_newest_state.sh
   NUM_PREFILL_NODES: 2
   NUM_DECODE_NODES: 2
   ENABLE_MOONCAKE: 1
