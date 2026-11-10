@@ -424,6 +424,7 @@ def runtime_identity() -> dict:
         ]
     }
     sources = {str(p.relative_to(ROOT)): digest(p) for p in ROOT.rglob("*.py")}
+    sources["policy/judge_output.schema.json"] = digest(ROOT / "policy/judge_output.schema.json")
     component_root = ROOT.parents[2]
     for boundary in ["benchmarks", "resources_servers", "responses_api_models", "responses_api_agents", "nemo_gym"]:
         for p in (component_root / boundary).rglob("*.py"):
