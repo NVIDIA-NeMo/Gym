@@ -580,8 +580,20 @@ def test_a_row_that_no_retry_can_fix_is_refused_as_final_without_a_sandbox(serve
     assert _post_seed(client, _seed()).status_code == 200, "a refusal does not fence the ID"
 
 
+def _fail_asset_uploads(monkeypatch, error: Exception) -> None:
+    """Fail the asset uploads only; start() delivers the PRD through upload() too."""
+    real_upload = AsyncSandbox.upload
+
+    async def upload(self: AsyncSandbox, local_path, remote_path: str) -> None:
+        if "/assets/" in remote_path:
+            raise error
+        await real_upload(self, local_path, remote_path)
+
+    monkeypatch.setattr(AsyncSandbox, "upload", upload)
+
+
 def test_a_failed_asset_upload_stops_the_sandbox(server, root, monkeypatch, stopped):
-    monkeypatch.setattr(AsyncSandbox, "upload", AsyncMock(side_effect=OSError("upload failed")))
+    _fail_asset_uploads(monkeypatch, OSError("upload failed"))
 
     with pytest.raises(OSError, match="upload failed"):
         _post_seed(TestClient(server.setup_webserver()), _seed())
@@ -644,7 +656,10 @@ def test_close_follows_the_session_contract(server, root, graded):
 def test_failed_setup_retains_cleanup_until_close(server, root, monkeypatch, operation):
     client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
     seed = _seed()
-    monkeypatch.setattr(AsyncSandbox, operation, AsyncMock(side_effect=OSError("setup failed")))
+    if operation == "upload":
+        _fail_asset_uploads(monkeypatch, OSError("setup failed"))
+    else:
+        monkeypatch.setattr(AsyncSandbox, operation, AsyncMock(side_effect=OSError("setup failed")))
     stop = AsyncMock(side_effect=[OSError("stop failed"), None])
     monkeypatch.setattr(AsyncSandbox, "stop", stop)
 
