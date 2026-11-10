@@ -76,6 +76,9 @@ def load_sqlite_db(conn: psycopg.Connection, db_id: str, sqlite_path: Path) -> L
             with conn.cursor().copy(copy_sql) as copy:
                 for row in zip(*values_by_column):
                     copy.write_row([_to_pg(v) for v in row])
+            # Planner statistics now: autovacuum reaches a new table only a minute or more later, and until then a
+            # grade can get a plan that runs past the timeout.
+            conn.execute(sql.SQL("ANALYZE {}").format(table_ref))
             all_fallbacks += fallbacks
         conn.execute(
             sql.SQL("INSERT INTO {}.loaded (db_id, fallbacks) VALUES (%s, %s)").format(sql.Identifier(_META_SCHEMA)),

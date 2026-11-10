@@ -209,6 +209,17 @@ class TestLoader:
         with psycopg.connect(ADMIN_DSN) as conn:
             assert conn.execute(query, (DB_ID,)).fetchone() == before
 
+    def test_tables_have_planner_statistics_after_the_load(self, postgres_env):
+        import psycopg
+
+        with psycopg.connect(ADMIN_DSN) as conn:
+            never_analyzed = conn.execute(
+                "SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
+                " WHERE n.nspname = %s AND c.relkind = 'r' AND c.reltuples < 0",
+                (DB_ID,),
+            ).fetchall()
+        assert never_analyzed == []
+
     def test_reader_role_cannot_write_even_outside_the_grader(self, postgres_env):
         import psycopg
 
