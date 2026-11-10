@@ -23,7 +23,13 @@ from nemo_gym.agents import (
 )
 from nemo_gym.core import MediaFile, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import read_text, stage_media, upload_text
-from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap
+from nemo_gym.trajectory import (
+    AgentInvocation,
+    AgentObservationBundle,
+    ObservationGap,
+    TrajectoryRecord,
+    TrajectoryTurn,
+)
 
 
 LOG = logging.getLogger(__name__)
@@ -96,6 +102,9 @@ class PiSandboxSession(AgentSessionState):
         | None
     ) = field(default=None, repr=False)
     _activation_observations: dict[int, AgentObservationBundle] = field(default_factory=dict, init=False, repr=False)
+    _activation_turns: dict[int, tuple[list[TrajectoryTurn], list[ObservationGap]]] = field(
+        default_factory=dict, init=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         self.directory = self.directory or self.session.session_dir
@@ -150,6 +159,38 @@ class PiSandboxSession(AgentSessionState):
         if self.activation_started is None:
             return None
         return (monotonic() - self.activation_started) * 1000
+
+    def record_turns(self, turns: list[TrajectoryTurn], gaps: list[ObservationGap]) -> None:
+        """Keep the current activation's turns and the gaps in them; close reports every activation's in order."""
+        self._activation_turns[self.activation_id or 1] = (turns, gaps)
+
+    def activation_trajectory(self, activation_id: int) -> TrajectoryRecord:
+        """One activation's turns; an activation that failed before Pi ran is reported with none."""
+        unavailable = ObservationGap(
+            code="turns_unavailable", invocation_id=f"{self.request.agent_session_id}:activation-{activation_id}"
+        )
+        turns, gaps = self._activation_turns.get(activation_id, ([], [unavailable]))
+        return TrajectoryRecord(
+            task_id=self.request.task_id.task_id,
+            rollout_id=self.request.episode_id.capture_key,
+            turns=list(turns),
+            gaps=list(gaps),
+        )
+
+    @property
+    def trajectory(self) -> TrajectoryRecord | None:
+        """Every reported activation's turns in order, or None outside a continuation session."""
+        if not self.is_continuation:
+            return None
+        records = [
+            self.activation_trajectory(activation_id) for activation_id in sorted(self._activation_observations)
+        ]
+        return TrajectoryRecord(
+            task_id=self.request.task_id.task_id,
+            rollout_id=self.request.episode_id.capture_key,
+            turns=[turn for record in records for turn in record.turns],
+            gaps=[gap for record in records for gap in record.gaps],
+        )
 
     def record_interrupted_activation(self, activation_id: int, error: BaseException) -> AgentObservationBundle:
         """Report an activation that failed before its run left observations, without replacing any it left.
