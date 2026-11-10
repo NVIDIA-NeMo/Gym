@@ -2,7 +2,7 @@
 
 # NIXL requires matching speculative cache configurations on both PD roles.
 # DWDP applies only to target experts; MTP draft weights remain replicated.
-NUM_SPECULATIVE_TOKENS="${NUM_SPECULATIVE_TOKENS:-5}"
+NUM_SPECULATIVE_TOKENS="${NUM_SPECULATIVE_TOKENS:-8}"
 
 # Optional detailed Nsight Systems capture on PD prefill nodes only.
 # PROFILE_PREFILL=1 auto-installs nsys if needed in root Ubuntu containers.

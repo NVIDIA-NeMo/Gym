@@ -106,7 +106,7 @@ VLLM_PREFILL_ARGS=(
 # @bxyu-nvidia: We set "enable_lookup": false for the Mooncake store connector because the prefill worker handles the prefix cache lookup and decode just needs to receive the transferred kv cache.
 VLLM_DECODE_ARGS=(
     --speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${NUM_SPECULATIVE_TOKENS}}"
-    --data-parallel-size 4
+    --data-parallel-size 8
     --data-parallel-size-local 4
     --enable-expert-parallel
     --moe-backend flashinfer_trtllm
