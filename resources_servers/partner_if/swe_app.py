@@ -181,6 +181,11 @@ class SWEIFResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, ScaleSW
             # The errors name the fields without their values, which can hold the task's private content.
             issues = error.errors(include_url=False, include_context=False, include_input=False)
             raise HTTPException(422, f"Invalid SWE task data: {issues}") from error
+        # Scale-SWE's curriculum start states come with its wire, but IF tasks grade the task as shipped and this seed
+        # does not build one, so a row asking for it would run the agent on a different task than the one graded.
+        start_state = [name for name in ("setup_patch", "squash_history") if getattr(instance, name)]
+        if start_state:
+            raise HTTPException(422, f"SWE IF tasks do not support curriculum start states: {', '.join(start_state)}")
         # A contract the verifier would refuse fails here, before the episode spends a sandbox and an agent run.
         actor_contract(contract)
         async with self._session_lock(session_id):

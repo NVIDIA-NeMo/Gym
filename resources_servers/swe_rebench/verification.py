@@ -28,6 +28,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
+from resources_servers.swebench.start_state import (
+    SETUP_PATCH_FAILED_ERROR,
+    apply_setup_patch_command,
+    setup_files,
+    setup_patch_failed,
+)
+
 
 # The marker delimits the graded test output from the install noise that precedes it. Parsers
 # are line-oriented and several will happily interpret dependency-resolver chatter as test
@@ -124,6 +131,8 @@ class VerificationInputs:
     base_commit: str
     patch: str
     test_patch: str = ""
+    # A curriculum start state: applied exactly, before ``patch`` (relative to it).
+    setup_patch: str = ""
     install: Sequence[str] = field(default_factory=tuple)
     test_cmd: Sequence[str] = field(default_factory=tuple)
     log_parser: str = ""
@@ -154,6 +163,7 @@ def build_eval_script(inputs: VerificationInputs) -> str:
     install_block = "\n".join(as_command_list(inputs.install))
     test_block = "\n".join(as_command_list(inputs.test_cmd))
 
+    apply_setup_patch = apply_setup_patch_command(inputs.setup_patch)
     apply_patch = ""
     if inputs.patch.strip():
         apply_patch = (
@@ -172,6 +182,7 @@ cd {shlex.quote(work_dir)} || exit 97
 git reset --hard HEAD >/dev/null 2>&1 || true
 git checkout {shlex.quote(inputs.base_commit)} >/dev/null 2>&1 || true
 
+{apply_setup_patch}
 {apply_patch}
 {apply_test_patch}
 
@@ -264,6 +275,7 @@ def verification_files(inputs: VerificationInputs, *, overwrite_maven_settings: 
     files = {"/tmp/nemo_gym_eval.sh": build_eval_script(inputs)}
     # Harmless for non-JVM rows, which never read them.
     files.update(_mirror_files(maven_settings=overwrite_maven_settings))
+    files.update(setup_files(inputs.setup_patch))
     if inputs.patch.strip():
         files["/tmp/nemo_gym_patch.diff"] = inputs.patch
     if inputs.test_patch.strip():
@@ -294,6 +306,15 @@ async def run_verification(
 
         await asyncio.to_thread(_persist_log)
 
+    if setup_patch_failed(inputs.setup_patch, result.return_code, output):
+        return VerificationResult(
+            completed=False,
+            resolved=False,
+            patch_applied=False,
+            test_results=None,
+            test_output=output,
+            error=SETUP_PATCH_FAILED_ERROR,
+        )
     if result.return_code == 97:
         return VerificationResult(
             completed=False,

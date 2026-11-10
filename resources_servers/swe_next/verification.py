@@ -55,6 +55,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+from resources_servers.swebench.start_state import (
+    SETUP_PATCH_FAILED_ERROR,
+    apply_setup_patch_command,
+    setup_files,
+    setup_patch_failed,
+)
+
 
 TEST_OUTPUT_BEGIN = "___NEMO_GYM_SWE_NEXT_TEST_BEGIN___"
 TEST_OUTPUT_END = "___NEMO_GYM_SWE_NEXT_TEST_END___"
@@ -82,6 +89,8 @@ class VerificationInputs:
     patch: str
     test_patch: str
     expected_output_json: str = "{}"
+    # A curriculum start state: applied exactly, before ``patch`` (relative to it).
+    setup_patch: str = ""
 
 
 @dataclass
@@ -139,6 +148,7 @@ def drop_patch_sections(patch: str, paths: Iterable[str]) -> str:
 
 
 def build_eval_script(inputs: VerificationInputs) -> str:
+    apply_setup = apply_setup_patch_command(inputs.setup_patch)
     apply_patch = (
         "git apply --reject --recount --ignore-space-change --whitespace=nowarn /tmp/nemo_gym_patch.diff || true"
         if inputs.patch.strip()
@@ -153,6 +163,7 @@ def build_eval_script(inputs: VerificationInputs) -> str:
     return f"""#!/bin/bash
 cd {shlex.quote(inputs.workdir)} || exit 97
 set +e
+{apply_setup}
 {apply_patch}
 {apply_test_patch}
 
@@ -175,6 +186,7 @@ def _slice(log: str, begin: str, end: str) -> str:
 
 def verification_files(inputs: VerificationInputs) -> dict[str, str]:
     files = {"/tmp/nemo_gym_eval.sh": build_eval_script(inputs)}
+    files.update(setup_files(inputs.setup_patch))
     if inputs.patch.strip():
         files["/tmp/nemo_gym_patch.diff"] = inputs.patch
     if inputs.test_patch.strip():
@@ -285,6 +297,15 @@ async def run_verification(
 
         await asyncio.to_thread(_persist)
 
+    if setup_patch_failed(inputs.setup_patch, result.return_code, output):
+        return VerificationResult(
+            completed=False,
+            resolved=False,
+            patch_applied=False,
+            test_results=None,
+            test_output=output,
+            error=SETUP_PATCH_FAILED_ERROR,
+        )
     if result.return_code == 97:
         return VerificationResult(
             completed=False,

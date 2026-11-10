@@ -46,3 +46,6 @@ class TaskData(BaseModel):
     agent_timeout_sec: float | None = Field(default=None, json_schema_extra={"consumed_by": ["provenance"]})
     verifier_timeout_sec: float | None = Field(default=None, json_schema_extra={"consumed_by": ["provenance"]})
     toml_workdir: str = Field(default="", json_schema_extra={"consumed_by": ["provenance"]})
+    # Curriculum start states (see swebench/start_state.py); squash_history is read only when seeding.
+    setup_patch: str = Field(default="", json_schema_extra={"consumed_by": ["verify"]})
+    squash_history: bool = False

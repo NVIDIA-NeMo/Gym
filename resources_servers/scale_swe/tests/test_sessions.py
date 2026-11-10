@@ -35,6 +35,7 @@ from resources_servers.scale_swe.app import (
 )
 from resources_servers.scale_swe.verification import TEST_OUTPUT_BEGIN, VerificationResult
 from resources_servers.swebench.patch_capture import CaptureCommandError, PatchCapture
+from resources_servers.swebench.start_state import SETUP_PATCH_PATH
 
 
 ROW = {"instance_id": "task", "workdir": "/repo", "image_url": "image", "FAIL_TO_PASS": '["tests/test_x.py::test_a"]'}
@@ -197,6 +198,24 @@ async def test_failed_seed_stops_its_sandbox(server):
 
     with pytest.raises(OSError):
         await server.seed_session(SimpleNamespace(session={}), seed())
+    sandbox.stop.assert_awaited_once()
+    assert "attempt" not in server._session_id_to_sandbox
+    assert not server._resources_sessions
+
+
+@pytest.mark.asyncio
+async def test_a_failed_start_state_seed_stops_its_sandbox_once(server, monkeypatch):
+    # The session owns the sandbox from creation, so only the failed seed's cleanup stops it.
+    sandbox = FakeSandbox()
+    server._create_sandbox.side_effect = None
+    server._create_sandbox.return_value = sandbox
+    failing = AsyncMock(side_effect=RuntimeError("start-state commit failed"))
+    monkeypatch.setattr(scale_swe_app, "seed_start_state", failing)
+
+    with pytest.raises(RuntimeError, match="start-state commit failed"):
+        await server.seed_session(SimpleNamespace(session={}), seed(setup_patch="diff --git a/x b/x\n"))
+    assert SETUP_PATCH_PATH in server._create_sandbox.await_args.kwargs["files"]
+    failing.assert_awaited_once()
     sandbox.stop.assert_awaited_once()
     assert "attempt" not in server._session_id_to_sandbox
     assert not server._resources_sessions
