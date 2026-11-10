@@ -172,3 +172,35 @@ async def test_unfinished_trace_rejected_before_verifier_and_resources_closed(to
     assert "Unfinished OpenCode assistant turn" in str(result.failure)
     assert "/verify" not in [path for _, path, _ in client.calls]
     assert client.calls[-1][1] == "/close_session"
+
+
+@pytest.mark.parametrize(
+    "marker,component,accepted",
+    [
+        ("math_with_judge_simple_agent", "math_with_judge", True),
+        ("string_match_simple_agent", "string_match", True),
+        ("mcqa_simple_agent", "mcqa", True),
+        ("math_with_judge_simple_agent", "string_match", False),
+        ("mcqa_simple_agent", "string_match", False),
+        ("unknown", "string_match", False),
+    ],
+)
+async def test_verifier_marker_checked_before_session_creation(marker, component, accepted):
+    base, client = _environment_server()
+    resource = base.config.resources_server.name
+    client.global_config_dict[resource] = {"resources_servers": {component: {"entrypoint": "app.py"}}}
+    client.global_config_dict.agent.responses_api_agents.test.tool_rewards = None
+    response = _agent_response().model_dump(mode="json")
+    response["opencode_evidence"] = {"turns_used": 1, "finished_naturally": True, "tool_reward": None}
+    client.responses[2] = _Response(response)
+    request = _request()
+    request.task.task_input.task_data["image_tools_base_agent_ref"] = {"name": marker}
+    server = OpenCodeEnvironmentServer(config=base.config, server_client=client)
+    result = await server.run_request(request)
+    if accepted:
+        assert result.failure is None
+        assert [(name, path) for name, path, _ in client.calls if path == "/verify"] == [(resource, "/verify")]
+    else:
+        assert result.failure.stage == "admission"
+        assert "Verifier marker" in result.failure.failure_reason
+        assert client.calls == []

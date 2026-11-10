@@ -83,6 +83,7 @@ def test_training_defaults_are_session_only(monkeypatch):
             "responses_api_models/vllm_model/configs/vllm_model.yaml",
         ],
         {
+            "training_resources_server": "string_match",
             "opencode_multimodal_agent": {
                 "responses_api_agents": {
                     "opencode_multimodal_agent": {
@@ -104,3 +105,57 @@ def test_training_defaults_are_session_only(monkeypatch):
         cfg.opencode_multimodal_agent_environment_server.environment_servers.single_agent_turn.entrypoint
         == "opencode.py"
     )
+
+
+@pytest.mark.parametrize(
+    "agent_name,resource",
+    [
+        ("opencode_multimodal_agent", "math_with_judge"),
+        ("opencode_string_match", "string_match"),
+        ("opencode_mcqa", "mcqa"),
+    ],
+)
+def test_training_verifier_profiles_resolve_independent_bindings(monkeypatch, agent_name, resource):
+    cfg = parse(
+        monkeypatch,
+        [
+            "responses_api_agents/opencode_multimodal_agent/configs/train_verifiers.yaml",
+            "responses_api_models/vllm_model/configs/vllm_model.yaml",
+        ],
+        {
+            "opencode_multimodal_agent": {
+                "responses_api_agents": {"opencode_multimodal_agent": {"sandbox_config": {"image": "test-image"}}}
+            }
+        },
+    )
+    settings = cfg[agent_name + "_environment_server"].environment_servers.single_agent_turn
+    env = SingleAgentTurnEnvironmentServerConfig.model_validate(
+        OmegaConf.to_container(settings, resolve=True) | {"name": agent_name + "_environment_server"}
+    )
+    assert env.agent_server.name == agent_name
+    assert env.resources_server.name == resource
+    agent = OpenCodeMultimodalAgentConfig.model_validate(
+        OmegaConf.to_container(cfg[agent_name].responses_api_agents.opencode_multimodal_agent, resolve=True)
+        | {"name": agent_name}
+    )
+    assert agent.sandbox_config["image"] == "test-image"
+    assert agent.token_id_capture
+
+
+def test_training_recipe_requires_explicit_verifier(monkeypatch):
+    from omegaconf.errors import InterpolationToMissingValueError, MissingMandatoryValue
+
+    with pytest.raises((MissingMandatoryValue, InterpolationToMissingValueError)):
+        cfg = parse(
+            monkeypatch,
+            [
+                "responses_api_agents/opencode_multimodal_agent/configs/opencode_multimodal_agent.yaml",
+                "responses_api_models/vllm_model/configs/vllm_model.yaml",
+            ],
+            {
+                "opencode_multimodal_agent": {
+                    "responses_api_agents": {"opencode_multimodal_agent": {"sandbox_config": {"image": "test-image"}}}
+                }
+            },
+        )
+        OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True)

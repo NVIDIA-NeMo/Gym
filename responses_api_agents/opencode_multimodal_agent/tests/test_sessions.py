@@ -334,3 +334,24 @@ def test_training_trace_eligibility_uses_native_messages(visual_setup, problem):
             assert result.status_code == 502
             assert ("terminal assistant" if problem == "unfinished" else "APIError") in result.text
         client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+
+
+def test_native_length_finish_retains_finalized_tool_evidence(visual_setup):
+    agent, sandbox = visual_setup
+    agent.config.tool_rewards = OpenCodeToolRewardConfig()
+    export = json.loads(sandbox.events)
+    export["messages"][1]["info"]["finish"] = "length"
+    sandbox.events = json.dumps(export)
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json=body().model_dump(mode="json"))
+        assert result.status_code == 200, result.text
+        response = result.json()
+        assert response["status"] == "incomplete"
+        evidence = response["opencode_evidence"]
+        assert evidence["verification_error"] is None
+        assert evidence["tool_reward"]["bash_success_count"] == 1
+        assert evidence["tool_reward"]["auxiliary_reward"] == pytest.approx(0.02)
+        assert evidence["finished_naturally"] is False
+        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))

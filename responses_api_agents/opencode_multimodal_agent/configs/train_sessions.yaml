@@ -3,6 +3,7 @@
 # Compose after the training recipe. EnvironmentServer sessions own each episode.
 config_paths:
 - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+training_resources_server: ??? # Explicit verifier instance; never infer string matching.
 use_absolute_ip: true
 head_server:
   host: 127.0.0.1
@@ -38,7 +39,7 @@ opencode_multimodal_agent_environment_server:
       cleanup_timeout_seconds: 180
       resources_server:
         type: resources_servers
-        name: string_match
+        name: ${training_resources_server}
       agent_server:
         type: responses_api_agents
         name: opencode_multimodal_agent

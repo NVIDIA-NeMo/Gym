@@ -42,6 +42,26 @@ requests keep their native response envelope. No separate execution runner or
 NeMo-RL reader patch is needed.
 
 
+Choose the verifier explicitly with `training_resources_server=<instance>` when
+using the base training recipe. Its Environment Server does not default to string
+matching. For mixed math/string/MCQA datasets, compose
+`configs/train_verifiers.yaml` and select these flat-row `task_source` values:
+
+| Original verifier marker | `task_source` | Resources server |
+| --- | --- | --- |
+| `math_with_judge_simple_agent` | `opencode_multimodal_agent` | `math_with_judge` (library grading; judge disabled) |
+| `string_match_simple_agent` | `opencode_string_match` | `string_match` |
+| `mcqa_simple_agent` | `opencode_mcqa` | `mcqa` |
+
+Set `agent_ref.name` to the same profile, or omit `agent_ref`. Preserve the task's
+question, expected answer, grading/extraction settings and
+`image_tools_base_agent_ref` marker. The marker is validated against the bound
+verifier before session creation; it does not dynamically switch verifiers.
+Unknown or mismatched markers fail admission. For custom verifier instances,
+select their explicit environment route. Network/tool profiles can be combined
+with each verifier by inheriting the corresponding agent/environment pair.
+Native tasksets use main's `environment_server_routes` to select the same pairs.
+
 Training enables token capture, an eight-turn final-answer policy and a 2048-token
 final-answer reserve by default. `backend_final_answer_reserve` requires a backend
 that implements that extension; disable it explicitly for hosted backends that do
