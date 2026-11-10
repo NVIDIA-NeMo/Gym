@@ -23,7 +23,15 @@ from responses_api_agents.stirrup_agent import sandbox_runner
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoAgent
 from responses_api_agents.stirrup_agent.sandbox import HARNESS_FILES
 from responses_api_agents.stirrup_agent.sandbox_runner import LocalShell, Observer, main, remote_tool, run
-from responses_api_agents.stirrup_agent.tests.fakes import _TOOLS, _call, _ModelServer, _Resources, _resources_app
+from responses_api_agents.stirrup_agent.tests.fakes import (
+    _TOOLS,
+    CONTEXT_OVERFLOW_ERROR,
+    STUB_ERROR,
+    _call,
+    _ModelServer,
+    _Resources,
+    _resources_app,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -235,12 +243,26 @@ def test_a_request_the_model_server_rejects_ends_the_run_as_failed_with_the_turn
     assert output["stop_reason"] == "model_error"
     assert str(status) in output["model_error"]
     assert output["model_error_status"] == status
+    assert json.loads(output["model_error_body"]) == {"error": STUB_ERROR}
     observations = output["observations"]
     assert observations["status"] == "failed"
     assert observations["model_response_ids"] == ["chatcmpl-1"]
     assert [t["tool_name"] for t in observations["tool_calls"]] == ["code_exec"]
     assert [item["type"] for item in output["output_items"]] == ["function_call", "function_call_output"]
     assert [u["total_tokens"] for u in output["usages"]] == [15]
+
+
+def test_a_context_overflow_keeps_the_endpoint_error_body_for_the_agent_server(tmp_path, resources):
+    """The agent server tells a context overflow from another 400 only by the body's OpenAI error code."""
+    model = _ModelServer([_call("code_exec", json.dumps({"cmd": "true"})), (400, CONTEXT_OVERFLOW_ERROR)])
+    try:
+        output = _run_main(tmp_path, _payload(model.base_url, resources.base_url, tmp_path))
+    finally:
+        model.close()
+
+    assert (output["stop_reason"], output["model_error_status"]) == ("model_error", 400)
+    assert json.loads(output["model_error_body"]) == {"error": CONTEXT_OVERFLOW_ERROR}
+    assert output["observations"]["model_response_ids"] == ["chatcmpl-1"]
 
 
 def test_a_run_whose_compaction_summaries_are_unusable_ends_as_failed_with_the_turns_so_far(

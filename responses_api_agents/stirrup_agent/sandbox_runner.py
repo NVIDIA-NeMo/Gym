@@ -415,6 +415,7 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
         stop_reason = None
         model_error = None
         model_error_status = None
+        model_error_body = None
         model_transport_error = False
         invalid_output = None
         async with agent.session(cache_on_interrupt=False) as session:
@@ -427,10 +428,11 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
                 stop_reason = _stop_reason(payload)
             except APIStatusError as error:
                 # The model answered the client's last attempt with an HTTP error; the episode ends on it, keeping
-                # the turns completed so far, and the agent server classifies it by its status.
+                # the turns completed so far, and the agent server classifies it by its status and body (whose
+                # OpenAI error code names a context overflow).
                 finish_params, history = None, _completed_turns(session, messages)
                 stop_reason, model_error = "model_error", str(error)
-                model_error_status = error.status_code
+                model_error_status, model_error_body = error.status_code, error.response.text
             except APIConnectionError as error:
                 # No reply after the client's retries (refused, reset or timed out): a transport error, with no status.
                 finish_params, history = None, _completed_turns(session, messages)
@@ -452,6 +454,7 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
             "stop_reason": stop_reason,
             "model_error": model_error,
             "model_error_status": model_error_status,
+            "model_error_body": model_error_body,
             "model_transport_error": model_transport_error,
             "invalid_output": invalid_output,
             **observer.report(status, history, output_items),

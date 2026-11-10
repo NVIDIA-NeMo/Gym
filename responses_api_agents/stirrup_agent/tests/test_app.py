@@ -404,6 +404,52 @@ class TestApp:
             assert agent_outcome_policy(response) == OutcomeAction.RETRY
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("replied", [False, True], ids=["first-request", "after-a-reply"])
+    async def test_a_context_overflow_is_incomplete_and_graded(self, replied) -> None:
+        """A 400 whose body carries OpenAI's ``context_length_exceeded`` code is a context limit, graded.
+
+        Classified by its status alone it failed: ``model_request_rejected`` (fail) on the first request and
+        ``model_request_error`` 400 after a reply.
+        """
+        body = json.dumps({"error": {"message": "maximum context length", "code": "context_length_exceeded"}})
+        report = _report(
+            stop_reason="model_error",
+            model_error="Error code: 400 - context_length_exceeded",
+            model_error_status=400,
+            model_error_body=body,
+            observations={"status": "failed", "model_response_ids": ["chatcmpl-1"] if replied else []},
+        )
+
+        response, _, _ = await _run_episode(
+            _make_config(), NeMoGymResponseCreateParamsNonStreaming(input="x", model="policy"), report
+        )
+
+        assert response.status == "incomplete"
+        assert response.metadata["ng_agent_stop_reason"] == "context_limit"
+        assert AGENT_OUTCOME_METADATA_KEY not in response.metadata
+        assert agent_outcome_policy(response) == OutcomeAction.VERIFY
+
+    @pytest.mark.asyncio
+    async def test_a_400_whose_body_names_no_context_overflow_stays_a_model_request_error(self) -> None:
+        report = _report(
+            stop_reason="model_error",
+            model_error="Error code: 400 - bad request",
+            model_error_status=400,
+            model_error_body=json.dumps({"error": {"message": "bad request", "code": "invalid_value"}}),
+            observations={"status": "failed", "model_response_ids": ["chatcmpl-1"]},
+        )
+
+        response, _, _ = await _run_episode(
+            _make_config(), NeMoGymResponseCreateParamsNonStreaming(input="x", model="policy"), report
+        )
+
+        assert response.status == "failed"
+        assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == {
+            "failure_kind": "model_request_error",
+            "status_code": 400,
+        }
+
+    @pytest.mark.asyncio
     async def test_a_run_ended_by_unusable_compaction_summaries_is_the_models_invalid_output(self) -> None:
         report = _report(
             stop_reason="compaction_failed",

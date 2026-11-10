@@ -17,8 +17,10 @@ from fastapi.testclient import TestClient
 from nemo_gym.agents import (
     AgentCloseSessionRequest,
     AgentSeedSessionRequest,
+    OutcomeAction,
     SandboxPythonRuntime,
     SandboxSession,
+    agent_outcome_policy,
     agent_tools,
     raises_agent_failure,
 )
@@ -26,12 +28,19 @@ from nemo_gym.agents.utils import sandbox_python
 from nemo_gym.agents.utils.sandbox_python import SandboxPlatform
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
-from nemo_gym.core import EpisodeId, TaskId
+from nemo_gym.core import EpisodeId, NeMoGymResponse, TaskId
 from nemo_gym.sandbox import AsyncSandbox, DirectSandboxConnection, SandboxAccess, SandboxExecResult, SandboxSpec
 from nemo_gym.server_runtime import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
 from responses_api_agents.stirrup_agent import app, sandbox
 from responses_api_agents.stirrup_agent.app import StirrupAgentWrapper, StirrupAgentWrapperConfig
-from responses_api_agents.stirrup_agent.tests.fakes import _TOOLS, _call, _ModelServer, _Resources, _resources_app
+from responses_api_agents.stirrup_agent.tests.fakes import (
+    _TOOLS,
+    CONTEXT_OVERFLOW_ERROR,
+    _call,
+    _ModelServer,
+    _Resources,
+    _resources_app,
+)
 
 
 _EPISODE = EpisodeId(rollout_id="rollout", attempt=0)
@@ -548,6 +557,29 @@ def test_a_runner_that_leaves_no_valid_output_fails_the_activation(agent, client
 
     with raises_agent_failure(RuntimeError, match="Stirrup sandbox runner exited without output"):
         _respond(client)
+
+
+@pytest.mark.parametrize("replied", [False, True], ids=["first-request", "after-a-reply"])
+def test_a_context_overflow_the_model_server_propagates_answers_incomplete(agent, client, root, monkeypatch, replied):
+    """HTTP 400 with OpenAI's ``context_length_exceeded`` code is a context limit, graded before or after a reply."""
+    agent.config.finish_tool_names = None
+    overflow = (400, CONTEXT_OVERFLOW_ERROR)
+    model = _ModelServer([_call("code_exec", json.dumps({"cmd": "true"})), overflow] if replied else [overflow])
+    monkeypatch.setattr(StirrupAgentWrapper, "resolve_model_base_url", lambda *_: model.base_url)
+    try:
+        _seed(client, sandbox_access=_sandbox_access(str(root)))
+        reply = _respond(client)
+        _close(client)
+    finally:
+        model.close()
+
+    assert reply.status_code == 200, reply.text
+    response = NeMoGymResponse.model_validate(reply.json())
+    assert response.status == "incomplete"
+    assert response.metadata["ng_agent_stop_reason"] == "context_limit"
+    assert "ng_agent_outcome" not in response.metadata
+    assert agent_outcome_policy(response) == OutcomeAction.VERIFY
+    assert "context_length_exceeded" in response.error.message
 
 
 class _FakeSandbox:

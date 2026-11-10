@@ -29,10 +29,10 @@ from nemo_gym.agents import (
     AgentSessionState,
     RunEvidence,
     SimpleResponsesAPIAgent,
+    model_http_error_outcome,
 )
 from nemo_gym.core import (
     AGENT_INVALID_OUTPUT,
-    MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -84,14 +84,18 @@ class NOOAAgent(SimpleResponsesAPIAgent):
     config: NOOAAgentConfig
 
     def classify_outcome(self, native_result: Mapping[str, object]) -> AgentOutcome:
-        """Report a trusted model rejection; the environment owns grading and retry policy."""
+        """Report a trusted model rejection by its status and error body; the environment owns grading and retry.
+
+        The body is the endpoint's own JSON, whose OpenAI error code names a context overflow
+        (``model_http_error_outcome``); diagnostic text is never parsed.
+        """
         status = native_result.get("model_status_code")
         if (
             native_result.get("termination_reason") == NOOATerminationReason.MODEL_REJECTED
             and type(status) is int
             and 400 <= status <= 599
         ):
-            return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
+            return model_http_error_outcome(status, error_body=native_result.get("model_error_body"))
         return AgentOutcome(failure_kind="unknown")
 
     def setup_webserver(self) -> FastAPI:
@@ -237,7 +241,11 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         reason = result.termination_reason
         if reason is NOOATerminationReason.MODEL_REJECTED:
             error = self.classify_outcome(
-                {"termination_reason": reason, "model_status_code": result.model_status_code}
+                {
+                    "termination_reason": reason,
+                    "model_status_code": result.model_status_code,
+                    "model_error_body": result.model_error_body,
+                }
             )
         elif reason is NOOATerminationReason.INVALID_POLICY_OUTPUT:
             error = AgentOutcome(failure_kind=AGENT_INVALID_OUTPUT)

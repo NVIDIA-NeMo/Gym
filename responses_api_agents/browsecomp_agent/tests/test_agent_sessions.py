@@ -102,17 +102,21 @@ class _Harness:
 
 
 def _agent(model_replies: list, monkeypatch: pytest.MonkeyPatch, **config) -> tuple[TestClient, MagicMock, _Harness]:
-    """An agent app whose model returns ``model_replies`` in order (a dict, or an int HTTP error status)."""
+    """An agent app whose model returns ``model_replies`` in order.
+
+    A reply is a dict, an int HTTP error status, or an HTTP error status with its error body.
+    """
 
     async def post(server_name=None, url_path=None, json=None, cookies=None):
         reply = model_replies.pop(0)
-        if isinstance(reply, int):
-            response = MagicMock(ok=False, status=reply, cookies={})
+        if isinstance(reply, (int, tuple)):
+            status, body = reply if isinstance(reply, tuple) else (reply, b"model refused the request")
+            response = MagicMock(ok=False, status=status, cookies={})
             request_info = SimpleNamespace(url="http://model", method="POST", headers={}, real_url="http://model")
             response.raise_for_status = MagicMock(
-                side_effect=ClientResponseError(request_info, (), status=reply, message="refused")
+                side_effect=ClientResponseError(request_info, (), status=status, message="refused")
             )
-            response.content.read = AsyncMock(return_value=b"model refused the request")
+            response.content.read = AsyncMock(return_value=body)
             return response
         response = MagicMock(ok=True, status=200, cookies={})
         response.read = AsyncMock(return_value=jsonlib.dumps(reply).encode())
@@ -290,6 +294,47 @@ def test_a_model_error_before_any_reply_is_classified_by_the_ladder(
     assert response.status == "failed" and response.output == []
     assert jsonlib.loads(response.metadata["ng_agent_outcome"])["failure_kind"] == kind
     assert agent_outcome_policy(response) == (OutcomeAction.FAIL if status == 401 else OutcomeAction.RETRY)
+
+
+# How Gym's model servers answer a context overflow they propagate: HTTP 400 with OpenAI's error envelope.
+CONTEXT_OVERFLOW = (
+    400,
+    jsonlib.dumps(
+        {
+            "error": {
+                "message": "This model's maximum context length is 32768 tokens.",
+                "type": "invalid_request_error",
+                "param": None,
+                "code": "context_length_exceeded",
+            }
+        }
+    ).encode(),
+)
+
+
+@pytest.mark.parametrize("replied", [False, True], ids=["first-request", "after-a-reply"])
+def test_a_context_overflow_is_incomplete_and_graded(replied: bool, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A propagated context overflow is a context limit: incomplete and graded, before or after the first reply.
+
+    Classified by its status alone, it failed: model_request_rejected (fail) on the first request, and
+    model_request_error 400 after a reply.
+    """
+    client, _, _ = _agent(
+        [_model_response(_tool_call("ls")), CONTEXT_OVERFLOW] if replied else [CONTEXT_OVERFLOW], monkeypatch
+    )
+    assert client.post("/v1/agent_sessions", json=_seed().model_dump(mode="json")).status_code == 200
+
+    reply = client.post(ROUTE, json=QUESTION)
+
+    assert reply.status_code == 200, reply.text
+    response = NeMoGymResponse.model_validate(reply.json())
+    assert response.status == "incomplete"
+    assert response.metadata["ng_agent_stop_reason"] == "context_limit"
+    assert "ng_agent_outcome" not in response.metadata
+    assert agent_outcome_policy(response) == OutcomeAction.VERIFY
+    # The trajectory before the overflow is kept for grading.
+    assert [item.type for item in response.output] == (["function_call", "function_call_output"] if replied else [])
+    assert "context_length_exceeded" in response.error.message
 
 
 def test_a_model_transport_error_keeps_the_trajectory_and_is_retried(monkeypatch: pytest.MonkeyPatch) -> None:

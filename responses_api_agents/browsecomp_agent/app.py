@@ -40,6 +40,7 @@ from nemo_gym.agents import (
     SandboxSession,
     SimpleResponsesAPIAgent,
     assert_model_url_reachable_from_sandbox,
+    model_http_error_outcome,
 )
 from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
 from nemo_gym.client import NeMoGymAsyncOpenAI, get_response_json, raise_for_status
@@ -53,7 +54,6 @@ from nemo_gym.config import (
     get_global_config_dict,
 )
 from nemo_gym.core import (
-    MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -635,8 +635,9 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 )
             except _ModelCallFailed as failure:
                 error = failure.error
+                # The body Gym's client kept names a context overflow by its OpenAI error code.
                 outcome = (
-                    AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=error.status)
+                    model_http_error_outcome(error.status, error_body=getattr(error, "response_content", None))
                     if isinstance(error, aiohttp.ClientResponseError)
                     else AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
                 )

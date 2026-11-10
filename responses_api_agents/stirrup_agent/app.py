@@ -39,12 +39,12 @@ from nemo_gym.agents import (
     RunEvidence,
     SandboxSession,
     SimpleResponsesAPIAgent,
+    model_http_error_outcome,
     sandbox_server_url,
 )
 from nemo_gym.config import ModelServerRef, get_global_config_dict
 from nemo_gym.core import (
     AGENT_INVALID_OUTPUT,
-    MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -367,10 +367,14 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
         )
 
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
-        """Use the SDK HTTP status or transport error the sandbox runner retained; never infer from error text."""
+        """Use the SDK HTTP status and error body, or the transport error, the sandbox runner retained.
+
+        Never inferred from error text: the body is the endpoint's own JSON, whose OpenAI error code names a context
+        overflow (``model_http_error_outcome``).
+        """
         status = native_result.get("model_error_status")
         if native_result.get("model_error") and type(status) is int and 400 <= status <= 599:
-            return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
+            return model_http_error_outcome(status, error_body=native_result.get("model_error_body"))
         if native_result.get("model_error") and native_result.get("model_transport_error") is True:
             return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
         if native_result.get("invalid_output"):

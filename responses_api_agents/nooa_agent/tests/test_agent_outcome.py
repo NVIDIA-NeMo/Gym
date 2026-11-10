@@ -11,8 +11,14 @@ import pytest
 from pydantic import ValidationError
 
 from environment_servers.single_agent_turn.app import AgentOutcomePolicyConfig
-from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AGENT_STOP_REASON_METADATA_KEY
+from nemo_gym.agents import (
+    AGENT_OUTCOME_METADATA_KEY,
+    AGENT_STOP_REASON_METADATA_KEY,
+    OutcomeAction,
+    agent_outcome_policy,
+)
 from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_collection import (
     ATTEMPT_INDEX_KEY_NAME,
@@ -23,7 +29,7 @@ from nemo_gym.rollout_collection import (
     _episode_record,
     failures_path_for,
 )
-from nemo_gym.trajectory import AgentInvocation
+from nemo_gym.trajectory import AgentInvocation, ModelCallRef
 from responses_api_agents.nooa_agent import sandbox_entrypoint as entrypoint
 from responses_api_agents.nooa_agent.app import NOOAAgent
 from responses_api_agents.nooa_agent.termination import NOOATerminationReason
@@ -41,10 +47,26 @@ def _outcome(status: int) -> dict:
     return {"failure_kind": "model_request_rejected"}
 
 
-def rejection_agent(status: int) -> NOOAAgent:
+# How Gym's model servers answer a context overflow they propagate: HTTP 400 with OpenAI's error envelope.
+CONTEXT_OVERFLOW_BODY = orjson.dumps(
+    {
+        "error": {
+            "message": "This model's maximum context length is 32768 tokens.",
+            "type": "invalid_request_error",
+            "param": None,
+            "code": "context_length_exceeded",
+        }
+    }
+)
+
+
+def rejection_agent(status: int, *, body: bytes | None = None) -> NOOAAgent:
     client = MagicMock(spec=ServerClient)
     failure = model_http_error(status)
     failure.message = "Provider rejected this request; diagnostic mentions HTTP 500"
+    if body is not None:
+        # Gym's raise_for_status keeps the endpoint's error body here.
+        failure.response_content = body
     client.post = AsyncMock(side_effect=failure)
     invocation = invocation_config(
         agent_class="responses_api_agents.nooa_agent.tests.test_runner:PolicyAgent",
@@ -194,6 +216,108 @@ async def test_worker_result_and_checkpoint_preserve_model_status(
     request = await open_session(instance)
     response = await instance.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
     assert orjson.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == _outcome(status)
+    await close(instance)
+
+
+async def test_a_context_overflow_rejection_is_graded_as_incomplete() -> None:
+    """A 400 whose body carries OpenAI's ``context_length_exceeded`` code is a context limit, verified.
+
+    Classified by its status alone it was ``model_request_rejected`` before any reply, which failed the episode.
+    """
+    instance = rejection_agent(400, body=CONTEXT_OVERFLOW_BODY)
+    environment, client = _environment(instance)
+
+    episode = await environment.run_request(_request())
+
+    assert episode.failure is None
+    response = episode.result.response
+    assert response.status == "incomplete"
+    assert response.metadata[AGENT_STOP_REASON_METADATA_KEY] == "context_limit"
+    assert AGENT_OUTCOME_METADATA_KEY not in response.metadata
+    assert agent_outcome_policy(response) == OutcomeAction.VERIFY
+    assert _paths(client)[-3:] == ["/v1/agent_sessions/close", "/verify", "/close_session"]
+
+
+async def test_worker_result_and_checkpoint_keep_the_model_error_body(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The sandboxed worker hands the error body across result.json, so the controller classifies the overflow."""
+    instance = rejection_agent(400, body=CONTEXT_OVERFLOW_BODY)
+    p = payload()
+    p.invocation = instance.config.nooa
+    monkeypatch.setattr(entrypoint, "_ModelClient", MagicMock(return_value=instance.server_client))
+
+    artifact = await entrypoint.execute(p)
+    path = tmp_path / "result.json"
+    entrypoint._write_json(path, artifact)
+    restored = entrypoint.SandboxResult.model_validate_json(path.read_text()).run_result()
+
+    assert artifact.model_error_body == restored.model_error_body == CONTEXT_OVERFLOW_BODY.decode()
+    assert restored.termination_reason is NOOATerminationReason.MODEL_REJECTED
+    checkpoint_path = tmp_path / "checkpoint.json"
+    entrypoint.write_checkpoint(checkpoint_path, restored)
+    checkpoint = entrypoint.SandboxCheckpoint.model_validate_json(checkpoint_path.read_text())
+    assert checkpoint.model_error_body == restored.model_error_body
+
+    instance, run = agent(monkeypatch)
+    run.return_value = restored
+    request = await open_session(instance)
+    response = await instance.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    assert response.status == "incomplete"
+    assert response.metadata[AGENT_STOP_REASON_METADATA_KEY] == "context_limit"
+    await close(instance)
+
+
+_OTHER_400_BODY = orjson.dumps({"error": {"message": "bad request", "code": "invalid_value"}})
+
+
+@pytest.mark.parametrize(
+    ("body", "replied", "status", "outcome", "action"),
+    [
+        (CONTEXT_OVERFLOW_BODY, False, "incomplete", None, OutcomeAction.VERIFY),
+        (CONTEXT_OVERFLOW_BODY, True, "incomplete", None, OutcomeAction.VERIFY),
+        # Another 400, even in OpenAI's envelope, is classified by its status.
+        (_OTHER_400_BODY, False, "failed", {"failure_kind": "model_request_rejected"}, OutcomeAction.FAIL),
+        (
+            _OTHER_400_BODY,
+            True,
+            "failed",
+            {"failure_kind": "model_request_error", "status_code": 400},
+            OutcomeAction.VERIFY,
+        ),
+    ],
+    ids=["overflow-first-request", "overflow-after-a-reply", "other-first-request", "other-after-a-reply"],
+)
+async def test_a_rejection_is_classified_by_its_error_body(
+    monkeypatch: pytest.MonkeyPatch,
+    body: bytes,
+    replied: bool,
+    status: str,
+    outcome: dict | None,
+    action: OutcomeAction,
+) -> None:
+    instance, run = agent(monkeypatch)
+    rejected = result(reason=NOOATerminationReason.MODEL_REJECTED)
+    rejected.model_status_code = 400
+    rejected.model_error_body = body.decode()
+    if replied:
+        model = ModelServerRef(type="responses_api_models", name="policy")
+        rejected.episode.observations.records = [
+            AgentInvocation(
+                invocation_id="root",
+                status="failed",
+                model_calls=[ModelCallRef(model_ref=model, response_id="r1")],
+            )
+        ]
+    run.return_value = rejected
+    request = await open_session(instance)
+
+    response = await instance.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+
+    assert response.status == status
+    raw = response.metadata.get(AGENT_OUTCOME_METADATA_KEY)
+    assert (orjson.loads(raw) if raw else None) == outcome
+    assert agent_outcome_policy(response) == action
     await close(instance)
 
 
