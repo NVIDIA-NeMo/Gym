@@ -13,9 +13,20 @@ config_paths:
   - benchmarks/agentic_mme/config.yaml
   - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
+# The lent sandbox's egress rule opens every port of the policy model's host. So every other server sets host
+# 127.0.0.1, which a launcher's default_host (NeMo RL sets one) cannot change: the judge (it spends the judge's API key
+# for any caller), the agent (a request without a session runs OpenCode on this host), and the resources and
+# Environment Servers (they start sandboxes and episodes). All their callers run on this host. opencode_server_tools.yaml
+# gives the resources server its reachable address back, because OpenCode calls its /mcp route from the sandbox.
+agentic_mme_judge_model:
+  responses_api_models:
+    openai_model:
+      host: 127.0.0.1
+
 agentic_mme:
   resources_servers:
     agentic_mme:
+      host: 127.0.0.1
       allowed_agents: [opencode_agent]
       # Names the top-level provider block from opensandbox.yaml.
       sandbox_provider: sandbox
@@ -44,6 +55,7 @@ agentic_mme_opencode_agent:
   responses_api_agents:
     opencode_agent:
       entrypoint: app.py
+      host: 127.0.0.1
       description: Agentic-MME with OpenCode in a sandbox that holds the task images
       # The resources server whose task schema checks the dataset rows below. The environment server runs the episodes.
       resources_server:
@@ -111,6 +123,7 @@ agentic_mme_opencode_agent:
 agentic_mme_environment_server:
   environment_servers:
     single_agent_turn_legacy:
+      host: 127.0.0.1
       # The episode's wall-clock bound: the lent sandbox's start, OpenCode's timeout (3600 s), the session close and
       # the judge fit inside it, and it ends well before the sandbox's ttl_s (7200 s). The default (21600 s) would
       # outlive the sandbox, and a verify after the sandbox expires is masked as a lost session.

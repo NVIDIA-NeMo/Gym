@@ -15,6 +15,9 @@ config_paths:
 agentic_mme:
   resources_servers:
     agentic_mme:
+      # OpenCode calls this server's /mcp from the sandbox, so it takes the reachable address (absolute_ip_server_types
+      # or a launcher's default_host) instead of opencode.yaml's 127.0.0.1.
+      host: null
       serve_image_tools: true
       task_images_in_sandbox: false
       expose_tools_over_mcp: true
