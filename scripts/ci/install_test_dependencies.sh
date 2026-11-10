@@ -19,15 +19,16 @@ packages=(
     libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1
     libpango-1.0-0 libcairo2 libasound2t64 fonts-liberation ffmpeg
 )
-# Workflow timeouts bound installation. A shorter per-attempt timeout
-# can kill dpkg during configuration and leave every subsequent install blocked.
-# Complete any interrupted configuration before retrying the package install.
+# Bound network operations separately so slow mirrors can be retried without
+# killing dpkg during configuration. Cached downloads survive each attempt;
+# the workflow timeout still bounds the complete installation.
 for attempt in 1 2 3 4; do
     if sudo bash -c '
         export DEBIAN_FRONTEND=noninteractive
         dpkg --configure -a &&
-            apt-get update &&
-            apt-get install -y --no-install-recommends "$@"
+            timeout 5m apt-get update &&
+            timeout 5m apt-get install --download-only -y --no-install-recommends "$@" &&
+            apt-get install --no-download -y --no-install-recommends "$@"
         ' bash "${packages[@]}"; then
         exit 0
     fi
