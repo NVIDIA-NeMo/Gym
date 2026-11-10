@@ -25,6 +25,7 @@ The environment pairs with the agent
 row: history up to a user message + the harness's system prompt and tools
   |
 /seed_session ....... store the history, pick the row's harness, replay recorded results into a model of its files
+                      (an Environment Server's typed seed: on the agent's first /harness call, which brings the history)
   |
 agent loop .......... policy step -> tool calls -> /simulate_tool_call -> answered in code if exact, else by the LLM
   |                   ends on: a final message (or an empty reply), a stop tool, the step (model call) or time cap,
@@ -87,6 +88,13 @@ gym eval run --no-serve \
   fails ends the run; add `++route_failures_to_sidecar=true` to record it in `..._failures.jsonl` and keep going.
 - Run one resources-server worker (`num_workers` unset or 1, the default): sessions live in its memory, and a call
   that reaches another worker finds no session.
+- Each rollout is an Environment Server episode (`single_agent_turn_legacy`). Its typed seed binds the session to the
+  episode and task and holds the row without `responses_create_params`, so the agent's first `/harness` call brings
+  the history, tools and instructions. `/harness`, `/simulate_tool_call`, `/verify` and close take the session's lock.
+  Close is idempotent; a `/harness` or `/simulate_tool_call` after close or verify answers 404 (`session_lost`), and a
+  `/verify` after close is masked. The agent's `/run` behind the deprecated `legacy_agent` relay
+  (`configs/agentic_turn_simulation_legacy_agent.yaml`) seeds with the flat row instead, and its `/verify` releases
+  the session.
 - The simulator and judge set throughput. For more than a few hundred rollouts, or to serve them from separate models,
   see [docs/training.md](docs/training.md#serving-the-simulator-and-the-judge).
 
