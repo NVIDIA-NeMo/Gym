@@ -54,6 +54,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import JUDGE_FAILURES, call_judge, is_judge_failure, reraise_judge_errors
 from resources_servers.sec_local_index.cache import atomic_write, make_shared_dirs
 from resources_servers.sec_local_index.edgar_search_service import EdgarSearchService
@@ -1560,3 +1561,6 @@ if __name__ == "__main__":
     for _logger_name in (__name__, "resources_servers"):
         logging.getLogger(_logger_name).setLevel(os.environ.get("NEMO_GYM_LOG_LEVEL", "INFO").upper())
     FinanceAgentResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = FinanceAgentResourcesServer.run_webserver()  # noqa: F401
