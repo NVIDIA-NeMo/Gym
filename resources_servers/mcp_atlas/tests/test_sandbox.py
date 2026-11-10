@@ -1,12 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
+import logging
 import os
 import re
+import shutil
+from pathlib import Path
 
 import pytest
 
 from nemo_gym.sandbox import SandboxSpec
+from resources_servers.mcp_atlas import sandbox as sandbox_module
 from resources_servers.mcp_atlas.sandbox import SandboxError, SandboxPool, call_sandbox_tool, sandbox_tool_names
 from resources_servers.mcp_atlas.tests.fake_agent_environment import FakeAgentEnvironment, free_port
 
@@ -164,6 +168,88 @@ async def test_a_failed_stop_keeps_the_sandbox_and_its_leases(tmp_path) -> None:
     assert sandboxes.get("s1") is None
     assert box.port not in sandboxes._ports._leased
     assert not os.path.exists(box.scratch_dir)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses read-only directory permissions")
+async def test_stop_removes_a_readonly_subdirectory_and_releases_its_leases(tmp_path) -> None:
+    sandboxes = pool(["calculator_calculate"], scratch_root=str(tmp_path))
+    readonly = None
+    try:
+        box = await sandboxes.start("s1", servers=["calculator"], tools=["calculator_calculate"])
+        provider = box.sandbox
+        readonly = Path(box.scratch_dir) / "readonly-cache"
+        readonly.mkdir()
+        cached_file = readonly / "cache.txt"
+        cached_file.write_text("cached data")
+        readonly.chmod(0o555)
+        try:
+            cached_file.unlink()
+        except PermissionError:
+            pass
+        else:
+            pytest.skip("the filesystem does not enforce read-only directory permissions")
+
+        assert await sandboxes.stop("s1") is True
+        assert provider.stopped and box.stopped
+        assert sandboxes.get("s1") is None
+        assert box.port not in sandboxes._ports._leased
+        assert not Path(box.scratch_dir).exists()
+        await asyncio.wait_for(sandboxes.start("s2", servers=["calculator"], tools=["calculator_calculate"]), 2)
+        await asyncio.wait_for(sandboxes.start("s3", servers=["calculator"], tools=["calculator_calculate"]), 2)
+    finally:
+        try:
+            if readonly is not None and readonly.exists():
+                readonly.chmod(0o755)
+        finally:
+            await sandboxes.close()
+
+
+async def test_residual_scratch_error_is_logged_without_leaking_or_overreleasing_capacity(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    sandboxes = pool(["calculator_calculate"], scratch_root=str(tmp_path))
+    scratch = None
+    waiting = None
+    try:
+        box = await sandboxes.start("s1", servers=["calculator"], tools=["calculator_calculate"])
+        provider = box.sandbox
+        scratch = Path(box.scratch_dir)
+        caplog.set_level(logging.WARNING, logger=sandbox_module.__name__)
+
+        def fail_cleanup(path, **kwargs) -> None:
+            assert Path(path) == scratch
+            raise OSError("residual disk cleanup failed")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(sandbox_module.shutil, "rmtree", fail_cleanup)
+            assert await sandboxes.stop("s1") is True
+
+        assert provider.stopped and box.stopped
+        assert sandboxes.get("s1") is None
+        assert box.port not in sandboxes._ports._leased
+        assert scratch.exists()
+        assert "could not be removed: residual disk cleanup failed" in caplog.text
+        assert str(scratch) in caplog.text
+        second = await asyncio.wait_for(
+            sandboxes.start("s2", servers=["calculator"], tools=["calculator_calculate"]), 2
+        )
+        third = await asyncio.wait_for(
+            sandboxes.start("s3", servers=["calculator"], tools=["calculator_calculate"]), 2
+        )
+        assert second.port != third.port
+        waiting = asyncio.create_task(sandboxes.start("s4", servers=["calculator"], tools=["calculator_calculate"]))
+        await asyncio.sleep(0)
+        assert not waiting.done()
+        assert sandboxes.get("s4") is None
+    finally:
+        if waiting is not None:
+            waiting.cancel()
+            await asyncio.gather(waiting, return_exceptions=True)
+        try:
+            await sandboxes.close()
+        finally:
+            if scratch is not None and scratch.exists():
+                shutil.rmtree(scratch)
 
 
 async def test_a_sandbox_that_did_not_stop_after_a_failed_start_is_kept_for_a_retry() -> None:

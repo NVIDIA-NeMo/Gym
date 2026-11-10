@@ -81,6 +81,9 @@ Set `MCP_ATLAS_JUDGE_API_KEY` through approved secret configuration before start
 `--limit 3` for a small smoke; a limited run is not the 500-task benchmark. The development-only
 `mcp_atlas_sandbox_url` connects every task to one shared environment and must not be used for scores.
 
+Tool calls within one rollout run serially under its session lock. Verification and close wait for an
+active call, up to `tool_call_timeout_s` (60 s by default). Different rollouts can run concurrently.
+
 ## Inspect results and failures
 
 The verifier judges each ground-truth claim against the final assistant answer. A fulfilled claim scores

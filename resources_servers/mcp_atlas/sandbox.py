@@ -15,11 +15,14 @@ import asyncio
 import contextlib
 import json as json_module
 import logging
+import os
 import shutil
 import socket
+import stat
 import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from time import monotonic
 from typing import Any, Optional
 
@@ -41,6 +44,26 @@ class SandboxError(RuntimeError):
     """The sandbox could not be started or reached: an infrastructure failure, not a model one."""
 
 
+def _remove_scratch_dir(directory: str) -> None:
+    root = Path(directory)
+
+    def retry_readonly(function: Callable[..., object], path: str, error: BaseException) -> None:
+        if not isinstance(error, PermissionError):
+            raise error
+        failed = Path(path)
+        for entry in (failed.parent, failed):
+            if entry.is_relative_to(root):
+                mode = entry.lstat().st_mode
+                if not stat.S_ISLNK(mode):
+                    entry.chmod(stat.S_IMODE(mode) | stat.S_IRWXU)
+        if function in (os.open, os.scandir):
+            shutil.rmtree(failed, onexc=retry_readonly)
+        else:
+            function(path)
+
+    shutil.rmtree(root, onexc=retry_readonly)
+
+
 @dataclass
 class AtlasSandbox:
     """A running sandbox and the names its MCP servers gave the task's tools."""
@@ -53,7 +76,7 @@ class AtlasSandbox:
     port: Optional[int] = None
     scratch_dir: Optional[str] = None
     last_used_at: float = field(default_factory=monotonic)
-    # Set once the provider confirmed the stop and the port, scratch directory and capacity slot are free.
+    # Set once the provider confirmed the stop and the port and capacity slot are free.
     stopped: bool = False
     stop_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
@@ -276,9 +299,10 @@ class SandboxPool:
         return listed
 
     async def _release(self, box: AtlasSandbox) -> None:
-        """Stop the sandbox, then free its port, scratch directory and capacity slot.
+        """Stop the sandbox, then free its port and capacity slot and remove its scratch directory.
 
         Raises SandboxError and frees nothing when the provider cannot stop the sandbox, so a later stop retries.
+        A residual scratch cleanup error is logged after the provider stops; it cannot strand the released leases.
         """
         async with box.stop_lock:
             if box.stopped:
@@ -288,18 +312,27 @@ class SandboxPool:
                     await box.sandbox.stop()
                 except Exception as exc:
                     raise SandboxError(f"sandbox stop failed: {type(exc).__name__}: {exc}") from exc
-            if box.server_task is not None:
-                box.server_task.cancel()
-                results = await asyncio.gather(box.server_task, return_exceptions=True)
-                for result in results:
-                    if isinstance(result, Exception):
-                        logger.warning("MCP-Atlas sandbox server stopped with an error: %s", result)
-            if box.scratch_dir is not None:
-                shutil.rmtree(box.scratch_dir)
-            if box.port is not None:
-                self._ports.release(box.port)
-            self._capacity.release()
-            box.stopped = True
+            try:
+                if box.server_task is not None:
+                    box.server_task.cancel()
+                    results = await asyncio.gather(box.server_task, return_exceptions=True)
+                    for result in results:
+                        if isinstance(result, Exception):
+                            logger.warning("MCP-Atlas sandbox server stopped with an error: %s", result)
+                if box.scratch_dir is not None:
+                    try:
+                        _remove_scratch_dir(box.scratch_dir)
+                    except OSError as exc:
+                        logger.warning(
+                            "MCP-Atlas sandbox stopped but scratch directory %s could not be removed: %s",
+                            box.scratch_dir,
+                            exc,
+                        )
+            finally:
+                if box.port is not None:
+                    self._ports.release(box.port)
+                self._capacity.release()
+                box.stopped = True
 
     async def stop(self, session_id: str) -> bool:
         """Stop the session's sandbox; False when it has none.

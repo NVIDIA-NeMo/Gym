@@ -193,6 +193,95 @@ async def test_service_errors_are_kept_when_masking_is_off(environment) -> None:
     assert result.failure_kind == "mcp_atlas:service_error"
 
 
+@pytest.mark.parametrize("status", [200, 404, 422, 500])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Failed to call tool: Object 502 not found",
+        "no results for query 'credits'",
+        "Invalid expression: quota",
+        "Failed to call tool: Invalid api key argument",
+        "Failed to call tool 'github_get_repository': Object 502 not found",
+        "Failed to call tool 'github_get_repository': 500: Tool 'github_get_repository' execution failed: "
+        "Invalid expression: quota",
+        "Failed to call tool 'github_get_repository': HTTP 404 Not Found",
+        "Failed to call tool 'github_get_repository': HTTP 422 Unprocessable Entity",
+    ],
+)
+async def test_model_tool_errors_are_scored_instead_of_masked(environment, status: int, text: str) -> None:
+    env, url = environment
+    payload = [{"type": "text", "text": text}] if status == 200 else {"detail": text}
+    env.results["github_get_repository"] = (status, payload)
+    server = make_server(url, judge_client("not_fulfilled", "not_fulfilled"))
+    await seed(server)
+    output = await server.call_tool(http_request(), "github_get_repository", {"objectId": 502})
+    assert text in output
+    result = await server.verify(http_request(), verify_body("wrong answer"))
+    assert result.reward == 0.0
+    assert result.mask_sample is False
+    assert result.failure_kind is None
+    assert result.service_errors == []
+    assert result.tool_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("status", "text"),
+    [
+        (429, "Too Many Requests"),
+        (503, "Service unavailable"),
+        (500, "Failed to call tool: HTTP 403 Forbidden"),
+        (500, "Failed to call tool: ConnectionError: connection refused"),
+        (500, "Failed to call tool 'github_get_repository': 429 Too Many Requests"),
+        (500, "Failed to call tool 'github_get_repository': HTTP 500 Internal Server Error"),
+        (
+            500,
+            "Failed to call tool 'github_get_repository': 500: Tool 'github_get_repository' execution failed: "
+            "HTTP 429 Too Many Requests",
+        ),
+        (200, "Error: HTTP 502 Bad Gateway"),
+    ],
+)
+async def test_explicit_upstream_failures_still_mask(environment, status: int, text: str) -> None:
+    env, url = environment
+    payload = [{"type": "text", "text": text}] if status == 200 else {"detail": text}
+    env.results["github_get_repository"] = (status, payload)
+    server = make_server(url, judge_client("fulfilled", "fulfilled"))
+    await seed(server)
+    await server.call_tool(http_request(), "github_get_repository", {})
+    result = await server.verify(http_request(), verify_body("answer"))
+    assert result.mask_sample is True
+    assert result.failure_kind == "mcp_atlas:service_error"
+    assert len(result.service_errors) == 1
+    assert text in result.service_errors[0]
+
+
+@pytest.mark.parametrize("service_failure", [False, True])
+async def test_single_server_error_wrappers_use_the_served_tool_name(service_failure: bool) -> None:
+    server = make_server("http://unused", judge_client("not_fulfilled", "not_fulfilled"))
+    server._pool = pool(["get_repository"])
+    try:
+        await server.seed_session(
+            http_request(),
+            MCPAtlasSeedSessionRequest(
+                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+                verifier_metadata={**META, "enabled_tools": ["github_get_repository"], "servers": ["github"]},
+            ),
+        )
+        env = FakeSandbox.instances[-1].environment
+        diagnostic = "HTTP 429 Too Many Requests" if service_failure else "Object 502 not found"
+        text = "Failed to call tool 'get_repository': 500: Tool 'get_repository' execution failed: " + diagnostic
+        env.results["get_repository"] = (500, {"detail": text})
+        assert text in await server.call_tool(http_request(), "github_get_repository", {})
+        assert env.calls[-1]["tool_name"] == "get_repository"
+        result = await server.verify(http_request(), verify_body("wrong answer"))
+        assert result.reward == 0.0
+        assert result.mask_sample is service_failure
+        assert result.failure_kind == ("mcp_atlas:service_error" if service_failure else None)
+        assert len(result.service_errors) == int(service_failure)
+    finally:
+        await server._shutdown()
+
+
 async def test_unreachable_sandbox_masks_the_rollout() -> None:
     server = make_server("http://127.0.0.1:9", judge_client("fulfilled", "fulfilled"))
     await seed(server)
@@ -292,6 +381,106 @@ async def test_judge_error_after_the_last_unreadable_verdict(environment) -> Non
     # The measurement fails instead of scoring the claims 0.
     with pytest.raises(JudgeError, match="no readable judge verdict after 2 attempts"):
         await server.verify(http_request(), verify_body("answer"))
+
+
+async def test_failed_claim_cancels_and_drains_other_judge_requests(environment) -> None:
+    _, url = environment
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    finished = asyncio.Event()
+    release = asyncio.Event()
+    cleanup_release = asyncio.Event()
+    unreadable = next(judge_client("not json").post.side_effect)
+    client = MagicMock(spec=ServerClient)
+
+    async def post(**kwargs):
+        prompt = kwargs["json"]["messages"][0]["content"]
+        if META["claims"][0] in prompt:
+            await started.wait()
+            return unreadable
+        started.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            await cleanup_release.wait()
+            raise
+        finally:
+            finished.set()
+        return unreadable
+
+    client.post = AsyncMock(side_effect=post)
+    server = make_server(url, client, judge_max_attempts=1, judge_max_concurrency=2)
+    await seed(server)
+    verification = asyncio.create_task(judge_failsafe(server.verify)(http_request(), verify_body("answer")))
+    try:
+        await asyncio.wait_for(cancelled.wait(), 2)
+        assert not verification.done(), "verify must wait for the pending request's asynchronous cleanup"
+        cleanup_release.set()
+        failed = await asyncio.wait_for(verification, 2)
+        saved = json.loads(failed.body)
+        assert saved["failure_kind"] == "judge_failed"
+        assert saved["mask_sample"] is True
+        assert cancelled.is_set(), "verify must drain the pending judge request before returning"
+        assert finished.is_set(), "verify must await the judge request's cancellation finalizer"
+        assert client.post.await_count == 2
+        assert "s1" not in server._rollouts
+    finally:
+        release.set()
+        cleanup_release.set()
+        if not verification.done():
+            verification.cancel()
+        await asyncio.gather(verification, return_exceptions=True)
+
+
+async def test_cancelled_verification_drains_judge_requests_and_retires_session(environment) -> None:
+    _, url = environment
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    release = asyncio.Event()
+    cleanup_release = asyncio.Event()
+    requests_started = 0
+    requests_cancelled = 0
+    requests_finished = 0
+    client = MagicMock(spec=ServerClient)
+
+    async def post(**kwargs):
+        nonlocal requests_started, requests_cancelled, requests_finished
+        requests_started += 1
+        if requests_started == 2:
+            started.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            requests_cancelled += 1
+            if requests_cancelled == 2:
+                cancelled.set()
+            await cleanup_release.wait()
+            raise
+        finally:
+            requests_finished += 1
+
+    client.post = AsyncMock(side_effect=post)
+    server = make_server(url, client, judge_max_concurrency=2)
+    await seed(server)
+    verification = asyncio.create_task(server.verify(http_request(), verify_body("answer")))
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        verification.cancel()
+        await asyncio.wait_for(cancelled.wait(), 2)
+        assert not verification.done()
+        cleanup_release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(verification, 2)
+        assert requests_finished == 2
+        assert client.post.await_count == 2
+        assert "s1" not in server._rollouts
+    finally:
+        release.set()
+        cleanup_release.set()
+        if not verification.done():
+            verification.cancel()
+        await asyncio.gather(verification, return_exceptions=True)
 
 
 async def test_failed_judge_call_is_routed_to_judge_failures(environment) -> None:

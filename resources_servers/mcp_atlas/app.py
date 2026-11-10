@@ -89,13 +89,18 @@ DEFAULT_SANDBOX_FILES = {
     "/root/.npmrc": "before=2026-07-17\ncache=/tmp/npm-cache\nupdate-notifier=false\n",
 }
 
-# Tool errors that name the service or the network, not the model's request.
+# Require an HTTP status or a diagnostic at the start of an error, rather than matching words/numbers
+# in model arguments (for example an object ID of 502 or a query containing "credits").
+SERVICE_HTTP_STATUSES = {401, 402, 403, 429, 502, 503, 504}
 SERVICE_ERROR_PATTERN = re.compile(
-    r"\b(?:401|402|403|429|502|503|504)\b|unauthori[sz]ed|forbidden|api[ _-]?key|rate[ _-]?limit|"
-    r"too many requests|quota|payment required|credits|certificate|\bssl\b|\btls\b|"
-    r"connection (?:refused|reset|closed|aborted)|timed out|timeout|name or service not known|"
-    r"name resolution|getaddrinfo|econnrefused|enotfound|etimedout|econnreset|"
-    r"client failed to connect|session was closed",
+    r"^(?:HTTP(?:/\d(?:\.\d)?)?\s+(?:401|402|403|408|429|5\d\d)\b|"
+    r"(?:HTTPError|ClientResponseError):\s*(?:401|402|403|408|429|5\d\d)\b|"
+    r"unauthori[sz]ed\b|forbidden\b|authentication failed\b|rate[ _-]?limit exceeded\b|"
+    r"too many requests\b|payment required\b|certificate verify failed\b|"
+    r"(?:SSLError|SSLCertVerificationError|ConnectionError|ConnectTimeout|ReadTimeout):|"
+    r"connection (?:refused|reset|closed|aborted)\b|timed out\b|name or service not known\b|"
+    r"name resolution failed\b|getaddrinfo failed\b|econnrefused\b|enotfound\b|etimedout\b|econnreset\b|"
+    r"client failed to connect\b|session was closed\b)",
     re.IGNORECASE,
 )
 EMPTY_RESULT = "success"
@@ -103,6 +108,31 @@ EMPTY_RESULT = "success"
 # always masked; the second is masked when mask_service_errors is set.
 HARD_FAILURES = ("session_lost", "sandbox_start_failed", "sandbox_unreachable", "tools_missing")
 SOFT_FAILURES = ("service_error", "tool_timeout")
+
+
+def _is_service_error(status: int, text: str, tool_name: str) -> bool:
+    if status in SERVICE_HTTP_STATUSES:
+        return True
+    error = text.strip()
+    wrapped = False
+    for prefix in (f"Failed to call tool '{tool_name}':", "Failed to call tool:"):
+        if error.startswith(prefix):
+            error = error[len(prefix) :].lstrip()
+            wrapped = True
+            break
+    # The pinned handler catches its own HTTPException for MCP is_error content, producing this wrapper.
+    # That 500 describes the handler, not the upstream service; classify only the enclosed diagnostic.
+    inner_prefix = f"500: Tool '{tool_name}' execution failed:"
+    if wrapped and error.startswith(inner_prefix):
+        error = error[len(inner_prefix) :].lstrip()
+    if error.startswith("Error:"):
+        error = error[len("Error:") :].lstrip()
+        wrapped = True
+    # The image wraps upstream exceptions in "Failed to call tool:"; only there does a leading status
+    # have HTTP meaning. A number elsewhere in a tool's message is not a service failure.
+    if wrapped and re.match(r"(?:401|402|403|429|502|503|504)\b", error):
+        return True
+    return (status >= 400 or wrapped) and SERVICE_ERROR_PATTERN.match(error) is not None
 
 
 class MCPAtlasResourcesServerConfig(BaseResourcesServerConfig):
@@ -356,6 +386,7 @@ class MCPAtlasResourcesServer(SimpleResourcesServer):
             rollout.tool_calls += 1
             if rollout.box is None:
                 return "Error: the MCP environment is unavailable"
+            served_name = rollout.box.tool_names.get(tool_name, tool_name)
             if tool_name == "met-museum_get-museum-object":
                 # Upstream's harness does the same: image blocks do not fit a text tool output.
                 body = {**body, "returnImage": False}
@@ -372,12 +403,13 @@ class MCPAtlasResourcesServer(SimpleResourcesServer):
             if status == 200:
                 text = tool_output_text(payload)
                 # Some servers report a failed upstream call as a short successful result.
-                if len(text) < 500 and "error" in text.lower() and SERVICE_ERROR_PATTERN.search(text):
+                if len(text) < 500 and _is_service_error(status, text, served_name):
                     rollout.failures.append(("service_error", f"{tool_name}: {text}"))
                 return text
             # The sandbox reports every tool error as an HTTP error; the model sees its body, as upstream.
             text = payload if isinstance(payload, str) else json.dumps(payload)
-            if status != 500 or SERVICE_ERROR_PATTERN.search(text):
+            detail = payload.get("detail") if isinstance(payload, dict) else None
+            if _is_service_error(status, detail if isinstance(detail, str) else text, served_name):
                 rollout.failures.append(("service_error", f"{tool_name}: HTTP {status}: {text[:500]}"))
             return text
 
@@ -405,6 +437,17 @@ class MCPAtlasResourcesServer(SimpleResourcesServer):
             f"no readable judge verdict after {self.config.judge_max_attempts} attempts: {(content or '')[:500]}"
         )
 
+    async def _judge_claims(self, claims: list[str], answer: str) -> list[dict[str, Any]]:
+        tasks = [asyncio.create_task(self._judge(claim, answer)) for claim in claims]
+        try:
+            return list(await asyncio.gather(*tasks))
+        finally:
+            # A failed or cancelled row no longer needs its other claim requests or retry attempts.
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     async def verify(self, request: Request, body: MCPAtlasVerifyRequest) -> MCPAtlasVerifyResponse:
         session_id = request.session.get(SESSION_ID_KEY)
         async with self.session_lock(session_id or ""):
@@ -431,7 +474,7 @@ class MCPAtlasResourcesServer(SimpleResourcesServer):
                 sandbox_down = bool(kinds & {"sandbox_start_failed", "session_lost"})
                 # Upstream scores an empty or "ERROR:" answer 0 without calling the judge.
                 judged = claims and answer.strip() and not answer.startswith("ERROR:") and not sandbox_down
-                verdicts = list(await asyncio.gather(*(self._judge(c, answer) for c in claims))) if judged else []
+                verdicts = await self._judge_claims(claims, answer) if judged else []
                 score = coverage(verdicts, len(claims)) if judged else 0.0
                 masked = bool(kinds & set(HARD_FAILURES)) or (self.config.mask_service_errors and bool(kinds))
                 worst = next((kind for kind in HARD_FAILURES + SOFT_FAILURES if kind in kinds), None)

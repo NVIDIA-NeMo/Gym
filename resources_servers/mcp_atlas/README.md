@@ -15,6 +15,9 @@ at revision `8c563b55`) with the servers of the upstream agent-environment image
   and a call that takes more than 60 s as `Tool call timed out after 60s`, as in the upstream harness.
 - **Limits.** 256 model turns (`max_steps`) and 100 tool calls; calls past the 100th return an error that asks
   for the final answer.
+- **Concurrency.** Tool calls within one rollout are serialized under its session lock. Verification and
+  close wait for an active call, up to `tool_call_timeout_s` (60 s by default), before stopping its sandbox.
+  Different rollouts can run concurrently.
 - **Answer.** The final answer is the last assistant message with non-empty text.
 - **Judge.** Each ground-truth claim is judged on its own against the final answer only, with upstream's
   `score_claims.py` prompt, structured output and temperature 0. The default judge is
