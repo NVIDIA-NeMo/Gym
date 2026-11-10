@@ -22,6 +22,7 @@ import pytest
 import yaml
 
 from nemo_gym.client import ServerClient
+from nemo_gym.core.failure_kinds import PROVIDER_UNAVAILABLE, VERIFIER_ERROR
 from nemo_gym.sandbox import SandboxCreateError, SandboxExecResult
 from resources_servers.cvdp.app import (
     CVDPResourcesServer,
@@ -30,9 +31,7 @@ from resources_servers.cvdp.app import (
 )
 from resources_servers.cvdp.cvdp_lib.subjective import calculate_BLEU, calculate_ROUGE
 from resources_servers.cvdp.testbench_runner import (
-    TestbenchRunner as CVDPTestbenchRunner,
-)
-from resources_servers.cvdp.testbench_runner import (
+    CVDPInfrastructureError,
     _apply_substitutions,
     _build_command,
     _build_env,
@@ -43,6 +42,9 @@ from resources_servers.cvdp.testbench_runner import (
     _parse_compose_service,
     _resolve_service_image,
     _service_build_key,
+)
+from resources_servers.cvdp.testbench_runner import (
+    TestbenchRunner as CVDPTestbenchRunner,
 )
 
 
@@ -348,6 +350,57 @@ class TestCVDPServerVerify:
             result = await self.server.verify(_make_request(body_dict))
         assert result.reward == 0.0
         assert result.container_exit_code == -1
+        assert result.evaluation_completed is True
+        assert result.mask_sample is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failure_kind", [PROVIDER_UNAVAILABLE, VERIFIER_ERROR])
+    async def test_infrastructure_failure_is_retried_then_masked(self, failure_kind):
+        body = _make_request(_make_body(output_text=SAMPLE_RTL))
+        with patch.object(
+            self.server._harness,
+            "run",
+            new_callable=AsyncMock,
+            side_effect=CVDPInfrastructureError("sandbox disappeared", failure_kind=failure_kind),
+        ) as run:
+            result = await self.server.verify(body)
+        assert run.await_count == 2
+        assert result.mask_sample is True
+        assert result.evaluation_completed is False
+        assert result.failure_kind == failure_kind
+        assert result.failure_reason == "sandbox disappeared"
+        assert result.container_exit_code is None
+        assert result.response == body.response
+
+    @pytest.mark.asyncio
+    async def test_retry_reuses_answer_and_returns_successful_grade(self):
+        body = _make_request(_make_body(output_text=SAMPLE_RTL))
+        with patch.object(
+            self.server._harness,
+            "run",
+            new_callable=AsyncMock,
+            side_effect=[CVDPInfrastructureError("temporary outage"), (0, "", [])],
+        ) as run:
+            result = await self.server.verify(body)
+        assert run.await_count == 2
+        assert run.await_args_list[0] == run.await_args_list[1]
+        assert result.reward == 1.0
+        assert result.mask_sample is False
+        assert result.evaluation_completed is True
+        assert result.failure_kind is None
+
+    @pytest.mark.asyncio
+    async def test_infrastructure_retries_can_be_disabled(self):
+        self.server.config.inconclusive_verification_retries = 0
+        with patch.object(
+            self.server._harness,
+            "run",
+            new_callable=AsyncMock,
+            side_effect=CVDPInfrastructureError("provider unavailable"),
+        ) as run:
+            result = await self.server.verify(_make_request(_make_body(output_text=SAMPLE_RTL)))
+        assert run.await_count == 1
+        assert result.mask_sample is True
 
     @pytest.mark.asyncio
     async def test_verify_missing_compose_returns_zero_reward(self):
@@ -791,6 +844,7 @@ class TestRunServiceProvider:
         exit_code, output = await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
 
         assert exit_code == 0
+        assert fake.created[0].ttl_s == 690
         assert output == "hi\n"
         spec = fake.created[0]
         assert spec.image == "ghcr.io/hdl/sim/osvb"
@@ -824,6 +878,7 @@ class TestRunServiceProvider:
         assert exit_code == -1
         assert "timed out after 30s" in output
         assert len(fake.closed) == 1
+        assert len(fake.execs) == 2  # setup and timed-out test; no snapshot can obscure that outcome
 
     @pytest.mark.asyncio
     async def test_create_failure_returns_error(self, tmp_path):
@@ -831,9 +886,9 @@ class TestRunServiceProvider:
             SandboxExecResult(stdout="", stderr="", return_code=0),
             create_error=SandboxCreateError("boom"),
         )
-        exit_code, output = await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
-        assert exit_code == 1
-        assert "sandbox create failed" in output
+        with pytest.raises(CVDPInfrastructureError, match="sandbox create failed") as error:
+            await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
+        assert error.value.failure_kind == PROVIDER_UNAVAILABLE
         assert fake.execs == []
         assert fake.closed == []
 
@@ -843,10 +898,62 @@ class TestRunServiceProvider:
             SandboxExecResult(stdout="hi\n", stderr="", return_code=0),
             snapshot_result=SandboxExecResult(stdout="", stderr="disk full", return_code=1),
         )
-        exit_code, output = await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
-        assert exit_code == 1
-        assert "workspace snapshot failed" in output
-        assert "disk full" in output
+        with pytest.raises(CVDPInfrastructureError, match="workspace snapshot failed.*disk full"):
+            await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
+        assert len(fake.closed) == 1
+
+    @pytest.mark.asyncio
+    async def test_explicit_sandbox_lifetime_is_preserved(self, tmp_path):
+        self.server.config.sandbox_spec = {"ttl_s": 3600}
+        fake = _FakeProvider(SandboxExecResult(stdout="", stderr="", return_code=0))
+        await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
+        assert fake.created[0].ttl_s == 3600
+
+    @pytest.mark.asyncio
+    async def test_provider_disappearance_is_infrastructure_failure(self, tmp_path):
+        fake = _FakeProvider(SandboxExecResult(stdout="", stderr="", return_code=0))
+        fake.exec = AsyncMock(side_effect=RuntimeError("Sandbox not found"))
+        with pytest.raises(CVDPInfrastructureError, match="sandbox operation failed.*Sandbox not found"):
+            await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
+        assert len(fake.closed) == 1
+
+    @pytest.mark.asyncio
+    async def test_non_timeout_exec_error_is_infrastructure_failure(self, tmp_path):
+        fake = _FakeProvider(SandboxExecResult(stdout="", stderr="unreachable", return_code=1, error_type="transport"))
+        with pytest.raises(CVDPInfrastructureError, match="sandbox exec failed.*transport"):
+            await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
+        assert len(fake.closed) == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("during_setup", [False, True])
+    async def test_confirmed_guest_oom_is_a_model_failure_only_during_test(self, tmp_path, during_setup):
+        fake = _FakeProvider(SandboxExecResult(stdout="", stderr="", return_code=0))
+        error = RuntimeError(
+            'Get command status failed: HTTP 410: {"code":"SANDBOX::ENDED",'
+            '"message":"Sandbox dead-beef has ended (OOMKilled): '
+            'container sandbox exited with code 137 (OOMKilled)"}'
+        )
+        fake.exec = AsyncMock(
+            side_effect=[error] if during_setup else [SandboxExecResult(stdout="", stderr="", return_code=0), error]
+        )
+        if during_setup:
+            with pytest.raises(CVDPInfrastructureError, match="sandbox operation failed"):
+                await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
+        else:
+            exit_code, output = await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
+            assert exit_code == 137
+            assert "test execution exceeded sandbox memory" in output
+            assert fake.exec.await_count == 2
+        assert len(fake.closed) == 1
+
+    @pytest.mark.asyncio
+    async def test_unconfirmed_oom_during_execution_remains_infrastructure_failure(self, tmp_path):
+        fake = _FakeProvider(SandboxExecResult(stdout="", stderr="", return_code=0))
+        fake.exec = AsyncMock(
+            side_effect=[SandboxExecResult(stdout="", stderr="", return_code=0), RuntimeError("node out of memory")]
+        )
+        with pytest.raises(CVDPInfrastructureError, match="sandbox operation failed"):
+            await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
 
     @pytest.mark.asyncio
     async def test_tmp_bind_path_added(self, tmp_path):

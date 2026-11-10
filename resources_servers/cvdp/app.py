@@ -52,10 +52,11 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from resources_servers.cvdp.testbench_runner import TestbenchRunner
+from resources_servers.cvdp.testbench_runner import CVDPInfrastructureError, TestbenchRunner
 
 
 _helpers = ModelHelpers()
+logger = logging.getLogger(__name__)
 
 
 # ----------------------------
@@ -69,6 +70,7 @@ class CVDPResourcesServerConfig(BaseResourcesServerConfig):
     eda_sim_image: str = ""  # Set to a commercial EDA image (e.g. Cadence Xcelium)
     container_timeout: int = 600
     num_processes: int = 4  # Max concurrent verifier sandboxes
+    inconclusive_verification_retries: int = Field(default=1, ge=0)
     harness_workspace_dir: str = ""  # Optional host directory for per-rollout temp workspaces
     container_workspace: str = "/code"
     container_transfer_dir: str = "/sandbox"
@@ -106,6 +108,7 @@ class CVDPVerifyRequest(CVDPRunRequest, BaseVerifyRequest):
 
 
 class CVDPVerifyResponse(BaseVerifyResponse):
+    evaluation_completed: bool = True
     task_id: Optional[str] = None
     category: Optional[str] = None  # e.g. "cid003" — for CVDP report
     difficulty: Optional[str] = None  # e.g. "easy" — for CVDP report
@@ -324,12 +327,33 @@ class CVDPResourcesServer(SimpleResourcesServer):
 
         async with self._semaphore:
             t0 = time.time()
-            exit_code, stderr, service_results = await self._harness.run(
-                rtl_files=rtl_files or {},
-                harness_files=meta.harness_files,
-                task_id=meta.task_id,
-                context_files=meta.context_files,
-            )
+            for attempt in range(self.config.inconclusive_verification_retries + 1):
+                try:
+                    exit_code, stderr, service_results = await self._harness.run(
+                        rtl_files=rtl_files or {},
+                        harness_files=meta.harness_files,
+                        task_id=meta.task_id,
+                        context_files=meta.context_files,
+                    )
+                    break
+                except CVDPInfrastructureError as exc:
+                    if attempt == self.config.inconclusive_verification_retries:
+                        return CVDPVerifyResponse(
+                            **body.model_dump(),
+                            reward=0.0,
+                            mask_sample=True,
+                            failure_kind=exc.failure_kind,
+                            failure_reason=str(exc),
+                            evaluation_completed=False,
+                            task_id=meta.task_id,
+                            category=category,
+                            difficulty=difficulty,
+                            extracted_rtl=rtl_files,
+                            container_stderr=str(exc),
+                            container_services=[],
+                            execution_time=time.time() - t0,
+                        )
+                    logger.warning("Retrying inconclusive CVDP verification for %s: %s", meta.task_id, exc)
             execution_time = time.time() - t0
 
         return CVDPVerifyResponse(

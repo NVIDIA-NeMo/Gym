@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import posixpath
+import re
 import shlex
 import tarfile
 import tempfile
@@ -28,6 +29,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import yaml
 
+from nemo_gym.core.failure_kinds import PROVIDER_UNAVAILABLE, VERIFIER_ERROR
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxCreateError,
@@ -39,6 +41,14 @@ from nemo_gym.sandbox import (
 
 if TYPE_CHECKING:
     from resources_servers.cvdp.app import CVDPResourcesServerConfig
+
+
+class CVDPInfrastructureError(RuntimeError):
+    """Verification did not produce a trustworthy task outcome."""
+
+    def __init__(self, message: str, *, failure_kind: str = VERIFIER_ERROR) -> None:
+        super().__init__(message)
+        self.failure_kind = failure_kind
 
 
 def _safe_workspace_path(workdir: Path, rel: str) -> Optional[Path]:
@@ -500,6 +510,11 @@ class TestbenchRunner:
         )
 
         spec_extra = dict(self.config.sandbox_spec)
+        if spec_extra.get("ttl_s") is None:
+            # Setup, the test command and snapshot each have their own timeout.
+            # Leave additional headroom for startup and workspace transfers; the
+            # SDK's ten-minute default can expire before a ten-minute test ends.
+            spec_extra["ttl_s"] = 3 * self.config.container_timeout + 600
         provider_options = dict(spec_extra.pop("provider_options", {}) or {})
         metadata = dict(self._sandbox_metadata)
         metadata.update(spec_extra.pop("metadata", {}) or {})
@@ -524,37 +539,54 @@ class TestbenchRunner:
                     cwd="/",
                     timeout_s=self.config.container_timeout,
                 )
-                if setup.return_code != 0:
+                if setup.error_type or setup.return_code != 0:
                     combined = (setup.stderr or "") + (setup.stdout or "")
-                    return 1, f"workspace setup failed for service '{service}': {combined}"
+                    raise CVDPInfrastructureError(f"workspace setup failed for service '{service}': {combined}")
 
-                result = await sandbox.exec(
-                    command,
-                    cwd=working_dir,
-                    env=env,
-                    timeout_s=self.config.container_timeout,
-                )
+                try:
+                    result = await sandbox.exec(
+                        command,
+                        cwd=working_dir,
+                        env=env,
+                        timeout_s=self.config.container_timeout,
+                    )
+                except Exception as exc:
+                    message = str(exc)
+                    # The control plane reports a guest OOM after the test kills its sandbox.
+                    if (
+                        re.search(r"Sandbox [\w-]+ has ended \(OOMKilled\)", message)
+                        and "container sandbox exited with code 137 (OOMKilled)" in message
+                    ):
+                        return 137, f"test execution exceeded sandbox memory for service '{service}': {message}"
+                    raise
+                if result.error_type == "timeout":
+                    return -1, f"sandbox exec timed out after {self.config.container_timeout}s"
+                if result.error_type:
+                    raise CVDPInfrastructureError(
+                        f"sandbox exec failed for service '{service}' ({result.error_type}): {result.stderr or ''}"
+                    )
 
                 snapshot = await sandbox.exec(
                     f"tar -czf {shlex.quote(output_archive)} -C {shlex.quote(workspace)} .",
                     timeout_s=self.config.container_timeout,
                 )
-                if snapshot.return_code == 0:
+                if not snapshot.error_type and snapshot.return_code == 0:
                     next_archive = workspace_archive.with_name(f"{workspace_archive.name}.next")
                     await sandbox.download(output_archive, next_archive)
                     next_archive.replace(workspace_archive)
                 else:
                     combined = (snapshot.stderr or "") + (snapshot.stdout or "")
-                    return 1, f"workspace snapshot failed for service '{service}': {combined}"
+                    raise CVDPInfrastructureError(f"workspace snapshot failed for service '{service}': {combined}")
+        except CVDPInfrastructureError:
+            raise
         except SandboxCreateError as exc:
-            return 1, f"sandbox create failed for service '{service}': {exc}"
+            raise CVDPInfrastructureError(
+                f"sandbox create failed for service '{service}': {exc}", failure_kind=PROVIDER_UNAVAILABLE
+            ) from exc
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            return 1, f"sandbox operation failed for service '{service}': {exc}"
-
-        if result.error_type == "timeout":
-            return -1, f"sandbox exec timed out after {self.config.container_timeout}s"
+            raise CVDPInfrastructureError(f"sandbox operation failed for service '{service}': {exc}") from exc
 
         combined = (result.stderr or "") + (result.stdout or "")
         return result.return_code, combined
