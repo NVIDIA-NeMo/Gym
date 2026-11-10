@@ -74,10 +74,14 @@ def main() -> None:
         folder = storage / key.lower()
         folder.mkdir(parents=True)
         variables[key] = str(folder)
+    empty_home = work / "empty-home"
+    empty_home.mkdir()
     install = rootfs / "opt/agentvista/install.sh"
     install.write_text(
         "#!/bin/bash\nset -euo pipefail\n"
         "/opt/agentvista/bin/uv venv --python /opt/agentvista-python/bin/python3.13 /opt/agentvista-worker\n"
+        "/opt/agentvista/bin/uv pip install --python /opt/agentvista-worker/bin/python "
+        "--index-url https://download.pytorch.org/whl/cpu torch==2.8.0 torchvision==0.23.0\n"
         "/opt/agentvista/bin/uv pip install --python /opt/agentvista-worker/bin/python "
         "-r /opt/agentvista/requirements-worker.txt\n"
         "/opt/agentvista-worker/bin/python -c 'import qwen_vl_utils,torch,jupyter_client,ipykernel,mcp'\n"
@@ -93,6 +97,10 @@ def main() -> None:
             "--rw",
             "--mount",
             f"{work}:{work}",
+            "--mount",
+            f"{empty_home}:/root:ro",
+            "--mount",
+            f"{empty_home}:/home/pritamb:ro",
             "agentvista",
             "env",
             "PYTHONDONTWRITEBYTECODE=1",
