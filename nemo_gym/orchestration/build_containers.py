@@ -48,6 +48,7 @@ class MooncakeConfig(BaseNeMoGymCLIConfig):
     branch: str
     cpus_per_task: int = Field(gt=0)
     build_parallel_level: int = Field(gt=0)
+    extra_apt_packages: Optional[List[str]] = None
 
 
 class VLLMRouterConfig(BaseNeMoGymCLIConfig):
@@ -671,6 +672,10 @@ class MooncakeBuilder(BaseBuilder):
             if apt-cache show libmsgpack-cxx-dev >/dev/null 2>&1; then
                 apt-get install -y --no-install-recommends libmsgpack-cxx-dev
             fi
+            if (( $# )); then
+                # Restore files that earlier image stages may have stripped.
+                apt-get install -y --no-install-recommends --reinstall -- "$@"
+            fi
             command -v uv >/dev/null || python3 -m pip install uv
 
             BUILD_DIR=$(mktemp -d /tmp/mooncake-build.XXXXXX)
@@ -709,7 +714,7 @@ class MooncakeBuilder(BaseBuilder):
             rm -rf /var/lib/apt/lists/*
             """
         ).lstrip()
-        return join(["bash", "-c", script, "mooncake-build"])
+        return join(["bash", "-c", script, "mooncake-build", *(self.config.extra_apt_packages or [])])
 
     def get_srun_env_vars(self, container_config: BuildContainerConfig) -> Dict[str, Any]:
         """Pass source and build settings as literal environment values."""

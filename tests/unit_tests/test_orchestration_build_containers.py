@@ -823,7 +823,12 @@ async def test_mooncake_preflight_and_resources(mooncake_builder, container_conf
 
 
 @pytest.mark.parametrize("cuda_version,install_failure", [("12.9", False), ("13.0", False), ("13.0", True)])
-def test_mooncake_build_and_cleanup(mooncake_builder, container_config, tmp_path, cuda_version, install_failure):
+@pytest.mark.parametrize("extra_apt_packages", [None, [], ["cuda-cudart-dev-13-0", "literal $(touch INJECTED)"]])
+def test_mooncake_build_and_cleanup(
+    mooncake_builder, container_config, tmp_path, cuda_version, install_failure, extra_apt_packages
+):
+    assert mooncake_builder.config.extra_apt_packages is None
+    mooncake_builder.config.extra_apt_packages = extra_apt_packages
     mooncake_builder._head_sha = "a" * 40
     argv = shlex.split(mooncake_builder.get_srun_command_str())
     subprocess.run(["bash", "-n", "-c", argv[2]], check=True)
@@ -884,6 +889,20 @@ elif tool == "uv" and args == ["cache", "clean"]:
         assert not capture.exists()
         return
     calls = [json.loads(line) for line in capture.read_text().splitlines()]
+    extra_installs = [call for call in calls if call["tool"] == "apt-get" and "--" in call["args"]]
+    if extra_apt_packages:
+        assert len(extra_installs) == 1
+        assert extra_installs[0]["args"] == [
+            "install",
+            "-y",
+            "--no-install-recommends",
+            "--reinstall",
+            "--",
+            *extra_apt_packages,
+        ]
+        assert calls.index(extra_installs[0]) < next(i for i, call in enumerate(calls) if call["tool"] == "uv")
+    else:
+        assert not extra_installs
     git_args = [call["args"] for call in calls if call["tool"] == "git"]
     assert ["remote", "add", "origin", mooncake_builder.config.repo] in git_args
     assert ["fetch", "--depth=1", "origin", "a" * 40] in git_args
