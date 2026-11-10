@@ -263,3 +263,44 @@ def test_documented_served_cli_selects_benchmark_split():
         E2ERolloutCollectionConfig(
             split="benchmark", output_jsonl_fpath="/tmp/rollouts.jsonl", input_jsonl_fpath="/tmp/tasks/gym.jsonl"
         )
+
+
+@pytest.mark.parametrize("profile", ["pi", "codex", "codex_guidance", "hermes", "hermes_guidance"])
+def test_dataset_discovery_uses_literal_custom_path(profile, tmp_path):
+    tasks = tmp_path / "tasks" / "gym.jsonl"
+    tasks.parent.mkdir()
+    tasks.write_text('{"task_id":"fixture"}\n')
+    dataset = {
+        "name": "skill_trigger",
+        "type": "benchmark",
+        "jsonl_fpath": str(tasks),
+        "prepare_script": "benchmarks/skill_trigger/package.py",
+        "num_repeats": 1,
+    }
+    overlay = tmp_path / "run.yaml"
+    overlay.write_text(
+        yaml.safe_dump(
+            {
+                "config_paths": [f"benchmarks/skill_trigger/configs/{profile}/config.yaml"],
+                "harbor_agent_general": {"responses_api_agents": {"harbor_agent_general": {"datasets": [dataset]}}},
+            }
+        )
+    )
+    parser = GlobalConfigDictParser()
+    parsed = parser.parse(
+        GlobalConfigDictParserConfig(
+            initial_global_config_dict=OmegaConf.create(
+                {
+                    "config_paths": [str(overlay)],
+                    "policy_model_name": "openai/fixture",
+                    "policy_base_url": "https://example.invalid/v1",
+                }
+            ),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+            offline=True,
+        )
+    )
+    server = next(c for c in parser.filter_for_server_instance_configs(parsed) if c.name == "harbor_agent_general")
+    assert Path(server.datasets[0].jsonl_fpath) == tasks
+    assert Path(server.datasets[0].jsonl_fpath).is_file()

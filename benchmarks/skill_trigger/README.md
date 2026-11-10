@@ -62,9 +62,27 @@ The package contains standard Harbor task directories and `gym.jsonl`. Expected 
 
 Supply `OPENAI_API_KEY` in the worker environment. The supplied profiles use an OpenAI-compatible endpoint and Harbor's `openai/MODEL_ID` naming. Pi uses the Responses API. Set paths and the manifest hash explicitly; keep keys out of YAML and command arguments.
 
+Dataset discovery uses literal paths. For custom task locations, save a run overlay
+such as `/absolute/path/to/run.yaml` (keep this task path equal to the `tasks`
+setting below):
+
+```yaml
+config_paths:
+- benchmarks/skill_trigger/configs/pi/config.yaml
+harbor_agent_general:
+  responses_api_agents:
+    harbor_agent_general:
+      datasets:
+      - name: skill_trigger
+        type: benchmark
+        jsonl_fpath: /absolute/path/to/tasks/gym.jsonl
+        prepare_script: benchmarks/skill_trigger/package.py
+        num_repeats: 1
+```
+
 ```sh
 gym eval run \
-  --config benchmarks/skill_trigger/configs/pi/config.yaml \
+  --config /absolute/path/to/run.yaml \
   --agent harbor_agent_general --model openai/MODEL_ID \
   --split benchmark \
   --output /absolute/path/to/new-run/rollouts.jsonl --num-repeats 3 \
@@ -75,7 +93,7 @@ gym eval run \
   ++skill_trigger_settings.jobs=/absolute/path/to/new-run/harbor
 ```
 
-Change the configuration path for another harness. Codex guidance additionally requires `skill_trigger_settings.model_catalog_path` and its SHA-256: use a catalog captured from the same Codex version and baseline model. The extension changes only the selected model's `include_skills_usage_instructions` value. A native model may already enable it; inspect the effective baseline before interpreting this as a treatment contrast.
+Change the profile in the overlay’s `config_paths` for another harness. Codex guidance additionally requires `skill_trigger_settings.model_catalog_path` and its SHA-256: use a catalog captured from the same Codex version and baseline model. The extension changes only the selected model's `include_skills_usage_instructions` value. A native model may already enable it; inspect the effective baseline before interpreting this as a treatment contrast.
 
 Gym and Harbor own scheduling, failure collection, and cleanup. This contribution does not change their worker-retry policy. Preserve the resolved configuration, runtime versions, task manifests, trajectories, and failure records. Do not infer complete coverage from process exit alone.
 
