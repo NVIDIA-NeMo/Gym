@@ -37,9 +37,13 @@ from nemo_gym.agents import (
     AGENT_ACTIVATION_HEADER,
     AGENT_OUTCOME_METADATA_KEY,
     AGENT_SESSION_COOKIE_KEY,
+    AGENT_STOP_REASON_METADATA_KEY,
     AgentCloseSessionRequest,
     AgentOutcome,
+    AgentOutcomePolicyConfig,
     AgentSeedSessionRequest,
+    OutcomeAction,
+    agent_response_action,
     check_agent_seed_rejected,
     raises_agent_failure,
 )
@@ -54,8 +58,10 @@ from nemo_gym.config import (
 )
 from nemo_gym.core import (
     AGENT_ROUTE_FAILED,
+    MODEL_CONTEXT_LIMIT,
     MODEL_POLICY_RESPONSE_TIMEOUT,
     MODEL_REQUEST_ERROR,
+    MODEL_REQUEST_REJECTED,
     EpisodeId,
     FailureBoundary,
     FailureEvent,
@@ -3403,13 +3409,46 @@ class TestFinalOnModelTimeout:
             )
 
 
-def _model_http_error(status: int) -> MagicMock:
-    response = _mock_response(status=status, content='{"error":{"message":"controlled model failure"}}')
+_MODEL_ERROR_BODY = '{"error":{"message":"controlled model failure"}}'
+# The HTTP 400 a Gym model server answers when it propagates a context overflow.
+_CONTEXT_OVERFLOW_BODY = '{"error":{"message":"controlled context overflow","code":"context_length_exceeded"}}'
+
+
+def _model_http_error(status: int, *, body: str = _MODEL_ERROR_BODY, forwarded: bool = False) -> MagicMock:
+    """A failed model reply; ``forwarded`` adds the report a Gym model server sends, selecting its failed attempt."""
+    headers = None
+    if forwarded:
+        attempt = FailureEvent(
+            boundary=FailureBoundary.MODEL,
+            failure_kind=MODEL_REQUEST_ERROR,
+            failure_reason=f"HTTP {status} from the model server",
+            operation="model_request",
+            operation_id="final-call",
+            attempt_id=uuid4().hex,
+            http_status=status,
+        )
+        headers = FailureHeader.encode(_policy_report([attempt], ended_on=attempt))
+    response = _mock_response(status=status, content=body)
     url = URL("http://model/v1/responses")
     response.raise_for_status.side_effect = ClientResponseError(
-        RequestInfo(url, "POST", CIMultiDictProxy(CIMultiDict()), url), (), status=status, message="model failure"
+        RequestInfo(url, "POST", CIMultiDictProxy(CIMultiDict()), url),
+        (),
+        status=status,
+        message="model failure",
+        headers=headers,
     )
     return response
+
+
+def _environment_action(response: NeMoGymResponse) -> tuple[OutcomeAction, str | None]:
+    """The default Environment Server action on an agent response, and the kind of the failure it records."""
+    action, cause = agent_response_action(response, config=AgentOutcomePolicyConfig())
+    return action, cause.failure_kind if cause is not None else None
+
+
+def _reported_outcome(response: NeMoGymResponse) -> AgentOutcome | None:
+    raw = (response.metadata or {}).get(AGENT_OUTCOME_METADATA_KEY)
+    return AgentOutcome.model_validate_json(raw) if raw is not None else None
 
 
 @pytest.mark.parametrize("status", [408, 425, 429, 500, 503])
@@ -3439,15 +3478,52 @@ async def test_model_http_retries_keep_one_decision(status: int, monkeypatch: Mo
     assert sleep.await_args_list == [call(0.5), call(1.0)]
 
 
+_REJECTED = AgentOutcome(failure_kind=MODEL_REQUEST_REJECTED)
+
+
+@pytest.mark.parametrize("forwarded", [False, True], ids=["no-report", "model-server-report"])
 @pytest.mark.parametrize(
-    ("status", "retries", "attempts"), [(400, 2, 1), (401, 2, 1), (422, 2, 1), (429, 0, 1), (500, 2, 3)]
+    ("status", "body", "attempts", "expected_status", "expected_outcome", "expected_action"),
+    [
+        # A 4xx other than 408/425/429 before any model reply: the run's setup made the request invalid.
+        pytest.param(400, _MODEL_ERROR_BODY, 1, "failed", _REJECTED, OutcomeAction.FAIL, id="400"),
+        pytest.param(401, _MODEL_ERROR_BODY, 1, "failed", _REJECTED, OutcomeAction.FAIL, id="401"),
+        pytest.param(422, _MODEL_ERROR_BODY, 1, "failed", _REJECTED, OutcomeAction.FAIL, id="422"),
+        # Retryable statuses keep the model request error once Simple Agent's own retries end.
+        pytest.param(
+            429,
+            _MODEL_ERROR_BODY,
+            3,
+            "failed",
+            AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=429),
+            OutcomeAction.RETRY,
+            id="429",
+        ),
+        pytest.param(
+            503,
+            _MODEL_ERROR_BODY,
+            3,
+            "failed",
+            AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=503),
+            OutcomeAction.RETRY,
+            id="503",
+        ),
+        # A propagated context overflow is graded, even before any reply.
+        pytest.param(400, _CONTEXT_OVERFLOW_BODY, 1, "incomplete", None, OutcomeAction.VERIFY, id="context-overflow"),
+    ],
 )
-async def test_terminal_model_http_error_returns_cause_and_zero_usage(
-    status: int, retries: int, attempts: int, monkeypatch: MonkeyPatch
+async def test_a_model_http_error_before_any_reply_takes_the_ladders_outcome(
+    status: int,
+    body: str,
+    attempts: int,
+    expected_status: str,
+    expected_outcome: AgentOutcome | None,
+    expected_action: OutcomeAction,
+    forwarded: bool,
+    monkeypatch: MonkeyPatch,
 ) -> None:
     server, client = _make_agent(True)
-    server.config.max_model_retries = retries
-    client.post = AsyncMock(side_effect=[_model_http_error(status) for _ in range(attempts)])
+    client.post = AsyncMock(side_effect=[_model_http_error(status, body=body, forwarded=forwarded)] * attempts)
     monkeypatch.setattr("responses_api_agents.simple_agent.app.asyncio.sleep", AsyncMock())
 
     response, trajectory, _, _ = await server._create_episode(
@@ -3458,16 +3534,147 @@ async def test_terminal_model_http_error_returns_cause_and_zero_usage(
     )
 
     assert client.post.await_count == attempts
-    assert response.status == "failed"
-    assert "controlled model failure" in response.error.message
-    assert AgentOutcome.model_validate_json(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == AgentOutcome(
-        failure_kind="model_request_error", status_code=status
+    assert response.status == expected_status
+    assert _reported_outcome(response) == expected_outcome
+    stop_reason = "error" if expected_outcome is not None else "context_limit"
+    assert response.metadata[AGENT_STOP_REASON_METADATA_KEY] == stop_reason
+    # The endpoint's own message stays in the response.
+    assert json.loads(body)["error"]["message"] in response.error.message
+    # A rejected request is the episode failure's cause and kind, whether or not the model server sent a report;
+    # an HTTP error is the cause only when that report selects it.
+    expected_cause = (
+        expected_outcome.failure_kind
+        if expected_outcome is not None and (forwarded or expected_outcome == _REJECTED)
+        else None
     )
+    assert _environment_action(response) == (expected_action, expected_cause)
     assert response.output == [] and response.usage.total_tokens == 0
     assert trajectory.turns == [] and trajectory.tool_calls == []
     invocation = trajectory.invocations[0]
-    assert invocation.status == "failed" and invocation.error_type == "model_request_error"
+    assert invocation.status == expected_status
+    # The invocation names the error the run ended on; the ladder's outcome is the response's.
+    assert invocation.error_type == (MODEL_CONTEXT_LIMIT if expected_outcome is None else MODEL_REQUEST_ERROR)
     assert invocation.model_calls == []  # The rejected attempts have no provider response IDs.
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "attempts", "expected_status", "expected_outcome", "expected_action"),
+    [
+        # After a reply the setup was valid, so a 4xx is a model request error, graded or failed by its status.
+        pytest.param(
+            400,
+            _MODEL_ERROR_BODY,
+            1,
+            "failed",
+            AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=400),
+            OutcomeAction.VERIFY,
+            id="400",
+        ),
+        pytest.param(
+            401,
+            _MODEL_ERROR_BODY,
+            1,
+            "failed",
+            AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=401),
+            OutcomeAction.FAIL,
+            id="401",
+        ),
+        pytest.param(
+            503,
+            _MODEL_ERROR_BODY,
+            3,
+            "failed",
+            AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=503),
+            OutcomeAction.RETRY,
+            id="503",
+        ),
+        pytest.param(400, _CONTEXT_OVERFLOW_BODY, 1, "incomplete", None, OutcomeAction.VERIFY, id="context-overflow"),
+    ],
+)
+async def test_a_model_http_error_after_a_reply_takes_the_ladders_outcome_and_keeps_the_work(
+    status: int,
+    body: str,
+    attempts: int,
+    expected_status: str,
+    expected_outcome: AgentOutcome | None,
+    expected_action: OutcomeAction,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    server, client = _make_agent(True)
+    tool_response = {
+        "id": "tool-response",
+        "created_at": 1,
+        "model": "model",
+        "object": "response",
+        "parallel_tool_calls": False,
+        "tool_choice": "auto",
+        "tools": [],
+        "output": [
+            {
+                "type": "function_call",
+                "id": "tool-1",
+                "call_id": "tool-1",
+                "name": "bash",
+                "arguments": '{"command":"printf done"}',
+            }
+        ],
+        "usage": {
+            "input_tokens": 20,
+            "output_tokens": 8,
+            "total_tokens": 28,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens_details": {"reasoning_tokens": 0},
+        },
+    }
+    client.post = AsyncMock(
+        side_effect=[
+            _mock_response(tool_response),
+            *[_model_http_error(status, body=body, forwarded=True)] * attempts,
+        ]
+    )
+    monkeypatch.setattr("responses_api_agents.simple_agent.app.http_request", AsyncMock(return_value=_mock_response()))
+    monkeypatch.setattr("responses_api_agents.simple_agent.app.asyncio.sleep", AsyncMock())
+
+    response, trajectory, _, _ = await server._create_episode(
+        NeMoGymResponseCreateParamsNonStreaming(input="hello"),
+        model_url_path="/ng-rollout/rollout/v1/responses",
+        in_session=True,
+        tool_access=DirectHTTPToolAccess(name="resources", base_url="http://resources", required=True),
+        collect_trajectory=True,
+    )
+
+    assert client.post.await_count == 1 + attempts
+    assert response.status == expected_status
+    assert _reported_outcome(response) == expected_outcome
+    expected_cause = expected_outcome.failure_kind if expected_outcome is not None else None
+    assert _environment_action(response) == (expected_action, expected_cause)
+    assert [item.type for item in response.output] == ["function_call", "function_call_output"]
+    assert response.usage.total_tokens == 28
+    assert trajectory.invocations[0].status == expected_status
+
+
+async def test_a_policy_timeout_in_a_session_keeps_its_typed_failure() -> None:
+    server, client = _make_agent(True)
+    client.post = AsyncMock(return_value=_failed_reply(_timed_out_report()))
+
+    response, trajectory, _, _ = await server._create_episode(
+        NeMoGymResponseCreateParamsNonStreaming(input="hello"),
+        model_url_path="/ng-rollout/rollout/v1/responses",
+        in_session=True,
+        collect_trajectory=True,
+    )
+
+    assert client.post.await_count == 1
+    assert response.status == "failed"
+    assert _reported_outcome(response) == AgentOutcome(failure_kind=MODEL_POLICY_RESPONSE_TIMEOUT)
+    assert response.metadata[AGENT_STOP_REASON_METADATA_KEY] == "error"
+    # Without a timeout rule the default policy fails it; the Environment Server's timeout_action may change that.
+    assert _environment_action(response) == (OutcomeAction.FAIL, MODEL_POLICY_RESPONSE_TIMEOUT)
+    report = FailureReport.model_validate(response.model_extra["failure_report"])
+    selected = report.events[report.failure_id]
+    assert (selected.boundary, selected.operation) == (FailureBoundary.AGENT, POLICY_TIMEOUT_OPERATION)
+    invocation = trajectory.invocations[0]
+    assert invocation.status == "failed" and invocation.error_type == MODEL_POLICY_RESPONSE_TIMEOUT
 
 
 @pytest.mark.parametrize("has_usage", [False, True])

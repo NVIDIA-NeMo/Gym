@@ -14,6 +14,15 @@ Status rules take precedence over kind rules, then `default_action`. The adapter
 
 `final_on_model_timeout: true` remains a compatibility alias for the rule above; explicit false selects `retry`. The alias is resolved once into `outcome_policy` and excluded from the serialized resolved configuration. An explicitly conflicting timeout rule or default is rejected. Prefer `outcome_policy` in new configurations.
 
+In an agent session, a model request that still fails after Simple Agent's own retries (`max_model_retries`, for HTTP 408, 425, 429 and 5xx) ends the activation with HTTP 200 and the shared outcome ladder's response, together with the partial work:
+
+- a context overflow that the model server propagates (HTTP 400, code `context_length_exceeded`) is `incomplete` and graded;
+- any other 4xx except 408, 425 and 429, before any model reply in the activation, is `failed` with `model_request_rejected`, which is neither graded nor retried;
+- any other HTTP error is `failed` with `model_request_error` and its status;
+- a confirmed policy-response timeout is `failed` with `model_policy_response_timeout`.
+
+The Environment Server's outcome policy then grades, retries or fails the episode.
+
 
 # Licensing information
 Code: Apache 2.0

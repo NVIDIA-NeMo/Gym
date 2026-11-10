@@ -39,7 +39,6 @@ from pydantic import (
 
 from nemo_gym.agents import (
     AGENT_ACTIVATION_HEADER,
-    AGENT_OUTCOME_METADATA_KEY,
     AgentCloseSessionResponse,
     AgentOutcome,
     AgentSeedRejectedError,
@@ -49,9 +48,12 @@ from nemo_gym.agents import (
     Body,
     OutcomeAction,
     OutcomePolicyConfig,
+    RunEvidence,
     SimpleResponsesAPIAgent,
     confirmed_policy_response_timeout,
+    decide_outcome,
     failure_outcome_policy,
+    model_http_error_outcome,
 )
 from nemo_gym.agents.agent_outcome import POLICY_TIMEOUT_OPERATION, policy_timeout_failure
 from nemo_gym.client import get_response_json, raise_for_status, rollout_path_prefix
@@ -67,6 +69,7 @@ from nemo_gym.core import (
     AGENT_RUN_ERROR,
     MODEL_POLICY_RESPONSE_TIMEOUT,
     MODEL_REQUEST_ERROR,
+    MODEL_REQUEST_REJECTED,
     EpisodeId,
     FailureBoundary,
     FailureClassificationConfig,
@@ -589,6 +592,29 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                         if failure is not None:
                             raise failure from error
                         raise
+                    content = getattr(error, "response_content", b"")
+                    # Each step calls the model once and continues only after its reply, so an earlier step replied.
+                    model_replied = step > 1
+                    evidence = RunEvidence(
+                        has_result=False,
+                        timed_out=False,
+                        model_replied=model_replied,
+                        error=(
+                            AgentOutcome(failure_kind=MODEL_POLICY_RESPONSE_TIMEOUT)
+                            if failure is not None
+                            else model_http_error_outcome(error.status, error_body=content)
+                        ),
+                    )
+                    if decide_outcome(evidence).outcome == AgentOutcome(failure_kind=MODEL_REQUEST_REJECTED):
+                        # The reply's report selects a failure of the outcome's kind, so the Environment Server records
+                        # that kind as the episode failure's; a selected model HTTP error would contradict the outcome.
+                        failure = NgFailureEvent(
+                            boundary=FailureBoundary.AGENT,
+                            failure_kind=MODEL_REQUEST_REJECTED,
+                            failure_reason=f"Model HTTP {error.status} before any model reply",
+                            operation=POLICY_TIMEOUT_OPERATION,
+                        )
+                        failure.__cause__ = error
                     # The session reply is checkpointed. Keep its selected cause in that reply, not
                     # only in request-local observations, whose selected ID is deliberately absent.
                     log = RequestFailureLog.current()
@@ -598,37 +624,33 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     forwarded = FailureHeader.decode(error.headers)
                     if forwarded is not None:
                         report = report.merged(forwarded)
-                    reported_kind = MODEL_POLICY_RESPONSE_TIMEOUT if failure is not None else MODEL_REQUEST_ERROR
                     # Return the cause and partial work; the Environment Server owns grading and retry policy.
-                    content = getattr(error, "response_content", b"")
                     detail = content.decode(errors="replace") if isinstance(content, bytes) else str(content)
-                    invocation_status = "failed"
-                    invocation_error_type = reported_kind
-                    model_response = NeMoGymResponse(
-                        id=f"resp_{uuid4().hex}",
-                        created_at=time(),
-                        model=body.model or self.config.model_server.name,
-                        object="response",
-                        output=[],
-                        status="failed",
-                        failure_report=report.model_dump(mode="json"),
-                        error={
-                            "code": "server_error",
-                            "message": f"Model HTTP {error.status}: {detail or error.message}",
-                        },
-                        tools=body.tools,
-                        tool_choice=body.tool_choice,
-                        parallel_tool_calls=body.parallel_tool_calls,
-                        metadata={
-                            **(body.metadata or {}),
-                            AGENT_OUTCOME_METADATA_KEY: AgentOutcome(
-                                failure_kind=reported_kind,
-                                status_code=error.status if reported_kind == MODEL_REQUEST_ERROR else None,
-                            ).model_dump_json(),
-                        },
+                    model_response = self.finish_response(
+                        NeMoGymResponse(
+                            id=f"resp_{uuid4().hex}",
+                            created_at=time(),
+                            model=body.model or self.config.model_server.name,
+                            object="response",
+                            output=[],
+                            status="failed",
+                            failure_report=report.model_dump(mode="json"),
+                            error={
+                                "code": "server_error",
+                                "message": f"Model HTTP {error.status}: {detail or error.message}",
+                            },
+                            tools=body.tools,
+                            tool_choice=body.tool_choice,
+                            parallel_tool_calls=body.parallel_tool_calls,
+                            metadata=body.metadata,
+                        ),
+                        evidence,
                     )
+                    # The invocation keeps the error it ended on; the response carries the ladder's outcome.
+                    invocation_status = model_response.status
+                    invocation_error_type = evidence.error.failure_kind
                     # No successful model response means known zero aggregate usage, not invented per-call usage.
-                    if step == 1:
+                    if not model_replied:
                         usage = NeMoGymResponseUsage.sum_from_list([])
                     break
                 try:
