@@ -290,6 +290,7 @@ def prepare_release(
                     shutil.copyfile(src, dest)
         manifest = {
             "artifact_kind": "source-audit" if audit_only else "prepared-release",
+            "benchmark_version": "0.2.1",
             "release_blockers": [b.model_dump() for b in selection.release_blockers],
             "version": selection.version,
             "selection_sha256": digest(encode(selection.model_dump())),

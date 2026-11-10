@@ -51,6 +51,8 @@ def release(tmp_path: Path) -> tuple[Selection, Path]:
     (folder / "NOTICE").write_text("Nested attribution\n")
     (folder / "evals/answers.json").write_text('{"hidden_answer": "do not expose"}')
     (repo / "LICENSE").write_text("Example license for test fixture\n")
+    (repo / "legal").mkdir()
+    (repo / "legal/NOTICE").write_text("Source attribution\n")
     upstream = repo / "cases.json"
     upstream.write_text(json.dumps({"trigger": {"positive": [{"prompt": "Original public prompt"}]}}))
     run_git(repo, "init", "-q")
@@ -66,7 +68,7 @@ def release(tmp_path: Path) -> tuple[Selection, Path]:
             "example": Source(
                 url="https://example.invalid/fixture.git",
                 commit=run_git(repo, "rev-parse", "HEAD"),
-                notices=["LICENSE"],
+                notices=["LICENSE", "legal/NOTICE"],
             )
         },
         catalogs={

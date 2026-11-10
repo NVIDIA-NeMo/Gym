@@ -32,7 +32,7 @@ from omegaconf import OmegaConf
 
 from benchmarks.skill_trigger.profiles import CodexCompat, CodexGuidance, HermesCompat, HermesGuidance
 from benchmarks.skill_trigger.scoring import EvidenceError, score_trajectory
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from responses_api_agents.harbor_agent_general.app import HarborAgentConfig
 
 
@@ -251,3 +251,15 @@ def test_codex_rejects_missing_or_ambiguous_root(tmp_path, ids):
     agent = CodexCompat(logs_dir=tmp_path / "parser", model_name="openai/fixture", version="0.156.1")
     with pytest.raises(EvidenceError, match="main.session"):
         agent.convert_trajectory(logs)
+
+
+def test_documented_served_cli_selects_benchmark_split():
+    from nemo_gym.config import ConfigError
+    from nemo_gym.rollouts.rollout_collection import E2ERolloutCollectionConfig
+
+    config = E2ERolloutCollectionConfig(split="benchmark", output_jsonl_fpath="/tmp/rollouts.jsonl")
+    assert config.split == "benchmark"
+    with pytest.raises(ConfigError, match="not supported when serving"):
+        E2ERolloutCollectionConfig(
+            split="benchmark", output_jsonl_fpath="/tmp/rollouts.jsonl", input_jsonl_fpath="/tmp/tasks/gym.jsonl"
+        )

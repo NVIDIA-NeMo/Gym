@@ -44,6 +44,9 @@ def test_standard_harbor_task_preserves_prompt_and_catalog(packaged):
     assert (rows.parent / task.short_name / "notices/example/LICENSE").read_bytes() == (
         manifest.parent / "notices/example/LICENSE"
     ).read_bytes()
+    assert (rows.parent / task.short_name / "notices/example/legal/NOTICE").read_bytes() == (
+        manifest.parent / "notices/example/legal/NOTICE"
+    ).read_bytes()
     assert task.instruction == "Adapted public prompt"
     assert task.config.environment.skills_dir == "/skills"
     assert task.config.agent.timeout_sec == 120
@@ -155,7 +158,7 @@ def test_missing_delegation_results_list_is_not_completed():
 
 
 def test_gym_ids_survive_row_reordering(packaged):
-    from nemo_gym.eval_plan import PlanBenchmark, PlanGym, build_eval_plan
+    from nemo_gym.eval.eval_plan import PlanBenchmark, PlanGym, build_eval_plan
 
     _, _, rows_path, _ = packaged
     row = json.loads(rows_path.read_text())
