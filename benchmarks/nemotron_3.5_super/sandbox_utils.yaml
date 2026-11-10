@@ -48,3 +48,114 @@ terminal_bench_2_1_terminus_2_sandboxed_resources_server:
       sandbox_config:
         metadata:
           nemo.nvidia.com/resources: custom
+
+swe_rebench_opencode_sandboxed_agent:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      opencode_max_context_window: 262144
+      sandbox_timeout: 3600
+      datasets: []
+      remote_opencode_install_script_path: /mnt/s3-data/data/harness/opencode/install.sh
+      remote_opencode_binary_path: /mnt/s3-data/data/harness/opencode/linux-x64/1.17.11/opencode
+      opencode_config:
+        compaction:
+          auto: false
+          prune: false
+scale_swe_opencode_sandboxed_agent:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      opencode_max_context_window: 262144
+      sandbox_timeout: 3600
+      datasets: []
+      remote_opencode_install_script_path: /mnt/s3-data/data/harness/opencode/install.sh
+      remote_opencode_binary_path: /mnt/s3-data/data/harness/opencode/linux-x64/1.17.11/opencode
+      opencode_config:
+        compaction:
+          auto: false
+          prune: false
+swemer_v1_opencode_sandboxed_agent:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      opencode_max_context_window: 262144
+      sandbox_timeout: 3600
+      datasets: []
+      remote_opencode_install_script_path: /mnt/s3-data/data/harness/opencode/install.sh
+      remote_opencode_binary_path: /mnt/s3-data/data/harness/opencode/linux-x64/1.17.11/opencode
+      opencode_config:
+        compaction:
+          auto: false
+          prune: false
+swemer_v2_opencode_sandboxed_agent:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      opencode_max_context_window: 262144
+      sandbox_timeout: 3600
+      datasets: []
+      remote_opencode_install_script_path: /mnt/s3-data/data/harness/opencode/install.sh
+      remote_opencode_binary_path: /mnt/s3-data/data/harness/opencode/linux-x64/1.17.11/opencode
+      opencode_config:
+        compaction:
+          auto: false
+          prune: false
+swe_next_opencode_sandboxed_agent:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      opencode_max_context_window: 262144
+      sandbox_timeout: 3600
+      datasets: []
+      remote_opencode_install_script_path: /mnt/s3-data/data/harness/opencode/install.sh
+      remote_opencode_binary_path: /mnt/s3-data/data/harness/opencode/linux-x64/1.17.11/opencode
+      opencode_config:
+        compaction:
+          auto: false
+          prune: false
+swe_rebench_resources_server:
+  resources_servers:
+    swe_rebench:
+      evaluation_timeout: 1200
+      sandbox_config:
+        env:
+          OPENCODE_VERSION: 1.17.11
+          OPENCODE_DISABLE_AUTOUPDATE: '1'
+          OPENCODE_DISABLE_SHARE: '1'
+          OPENCODE_DISABLE_MODELS_FETCH: 'true'
+scale_swe_resources_server:
+  resources_servers:
+    scale_swe:
+      evaluation_timeout: 1200
+      sandbox_config:
+        env:
+          OPENCODE_VERSION: 1.17.11
+          OPENCODE_DISABLE_AUTOUPDATE: '1'
+          OPENCODE_DISABLE_SHARE: '1'
+          OPENCODE_DISABLE_MODELS_FETCH: 'true'
+swemer_v1_resources_server:
+  resources_servers:
+    swemer_v1:
+      evaluation_timeout: 1200
+      sandbox_config:
+        env:
+          OPENCODE_VERSION: 1.17.11
+          OPENCODE_DISABLE_AUTOUPDATE: '1'
+          OPENCODE_DISABLE_SHARE: '1'
+          OPENCODE_DISABLE_MODELS_FETCH: 'true'
+swemer_v2_resources_server:
+  resources_servers:
+    swemer_v2:
+      evaluation_timeout: 1200
+      sandbox_config:
+        env:
+          OPENCODE_VERSION: 1.17.11
+          OPENCODE_DISABLE_AUTOUPDATE: '1'
+          OPENCODE_DISABLE_SHARE: '1'
+          OPENCODE_DISABLE_MODELS_FETCH: 'true'
+swe_next_resources_server:
+  resources_servers:
+    swe_next:
+      evaluation_timeout: 1200
+      sandbox_config:
+        env:
+          OPENCODE_VERSION: 1.17.11
+          OPENCODE_DISABLE_AUTOUPDATE: '1'
+          OPENCODE_DISABLE_SHARE: '1'
+          OPENCODE_DISABLE_MODELS_FETCH: 'true'
