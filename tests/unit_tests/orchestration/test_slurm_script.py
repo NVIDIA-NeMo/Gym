@@ -1143,6 +1143,18 @@ def test_build_sbatch_script_no_capture_dir_when_observability_off(submit_config
     assert "model_call_capture_dir" not in script
 
 
+@pytest.mark.parametrize("resumable", [False, True])
+def test_every_step_uses_the_selected_slurm_account(submit_config, bench_dir, resumable):
+    benchmark = submit_config.driver.benchmarks["gsm8k"]
+    benchmark.resumable = resumable
+    compute = next(iter(submit_config.compute.values()))
+    compute.account = "operator_account_override"
+    script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
+    steps = [line for line in script.splitlines() if "srun --overlap" in line]
+    assert len(steps) >= 2
+    assert all("--account=operator_account_override" in line for line in steps)
+
+
 def test_build_sbatch_script_contains_shebang(submit_config, bench_dir):
     benchmark = submit_config.driver.benchmarks["gsm8k"]
     compute = next(iter(submit_config.compute.values()))
@@ -2039,7 +2051,7 @@ def test_a_command_still_runs_prepare_first(tmp_path):
     )
 
     prepare_at = script.index("gym eval prepare")
-    assert prepare_at < script.index("harness")
+    assert prepare_at < script.index("    harness\n", prepare_at)
 
 
 def test_a_multi_line_command_survives_quoting(tmp_path):
