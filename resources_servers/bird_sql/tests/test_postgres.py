@@ -18,7 +18,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.core import VERIFIER_ERROR
 from resources_servers.bird_sql.app import BirdSqlResourcesServer, BirdSqlResourcesServerConfig, FailureCode
 from resources_servers.bird_sql.tests.test_app import _make_verify_request
 
@@ -53,6 +54,9 @@ requires_psycopg = pytest.mark.skipif(not _HAS_DEPS, reason="needs psycopg, psyc
 @requires_psycopg
 @pytest.mark.asyncio
 async def test_verify_postgres_dialect_routes_to_postgres(tmp_path, monkeypatch):
+    # Gold runs on the SQLite file, so verify needs it to exist; the mocked executors never open it.
+    (tmp_path / "TestDB").mkdir()
+    (tmp_path / "TestDB" / "TestDB.sqlite").touch()
     monkeypatch.setattr("resources_servers.bird_sql.app.ensure_bird_sql", lambda _path: tmp_path)
     checked = []
     monkeypatch.setattr(
@@ -96,7 +100,10 @@ async def test_verify_postgres_dialect_routes_to_postgres(tmp_path, monkeypatch)
 @requires_psycopg
 @pytest.mark.asyncio
 async def test_unreachable_server_is_not_scored_as_a_pred_error(tmp_path, monkeypatch):
-    # A grader outage must not look like the model's mistake: it raises, and verify() reports unknown_error.
+    # A grader outage must not look like the model's mistake: it raises, and verify() masks the row as a
+    # verifier error (unknown_error) instead of scoring it.
+    (tmp_path / "TestDB").mkdir()
+    (tmp_path / "TestDB" / "TestDB.sqlite").touch()
     monkeypatch.setattr("resources_servers.bird_sql.app.ensure_bird_sql", lambda _path: tmp_path)
     monkeypatch.setattr("resources_servers.bird_sql.setup_bird_postgres.check_bird_postgres", lambda *_a: None)
     monkeypatch.setattr("resources_servers.bird_sql.eval_utils.execute_sqlite", lambda *_a: [(1,)])
@@ -111,6 +118,7 @@ async def test_unreachable_server_is_not_scored_as_a_pred_error(tmp_path, monkey
     server = BirdSqlResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
     resp = await server.verify(_make_verify_request("```sql\nSELECT 1\n```", gt_sql="SELECT 1"))
     assert (resp.reward, resp.failure_reason) == (0.0, FailureCode.UNKNOWN_ERROR)
+    assert (resp.mask_sample, resp.failure_kind) == (True, VERIFIER_ERROR)
 
 
 @requires_psycopg

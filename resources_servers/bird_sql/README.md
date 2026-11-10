@@ -50,8 +50,8 @@ server that holds one schema per `db_id`, while the BIRD gold query still runs, 
 on the original SQLite database; only the two result sets are compared, as for Spark. No
 gold SQL is transpiled. The model's query runs as a single prepared statement (so
 `COMMIT; ...` cannot leave the transaction) in a read-only transaction as a read-only role,
-with a server-side `statement_timeout`. A connection or server failure is scored as
-`unknown_error`, not as the model's mistake.
+with a server-side `statement_timeout`. A connection or server failure is masked as a
+verifier error (`unknown_error`), not scored as the model's mistake.
 
 Each server process keeps a pool of `max_concurrency` connections (opened on the first
 grade), so the PostgreSQL server needs `max_connections` above `max_concurrency` times the
