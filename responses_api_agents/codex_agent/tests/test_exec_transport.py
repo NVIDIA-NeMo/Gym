@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from nemo_gym.agents import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
+from nemo_gym.agents.utils.supervisor_client import LAUNCH_CLAIM_FILE, SUPERVISOR_FILE, SUPERVISOR_PID_FILE
 from nemo_gym.sandbox import SandboxExecResult
 from responses_api_agents.codex_agent.sandbox import LAUNCHER_FILE, CodexSandboxSession
 from responses_api_agents.codex_agent.tests.test_sandbox_sessions import seed
@@ -166,18 +167,28 @@ async def test_exec_only_supervision_leaves_task_children_for_sandbox_owner(tmp_
                     pass
 
 
-async def test_lost_launch_is_fenced_even_after_directory_retirement(tmp_path):
+@pytest.mark.parametrize("retired", [False, True], ids=["before_retirement", "after_retirement"])
+async def test_lost_launch_is_fenced_before_and_after_directory_retirement(tmp_path, retired):
     state, provider, workdir = make_session(tmp_path)
     provider.lost_launch = True
     with pytest.raises(TimeoutError, match="lost launch response"):
         await state.execute(payload(state, "open('started','w').close()"), timeout=0.5, close_timeout=3)
     assert state.session.cleanup["cleanup_confirmed"] is True
     assert state.runtime_info is None  # No worker ran after the failed launch.
-    await state.close(3)
     provider.lost_launch = False
+    session_dir = Path(state.session.session_dir)
+    if retired:
+        await state.close(3)
+    else:
+        # The supervisor is still in place, so only the stop's launch claim can fence the delayed command.
+        assert (session_dir / SUPERVISOR_FILE).exists()
     await provider.exec(provider.delayed_command, cwd=str(workdir))
     assert not (workdir / "started").exists()
-    assert not Path(state.session.session_dir).exists()
+    if not retired:
+        assert not (session_dir / SUPERVISOR_PID_FILE).exists()
+        assert (session_dir / LAUNCH_CLAIM_FILE).readlink() == Path("stop")
+        await state.close(3)
+    assert not session_dir.exists()
 
 
 async def test_terminal_failed_receipt_releases_borrowed_session(tmp_path):

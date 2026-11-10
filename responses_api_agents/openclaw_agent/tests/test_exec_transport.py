@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from nemo_gym.agents import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
+from nemo_gym.agents.utils.supervisor_client import LAUNCH_CLAIM_FILE, SUPERVISOR_FILE, SUPERVISOR_PID_FILE
 from nemo_gym.sandbox import SandboxExecResult
 from responses_api_agents.openclaw_agent.sandbox import OpenClawSandboxSession
 from responses_api_agents.openclaw_agent.tests.test_sandbox import seed
@@ -182,7 +183,8 @@ async def test_supervisor_and_runner_run_under_neutral_names(tmp_path):
     assert provider.disconnected
 
 
-async def test_lost_launch_is_fenced_even_after_directory_retirement(tmp_path):
+@pytest.mark.parametrize("retired", [False, True], ids=["before_retirement", "after_retirement"])
+async def test_lost_launch_is_fenced_before_and_after_directory_retirement(tmp_path, retired):
     state, provider, workdir = make_session(tmp_path)
     provider.lost_launch = True
     with pytest.raises(TimeoutError, match="lost launch response"):
@@ -191,11 +193,20 @@ async def test_lost_launch_is_fenced_even_after_directory_retirement(tmp_path):
     assert state.session.cleanup["return_code"] is None
     assert state.session.cleanup["error"] is None
     assert state.runtime_info is None
-    await state.close(CLOSE_TIMEOUT)
     provider.lost_launch = False
+    session_dir = Path(state.session.session_dir)
+    if retired:
+        await state.close(CLOSE_TIMEOUT)
+    else:
+        # The supervisor is still in place, so only the stop's launch claim can fence the delayed command.
+        assert (session_dir / SUPERVISOR_FILE).exists()
     await provider.exec(provider.delayed_command, cwd=str(workdir))
     assert not (workdir / "started").exists()
-    assert not Path(state.session.session_dir).exists()
+    if not retired:
+        assert not (session_dir / SUPERVISOR_PID_FILE).exists()
+        assert (session_dir / LAUNCH_CLAIM_FILE).readlink() == Path("stop")
+        await state.close(CLOSE_TIMEOUT)
+    assert not session_dir.exists()
 
 
 async def test_terminal_failed_receipt_releases_borrowed_session(tmp_path):
