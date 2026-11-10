@@ -33,6 +33,10 @@ opencode_agent:
           # No subagents, as in the deprecated preset; the web and skill tools are denied by the default rules.
           task: deny
       sandbox_config:
+        # profiles/benchmark.yaml's 14,400 s TTL starts when the seed creates the sandbox, but the 14,400 s run budget
+        # only after the seed (up to the 1,200 s ready wait). A run near its deadline would outlive its sandbox, and a
+        # lost sandbox is retried, not graded: the TTL adds 1,800 s for the seed.
+        ttl_s: 16200
         image: ${oc.env:OPENCODE_SANDBOX_IMAGE}
         workdir: /workspace
         entrypoint:
