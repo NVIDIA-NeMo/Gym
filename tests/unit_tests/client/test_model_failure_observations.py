@@ -13,6 +13,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 import nemo_gym.client.http_client as http_client
+import nemo_gym.client.openai_client as openai_client
 from nemo_gym.client.openai_client import MODEL_RESPONSE_TIMEOUT_REASON, NeMoGymAsyncOpenAI, PermanentEndpointError
 from nemo_gym.core.failure_kinds import MODEL_REQUEST_ERROR
 from nemo_gym.core.failure_records import FailureBoundary, FailureEvent, FailureReport
@@ -437,6 +438,32 @@ async def test_failed_body_upload_never_reports_a_response_wait_timeout(monkeypa
     assert attempt.failure_reason != MODEL_RESPONSE_TIMEOUT_REASON
 
 
+def _body_failure_client(monkeypatch, session, mode):
+    """Keep real HTTP headers, then fail the body read without a whole-request deadline."""
+    now = [100.0]
+    monkeypatch.setattr(openai_client, "monotonic", lambda: now[0])
+
+    async def request(**kwargs):
+        response = await session.request(**kwargs)
+        if mode != "complete":
+            read = type(response.content).read
+
+            async def read_body(stream, *args, **kwargs):
+                if stream is response.content:
+                    now[0] += 0.25
+                    if mode == "timeout":
+                        raise TimeoutError("response body read timed out")
+                return await read(stream, *args, **kwargs)
+
+            monkeypatch.setattr(type(response.content), "read", read_body)
+        return response
+
+    wire = SimpleNamespace(request=AsyncMock(side_effect=request))
+    monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: wire)
+    monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
+    return wire
+
+
 @pytest.mark.parametrize("mode", ["truncated", "timeout", "complete"])
 async def test_actual_200_body_failure_keeps_one_model_attempt(monkeypatch, mode):
     hits = 0
@@ -444,27 +471,21 @@ async def test_actual_200_body_failure_keeps_one_model_attempt(monkeypatch, mode
     async def endpoint(request):
         nonlocal hits
         hits += 1
-        if mode == "complete":
+        if mode != "truncated":
             return web.json_response({"id": "reply", "output": []})
         response = web.StreamResponse(headers={"Content-Type": "application/json", "Content-Length": "1000"})
         await response.prepare(request)
         await response.write(b'{"id":')
-        if mode == "truncated":
-            await asyncio.sleep(0.01)
-            request.transport.close()
-        else:
-            await asyncio.sleep(0.15)
+        request.transport.close()
         return response
 
     app = web.Application()
     app.router.add_post("/responses", endpoint)
     async with TestServer(app) as server, aiohttp.ClientSession() as session:
-        monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: session)
-        monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
+        wire = _body_failure_client(monkeypatch, session, mode)
         model = NeMoGymAsyncOpenAI(
             api_key="test",
             base_url=str(server.make_url("")).rstrip("/"),
-            request_timeout_seconds=0.05,
             max_num_tries=1,
         )
         with RequestFailureLog.capture() as log:
@@ -489,10 +510,12 @@ async def test_actual_200_body_failure_keeps_one_model_attempt(monkeypatch, mode
                 assert operation.final_attempt_id == event.attempt_id
                 assert operation.outcome == "failed" and operation.failure_id == event.event_id
                 assert caught.value.__cause__.event_id == event.event_id
-                assert operation.request_elapsed_ms >= (40 if mode == "timeout" else 8)
+                assert operation.request_elapsed_ms == 250
+                assert isinstance(caught.value, TimeoutError if mode == "timeout" else aiohttp.ClientPayloadError)
             assert operation.http_attempts == 1
             assert operation.transport_failures == 0 and operation.retry_wait_s == 0
     assert hits == 1
+    assert wire.request.await_count == 1
 
 
 @pytest.mark.parametrize("forwarded", [False, True])
@@ -519,24 +542,22 @@ async def test_a_failed_error_body_read_selects_the_attempt_that_returned_it(mon
         headers = {"Content-Type": "application/json", "Content-Length": "1000"}
         if forwarded:
             headers.update(FailureHeader.encode(failure_report_for(remote)))
+        if mode == "timeout":
+            headers.pop("Content-Length")
+            return web.Response(status=status, headers=headers, body=b'{"error":')
         response = web.StreamResponse(status=status, headers=headers)
         await response.prepare(request)
         await response.write(b'{"error":')
-        if mode == "truncated":
-            request.transport.close()
-        else:
-            await asyncio.sleep(0.15)
+        request.transport.close()
         return response
 
     app = web.Application()
     app.router.add_post("/responses", endpoint)
     async with TestServer(app) as server, aiohttp.ClientSession() as session:
-        monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: session)
-        monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
+        wire = _body_failure_client(monkeypatch, session, mode)
         model = NeMoGymAsyncOpenAI(
             api_key="test",
             base_url=str(server.make_url("")).rstrip("/"),
-            request_timeout_seconds=0.05,
             max_num_tries=1,
         )
         with RequestFailureLog.capture() as log:
@@ -544,6 +565,8 @@ async def test_a_failed_error_body_read_selects_the_attempt_that_returned_it(mon
                 await model.create_response(input=[])
             report = log.reply_report(caught.value)
     assert hits == 1, "a failed body read sends no second request"
+    assert wire.request.await_count == 1
+    assert isinstance(caught.value, TimeoutError if mode == "timeout" else aiohttp.ClientPayloadError)
     assert report.failure_id is not None
     event = report.events[report.failure_id]
     assert event.http_status == status

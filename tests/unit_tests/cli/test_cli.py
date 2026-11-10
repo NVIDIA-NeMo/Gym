@@ -1646,6 +1646,8 @@ class TestListEnvironments:
         modality="text",
         licensing="Apache-2.0",
         lifecycle="active",
+        resources_server="alpha",
+        agent_server="simple_agent",
     )
     _BETA = EnvironmentCatalogEntry(
         name="beta",
@@ -1712,8 +1714,234 @@ class TestListEnvironments:
                 "path": str(tmp_path.resolve() / "environments/alpha"),
                 "config_path": str(tmp_path.resolve() / "environments/alpha/config.yaml"),
                 "manifest_path": str(tmp_path.resolve() / "environments/alpha/manifest.yaml"),
+                "resources_server": "alpha",
+                "agent_server": "simple_agent",
             }
         ]
+
+    def test_json_output_reads_servers_from_the_config_only_without_a_manifest(
+        self, monkeypatch: MonkeyPatch, capsys
+    ) -> None:
+        resolved = []
+
+        def resolve(config_path: Path) -> tuple[str, str]:
+            resolved.append(config_path)
+            return "beta", "simple_agent"
+
+        monkeypatch.setattr(nemo_gym.cli.env, "resolve_config_servers", resolve)
+        self._mock_catalog(monkeypatch, overrides={"json": True})
+
+        list_environments()
+
+        payloads = {payload["name"]: payload for payload in json.loads(capsys.readouterr().out)}
+        assert resolved == [self._BETA.config_path]
+        assert (payloads["beta"]["resources_server"], payloads["beta"]["agent_server"]) == ("beta", "simple_agent")
+        assert (payloads["alpha"]["resources_server"], payloads["alpha"]["agent_server"]) == ("alpha", "simple_agent")
+
+    @pytest.mark.parametrize(
+        ("agents", "expected_agent"),
+        [
+            (["simple_agent"], "simple_agent"),
+            (["simple_agent", "simple_agent"], "simple_agent"),
+            # Two different agents: the file alone does not say which one runs.
+            (["simple_agent", "harness_agent"], None),
+        ],
+    )
+    @pytest.mark.parametrize(
+        ("resources", "expected_resources"),
+        [(["beta"], "beta"), (["beta", "beta"], "beta"), (["beta", "other"], None)],
+    )
+    def test_servers_fall_back_to_the_names_a_config_file_states(
+        self,
+        monkeypatch: MonkeyPatch,
+        capsys,
+        tmp_path: Path,
+        agents: list[str],
+        expected_agent: str | None,
+        resources: list[str],
+        expected_resources: str | None,
+    ) -> None:
+        config_path = tmp_path / "config.yaml"
+        config = {f"beta_resources_{index}": {"resources_servers": {name: {}}} for index, name in enumerate(resources)}
+        for index, agent in enumerate(agents):
+            config[f"beta_agent_{index}"] = {"responses_api_agents": {agent: {}}}
+        config_path.write_text(json.dumps(config))
+        monkeypatch.setattr(nemo_gym.cli.env, "resolve_config_servers", lambda config_path: None)
+        self._mock_catalog(
+            monkeypatch, overrides={"json": True}, entries=(replace(self._BETA, config_path=config_path),)
+        )
+
+        list_environments()
+
+        [payload] = json.loads(capsys.readouterr().out)
+        assert (payload["resources_server"], payload["agent_server"]) == (expected_resources, expected_agent)
+        self._mock_catalog(
+            monkeypatch,
+            overrides={"json": True, "component_name": "beta"},
+            entries=(replace(self._BETA, config_path=config_path),),
+        )
+        list_environments()
+        details = json.loads(capsys.readouterr().out)["details"]
+        assert details.get("resources servers") == expected_resources
+        assert details.get("agent") == expected_agent
+
+    def test_inspect_shows_resolved_servers_the_config_file_does_not_state(
+        self, monkeypatch: MonkeyPatch, capsys
+    ) -> None:
+        # Like benchmarks/aime24: the file inherits its resources server from a config it loads.
+        self._mock_catalog(monkeypatch, overrides={"component_name": "beta"})
+        monkeypatch.setattr(
+            nemo_gym.cli.env,
+            "read_environment_details",
+            lambda cfg: {
+                "domain": "math",
+                "description": "Beta benchmark",
+                "value": None,
+                "resources_servers": [],
+                "agents": ["simple_agent"],
+                "datasets": ["beta"],
+            },
+        )
+        monkeypatch.setattr(
+            nemo_gym.cli.env, "resolve_config_servers", lambda config_path: ("math_with_judge", "simple_agent")
+        )
+
+        list_environments()
+
+        out = capsys.readouterr().out
+        assert "resources servers: math_with_judge" in out and "agent: simple_agent" in out
+
+    def test_list_and_inspect_survive_configs_gym_cannot_resolve(
+        self, monkeypatch: MonkeyPatch, capsys, tmp_path: Path
+    ) -> None:
+        # A benchmark whose data already exists may omit prepare_script: Gym runs it, though a manifest would not
+        # accept it. A malformed config is still discovered by its location, whether its syntax is broken or a
+        # field has the wrong type.
+        for name, preamble, datasets in (
+            ("paths_not_a_list", "config_paths: 1\n", "[]"),
+            ("datasets_not_a_list", "", "1"),
+            ("policy_model_port", "policy_model: {port: 12345}\n", "[]"),
+            ("recursive_alias", "recursive: &loop {child: *loop}\n", "[]"),
+        ):
+            config = tmp_path / "environments" / name / "config.yaml"
+            config.parent.mkdir(parents=True)
+            config.write_text(
+                f"{preamble}"
+                f"{name}_resources:\n"
+                "  resources_servers:\n"
+                f"    {name}:\n"
+                "      entrypoint: app.py\n"
+                f"{name}_agent:\n"
+                "  responses_api_agents:\n"
+                "    simple_agent:\n"
+                "      entrypoint: app.py\n"
+                f"      resources_server: {{type: resources_servers, name: {name}_resources}}\n"
+                "      model_server: {type: responses_api_models, name: policy_model}\n"
+                f"      datasets: {datasets}\n",
+                encoding="utf-8",
+            )
+        benchmark = tmp_path / "benchmarks" / "no_prepare" / "config.yaml"
+        benchmark.parent.mkdir(parents=True)
+        benchmark.write_text(
+            "no_prepare_resources:\n"
+            "  resources_servers:\n"
+            "    no_prepare:\n"
+            "      entrypoint: app.py\n"
+            "      domain: math\n"
+            "no_prepare_agent:\n"
+            "  responses_api_agents:\n"
+            "    simple_agent:\n"
+            "      entrypoint: app.py\n"
+            "      resources_server: {type: resources_servers, name: no_prepare_resources}\n"
+            "      model_server: {type: responses_api_models, name: policy_model}\n"
+            "      datasets:\n"
+            "      - {name: no_prepare, type: benchmark, jsonl_fpath: benchmarks/no_prepare/data.jsonl}\n",
+            encoding="utf-8",
+        )
+        malformed = tmp_path / "environments" / "malformed" / "config.yaml"
+        malformed.parent.mkdir(parents=True)
+        malformed.write_text("malformed: ${unclosed\n", encoding="utf-8")
+        # Discovery reads resources-server configs for datasets; this one's is not a list, so it is not an entry.
+        not_runnable = tmp_path / "resources_servers" / "not_runnable" / "configs" / "not_runnable.yaml"
+        not_runnable.parent.mkdir(parents=True)
+        not_runnable.write_text(
+            "rs:\n  resources_servers:\n    not_runnable: {entrypoint: app.py}\n"
+            "agent:\n  responses_api_agents:\n    simple_agent: {datasets: 1}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("nemo_gym.environment.registry.component_search_roots", lambda: [tmp_path])
+
+        monkeypatch.setattr(nemo_gym.cli.env, "_command_overrides", lambda: OmegaConf.create({"json": True}))
+        list_environments()
+        servers = {
+            payload["name"]: (payload["resources_server"], payload["agent_server"])
+            for payload in json.loads(capsys.readouterr().out)
+        }
+        assert servers == {
+            "no_prepare": ("no_prepare", "simple_agent"),
+            "malformed": (None, None),
+            # Gym cannot resolve these, so the names the file states are shown.
+            "paths_not_a_list": ("paths_not_a_list", "simple_agent"),
+            "datasets_not_a_list": ("datasets_not_a_list", "simple_agent"),
+            "policy_model_port": ("policy_model_port", "simple_agent"),
+            "recursive_alias": (None, None),
+        }
+
+        for name in servers:
+            monkeypatch.setattr(
+                nemo_gym.cli.env, "_command_overrides", lambda name=name: OmegaConf.create({"component_name": name})
+            )
+            list_environments()
+        out = capsys.readouterr().out
+        assert "The no_prepare benchmark" in out and "resources servers: no_prepare" in out
+        assert "The malformed environment" in out
+        assert "resources servers: paths_not_a_list" in out
+        assert "resources servers: datasets_not_a_list" in out
+        assert "resources servers: policy_model_port" in out
+        assert "The recursive_alias environment" in out
+
+    @pytest.mark.parametrize("case", ["environment_only", "stale_agent_binding", "ambiguous"])
+    def test_catalog_views_follow_environment_resources(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch, capsys, case: str
+    ) -> None:
+        agent = {
+            "entrypoint": "app.py",
+            "model_server": {"type": "responses_api_models", "name": "policy_model"},
+            "datasets": [{"name": "example", "type": "example", "jsonl_fpath": "unused.jsonl"}],
+        }
+        environment = {
+            "entrypoint": "app.py",
+            "agent_server": {"type": "responses_api_agents", "name": "demo_agent"},
+            "resources_server": {"type": "resources_servers", "name": "demo_resources"},
+        }
+        config = {
+            "demo_resources": {"resources_servers": {"demo": {"entrypoint": "app.py", "domain": "math"}}},
+            "demo_agent": {"responses_api_agents": {"simple_agent": agent}},
+            "demo_environment": {"environment_servers": {"single_agent_turn_legacy": environment}},
+        }
+        if case == "stale_agent_binding":
+            config["other_resources"] = {"resources_servers": {"other": {"entrypoint": "app.py", "domain": "math"}}}
+            agent["resources_server"] = {"type": "resources_servers", "name": "other_resources"}
+        elif case == "ambiguous":
+            config["second_environment"] = config["demo_environment"]
+            agent["resources_server"] = {"type": "resources_servers", "name": "demo_resources"}
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(json.dumps(config))
+        entry = replace(self._BETA, name="demo", path=tmp_path, config_path=config_path)
+        expected = None if case == "ambiguous" else "demo"
+        self._mock_catalog(monkeypatch, entries=(entry,), overrides={"json": True})
+
+        list_environments()
+
+        [payload] = json.loads(capsys.readouterr().out)
+        assert (payload["resources_server"], payload["agent_server"]) == (expected, "simple_agent")
+        self._mock_catalog(monkeypatch, entries=(entry,), overrides={"json": True, "component_name": "demo"})
+
+        list_environments()
+
+        details = json.loads(capsys.readouterr().out)["details"]
+        assert details.get("resources servers") == expected
+        assert details["agent"] == "simple_agent"
 
     def test_json_output_without_manifest_has_null_manifest_path(
         self, monkeypatch: MonkeyPatch, capsys, tmp_path: Path
@@ -1803,7 +2031,7 @@ class TestListEnvironments:
                 "description": "Alpha env",
                 "value": "Some value",
                 "resources_servers": ["alpha_rs"],
-                "agent": "simple_agent",
+                "agents": ["simple_agent"],
                 "datasets": ["train", "example"],
             },
         )
@@ -1818,7 +2046,8 @@ class TestListEnvironments:
         assert "Value: Some value" in out
         assert "status: experimental" in out
         assert "manifest:" in out and "profile: custom-gym-verifier" in out
-        assert "resources servers: alpha_rs" in out and "agent: simple_agent" in out
+        # The manifest's servers, not the names the config file states.
+        assert "resources servers: alpha" in out and "alpha_rs" not in out and "agent: simple_agent" in out
         assert "datasets: train, example" in out
         assert "gym env start --environment alpha --model-type vllm_model" in out
 
@@ -1879,7 +2108,7 @@ class TestListEnvironments:
                 "modality": "text",
                 "licensing": "Apache-2.0",
                 "lifecycle": "active",
-                "resources servers": "alpha_rs",
+                "resources servers": "alpha",
                 "agent": "simple_agent",
                 "datasets": "train, example",
             },
