@@ -344,11 +344,18 @@ def tool_call_turn_fingerprint(items: list[dict], *, read_placeholders: frozense
     This fallback key supplements the versioned content fingerprint and the
     request-context digest in both in-memory and durable lineage indexes.
 
+    Tool names are compared without case: OpenCode renames a call whose lowercase name is a
+    known tool to that lowercase name, and echoes it that way in every later request. The
+    call IDs, their order, the content and the request-context digest still have to agree.
+
     ``read_placeholders`` names the tool-call IDs whose call, if it has the shape of
     OpenCode's unavailable-tool placeholder, counts as the call the model was served
     (``_served_tool_name``). Only a lookup of a harness's echoed history sets it
-    (``echoed_tool_call_turn_fingerprints``). Keys of served output never set it, so
-    stored keys keep their meaning across this change.
+    (``echoed_tool_call_turn_fingerprints``). Keys of served output never set it.
+
+    Stored keys lowercase the served names too. A key that an older Gym stored, before names
+    were lowercased, still matches when the turn's served names had no capital letters; a turn
+    served with a capitalized name then resolves only through the strict fingerprint.
     """
     hasher = hashlib.sha256(b"nemo-gym-tool-call-turn")
     seen_ids: set[str] = set()
@@ -369,9 +376,9 @@ def tool_call_turn_fingerprint(items: list[dict], *, read_placeholders: frozense
                 return ""
             seen_ids.add(call_id)
             _update_field(hasher, b"\x02", call_id)
-            _update_field(
-                hasher, b"\x03", _served_tool_name(name, arguments) if call_id in read_placeholders else name
-            )
+            served = _served_tool_name(name, arguments) if call_id in read_placeholders else name
+            # Without case: OpenCode renames a call whose lowercase name is a known tool to that name.
+            _update_field(hasher, b"\x03", served.lower())
     return hasher.hexdigest() if seen_ids else ""
 
 
