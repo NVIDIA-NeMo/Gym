@@ -367,7 +367,7 @@ jobs:
   notify-failure:
     name: Notify test failure
     runs-on: ubuntu-latest
-    needs: [full-test-suite, server-suite, server-suite-result, test-wheel-install]
+    needs: [full-test-suite, server-suite, server-suite-result, offline-image, test-wheel-install]
     environment: main
     permissions: {}
     # Use the event directly: setup outputs are empty when setup fails.
