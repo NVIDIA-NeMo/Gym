@@ -1,0 +1,34 @@
+config_paths:
+  - environments/gym_v/config.yaml
+
+gym_v_smoke_resources_server:
+  _inherit_from: gym_v
+  resources_servers:
+    gym_v:
+      reward_mode: task_success
+
+gym_v_smoke_agent:
+  _inherit_from: gym_v_agent
+  responses_api_agents:
+    gymv_agent:
+      resources_server:
+        name: gym_v_smoke_resources_server
+      datasets:
+        - name: gym_v_smoke
+          type: benchmark
+          jsonl_fpath: benchmarks/gym_v_smoke/data/gym_v_smoke_benchmark.jsonl
+          prepare_script: benchmarks/gym_v_smoke/prepare.py
+          num_repeats: 1
+
+# Override the inherited relay; a second relay would make agent routing ambiguous.
+gym_v_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: gym_v_smoke_agent
+      max_concurrent_episodes: null
+      queue_timeout_seconds: null
+      default_episode_timeout_seconds: null
+      cleanup_timeout_seconds: 180

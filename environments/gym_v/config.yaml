@@ -1,0 +1,66 @@
+gym_v:
+  resources_servers:
+    gym_v:
+      entrypoint: app.py
+      allowed_agents: [gymv_agent]
+      domain: games
+      verified: false
+      num_workers: 1
+      description: Env-id-parametric Gym-V visual RL wrapper
+      value: Multi-turn visual reasoning and RL
+      task_jsonl_fpaths: []
+      image_format: "PNG"
+      image_jpeg_quality: 90
+      max_image_wh: null
+      enforce_horizon_cap: true
+      return_transitions: false
+      disable_text_feedback: true
+      # Gym-V has no universal success flag. These predicates are an exact
+      # allowlist audited against the revision pinned in requirements.txt.
+      require_success_criterion: true
+      success_criteria_by_env_id:
+        Games/FrozenLake-v0:
+          type: terminal_step_reward
+          comparison: equal
+          threshold: 1.0
+        Algorithmic/GameOfLife-v0:
+          type: terminal_step_reward
+          comparison: equal
+          threshold: 1.0
+        Spatial/DoorKey-v0:
+          type: terminal_step_reward
+          comparison: greater_than
+          threshold: 0.0
+        Graphs/GridComponent-v0:
+          type: terminal_step_reward
+          comparison: equal
+          threshold: 1.0
+        Graphs/TreeEvenPartitioning-v0:
+          type: terminal_step_reward
+          comparison: equal
+          threshold: 1.0
+gym_v_agent:
+  responses_api_agents:
+    gymv_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: gym_v
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_steps: 64
+      done_if_no_boxed_answer: false
+      return_transitions: false
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: environments/gym_v/data/example.jsonl
+
+gym_v_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: gym_v_agent

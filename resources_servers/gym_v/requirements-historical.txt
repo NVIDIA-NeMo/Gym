@@ -1,0 +1,4 @@
+-e nemo-gym[dev] @ ../../
+gym-v[games,spatial,reasoning-gym] @ git+https://github.com/rohitrango/gym-v.git@7ccf14ecb5241f37372dd530accf77f7e7ef5fc6
+pillow>=11,<13
+pytest>=8

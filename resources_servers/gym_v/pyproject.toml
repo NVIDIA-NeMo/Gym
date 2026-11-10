@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[project]
+name = "gym-resources-servers-gym-v"
+version = "0.0.0"
+requires-python = ">=3.13.14"
+dependencies = [
+    "nemo-gym[dev]",
+    "gym-v[games,spatial,reasoning-gym] @ git+https://github.com/rohitrango/gym-v.git@7ccf14ecb5241f37372dd530accf77f7e7ef5fc6",
+    "pillow>=11,<13",
+    "pytest>=8",
+]
+
+[tool.uv]
+package = false
+required-version = ">=0.13.4"
+
+[tool.uv.sources]
+nemo-gym = { path = "../..", editable = true }
+
+[tool.uv.workspace]
+members = []
