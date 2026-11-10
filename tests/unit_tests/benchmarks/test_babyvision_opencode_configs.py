@@ -98,3 +98,19 @@ def test_episodes_are_admitted_at_the_agent_s_rate_and_end_before_the_sandbox_ex
     # The episode covers the sandbox start and OpenCode's run, and ends before the sandbox's TTL.
     deadline = pairing["default_episode_timeout_seconds"]
     assert sandbox["ready_timeout_s"] + agent["timeout"] < deadline < sandbox["ttl_s"]
+
+
+def test_the_sandbox_image_carries_the_pinned_plugin_dependencies():
+    """The image builds OpenCode's plugin dependencies from agentic_if's lockfile, to the digest the config pins."""
+    _, config = resolve("resources_servers/visual_coding_opencode/configs/visual_coding_opencode.yaml")
+    agent = config["visual_coding_opencode_agent"]["responses_api_agents"]["opencode_agent"]
+    image = ROOT / "resources_servers" / "visual_coding_opencode" / "sandbox_image"
+    for name in ("package.json", "package-lock.json"):
+        assert (image / "opencode" / name).read_bytes() == (
+            ROOT / "benchmarks/agentic_if/opencode" / name
+        ).read_bytes()
+    dockerfile = (image / "Dockerfile").read_text()
+    archive = agent["sandbox_plugin_dependencies_path"]
+    assert f"COPY --from=plugin-archive /{Path(archive).name} {Path(archive).parent}/" in dockerfile
+    # The build checks the archive against the pin, so the image and the config cannot drift apart.
+    assert f"{agent['sandbox_plugin_dependencies_sha256']}  /{Path(archive).name}" in dockerfile
