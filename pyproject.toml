@@ -886,7 +886,7 @@ layers = [
     # eval/
     "nemo_gym.eval",
     # orchestration/
-    "nemo_gym.cli._locked_env : nemo_gym.cli._prepare_worker : nemo_gym.orchestration",
+    "nemo_gym.orchestration",
     # rollouts/
     "nemo_gym.rollouts",
     # data/
@@ -895,8 +895,11 @@ layers = [
     "nemo_gym.agents",
     # models/
     "nemo_gym.models",
+    # server_runtime/supervisor/: starts the servers of a run, so it sits above the rest of server_runtime;
+    # nothing that runs inside a server may import it
+    "nemo_gym.server_runtime.supervisor",
     # server_runtime/
-    "nemo_gym.server_runtime._checkpoint : nemo_gym.server_runtime.agent_context : nemo_gym.server_runtime.base_environment_server : nemo_gym.server_runtime.base_resources_server : nemo_gym.server_runtime.base_server : nemo_gym.server_runtime.entrypoint_flags : nemo_gym.server_runtime.mcp_auto_exposure : nemo_gym.server_runtime.ray_support : nemo_gym.server_runtime.registry_server : nemo_gym.server_runtime.request_handling : nemo_gym.server_runtime.runtime_dir : nemo_gym.server_runtime.server_status : nemo_gym.server_runtime.single_agent_turn_types : nemo_gym.server_runtime.tool_access : nemo_gym.server_runtime.testing : nemo_gym.server_runtime.uvicorn_reuse_port : nemo_gym.server_runtime.verifier_observability",
+    "nemo_gym.server_runtime._checkpoint : nemo_gym.server_runtime.agent_context : nemo_gym.server_runtime.base_environment_server : nemo_gym.server_runtime.base_resources_server : nemo_gym.server_runtime.base_server : nemo_gym.server_runtime.entrypoint_flags : nemo_gym.server_runtime.mcp_auto_exposure : nemo_gym.server_runtime.ray_support : nemo_gym.server_runtime.registry_server : nemo_gym.server_runtime.request_handling : nemo_gym.server_runtime.runtime_dir : nemo_gym.server_runtime.sandbox_lending : nemo_gym.server_runtime.server_status : nemo_gym.server_runtime.single_agent_turn_types : nemo_gym.server_runtime.tool_access : nemo_gym.server_runtime.testing : nemo_gym.server_runtime.uvicorn_reuse_port : nemo_gym.server_runtime.verifier_observability",
     # artifacts/
     "nemo_gym.artifacts",
     # metrics/
@@ -925,7 +928,6 @@ ignore_imports = [
     "nemo_gym.client.server_client -> nemo_gym.server_runtime._checkpoint.settings",
     "nemo_gym.config.global_config -> nemo_gym.server_runtime._checkpoint.settings",
     "nemo_gym.config.global_config -> nemo_gym.artifacts.exporters",
-    "nemo_gym.config.global_config -> nemo_gym.orchestration.h2_ping_sidecar.config",
     "nemo_gym.config.global_config -> nemo_gym.sandbox.providers.registry",
     "nemo_gym.config.global_config -> nemo_gym.telemetry.setup",
     "nemo_gym.sandbox.adapters.docker_compose -> nemo_gym.data.tasks.harbor.digest",

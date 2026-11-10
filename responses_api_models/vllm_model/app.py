@@ -36,6 +36,8 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from nemo_gym.client import MAX_NUM_TRIES, SESSION_ID_KEY, NeMoGymAsyncOpenAI
 from nemo_gym.client.http_client import _redacted_url
 from nemo_gym.core import (
+    MODEL_SAMPLING_HEADER,
+    MODEL_SAMPLING_NULL,
     REQUIRED_TOKEN_METADATA_FIELDS,
     TOKEN_METADATA_FIELDS,
     FailureHeader,
@@ -46,8 +48,11 @@ from nemo_gym.core import (
     NeMoGymChoice,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    current_model_sampling_segment,
     current_rollout_id,
+    current_session_key,
     failure_report_for,
+    model_call_sampling_config,
 )
 from nemo_gym.models import (
     PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
@@ -156,6 +161,9 @@ _UNSUPPORTED_VALUE_PATTERNS = (
 )
 # The error category recorded for such a refusal; the acceptance gate types it as ``invalid_request_parameter``.
 INVALID_REQUEST_PARAMETER_CATEGORY = "invalid_request_parameter"
+# Request fields that choose what the engine reports about the tokens it samples, not how it samples them. A trained
+# agent's Model Server may pin these: NeMo RL's score centering pins logprobs and top_logprobs on its policy's server.
+_REPORTING_ONLY_SAMPLING_OVERRIDES = frozenset({"logprobs", "top_logprobs"})
 
 
 def _names_context_window(message: str) -> bool:
@@ -488,10 +496,26 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
             "call once more with that budget lowered to the window minus the prompt minus a small margin. The prompt "
             "length is the one the refusal states, or else the engine's `/tokenize` count. The model call's capture "
             "records `requested_max_tokens` and `applied_max_tokens` and an `output_budget_refit` event with the "
-            "window, which the gate's facts count. A budget within the window is never changed: "
+            "window, which the gate's facts count. A budget within the window is not changed by this setting: "
             "when the prompt and that budget together overflow, the call keeps the `context_length_exceeded` refusal "
-            "(or empty completion), so a harness that compacts its history still gets the cue. A prompt that leaves "
+            "(or empty completion), so a harness that compacts its history still gets the cue; "
+            "`refit_output_budget_to_prompt` opts in to lowering that budget too. A prompt that leaves "
             "no output token keeps the refusal too. Turn it off to keep every length refusal."
+        ),
+    )
+    refit_output_budget_to_prompt: bool = Field(
+        default=False,
+        description=(
+            "Opt in to the same single resend for the other length refusal: the requested output budget fits the "
+            "context window by itself, but the prompt and that budget together overflow it. The call is sent once "
+            "more with the budget lowered to the window minus the prompt minus the same small margin, so the model "
+            "answers with what the window leaves instead of the call ending on an empty `length` completion once the "
+            "prompt passes the window minus the budget. The prompt length and the capture are those of "
+            "`refit_output_budget_to_window`, whose setting does not matter here. A prompt that alone fills the "
+            "window leaves no output token and keeps the `context_length_exceeded` refusal, as does any refusal that "
+            "names no window. Off by default: with it off a prompt and budget that overflow together always keep the "
+            "refusal, which is the cue a harness that compacts its history relies on. Enable it for a benchmark whose "
+            "agent does not compact and whose output budget is large against the window."
         ),
     )
 
@@ -660,9 +684,11 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     @model_validator(mode="after")
     def _validate_chat_conversion_options(self) -> "VLLMModelConfig":
         if self.is_responses_native:
+            # stream_keepalive_s is also refused by setup_webserver, but only after a local engine has started.
             for option in (
                 "forward_unvalidated_reasoning_effort",
                 "inline_tool_output_images",
+                "stream_keepalive_s",
             ):
                 if getattr(self, option):
                     raise ValueError(
@@ -672,6 +698,11 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
             raise ValueError(
                 "forward_unvalidated_reasoning_effort requires use_completions_api=false: /v1/completions has no "
                 "reasoning_effort, so the effort would be dropped"
+            )
+        if self.inline_tool_output_images and self.use_completions_api:
+            raise ValueError(
+                "inline_tool_output_images requires use_completions_api=false: /v1/completions takes text-only "
+                "messages, so every inlined image would be refused"
             )
         return self
 
@@ -816,15 +847,20 @@ class VLLMModel(SimpleResponsesAPIModel):
     ) -> bool:
         """Lower ``outbound``'s output budget, in place, to what the window the refusal names leaves after the prompt.
 
-        Returns whether the budget was lowered, in which case the caller sends ``outbound`` once more. Only a budget
-        that by itself exceeds the window is lowered, the refusal ``_length_refusal_category`` calls
-        ``invalid_output_token_parameter``. Nothing changes when the setting is off, when ``error`` is not a length
-        refusal naming the window, when the call has no budget, when the budget fits the window (prompt and budget
-        together overflowing stays a ``context_length_exceeded`` refusal, the cue for a harness to compact), or when
-        the window minus the prompt minus the margin leaves no output token. Calls admitted by an external capture worker are left alone: the worker has
-        settled the refused call, so a second send under the same call id is not this server's to make.
+        Returns whether the budget was lowered, in which case the caller sends ``outbound`` once more. A budget that by
+        itself exceeds the window, the refusal ``_length_refusal_category`` calls ``invalid_output_token_parameter``, is
+        lowered when ``refit_output_budget_to_window`` is on. A budget that fits the window while the prompt and the
+        budget together overflow it is lowered only when ``refit_output_budget_to_prompt`` is on; with it off the call
+        keeps the ``context_length_exceeded`` refusal, the cue for a harness to compact. Nothing changes when the
+        setting for the refusal's case is off, when ``error`` is not a length refusal naming the window, when the call
+        has no budget, when the window minus the prompt minus the margin leaves no output token (a prompt that alone
+        fills the window), or when the lowered budget would not be lower. Calls admitted by an external capture worker
+        are left alone: the worker has settled the refused call, so a second send under the same call id is not this
+        server's to make.
         """
-        if not self.config.refit_output_budget_to_window or not _is_context_length_error(error):
+        if not (
+            self.config.refit_output_budget_to_window or self.config.refit_output_budget_to_prompt
+        ) or not _is_context_length_error(error):
             return False
         context = current_capture_context()
         if context is not None and context.external_staging:
@@ -833,7 +869,13 @@ class VLLMModel(SimpleResponsesAPIModel):
         budget = None if key is None else outbound[key]
         message, _, _ = context_overflow_error_fields(error)
         window = _CONTEXT_WINDOW_SIZE.search(message)
-        if type(budget) is not int or window is None or budget <= int(window.group(1)):
+        if type(budget) is not int or window is None:
+            return False
+        if not (
+            self.config.refit_output_budget_to_window
+            if budget > int(window.group(1))
+            else self.config.refit_output_budget_to_prompt
+        ):
             return False
         prompt_tokens = _stated_prompt_tokens(message)
         if prompt_tokens is None:
@@ -841,7 +883,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             if prompt_tokens is None:
                 return False
         applied = int(window.group(1)) - prompt_tokens - _REFIT_MARGIN_TOKENS
-        if applied < 1:
+        if applied < 1 or applied >= budget:
             return False
         outbound[key] = applied
         execution.update(
@@ -957,8 +999,19 @@ class VLLMModel(SimpleResponsesAPIModel):
             body = _set_aside_unlisted_reasoning_effort(request, body)
         return await super().responses_dispatch(request, body)
 
+    def _sampling_pins(self) -> List[str]:
+        """The ``sampling_overrides`` fields that change how the engine samples."""
+        return sorted(set(self.config.sampling_overrides or {}) - _REPORTING_ONLY_SAMPLING_OVERRIDES)
+
     def _post_init(self) -> None:
         if self.config.sampling_overrides:
+            sampling_config = model_call_sampling_config(getattr(self.server_client, "global_config_dict", None))
+            pins = self._sampling_pins()
+            if pins and sampling_config is not None and self.config.name in sampling_config.required_model_servers:
+                raise ValueError(
+                    f"Model Server {self.config.name!r} serves an agent that the training framework trains, so it "
+                    f"cannot set sampling_overrides {pins}: that agent samples with the framework's values."
+                )
             LOG.info(
                 "`%s` pins sampling on every request to the engine: %s",
                 self.config.name,
@@ -1116,6 +1169,16 @@ class VLLMModel(SimpleResponsesAPIModel):
         sampling is pinned.
         """
         if self.config.sampling_overrides:
+            pins = self._sampling_pins()
+            if pins and current_model_sampling_segment() not in (None, MODEL_SAMPLING_NULL):
+                # 409, not 500: the conflict is configuration, so retrying the rollout cannot help.
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Model Server {self.config.name!r} sets sampling_overrides {pins}, but this call carries a "
+                    "training framework's values for an agent it trains, which must sample with them. Remove them "
+                    "from this Model Server's sampling_overrides, and give an untrained agent that needs a pin a "
+                    "Model Server of its own.",
+                )
             body_dict.update(self.config.sampling_overrides)
         return body_dict
 
@@ -1666,11 +1729,15 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         execution["upstream_attempted"] = True
         context = current_capture_context()
-        transport_options = (
+        transport_options: dict[str, Any] = (
             {"_resend_after_disconnect": False}
             if context is not None and context.parent_resolution_mode == "source_history"
             else {}
         )
+        if current_model_sampling_segment() == MODEL_SAMPLING_NULL:
+            # A training framework's generation server holds every call to its training sampling, except the calls
+            # of agents it does not train, which keep their own.
+            transport_options["_headers"] = {MODEL_SAMPLING_HEADER: MODEL_SAMPLING_NULL}
         try:
             try:
                 chat_completion_dict = await self._call_endpoint(
@@ -2495,10 +2562,11 @@ class VLLMModel(SimpleResponsesAPIModel):
 
     def _resolve_client(self, request: Request) -> NeMoGymAsyncOpenAI:
         self._maybe_rebind_endpoint()
-        # Route by rollout when the call carries one: agents that drop cookies get a new
+        # Route by session when the call carries a rollout: agents that drop cookies get a new
         # session per call, which scatters a rollout's turns and lets the slowest endpoint
-        # collect them. Keying on the rollout keeps its turns on one endpoint.
-        session_id = current_rollout_id() or request.session[SESSION_ID_KEY]
+        # collect them. Keying on the session keeps its turns on one endpoint. This is the same key
+        # the outbound session header carries, so an upstream router and this server agree.
+        session_id = current_session_key() or request.session[SESSION_ID_KEY]
         client = self._session_id_to_client.get(session_id)
         if self.config.route_around_failing_endpoints:
             hashed = self._hashed_client(session_id)

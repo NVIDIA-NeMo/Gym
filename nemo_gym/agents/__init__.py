@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from nemo_gym.agents.agent_activation_types import AgentContinuationCapabilities, AgentContinuationRequirements
     from nemo_gym.agents.agent_outcome import (
         AGENT_OUTCOME_METADATA_KEY,
+        HARNESS_STEP_LIMIT_METADATA_KEY,
         AgentOutcome,
         AgentOutcomePolicyConfig,
         OutcomeAction,
@@ -121,6 +122,7 @@ _PUBLIC_API = {
     "HARNESS_RUNNER_FAILED": "utils.sandbox_session",
     "HARNESS_RUNNER_FILE": "utils.sandbox_session",
     "HARNESS_RUNNER_SCRIPT": "utils.sandbox_session",
+    "HARNESS_STEP_LIMIT_METADATA_KEY": "agent_outcome",
     "OUTPUT_LOG_FILE": "utils.supervisor_client",
     "OrderedOperationLedger": "utils.ordered_operations",
     "OutcomeAction": "agent_outcome",
