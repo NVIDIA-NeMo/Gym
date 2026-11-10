@@ -24,7 +24,7 @@ from nemo_gym.environment.in_process import (
 from nemo_gym.eval.eval_plan import PlanBenchmark, PlanGym, build_eval_plan
 from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
 from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
-from nemo_gym.server_runtime.supervisor import ServerSpinupTimeoutError, ServerStartFailedError
+from nemo_gym.server_runtime.supervisor.server_supervisor import ServerSpinupTimeoutError, ServerStartFailedError
 
 
 HEAD = BaseServerConfig(host="127.0.0.1", port=4242)

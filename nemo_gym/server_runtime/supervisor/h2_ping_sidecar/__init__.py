@@ -14,6 +14,6 @@
 # limitations under the License.
 """Run the h2-ping-sidecar from ``gym env start`` so NVCF calls survive the 340s idle limit.
 
-See ``nemo_gym/server_runtime/tools/sidecar`` for the proxy and ``h2_ping_sidecar:`` in the configuration
+See ``nemo_gym/server_runtime/supervisor/tools/sidecar`` for the proxy and ``h2_ping_sidecar:`` in the configuration
 reference for the settings.
 """

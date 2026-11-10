@@ -37,8 +37,8 @@ def main() -> None:
     parser.add_argument("--args-file", type=Path, required=True)
     parser.add_argument("--result", type=Path, required=True)
     args = parser.parse_args()
-    # Python puts this script's directory first on sys.path, and nemo_gym/cli/agents.py there would shadow the
-    # `agents` package of openai-agents that verifiers imports, so a preparer environment could never load it.
+    # Python puts this script's directory first on sys.path, so a module beside it would shadow a same-named package
+    # of the preparer environment (the `agents` package of openai-agents did, when this script lived in nemo_gym/cli).
     if sys.path and Path(sys.path[0]).resolve() == Path(__file__).resolve().parent:
         del sys.path[0]
     sys.path.insert(0, args.root)

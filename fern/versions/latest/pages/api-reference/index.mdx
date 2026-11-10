@@ -70,7 +70,7 @@ Read the diagram top to bottom, and left to right within a group: each package m
 | `data` | Datasets and task data. |
 | `agents` | The shared base for agent servers. |
 | `models` | The shared base for model servers, and converters between model API formats. |
-| `server_runtime` | What runs inside every server, including the resources server and environment server bases. Also the supervisor that starts the servers of a run. |
+| `server_runtime` | What runs inside every server, including the resources server and environment server bases. The `supervisor` subpackage starts the servers of a run and sets up their venvs; nothing that runs inside a server imports it. |
 | `artifacts` | The files a run writes and exports. |
 | `metrics` | Rollout metrics, such as reward profiles and pass@k. |
 | `verification` | Helpers resources servers share for verification, such as LLM judges. |

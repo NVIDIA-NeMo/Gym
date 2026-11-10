@@ -44,7 +44,7 @@ from nemo_gym.config.global_config import (
     NEMO_GYM_LOG_DIR_KEY_NAME,
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
 )
-from nemo_gym.server_runtime.h2_ping_sidecar.config import (
+from nemo_gym.server_runtime.supervisor.h2_ping_sidecar.config import (
     H2PingSidecarConfig,
     SidecarInstanceConfig,
     is_loopback_host,
@@ -443,7 +443,7 @@ class NodeSidecars:
 
     def stop(self) -> None:
         """SIGTERM every sidecar (it drains in-flight requests), then SIGKILL stragglers."""
-        from nemo_gym.server_runtime.h2_ping_sidecar.config import parse_duration_seconds
+        from nemo_gym.server_runtime.supervisor.h2_ping_sidecar.config import parse_duration_seconds
 
         for process in self._processes.values():
             if process.poll() is None:

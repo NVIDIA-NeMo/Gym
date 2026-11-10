@@ -10,10 +10,10 @@ from unittest.mock import MagicMock
 import pytest
 from omegaconf import OmegaConf
 
-import nemo_gym.server_runtime.supervisor as env_module
+import nemo_gym.server_runtime.supervisor.server_supervisor as env_module
 from nemo_gym.config.global_config import HEAD_SERVER_KEY_NAME, NEMO_GYM_LOG_DIR_KEY_NAME, UV_CACHE_DIR_KEY_NAME
 from nemo_gym.core.failure_kinds import FAILURE_KINDS, SERVER_START_FAILED
-from nemo_gym.server_runtime.supervisor import RunHelper, ServerStartFailedError, _bind_errno
+from nemo_gym.server_runtime.supervisor.server_supervisor import RunHelper, ServerStartFailedError, _bind_errno
 
 
 BIND_ERROR = (
