@@ -33,7 +33,7 @@ from .documentation import BEGIN, END, PAGE, atomic_write, replace_block
 from .episode import HARNESSES
 from .rendering import render_table
 from .runner import run_suite
-from .scenarios import SCENARIOS, SUITE
+from .scenarios import SCENARIOS, SUITE, scenarios_for
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -114,7 +114,7 @@ def regenerate(*, root: Path, commit: str, output: Path, harnesses: list[str], t
     runtimes = {}
     for harness in harnesses:
         identities = []
-        for scenario in SCENARIOS:
+        for scenario in scenarios_for(harness):
             runtime = json.loads((probes / harness / scenario.name / "runtime.json").read_text())
             # Runtime locations are machine-local; versions and source hashes are portable.
             identities.append({key: value for key, value in runtime.items() if key not in ("source", "executable")})

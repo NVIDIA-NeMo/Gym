@@ -14,6 +14,7 @@ from uuid import uuid4
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.middleware.sessions import SessionMiddleware
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymChatCompletion
@@ -41,6 +42,65 @@ SHELL_TOOLS = ("bash", "terminal", "shell", "shell_command", "exec_command", "co
 # Harnesses that end an episode on a tool call rather than on a text answer.
 FINISH_TOOLS = ("finish", "submit")
 ANSWER = "CONFORMANCE_DONE"
+
+# The reply vllm_model gives a context-length refusal when propagate_context_overflow_errors is on: the engine's
+# HTTP 400 in OpenAI's error envelope with the code that tells a harness to compact.
+CONTEXT_OVERFLOW_ERROR = {
+    "error": {
+        "message": "This model's maximum context length is 32768 tokens. However, you requested 32818 tokens in the "
+        "messages, Please reduce the length of the messages.",
+        "type": "invalid_request_error",
+        "param": None,
+        "code": "context_length_exceeded",
+    }
+}
+# vllm_model's default for the same refusal: an empty completion with zero usage and a length stop.
+LENGTH_STOP_USAGE = {
+    "chat": {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "prompt_tokens_details": {"cached_tokens": 0},
+        "completion_tokens_details": {"reasoning_tokens": 0},
+    },
+    "responses": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "input_tokens_details": {"cached_tokens": 0},
+        "output_tokens_details": {"reasoning_tokens": 0},
+    },
+}
+
+
+def harness_kill_command(token: str, marker: Path) -> str:
+    """A shell command that records ``token`` and then SIGKILLs the supervised harness it runs under.
+
+    Gym's process supervisor starts a harness with ``NEMO_GYM_SUPERVISOR=<identity>`` and gives itself the value
+    ``detached``. The command walks up from its own shell to the outermost ancestor that carries the identity (the
+    harness) and kills those ancestors, outermost first. It then kills every other process that carries the identity,
+    such as a tool the harness started in another session, and last itself. The supervisor never carries the identity,
+    so it survives and reports the harness's exit. Without a supervised ancestor the command kills nothing and exits
+    97. Linux only (``/proc``, GNU ``grep -z``), like the probes that use it.
+    """
+    record = f"printf %s {shlex.quote(token)} > {shlex.quote(str(marker))}"
+    return (
+        f"{record}; p=$$; id=; tree=; "
+        "while [ -r /proc/$p/environ ]; do "
+        "v=$(tr '\\0' '\\n' 2>/dev/null < /proc/$p/environ | sed -n 's/^NEMO_GYM_SUPERVISOR=//p'); "
+        'if [ -n "$v" ] && [ "$v" != detached ] && { [ -z "$id" ] || [ "$v" = "$id" ]; }; then '
+        'id=$v; tree="$p $tree"; '
+        'elif [ -n "$id" ]; then break; fi; '
+        "p=$(sed 's/.*) //' /proc/$p/stat | cut -d ' ' -f 2); "
+        '[ "$p" -gt 1 ] 2>/dev/null || break; '
+        "done; "
+        '[ -n "$id" ] || exit 97; '
+        'for q in $tree; do [ "$q" = $$ ] || kill -KILL "$q" 2>/dev/null; done; '
+        'for e in $(grep -lzxF "NEMO_GYM_SUPERVISOR=$id" /proc/[0-9]*/environ 2>/dev/null); do '
+        'q=${e#/proc/}; q=${q%/environ}; [ "$q" = $$ ] || kill -KILL "$q" 2>/dev/null; '
+        "done; "
+        "kill -KILL $$"
+    )
 
 
 # Identify the actual summary instruction, never the availability of tools or a
@@ -71,6 +131,7 @@ class Probe:
     violations: list[str] = field(default_factory=list)
     verifications: list[dict] = field(default_factory=list)
     agent_responses: list[dict] = field(default_factory=list)
+    agent_replies: list[dict] = field(default_factory=list)
     judge_calls: list[dict] = field(default_factory=list)
     seeded: int = 0
     closed: int = 0
@@ -83,12 +144,17 @@ class Probe:
 
     def save(self) -> None:
         """Persist independent observations even if collection fails."""
+        # A call that ends the harness has no later request to observe its execution.
+        for call in self.tool_calls:
+            if call.get("ends_harness"):
+                self._observe_execution(call)
         witness = {
             "attempts": self.attempts,
             "tool_calls": self.tool_calls,
             "violations": self.violations,
             "verifications": self.verifications,
             "agent_responses": self.agent_responses,
+            "agent_replies": self.agent_replies,
             "judge_calls": self.judge_calls,
             "seeded": self.seeded,
             "closed": self.closed,
@@ -121,7 +187,12 @@ class Probe:
                 token = f"probe_{uuid4().hex}"
                 marker = self.directory / f"tool-{index}.txt"
                 code = self.scenario.tool_exit_code if index == 0 else 0
-                command = f"printf %s {shlex.quote(token)} > {shlex.quote(str(marker))}; printf %s {shlex.quote(token)}; exit {code}"
+                ends_harness = self.scenario.kill_harness and index == self.scenario.tool_steps - 1
+                command = (
+                    harness_kill_command(token, marker)
+                    if ends_harness
+                    else f"printf %s {shlex.quote(token)} > {shlex.quote(str(marker))}; printf %s {shlex.quote(token)}; exit {code}"
+                )
                 if bare == "python_cell" and "code" in properties:
                     args = {
                         "code": (
@@ -150,6 +221,7 @@ class Probe:
                         "exit_code": code,
                         "result_seen": False,
                         "outputs": [],
+                        **({"ends_harness": True} if ends_harness else {}),
                     }
                 )
                 return name, args, namespaces
@@ -218,13 +290,31 @@ class Probe:
                 output = item.get("content", item.get("output"))
                 if output is not None and output not in call["outputs"]:
                     call["outputs"].append(output)
-            marker = Path(call["marker"])
-            call["executed"] = marker.is_file() and marker.read_text() == call["token"]
+            self._observe_execution(call)
+
+    @staticmethod
+    def _observe_execution(call: dict) -> None:
+        marker = Path(call["marker"])
+        call["executed"] = marker.is_file() and marker.read_text() == call["token"]
+
+    async def _hold(self, request: Request, body: dict, attempt: dict) -> None:
+        """Never answer: hold the request until the harness disconnects, as a model that never replies.
+
+        The harness's own deadline ends it. The exchange then ends as a cancelled call, which capture records without
+        a response, and the witness keeps the attempt without a status.
+        """
+        self.attempts.append({**attempt, "request": body, "response": None, "status_code": None})
+        self.save()
+        while not await request.is_disconnected():
+            await asyncio.sleep(0.1)
+        raise asyncio.CancelledError("the harness disconnected from a request the provider never answers")
 
     async def model(self, request: Request) -> JSONResponse | StreamingResponse:
         body = await request.json()
         self._observe_tool_results(body)
         index = len(self.attempts)
+        attempt = {"attempt_id": f"attempt-{index}", "received_at": time()}
+        headers = {"Retry-After": "0"}
         status = 200
         if index < len(self.scenario.http_errors):
             status = self.scenario.http_errors[index]
@@ -241,13 +331,32 @@ class Probe:
             try:
                 if self.finished:
                     raise ValueError("unexpected model request after the scripted final answer")
+                scripted = len(self.tool_calls) >= self.scenario.tool_steps
+                if self.scenario.kill_harness and scripted:
+                    raise ValueError("unexpected model request after the scripted tool call ended the harness")
                 # A summary can cover only older history. Policy requests must still
                 # show every executed result before receiving the next scripted action.
                 if not compacting and any(
                     not call["result_seen"] or not call.get("executed") for call in self.tool_calls
                 ):
                     raise ValueError("tool execution or model-visible result was not witnessed")
-                if compacting:
+                length_stop = scripted and not compacting and self.scenario.ending == "length_stop"
+                output = None
+                if scripted and not compacting and self.scenario.ending == "no_reply":
+                    await self._hold(request, body, attempt)
+                elif scripted and not compacting and self.scenario.ending == "context_overflow_error":
+                    status, payload, headers = 400, CONTEXT_OVERFLOW_ERROR, {}
+                elif length_stop:
+                    output = [
+                        {
+                            "type": "message",
+                            "id": f"msg_{uuid4().hex}",
+                            "role": "assistant",
+                            "status": "completed",
+                            "content": [{"type": "output_text", "text": "", "annotations": []}],
+                        }
+                    ]
+                elif compacting:
                     if self.scenario.compaction is not True or not self.tool_calls or self.compaction_response_ids:
                         raise ValueError("unexpected compaction request outside the single summary stage")
                     output = [
@@ -297,94 +406,141 @@ class Probe:
                         }
                     ]
                     self.finished = True
-                calls_tool = output[0]["type"] == "function_call"
-                prompt_tokens = 20 + index
-                completion_tokens = 11 if compacting else 8
-                if self.scenario.compaction is not None:
-                    policy_index = index - len(self.compaction_response_ids)
-                    prompt_tokens = (
-                        500
-                        if compacting
-                        else 27000 + policy_index
-                        if not self.compaction_response_ids
-                        else 100 + policy_index
+                if output is not None:
+                    payload = self._reply(
+                        request,
+                        body,
+                        output,
+                        namespaces,
+                        response_id,
+                        index,
+                        compacting=compacting,
+                        length=length_stop,
                     )
-                if request.url.path.endswith("/chat/completions"):
-                    message = {
-                        "role": "assistant",
-                        "content": None if calls_tool else output[0]["content"][0]["text"],
-                    }
-                    if not compacting:
-                        message["reasoning_content"] = "Perform the prescribed check."
-                    if calls_tool:
-                        message["tool_calls"] = [
-                            {
-                                "id": output[0]["call_id"],
-                                "type": "function",
-                                "function": {"name": name, "arguments": json.dumps(arguments)},
-                            }
-                        ]
-                    payload = {
-                        "id": response_id,
-                        "object": "chat.completion",
-                        "created": 1,
-                        "model": body.get("model") or "conformance-model",
-                        "choices": [
-                            {
-                                "index": 0,
-                                "message": message,
-                                "finish_reason": "tool_calls" if calls_tool else "stop",
-                            }
-                        ],
-                    }
-                    if self.scenario.usage:
-                        payload["usage"] = {
-                            "prompt_tokens": prompt_tokens,
-                            "completion_tokens": completion_tokens,
-                            "total_tokens": prompt_tokens + completion_tokens,
-                            "prompt_tokens_details": {"cached_tokens": 3},
-                            "completion_tokens_details": {"reasoning_tokens": 0 if compacting else 2},
-                        }
-                else:
-                    payload = {
-                        "id": response_id,
-                        "object": "response",
-                        "created_at": 1,
-                        "status": "completed",
-                        "error": None,
-                        "incomplete_details": None,
-                        "model": body.get("model") or "conformance-model",
-                        "output": restore_namespace_tool_calls(output, namespaces),
-                        "parallel_tool_calls": body.get("parallel_tool_calls", False),
-                        "tool_choice": body.get("tool_choice", "auto"),
-                        "tools": body.get("tools", []),
-                    }
-                    if self.scenario.usage:
-                        payload["usage"] = {
-                            "input_tokens": prompt_tokens,
-                            "output_tokens": completion_tokens,
-                            "total_tokens": prompt_tokens + completion_tokens,
-                            "input_tokens_details": {"cached_tokens": 3},
-                            "output_tokens_details": {"reasoning_tokens": 0 if compacting else 2},
-                        }
                 if compacting:
                     self.compaction_response_ids.append(response_id)
             except ValueError as exc:
                 status = 409
                 self.violations.append(str(exc))
                 payload = {"error": {"message": str(exc), "type": "probe_protocol_error"}}
-        self.attempts.append(
-            {"attempt_id": f"attempt-{index}", "request": body, "response": payload, "status_code": status}
-        )
+        self.attempts.append({**attempt, "request": body, "response": payload, "status_code": status})
         self.save()
         if status != 200 or not body.get("stream"):
-            return JSONResponse(payload, status_code=status, headers={"Retry-After": "0"})
+            return JSONResponse(payload, status_code=status, headers=headers)
         events = (
             synthesize_chat_completion_sse(payload, include_usage=True)
             if request.url.path.endswith("/chat/completions")
             else synthesize_responses_sse(payload)
         )
         return StreamingResponse(events, media_type="text/event-stream")
+
+    def _reply(
+        self,
+        request: Request,
+        body: dict,
+        output: list[dict],
+        namespaces: dict,
+        response_id: str,
+        index: int,
+        *,
+        compacting: bool,
+        length: bool,
+    ) -> dict:
+        """The Chat or Responses body for one scripted model reply.
+
+        A ``length`` reply is vllm_model's default answer to a context overflow: an empty assistant message with zero
+        usage, finished by ``length`` (Chat) or incomplete for ``max_output_tokens`` (Responses).
+        """
+        calls_tool = output[0]["type"] == "function_call"
+        prompt_tokens = 20 + index
+        completion_tokens = 11 if compacting else 8
+        if self.scenario.compaction is not None:
+            policy_index = index - len(self.compaction_response_ids)
+            prompt_tokens = (
+                500 if compacting else 27000 + policy_index if not self.compaction_response_ids else 100 + policy_index
+            )
+        if request.url.path.endswith("/chat/completions"):
+            message = {
+                "role": "assistant",
+                "content": None if calls_tool or length else output[0]["content"][0]["text"],
+            }
+            if not compacting and not length:
+                message["reasoning_content"] = "Perform the prescribed check."
+            if calls_tool:
+                message["tool_calls"] = [
+                    {
+                        "id": output[0]["call_id"],
+                        "type": "function",
+                        "function": {"name": output[0]["name"], "arguments": output[0]["arguments"]},
+                    }
+                ]
+            payload = {
+                "id": response_id,
+                "object": "chat.completion",
+                "created": 1,
+                "model": body.get("model") or "conformance-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": message,
+                        "finish_reason": "length" if length else "tool_calls" if calls_tool else "stop",
+                    }
+                ],
+            }
+            if length:
+                payload["usage"] = LENGTH_STOP_USAGE["chat"]
+            elif self.scenario.usage:
+                payload["usage"] = {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": prompt_tokens + completion_tokens,
+                    "prompt_tokens_details": {"cached_tokens": 3},
+                    "completion_tokens_details": {"reasoning_tokens": 0 if compacting else 2},
+                }
+            return payload
+        payload = {
+            "id": response_id,
+            "object": "response",
+            "created_at": 1,
+            "status": "incomplete" if length else "completed",
+            "error": None,
+            "incomplete_details": {"reason": "max_output_tokens"} if length else None,
+            "model": body.get("model") or "conformance-model",
+            "output": restore_namespace_tool_calls(output, namespaces),
+            "parallel_tool_calls": body.get("parallel_tool_calls", False),
+            "tool_choice": body.get("tool_choice", "auto"),
+            "tools": body.get("tools", []),
+        }
+        if length:
+            payload["metadata"] = {"nemo_gym_context_window_exceeded": "true"}
+            payload["usage"] = LENGTH_STOP_USAGE["responses"]
+        elif self.scenario.usage:
+            payload["usage"] = {
+                "input_tokens": prompt_tokens,
+                "output_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+                "input_tokens_details": {"cached_tokens": 3},
+                "output_tokens_details": {"reasoning_tokens": 0 if compacting else 2},
+            }
+        return payload
+
+    def observe_agent(self, app: ASGIApp) -> ASGIApp:
+        """Witness the HTTP status of each agent reply to the Environment Server's ``/v1/responses`` call."""
+
+        async def observed(scope: Scope, receive: Receive, send: Send) -> None:
+            if scope["type"] != "http" or not scope["path"].endswith("/v1/responses"):
+                await app(scope, receive, send)
+                return
+
+            async def watch(message: Message) -> None:
+                if message["type"] == "http.response.start":
+                    self.agent_replies.append({"http_status": message["status"], "replied_at": time()})
+                    self.save()
+                await send(message)
+
+            await app(scope, receive, watch)
+
+        return observed
 
     def model_app(self, *, assistant_message_header: bytes | None = None) -> FastAPI:
         app = FastAPI()

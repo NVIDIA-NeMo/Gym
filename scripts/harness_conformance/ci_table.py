@@ -15,7 +15,7 @@ from .checks import ci_result
 from .documentation import atomic_write
 from .registry import HARNESSES
 from .rendering import render_table, validate_row
-from .scenarios import SCENARIOS
+from .scenarios import SCENARIOS, scenarios_for
 
 
 def render_ci(*, artifacts: Path, commit: str, output: Path, run_url: str) -> None:
@@ -34,7 +34,7 @@ def render_ci(*, artifacts: Path, commit: str, output: Path, run_url: str) -> No
             ):
                 raise ValueError("incomplete probe suite")
             row = summary["harnesses"][harness]
-            if [s["scenario"] for s in row["scenarios"]] != [s.name for s in SCENARIOS]:
+            if [s["scenario"] for s in row["scenarios"]] != [s.name for s in scenarios_for(harness, SCENARIOS)]:
                 raise ValueError("incomplete scenario coverage")
             if result["status"] != "unavailable" and row["verdict"] != (
                 "fulfilled" if result["status"] == "passed" else "not_fulfilled"

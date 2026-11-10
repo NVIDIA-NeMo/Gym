@@ -113,6 +113,34 @@ def test_http_error_attempt_keeps_ownership_without_requiring_a_model_turn(statu
     assert checks(record)["ownership.call_owner"]["status"] == "fail"
 
 
+@pytest.mark.parametrize("category", ["cancelled", "timeout"])
+def test_request_cut_before_a_reply_keeps_ownership_without_requiring_a_model_turn(category):
+    # A run deadline cancels the request the model never answered: the call has no status and no response.
+    record = evidence_record()
+    trajectory = record["ng_trajectory"]
+    cut = deepcopy(trajectory["model_calls"][0])
+    cut["model_call_id"] = "cut"
+    cut["response_metadata"].update(
+        status_code=None, response_id=None, response_status=None, finish_reason=None, error_category=category
+    )
+    cut["response"] = None
+    trajectory["model_calls"].append(cut)
+    trajectory["invocations"][0]["model_calls"].append({"model_call_id": "cut"})
+
+    result = checks(record)
+    assert result["calls.response"]["status"] == "pass"
+    assert result["ownership.call_owner"]["status"] == "pass"
+    assert result["steps.attempt_accounting"]["status"] == "pass"
+    trajectory["turns"][1]["model_calls"].append({"model_call_id": "cut"})
+    assert checks(record)["steps.attempt_accounting"]["status"] == "pass"
+    trajectory["turns"][0]["model_calls"].append({"model_call_id": "cut"})
+    assert checks(record)["steps.attempt_accounting"]["status"] == "fail"
+    # Without an error category the call is not a failed attempt, so it is a policy response that needs its step.
+    del trajectory["turns"][0]["model_calls"][-1], trajectory["turns"][1]["model_calls"][-1]
+    cut["response_metadata"]["error_category"] = None
+    assert checks(record)["steps.attempt_accounting"]["status"] == "fail"
+
+
 def test_retry_attempt_and_compaction_helper_accounting():
     record = evidence_record()
     trajectory = record["ng_trajectory"]
