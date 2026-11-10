@@ -73,6 +73,7 @@ def fake_sandbox(monkeypatch):
             info = {
                 "exists": self.mode != "missing_output",
                 "regular": self.mode != "symlink",
+                "readable": self.mode != "unreadable",
                 "bytes": module.MAX_BYTES + 1 if self.mode == "oversized" else 100,
             }
             return SandboxExecResult(json.dumps(info), "", 0)
@@ -130,6 +131,7 @@ async def attempt(tmp_path, **kwargs):
         ("timeout", "timeout"),
         ("missing_output", "missing_output"),
         ("symlink", "invalid_output"),
+        ("unreadable", "invalid_output"),
         ("oversized", "invalid_output"),
         ("invalid", "invalid_output"),
         ("invalid_checksum", "invalid_output"),
@@ -157,7 +159,7 @@ async def test_lifecycle(fake_sandbox, tmp_path, mode, status):
         assert set(instances[0].uploads) == {"/workspace/code.py", "/workspace/launcher.py"}
         assert instances[0].commands[0].startswith("/usr/bin/env -i ")
         assert "unshare --user --map-current-user --net" in instances[0].commands[0]
-    if mode in {"symlink", "oversized", "missing_output", "isolation_failure", "mount_failure"}:
+    if mode in {"symlink", "unreadable", "oversized", "missing_output", "isolation_failure", "mount_failure"}:
         assert not instances[0].downloaded
     if mode in {"isolation_failure", "mount_failure"}:
         assert not any("launcher.py" in command for command in instances[0].commands)
@@ -242,6 +244,12 @@ def test_code_normalization(text):
 @pytest.mark.parametrize("text", ["this is not python !", "```python\nprint(1)"])
 def test_code_normalization_preserves_invalid_or_unclosed_programs(text):
     assert module.normalize_code(text) == text + "\n"
+
+
+@pytest.mark.parametrize("literal", ["```py```", "<think>visible</think>", "</think>", "<think>"])
+def test_code_normalization_preserves_python_strings(literal: str) -> None:
+    code = f"label = {literal!r}\nprint(label)"
+    assert module.normalize_code(code) == code + "\n"
 
 
 @pytest.mark.parametrize("kind", ["symlink", "bytes", "pixels", "corrupt"])

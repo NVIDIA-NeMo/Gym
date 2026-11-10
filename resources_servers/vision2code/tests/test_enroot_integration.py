@@ -2,12 +2,18 @@
 # SPDX-License-Identifier: Apache-2.0
 """Opt-in real execution tests. No host execution fallback is permitted."""
 
+import hashlib
 import os
 import shutil
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
+from PIL import Image
 
+from nemo_gym.client import ServerClient
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from resources_servers.vision2code.app import Vision2CodeConfig, Vision2CodeServer, Vision2CodeVerifyRequest
 from resources_servers.vision2code.render import render
 
 
@@ -29,6 +35,11 @@ VALID = "from PIL import Image\nImage.new('RGB',(TARGET_WIDTH,TARGET_HEIGHT),'wh
         (f"```python\n{VALID}\n```", "ok"),
         ("this is not python !", "code_error"),
         ("raise SystemExit(137)", "code_error"),
+        ("raise SystemExit(1)", "code_error"),
+        ("import sys; sys.stderr.write('[ERROR] deliberate failure\\n'); raise SystemExit(1)", "code_error"),
+        ("import os; os.write(2, b'[ERROR] direct fd write\\n'); raise SystemExit(1)", "code_error"),
+        (VALID + "\nimport os; os.chmod(OUTPUT_PATH, 0)", "invalid_output"),
+        (VALID + "\nlabel = '```py``` <think>literal</think>'", "ok"),
         ("while True: pass", "timeout"),
         ("pass", "missing_output"),
         ("open(OUTPUT_PATH,'w').write('not png')", "invalid_output"),
@@ -50,6 +61,70 @@ async def test_real_execution(tmp_path, code, status):
     )
     assert result.status == status, result.model_dump()
     assert result.diagnostics["stopped"]
+    if "[ERROR]" in code:
+        assert "[ERROR]" in result.diagnostics["execution"]["stdout"]
+        assert result.diagnostics["execution"]["error_type"] is None
+
+
+@pytest.mark.parametrize(
+    "code,status",
+    [
+        ("raise SystemExit(1)", "code_error"),
+        ("import sys; sys.stderr.write('[ERROR] deliberate failure\\n'); raise SystemExit(1)", "code_error"),
+        (VALID + "\nimport os; os.chmod(OUTPUT_PATH, 0)", "invalid_output"),
+    ],
+)
+async def test_real_program_failures_are_unmasked_zeros(tmp_path: Path, code: str, status: str) -> None:
+    reference = tmp_path / "reference.png"
+    Image.new("RGB", (80, 60), "white").save(reference)
+    server = Vision2CodeServer(
+        config=Vision2CodeConfig(
+            name="vision2code",
+            host="127.0.0.1",
+            port=8080,
+            entrypoint="app.py",
+            judge_model_server={"type": "responses_api_models", "name": "judge"},
+            judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            sandbox_image=IMAGE,
+            artifact_dir=str(tmp_path / "artifacts"),
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    body = Vision2CodeVerifyRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        response=NeMoGymResponse(
+            id="response",
+            created_at=0,
+            model="test",
+            object="response",
+            parallel_tool_calls=False,
+            tool_choice="none",
+            tools=[],
+            output=[
+                {
+                    "id": "message",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": code, "annotations": []}],
+                }
+            ],
+        ),
+        verifier_metadata={
+            "id": "sample",
+            "image_path": str(reference),
+            "rubric": "generic",
+            "width": 80,
+            "height": 60,
+            "sha256": hashlib.sha256(reference.read_bytes()).hexdigest(),
+        },
+    )
+    result = await server.verify(body)
+    assert result.reward == 0 and not result.mask_sample
+    assert result.render.status == status
+    assert len(result.render_attempts) == 1
+    assert result.render.diagnostics["stopped"]
+    assert not server._pending_cleanup
 
 
 async def test_real_matplotlib_dependencies_and_dimensions(tmp_path):

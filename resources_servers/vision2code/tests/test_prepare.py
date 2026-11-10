@@ -7,12 +7,13 @@ from typing import get_args
 
 import pytest
 from PIL import Image
-from pydantic import TypeAdapter
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.data import validate_jsonl_rows
+from resources_servers.vision2code.app import Vision2CodeVerifyRequest
 from resources_servers.vision2code.evaluation import RubricName
-from resources_servers.vision2code.prepare import prepare
+from resources_servers.vision2code.prepare import Reference, prepare
 from resources_servers.vision2code.task_data import TaskData
 
 
@@ -35,10 +36,79 @@ def test_manifest(tmp_path):
         assert metadata["image_path"] == str(image)
         params = row["responses_create_params"]
         NeMoGymResponseCreateParamsNonStreaming.model_validate(params)
+        parsed = Vision2CodeVerifyRequest.model_validate(
+            {
+                **row,
+                "response": {
+                    "id": "response",
+                    "created_at": 0,
+                    "model": "test",
+                    "object": "response",
+                    "parallel_tool_calls": False,
+                    "tool_choice": "none",
+                    "tools": [],
+                    "output": [
+                        {
+                            "id": "message",
+                            "type": "message",
+                            "role": "assistant",
+                            "status": "completed",
+                            "content": [{"type": "output_text", "text": "pass", "annotations": []}],
+                        }
+                    ],
+                },
+            }
+        )
+        assert parsed.verifier_metadata.model_dump() == metadata
         assert params["tools"] == []
         content = params["input"][1]["content"]
         assert base64.b64decode(content[0]["image_url"].split(",")[1]) == image.read_bytes()
         assert content[1]["text"] == "Generate Python code to recreate this image. Return code only."
+
+
+def reference_contract(model: type[BaseModel]) -> dict:
+    schema = model.model_json_schema()
+    return {
+        "required": sorted(schema["required"]),
+        "properties": {
+            name: {
+                key: value for key, value in field.items() if key not in {"title", "description", "legacy_location"}
+            }
+            for name, field in schema["properties"].items()
+        },
+    }
+
+
+def test_reference_contract_matches_task_data() -> None:
+    assert reference_contract(Reference) == reference_contract(TaskData)
+    assert Reference.model_config["extra"] == "forbid"
+    assert TaskData.model_config["extra"] == "allow"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("sha256", None), ("sha256", "invalid"), ("width", 0), ("height", -1), ("rubric", "unknown"), ("extra", 1)],
+)
+def test_reference_rejects_invalid_metadata(field: str, value: object) -> None:
+    metadata = {
+        "id": "sample",
+        "image_path": "reference.png",
+        "rubric": "generic",
+        "width": 60,
+        "height": 80,
+        "sha256": "a" * 64,
+    }
+    if value is None:
+        metadata.pop(field)
+    else:
+        metadata[field] = value
+    with pytest.raises(ValidationError):
+        Reference.model_validate(metadata)
+    if field == "extra":
+        assert TaskData.model_validate(metadata).model_extra == {"extra": 1}
+    else:
+        with pytest.raises(ValidationError):
+            TaskData.model_validate(metadata)
 
 
 @pytest.mark.parametrize("bad", ["unknown", "strict-category", "geometry", "graph_algorithms", "duplicate", "corrupt"])

@@ -11,6 +11,7 @@ from pydantic import Field, model_validator
 
 from nemo_gym.core import NeMoGymEasyInputMessage, accumulate_response_usage
 from nemo_gym.trajectory import TrajectoryRecord
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.simple_agent.app import (
     SimpleAgent,
     SimpleAgentConfig,
@@ -74,6 +75,7 @@ def revision_feedback(
                 "return_code": execution.get("return_code"),
                 "error_type": execution.get("error_type"),
                 "stderr": str(execution.get("stderr") or "")[-4000:],
+                "stdout": str(execution.get("stdout") or "")[-4000:],
             },
             ensure_ascii=False,
         )
@@ -230,3 +232,5 @@ class Vision2CodeAgent(SimpleAgent):
 
 if __name__ == "__main__":
     Vision2CodeAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = Vision2CodeAgent.run_webserver()

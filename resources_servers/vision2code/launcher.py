@@ -28,6 +28,10 @@ def _configure_matplotlib_output(*, output_path: str, width: int, height: int) -
 
 
 if __name__ == "__main__":
+    # Keep program diagnostics on stdout, away from Enroot's stderr classifier.
+    # Redirect the descriptor too, so native extensions and children follow it.
+    # Enroot and unshare retain their separate transport stderr outside this process.
+    os.dup2(1, 2)
     os.makedirs("/workspace/.tmp", exist_ok=True)
     import matplotlib
 

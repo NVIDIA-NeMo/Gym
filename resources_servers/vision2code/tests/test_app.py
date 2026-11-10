@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import runpy
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,12 +16,33 @@ from pydantic import ValidationError
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_runtime import SimpleServer
 from nemo_gym.verification import JudgeError
 from resources_servers.vision2code import app
 from resources_servers.vision2code.evaluation import RubricName, system_prompt
 from resources_servers.vision2code.generic_rubric import GENERIC_RUBRIC, GENERIC_RUBRIC_VERSION
 from resources_servers.vision2code.render import RenderResult
 from resources_servers.vision2code.rubrics import DATASET_RUBRICS
+
+
+@pytest.mark.parametrize(
+    "worker,module_name,expected",
+    [(False, "worker_import", False), (True, "worker_import", True), (True, "__mp_main__", False)],
+)
+def test_worker_entrypoint(monkeypatch, worker: bool, module_name: str, expected: bool) -> None:
+    monkeypatch.setenv("IS_NEMO_GYM_FASTAPI_WORKER", "1" if worker else "0")
+    monkeypatch.setenv("IS_NEMO_GYM_FASTAPI_ENTRYPOINT", "resources_servers/vision2code/app.py")
+    built = []
+    application = object()
+
+    def build(cls):
+        built.append(cls.__name__)
+        return application
+
+    monkeypatch.setattr(SimpleServer, "run_webserver", classmethod(build))
+    namespace = runpy.run_path(app.__file__, run_name=module_name)
+    assert (namespace.get("app") is application) == expected
+    assert built == (["Vision2CodeServer"] if expected else [])
 
 
 def response(text):

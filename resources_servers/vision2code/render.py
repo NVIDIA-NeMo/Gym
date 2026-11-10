@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """One fresh Enroot sandbox per render, using Gym's lifecycle and file transfers."""
 
+import ast
 import asyncio
 import json
 import logging
@@ -46,6 +47,12 @@ class InfrastructureError(RuntimeError):
 
 def normalize_code(text: str) -> str:
     """Remove thinking markup and extract the last complete code fence, or raw Python."""
+    try:
+        ast.parse(text)
+    except (SyntaxError, ValueError, RecursionError):
+        pass
+    else:
+        return text.strip() + "\n"
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
     # Some endpoints omit the opening tag when returning reasoning inline.
     if "</think>" in text:
@@ -227,6 +234,7 @@ async def render(
             "import os,stat,json; p='/workspace/output.png'; "
             "s=os.lstat(p) if os.path.lexists(p) else None; "
             "print(json.dumps({'exists':s is not None,'regular':s is not None and stat.S_ISREG(s.st_mode),"
+            "'readable':s is not None and os.access(p,os.R_OK),"
             "'bytes':s.st_size if s else 0}))"
         )
         checked = await sandbox.exec(
@@ -239,7 +247,7 @@ async def render(
         if not info["exists"]:
             result.status = "missing_output"
             return result
-        if not info["regular"] or info["bytes"] > MAX_BYTES:
+        if not info["regular"] or not info["readable"] or info["bytes"] > MAX_BYTES:
             result.status = "invalid_output"
             return result
         path = artifact_dir / "output.png"

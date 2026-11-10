@@ -3,6 +3,8 @@
 """Exercise revisions through SimpleAgent's generation and verification flow."""
 
 import json
+import runpy
+import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -21,9 +23,30 @@ from nemo_gym.core import (
     NgFailureEvent,
     failure_report_for,
 )
+from nemo_gym.server_runtime import SimpleServer
 from nemo_gym.trajectory import TrajectoryRecord
 from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentRunRequest
 from responses_api_agents.vision2code_agent.app import Vision2CodeAgent, Vision2CodeAgentConfig
+
+
+@pytest.mark.parametrize(
+    "worker,module_name,expected",
+    [(False, "worker_import", False), (True, "worker_import", True), (True, "__mp_main__", False)],
+)
+def test_worker_entrypoint(monkeypatch, worker: bool, module_name: str, expected: bool) -> None:
+    monkeypatch.setenv("IS_NEMO_GYM_FASTAPI_WORKER", "1" if worker else "0")
+    monkeypatch.setenv("IS_NEMO_GYM_FASTAPI_ENTRYPOINT", "responses_api_agents/vision2code_agent/app.py")
+    built = []
+    application = object()
+
+    def build(cls):
+        built.append(cls.__name__)
+        return application
+
+    monkeypatch.setattr(SimpleServer, "run_webserver", classmethod(build))
+    namespace = runpy.run_path(sys.modules[Vision2CodeAgent.__module__].__file__, run_name=module_name)
+    assert (namespace.get("app") is application) == expected
+    assert built == (["Vision2CodeAgent"] if expected else [])
 
 
 def config(**overrides):
@@ -299,8 +322,9 @@ async def test_feedback_without_imperfect_categories(harness, categories):
     assert "Improve on these" not in feedback and "Exact." not in feedback
 
 
+@pytest.mark.parametrize("stream", ["stderr", "stdout"])
 @pytest.mark.parametrize("status", ["code_error", "timeout", "missing_output", "invalid_output"])
-async def test_render_failure_feedback(harness, status):
+async def test_render_failure_feedback(harness, status, stream):
     agent, request, body, calls, _ = harness(
         num_passes=2,
         observability=False,
@@ -310,7 +334,7 @@ async def test_render_failure_feedback(harness, status):
                 "render": {
                     "status": status,
                     "diagnostics": {
-                        "execution": {"return_code": 1, "stderr": "x" * 5000 + "NameError: bad_name"},
+                        "execution": {"return_code": 1, stream: "x" * 5000 + "NameError: bad_name"},
                         "mount_probe": "PRIVATE HOST PATH",
                     },
                 },
