@@ -22,9 +22,9 @@ import re
 import shlex
 import shutil
 from asyncio import Semaphore
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from time import time
+from time import monotonic, time
 from typing import Any, ClassVar, Literal, Optional
 from uuid import uuid4
 
@@ -54,6 +54,7 @@ from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_confi
 from nemo_gym.core import (
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
+    MediaFile,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -65,6 +66,8 @@ from nemo_gym.core import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
+    UnsupportedContentError,
+    split_text_and_media,
 )
 from nemo_gym.models import ChatCompletionsConverter
 from nemo_gym.sandbox import (
@@ -72,6 +75,7 @@ from nemo_gym.sandbox import (
     DirectSandboxConnection,
     SandboxSpec,
     create_provider,
+    media_path,
     resolve_provider_config,
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse, MCPToolAccess, ToolAccess
@@ -647,6 +651,14 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
     max_output_tokens: int = 131072
     output_token_policy: Literal["fixed", "remaining_context"] = "fixed"
     auto_compaction: bool = True
+    image_input: bool = Field(
+        default=False,
+        description=(
+            "Declare image input on the Gym model in sandbox sessions even when the prompt has no images, so that Pi "
+            "sends the model images its tools return, such as task files it reads. A prompt with images always "
+            "declares it."
+        ),
+    )
     pi_version: Optional[str] = None
     mcp_servers: dict[str, PiMCPServerConfig] = Field(default_factory=dict)
     sandbox_provider: str | None = None
@@ -894,8 +906,11 @@ class PiAgent(SimpleResponsesAPIAgent):
 
     def _validate_request(
         self, body: NeMoGymResponseCreateParamsNonStreaming
-    ) -> NeMoGymResponseCreateParamsNonStreaming:
-        """Validate the supported controls for a sandbox session activation."""
+    ) -> tuple[NeMoGymResponseCreateParamsNonStreaming, list[MediaFile]]:
+        """Validate the supported controls for a sandbox session activation.
+
+        Returns a copy of the request with ``input`` as a list, and the user prompt's decoded media in order.
+        """
         if body.model is not None and body.model != self.config.model:
             raise HTTPException(422, "Pi model must match the configured model")
         if body.max_output_tokens is not None:
@@ -922,14 +937,16 @@ class PiAgent(SimpleResponsesAPIAgent):
         )
         roles = [getattr(item, "role", None) for item in items]
         if roles not in (["user"], ["system", "user"]):
-            raise HTTPException(422, "Pi accepts one text user prompt with an optional system message")
+            raise HTTPException(422, "Pi accepts one user prompt with an optional system message")
         for item in items:
-            if not isinstance(item.content, str) and any(
-                (part.get("type") if isinstance(part, dict) else getattr(part, "type", None)) != "input_text"
-                for part in item.content
-            ):
-                raise HTTPException(422, "Pi only supports text input")
-        return body.model_copy(update={"input": items}).model_copy(deep=True)
+            try:
+                _, media = split_text_and_media(item.content)
+            except UnsupportedContentError as error:
+                raise HTTPException(422, f"Pi: {error}") from error
+            if media and item.role != "user":
+                raise HTTPException(422, "Pi accepts media only in the user prompt")
+        # The loop ends on the user prompt, so `media` holds its media.
+        return body.model_copy(update={"input": items}).model_copy(deep=True), media
 
     def _conversation_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
         """Build identical instructions for local and sandbox Pi."""
@@ -970,16 +987,27 @@ class PiAgent(SimpleResponsesAPIAgent):
         *,
         prompt: str,
         system: str,
+        media: Sequence[MediaFile] = (),
     ) -> NeMoGymResponse:
         # Sandbox sessions use only Gym's provider; do not copy credentials for
         # unrelated direct providers from the host configuration into the sandbox.
         models = {
             "providers": {"nemo": self._build_models_config(state.request.episode_id.capture_key)["providers"]["nemo"]}
         }
+        # Without image input on the model, Pi leaves images out of model requests, including images its read tool
+        # returns, which it replaces with an "omitted" note. A text-only deployment rejects requests that carry an
+        # image, so image input is declared only for a prompt with images or when the configuration asks for it.
+        if media or self.config.image_input:
+            for model in models["providers"]["nemo"]["models"]:
+                model["input"] = ["text", "image"]
         # Staged inside the session's execute, so that close cancels the uploads before it releases the sandbox.
         files: dict[str, str | Path] = {
             "home/.pi/agent/models.json": json.dumps(models),
-            "home/.pi/agent/settings.json": json.dumps(self._build_settings_config()),
+            # Pi otherwise resizes large images, from @file arguments and its read tool alike, so the model would
+            # get different pixels than the environment sent.
+            "home/.pi/agent/settings.json": json.dumps(
+                {**self._build_settings_config(), "images": {"autoResize": False}}
+            ),
         }
         output_limit_extension = "output-limit.mjs"
         files[output_limit_extension] = Path(__file__).with_name(output_limit_extension)
@@ -1030,6 +1058,9 @@ class PiAgent(SimpleResponsesAPIAgent):
         if system:
             flag = "--system-prompt" if self.config.system_prompt_mode == "replace" else "--append-system-prompt"
             command += [flag, system]
+        # Pi attaches `@file` arguments, media included, to the prompt it reads from stdin.
+        # The paths depend only on the content, so the same task gives Pi the same prompt in every sandbox.
+        command += [f"@{media_path(file)}" for file in media]
         env = {
             "PI_CODING_AGENT_DIR": f"{state.session.session_dir}/home/.pi/agent",
             "PI_SKIP_VERSION_CHECK": "1",
@@ -1040,13 +1071,16 @@ class PiAgent(SimpleResponsesAPIAgent):
         try:
             async with self.sem:
                 try:
+                    # Staging spends the activation's budget; Pi runs for what remains.
                     raw = await state.execute(
                         command=command,
                         env=env,
                         prompt=prompt,
+                        media=media,
                         timeout=timeout,
                         close_timeout=self.config.session_close_timeout_seconds,
                         files=files,
+                        deadline=monotonic() + timeout,
                     )
                 except TimeoutError:
                     # The supervisor stops Pi at the deadline, and execute returns. If the provider's exec limit
@@ -1520,7 +1554,6 @@ class PiAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         session_id = self._agent_session_id_from_request(request)
         if session_id is not None:
-            body = self._validate_request(body)
             state = self._require_agent_session(session_id)
             assert isinstance(state, PiSandboxSession)
             rollout_id = request.path_params.get("rollout_id")
@@ -1528,11 +1561,16 @@ class PiAgent(SimpleResponsesAPIAgent):
                 raise HTTPException(409, "Pi activation does not match the seeded session and rollout route")
             if state.session.closing:
                 raise HTTPException(409, "Pi session is closing")
-            prompt, system = self._conversation_input(body)
             if state.task is None:
-                # Bind the request before the first await so retries join one invocation.
+                # Validate and decode only for a new activation: a retry is compared with the stored request, so
+                # its media are never decoded again. Bind the request before the first await so retries join one
+                # invocation.
+                validated, media = self._validate_request(body)
+                prompt, system = self._conversation_input(validated)
                 state.activation_request = body.model_copy(deep=True)
-                state.task = asyncio.create_task(self._sandbox_response(state, body, prompt=prompt, system=system))
+                state.task = asyncio.create_task(
+                    self._sandbox_response(state, validated, prompt=prompt, system=system, media=media)
+                )
             elif body != state.activation_request:
                 raise HTTPException(409, "Pi sandbox sessions support one activation; retry the same request")
             # Session close owns cancellation. Losing an HTTP waiter must not stop the harness.

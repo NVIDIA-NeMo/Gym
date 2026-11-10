@@ -239,6 +239,7 @@ upstream copyright header and adds an NVIDIA modifications block.
 | NeMo Skills `generic/math` prompt | Apache-2.0 (vendored unmodified) | `resources_servers/ns_tools/prompts/generic/math.yaml` (upstream `nemo_skills/prompt/config/generic/math.yaml`, byte-for-byte below a provenance header) | https://github.com/NVIDIA-NeMo/Skills |
 | LongFact prompt data | CC-BY-4.0 | `resources_servers/longfact/data/example.jsonl`, `benchmarks/longfact/data/hard200.jsonl` (selected source prompts with NeMo Gym fields, stable task IDs, source provenance and the original canary) | https://github.com/google-deepmind/long-form-factuality/tree/9d27158d198ced0a9d8271a80147cae580614601/longfact |
 | GPT-5 System Card prompts | CC-BY-4.0 (prompt text); Apache-2.0 (NVIDIA implementation) | `resources_servers/longfact/claim_prompts.py`, `resources_servers/longfact/card_fact_check.py` (Appendix 2 prompt adaptations) | https://arxiv.org/html/2601.03267v1 |
+| OpenCode max-steps prompt | MIT (vendored unmodified) | `nemo_gym/models/token_capture/harness_notes/opencode.py` (`OPENCODE_MAX_STEPS_PROMPT`, upstream `packages/core/src/session/runner/max-steps.ts`, verbatim) | https://github.com/anomalyco/opencode |
 
 - Upstream license: reproduced in full in the Apple MIT License section below
 - Subcomponent notices: `resources_servers/toolsandbox/tool_sandbox/ACKNOWLEDGEMENTS`
@@ -251,6 +252,7 @@ upstream copyright header and adds an NVIDIA modifications block.
 - NeMo Skills `generic/math` prompt: vendored, unmodified, from upstream revision `da85a881d972e6fec847b90cf553a0bf9bf10638` (https://github.com/NVIDIA-NeMo/Skills/blob/da85a881d972e6fec847b90cf553a0bf9bf10638/nemo_skills/prompt/config/generic/math.yaml), the revision `resources_servers/ns_tools/requirements.txt` pins, because the pinned `nemo-skills-tools` package ships no prompt YAMLs. Upstream is Apache-2.0, the same license as this repository, so no additional license text is required. The file header records the same source, revision and license.
 - LongFact prompt data: Copyright 2024 DeepMind Technologies Limited, licensed under [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/). The [upstream license statement](https://github.com/google-deepmind/long-form-factuality/blob/9d27158d198ced0a9d8271a80147cae580614601/README.md#license-and-disclaimer) applies to the prompt materials at revision `9d27158d198ced0a9d8271a80147cae580614601`. The subsets select and reorder prompts, normalize surrounding whitespace, and add NeMo Gym metadata; each row preserves its source file checksum, row index and canary. Full-suite preparation uses the same source and attribution.
 - GPT-5 System Card prompts: OpenAI, [GPT-5 System Card, section 3.7 and Appendix 2, arXiv:2601.03267v1](https://arxiv.org/html/2601.03267v1), licensed under [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/). Adaptations change output formatting, add validated claim IDs and optional browsing-off instructions, and replace iterative browsing with a single search-planning pass. Per-file source and license notices are retained; equivalence with the paper's reported scores has not been validated.
+- OpenCode max-steps prompt: copied verbatim from upstream revision `67aec2212010d67775c35e696d8b8b54902eb338` (OpenCode 1.17.11, https://github.com/anomalyco/opencode/blob/67aec2212010d67775c35e696d8b8b54902eb338/packages/core/src/session/runner/max-steps.ts), because token capture must recognize the exact text OpenCode sends at its step limit. Upstream is MIT; its license is reproduced in full in the OpenCode MIT License section below. The file header records the same source, revision and license.
 
 ---
 
@@ -22544,6 +22546,36 @@ SOFTWARE DISTRIBUTED WITH TOOLSANDBOX:
 The ToolSandbox software includes a number of subcomponents with separate
 copyright notices and license terms - please see the file ACKNOWLEDGEMENTS.
 -------------------------------------------------------------------------------
+```
+
+---
+
+## OpenCode MIT License (max-steps prompt)
+
+Applies to `OPENCODE_MAX_STEPS_PROMPT` in `nemo_gym/models/token_capture/harness_notes/opencode.py`.
+
+```text
+MIT License
+
+Copyright (c) 2025 opencode
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ---
