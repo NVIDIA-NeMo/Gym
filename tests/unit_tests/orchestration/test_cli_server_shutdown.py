@@ -69,7 +69,10 @@ interrupts = Path({str(interrupts)!r})
 def stop(*_):
     interrupts.write_text(interrupts.read_text() + 'SIGINT\\n' if interrupts.exists() else 'SIGINT\\n')
 signal.signal(signal.SIGINT, stop)
-Path({str(ready)!r}).write_text(str(os.getsid(0)))
+ready = Path({str(ready)!r})
+ready_tmp = ready.with_name(ready.name + ".tmp")
+ready_tmp.write_text(str(os.getsid(0)))
+ready_tmp.replace(ready)
 while not interrupts.exists():
     time.sleep(0.01)
 time.sleep(0.1)
@@ -138,7 +141,10 @@ def test_shutdown_kills_descendant_after_its_wrapper_exited(tmp_path):
 import os, signal, time
 from pathlib import Path
 signal.signal(signal.SIGINT, signal.SIG_IGN)
-Path({str(ready)!r}).write_text(str(os.getpid()))
+ready = Path({str(ready)!r})
+ready_tmp = ready.with_name(ready.name + ".tmp")
+ready_tmp.write_text(str(os.getpid()))
+ready_tmp.replace(ready)
 while True:
     time.sleep(0.01)
 """
