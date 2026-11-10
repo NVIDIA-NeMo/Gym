@@ -46,7 +46,8 @@ class LentSandboxes:
     (providers without leases ignore the scope). A stop goes on when the request that asked for it is cancelled, and
     gives up after ``STOP_TIMEOUT_S``. A session that is never closed keeps its sandbox until shutdown, or until the
     provider reclaims it after ``sandbox_config.ttl_s``, so set ``ttl_s`` above the episode deadline plus the time
-    that grading and cleanup take.
+    that grading and cleanup take. A sandbox from a failed seed whose stop also fails is kept apart from the lent
+    ones, and the session's next lend, its release or the shutdown tries the stop again.
 
     With ``network_access="model_only"``, each sandbox is created with an egress rule that allows only the host of
     ``model_server``, the model server that a harness in the sandbox calls. ``model_and_tools`` also allows the hosts
@@ -87,6 +88,8 @@ class LentSandboxes:
         self._model_server = model_server
         self._tool_servers = tuple(tool_servers)
         self._sandboxes: dict[str, AsyncSandbox] = {}
+        # Sandboxes of failed seeds whose stop failed too. They are never lent; a later stop of each is retried.
+        self._failed_seed_sandboxes: dict[str, AsyncSandbox] = {}
 
     def get(self, resources_session_id: str) -> AsyncSandbox | None:
         """Return the sandbox lent for ``resources_session_id``, or ``None``."""
@@ -102,12 +105,14 @@ class LentSandboxes:
         """Return the access a harness needs to the session's sandbox, and start the sandbox on the first call.
 
         ``files`` maps absolute paths in the sandbox to their contents; it can be empty. A repeated call, as for a
-        repeated seed, returns the same sandbox. If the new sandbox cannot be described, it is stopped and the error
-        is raised.
+        repeated seed, returns the same sandbox. If the new sandbox cannot start, receive its files or be described,
+        it is stopped and the error is raised. If that stop fails too, the sandbox is kept for a later stop: the
+        session's next lend stops it before it starts another one, and a failed stop there fails the lend.
         """
         sandbox = self._sandboxes.get(resources_session_id)
         if sandbox is not None:
             return await self._access(sandbox)
+        await self._stop_failed_seed_sandbox(resources_session_id)
         named_configs = get_global_config_dict()
         spec = self._config.spec(
             self._provider,
@@ -124,23 +129,31 @@ class LentSandboxes:
                 provider_options={**spec.provider_options, "network_policy": self._restricted_policy(provider_config)},
             )
         sandbox = AsyncSandbox(provider_config)
-        # start() stops the sandbox itself when delivering the files fails.
-        await sandbox.start(spec)
         try:
+            # start() stops the sandbox itself when delivering the files fails, but not under cancellation: its stop
+            # is cancelled with the request. _stop() then finishes it, and does nothing after a stop that finished.
+            await sandbox.start(spec)
             access = await self._access(sandbox)
         except BaseException:
             try:
                 await _stop(sandbox)
             except Exception:
                 LOGGER.exception(
-                    "Failed to stop an undescribed sandbox for resources session %s", resources_session_id
+                    "Failed to stop the sandbox of a failed seed for resources session %s; a later lend, release or "
+                    "shutdown tries again",
+                    resources_session_id,
                 )
+                self._failed_seed_sandboxes[resources_session_id] = sandbox
             raise
         self._sandboxes[resources_session_id] = sandbox
         return access
 
     async def release(self, resources_session_id: str) -> None:
-        """Stop the session's sandbox; safe to repeat. A failed stop raises and keeps it, so a close can retry."""
+        """Stop the session's sandbox; safe to repeat. A failed stop raises and keeps it, so a close can retry.
+
+        It also stops a sandbox that a failed seed of the session left running.
+        """
+        await self._stop_failed_seed_sandbox(resources_session_id)
         sandbox = self._sandboxes.get(resources_session_id)
         if sandbox is None:
             return
@@ -158,7 +171,16 @@ class LentSandboxes:
                 except Exception:
                     LOGGER.exception("Failed to stop the sandbox lent for resources session %s", resources_session_id)
 
-        await asyncio.gather(*(release(resources_session_id) for resources_session_id in list(self._sandboxes)))
+        sessions = dict.fromkeys([*self._sandboxes, *self._failed_seed_sandboxes])
+        await asyncio.gather(*(release(resources_session_id) for resources_session_id in sessions))
+
+    async def _stop_failed_seed_sandbox(self, resources_session_id: str) -> None:
+        """Stop the sandbox a failed seed of the session left running, if any. A failed stop raises and keeps it."""
+        sandbox = self._failed_seed_sandboxes.get(resources_session_id)
+        if sandbox is None:
+            return
+        await _stop(sandbox)
+        self._failed_seed_sandboxes.pop(resources_session_id, None)
 
     def _restricted_policy(self, provider_config: Mapping[str, object]) -> dict[str, object]:
         """The egress rule for ``network_access``, refused (422) where it cannot be enforced.

@@ -13,6 +13,7 @@ import pytest
 from nemo_gym.core.episode_types import TaskId
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.config import SandboxConfig
+from nemo_gym.sandbox.providers.local.provider import LocalProvider
 from nemo_gym.server_runtime import sandbox_lending
 from nemo_gym.server_runtime.base_resources_server import ResourcesSeedRejectedError
 from nemo_gym.server_runtime.sandbox_lending import LentSandboxes
@@ -226,6 +227,123 @@ async def test_a_lend_cancelled_while_describing_the_sandbox_still_stops_it(work
         await lender.lend("session", TASK)
 
     assert len(finished) == 1
+    assert lender.get("session") is None
+
+
+async def test_a_lend_cancelled_while_delivering_files_still_stops_the_sandbox(workdir, monkeypatch) -> None:
+    lender = _lender(workdir)
+    seed = anyio.CancelScope()
+    closed: list[object] = []
+    real_close = LocalProvider.close
+
+    async def upload_file(self: LocalProvider, handle, source_path, target_path) -> None:
+        # The seed request is cancelled while the new sandbox receives its files.
+        seed.cancel()
+        await anyio.sleep(0)
+
+    async def close(self: LocalProvider, handle) -> None:
+        # A checkpoint where a stop that is not shielded is cancelled with the seed, as start()'s own stop is.
+        await anyio.sleep(0)
+        await real_close(self, handle)
+        closed.append(handle)
+
+    monkeypatch.setattr(LocalProvider, "upload_file", upload_file)
+    monkeypatch.setattr(LocalProvider, "close", close)
+    with seed:
+        await lender.lend("session", TASK, files={str(workdir / "0.png"): b"png"})
+
+    assert len(closed) == 1, "the sandbox must be stopped although the seed was cancelled"
+    assert lender.get("session") is None
+    await lender.release_all()
+    assert len(closed) == 1, "nothing is left for the shutdown to stop"
+
+
+def _stop_failing_first(monkeypatch, failure) -> list[AsyncSandbox]:
+    """Make the first stop fail by calling ``failure``, and record each later stop, which really stops."""
+    stopped: list[AsyncSandbox] = []
+    real_stop = AsyncSandbox.stop
+    calls = 0
+
+    async def stop(self: AsyncSandbox) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            await failure()
+        await real_stop(self)
+        stopped.append(self)
+
+    monkeypatch.setattr(AsyncSandbox, "stop", stop)
+    return stopped
+
+
+async def _provider_down() -> None:
+    raise RuntimeError("provider down")
+
+
+async def _hang() -> None:
+    await asyncio.Event().wait()
+
+
+@pytest.mark.parametrize("failure", [_provider_down, _hang], ids=["stop fails", "stop hangs"])
+@pytest.mark.parametrize("cleanup", ["release", "release_all"])
+async def test_a_failed_seed_whose_stop_fails_is_stopped_later(
+    workdir, started, monkeypatch, failure, cleanup
+) -> None:
+    monkeypatch.setattr(sandbox_lending, "STOP_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(AsyncSandbox, "serialize", AsyncMock(side_effect=RuntimeError("no descriptor")))
+    stopped = _stop_failing_first(monkeypatch, failure)
+    lender = _lender(workdir)
+
+    with pytest.raises(RuntimeError, match="no descriptor"):
+        await lender.lend("session", TASK)
+    assert lender.get("session") is None, "a failed seed's sandbox is never lent"
+
+    if cleanup == "release":
+        await lender.release("session")
+        await lender.release("session")
+    else:
+        await lender.release_all()
+        await lender.release_all()
+    assert len(stopped) == 1 and len(started) == 1
+
+
+async def test_a_repeated_seed_stops_the_failed_seed_s_sandbox_before_it_starts_another(
+    workdir, started, monkeypatch
+) -> None:
+    describe = AsyncMock(side_effect=[RuntimeError("no descriptor"), {"sandbox_id": "local"}])
+    monkeypatch.setattr(AsyncSandbox, "serialize", describe)
+    stopped = _stop_failing_first(monkeypatch, _provider_down)
+    lender = _lender(workdir)
+    with pytest.raises(RuntimeError, match="no descriptor"):
+        await lender.lend("session", TASK)
+    assert stopped == [], "the first stop failed"
+
+    # The second seed first stops the sandbox the first seed left, and only then starts its own.
+    access = await lender.lend("session", TASK)
+
+    assert len(started) == 2
+    assert len(stopped) == 1 and stopped[0] is not lender.get("session")
+    assert access.connection.descriptor == {"sandbox_id": "local"}
+    await lender.release("session")
+    assert len(stopped) == 2
+
+
+async def test_a_repeated_seed_fails_while_the_failed_seed_s_sandbox_cannot_be_stopped(
+    workdir, started, monkeypatch
+) -> None:
+    monkeypatch.setattr(AsyncSandbox, "serialize", AsyncMock(side_effect=RuntimeError("no descriptor")))
+    lender = _lender(workdir)
+    real_stop = AsyncSandbox.stop
+    monkeypatch.setattr(AsyncSandbox, "stop", AsyncMock(side_effect=RuntimeError("provider down")))
+    with pytest.raises(RuntimeError, match="no descriptor"):
+        await lender.lend("session", TASK)
+
+    with pytest.raises(RuntimeError, match="provider down"):
+        await lender.lend("session", TASK)
+    assert len(started) == 1, "no second sandbox starts while the first one may still run"
+
+    monkeypatch.setattr(AsyncSandbox, "stop", real_stop)
+    await lender.release("session")
     assert lender.get("session") is None
 
 
