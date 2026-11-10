@@ -18,6 +18,7 @@ from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.core.episode_context import current_rollout_id
 from nemo_gym.core.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeId, MaterializedTask, TaskId
+from nemo_gym.sandbox.providers.base import SandboxSpec
 from nemo_gym.server_runtime.base_environment_server import (
     BaseEnvironmentServerWithTools,
     BaseEnvironmentServerWithToolsConfig,
@@ -156,7 +157,7 @@ def _app(
         port=1234,
         entrypoint="app.py",
         cleanup_timeout_seconds=1,
-        **overrides,
+        **({"sandbox_provider": {"local": {}}} | overrides),
     )
     client = MagicMock(spec=ServerClient)
     client._resolve_base_url.return_value = BASE_URL
@@ -854,3 +855,159 @@ def test_an_mcp_grant_refuses_tool_names_mcp_clients_reject() -> None:
 def test_tool_transports_cannot_repeat() -> None:
     with pytest.raises(ValidationError, match="must not repeat"):
         _app(tool_transports=["mcp", "mcp"])
+
+
+def test_a_tools_server_must_say_where_its_data_plane_runs() -> None:
+    with pytest.raises(ValidationError, match="sandbox_provider"):
+        BaseEnvironmentServerWithToolsConfig(
+            name="counter_environment", host="127.0.0.1", port=1234, entrypoint="app.py"
+        )
+
+
+@pytest.mark.parametrize(
+    ("provider", "warns"), [({"local": {}}, True), ({"docker": {}}, False)], ids=["local", "docker"]
+)
+def test_a_data_plane_on_the_host_logs_a_warning_at_startup(
+    provider: dict[str, Any], warns: bool, caplog: pytest.LogCaptureFixture
+) -> None:
+    _app(sandbox_provider=provider)
+
+    assert ("data plane runs as host subprocesses" in caplog.text) is warns
+
+
+def test_a_sandbox_provider_that_the_config_does_not_define_fails_at_startup() -> None:
+    with pytest.raises(ValueError, match="'sandbox' is not defined"):
+        _app(sandbox_provider="sandbox")
+
+
+class _FakeSandbox:
+    """Records what the server does with a sandbox; ``fail_start`` and ``stop_failures`` make those steps fail."""
+
+    made: ClassVar[list["_FakeSandbox"]] = []
+    fail_start: ClassVar[bool] = False
+    stop_failures: ClassVar[int] = 0
+
+    def __init__(self, provider_config: dict[str, Any]) -> None:
+        self.provider_config = provider_config
+        self.spec: SandboxSpec | None = None
+        self.events: list[str] = []
+        self.stop_failures = type(self).stop_failures
+        type(self).made.append(self)
+
+    async def start(self, spec: SandboxSpec) -> None:
+        self.events.append("start")
+        self.spec = spec
+        if type(self).fail_start:
+            raise RuntimeError("the provider could not create the sandbox")
+
+    async def stop(self) -> None:
+        self.events.append("stop")
+        if self.stop_failures:
+            self.stop_failures -= 1
+            raise RuntimeError("the provider returned 503")
+
+
+@pytest.fixture
+def fake_sandbox(monkeypatch: pytest.MonkeyPatch) -> type[_FakeSandbox]:
+    fake = type("_Fake", (_FakeSandbox,), {"made": [], "fail_start": False, "stop_failures": 0})
+    monkeypatch.setattr("nemo_gym.server_runtime.base_environment_server.AsyncSandbox", fake)
+    return fake
+
+
+def _episode_cleanup(request: _Request) -> CleanupContext:
+    return CleanupContext(episode_id=request.episode_id, cleanup_timeout_seconds=1)
+
+
+async def test_an_episode_sandbox_is_labelled_set_up_and_stopped_with_the_episode(
+    fake_sandbox: type[_FakeSandbox],
+) -> None:
+    server, _ = _app(sandbox_provider={"default_metadata": {"team": "gym"}, "docker": {}})
+    request = _request()
+    cleanup = _episode_cleanup(request)
+
+    async def setup(sandbox: _FakeSandbox) -> None:
+        sandbox.events.append("setup")
+
+    spec = SandboxSpec(image="python:3.12-slim", ttl_s=60, metadata={"team": "bird", "instance_id": "alien_1"})
+    sandbox = await server.start_episode_sandbox(request, cleanup, spec, setup)
+    await cleanup.aclose()
+
+    assert sandbox.provider_config == {"docker": {}}
+    assert sandbox.spec.metadata == {
+        "team": "bird",
+        "instance_id": "alien_1",
+        "nemo_gym_environment": "counter_environment",
+        "rollout_id": "3-0",
+    }
+    assert sandbox.events == ["start", "setup", "stop"]
+
+
+async def test_an_episode_sandbox_needs_a_ttl(fake_sandbox: type[_FakeSandbox]) -> None:
+    server, _ = _app()
+    request = _request()
+
+    with pytest.raises(ValueError, match="needs ttl_s"):
+        await server.start_episode_sandbox(request, _episode_cleanup(request), SandboxSpec(), _no_setup)
+
+    assert fake_sandbox.made == []
+
+
+async def _no_setup(sandbox: Any) -> None:
+    pass
+
+
+async def test_the_cleanup_stops_a_sandbox_whose_start_failed(fake_sandbox: type[_FakeSandbox]) -> None:
+    """The provider may have created the sandbox before the start failed, so its stop is registered first."""
+    server, _ = _app()
+    fake_sandbox.fail_start = True
+    request = _request()
+    cleanup = _episode_cleanup(request)
+
+    with pytest.raises(RuntimeError, match="could not create"):
+        await server.start_episode_sandbox(request, cleanup, SandboxSpec(ttl_s=60), _no_setup)
+    await cleanup.aclose()
+
+    (sandbox,) = fake_sandbox.made
+    assert sandbox.events == ["start", "stop"]
+
+
+async def test_a_failed_setup_stops_the_sandbox_and_the_cleanup_retries_a_failed_stop(
+    fake_sandbox: type[_FakeSandbox], caplog: pytest.LogCaptureFixture
+) -> None:
+    server, _ = _app()
+    fake_sandbox.stop_failures = 1
+    request = _request()
+    cleanup = _episode_cleanup(request)
+
+    async def setup(sandbox: _FakeSandbox) -> None:
+        raise RuntimeError("the task's database did not load")
+
+    with pytest.raises(RuntimeError, match="did not load"):
+        await server.start_episode_sandbox(request, cleanup, SandboxSpec(ttl_s=60), setup, name="database sandbox")
+    await cleanup.aclose()
+
+    (sandbox,) = fake_sandbox.made
+    # The first stop got the provider's error; the episode's cleanup stopped the sandbox.
+    assert sandbox.events == ["start", "stop", "stop"] and sandbox.stop_failures == 0
+    assert "Could not stop the database sandbox whose setup failed: episode_id=3-0" in caplog.text
+
+
+async def test_the_shutdown_sweep_stops_the_sandbox_of_a_running_episode(fake_sandbox: type[_FakeSandbox]) -> None:
+    started = asyncio.Event()
+
+    async def run(self: _Server, request: _Request, cleanup: CleanupContext) -> _Response:
+        await self.start_episode_sandbox(request, cleanup, SandboxSpec(ttl_s=60), _no_setup)
+        started.set()
+        await asyncio.Event().wait()
+
+    server, _ = _app()
+    type(server).run = run
+    episode = asyncio.create_task(server.run_request(_request()))
+    await started.wait()
+
+    await server.finish_running_cleanups()
+    episode.cancel()
+    await asyncio.gather(episode, return_exceptions=True)
+
+    (sandbox,) = fake_sandbox.made
+    assert sandbox.events == ["start", "stop"]

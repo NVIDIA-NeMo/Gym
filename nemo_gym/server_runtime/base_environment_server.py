@@ -10,7 +10,7 @@ import re
 from abc import abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from time import perf_counter
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Literal, Optional, TypeVar
 
@@ -40,6 +40,9 @@ from nemo_gym.core.failure_records import EpisodeFailure, FailureBoundary, Failu
 from nemo_gym.core.failure_transport import reply_failure_report, report_for_current_request
 from nemo_gym.core.model_call_sampling import MODEL_SAMPLING_NULL, encode_model_sampling
 from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for
+from nemo_gym.sandbox.api import AsyncSandbox
+from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.sandbox.providers.base import SandboxSpec
 from nemo_gym.server_runtime._checkpoint.control import CheckpointMode
 from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant
 from nemo_gym.server_runtime._checkpoint.errors import ControlError
@@ -705,6 +708,14 @@ class BaseEnvironmentServerWithToolsConfig(BaseEnvironmentServerConfig):
         ),
     )
 
+    sandbox_provider: str | dict[str, Any] = Field(
+        description=(
+            "Where the episodes' data plane runs: a sandbox provider block name, such as `sandbox`, or an inline "
+            "mapping like `{docker: {}}`. `local` runs it as host subprocesses, with no isolation, and the server "
+            "logs a warning at startup."
+        )
+    )
+
     @field_validator("tool_transports")
     @classmethod
     def validate_unique_transports(cls, transports: list[ToolTransport]) -> list[ToolTransport]:
@@ -775,8 +786,11 @@ class _EpisodeTokensOpenOnlyTools:
 class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, EpisodeResponseT]):
     """An Environment Server that serves each episode's tools itself, so it needs no Resources Server.
 
-    Other Environment Servers grant the agent a Resources Server's tools; this one owns the tools, their state and
-    verification.
+    Each episode has a control plane and a data plane. The control plane is this server: it decides which operation
+    a tool call runs and with which limits, records the call and answers. The data plane is the episode's sandbox:
+    it holds the episode's world, such as a database, and runs every operation on it, the grader's included. The
+    control plane never runs such an operation in its own process; it starts the sandbox with
+    ``start_episode_sandbox`` and sends the operation there. ``sandbox_provider`` says where the data plane runs.
 
     ``run`` holds the episode's state, and ``serve_tools`` grants the agent the episode's tools until the episode
     ends, over each transport in ``tool_transports``. Every call carries the episode token in the
@@ -831,6 +845,13 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
         self._open_episodes = {}
 
     def setup_webserver(self) -> FastAPI:
+        global_config = getattr(self.server_client, "global_config_dict", None)
+        provider_config = resolve_provider_config(self.config.sandbox_provider, global_config)
+        if "local" in provider_config:
+            LOGGER.warning(
+                f"{self.config.name}: sandbox_provider is local, so the data plane runs as host subprocesses with no "
+                "isolation. Use a container provider, such as docker."
+            )
         app = super().setup_webserver()
         if "mcp" in self.config.tool_transports:
             self._mount_mcp_endpoint(app)
@@ -877,6 +898,53 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
 
     def use_session_owners(self, owners: SessionOwners) -> None:
         self._session_owners = owners
+
+    async def start_episode_sandbox(
+        self,
+        request: EpisodeRequestT,
+        cleanup: CleanupContext,
+        spec: SandboxSpec,
+        setup: Callable[[AsyncSandbox], Awaitable[None]],
+        *,
+        name: str = "sandbox",
+    ) -> AsyncSandbox:
+        """Start a sandbox for this episode's data plane, run ``setup`` in it, and stop it with the episode.
+
+        The stop is registered in ``cleanup`` before the sandbox starts, so the episode's cleanup, or the shutdown
+        sweep, also stops a sandbox whose start or first stop failed. ``spec.ttl_s`` is required: the provider
+        reclaims a sandbox that a crashed server never stopped. The spec's metadata goes over the provider's
+        defaults, and the server's name and the episode's rollout label the sandbox. A ``setup`` that fails stops
+        the sandbox before its error propagates. Call it again for a second sandbox or a fresh one.
+        """
+        if spec.ttl_s is None:
+            raise ValueError(
+                f"{self.config.name}: an episode sandbox needs ttl_s, so the provider reclaims it if the server dies"
+            )
+        global_config = getattr(self.server_client, "global_config_dict", None)
+        spec = replace(
+            spec,
+            metadata=resolve_provider_metadata(self.config.sandbox_provider, global_config)
+            | spec.metadata
+            | {
+                "nemo_gym_environment": self.config.name[:63],
+                "rollout_id": request.episode_id.capture_key[:63],
+            },
+        )
+        sandbox = AsyncSandbox(resolve_provider_config(self.config.sandbox_provider, global_config))
+        cleanup.register_cleanup(name, sandbox.stop)
+        await sandbox.start(spec)
+        try:
+            await setup(sandbox)
+        except BaseException:
+            try:
+                await sandbox.stop()
+            except Exception:
+                LOGGER.exception(
+                    f"Could not stop the {name} whose setup failed: episode_id={request.episode_id.capture_key}; "
+                    "the episode's cleanup tries again"
+                )
+            raise
+        return sandbox
 
     async def serve_tools(
         self, request: EpisodeRequestT, toolset: EpisodeToolset, cleanup: CleanupContext

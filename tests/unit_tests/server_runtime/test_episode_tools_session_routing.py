@@ -91,6 +91,7 @@ class _Worker:
             entrypoint="app.py",
             cleanup_timeout_seconds=1,
             num_workers=2 if socket_dir is not None else 1,
+            sandbox_provider={"local": {}},
         )
         server_client = MagicMock(spec=ServerClient)
         server_client._resolve_base_url.return_value = "http://127.0.0.1:1234"
