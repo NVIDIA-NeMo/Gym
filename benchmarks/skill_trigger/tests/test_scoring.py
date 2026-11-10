@@ -138,3 +138,32 @@ def test_completed_no_tool_answer_is_a_valid_miss():
     value.steps[1].tool_calls = None
     value.steps[1].observation = None
     assert score(value) == 0
+
+
+@pytest.mark.parametrize("code", [1, 137, -1, -9])
+def test_signed_nonzero_exit_cannot_establish_read(code):
+    assert score(trajectory(tool="exec_command", content=f"Process exited with code {code}\n" + BODY)) == 0
+
+
+def test_zero_exit_retains_read():
+    assert score(trajectory(tool="exec_command", content="Process exited with code 0\n" + BODY)) == 1
+
+
+def test_missing_successful_content_is_unscored():
+    with pytest.raises(EvidenceError, match="Missing tool result content"):
+        score(trajectory(content=None))
+    assert score(trajectory(content="")) == 0
+    assert score(trajectory(content=None, extra={"is_error": True})) == 0
+
+
+def test_negative_controls_reject_bulk_reads_and_preserve_uncertainty():
+    from benchmarks.skill_trigger.scoring import score_negative_trajectory
+
+    sources = {"target": SKILL, "other": "Different instructions: answer carefully and check all inputs."}
+    value = trajectory(tool="exec_command", content=BODY + "\n" + sources["other"])
+    assert score_negative_trajectory(value, sources=sources, harness="pi") == 0
+    value.steps[1].tool_calls = None
+    value.steps[1].observation = None
+    assert score_negative_trajectory(value, sources=sources, harness="pi") == 1
+    with pytest.raises(EvidenceError):
+        score_negative_trajectory(trajectory(content=None), sources=sources, harness="pi")

@@ -40,6 +40,10 @@ def packaged(release, tmp_path):
 
 def test_standard_harbor_task_preserves_prompt_and_catalog(packaged):
     manifest, _, rows, task = packaged
+    assert json.loads(rows.read_text())["task_id"] == task.short_name
+    assert (rows.parent / task.short_name / "notices/example/LICENSE").read_bytes() == (
+        manifest.parent / "notices/example/LICENSE"
+    ).read_bytes()
     assert task.instruction == "Adapted public prompt"
     assert task.config.environment.skills_dir == "/skills"
     assert task.config.agent.timeout_sec == 120
@@ -72,6 +76,11 @@ async def test_verifier_uses_host_trajectory_and_rejects_missing_evidence(packag
     value.steps[1].observation.results[0].content = "Not the instructions"
     (paths.agent_dir / "trajectory.json").write_text(value.model_dump_json())
     assert (await verifier.verify()).rewards == {"reward": 0}
+    value.steps[1].observation.results[0].content = None
+    (paths.agent_dir / "trajectory.json").write_text(value.model_dump_json())
+    with pytest.raises(EvidenceError, match="Missing tool result content"):
+        await verifier.verify()
+    value.steps[1].observation.results[0].content = "Not the instructions"
     verifier.harness = "codex"
     value.agent.extra = {"uncollected_subagents": True}
     (paths.agent_dir / "trajectory.json").write_text(value.model_dump_json())
@@ -143,3 +152,19 @@ async def test_completed_delegation_without_child_logs_is_unscored(packaged, tmp
 def test_missing_delegation_results_list_is_not_completed():
     value = trajectory(tool="delegate_task", content='{"results": null}')
     assert not has_uncollected_delegation(value)
+
+
+def test_gym_ids_survive_row_reordering(packaged):
+    from nemo_gym.eval_plan import PlanBenchmark, PlanGym, build_eval_plan
+
+    _, _, rows_path, _ = packaged
+    row = json.loads(rows_path.read_text())
+    rows = [row, {**row, "task_id": "case-other", "task_name": "case-other"}]
+    kwargs = dict(
+        benchmark=PlanBenchmark(name="skill_trigger", config_paths=[]),
+        taskset="fixture",
+        gym=PlanGym(version="test", commit=None),
+    )
+    left = build_eval_plan(rows, **kwargs)
+    right = build_eval_plan(list(reversed(rows)), **kwargs)
+    assert {t.task_id.task_id: t.digest for t in left.tasks} == {t.task_id.task_id: t.digest for t in right.tasks}

@@ -82,6 +82,12 @@ def prepare(*, release: str, manifest_sha256: str, output: str) -> Path:
             (task / "tests/test.sh").write_text(
                 "#!/bin/sh\n# Requires the host-side skill-opening verifier.\nexit 1\n"
             )
+            source_name = manifest["catalogs"][case["catalog"]]["source"]
+            for relative in manifest["sources"][source_name]["notices"]:
+                src = source_path(release_path, "notices/" + source_name + "/" + relative)
+                dst = task / "notices" / source_name / relative
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
             for member in manifest["catalogs"][case["catalog"]]["members"]:
                 source = source_path(release_path, "catalogs/" + case["catalog"] + "/" + member["name"])
                 for relative, _ in member["files"]:
@@ -89,10 +95,10 @@ def prepare(*, release: str, manifest_sha256: str, output: str) -> Path:
                     dst = environment / "skills" / member["name"] / relative
                     dst.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(src, dst)
-            rows.append({"task_name": name, "responses_create_params": {"input": []}})
+            rows.append({"task_id": name, "task_name": name, "responses_create_params": {"input": []}})
         (staged / "gym.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
         (staged / "package.json").write_text(
-            json.dumps({"benchmark_version": "0.2.0", "manifest_sha256": manifest_sha256})
+            json.dumps({"benchmark_version": "0.2.1", "manifest_sha256": manifest_sha256})
         )
         staged.rename(destination)
     return destination / "gym.jsonl"

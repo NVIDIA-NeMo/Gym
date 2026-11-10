@@ -1054,8 +1054,8 @@
       "target": "skills/bionemo-agent-toolkit/skills/kermt-finetune",
       "target_tree_sha256": "7c5428cb551fd85a6f8531432e14e025bb070a740c97a4a99e82ea9d55288216",
       "catalog": "bionemo-9984d9c3ec80",
-      "prompt": "Prepare a standalone KERMT fine-tuning configuration and command template for a pretrained grover_base molecular encoder and a labeled SMILES CSV with three regression targets: logP, solubility, and melting_point. Use a learning rate of 0.0001 and 100 epochs. Use placeholders for the checkpoint, CSV, and output paths; no files are supplied. Explain the required input format and configuration without inspecting files or launching training.",
-      "prompt_sha256": "76af0c49fe8d5d4a52c2814b2b9f98e45b9e799634341fe03c4f8927b9177c56",
+      "prompt": "Prepare a standalone KERMT fine-tuning configuration and command template for a pretrained grover_base molecular encoder and a labeled SMILES CSV with three regression targets: logP, solubility, and melting_point. Use a learning rate of 0.0001 and 100 epochs. Use placeholders for the checkpoint, CSV, and output paths; no files are supplied. Explain the required input format and configuration without launching training or launching training.",
+      "prompt_sha256": "478aba05dd106a3c828f04910d6bf8511516a6f998618af91b7c63bd5e7a8200",
       "provenance": {
         "kind": "adapted_completion",
         "path": "skills/bionemo-agent-toolkit/skills/kermt-finetune/evals/evals.json",

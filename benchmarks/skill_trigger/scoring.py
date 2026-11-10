@@ -76,7 +76,7 @@ def returned_text(text: str, extra: dict) -> str | None:
     """Exclude explicit tool failures; retain unwrapped text emitted by Harbor."""
     if extra.get("is_error") or extra.get("status") in {"failed", "error"}:
         return None
-    if re.search(r"Process exited with code [1-9][0-9]*", text):
+    if re.search(r"Process exited with code -?[1-9][0-9]*", text):
         return None
     try:
         payload = json.loads(text)
@@ -120,6 +120,8 @@ def score_trajectory(trajectory: Trajectory, *, sources: dict[str, str], target:
             tool = call.function_name.rsplit(".", 1)[-1]
             details = (step.extra or {}).get("tool_call_details", {}).get(result.source_call_id, {})
             extra = {**(step.extra or {}), **details, **(result.extra or {})}
+            if result.content is None and not (extra.get("is_error") or extra.get("status") in {"failed", "error"}):
+                raise EvidenceError("Missing tool result content")
             text = returned_text(text_content(result.content), extra)
             if text is None:
                 continue
@@ -143,3 +145,11 @@ def score_trajectory(trajectory: Trajectory, *, sources: dict[str, str], target:
     if not matched and (delegated or trajectory.subagent_trajectories):
         raise EvidenceError("Unscored: root did not open the skill and delegated traces require separate verification")
     return int(matched)
+
+
+def score_negative_trajectory(trajectory: Trajectory, *, sources: dict[str, str], harness: str) -> int:
+    """Reward a complete root session that opens none of its installed skills."""
+    if not sources:
+        raise EvidenceError("Negative control requires a nonempty catalog")
+    opened = [score_trajectory(trajectory, sources=sources, target=name, harness=harness) for name in sources]
+    return int(not any(opened))

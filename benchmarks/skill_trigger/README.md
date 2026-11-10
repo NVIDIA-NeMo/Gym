@@ -66,7 +66,7 @@ Supply `OPENAI_API_KEY` in the worker environment. The supplied profiles use an 
 gym eval run \
   --config benchmarks/skill_trigger/configs/pi/config.yaml \
   --agent harbor_agent_general --model openai/MODEL_ID \
-  --input /absolute/path/to/tasks/gym.jsonl \
+  --split benchmark \
   --output /absolute/path/to/new-run/rollouts.jsonl --num-repeats 3 \
   ++policy_base_url=https://api.openai.com/v1 \
   ++skill_trigger_settings.release=/absolute/path/to/release \
@@ -86,3 +86,47 @@ python -m pytest --confcutdir=benchmarks/skill_trigger/tests benchmarks/skill_tr
 ```
 
 Tests cover source integrity, hidden-label exclusion, packaging, score success/miss/error cases, all five resolved Gym configurations, and the two guidance overrides. Before release, validate representative real-model runs for each profile and inspect their trajectories. Keep the PR draft until source clearance and model validation are complete.
+
+
+## Revision 0.2.1 and negative controls
+
+Revision 0.2.1 corrects missing-content and signed-exit scoring, task IDs, notices,
+and two contradictory positive prompts. Earlier frozen releases and results remain
+separate; their observations must not be relabeled as results for revised prompts.
+The canonical selection still has 110 positive cases and nine source-blocked cases.
+
+A separate six-case control release tests whether the agent opens any installed
+skill for self-contained arithmetic or repetition prompts. It uses two prompts per
+collection and the full catalog from that collection's lexicographically first
+cleared case. Review these catalogs before execution. These simple controls measure
+unnecessary opening on these prompts, not general skill-selection specificity.
+
+Create it from an already cleared release, then package its new manifest using the
+same package command above:
+
+```sh
+python -m benchmarks.skill_trigger.negative_controls \
+  --release /absolute/path/to/cleared-release \
+  --manifest-sha256 MANIFEST_SHA256 \
+  --output /absolute/path/to/new-negative-release
+```
+
+A negative control earns reward 1 for no verified skill openings and 0 for any
+verified skill opening. Missing evidence or unresolved delegation remains unscored.
+Report its **unnecessary-opening rate** (1 minus mean reward) separately from the
+positive target-opening rate. Bulk-reading every skill fails the negative controls;
+useful multi-skill behavior on positive cases is not penalized.
+
+Use three attempts per control and all five profiles with the same identified model.
+Preserve every planned attempt, including failed and pending attempts, in an attempt
+ledger matching `report.Attempt`. The summary separates models, runtimes, profiles,
+collections, release hashes, and control kinds:
+
+```sh
+python -m benchmarks.skill_trigger.report --attempts /absolute/path/to/attempts.jsonl
+```
+
+Each summary includes the numerator, scored denominator, unscored count, and pending
+count. No scored attempts means an unavailable rate, never zero. This ledger summary
+supplements Gym's native `gym eval profile`; it does not infer absent attempts from
+successful rollouts. Never pool exploratory probes with benchmark baselines.
