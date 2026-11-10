@@ -1850,6 +1850,7 @@ class TestApp:
         self, monkeypatch: MonkeyPatch, forward: bool
     ) -> None:
         server = self._setup_server(monkeypatch, forward_session_id_as_conversation_id=forward)
+        server.config.forward_session_id_header = forward
         mock_chat_completion = NeMoGymChatCompletion(
             id="chtcmpl-conv",
             object="chat.completion",
@@ -1884,8 +1885,29 @@ class TestApp:
 
         if forward:
             assert captured_kwargs["conversation_params"] == {"conversation_id": "session-1"}
+            assert captured_kwargs["_request_headers"] == {"X-Session-ID": "session-1"}
         else:
             assert "conversation_params" not in captured_kwargs
+            assert "_request_headers" not in captured_kwargs
+
+    @mark.parametrize("forward", [False, True])
+    def test_backend_session_header_uses_cookie_not_child_capture(self, monkeypatch, forward):
+        from nemo_gym.core.episode_context import rollout_context
+
+        server = self._setup_server(monkeypatch)
+        server.config.forward_session_id_header = forward
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: "unique-rollout-session"}
+        request.headers = {"x-session-id": "child-invocation"}
+        with rollout_context("0-0"):
+            options = server._backend_session_options(request)
+        assert options == ({"_request_headers": {"X-Session-ID": "unique-rollout-session"}} if forward else {})
+        request.session = {}
+        if forward:
+            with raises(ValueError, match="Gym session identity"):
+                server._backend_session_options(request)
+        else:
+            assert server._backend_session_options(request) == {}
 
     def test_responses_multistep(self, monkeypatch: MonkeyPatch):
         server = self._setup_server(monkeypatch)

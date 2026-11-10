@@ -606,6 +606,9 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 
     default_headers: Dict[str, str] = Field(default_factory=dict)
 
+    # Opt-in backend affinity; use the rollout identity, never the child invocation ID.
+    forward_session_id_header: bool = False
+
     # Optional path to a file that publishes the current backend base_url.
     # Used for shared serving jobs that move hosts when they restart.
     endpoint_file: Optional[str] = None
@@ -1600,6 +1603,14 @@ class VLLMModel(SimpleResponsesAPIModel):
                 total,
             )
 
+    def _backend_session_options(self, request: Request) -> Dict[str, Any]:
+        if not self.config.forward_session_id_header:
+            return {}
+        session_id = request.session.get(SESSION_ID_KEY)
+        if not session_id:
+            raise ValueError("forward_session_id_header requires a Gym session identity")
+        return {"_request_headers": {"X-Session-ID": str(session_id)}}
+
     async def _prepare_chat_request(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming
     ) -> Dict[str, Any]:
@@ -1671,6 +1682,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             if context is not None and context.parent_resolution_mode == "source_history"
             else {}
         )
+        transport_options.update(self._backend_session_options(request))
         try:
             try:
                 chat_completion_dict = await self._call_endpoint(
@@ -2084,10 +2096,13 @@ class VLLMModel(SimpleResponsesAPIModel):
         note_generation_request(body_dict)
         client = self._resolve_client(request)
 
+        transport_options = self._backend_session_options(request)
         execution = start_model_execution(request, upstream_attempted=True)
         try:
             try:
-                completion_dict = await self._call_endpoint(client, client.create_completion(**completion_body))
+                completion_dict = await self._call_endpoint(
+                    client, client.create_completion(**transport_options, **completion_body)
+                )
             except ClientResponseError as refusal:
                 if not await self._refit_output_budget(
                     execution,
@@ -2098,7 +2113,9 @@ class VLLMModel(SimpleResponsesAPIModel):
                     lambda: self._completion_tokenize_body(prompt, completion_body),
                 ):
                     raise
-                completion_dict = await self._call_endpoint(client, client.create_completion(**completion_body))
+                completion_dict = await self._call_endpoint(
+                    client, client.create_completion(**transport_options, **completion_body)
+                )
         except ClientResponseError as e:
             execution.update(response_source="upstream", upstream_status_code=e.status)
             result_content_str = e.response_content.decode(errors="replace")

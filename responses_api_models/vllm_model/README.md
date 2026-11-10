@@ -166,3 +166,12 @@ and 503 responses do not extend the configured HTTP attempt count.
 These settings also apply after endpoint-file rebinding.
 `request_timeout_seconds` bounds each HTTP attempt; it is not an overall
 agent retry budget. Agent-level retries remain separately configured.
+
+### Backend session affinity
+
+Set `forward_session_id_header: true` only for backends that route on
+`X-Session-ID`. Each generation request forwards the Gym session cookie identity,
+which stays stable across turns and HTTP retries; child capture invocation IDs
+do not replace it. This applies to both Chat Completions and Completions mode.
+The option defaults to false and does not change the JSON request body.
+Do not also configure a static `X-Session-ID` in `default_headers`.

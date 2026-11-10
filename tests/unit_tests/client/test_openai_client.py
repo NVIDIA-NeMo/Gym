@@ -63,6 +63,30 @@ class TestOpenAIUtils:
         logged = "Request kwargs:" in capsys.readouterr().out
         assert logged is debug_enabled
 
+    @pytest.mark.parametrize(
+        "method,path",
+        [
+            ("create_chat_completion", "chat/completions"),
+            ("create_completion", "completions"),
+        ],
+    )
+    async def test_per_request_headers_do_not_enter_model_payload(self, monkeypatch, method, path):
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
+        response = SimpleNamespace(ok=True)
+        request = AsyncMock(return_value=response)
+        monkeypatch.setattr(client, "_request", request)
+        monkeypatch.setattr(client, "_raise_for_status", AsyncMock())
+        monkeypatch.setattr(client, "_read_response_json", AsyncMock(return_value={"id": "ok"}))
+        for session in ["rollout-a", "rollout-b", "rollout-a"]:
+            await getattr(client, method)(model="m", _request_headers={"X-Session-ID": session})
+            request.assert_awaited_with(
+                method="POST",
+                url=f"https://example.com/v1/{path}",
+                json={"model": "m"},
+                headers={"X-Session-ID": session},
+            )
+        assert client.default_headers == {}
+
     async def test_create_embeddings_posts_to_embeddings_url(self, monkeypatch) -> None:
         client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
         response = SimpleNamespace(ok=True)
