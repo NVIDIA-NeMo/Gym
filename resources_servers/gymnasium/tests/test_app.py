@@ -80,6 +80,11 @@ class _MaskingEnv(GymnasiumServer):
         return None, 0.2, False, True, info
 
 
+class _KindlessMaskingEnv(GymnasiumServer):
+    async def step(self, action, metadata, session_id=None):
+        return None, 0.0, True, False, {"mask_sample": True, "failure_reason": "no reply"}
+
+
 class _NoneFailureFieldsEnv(GymnasiumServer):
     async def step(self, action, metadata, session_id=None):
         # An env that computes the flags and leaves them unset: None must read as absent, not as a bad value.
@@ -185,6 +190,15 @@ class TestGymnasiumServer:
         # Only the env's own metrics stay in info, so aggregation columns do not change shape.
         assert resp.info == {"score": 0.2}
         assert resp.model_dump()["mask_sample"] is True
+
+    @pytest.mark.asyncio
+    async def test_a_masked_step_without_a_kind_gets_the_generic_episode_kind(self):
+        env = _make_env(_KindlessMaskingEnv)
+        body = EnvStepRequest(responses_create_params={"input": []}, response=_make_response("x"))
+        resp = await env._step_endpoint(body, _FakeRequest("sid-1"))
+        assert resp.mask_sample is True
+        assert resp.failure_kind == "environment_episode_failed"
+        assert resp.failure_reason == "no reply"
 
     @pytest.mark.asyncio
     async def test_step_without_failure_fields_reports_a_valid_sample(self):

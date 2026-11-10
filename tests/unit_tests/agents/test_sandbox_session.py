@@ -99,7 +99,7 @@ async def test_completed_execution_captures_once_before_release(session, owned):
     if owned:
         session.sandbox.stop.assert_awaited_once()
         session.sandbox.disconnect.assert_not_awaited()
-        assert session.sandbox.exec.await_count == 1
+        assert "mv /session /session.closed" in session.sandbox.exec.await_args.args[0]
     else:
         session.sandbox.stop.assert_not_awaited()
         session.sandbox.disconnect.assert_awaited_once()
@@ -156,7 +156,7 @@ async def test_interruption_captures_before_transport_cancellation_and_release(s
         await running
     assert session.artifacts == "partial transcript"
     collector.assert_awaited_once()
-    assert events == ["collect", "cancel_exec", *(["stop_sandbox"] if owned else ["remove_files", "disconnect"])]
+    assert events == ["collect", "cancel_exec", "remove_files", "stop_sandbox" if owned else "disconnect"]
 
 
 async def test_close_joins_collection_started_by_normal_completion(session):
@@ -1114,3 +1114,63 @@ def test_shell_assignments_round_trip_through_bash(tmp_path):
 def test_shell_assignments_reject_names_bash_cannot_assign(values):
     with pytest.raises(ValueError, match="Invalid"):
         shell_assignments(values)
+
+
+@pytest.mark.parametrize("launched", [False, True], ids=["seed-only", "completed"])
+async def test_owned_local_session_reclaims_runtime_without_deleting_task(tmp_path, launched):
+    from nemo_gym.sandbox.providers.base import SandboxSpec
+    from nemo_gym.sandbox.providers.local.provider import LocalProvider
+
+    workdir, runtime = tmp_path / "task", tmp_path / "private-session"
+    workdir.mkdir()
+    runtime.mkdir()
+    (workdir / "result.txt").write_text("task output")
+    (runtime / "node-runtime").write_text("private runtime")
+    sandbox = AsyncSandbox(LocalProvider())
+    await sandbox.start(SandboxSpec(workdir=str(workdir)))
+    session = SandboxSession(
+        sandbox=sandbox, session_dir=str(runtime), workdir=str(workdir), harness="test", owns_sandbox=True
+    )
+    session.launch_started = launched
+    if launched:
+        session.cleanup = RECEIPT
+    await session.close(timeout=5)
+    assert not runtime.exists()
+    assert not runtime.with_name(runtime.name + ".closed").exists()
+    assert (workdir / "result.txt").read_text() == "task output"
+
+
+@pytest.mark.parametrize("failure", ["exit", "transport", "timeout"])
+async def test_owned_session_stops_even_when_runtime_removal_fails(session, caplog, failure):
+    session.owns_sandbox = True
+    await execute(session)
+    if failure == "exit":
+        session.sandbox.exec.return_value = SandboxExecResult("", "disk error", 1)
+    elif failure == "transport":
+        session.sandbox.exec.side_effect = RuntimeError("transport unavailable")
+    else:
+
+        async def hanging_exec(*args, **kwargs):
+            await asyncio.Future()
+
+        session.sandbox.exec.side_effect = hanging_exec
+    await session.close(timeout=0.05)
+    await session.close(timeout=0.05)
+    assert session.closed
+    assert session.artifacts == "transcript"
+    assert "Could not remove test session files; stopping owned sandbox" in caplog.text
+    session.sandbox.stop.assert_awaited_once()
+
+
+async def test_owned_session_removal_cancellation_still_stops_sandbox(session):
+    session.owns_sandbox = True
+    await execute(session)
+    session.sandbox.exec.side_effect = asyncio.CancelledError()
+    with pytest.raises(asyncio.CancelledError):
+        await session.close(timeout=1)
+    assert session.sandbox_stopped
+    assert not session.closed
+    session.sandbox.stop.assert_awaited_once()
+    await session.close(timeout=1)
+    assert session.closed
+    session.sandbox.stop.assert_awaited_once()

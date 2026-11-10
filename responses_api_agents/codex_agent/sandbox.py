@@ -104,19 +104,38 @@ class CodexSandboxSession(AgentSessionState):
                     raise
                 # The agent base replays the activation error independently of close.
 
-    async def execute(self, payload: dict[str, JsonValue], *, timeout: float, close_timeout: float) -> str:
-        """Run through the common lifecycle; the adapter validates terminal events."""
+    async def execute(
+        self,
+        payload: dict[str, JsonValue],
+        *,
+        timeout: float,
+        close_timeout: float,
+        files: dict[str, str] | None = None,
+    ) -> str:
+        """Run through the common lifecycle; the adapter validates terminal events.
+
+        ``files`` are staged with the invocation; see ``stage_activation``.
+        """
         self.capture_budget_s = close_timeout
         return await self.session.execute(
-            stage_activation=lambda: self.stage_activation(payload),
+            stage_activation=lambda: self.stage_activation(payload, files=files),
             collect=self.collect_artifacts,
             timeout=timeout,
             close_timeout=close_timeout,
         )
 
-    async def stage_activation(self, payload: dict[str, JsonValue]) -> SandboxCommand:
-        """Stage the invocation and return the runner command that starts the Codex launcher."""
+    async def stage_activation(
+        self, payload: dict[str, JsonValue], *, files: dict[str, str] | None = None
+    ) -> SandboxCommand:
+        """Stage the invocation and return the runner command that starts the Codex launcher.
+
+        ``files`` maps paths under the session directory to text, kept out of ``input.json``. They are uploaded here,
+        inside the session's execute, so that close cancels and waits for the uploads before it releases the
+        sandbox.
+        """
         directory = self.session.session_dir
+        for name, text in (files or {}).items():
+            await self.upload_text(name, text)
         await self.upload_json("input.json", payload)
         await self.upload_text("prompt.txt", payload["prompt"])
         params = {
