@@ -202,6 +202,49 @@ def test_a_successful_reply_keeps_the_recovered_failures_that_fit() -> None:
     assert 0 < len(decoded.events) < len(recovered)
 
 
+def test_a_report_one_byte_over_the_budget_still_keeps_its_own_failure() -> None:
+    """``"omitted":true`` is a byte shorter than ``false``; a report one byte over must still lose an event, not
+    fall back to omitting everything."""
+    own = _model("own failure")
+
+    def report(padding: int) -> FailureReport:
+        recovered = [_model("r" * 1800), _model("r" * padding)]
+        with RequestFailureLog.capture() as log:
+            for failure in recovered:
+                observe_failure(failure)
+            return log.reply_report(own)
+
+    def compact(value: FailureReport) -> int:
+        return len(json.dumps(value.model_dump(mode="json"), ensure_ascii=True, separators=(",", ":")))
+
+    padding = 1800
+    padding += FailureHeader.MAX_BYTES + 1 - compact(report(padding))
+    over = report(padding)
+    assert compact(over) == FailureHeader.MAX_BYTES + 1 and not over.omitted
+
+    decoded = FailureHeader.decode(FailureHeader.encode(over))
+    assert decoded.failure_id == own.event_id and decoded.omitted
+    assert 1 < len(decoded.events) < len(over.events)
+
+
+def test_a_newer_event_too_large_to_fit_does_not_crowd_out_a_smaller_older_one() -> None:
+    small, larger, newest = _model("s" * 50), _model("l" * 1990), _model("n" * 1990)
+    own = _model("own failure")
+    with RequestFailureLog.capture() as log:
+        for failure in (small, larger, newest):
+            observe_failure(failure)
+        report = log.reply_report(own)
+    assert [key for key in report.events if key != own.event_id] == [
+        newest.event_id,
+        larger.event_id,
+        small.event_id,
+    ]
+
+    decoded = FailureHeader.decode(FailureHeader.encode(report))
+    assert decoded.failure_id == own.event_id and decoded.omitted
+    assert set(decoded.events) == {own.event_id, newest.event_id, small.event_id}
+
+
 def test_a_report_whose_own_failure_chain_does_not_fit_is_omitted_whole() -> None:
     cause = _model("c" * 2000)
     middle = _chained(_model("m" * 2000), cause)

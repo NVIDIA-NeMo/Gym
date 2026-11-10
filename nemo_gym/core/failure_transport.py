@@ -39,8 +39,9 @@ class FailureHeader:
     aiohttp's client rejects a reply whose header line (name and value) is over 8190 bytes, and the caller then
     sees an unreadable error instead of the real status and body, so a report's JSON is kept within ``MAX_BYTES``.
     A report over it is trimmed and marked ``omitted``, and every hop above keeps that flag: the request's own
-    failure and its cause chain are always kept, then the other events in report order, each with its causes,
-    while they fit. A report whose own failure chain does not fit alone is sent as ``{"omitted": true}``.
+    failure and its cause chain are always kept, then each other event, in report order, that still fits with
+    its causes. A larger event that does not fit is skipped, so a smaller one after it can still be kept. A report
+    whose own failure chain does not fit alone is sent as ``{"omitted": true}``.
     """
 
     NAME: ClassVar[str] = "X-NG-Failure-Report"
@@ -86,7 +87,9 @@ class FailureHeader:
 
         # The compact JSON of the kept events is the empty report's JSON plus each event's ``"id":{...}`` and a
         # separating comma, so the size is summed per event instead of serializing the report on every insert.
-        size = len(_compact_json({"failure_id": report.failure_id, "events": {}, "omitted": True}))
+        # It is budgeted with ``"omitted":false``, one byte longer than the ``true`` sent, so a report over
+        # ``MAX_BYTES`` always loses at least one event and its ``omitted`` flag is truthful.
+        size = len(_compact_json({"failure_id": report.failure_id, "events": {}, "omitted": False}))
         kept: set[str] = set()
 
         def add(chain: list[str]) -> bool:
@@ -108,9 +111,6 @@ class FailureHeader:
         for event_id in events:
             if event_id not in kept:
                 add(with_causes(event_id))
-        if len(kept) == len(events):
-            # Nothing was cut; the report fit only because ``"omitted":true`` is one byte shorter than ``false``.
-            return None
         # Report order is kept, so the request's own failure stays where ``merged`` put it.
         return FailureReport.model_construct(
             failure_id=report.failure_id,
