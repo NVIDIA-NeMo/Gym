@@ -260,7 +260,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
             global_config_dict = get_global_config_dict()
 
             policy_model_name = global_config_dict["policy_model_name"]
-            base_url = self._resolve_model_base_url(global_config_dict)
+            base_url = self._resolve_model_base_url(global_config_dict, body)
             run_timestamp = datetime.now(timezone.utc)
             run_id = self._build_run_id(run_timestamp)
 
@@ -426,14 +426,15 @@ class HarborAgent(SimpleResponsesAPIAgent):
         sanitized = sanitized.strip("._")
         return sanitized or "unknown"
 
-    def _resolve_model_base_url(self, global_config_dict: Any) -> str:
-        """Resolve model base URL from required model_server reference."""
+    def _resolve_model_base_url(self, global_config_dict: Any, body: HarborRunRequest) -> str:
+        """Resolve the model base URL from the required model_server reference, with this run's URL segments."""
         server_name = self.config.model_server.name
         model_server_config = get_first_server_config_dict(
             global_config_dict,
             server_name,
         )
-        return f"http://{model_server_config['host']}:{model_server_config['port']}/v1"
+        base_url = f"http://{model_server_config['host']}:{model_server_config['port']}"
+        return f"{self.base_url_for_run(base_url, body)}/v1"
 
     def _build_job_config(
         self,

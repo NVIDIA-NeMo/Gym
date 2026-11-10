@@ -41,6 +41,7 @@ from nemo_gym.core import (
     CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
     FailureBoundary,
     FailureHeader,
+    ModelCallSampling,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionAssistantMessageForTrainingParam,
     NeMoGymChatCompletionAssistantMessageParam,
@@ -70,10 +71,12 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
     NgFailureEvent,
+    encode_model_sampling,
     rollout_context,
 )
 from nemo_gym.models import (
     PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
+    CaptureStore,
     ChatCompletionsConverter,
     PolicyModelParticipant,
     VLLMWorkerCaptureHandler,
@@ -7116,6 +7119,329 @@ class TestSamplingOverrides:
         assert capsys.readouterr().out == ""
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# A training framework's sampling values in the model URL (/ng-sampling/<values|null>)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _sampling_model_server(
+    tmp_path, *, sampling_overrides=None, required: bool = True, policy_checkpoint: bool = False
+) -> VLLMModel:
+    global_config = {
+        "observability_enabled": True,
+        "model_call_capture_dir": str(tmp_path),
+        "policy": {"responses_api_models": {"vllm_model": {}}},
+        "model_call_sampling": {"required_model_servers": ["policy"] if required else []},
+    }
+    if policy_checkpoint:
+        global_config["checkpoint"] = {"enabled": True, "control_auth_token": "test"}
+    return VLLMModel(
+        config=VLLMModelConfig(
+            host="127.0.0.1",
+            port=0,
+            name="policy",
+            entrypoint="app.py",
+            base_url="http://unused/v1",
+            api_key="gym",  # pragma: allowlist secret
+            model="served-policy",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            sampling_overrides=sampling_overrides,
+            checkpoint={"policy": policy_checkpoint},
+        ),
+        server_client=MagicMock(spec=ServerClient, global_config_dict=global_config),
+    )
+
+
+def _sampling_provider() -> MagicMock:
+    provider = MagicMock()
+    provider.create_chat_completion = AsyncMock(
+        return_value={
+            "id": "chatcmpl-sampling",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "served-policy",
+            "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "done"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+    )
+    return provider
+
+
+_SAMPLING_BODIES = {
+    "chat/completions": (
+        {"messages": [{"role": "user", "content": "task"}], "max_tokens": 1024},
+        "max_completion_tokens",
+    ),
+    "responses": ({"input": [{"role": "user", "content": "task"}], "max_output_tokens": 1024}, "max_output_tokens"),
+    # Claude Code's endpoint: Gym serves Anthropic Messages through its own Responses path.
+    "messages": ({"messages": [{"role": "user", "content": "task"}], "max_tokens": 1024}, "max_tokens"),
+}
+
+
+@mark.parametrize("dialect", list(_SAMPLING_BODIES))
+@mark.parametrize("policy_checkpoint", [False, True])
+def test_a_trained_agents_values_reach_the_engine_and_capture_after_admission(tmp_path, dialect, policy_checkpoint):
+    server = _sampling_model_server(tmp_path, policy_checkpoint=policy_checkpoint)
+    provider = _sampling_provider()
+    server._clients = [provider]
+    app = server.setup_webserver()
+    if policy_checkpoint:
+        gate = app.state.nemo_gym_policy_gate
+        gate.admit = AsyncMock(wraps=gate.admit)
+    capture_path = "/training-token-capture" if policy_checkpoint else ""
+    sampling = ModelCallSampling(temperature=0.0, top_p=0.8, max_output_tokens=73)
+    body, limit_field = _SAMPLING_BODIES[dialect]
+
+    response = TestClient(app).post(
+        f"/ng-rollout/integration-a2{capture_path}/ng-sampling/{encode_model_sampling(sampling)}/v1/{dialect}",
+        json=body | {"temperature": 1.0, "top_p": 1.0},
+    )
+
+    assert response.status_code == 200, response.text
+    if policy_checkpoint:
+        gate.admit.assert_awaited_once_with("integration-a2")
+    sent = provider.create_chat_completion.await_args.kwargs
+    assert (sent["temperature"], sent["top_p"]) == (0.0, 0.8)
+    # Exactly one limit reaches the engine; a caller limit left next to the cap would let the larger one win.
+    assert [sent[k] for k in ("max_tokens", "max_completion_tokens") if k in sent] == [73]
+    # A trained agent's call is not flagged, so a training framework's generation server still checks it.
+    assert "_headers" not in sent
+    [captured] = CaptureStore(tmp_path).read("integration-a2")
+    assert (captured["request"]["temperature"], captured["request"]["top_p"]) == (0.0, 0.8)
+    assert captured["request"][limit_field] == 73
+
+
+def test_a_trained_agents_server_refuses_a_call_that_dropped_its_segment(tmp_path):
+    server = _sampling_model_server(tmp_path)
+    provider = _sampling_provider()
+    server._clients = [provider]
+
+    response = TestClient(server.setup_webserver()).post(
+        "/ng-rollout/dropped-a1/v1/responses", json={"input": "task", "temperature": 1.0, "top_p": 1.0}
+    )
+
+    assert response.status_code == 422, response.text
+    provider.create_chat_completion.assert_not_awaited()
+    assert CaptureStore(tmp_path).read("dropped-a1") == []
+
+
+# A judge on the trained agent's Model Server, or on its own Model Server with or without a pin. A trained agent's
+# Model Server cannot pin; see the startup test.
+@mark.parametrize("required, sampling_overrides", [(True, None), (False, None), (False, {"top_p": 0.5})])
+def test_an_untrained_callers_call_keeps_its_own_sampling_and_is_flagged(tmp_path, required, sampling_overrides):
+    server = _sampling_model_server(tmp_path, required=required, sampling_overrides=sampling_overrides)
+    provider = _sampling_provider()
+    server._clients = [provider]
+
+    response = TestClient(server.setup_webserver()).post(
+        "/ng-rollout/judge-a1/ng-sampling/null/v1/responses",
+        json={"input": "grade", "temperature": 0.0, "top_p": 0.9},
+    )
+
+    assert response.status_code == 200, response.text
+    sent = provider.create_chat_completion.await_args.kwargs
+    assert sent["temperature"] == 0.0
+    assert sent["top_p"] == (sampling_overrides or {"top_p": 0.9})["top_p"]
+    # The generation server learns that this call keeps its caller's sampling.
+    assert sent["_headers"] == {"x-ng-sampling": "null"}
+
+
+async def test_a_null_calls_header_reaches_the_wire(monkeypatch):
+    """vllm_model hands x-ng-sampling: null to the client (see above); the client must put it on the HTTP request.
+
+    NeMo RL's vLLM skips its train/val check only on that header, so losing it fails every judge call there.
+    """
+
+    class Sent(Exception):
+        pass
+
+    captured: dict[str, Any] = {}
+
+    async def fake_request(**kwargs: Any) -> None:
+        captured.update(kwargs)
+        raise Sent
+
+    monkeypatch.setattr("nemo_gym.client.openai_client.request", fake_request)
+    client = NeMoGymAsyncOpenAI(api_key="abc", base_url="http://engine/v1", default_headers={"x-default": "1"})
+    with raises(Sent):
+        await client.create_chat_completion(_headers={"x-ng-sampling": "null"}, model="m", messages=[])
+    assert captured["headers"]["x-ng-sampling"] == "null"
+    assert captured["headers"]["x-default"] == "1"
+    assert captured["headers"]["Authorization"] == "Bearer abc"
+
+
+def test_a_pinned_server_refuses_a_training_frameworks_values(tmp_path):
+    server = _sampling_model_server(tmp_path, required=False, sampling_overrides={"temperature": 1.0})
+    provider = _sampling_provider()
+    server._clients = [provider]
+    app = server.setup_webserver()
+    server.setup_exception_middleware(app)
+    segment = encode_model_sampling(ModelCallSampling(temperature=0.6, top_p=0.95))
+
+    response = TestClient(app, raise_server_exceptions=False).post(
+        f"/ng-sampling/{segment}/v1/responses", json={"input": "task"}
+    )
+
+    # A configuration conflict, not a transient failure: 409 ends the rollout instead of retrying it.
+    assert response.status_code == 409
+    assert "sampling_overrides ['temperature']" in response.text
+    provider.create_chat_completion.assert_not_awaited()
+
+
+def test_a_trained_agents_server_cannot_also_pin_sampling(tmp_path):
+    with raises(ValueError, match=r"cannot set sampling_overrides \['temperature'\]"):
+        _sampling_model_server(tmp_path, sampling_overrides={"temperature": 1.0, "logprobs": True})
+
+
+def test_a_trained_agents_server_may_pin_what_the_engine_reports(tmp_path):
+    """Score centering pins logprobs and top_logprobs on the policy's server; they do not change sampling."""
+    server = _sampling_model_server(tmp_path, sampling_overrides={"logprobs": True, "top_logprobs": 16})
+    provider = _sampling_provider()
+    server._clients = [provider]
+    segment = encode_model_sampling(ModelCallSampling(temperature=0.6, top_p=0.95))
+
+    response = TestClient(server.setup_webserver()).post(
+        f"/ng-rollout/trained-a1/ng-sampling/{segment}/v1/responses", json={"input": "task"}
+    )
+
+    assert response.status_code == 200, response.text
+    sent = provider.create_chat_completion.await_args.kwargs
+    assert (sent["temperature"], sent["top_p"]) == (0.6, 0.95)
+    assert (sent["logprobs"], sent["top_logprobs"]) == (True, 16)
+
+
+def _completions_provider() -> MagicMock:
+    provider = _sampling_provider()
+    provider.create_completion = AsyncMock(
+        return_value={
+            "id": "cmpl-sampling",
+            "object": "text_completion",
+            "created": 0,
+            "model": "served-policy",
+            "choices": [{"index": 0, "text": "done", "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+    )
+    return provider
+
+
+@mark.parametrize("harness_limit, expected", [(1024, 73), (11, 11)])
+def test_a_trained_call_on_the_completions_path_sends_the_cap_as_max_tokens(tmp_path, harness_limit, expected):
+    """/v1/completions reads only max_tokens; the cap the middleware writes as max_completion_tokens must arrive."""
+    server = _sampling_model_server(tmp_path)
+    server.config.use_completions_api = True
+    provider = _completions_provider()
+    server._clients = [provider]
+    sampling = ModelCallSampling(temperature=0.0, top_p=0.8, max_output_tokens=73)
+
+    response = TestClient(server.setup_webserver()).post(
+        f"/ng-rollout/c-a1/ng-sampling/{encode_model_sampling(sampling)}/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "task"}], "max_tokens": harness_limit, "temperature": 1.0},
+    )
+
+    assert response.status_code == 200, response.text
+    sent = provider.create_completion.await_args.kwargs
+    assert (sent["temperature"], sent["top_p"], sent["max_tokens"]) == (0.0, 0.8, expected)
+    provider.create_chat_completion.assert_not_awaited()
+
+
+def test_a_streamed_trained_call_samples_with_the_values(tmp_path):
+    server = _sampling_model_server(tmp_path)
+    provider = _sampling_provider()
+    server._clients = [provider]
+    sampling = ModelCallSampling(temperature=0.0, top_p=0.8, max_output_tokens=73)
+
+    response = TestClient(server.setup_webserver()).post(
+        f"/ng-rollout/s-a1/ng-sampling/{encode_model_sampling(sampling)}/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "task"}], "stream": True, "temperature": 1.0, "top_p": 1.0},
+    )
+
+    assert response.status_code == 200, response.text
+    sent = provider.create_chat_completion.await_args.kwargs
+    assert (sent["temperature"], sent["top_p"], sent["max_completion_tokens"]) == (0.0, 0.8, 73)
+    assert "_headers" not in sent
+
+
+def test_a_malformed_segment_never_reaches_the_engine(tmp_path):
+    server = _sampling_model_server(tmp_path)
+    provider = _sampling_provider()
+    server._clients = [provider]
+
+    response = TestClient(server.setup_webserver()).post(
+        "/ng-rollout/m-a1/ng-sampling/not+valid/v1/responses", json={"input": "task"}
+    )
+
+    assert response.status_code == 422
+    provider.create_chat_completion.assert_not_awaited()
+
+
+def test_gym_only_evaluation_sends_the_request_unchanged(tmp_path):
+    """Without the model_call_sampling block, a call without a segment passes as before and is not flagged."""
+    server = VLLMModel(
+        config=VLLMModelConfig(
+            host="127.0.0.1",
+            port=0,
+            name="policy",
+            entrypoint="app.py",
+            base_url="http://unused/v1",
+            api_key="gym",  # pragma: allowlist secret
+            model="served-policy",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+        ),
+        server_client=MagicMock(spec=ServerClient, global_config_dict={}),
+    )
+    provider = _sampling_provider()
+    server._clients = [provider]
+
+    response = TestClient(server.setup_webserver()).post(
+        "/ng-rollout/e-a1/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "task"}], "temperature": 0.3, "top_p": 0.4, "max_tokens": 9},
+    )
+
+    assert response.status_code == 200, response.text
+    sent = provider.create_chat_completion.await_args.kwargs
+    assert (sent["temperature"], sent["top_p"], sent["max_tokens"]) == (0.3, 0.4, 9)
+    assert "max_completion_tokens" not in sent
+    assert "_headers" not in sent
+
+
+@mark.parametrize("use_completions_api", [False, True])
+def test_a_pinned_server_refuses_values_on_every_endpoint(tmp_path, use_completions_api):
+    server = _sampling_model_server(tmp_path, required=False, sampling_overrides={"top_p": 0.5})
+    server.config.use_completions_api = use_completions_api
+    provider = _completions_provider()
+    server._clients = [provider]
+    app = server.setup_webserver()
+    server.setup_exception_middleware(app)
+    segment = encode_model_sampling(ModelCallSampling(temperature=0.6, top_p=0.95))
+
+    response = TestClient(app, raise_server_exceptions=False).post(
+        f"/ng-sampling/{segment}/v1/chat/completions", json={"messages": [{"role": "user", "content": "task"}]}
+    )
+
+    assert response.status_code == 409, response.text
+    provider.create_chat_completion.assert_not_awaited()
+    provider.create_completion.assert_not_awaited()
+
+
+def test_a_null_call_on_the_completions_path_carries_no_header(tmp_path):
+    """Documents current behavior: x-ng-sampling: null is sent only on /v1/chat/completions."""
+    server = _sampling_model_server(tmp_path)
+    server.config.use_completions_api = True
+    provider = _completions_provider()
+    server._clients = [provider]
+
+    response = TestClient(server.setup_webserver()).post(
+        "/ng-rollout/j-a1/ng-sampling/null/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "grade"}], "temperature": 0.0},
+    )
+
+    assert response.status_code == 200, response.text
+    assert "_headers" not in provider.create_completion.await_args.kwargs
+
+
 class TestEndpointFile:
     def _make_server(self, tmp_path, **overrides) -> VLLMModel:
         params = dict(
@@ -8320,9 +8646,9 @@ class TestCodexRequests:
 
     def test_keepalive_streams_are_refused_on_the_native_responses_path(self) -> None:
         # vLLM issues the native path's response ids, which a keepalive stream cannot announce in advance.
-        server, _ = self._server(is_responses_native=True, stream_keepalive_s=0.02)
-        with raises(ValueError, match="stream_keepalive_s"):
-            server.setup_webserver()
+        # The config refuses it when it loads, before a local engine starts, not only in setup_webserver.
+        with raises(ValueError, match="stream_keepalive_s applies to the Chat Completions conversion"):
+            self._server(is_responses_native=True, stream_keepalive_s=0.02)
 
     def test_non_streaming_request_forwards_the_effort_too(self) -> None:
         server, client = self._server(forward_unvalidated_reasoning_effort=True)
@@ -8567,6 +8893,9 @@ class TestCodexRequests:
     def test_inline_tool_output_images_needs_the_chat_path(self) -> None:
         with raises(ValueError, match="requires is_responses_native=false"):
             self._server(inline_tool_output_images=True, is_responses_native=True)
+        # /v1/completions takes text-only messages, so every inlined image would be refused.
+        with raises(ValueError, match="requires use_completions_api=false"):
+            self._server(inline_tool_output_images=True, use_completions_api=True)
 
     @mark.parametrize(
         ("overrides", "content"),
@@ -8613,6 +8942,43 @@ class TestCodexRequests:
         terminal = self._events(response.text)[-1]
         assert terminal["type"] == "response.failed"
         assert "input_image" in terminal["response"]["error"]["message"]
+        client.create_chat_completion.assert_not_awaited()
+
+    URLLESS_IMAGES = [
+        {"type": "input_image", "file_id": "file-1", "detail": "auto"},
+        {"type": "input_image", "image_url": "", "detail": "auto"},
+    ]
+
+    @mark.parametrize("image", URLLESS_IMAGES, ids=["file_id", "empty_url"])
+    def test_inlining_keeps_the_placeholder_for_an_image_without_a_url(self, image: dict[str, Any]) -> None:
+        server, client = self._server(**self.CODEX_FIELDS, inline_tool_output_images=True)
+        client.create_chat_completion = AsyncMock(
+            return_value=self._completion({"role": "assistant", "content": "done", "reasoning": "r"})
+        )
+        output = {**self.VIEW_IMAGE_OUTPUT, "output": [image]}
+
+        response = TestClient(server.setup_webserver()).post(
+            "/v1/responses", json=self._codex_body([self.USER, self.VIEW_IMAGE_CALL, output])
+        )
+
+        assert response.status_code == 200
+        assert self._events(response.text)[-1]["type"] == "response.completed"
+        assert client.create_chat_completion.await_args.kwargs["messages"][-1]["content"] == [
+            {"type": "text", "text": "[image omitted from tool output]"}
+        ]
+
+    @mark.parametrize("image", URLLESS_IMAGES, ids=["file_id", "empty_url"])
+    def test_inlining_an_image_without_a_url_fails_without_dropping(self, image: dict[str, Any]) -> None:
+        server, client = self._server(inline_tool_output_images=True)
+        client.create_chat_completion = AsyncMock()
+        output = {**self.VIEW_IMAGE_OUTPUT, "output": [image]}
+
+        response = TestClient(server.setup_webserver()).post(
+            "/v1/responses", json={"stream": True, "input": [self.USER, self.VIEW_IMAGE_CALL, output]}
+        )
+
+        assert response.status_code == 200
+        assert self._events(response.text)[-1]["type"] == "response.failed"
         client.create_chat_completion.assert_not_awaited()
 
 

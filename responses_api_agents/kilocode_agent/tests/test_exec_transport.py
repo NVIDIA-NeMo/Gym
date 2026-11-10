@@ -23,6 +23,9 @@ from responses_api_agents.kilocode_agent.tests.test_sandbox import seed
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux /proc required")
 
+# Real /proc scanning and receipt polling need scheduling slack on shared CI hosts.
+CLOSE_TIMEOUT = 10
+
 
 class ExecOnlySandbox:
     def __init__(self):
@@ -86,7 +89,7 @@ def activate(state, code, timeout=0.5):
         stage_activation=lambda: state.stage_activation(command=[sys.executable, "-c", code], config="{}"),
         collect=state.collect_artifacts,
         timeout=timeout,
-        close_timeout=3,
+        close_timeout=CLOSE_TIMEOUT,
     )
 
 
@@ -113,7 +116,7 @@ async def test_exec_only_supervision_reaps_harness_group(tmp_path, ending, detac
             with pytest.raises(asyncio.CancelledError):
                 await task
         elif ending == "close":
-            await state.close(timeout=3)
+            await state.close(timeout=CLOSE_TIMEOUT)
             await asyncio.gather(task, return_exceptions=True)
         else:
             artifacts = await task
@@ -129,15 +132,15 @@ async def test_exec_only_supervision_reaps_harness_group(tmp_path, ending, detac
         # Natural CLI exit has no stop cutoff; the sandbox owner tears down a detached tool.
         assert (stat.rpartition(")")[2].split()[0] in ("Z", "X")) is not (detached and ending == "natural")
         assert provider.cancelled_launch is False
-        assert provider.deadline > deadline + 3 * 1
-        await state.close(timeout=3)
-        await state.close(timeout=3)
+        assert provider.deadline > deadline + CLOSE_TIMEOUT
+        await state.close(timeout=CLOSE_TIMEOUT)
+        await state.close(timeout=CLOSE_TIMEOUT)
         assert provider.disconnected
         assert not Path(state.session.session_dir).exists()
     finally:
         try:
             if not state.session.closed:
-                await state.close(timeout=3)
+                await state.close(timeout=CLOSE_TIMEOUT)
         finally:
             if (workdir / "child.pid").exists():
                 try:
@@ -159,7 +162,7 @@ async def test_observations_include_commits_still_in_the_wal(tmp_path):
     records = artifacts.observations.records
     invocations = {record.invocation_id for record in records if isinstance(record, AgentInvocation)}
     assert {"root", "new-child"} <= invocations
-    await state.close(timeout=3)
+    await state.close(timeout=CLOSE_TIMEOUT)
 
 
 async def test_lost_launch_is_fenced_even_after_directory_retirement(tmp_path):
@@ -170,7 +173,7 @@ async def test_lost_launch_is_fenced_even_after_directory_retirement(tmp_path):
     assert state.session.cleanup["cleanup_confirmed"] is True
     assert state.session.cleanup["return_code"] is None
     assert state.session.cleanup["error"] is None
-    await state.close(timeout=3)
+    await state.close(timeout=CLOSE_TIMEOUT)
     provider.lost_launch = False
     await provider.exec(provider.delayed_command, cwd=str(workdir))
     assert not (workdir / "started").exists()
@@ -188,7 +191,7 @@ async def test_terminal_failed_receipt_releases_borrowed_session(tmp_path):
     }
     path = Path(state.session.session_dir) / "cleanup.json"
     path.write_text(json.dumps(receipt))
-    await state.close(timeout=3)
+    await state.close(timeout=CLOSE_TIMEOUT)
     assert provider.disconnected
     assert state.session.closed
     assert state.session.cleanup is None
