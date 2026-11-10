@@ -14,11 +14,16 @@
 # limitations under the License.
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
+from nemo_gym.config import ModelServerRef
 from resources_servers.opencode_search.app import (
+    SearchResourcesServer,
     SearchResourcesServerConfig,
+    SearchVerifyRequest,
     _last_assistant_text,
     parse_judge_verdict,
 )
@@ -131,3 +136,88 @@ class TestJudgeRetryLadder:
         )
         assert worst_case_s == pytest.approx(750.0)
         assert worst_case_s < 0.25 * 4 * 3600
+
+
+def _verify_request(**extra) -> SearchVerifyRequest:
+    return SearchVerifyRequest.model_validate(
+        {
+            "responses_create_params": {"input": []},
+            "response": {
+                "id": "resp",
+                "created_at": 0.0,
+                "model": "policy_model",
+                "object": "response",
+                "output": [],
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+            },
+            "question": "q",
+            "ground_truth": "a",
+            **extra,
+        }
+    )
+
+
+def _server(monkeypatch, reward: float) -> SearchResourcesServer:
+    server = SearchResourcesServer(
+        config=SearchResourcesServerConfig(
+            host="0.0.0.0",
+            port=0,
+            entrypoint="app.py",
+            name="opencode_search",
+            sandbox_provider="opensandbox",
+            sandbox_config={},
+            sandbox_image="image",
+            judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+
+    async def judge(**_):
+        return {
+            "reward": reward,
+            "extracted_final_answer": "x",
+            "judge_parsed": True,
+            "judge_attempts": 1,
+            "judge_time_taken": 0.0,
+        }
+
+    monkeypatch.setattr(server, "_judge_answer", judge)
+    monkeypatch.setattr("resources_servers.opencode_search.app._last_assistant_text", lambda _: "an answer")
+    return server
+
+
+class TestMaskedTerminalFailureKinds:
+    """Masked endings name their cause; reward and mask are the same as without the diagnostics."""
+
+    @pytest.mark.parametrize(
+        ("reason", "kind"),
+        [
+            ("max_iteration", "agent_limit"),
+            ("context_window", "model_context_limit"),
+            ("agent_timed_out", "agent_timeout"),
+        ],
+    )
+    async def test_masked_ending_reports_kind_and_keeps_scored_reward(self, monkeypatch, reason, kind):
+        server = _server(monkeypatch, reward=1.0)
+        request = SimpleNamespace(session={SESSION_ID_KEY: "s"})
+
+        verified = await server.verify(request, _verify_request(opencode_terminal_reason=reason))
+
+        assert verified.mask_sample is True
+        assert verified.reward == 1.0
+        assert verified.failure_kind == kind
+        assert verified.failure_reason
+
+    @pytest.mark.parametrize("reward", [0.0, 1.0])
+    async def test_normal_ending_has_no_failure_fields(self, monkeypatch, reward):
+        server = _server(monkeypatch, reward=reward)
+        request = SimpleNamespace(session={SESSION_ID_KEY: "s"})
+
+        verified = await server.verify(request, _verify_request(opencode_terminal_reason=""))
+
+        assert verified.mask_sample is False
+        assert verified.reward == reward
+        assert verified.failure_kind is None
+        assert verified.failure_reason is None

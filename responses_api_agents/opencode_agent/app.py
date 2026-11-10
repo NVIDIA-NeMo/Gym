@@ -53,9 +53,11 @@ from nemo_gym.agents import (
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    SandboxNetworkAccess,
     SandboxSession,
     SimpleResponsesAPIAgent,
     resolve_agent_timeout,
+    restrict_sandbox_network,
     verification_failure_fields,
 )
 from nemo_gym.client import get_response_json, raise_for_status
@@ -350,6 +352,15 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # Used only when Resources does not supply a borrowed sandbox.
     sandbox_provider: str | None = None
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
+    network_access: SandboxNetworkAccess = Field(
+        default="inherit",
+        description=(
+            "Egress of a sandbox OpenCode creates: `model_only` allows only the model server's host, "
+            "`model_and_tools` also each MCP grant's host. A restricted sandbox cannot download OpenCode, so set "
+            "`sandbox_executable_path` (or use an image with the runtime already at the cache path). A borrowed task "
+            "sandbox keeps its owner's network, so a session that borrows one rejects any other value than `inherit`."
+        ),
+    )
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     report_agent_sandbox_oom: bool = False
     # Connection and per-call timeout of a sandbox session's MCP tool grants; OpenCode's default is 30 s.
@@ -885,6 +896,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         else:
             if not isinstance(body.sandbox_access.connection, DirectSandboxConnection):
                 raise HTTPException(422, "OpenCode requires direct SandboxAccess")
+            if self.config.network_access != "inherit":
+                raise AgentSeedRejectedError(
+                    "OpenCode network_access applies only to a sandbox it creates, not a borrowed one"
+                )
             workdir = body.sandbox_access.workdir
             provider_ref = body.sandbox_access.connection.provider_config_ref
         if not isinstance(workdir, str):
@@ -959,6 +974,27 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         plugin_dependencies = self._pinned_file("plugin_dependencies")
         provider = create_provider(resolve_provider_config(provider_ref, get_global_config_dict()))
         if owns_sandbox:
+            try:
+                spec = restrict_sandbox_network(
+                    spec,
+                    network_access=self.config.network_access,
+                    provider=provider,
+                    model_base_url=self.resolve_model_base_url(self.config.model_server.name, trace_context=False),
+                    tool_urls=[
+                        str(access.connection.url)
+                        for access in self.effective_tool_accesses(body)
+                        if isinstance(access, MCPToolAccess)
+                    ],
+                    # model_only blocks these hosts, so a required grant is refused before the sandbox exists.
+                    required_tool_urls=[
+                        str(access.connection.url)
+                        for access in self.effective_tool_accesses(body)
+                        if isinstance(access, MCPToolAccess) and access.required
+                    ],
+                )
+            except BaseException:
+                await provider.aclose()
+                raise
             sandbox = AsyncSandbox(provider)
         else:
             try:
