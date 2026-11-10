@@ -255,7 +255,7 @@ def test_installed_revision_requires_a_git_install_of_usersim(
         installed_usersim_revision()
 
 
-@pytest.mark.parametrize("suffix", ["", "359bccbed20f42753c3054dd6209"])
+@pytest.mark.parametrize("suffix", ["", "359bccbed20f42753c3054dd6209"])  # pragma: allowlist secret
 def test_resolved_row_accepts_short_and_full_revisions(suffix: str) -> None:
     row = _resolved_row()
     row["usersim_provenance"] = json.dumps({"code_sha": REVISION + suffix, "nemotron_personas_version": "synthetic"})
