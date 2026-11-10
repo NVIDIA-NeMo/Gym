@@ -1112,8 +1112,11 @@ async def test_resolve_selected_environment_urls_for_nonroot_service(tmp_path, a
                     "healthcheck": {
                         "test": [
                             "CMD-SHELL",
+                            f"test -s {shlex.quote(str(output))} && "
                             f'test "$URL" = {shlex.quote(expected)} && test "$UNCHANGED" = {shlex.quote(original)}',
-                        ]
+                        ],
+                        "interval": "0.01s",
+                        "retries": 500,
                     },
                 }
             }
