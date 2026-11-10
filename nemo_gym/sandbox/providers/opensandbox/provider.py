@@ -2542,10 +2542,21 @@ class OpenSandboxProvider:
         The logs endpoint returns one combined stream, so unlike the foreground
         path ``stdout`` carries both streams and ``stderr`` is set only when the
         sandbox itself reports an error.
+
+        Gym enforces ``total_timeout_s`` itself: once its own deadline passes
+        while the command is still running, it interrupts the command and
+        returns the timeout result, as the session path does. execd reports its
+        own timeout kill only as a signal death, so its timer is moved past
+        Gym's deadline and serves as a backstop.
         """
         _, _, RunCommandOpts, _, _ = _require_opensandbox_sdk()
         background_opts = dict(opts_kwargs)
         background_opts["background"] = True
+        command_timeout_s = float(total_timeout_s) if total_timeout_s else None
+        if command_timeout_s is not None:
+            background_opts["timeout"] = timedelta(
+                seconds=command_timeout_s + self._operations.command_timeout_headroom_s / 2
+            )
 
         loop = asyncio.get_running_loop()
 
@@ -2569,6 +2580,8 @@ class OpenSandboxProvider:
                 failure_kind=PROVIDER_COMMAND_OUTCOME_UNKNOWN,
                 reason="OpenSandbox background command did not return an execution id",
             )
+        command_deadline = loop.time() + command_timeout_s if command_timeout_s is not None else None
+        timed_out = False
 
         # The server enforces the command timeout; leave the client headroom.
         deadline = (
@@ -2686,7 +2699,13 @@ class OpenSandboxProvider:
                 if status.running is False:
                     break
                 seen_running = True
-            limits = [value for value in (deadline, status_failure_deadline) if value is not None]
+                if command_deadline is not None and not timed_out and loop.time() >= command_deadline:
+                    timed_out = await self._interrupt_at_deadline(
+                        handle, execution_id, timeout_s=command_timeout_s, request_timeout_s=status_timeout_s
+                    )
+                    # One attempt: if the interrupt fails, execd's backstop timer still stops the command.
+                    command_deadline = None
+            limits = [value for value in (deadline, status_failure_deadline, command_deadline) if value is not None]
             # Retry caps must not shorten the configured polling cadence, even when the cap is zero.
             delay = max(
                 poll_interval,
@@ -2748,6 +2767,9 @@ class OpenSandboxProvider:
         stderr = status_error or None
         if output_deleted:
             stderr = f"{stderr}\n{DELETED_OUTPUT_NOTE}" if stderr else DELETED_OUTPUT_NOTE
+        if timed_out:
+            note = f"Command timed out after {command_timeout_s:g}s; Gym interrupted it"
+            return SandboxExecResult(stdout, f"{stderr}\n{note}" if stderr else note, 124, error_type="timeout")
         error_type = None
         if status.exit_code is not None:
             if status.exit_code == 0 and status_error is not None:
@@ -2769,6 +2791,38 @@ class OpenSandboxProvider:
             )
 
         return SandboxExecResult(stdout=stdout, stderr=stderr, return_code=return_code, error_type=error_type)
+
+    async def _interrupt_at_deadline(
+        self, handle: SandboxHandle, execution_id: str, *, timeout_s: float, request_timeout_s: float
+    ) -> bool:
+        """Interrupt a background command still running at Gym's deadline; whether the interrupt was accepted."""
+        observe_failure(
+            opensandbox_failure(
+                operation="command status",
+                sandbox_id=handle.sandbox_id,
+                execution_id=execution_id,
+                failure_kind=PROVIDER_COMMAND_TIMEOUT,
+                reason=f"Gym command deadline expired after {timeout_s:g}s",
+            )
+        )
+        try:
+            await self._await_sdk_call(
+                handle.raw.commands.interrupt(execution_id),
+                operation="command interrupt",
+                sandbox_id=handle.sandbox_id,
+                timeout_s=request_timeout_s,
+            )
+        except Exception as error:
+            # The command may have finished on its own just before the interrupt; its status says how it ended.
+            observe_failure(
+                error
+                if isinstance(error, NgFailureEvent)
+                else opensandbox_failure(
+                    operation="command interrupt", sandbox_id=handle.sandbox_id, execution_id=execution_id, cause=error
+                )
+            )
+            return False
+        return True
 
     async def exec(
         self,

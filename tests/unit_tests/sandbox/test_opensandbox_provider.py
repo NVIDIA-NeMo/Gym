@@ -1528,6 +1528,80 @@ async def test_background_signal_exit_near_deadline_keeps_unknown_cause(
     assert result.stderr == "signal: killed"
 
 
+class _DeadlineCommands:
+    """A background command that runs until it is interrupted, or for ``runs_s`` on its own."""
+
+    def __init__(self, *, runs_s: float = 60.0, interrupt_error: Exception | None = None) -> None:
+        self.runs_s = runs_s
+        self.interrupt_error = interrupt_error
+        self.interrupts: list[str] = []
+        self.opts: Any = None
+        self.killed = False
+
+    async def run(self, command: str, *, opts: Any) -> Any:
+        self.opts = opts
+        self.submitted = asyncio.get_running_loop().time()
+        return SimpleNamespace(id="exec-42")
+
+    async def interrupt(self, execution_id: str) -> None:
+        self.interrupts.append(execution_id)
+        if self.interrupt_error is not None:
+            raise self.interrupt_error
+        self.killed = True
+
+    async def get_command_status(self, execution_id: str) -> Any:
+        if self.killed:
+            return SimpleNamespace(running=False, exit_code=-1, error="signal: killed")
+        if asyncio.get_running_loop().time() - self.submitted < self.runs_s:
+            return SimpleNamespace(running=True, exit_code=None, error=None)
+        return SimpleNamespace(running=False, exit_code=-1, error="signal: killed")
+
+    async def get_background_command_logs(self, execution_id: str) -> Any:
+        return SimpleNamespace(content="partial output", cursor=None)
+
+
+# execd reports its own timeout kill only as a signal death, so Gym enforces the deadline and owns the outcome.
+async def test_background_command_running_at_gym_deadline_is_interrupted_and_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands = _DeadlineCommands()
+    provider, handle = _background_provider(monkeypatch, commands, command_timeout_headroom_s=2.0)
+
+    result = await provider.exec(handle, "bash solve.sh", timeout_s=0.2)
+
+    assert commands.interrupts == ["exec-42"]
+    # execd's own timer is a backstop past Gym's deadline.
+    assert commands.opts.kwargs["timeout"] == timedelta(seconds=1.2)
+    assert (result.return_code, result.error_type) == (124, "timeout")
+    assert result.stdout == "partial output"
+    assert result.stderr == "signal: killed\nCommand timed out after 0.2s; Gym interrupted it"
+
+
+async def test_background_command_finishing_before_gym_deadline_is_not_interrupted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands = _DeadlineCommands(runs_s=0.05)
+    provider, handle = _background_provider(monkeypatch, commands)
+
+    result = await provider.exec(handle, "bash solve.sh", timeout_s=5)
+
+    assert commands.interrupts == []
+    assert (result.return_code, result.error_type) == (-1, None)
+    assert result.stderr == "signal: killed"
+
+
+# A refused interrupt (e.g. the command finished just before it) proves nothing; the reported exit is kept.
+async def test_background_refused_interrupt_keeps_the_reported_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    commands = _DeadlineCommands(runs_s=0.4, interrupt_error=RuntimeError("Interrupt command failed: 404"))
+    provider, handle = _background_provider(monkeypatch, commands, command_timeout_headroom_s=2.0)
+
+    result = await provider.exec(handle, "bash solve.sh", timeout_s=0.2)
+
+    assert commands.interrupts == ["exec-42"]
+    assert (result.return_code, result.error_type) == (-1, None)
+    assert result.stderr == "signal: killed"
+
+
 # execd's init and error stamps (ms) for commands run with `timeout_s` on an OpenSandbox cell (2026-10-28).
 LIVE_INIT_MS = 1793227333925
 
