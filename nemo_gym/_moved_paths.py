@@ -702,6 +702,9 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
         **_names("nemo_gym.eval.eval_plan", "0.8.0", "PlanBenchmark PlanGym build_eval_plan"),
         **_names("nemo_gym.utils.gym_commit", "0.8.0", "installed_gym_commit"),
     },
+    "nemo_gym.orchestration.jobs": {
+        **_names("nemo_gym.utils.gym_commit", "0.8.0", "installed_gym_commit"),
+    },
     "nemo_gym.server_runtime.h2_ping_sidecar.config": {
         "H2_PING_SIDECAR_KEY_NAME": MovedPath(new="nemo_gym.config.global_config", since="0.8.0"),
     },

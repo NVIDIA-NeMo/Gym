@@ -55,6 +55,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
 
+from nemo_gym._moved_paths import moved_names_getattr
+
 
 logger = logging.getLogger(__name__)
 
@@ -362,3 +364,6 @@ def load_submission_record(gym_job_id: str) -> SubmissionRecord:
     if manifest.is_file():
         record = SubmissionRecord.load(json.loads(manifest.read_text(encoding="utf-8")))
     return record
+
+
+__getattr__ = moved_names_getattr(__name__)
