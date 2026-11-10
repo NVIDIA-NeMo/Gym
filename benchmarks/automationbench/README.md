@@ -2,6 +2,27 @@
 
 AutomationBench scored with the Artificial Analysis headline metric by default.
 
+## Recipes
+
+| Config | Agent | Path |
+| --- | --- | --- |
+| `config.yaml` | `simple_agent` | `single_agent_turn` Environment Server with the [`automationbench` resources server](../../resources_servers/automationbench/README.md) |
+| `config_legacy_agent.yaml` (deprecated) | `verifiers_agent` | `legacy_agent` relay |
+
+Both run the same tasks, prompts, tools and rubric. `config.yaml` keeps each
+task's world in a resources server session and runs the tool loop in
+`simple_agent`, capped at 50 model calls as verifiers' `max_turns` is.
+`config_legacy_agent.yaml` hands the whole episode to verifiers and stays to
+reproduce existing results; the relay will be removed after the Environment
+Server migration.
+
+Sampling: `config_legacy_agent.yaml` sends `temperature` and `top_p` from the
+agent config (1.0 each). Rows carry neither, so `config.yaml` sends what the
+run sets, for example
+`++responses_create_params.temperature=1.0 ++responses_create_params.top_p=1.0`,
+or the model server's defaults. Rows do carry the tools and the 131072-token
+output budget.
+
 ## Metric
 
 Artificial Analysis defines the score as:
@@ -30,21 +51,30 @@ directly comparable to the AA leaderboard column.
 
 ## Per-assertion results (optional)
 
-Off by default. To keep every assertion's verdict in the rollout, collect with
+Off by default. To keep every assertion's verdict in the rollout, collect
+`config.yaml` with
+
+```bash
+++automationbench_resources_server.resources_servers.automationbench.export_assertion_results=true
+```
+
+and each rollout carries `assertion_results`. With `config_legacy_agent.yaml`,
+collect with
 
 ```bash
 ++automationbench.responses_api_agents.verifiers_agent.export_state_columns='[assertion_results]'
 ```
 
-Each rollout then carries
-`response.exported_state.assertion_results`, one record per assertion in task
+and each rollout carries
+`response.exported_state.assertion_results`. Either way it holds one record per assertion in task
 order: `index`, `type`, `app` (the WorldState service the assertion inspects),
 `role` (`objective`, `guardrail` or `unscored`), `passed` (final-world verdict;
 a guardrail with `passed: false` is a violation) and `initially_passed`
 (initial-world verdict; `null` for unscored assertions and for tasks without an
 initial state). The records use the same classification as the count metrics.
-If the rubric could not score a rollout (an assertion raised), the key is
-omitted and the agent logs a warning.
+If the rubric could not score a rollout (an assertion raised), the sample is
+masked as `verifier_error`; under `config_legacy_agent.yaml` the key is omitted
+and the agent logs a warning.
 
 ## Install
 
