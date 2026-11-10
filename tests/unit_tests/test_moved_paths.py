@@ -787,7 +787,7 @@ def test_package_facade_warns_once_for_a_renamed_name() -> None:
         ("nemo_gym.models", "ResponsesConverter", "ChatCompletionsConverter"),
         ("nemo_gym.models.token_capture.completion", "ResponsesConverter", "ChatCompletionsConverter"),
         ("nemo_gym.token_id_capture.completion", "ResponsesConverter", "ChatCompletionsConverter"),
-        # The vLLM-named aliases, released in 0.7.0 at nemo_gym.responses_converter and the vLLM model server.
+        # The vLLM-named aliases, released in 0.7.0. The vLLM model server's tests cover its re-exports.
         ("nemo_gym.responses_converter", "VLLMConverter", "ChatCompletionsConverter"),
         (
             "nemo_gym.responses_converter",
@@ -802,12 +802,6 @@ def test_package_facade_warns_once_for_a_renamed_name() -> None:
         ),
         ("nemo_gym.models", "VLLMConverter", "ChatCompletionsConverter"),
         ("nemo_gym.models", "VLLMConverterResponsesToChatCompletionsState", "ChatCompletionsConverterState"),
-        ("responses_api_models.vllm_model.app", "VLLMConverter", "ChatCompletionsConverter"),
-        (
-            "responses_api_models.vllm_model.app",
-            "VLLMConverterResponsesToChatCompletionsState",
-            "ChatCompletionsConverterState",
-        ),
     ],
 )
 def test_renamed_converter_resolves_at_each_old_path_with_a_warning(module: str, old_name: str, new_name: str) -> None:
