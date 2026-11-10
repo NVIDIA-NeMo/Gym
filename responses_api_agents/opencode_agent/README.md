@@ -394,6 +394,15 @@ sha256sum opencode-1.17.11-plugin-dependencies.tar.gz
 An `rg` already on the task `PATH` takes precedence over the pinned copy, as in stock
 OpenCode.
 
+### Repository project config
+
+Sessions ignore the task repository's OpenCode project config and instruction files
+(`AGENTS.md` or `CLAUDE.md`, `opencode.json`, `.opencode/`) unless `session_project_config`
+is set. With it, the run reads them as OpenCode does when started in that repository; the
+configuration Gym passes is merged last and still takes precedence. A repository can then
+add instructions, agents, plugins or tools, so set it only for task repositories you would
+run OpenCode in yourself. Export and import never read project config.
+
 ### Session exports
 
 `export_dir` is an absolute sandbox directory chosen by the sandbox owner, outside the

@@ -792,7 +792,14 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             workers = 1
             cache_dir_template = self.config.cache_dir_template
             run_golden = self.config.run_golden
-            base_url = body.policy_base_url or f"http://{model_server_config['host']}:{model_server_config['port']}/v1"
+            if body.policy_base_url:
+                # The caller owns routing (and any per-rollout correlation) for
+                # its own endpoint; Gym's URL segments only apply to the built-in
+                # model server.
+                base_url = body.policy_base_url
+            else:
+                base_url = f"http://{model_server_config['host']}:{model_server_config['port']}"
+                base_url = f"{self.base_url_for_run(base_url, body)}/v1"
             api_key = body.policy_api_key or "dummy_key"
             model_name = f"hosted_vllm/{policy_model_name}"
             step_timeout = self.config.step_timeout

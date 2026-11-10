@@ -23,8 +23,10 @@ from fastapi.testclient import TestClient
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    ModelCallSampling,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponseCreateParamsNonStreaming,
+    encode_model_sampling,
 )
 from responses_api_agents.mini_swe_agent.app import (
     MiniSWEAgent,
@@ -257,6 +259,35 @@ class TestApp:
         assert_run_response(response)
 
         assert_run_swegym_called(mock_to_thread)
+
+    @pytest.mark.parametrize("sampled", [False, True])
+    @patch("responses_api_agents.mini_swe_agent.app.get_first_server_config_dict")
+    @patch("responses_api_agents.mini_swe_agent.app.get_config_path")
+    @patch("responses_api_agents.mini_swe_agent.app.runner_ray_remote")
+    @patch("asyncio.to_thread")
+    async def test_run_puts_the_rollouts_sampling_values_in_the_model_url(
+        self,
+        mock_to_thread,
+        mock_runner_ray_remote,
+        mock_get_config_path,
+        mock_get_first_server_config_dict,
+        sampled,
+    ) -> None:
+        mock_server_client = MagicMock(spec=ServerClient)
+        server = MiniSWEAgent(config=create_test_config(), server_client=mock_server_client)
+        setup_server_client_mocks(mock_server_client, mock_get_first_server_config_dict)
+        setup_config_path_mock(mock_get_config_path)
+        setup_run_swegym_mock(mock_to_thread, mock_runner_ray_remote)
+        sampling = ModelCallSampling(temperature=1.0, top_p=1.0, max_output_tokens=8192)
+        run_request = create_run_request()
+        if sampled:
+            run_request = run_request.model_copy(update={"model_sampling": sampling})
+
+        await server.run(run_request)
+
+        params = mock_runner_ray_remote.remote.call_args.args[1]
+        segment = f"/ng-sampling/{encode_model_sampling(sampling)}" if sampled else ""
+        assert params["base_url"] == f"http://0.0.0.0:8080{segment}/v1"
 
     def test_chat_cmp_to_responses_preserves_routed_experts(self) -> None:
         routed_experts = [
