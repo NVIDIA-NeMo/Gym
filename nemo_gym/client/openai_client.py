@@ -740,13 +740,17 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         await self._raise_for_status(response, request_kwargs)
         return await self._read_response_json(response)
 
-    async def create_chat_completion(self, *, _resend_after_disconnect: bool = True, **kwargs) -> Dict[str, Any]:
+    async def create_chat_completion(
+        self, *, _resend_after_disconnect: bool = True, _headers: Optional[Dict[str, str]] = None, **kwargs
+    ) -> Dict[str, Any]:
         request_kwargs = dict(
             url=f"{self.base_url}/chat/completions",
             json=kwargs,
         )
         if not _resend_after_disconnect:
             request_kwargs["_resend_after_disconnect"] = False
+        if _headers:
+            request_kwargs["headers"] = _headers
         response = await self._request(method="POST", **request_kwargs)
 
         await self._raise_for_status(response, request_kwargs)

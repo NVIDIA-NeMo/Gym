@@ -45,7 +45,7 @@ episode.
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `model_server` | required | The policy model. |
-| `agent_max_turns` | `250` | Turn cap for the agent loop. |
+| `agent_max_turns` | `250` | Turn cap for the agent loop. A run that uses every turn without a finish call answers `status: incomplete` with `metadata.stop_reason: max_turns`. |
 | `concurrency` | `32` | Maximum concurrent episodes. |
 | `temperature` | `0.6` | Sampling temperature when the request sets none. |
 | `finish_tool_names` | `null` | Request tools that end the episode when they succeed; `null` uses Stirrup's own finish tool. |
