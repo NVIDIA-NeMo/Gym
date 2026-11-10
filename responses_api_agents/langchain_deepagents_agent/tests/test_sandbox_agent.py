@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from nemo_gym.agents import (
+    AGENT_OUTCOME_METADATA_KEY,
     ROLLOUT_STOP_METADATA_KEY,
     AgentCloseSessionRequest,
     AgentSeedSessionRequest,
@@ -28,6 +29,7 @@ from nemo_gym.agents import (
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    AGENT_RUN_ERROR,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
     EpisodeId,
@@ -223,10 +225,19 @@ async def test_a_failed_runtime_install_releases_the_lent_sandbox(lent_sandbox, 
     owner, access = lent_sandbox
     monkeypatch.setattr(SandboxPythonRuntime, "is_installed", AsyncMock(return_value=False))
     monkeypatch.setattr(SandboxPythonRuntime, "install", AsyncMock(side_effect=RuntimeError("no wheel")))
+    disconnected, disconnect = [], AsyncSandbox.disconnect
+
+    async def recorded_disconnect(sandbox: AsyncSandbox) -> None:
+        disconnected.append(sandbox.sandbox_id)
+        await disconnect(sandbox)
+
+    monkeypatch.setattr(AsyncSandbox, "disconnect", recorded_disconnect)
 
     with pytest.raises(RuntimeError, match="no wheel"):
         await _agent().seed_agent_session(_request(), _seed(sandbox_access=access))
 
+    # The failed seed released its connection to the lent sandbox without stopping it.
+    assert disconnected == [owner.sandbox_id]
     assert owner.sandbox_id not in _LendableLocalProvider.closed
     assert (await owner.exec("cat input.txt")).stdout == "from the task image\n"
 
@@ -287,7 +298,7 @@ async def test_a_run_past_the_task_timeout_answers_with_its_partial_run_as_incom
     agent, request = _agent(), _request()
     try:
         await agent.seed_agent_session(request, _seed(sandbox_access=access))
-        body = NeMoGymResponseCreateParamsNonStreaming(input="Do the task.", metadata={"agent_timeout_sec": "5"})
+        body = NeMoGymResponseCreateParamsNonStreaming(input="Do the task.", metadata={"agent_timeout_sec": "10"})
         response = await asyncio.wait_for(agent.responses(request, Response(), body), 120)
         close = await asyncio.wait_for(agent.close_agent_session(request, _close_body()), 60)
     finally:
@@ -334,7 +345,7 @@ async def test_a_rollout_stop_ends_the_run_as_a_marked_timeout(lent_sandbox, run
             agent.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="Do the task."))
         )
         assert await asyncio.to_thread(model.blocked.wait, 60), "the graph never called the model"
-        stop = await agent.stop_rollout(_EPISODE.capture_key)
+        stop = await asyncio.wait_for(agent.stop_rollout(_EPISODE.capture_key), 60)
         response = await asyncio.wait_for(activation, 60)
         await asyncio.wait_for(agent.close_agent_session(request, _close_body()), 60)
     finally:
@@ -436,10 +447,10 @@ async def test_explicit_context_rejection_is_incomplete_in_the_response(lent_san
     _, access = lent_sandbox
     try:
         await agent.seed_agent_session(request, _seed(sandbox_access=access))
-        response = await agent.responses(
-            request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="Do the task.")
+        response = await asyncio.wait_for(
+            agent.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="Do the task.")), 120
         )
-        await agent.close_agent_session(request, _close_body())
+        await asyncio.wait_for(agent.close_agent_session(request, _close_body()), 60)
     finally:
         model.close()
     assert response.status == "incomplete"
@@ -462,8 +473,9 @@ async def test_confirmed_deadline_retains_provider_timeout_and_replays_it_on_clo
         "status": "incomplete",
         "stop_reason": "wall_time",
         "messages": [],
-        "model_calls": 0,
-        "usages": [],
+        # One model reply arrived before the deadline, so the stop is graded.
+        "model_calls": 1,
+        "usages": [USAGE],
         "model_error": None,
     }
     session = SimpleNamespace(
@@ -502,15 +514,17 @@ async def test_stop_before_activation_returns_empty_incomplete(lent_sandbox, run
     _, access = lent_sandbox
     agent, request = _agent(), _request()
     await agent.seed_agent_session(request, _seed(sandbox_access=access))
-    await agent.stop_rollout(_EPISODE.capture_key)
+    await asyncio.wait_for(agent.stop_rollout(_EPISODE.capture_key), 60)
     try:
-        response = await agent.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="hi"))
+        response = await asyncio.wait_for(
+            agent.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="hi")), 120
+        )
         assert response.status == "incomplete"
         assert response.output == []
         assert response.metadata["stop_reason"] == "wall_time"
         assert ROLLOUT_STOP_METADATA_KEY in response.metadata
     finally:
-        await agent.close_agent_session(request, _close_body())
+        await asyncio.wait_for(agent.close_agent_session(request, _close_body()), 60)
 
 
 @linux_only
@@ -531,10 +545,12 @@ async def test_rejected_tools_do_not_bind_the_session(lent_sandbox, runtime, mon
         assert refused.value.status_code == 422
         assert agent._require_agent_session("agent-session").activation is None
         assert model.requests == []
-        response = await agent.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="hi"))
+        response = await asyncio.wait_for(
+            agent.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="hi")), 120
+        )
         assert response.status == "completed"
     finally:
-        await agent.close_agent_session(request, _close_body())
+        await asyncio.wait_for(agent.close_agent_session(request, _close_body()), 60)
         model.close()
 
 
@@ -587,3 +603,59 @@ async def test_owned_start_failure_retains_cleanup_handle_and_metadata(monkeypat
     assert spec.metadata["gym-agent"] == "deepagents"
     assert spec.ttl_s > 0
     provider.aclose.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("launched", "oom", "outcome"), [(False, None, "cancelled"), (True, None, "unknown"), (True, "oom", "oom")]
+)
+def test_a_run_that_left_no_report_is_cancelled_only_before_it_launched(launched, oom, outcome):
+    session = SimpleNamespace(artifacts=None, launch_started=launched, execution_oom=oom)
+    state = SimpleNamespace(session=session, sandbox_provider="local", sandbox_id="sb")
+
+    [record] = DeepAgentsAgent._observations(state).records
+
+    assert record.outcome == outcome
+
+
+def test_a_runner_stopped_by_something_other_than_its_supervisor_is_a_run_error():
+    assert _agent().classify_outcome({"harness_terminated": True}).failure_kind == AGENT_RUN_ERROR
+
+
+@linux_only
+async def test_a_deadline_before_any_model_reply_is_a_transport_failure(lent_sandbox, runtime, monkeypatch):
+    _, access = lent_sandbox
+    model = _model(monkeypatch, [None])
+    agent, request = _agent(), _request()
+    try:
+        await agent.seed_agent_session(request, _seed(sandbox_access=access))
+        body = NeMoGymResponseCreateParamsNonStreaming(input="Do the task.", metadata={"agent_timeout_sec": "5"})
+        response = await asyncio.wait_for(agent.responses(request, Response(), body), 120)
+        close = await asyncio.wait_for(agent.close_agent_session(request, _close_body()), 60)
+    finally:
+        model.close()
+
+    # The Model Server never answered, so the outcome policy retries the episode instead of grading an empty answer.
+    assert (response.status, response.output) == ("failed", [])
+    assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY])["failure_kind"] == MODEL_TRANSPORT_ERROR
+    assert _sandbox_record(close).outcome == "failed"
+
+
+@linux_only
+async def test_a_task_command_that_stops_the_runner_is_not_its_deadline(lent_sandbox, runtime, monkeypatch):
+    _, access = lent_sandbox
+    # The command's shell is the runner's child: a task's `pkill python3` that reaches the runner.
+    model = _model(monkeypatch, [[call("execute", {"command": "kill -TERM $PPID; sleep 30"}, "c1")], [text("late")]])
+    agent, request = _agent(), _request()
+    try:
+        await agent.seed_agent_session(request, _seed(sandbox_access=access))
+        body = NeMoGymResponseCreateParamsNonStreaming(input="Do the task.")
+        response = await asyncio.wait_for(agent.responses(request, Response(), body), 120)
+        close = await asyncio.wait_for(agent.close_agent_session(request, _close_body()), 60)
+    finally:
+        model.close()
+
+    # The supervisor's receipt shows no timeout, so the runner's own `wall_time` is not graded as one.
+    assert response.status == "failed"
+    assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY])["failure_kind"] == AGENT_RUN_ERROR
+    assert "not its deadline" in response.error.message
+    assert _sandbox_record(close).outcome == "failed"

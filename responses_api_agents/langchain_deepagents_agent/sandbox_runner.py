@@ -22,6 +22,19 @@ from pathlib import Path
 from typing import Any
 
 
+# A SIGTERM that arrives while the runner still imports deepagents (seconds in a cold sandbox) is noted here instead of
+# killing the runner without a report; the event loop's handler takes over once the graph can be cancelled.
+_terminated_before_start = False
+
+
+def _note_termination(signum: int, frame: object) -> None:
+    global _terminated_before_start
+    _terminated_before_start = True
+
+
+if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, _note_termination)
+
 # This file is staged below a private package root, so no task file is imported as code.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -33,7 +46,10 @@ from langchain_core.messages import messages_from_dict, messages_to_dict  # noqa
 from langgraph.errors import GraphRecursionError  # noqa: E402
 from pydantic import Field  # noqa: E402
 
-from responses_api_agents.langchain_deepagents_agent.responses_chat_model import ResponsesChatModel  # noqa: E402
+from responses_api_agents.langchain_deepagents_agent.responses_chat_model import (  # noqa: E402
+    ResponsesChatModel,
+    is_context_limit,
+)
 
 
 # deepagents' own files (offloaded conversation history, evicted large tool results) stay in graph state under this
@@ -44,6 +60,8 @@ HARNESS_FILES_ROOT = "/.deepagents/"
 _RETRY_STATUSES = frozenset({408, 425, 429})
 _MODEL_ATTEMPTS = 3
 _MAX_RETRY_DELAY_S = 30.0
+# A failed runner's error text and traceback are capped, since they end up in the activation's error.
+_MAX_ERROR_CHARS = 4000
 
 
 class ModelRequestError(RuntimeError):
@@ -52,13 +70,7 @@ class ModelRequestError(RuntimeError):
     def __init__(self, status: int, body: str) -> None:
         super().__init__(f"Model Server HTTP {status}: {body[:2000]}")
         self.status = status
-        try:
-            document = json.loads(body)
-        except (TypeError, ValueError):
-            document = None
-        error = document.get("error") if isinstance(document, dict) else None
-        # HTTP status alone cannot prove a context limit; use the provider's explicit error code.
-        self.context_limit = isinstance(error, dict) and error.get("code") == "context_length_exceeded"
+        self.context_limit = is_context_limit(body)
 
 
 class ModelTransportError(RuntimeError):
@@ -222,10 +234,9 @@ async def run(payload: dict[str, Any], scratch: Path) -> dict[str, Any]:
             async for state in graph.astream({"messages": input_messages}, config=config, stream_mode="values"):
                 messages = state["messages"]
         except asyncio.CancelledError:
-            # SIGTERM from the supervisor, at the deadline or on close: report the messages finished so far.
+            # SIGTERM, from the supervisor at the deadline or on close: report the messages finished so far.
             asyncio.current_task().uncancel()
-            stopped = Path(payload["stop_request_path"]).exists()
-            report.update(status="incomplete", stop_reason="cancelled" if stopped else "wall_time")
+            report.update(status="incomplete", stop_reason=_stop_reason(payload))
         except GraphRecursionError:
             report.update(status="incomplete", stop_reason="max_iterations")
         except ModelRequestError as error:
@@ -247,19 +258,63 @@ async def run(payload: dict[str, Any], scratch: Path) -> dict[str, Any]:
     }
 
 
+def _stop_reason(payload: dict[str, Any]) -> str:
+    """Why a SIGTERM stopped the run: close writes its stop request first; otherwise the runner takes it for the
+    deadline, which the agent server checks against the supervisor's receipt."""
+    return "cancelled" if Path(payload["stop_request_path"]).exists() else "wall_time"
+
+
+def _stopped_before_start(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "status": "incomplete",
+        "stop_reason": _stop_reason(payload),
+        "model_error": None,
+        "messages": [],
+        "model_calls": 0,
+        "usages": [],
+        "usage_incomplete": False,
+    }
+
+
 async def _run_until_terminated(payload: dict[str, Any], scratch: Path) -> dict[str, Any]:
     asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, asyncio.current_task().cancel)
-    return await run(payload, scratch)
+    if _terminated_before_start:
+        return _stopped_before_start(payload)
+    try:
+        return await run(payload, scratch)
+    except asyncio.CancelledError:
+        # A SIGTERM before the graph started.
+        asyncio.current_task().uncancel()
+        return _stopped_before_start(payload)
+
+
+def _write_output(path: Path, output: dict[str, Any]) -> None:
+    """Write the report whole, so a reader never sees part of it even if the supervisor kills the runner meanwhile."""
+    partial = path.with_name(f".{path.name}.partial")
+    partial.write_text(json.dumps(output))
+    os.replace(partial, path)
 
 
 def main(input_path: str, output_path: str) -> None:
     payload = json.loads(Path(input_path).read_text())
+    loop = asyncio.new_event_loop()
     try:
-        output = asyncio.run(_run_until_terminated(payload, Path(input_path).parent))
+        output = loop.run_until_complete(_run_until_terminated(payload, Path(input_path).parent))
     except BaseException as error:
-        output = {"status": "failed", "error": repr(error), "traceback": traceback.format_exc()}
-    Path(output_path).write_text(json.dumps(output))
+        output = {
+            "status": "failed",
+            "error": repr(error)[:_MAX_ERROR_CHARS],
+            "traceback": traceback.format_exc()[-_MAX_ERROR_CHARS:],
+        }
+    # Written before the loop closes: asyncio.run() would first wait for deepagents' file-tool threads, which its own
+    # timeouts do not stop, and the supervisor kills a runner that outlasts its stop grace period.
+    _write_output(Path(output_path), output)
+    loop.close()
 
 
 if __name__ == "__main__":
     main(*sys.argv[1:])
+    # Exit without joining those threads either.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)

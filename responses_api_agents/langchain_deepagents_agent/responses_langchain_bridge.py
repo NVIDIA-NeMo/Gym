@@ -45,6 +45,7 @@ import time
 import uuid
 from typing import Any
 
+from aiohttp import ClientResponseError
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.messages.tool import tool_call
 from langchain_core.runnables import ensure_config
@@ -159,13 +160,23 @@ class GymResponsesChatModel(ResponsesChatModel):
         model_reasoning = configurable.get("model_reasoning")
         if model_reasoning is not None:
             request_body["reasoning"] = model_reasoning
+        # The activation request's sampling controls, such as temperature and top_p, apply to every model call.
+        for name, value in (configurable.get("model_request_defaults") or {}).items():
+            request_body.setdefault(name, value)
         resp = await self.agent.server_client.post(
             server_name=self.agent.config.model_server.name,
             url_path=model_url_path,
             json=request_body,
             cookies=model_cookies["cookies"],
         )
-        await raise_for_status(resp)
+        try:
+            await raise_for_status(resp)
+        except ClientResponseError as error:
+            # Marks the error as a model call's, so a session can type it apart from a tool's HTTP error.
+            model_failure = configurable.get("model_failure")
+            if model_failure is not None:
+                model_failure["error"] = error
+            raise
         # `model_cookies` is the same holder dict object referenced from `configurable` (not a copy), so
         # this mutation is visible to the next `_agenerate()` call for this rollout — matches
         # `simple_agent`'s pattern of chaining model-server cookies from each response into the next call.

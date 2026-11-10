@@ -25,9 +25,10 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import Any, Literal, Optional
+from typing import Any, ClassVar, Literal, Optional
 from uuid import uuid4
 
+from aiohttp import ClientResponseError
 from deepagents import create_deep_agent
 from fastapi import Body, HTTPException, Request, Response
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -50,16 +51,20 @@ from nemo_gym.agents import (
 )
 from nemo_gym.config import get_global_config_dict
 from nemo_gym.core import (
+    AGENT_RUN_ERROR,
     MODEL_CONTEXT_LIMIT,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
+    FailureHeader,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseUsage,
     NgFailureEvent,
+    RequestFailureLog,
     accumulate_response_usage,
     observe_failure,
+    report_for_current_request,
     sdk_error_details,
 )
 from nemo_gym.sandbox import (
@@ -69,8 +74,10 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
     resolve_provider_metadata,
 )
+from nemo_gym.server_runtime import is_retryable_dependency_status
 from nemo_gym.trajectory import AgentObservationBundle, ObservationGap, SandboxObservation
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from responses_api_agents.langchain_deepagents_agent.responses_chat_model import is_context_limit
 from responses_api_agents.langchain_deepagents_agent.responses_langchain_bridge import (
     GymResponsesChatModel,
     to_langchain,
@@ -132,7 +139,11 @@ class DeepAgentsAgentConfig(SimpleAgentConfig):
     shell_timeout_seconds: int = Field(
         default=120, gt=0, description="Default time limit of one `execute` command; the model may pass its own"
     )
-    concurrency: int = Field(default=32, gt=0, description="Maximum concurrent runs")
+    concurrency: int = Field(
+        default=32,
+        gt=0,
+        description="Maximum concurrent sandbox runs of the builtin profile; search runs are unbounded",
+    )
     sandbox_provider: Optional[str] = Field(
         default=None, description="Sandbox provider config to start a sandbox from when the session lends none."
     )
@@ -209,6 +220,58 @@ def _reject_response_budget(body: NeMoGymResponseCreateParamsNonStreaming) -> No
         )
 
 
+def _request_defaults(body: NeMoGymResponseCreateParamsNonStreaming) -> dict[str, float]:
+    """The activation request's sampling controls that every model call of the graph sends."""
+    sampling = {"temperature": body.temperature, "top_p": body.top_p}
+    return {name: value for name, value in sampling.items() if value is not None}
+
+
+def _final_model_refusal(error: ClientResponseError) -> bool:
+    """Whether the Model Server refused a request with a status that another episode attempt would not change.
+
+    A retryable status, and a reply whose failure report was omitted, keep the route's own failure, so the
+    Environment Server reruns the episode as before.
+    """
+    if is_retryable_dependency_status(error.status):
+        return False
+    report = FailureHeader.decode(error.headers)
+    return report is None or not report.omitted
+
+
+def _settle_wall_time(output: dict[str, Any], *, deadline_reached: bool, rollout_stopped: bool) -> None:
+    """Keep the runner's `wall_time` stop only when it is the run's deadline and some model reply had arrived.
+
+    The runner takes any SIGTERM without a close request for its deadline. When the supervisor's receipt shows no
+    timeout, a task command (such as `pkill python3`) stopped the harness, so the run failed. A deadline before any
+    model reply means the Model Server never answered, so the run is a transport failure, which the outcome policy
+    retries, not the model's empty answer; a rollout stop stays a graded stop. Updates the runner's report in place,
+    so the close record agrees.
+    """
+    if output.get("stop_reason") != "wall_time":
+        return
+    if not deadline_reached:
+        output.update(
+            status="failed",
+            stop_reason=None,
+            run_error="The DeepAgents runner was stopped by a signal that was not its deadline",
+            harness_terminated=True,
+        )
+    elif not rollout_stopped and not output.get("usages"):
+        output.update(
+            status="failed",
+            stop_reason=None,
+            model_error="No Model Server reply arrived before the run's deadline",
+            model_transport_error=True,
+        )
+
+
+def _unreported_outcome(session: SandboxSession) -> str:
+    """How a run that left no report ended: it never started, the provider killed the sandbox, or it is unknown."""
+    if not session.launch_started:
+        return "cancelled"
+    return "oom" if session.execution_oom is not None else "unknown"
+
+
 def _model_error_type(output: Mapping[str, Any]) -> Optional[str]:
     if not output.get("model_error"):
         return None
@@ -223,6 +286,9 @@ class DeepAgentsAgent(SimpleAgent):
     """
 
     checkpoint_mode = "restart_only"
+    # The builtin profile, this entrypoint's default, calls the Model Server from the task sandbox; Harbor reads this
+    # literal from app.py. The tavily_search profile refuses a lent sandbox, so a Harbor run never uses it.
+    calls_model_from_sandbox: ClassVar[bool] = True
     config: DeepAgentsAgentConfig
     agent: Any = Field(default=None, exclude=True)
     _sem: asyncio.Semaphore = PrivateAttr()
@@ -411,8 +477,7 @@ class DeepAgentsAgent(SimpleAgent):
             role="agent",
             provider=state.sandbox_provider,
             sandbox_id=state.sandbox_id,
-            # A session closed before its run reported anything was cancelled.
-            outcome=_SANDBOX_OUTCOMES.get(ending, "unknown") if output else "cancelled",
+            outcome=_SANDBOX_OUTCOMES.get(ending, "unknown") if output else _unreported_outcome(state.session),
             error_type=_model_error_type(output),
         )
         return AgentObservationBundle(
@@ -428,7 +493,8 @@ class DeepAgentsAgent(SimpleAgent):
         )
 
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
-        """The Model Server's HTTP status, or a transport failure, that ended the run, as the runner reported it."""
+        """What ended the run, as the runner reported it: the Model Server's HTTP status, a transport failure, or a
+        signal that stopped the runner before its deadline."""
         if native_result.get("model_context_limit"):
             return AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT)
         status = native_result.get("model_error_status")
@@ -436,6 +502,8 @@ class DeepAgentsAgent(SimpleAgent):
             return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
         if native_result.get("model_transport_error"):
             return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
+        if native_result.get("harness_terminated"):
+            return AgentOutcome(failure_kind=AGENT_RUN_ERROR)
         return super().classify_outcome(native_result)
 
     async def _run_in_sandbox(
@@ -452,17 +520,15 @@ class DeepAgentsAgent(SimpleAgent):
         if body.instructions:
             messages.insert(0, SystemMessage(content=body.instructions))
         capture_key = state.request.episode_id.capture_key
-        sampling = {
-            "temperature": body.temperature,
-            "top_p": body.top_p,
-            "reasoning": body.reasoning,
-        }
         access = state.request.sandbox_access
         payload = {
             "messages": messages_to_dict(messages),
             # The sandbox reaches the Model Server directly; the rollout prefix keeps its calls correlated.
             "model_url": f"{self.resolve_model_base_url(self.config.model_server.name, capture_key)}/responses",
-            "request_defaults": {name: value for name, value in sampling.items() if value is not None},
+            "request_defaults": {
+                **_request_defaults(body),
+                **({"reasoning": body.reasoning} if body.reasoning is not None else {}),
+            },
             "max_input_tokens": self.config.max_input_tokens,
             "system_prompt": self.config.system_prompt,
             "shell_timeout_seconds": self.config.shell_timeout_seconds,
@@ -477,6 +543,8 @@ class DeepAgentsAgent(SimpleAgent):
                 timeout=resolve_agent_timeout(body.metadata, ceiling=self.config.sandbox_runner_timeout_seconds),
                 close_timeout=self.config.session_close_timeout_seconds,
             )
+            cleanup = state.session.cleanup
+            deadline_reached = bool(cleanup and cleanup["timed_out"])
         except TimeoutError as failure:
             # The runner normally stops at the deadline and writes its partial report. If the supervisor overran
             # too, the episode is still a timeout when that report is there, and an infrastructure failure when not.
@@ -493,6 +561,9 @@ class DeepAgentsAgent(SimpleAgent):
             )
             state.provider_wait_failure.__cause__ = failure
             observe_failure(state.provider_wait_failure)
+            deadline_reached = True
+        _settle_wall_time(output, deadline_reached=deadline_reached, rollout_stopped=state.session.expired)
+        error = output["model_error"] or output.get("run_error")
         response = to_responses(messages_from_dict(output["messages"]), self.config.model_server.name)
         response.update(
             id=f"deepagents-{capture_key}",
@@ -500,7 +571,7 @@ class DeepAgentsAgent(SimpleAgent):
             status=output["status"],
             usage=_usage(output),
             metadata={"stop_reason": output["stop_reason"]} if output["stop_reason"] else None,
-            error={"code": "server_error", "message": output["model_error"]} if output["model_error"] else None,
+            error={"code": "server_error", "message": error} if error else None,
         )
         response = self.report_rollout_stop(NeMoGymResponse.model_validate(response), state.session)
         return self.report_outcome(response, output)
@@ -546,7 +617,9 @@ class DeepAgentsAgent(SimpleAgent):
                 if isinstance(state, DeepAgentsSandboxSession):
                     async with self._sem:
                         return await self._run_in_sandbox(body, state)
-                return await self._run_graph(body, model_url_path=model_url_path, rollout_id=rollout_id)
+                return await self._run_graph(
+                    body, model_url_path=model_url_path, rollout_id=rollout_id, in_session=True
+                )
 
             state.activation = asyncio.create_task(activate())
         elif body != state.activation_request:
@@ -560,12 +633,17 @@ class DeepAgentsAgent(SimpleAgent):
         *,
         model_url_path: str,
         rollout_id: str | None,
+        in_session: bool = False,
     ) -> NeMoGymResponse:
+        """Run the in-process graph once. A session types a model request the Model Server refused for good; legacy
+        /run raises it as before."""
         if isinstance(body.input, str):
             input_items = [NeMoGymEasyInputMessage(role="user", content=body.input)]
         else:
             input_items = body.input
         input_messages = to_langchain(input_items)
+        if body.instructions:
+            input_messages.insert(0, SystemMessage(content=body.instructions))
 
         # `model_cookies` starts empty, not from `request.cookies` (those are resources-server session
         # cookies chained from /seed_session — see the cookie-mirroring loop in responses() — and are unrelated
@@ -574,6 +652,7 @@ class DeepAgentsAgent(SimpleAgent):
         # responses_langchain_bridge.py. `model_usage` similarly accumulates usage from every internal
         # model call so the final agent response reports the whole rollout.
         model_usage = {"usage": None}
+        model_failure: dict[str, ClientResponseError | None] = {"error": None}
         run_config: RunnableConfig = {
             "configurable": {
                 "model_url_path": model_url_path,
@@ -597,14 +676,56 @@ class DeepAgentsAgent(SimpleAgent):
                 # TypedDict, not a BaseModel — verified via NeMoGymResponseCreateParamsNonStreaming; no
                 # .model_dump() needed, and calling one would raise AttributeError on a plain dict).
                 "model_reasoning": body.reasoning,
+                "model_request_defaults": _request_defaults(body),
+                # The bridge records a model call's HTTP error here, so it is not mistaken for a tool's.
+                "model_failure": model_failure,
             }
         }
-        final_state = await self.agent.ainvoke({"messages": input_messages}, config=run_config)
+        try:
+            final_state = await self.agent.ainvoke({"messages": input_messages}, config=run_config)
+        except ClientResponseError as error:
+            if in_session and error is model_failure["error"] and _final_model_refusal(error):
+                return self._model_refusal_response(error)
+            raise
 
         new_messages = final_state["messages"][len(input_messages) :]
         response_body = to_responses(new_messages, self.config.model_server.name)
         response_body["usage"] = model_usage["usage"]
         return NeMoGymResponse.model_validate(response_body)
+
+    def _model_refusal_response(self, error: ClientResponseError) -> NeMoGymResponse:
+        """The session reply for a model request the Model Server refused for good, typed as the sandbox runner types it.
+
+        A context limit is `incomplete` and verified; any other refusal is `failed` with its HTTP status in
+        `ng_agent_outcome`, for the Environment Server's outcome policy. ainvoke() keeps no partial graph state, so
+        the reply has no output, and its usage is unknown.
+        """
+        content = getattr(error, "response_content", None)
+        detail = content.decode("utf-8", errors="replace") if isinstance(content, bytes) else str(error.message)
+        context_limit = is_context_limit(detail)
+        report = {
+            "status": "incomplete" if context_limit else "failed",
+            "stop_reason": "context_limit" if context_limit else None,
+            "model_error": None if context_limit else f"Model Server HTTP {error.status}: {detail[:2000]}",
+            "model_error_status": error.status,
+            "model_context_limit": context_limit,
+        }
+        response = to_responses([], self.config.model_server.name)
+        response.update(
+            status=report["status"],
+            usage=None,
+            metadata={"stop_reason": "context_limit"} if context_limit else None,
+            error=None if context_limit else {"code": "server_error", "message": report["model_error"]},
+        )
+        if not context_limit:
+            # As SimpleAgent's session reply does: keep the Model Server's selected cause with the reply.
+            log = RequestFailureLog.current()
+            failure_report = log.reply_report(error) if log else report_for_current_request(error)
+            forwarded = FailureHeader.decode(error.headers)
+            if forwarded is not None:
+                failure_report = failure_report.merged(forwarded)
+            response["failure_report"] = failure_report.model_dump(mode="json")
+        return self.report_outcome(NeMoGymResponse.model_validate(response), report)
 
     async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
         """Keep legacy /run for the search profile; sandbox episodes require an Environment Server."""

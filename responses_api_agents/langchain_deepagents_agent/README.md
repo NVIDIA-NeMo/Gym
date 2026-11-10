@@ -113,6 +113,14 @@ session, and then calls `/verify`. The agent's side of that contract:
 - **Close** cancels a graph that is still running. Close returns no resources cookie jar, so `/verify` receives
   the seed's cookies unchanged. It returns an observation bundle with the gaps `agent_transcript_unavailable` and
   `model_call_ownership_unavailable` (see [Open gaps](#open-gapslimitations)).
+- **Request fields.** `input`, `instructions` (as a system message), and `temperature`, `top_p` and `reasoning`
+  apply to every model call, on legacy `/run` as well. The request's `tools` are ignored: the graph calls only its
+  own Tavily search. `concurrency` bounds only the builtin profile's sandbox runs.
+- **Model errors.** A Model Server status that another episode attempt can change (408, 425, 429 or 5xx), or a
+  connection failure, fails the activation, and the Environment Server runs the episode again. Any other HTTP
+  error ends the session's run with a reply that has no output: `incomplete` with `metadata.stop_reason:
+  context_limit` for the error code `context_length_exceeded`, which is verified, and otherwise `failed` with
+  `model_request_error` and the HTTP status in `ng_agent_outcome`. Legacy `/run` raises every model error.
 - The agent does not enforce a task's agent timeout (`metadata.agent_timeout_sec`), and it does not support
   rollout stops (`/rollouts/<id>/stop` answers 501).
 - **`execute_tools: false`** is rejected when the config loads: the graph always runs its own tools.
@@ -164,16 +172,21 @@ not list this agent yet, so start its servers with `--allow-unsupported-pairing`
   outside `workdir`.
 - **Time limit and stop.** The run's limit is `sandbox_runner_timeout_seconds`, or a task's shorter
   `metadata.agent_timeout_sec`. At the limit Gym's process supervisor stops the runner, which reports the messages
-  finished so far: the response is `incomplete` with `metadata.stop_reason: wall_time`, and it is still verified. A
-  rollout stop (`POST /rollouts/<id>/stop`) ends the run the same way and adds `ng_rollout_stop`; while the graph
+  finished so far: the response is `incomplete` with `metadata.stop_reason: wall_time`, and it is still verified. If
+  no model reply had arrived by then, the Model Server never answered: the response is `failed` with
+  `model_transport_error`, which the Environment Server retries. The runner writes its report before it waits for
+  any tool thread, and a stop during its startup still leaves an empty report. A
+  rollout stop (`POST /rollouts/<id>/stop`) ends the run as at the limit and adds `ng_rollout_stop`; while the graph
   runs, it needs a provider whose uploads never wait for running commands (Local, or OpenSandbox with background
-  exec). Reaching deepagents' step limit also returns `incomplete`, with `stop_reason: max_iterations`.
+  exec). A stop that the supervisor's receipt does not show as the limit, such as a task command `pkill python3`
+  that reaches the runner, ends the run `failed` with `agent_run_error`. Reaching deepagents' step limit also
+  returns `incomplete`, with `stop_reason: max_iterations`.
 - **Activation** runs the graph once per session. An identical retry joins that run, and a different request or a
   request for another rollout answers 409. A client that disconnects does not cancel the run.
 - **Close** stops the graph through the supervisor, then disconnects from a borrowed sandbox without stopping it:
   the resources server that lent it stops it after `/verify`. The observation bundle has a `sandbox` record whose
-  outcome says how the run ended (`completed`, `failed`, `timeout` or `cancelled`), and the same two gaps as the
-  in-process agent.
+  outcome says how the run ended (`completed`, `failed`, `timeout` or `cancelled`; `oom` or `unknown` for a run that
+  left no report after it launched), and the same two gaps as the in-process agent.
 - **Usage** is the sum over the run's model calls when every call returned usage; otherwise it is unknown.
 
 ## Tool ownership: agent vs. resources server
@@ -305,7 +318,9 @@ request - it gets the compacted version.
   reported, so that alone accounts for most of the risk. That's considered safe enough to ship as-is; the
   exception-type mismatch itself is still unfixed, so if compaction ever lags (e.g. `max_input_tokens` set
   too high relative to the real limit, compounded by the approximate token counting above), the failure
-  mode is still an opaque `ClientResponseError` rather than a graceful retry. 
+  mode is still an aiohttp `ClientResponseError` rather than a graceful retry. A session's run then ends
+  `incomplete` with no output (see the search profile's **Model errors** above); the builtin profile keeps the
+  messages finished before the error.
 
 - **Known lossy points in the LangChain ↔ Responses translation layer** — see the table and list above:
   unrecognized input item types are dropped silently on one side but raise on the other, `usage_metadata`
