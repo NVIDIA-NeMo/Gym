@@ -153,23 +153,40 @@ def skips_token_capture(body: BaseModel | Mapping[str, Any] | None) -> bool:
     """Return whether a run request or row skips token capture for its rollout.
 
     A training framework sets ``_ng_skip_token_capture: true`` on a rollout it does not train on, such as a validation
-    rollout, so none of the rollout's model calls is captured. ``false`` or no value leaves capture to the run's
-    ``token_id_capture`` block: a rollout can turn capture off, never on.
+    rollout, so none of the rollout's model calls is captured. ``false``, ``null`` or no value leaves capture to the
+    run's ``token_id_capture`` block: a rollout can turn capture off, never on.
     """
     # Imported here because global_config imports feature modules that import the episode identity.
-    from nemo_gym.config.global_config import SKIP_TOKEN_CAPTURE_KEY_NAME
+    from nemo_gym.config.global_config import (
+        ROLLOUT_ID_KEY_NAME,
+        ROLLOUT_INDEX_KEY_NAME,
+        SKIP_TOKEN_CAPTURE_KEY_NAME,
+        TASK_INDEX_KEY_NAME,
+    )
 
     if isinstance(body, Mapping):
-        value = body.get(SKIP_TOKEN_CAPTURE_KEY_NAME, False)
+        value = body.get(SKIP_TOKEN_CAPTURE_KEY_NAME)
     elif isinstance(body, BaseModel):
         # BaseRunRequest declares the key as ``skip_token_capture``; other models may keep it as an extra field.
         value = getattr(body, "skip_token_capture", None)
         if value is None:
-            value = (body.model_extra or {}).get(SKIP_TOKEN_CAPTURE_KEY_NAME, False)
+            value = (body.model_extra or {}).get(SKIP_TOKEN_CAPTURE_KEY_NAME)
     else:
         return False
+    # ``null`` counts as unset, as for ``_ng_rollout_id``: a table that sets the column on some rows writes it on the
+    # others.
+    if value is None:
+        return False
     if not isinstance(value, bool):
-        raise ValueError(f"{SKIP_TOKEN_CAPTURE_KEY_NAME} must be true or false; got {value!r}")
+        row = ""
+        if isinstance(body, Mapping):
+            identity = {
+                key: body[key]
+                for key in (TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, ROLLOUT_ID_KEY_NAME)
+                if body.get(key) is not None
+            }
+            row = f" (row {identity})" if identity else ""
+        raise ValueError(f"{SKIP_TOKEN_CAPTURE_KEY_NAME} must be true or false{row}; got {value!r}")
     return value
 
 

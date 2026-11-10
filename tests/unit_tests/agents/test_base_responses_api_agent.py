@@ -350,6 +350,11 @@ class TestRolloutTokenCapture:
                 "/ng-rollout/3-1/training-token-capture/v1/responses",
                 "http://model-host:8000/ng-rollout/3-1/training-token-capture/v1",
             ),
+            (
+                {"_ng_skip_token_capture": None},
+                "/ng-rollout/3-1/training-token-capture/v1/responses",
+                "http://model-host:8000/ng-rollout/3-1/training-token-capture/v1",
+            ),
             # The rollout keeps its prefix and drops only the training tag.
             (
                 {"_ng_skip_token_capture": True},

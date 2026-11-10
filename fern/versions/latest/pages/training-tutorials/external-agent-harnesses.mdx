@@ -461,7 +461,7 @@ A training framework that also runs rollouts it does not train on, such as valid
 
 None of that rollout's model calls carries the `training-token-capture` segment, so the model server records no token ids for it. A flat row keeps the key, which `single_agent_turn_legacy` and the agent's `/run` read. A materialized task row carries the setting as `skip_token_capture: true` in the episode request, and the Environment Server activates its agents without the segment. An agent activated on a rollout path without the segment captures none of that activation's calls, whatever its own `token_id_capture` setting.
 
-`false`, or no key, leaves capture to the run's `token_id_capture` settings: a row can turn capture off, never on. A rollout that skips capture keeps its `/ng-rollout/<id>` prefix and otherwise runs like an uncaptured evaluation rollout: an agent whose output depends on capture returns its evaluation output, and Claude Code, for example, folds its thinking into the message text.
+`false`, `null`, or no key leaves capture to the run's `token_id_capture` settings: a row can turn capture off, never on. A rollout that skips capture keeps its `/ng-rollout/<id>` prefix and otherwise runs like an uncaptured evaluation rollout: an agent whose output depends on capture returns its evaluation output, and Claude Code, for example, folds its thinking into the message text.
 
 Rollout collection does not rebuild the response of a row that skips capture. A framework that rebuilds responses itself (see [Rebuild and retire rollouts in the framework](#rebuild-and-retire-rollouts-in-the-framework)) must not finalize a row it marked: `finalize_rollout_token_capture` finds no records for it and masks it.
 

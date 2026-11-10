@@ -185,8 +185,9 @@ class BaseRunRequest(BaseModel):
         alias=MODEL_SAMPLING_KEY_NAME,
         exclude=True,
     )
-    # True turns token capture off for this rollout's model calls; see nemo_gym.core.episode_context.
-    skip_token_capture: StrictBool = Field(
+    # True turns token capture off for this rollout's model calls; null counts as unset. See
+    # nemo_gym.core.episode_context.
+    skip_token_capture: Optional[StrictBool] = Field(
         default=False,
         alias="_ng_skip_token_capture",
         exclude=True,

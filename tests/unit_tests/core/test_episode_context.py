@@ -30,6 +30,8 @@ from nemo_gym.server_runtime.base_resources_server import BaseRunRequest
     [
         ({}, False),
         ({"_ng_skip_token_capture": False}, False),
+        # A table that sets the column on some rows writes null on the others.
+        ({"_ng_skip_token_capture": None}, False),
         ({"_ng_skip_token_capture": True}, True),
     ],
 )
@@ -37,10 +39,15 @@ def test_a_row_skips_token_capture_only_with_true(row: dict[str, Any], expected:
     assert skips_token_capture({"responses_create_params": {"input": "task"}, **row}) is expected
 
 
-@pytest.mark.parametrize("value", ["true", 1, None])
+@pytest.mark.parametrize("value", ["true", 1])
 def test_a_row_with_a_value_that_is_not_a_boolean_is_refused(value: Any) -> None:
     with pytest.raises(ValueError, match="_ng_skip_token_capture must be true or false"):
         skips_token_capture({"_ng_skip_token_capture": value})
+
+
+def test_a_refused_value_names_its_row() -> None:
+    with pytest.raises(ValueError, match=r"\(row \{'_ng_task_index': 3, '_ng_rollout_index': 1\}\); got 'yes'"):
+        skips_token_capture({"_ng_task_index": 3, "_ng_rollout_index": 1, "_ng_skip_token_capture": "yes"})
 
 
 def test_a_run_request_reads_the_key_and_keeps_it_out_of_its_serialized_form() -> None:
@@ -50,6 +57,10 @@ def test_a_run_request_reads_the_key_and_keeps_it_out_of_its_serialized_form() -
 
     assert skips_token_capture(body) is True
     assert "_ng_skip_token_capture" not in body.model_dump(by_alias=True)
+    unset = BaseRunRequest.model_validate(
+        {"responses_create_params": {"input": "task"}, "_ng_skip_token_capture": None}
+    )
+    assert skips_token_capture(unset) is False
     with pytest.raises(ValidationError):
         BaseRunRequest.model_validate({"responses_create_params": {"input": "task"}, "_ng_skip_token_capture": "true"})
 
