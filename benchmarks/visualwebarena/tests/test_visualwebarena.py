@@ -12,8 +12,8 @@ import pytest
 from omegaconf import DictConfig, OmegaConf
 
 from benchmarks.visualwebarena import prepare as visualwebarena_prepare
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
-from nemo_gym.web.task_images import resolve_local_task_image_path
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.web import resolve_local_task_image_path
 
 
 def _write_source(root: Path, count: int) -> tuple[Path, str]:
