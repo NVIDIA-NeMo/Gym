@@ -427,8 +427,11 @@ def runtime_identity() -> dict:
     component_root = ROOT.parents[2]
     for boundary in ["benchmarks", "resources_servers", "responses_api_models", "responses_api_agents", "nemo_gym"]:
         for p in (component_root / boundary).rglob("*.py"):
-            if ".venv" not in p.parts:
-                sources["gym/" + str(p.relative_to(component_root))] = digest(p)
+            relative = p.relative_to(component_root)
+            # Hidden directories hold installed tools (.venv, pi_agent's .pi_node), not Gym source, and other
+            # test runs in the same checkout create and delete them.
+            if not any(part.startswith(".") for part in relative.parts):
+                sources["gym/" + str(relative)] = digest(p)
     return {
         "python": sys.version,
         "dependencies": versions,

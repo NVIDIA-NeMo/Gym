@@ -541,3 +541,22 @@ def test_runtime_fingerprint_covers_active_agent_and_core(monkeypatch):
         lambda path: "modified-agent" if path.as_posix().endswith("simple_agent/app.py") else digest(path),
     )
     assert core.runtime_identity() != before
+
+
+def test_runtime_fingerprint_skips_hidden_directories(monkeypatch, tmp_path):
+    from nemo_gym.orchestration import jobs
+
+    root = tmp_path / "resources_servers/agentic_if_realworld/benchmark"
+    root.mkdir(parents=True)
+    (root / "source_manifest.json").write_text('{"gym_commit": "source-revision"}')
+    agent = tmp_path / "responses_api_agents/pi_agent"
+    (agent / ".pi_node/lib").mkdir(parents=True)
+    (agent / "app.py").write_text("")
+    (agent / ".pi_node/lib/tool.py").write_text("")
+    monkeypatch.setattr(core, "ROOT", root)
+    monkeypatch.setattr(jobs, "installed_gym_commit", lambda: "runtime-revision")
+    before = core.runtime_identity()
+    assert "gym/responses_api_agents/pi_agent/app.py" in before["sources"]
+    assert not any(".pi_node" in path for path in before["sources"])
+    (agent / ".pi_node/lib/tool.py").unlink()
+    assert core.runtime_identity() == before
