@@ -3,13 +3,14 @@
 
 """Component selection and rules of the Environment Server compliance suite."""
 
+import importlib
 import json
 import subprocess
 import sys
 
 import pytest
 from scripts.check_suites.github_actions import read_ci_result, write_ci_result
-from scripts.environment_server_compliance import checks, ci
+from scripts.environment_server_compliance import checks, ci, probe, rules
 from scripts.environment_server_compliance.ci import all_components, select_components
 from scripts.environment_server_compliance.component import _base_class, default_agent_config
 from scripts.environment_server_compliance.engine import (
@@ -345,8 +346,14 @@ def test_the_inspection_can_import_modules_next_to_the_apps_entry_point(monkeypa
     monkeypatch.setattr(server_venv, "setup_env_command", lambda *args: "true")
     monkeypatch.setattr(server_venv, "run_command", lambda *args, **kwargs: Done())
     monkeypatch.setattr(server_venv, "get_venv_path", lambda directory, config: tmp_path)
-    monkeypatch.setattr(ci.subprocess, "run", lambda command, **kwargs: environments.append(kwargs["env"]) or Done())
+    commands = []
+    monkeypatch.setattr(
+        ci.subprocess,
+        "run",
+        lambda command, **kwargs: commands.append(command) or environments.append(kwargs["env"]) or Done(),
+    )
     assert ci.inspect_component("responses_api_agents/sibling_imports") is None
+    assert commands[0][1:3] == ["-m", "scripts.environment_server_compliance.inspection"]
     paths = environments[0]["PYTHONPATH"].split(ci.os.pathsep)
     assert paths == [str(ci.ROOT), str(ci.ROOT / "responses_api_agents/sibling_imports")]
 
@@ -486,6 +493,232 @@ def test_the_reporter_imports_without_gym_or_site_packages():
     )
 
 
+LENDING_AGENT = """
+from dataclasses import dataclass
+
+from fastapi import HTTPException
+
+from nemo_gym.agents import (
+    AgentCloseSessionResponse,
+    AgentSessionState,
+    BaseResponsesAPIAgentConfig,
+    SimpleResponsesAPIAgent,
+)
+from nemo_gym.config import get_global_config_dict
+from nemo_gym.sandbox import AsyncSandbox, create_provider, resolve_provider_config
+
+
+@dataclass
+class State(AgentSessionState):
+    sandbox: AsyncSandbox | None
+
+
+class Config(BaseResponsesAPIAgentConfig):
+    label: str = ""
+    refuse_the_seed: bool = False
+    crash_the_seed: bool = False
+    reject_sandbox_access: bool = False
+    fail_the_close: bool = False
+    stop_the_lent_sandbox: bool = False
+
+
+class LendingAgent(SimpleResponsesAPIAgent):
+    config: Config
+
+    async def responses(self, body=None):
+        raise NotImplementedError
+
+    async def run(self, body=None):
+        raise NotImplementedError
+
+    async def _seed_agent_session_state(self, body):
+        if self.config.crash_the_seed:
+            raise KeyError("policy_model")
+        if self.config.refuse_the_seed:
+            raise HTTPException(422, "refused")
+        if self.config.reject_sandbox_access and body.sandbox_access:
+            raise HTTPException(422, "Lending Agent does not support sandbox access")
+        access = body.sandbox_access
+        if access is None:
+            return State(request=body, sandbox=None)
+        provider = create_provider(
+            resolve_provider_config(access.connection.provider_config_ref, get_global_config_dict())
+        )
+        return State(request=body, sandbox=await AsyncSandbox.connect(access.connection.descriptor, provider=provider))
+
+    async def _close_agent_session_state(self, state):
+        if self.config.fail_the_close:
+            raise HTTPException(500, "close failed")
+        if state.sandbox is None:
+            pass
+        elif self.config.stop_the_lent_sandbox:
+            await state.sandbox.stop()
+        else:
+            await state.sandbox.disconnect()
+        return AgentCloseSessionResponse(agent_session_id=state.request.agent_session_id)
+"""
+
+
+@pytest.fixture
+def lending_component(tmp_path, monkeypatch):
+    """Write a component whose agent borrows the lent sandbox, import it, and give its agent class."""
+    from nemo_gym.config.global_config import reset_global_config_dict
+
+    created = []
+
+    def create(**config):
+        name = f"compliance_probe_{len(created)}"
+        write(tmp_path, f"responses_api_agents/{name}/app.py", LENDING_AGENT)
+        lines = "".join(f"      {key}: {str(value).lower()}\n" for key, value in config.items())
+        write(
+            tmp_path,
+            f"responses_api_agents/{name}/configs/{name}.yaml",
+            f"{name}:\n  responses_api_agents:\n    lending_agent:\n      entrypoint: app.py\n"
+            f"      label: ${{policy_model_name}}\n{lines}",
+        )
+        monkeypatch.syspath_prepend(str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+        created.append(name)
+        module = importlib.import_module(f"responses_api_agents.{name}.app")
+        return tmp_path / "responses_api_agents" / name, module.LendingAgent
+
+    reset_global_config_dict()
+    yield create
+    reset_global_config_dict()
+    for name in created:
+        for module in [module for module in sys.modules if module.startswith(f"responses_api_agents.{name}")]:
+            del sys.modules[module]
+
+
+def test_the_agent_config_is_the_default_configs_agent_instance_with_placeholders(lending_component):
+    component, _ = lending_component(stop_the_lent_sandbox=True)
+    assert probe.agent_config(component) == {
+        "name": component.name,
+        "host": "127.0.0.1",
+        "port": 1,
+        "entrypoint": "app.py",
+        "label": "probe",
+        "stop_the_lent_sandbox": True,
+    }
+
+
+def test_the_agent_config_takes_the_probe_override_for_what_the_default_config_leaves_unset(tmp_path):
+    component = tmp_path / "claude_code_agent"
+    write(
+        component,
+        "configs/claude_code_agent.yaml",
+        "claude_code_agent:\n  responses_api_agents:\n    claude_code_agent:\n      claude_code_version: null\n",
+    )
+    assert probe.agent_config(component)["claude_code_version"] == "2.1.261"
+
+
+def test_a_session_that_disconnects_leaves_the_lent_sandbox_running(lending_component):
+    component, agent = lending_component()
+    assert probe.probe_session(agent, probe.agent_config(component)) == probe.SessionObservation(
+        "accepted", "accepted", False
+    )
+
+
+def test_a_session_that_stops_the_lent_sandbox_is_observed(lending_component):
+    component, agent = lending_component(stop_the_lent_sandbox=True)
+    assert probe.probe_session(agent, probe.agent_config(component)) == probe.SessionObservation(
+        "accepted", "accepted", True
+    )
+
+
+def test_an_agent_that_says_it_does_not_support_sandbox_access_is_observed_refusing_it(lending_component):
+    component, agent = lending_component(reject_sandbox_access=True)
+    assert probe.probe_session(agent, probe.agent_config(component)) == probe.SessionObservation("refused", None, None)
+
+
+@pytest.mark.parametrize("option", ["refuse_the_seed", "crash_the_seed"])
+def test_a_seed_that_fails_is_observed_as_failed(lending_component, option):
+    component, agent = lending_component(**{option: True})
+    assert probe.probe_session(agent, probe.agent_config(component)) == probe.SessionObservation("failed", None, None)
+
+
+def test_a_close_that_fails_is_observed_as_failed_and_the_sandbox_is_not_applicable(lending_component):
+    component, agent = lending_component(fail_the_close=True)
+    assert probe.probe_session(agent, probe.agent_config(component)) == probe.SessionObservation(
+        "accepted", "failed", None
+    )
+
+
+def test_a_sandbox_whose_state_after_the_close_cannot_be_read_is_not_judged_stopped(
+    lending_component, monkeypatch, capsys
+):
+    from nemo_gym.sandbox.providers.base import SandboxExecResult
+
+    async def timed_out(self, handle, *args, **kwargs):
+        return SandboxExecResult(None, "local command timed out", 125, "timeout")
+
+    component, agent = lending_component()
+    monkeypatch.setattr(probe.BorrowableLocalProvider, "exec", timed_out)
+    assert probe.probe_session(agent, probe.agent_config(component)) == probe.SessionObservation(
+        "accepted", "accepted", None
+    )
+    results = inspect_component(f"responses_api_agents/{component.name}")
+    assert _filter_findings(results, "A4") == _filter_findings(results, "A5") == []
+    assert "A5 not applicable: whether the lent sandbox survived the close could not be determined" in (
+        capsys.readouterr().err
+    )
+
+
+def test_an_agent_that_stops_the_lent_sandbox_is_reported_at_its_close_hook(lending_component):
+    component, agent = lending_component(stop_the_lent_sandbox=True)
+    [finding] = _filter_findings(inspect_component(f"responses_api_agents/{component.name}"), "A5")
+    assert finding["path"] == f"responses_api_agents/{component.name}/app.py"
+    assert finding["line"] == agent._close_agent_session_state.__code__.co_firstlineno
+
+
+def test_an_agent_that_refuses_the_lent_sandbox_properly_has_no_session_finding(lending_component, capsys):
+    component, _ = lending_component(reject_sandbox_access=True)
+    results = inspect_component(f"responses_api_agents/{component.name}")
+    assert _filter_findings(results, "A4") == _filter_findings(results, "A5") == []
+    assert capsys.readouterr().err == ""
+
+
+def test_an_agent_whose_close_fails_is_noted_and_has_no_session_finding(lending_component, capsys):
+    component, _ = lending_component(fail_the_close=True)
+    assert _filter_findings(inspect_component(f"responses_api_agents/{component.name}"), "A5") == []
+    assert "A5 not applicable: the session close was failed" in capsys.readouterr().err
+
+
+def test_an_agent_that_leaves_the_lent_sandbox_running_has_no_session_finding(lending_component):
+    component, _ = lending_component()
+    assert _filter_findings(inspect_component(f"responses_api_agents/{component.name}"), "A5") == []
+
+
+def test_a_stopped_lent_sandbox_is_located_at_the_own_close_hook_or_else_the_class():
+    from nemo_gym.agents.base_responses_api_agent import SimpleResponsesAPIAgent
+
+    class Closing(SimpleResponsesAPIAgent):
+        async def _close_agent_session_state(self, state):
+            pass
+
+    class Inheriting(Closing):
+        pass
+
+    def stopped(agent, *observation):
+        target = Target(agent)
+        target.once("session", lambda: probe.SessionObservation(*observation))
+        return rules.stopped_lent_sandbox(target)
+
+    assert stopped(Closing, "accepted", "accepted", True) is vars(Closing)["_close_agent_session_state"]
+    assert stopped(Inheriting, "accepted", "accepted", True) is Inheriting
+    assert stopped(Closing, "accepted", "accepted", False) is None
+    assert stopped(Closing, "refused", None, None) is None
+    with pytest.raises(Unavailable, match="the session close was failed"):
+        stopped(Closing, "accepted", "failed", None)
+    with pytest.raises(Unavailable, match="could not be determined"):
+        stopped(Closing, "accepted", "accepted", None)
+
+
+def test_a_session_is_not_observed_without_a_component_to_run_it_from():
+    with pytest.raises(Unavailable, match="no component directory"):
+        probe.observe_session(Target(object))
+
+
 def _rule(id, check, *requires):
     return Rule(id, AGENT_SERVER, id, check, requires)
 
@@ -550,3 +783,15 @@ def test_rules_must_require_earlier_rules_of_their_own_kind():
         validate((_rule("A", nothing), Rule("B", RESOURCES_SERVER, "B", nothing, ("A",))))
     with pytest.raises(ValueError, match="Duplicate rule id"):
         validate((_rule("A", nothing), _rule("A", nothing)))
+
+
+@pytest.mark.parametrize("option", ["refuse_the_seed", "crash_the_seed"])
+def test_an_agent_whose_seed_fails_is_reported_at_its_seed_hook_and_its_close_is_not_applicable(
+    lending_component, capsys, option
+):
+    component, agent = lending_component(**{option: True})
+    results = inspect_component(f"responses_api_agents/{component.name}")
+    [finding] = _filter_findings(results, "A4")
+    assert finding["line"] == agent._seed_agent_session_state.__code__.co_firstlineno
+    assert _filter_findings(results, "A5") == []
+    assert "not applicable" not in capsys.readouterr().err
