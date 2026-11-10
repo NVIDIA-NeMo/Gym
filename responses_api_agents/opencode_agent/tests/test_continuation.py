@@ -3,6 +3,7 @@
 """Multi-turn continuation uses ordinary Responses requests and per-activation evidence."""
 
 import asyncio
+import hashlib
 import json
 import shlex
 import sqlite3
@@ -28,7 +29,13 @@ from nemo_gym.core import (
 from nemo_gym.trajectory import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
 from responses_api_agents.opencode_agent.continuation import classify_opencode_run
 from responses_api_agents.opencode_agent.snapshot import snapshot
-from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import seed, setup  # noqa: F401
+from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import (  # noqa: F401
+    PNG,
+    PNG_URI,
+    count_media_decodes,
+    seed,
+    setup,
+)
 
 
 def sandbox_oom(reason: str, *, sandbox_id: str = "task-5") -> NgFailureEvent:
@@ -1156,3 +1163,131 @@ def test_missing_native_step_diagnostics_survive_http_close(setup, tmp_path):
         assert capture["cleanup"] == {"cleanup_confirmed": True, "timed_out": False, "return_code": 0}
         assert "Answer 0" not in gap["detail"]
         assert close(client, request) == receipt
+
+
+def test_media_staging_spends_the_activation_budget(setup, tmp_path):
+    agent, sandbox = setup
+    install_artifact_runner(sandbox, tmp_path)
+    upload = sandbox.upload
+    stalled = SimpleNamespace(cancelled=False)
+
+    async def stall_media(source, destination):
+        if "/nemo-gym-media/" not in destination:
+            return await upload(source, destination)
+        try:
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            stalled.cancelled = True
+            raise
+
+    sandbox.upload = stall_media
+    prompt = [
+        {"type": "input_text", "text": "What is shown?"},
+        {"type": "input_image", "image_url": PNG_URI, "detail": "auto"},
+    ]
+    with TestClient(agent.setup_webserver()) as client:
+        request = start(client)
+        result = client.post(
+            "/v1/responses",
+            headers={AGENT_ACTIVATION_HEADER: "1"},
+            json={"input": [{"role": "user", "content": prompt}], "metadata": {"agent_timeout_sec": "0.5"}},
+        )
+        assert result.status_code == 200 and result.json()["status"] == "incomplete", result.text
+        assert stalled.cancelled
+        sandbox.launch.assert_not_awaited()
+        close(client, request)
+
+
+@pytest.mark.parametrize(
+    "failing, result",
+    [
+        # The provider timed out: an outage, unlike the activation's own deadline, which ends it incomplete.
+        (
+            "mkdir -p -- /tmp/nemo-gym-media",
+            SimpleNamespace(return_code=None, stdout="", stderr="", error_type="timeout"),
+        ),
+        (
+            "{ [ ! -d /tmp/nemo-gym-media/",
+            SimpleNamespace(return_code=1, stdout="", stderr="denied", error_type=None),
+        ),
+    ],
+    ids=["provider-timeout", "rename-refused"],
+)
+def test_media_staging_error_fails_the_activation(setup, tmp_path, failing, result):
+    agent, sandbox = setup
+    install_artifact_runner(sandbox, tmp_path)
+    execute = sandbox.exec.side_effect
+
+    async def fail_staging(command, **kwargs):
+        if command.startswith(failing):
+            return result
+        return await execute(command, **kwargs)
+
+    prompt = [
+        {"type": "input_text", "text": "What is shown?"},
+        {"type": "input_image", "image_url": PNG_URI, "detail": "auto"},
+    ]
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+        request = start(client)
+        sandbox.exec.side_effect = fail_staging
+        response = client.post(
+            "/v1/responses",
+            headers={AGENT_ACTIVATION_HEADER: "1"},
+            json={"input": [{"role": "user", "content": prompt}], "metadata": {"agent_timeout_sec": "30"}},
+        )
+        assert response.status_code == 500, response.text
+        receipt = close(client, request)
+        [root] = roots(receipt["agent_observations"])
+        assert root["status"] == "failed" and root["error_type"] == "server_error"
+    sandbox.launch.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "first, declared",
+    [
+        ("text", [False, False]),
+        # OpenCode resends the first prompt's image with the history, so the next activation keeps the declaration.
+        ("image", [True, True]),
+    ],
+)
+def test_continuation_keeps_declaring_image_input_once_a_prompt_has_images(setup, tmp_path, first, declared):
+    agent, sandbox = setup
+    payloads = install_artifact_runner(sandbox, tmp_path)
+    content = [{"type": "input_text", "text": "What is shown?"}]
+    if first == "image":
+        content.append({"type": "input_image", "image_url": PNG_URI, "detail": "auto"})
+    with TestClient(agent.setup_webserver()) as client:
+        request = start(client)
+        assert activate(client, 1, [{"role": "user", "content": content}]).status_code == 200
+        assert activate(client, 2, "Describe it again").status_code == 200
+        close(client, request)
+    models = [
+        json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])["provider"]["nemo_gym"]["models"]["dummy_model"]
+        for payload in payloads
+    ]
+    assert ["modalities" in model for model in models] == declared
+
+
+def test_continuation_decodes_each_activation_image_once(setup, tmp_path, monkeypatch):
+    agent, sandbox = setup
+    payloads = install_artifact_runner(sandbox, tmp_path)
+    decodes = count_media_decodes(monkeypatch)
+    prompt = [
+        {"type": "input_text", "text": "What is shown?"},
+        {"type": "input_image", "image_url": PNG_URI, "detail": "auto"},
+    ]
+    with TestClient(agent.setup_webserver()) as client:
+        request = start(client)
+        result = client.post(
+            "/v1/responses",
+            headers={AGENT_ACTIVATION_HEADER: "1"},
+            json={"input": [{"role": "user", "content": prompt}], "metadata": {"agent_timeout_sec": "30"}},
+        )
+        assert result.status_code == 200 and result.json()["status"] == "completed", result.text
+        # Validation decodes the image, and the activation reuses that result.
+        assert decodes == [PNG_URI]
+        command = payloads[0]["command"]
+        path = command[command.index("--file") + 1]
+        assert path == f"/tmp/nemo-gym-media/{hashlib.sha256(PNG).hexdigest()}.png"
+        assert sandbox.files[path] == PNG
+        close(client, request)

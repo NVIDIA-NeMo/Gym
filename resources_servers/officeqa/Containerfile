@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Each supported platform has its own resolved package locks and offline checks.
+FROM python:3.13.17-slim-trixie@sha256:d98cc29d3266e535dd9da1099688d9cb3ca4753813571e071763d17725460962
+ARG TARGETARCH
+ENV PATH=/opt/venv/bin:$PATH PYTHONUNBUFFERED=1
+COPY resources_servers/officeqa/toolset/apt.linux-${TARGETARCH}.lock /tmp/system.lock
+RUN test "$(dpkg --print-architecture)" = "$TARGETARCH" \
+    && sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o APT::Update::Error-Mode=any update \
+    && apt-get upgrade -y \
+    && apt-get install -y --no-install-recommends $(cat /tmp/system.lock) \
+    && rm -rf /var/lib/apt/lists/*
+COPY resources_servers/officeqa/toolset/pip.linux-${TARGETARCH}.lock /tmp/packages.lock
+RUN python -m venv /opt/venv \
+    && pip install --no-cache-dir --upgrade pip==26.2.2 uv==0.13.5 \
+    && uv pip sync --python /opt/venv/bin/python --no-cache /tmp/packages.lock \
+    && uv pip check --python /opt/venv/bin/python \
+    && mkdir -p /workspace/task /workspace/docs /usr/local/share/document-tools \
+    && chmod 1777 /workspace/task \
+    && uv pip freeze --python /opt/venv/bin/python > /usr/local/share/document-tools/environment.txt \
+    && dpkg-query -W -f='${binary:Package}=${Version}\n' >> /usr/local/share/document-tools/environment.txt \
+    && rm /tmp/system.lock /tmp/packages.lock
+WORKDIR /workspace/task
+CMD ["bash"]
+
+ENV OMP_NUM_THREADS=2 MKL_NUM_THREADS=2
+# Check imports, executable presence, and English OCR data offline as the task user.
+USER 65534:65534
+RUN --network=none set -eu; \
+    python -I -c 'import importlib; [importlib.import_module(m) for m in ("pytesseract ocrmypdf pymupdf cv2 PIL " \
+      "pdf2image pdfplumber pypdf PyPDF2 pdfminer openpyxl pikepdf fpdf img2pdf lxml shapely " \
+      "numpy pandas scipy statsmodels sympy mpmath").split()]'; \
+    for tool in pdftotext pdfinfo pdftoppm pdfgrep qpdf gs magick rg curl gawk tesseract ocrmypdf; \
+      do command -v "$tool" >/dev/null; done; \
+    tesseract --list-langs 2>&1 | grep -qx eng
+USER root
