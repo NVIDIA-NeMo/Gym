@@ -49,7 +49,7 @@ def test_adaptive_capture_selected_parameters_and_resume(
     # status changes must not impersonate a runtime change within this synthetic resume test.
     # The real source fingerprint is exercised separately below.
     runtime = {"gym_commit": "synthetic-runtime"}
-    monkeypatch.setattr(rollout_driver, "runtime_identity", lambda: dict(runtime))
+    monkeypatch.setattr(rollout_driver, "runtime_identity", lambda: copy.deepcopy(runtime))
     create(tmp_path / "data", examples=interrupted or multiple)
     dataset = core.Dataset(tmp_path / "data", synthetic=True)
     prepared = tmp_path / "prepared.jsonl"
