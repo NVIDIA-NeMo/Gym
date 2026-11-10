@@ -474,3 +474,23 @@ def test_extract_token_stats_openai_cached_not_double_counted():
     assert stats["tokens_in"] == 10
     assert stats["tokens_total"] == 15
     assert stats["cache_creation_tokens"] is None
+
+
+@pytest.mark.parametrize(
+    ("response", "exchange_finish_reason", "expected"),
+    [
+        # A completed Responses call has no reason of its own; the adapter's note fills it.
+        ({"status": "completed"}, "stop", "stop"),
+        ({"status": "completed"}, None, None),
+        # What the payload itself reports stays first.
+        (
+            {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}},
+            "length",
+            "max_output_tokens",
+        ),
+    ],
+)
+def test_build_model_call_record_falls_back_to_the_adapters_finish_reason(response, exchange_finish_reason, expected):
+    exchange = {"response": response, "finish_reason": exchange_finish_reason}
+
+    assert build_model_call_record(exchange, call_index=0).finish_reason == expected

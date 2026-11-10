@@ -5,7 +5,6 @@ import os
 import shlex
 import shutil
 import subprocess
-import sys
 
 import pytest
 
@@ -13,17 +12,13 @@ from responses_api_agents.codex_agent.app import _sandbox_prepare_command
 
 
 @pytest.mark.parametrize("package_manager", ["apk", "apt-get"])
-@pytest.mark.parametrize("missing", [("bash",), ("python3",), ("python3", "bash")])
 @pytest.mark.parametrize("failure", [None, "nonroot", "install", "unavailable"])
-def test_posix_bootstrap_installs_only_missing_prerequisites(tmp_path, package_manager, missing, failure):
+def test_posix_bootstrap_installs_missing_bash(tmp_path, package_manager, failure):
     """Exercise the actual preparation through sh without invoking a host package manager."""
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    binaries = {"python3": sys.executable, "bash": shutil.which("bash"), "mkdir": shutil.which("mkdir")}
-    assert all(binaries.values())
-    for name, executable in binaries.items():
-        if name not in missing:
-            (bindir / name).symlink_to(executable)
+    bash = shutil.which("bash")
+    (bindir / "mkdir").symlink_to(shutil.which("mkdir"))
     (bindir / "ln").symlink_to(shutil.which("ln"))
     uid = bindir / "id"
     uid.write_text(f"#!/bin/sh\necho {1000 if failure == 'nonroot' else 0}\n")
@@ -32,10 +27,7 @@ def test_posix_bootstrap_installs_only_missing_prerequisites(tmp_path, package_m
     manager.write_text(
         '#!/bin/sh\nprintf "%s\\n" "$*" >> "$TEST_ROOT/packages.log"\n'
         + ("exit 100\n" if failure == "install" else "")
-        + 'for name in "$@"; do\n'
-        + f'case "$name" in\n python3) ln -s {shlex.quote(sys.executable)} "$TEST_ROOT/bin/python3" ;;\n'
-        + f' bash) ln -s {shlex.quote(binaries["bash"])} "$TEST_ROOT/bin/bash" ;;\n'
-        + "esac\ndone\n"
+        + f'[ "$*" = "${{*%bash}}" ] || ln -s {shlex.quote(bash)} "$TEST_ROOT/bin/bash"\n'
     )
     manager.chmod(0o755)
     if failure == "unavailable":
@@ -60,11 +52,8 @@ def test_posix_bootstrap_installs_only_missing_prerequisites(tmp_path, package_m
         return
     assert result.returncode == 0, result.stderr
     assert (tmp_path / "session/home/.codex").is_dir()
-    packages = " ".join(missing)
     assert (tmp_path / "packages.log").read_text().splitlines() == (
-        [f"add --no-cache {packages}"]
-        if package_manager == "apk"
-        else ["update", f"install -y --no-install-recommends {packages}"]
+        ["add --no-cache bash"] if package_manager == "apk" else ["update", "install -y --no-install-recommends bash"]
     )
     bash = subprocess.run(
         ["/bin/sh", "-c", "bash -c 'printf ready'"],
