@@ -265,3 +265,42 @@ async def test_native_search_requires_explicit_permission_and_network(visual_set
     }
     await agent._prepare_session_launch(state, body(), payload)
     assert payload["env"]["OPENCODE_ENABLE_EXA"] == enabled
+
+
+@pytest.mark.parametrize("image_input", [False, True])
+@pytest.mark.parametrize("string_input", [False, True])
+def test_text_prompt_uses_shared_conditional_image_declaration(visual_setup, image_input, string_input):
+    agent, sandbox = visual_setup
+    agent.config.image_input = image_input
+    export = json.loads(sandbox.events)
+    # No initial image; a tool can attach one later without being mistaken for a dropped prompt image.
+    export["messages"][0]["parts"] = [p for p in export["messages"][0]["parts"] if p.get("type") != "file"]
+    if image_input:
+        export["messages"][1]["parts"][1]["state"]["attachments"] = [
+            {"type": "file", "mime": "image/png", "url": image_url()}
+        ]
+    sandbox.events = json.dumps(export)
+    request = body(input="Inspect the task" if string_input else [{"role": "user", "content": "Inspect the task"}])
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json=request.model_dump(mode="json"))
+        assert result.status_code == 200, result.text
+        launch = sandbox.params()
+        model_config = json.loads(launch["env"]["OPENCODE_CONFIG_CONTENT"])
+        model = model_config["provider"]["nemo_gym"]["models"][agent.config.sandbox_model_id]
+        assert ("modalities" in model) is image_input
+        if image_input:
+            assert "image" in model["modalities"]["input"]
+            assert model_config["attachment"]["image"]["max_width"] == 2**31 - 1
+        else:
+            assert "attachment" not in model_config
+        assert "--file" not in launch["command"]
+        assert not any(path.startswith("/tmp/nemo-gym-media/") for path in sandbox.files)
+        retry = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json=request.model_dump(mode="json"))
+        assert retry.json() == result.json()
+        sandbox.launch.assert_awaited_once()
+        assert (
+            client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).status_code
+            == 200
+        )

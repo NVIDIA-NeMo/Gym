@@ -92,8 +92,13 @@ can be overridden through `opencode_config.permission`.
 
 ## Images and artifacts
 
-The adapter requires user prompt images and enforces `max_images` and
-`max_source_pixels` (150 million pixels by default). Exceeding a limit rejects the
+The adapter accepts text-only prompts and user prompt images. Image input is
+declared by main when the prompt contains images or `image_input: true` is set.
+Set that option for text prompts whose images arrive through tools or task files;
+leave it false for text-only models.
+
+Image prompts enforce `max_images` and `max_source_pixels` (150 million pixels by
+default). Exceeding a limit rejects the
 request. Valid images preserve their bytes by default. Explicit
 `preserve_image_format: false` converts prompt images to RGB PNG.
 

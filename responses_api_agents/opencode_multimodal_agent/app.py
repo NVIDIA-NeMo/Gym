@@ -107,7 +107,7 @@ class OpenCodeMultimodalAgent(OpenCodeAgent):
             raise HTTPException(422, "max_output_tokens must be positive and within context_window")
         validated = body.model_copy(update={"max_output_tokens": None})
         prompt, system, media = super()._session_input(validated)
-        if not media or (self.config.max_images is not None and len(media) > self.config.max_images):
+        if self.config.max_images is not None and len(media) > self.config.max_images:
             raise HTTPException(422, "Initial image count is outside the configured limits")
         try:
             media = [
@@ -131,9 +131,10 @@ class OpenCodeMultimodalAgent(OpenCodeAgent):
         config = self._deep_merge(
             copy.deepcopy(DEFAULT_TOOL_POLICY), json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
         )
+        input_items = body.model_dump()["input"]
         state.expected_images = sum(
             part.get("type") == "input_image"
-            for item in body.model_dump()["input"]
+            for item in (input_items if isinstance(input_items, list) else [])
             for part in (item["content"] if not isinstance(item["content"], str) else [])
         )
         model_id = self.config.sandbox_model_id
