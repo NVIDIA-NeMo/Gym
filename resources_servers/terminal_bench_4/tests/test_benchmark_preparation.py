@@ -114,21 +114,32 @@ def test_agent_artifacts_follow_run_directory_unless_overridden(overrides, expec
 
 
 @pytest.mark.parametrize(
-    "overrides,steps,timeout,episode",
+    "overrides,steps,timeout,runner,episode",
     [
-        ({}, 500, 30, 54000),
-        ({"tb4_max_steps": 0, "tb4_step_timeout_sec": 45, "tb4_episode_timeout_sec": 60000}, 0, 45, 60000),
+        ({}, 500, 30, 28800, 54000),
+        (
+            {
+                "tb4_max_steps": 0,
+                "tb4_step_timeout_sec": 45,
+                "tb4_agent_max_timeout_sec": 900,
+                "tb4_episode_timeout_sec": 60000,
+            },
+            0,
+            45,
+            900,
+            60000,
+        ),
     ],
 )
-def test_harbor_profile_runs_the_entry_at_the_benchmark_settings(overrides, steps, timeout, episode):
+def test_harbor_profile_runs_the_entry_at_the_benchmark_settings(overrides, steps, timeout, runner, episode):
     from nemo_gym.data.tasks.harbor.prepare import harbor_benchmark
 
     path = preparation.BENCHMARK_DIR / "miniswe.yaml"
     benchmark = harbor_benchmark(path)
     assert benchmark.target == "terminal_bench_4"
-    assert (benchmark.agent.instance_name, benchmark.agent.impl_name) == ("miniswe_sandboxed_agent",) * 2
+    assert (benchmark.agent.instance_name, benchmark.agent.impl_name) == ("mini_swe_agent",) * 2
     config = OmegaConf.merge(OmegaConf.load(path), overrides)
-    harness = config.miniswe_sandboxed_agent.responses_api_agents.miniswe_sandboxed_agent.harness
-    assert (harness.step_limit, harness.step_timeout_sec) == (steps, timeout)
+    agent = config.mini_swe_agent.responses_api_agents.mini_swe_agent
+    assert (agent.step_limit, agent.step_timeout, agent.sandbox_runner_timeout_seconds) == (steps, timeout, runner)
     harbor = config.harbor_environment_server.environment_servers.harbor
     assert harbor.default_episode_timeout_seconds == episode

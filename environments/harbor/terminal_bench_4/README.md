@@ -9,7 +9,7 @@ Analysis settings (`gym eval run --benchmark terminal_bench_4/miniswe`; see `ben
 gym dataset pull terminal_bench_4
 gym dataset validate terminal_bench_4 --sandbox opensandbox \
   --config environments/harbor/terminal_bench_4/harbor_sandbox.yaml
-gym eval run terminal_bench_4 --agent miniswe_sandboxed_agent --sandbox opensandbox \
+gym eval run terminal_bench_4 --agent mini_swe_agent/mini_swe_agent_sandboxed --sandbox opensandbox \
   --config environments/harbor/terminal_bench_4/harbor_sandbox.yaml \
   --model-type openai_model --model <model> --model-url <url>
 ```

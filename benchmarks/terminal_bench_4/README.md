@@ -6,11 +6,13 @@
 
 - `terminal_bench_4/miniswe`: mini-SWE **2.4.6** `DefaultAgent`, with upstream
   `mini.yaml` prompts, native bash tool calls through Gym's Responses model
-  adapter, and task-local MCP CLI. It runs the task folders of
+  adapter, and task-local MCP CLI, in
+  [`mini_swe_agent`](../../responses_api_agents/mini_swe_agent/README.md#agent-sessions)
+  agent sessions. It runs the task folders of
   [`environments/harbor/terminal_bench_4`](../../environments/harbor/terminal_bench_4/README.md)
   through the Harbor environment server (`harbor_target` in `miniswe.yaml`).
-- `terminal_bench_4/miniswe_legacy_agent` (deprecated): the same harness over the legacy
-  `/run` relay of the TB4 resources server. It stays for comparison until that
+- `terminal_bench_4/miniswe_legacy_agent` (deprecated): the same mini-SWE version in
+  `miniswe_sandboxed_agent`, over the legacy `/run` relay of the TB4 resources server. It stays for comparison until that
   server is retired. The sections from "Failure scoring" to "Infra validation"
   describe this path.
 
@@ -117,20 +119,23 @@ gym eval run --benchmark terminal_bench_4/miniswe --sandbox opensandbox \
 ```
 
 The Harbor environment server starts each task's sandbox and Compose group,
-lends the sandbox to mini-SWE's agent session, closes the agent, and then grades
-in the task's separate verifier. Each row carries the official instruction and
-the task's 8-hour agent budget; mini-SWE renders the instruction with its
+lends the sandbox to `mini_swe_agent`'s agent session, closes the agent, and then
+grades in the task's separate verifier. Each row carries the official instruction
+and the task's 8-hour agent budget; mini-SWE renders the instruction with its
 `mini.yaml` templates. A task's MCP servers and skills directory reach mini-SWE
-in `/tmp/.nemo-gym/task.json`. MCP tasks also need Python venv/pip for its
-pinned task-local `mcp==1.29.0` client. The episode bound (54,000 seconds,
+in `/tmp/.nemo-gym/task.json`. The agent server builds mini-SWE's runtime and
+uploads it at seed, so the task sandbox needs no PyPI access; it needs glibc 2.28
+or newer (or musl) and about 450 MB under `/tmp`. mini-SWE runs as the image's
+default user, and the response metadata reports its exit as
+`mini_swe_termination`. The episode bound (54,000 seconds,
 `++tb4_episode_timeout_sec`) covers harness setup, the agent budget and the
 slowest verifier.
 
 `DEPLOYMENT_OVERLAY.yaml` holds the deployment's settings: Compose networking
 and runtime labels in the `sandbox` block, and a `sandbox_gpu` block named by
 `harbor_environment_server.environment_servers.harbor.gpu_sandbox_provider` for
-the three H100 tasks (see
-[Compose tasks on OpenSandbox](../../environment_servers/harbor/README.md#compose-tasks-on-opensandbox)).
+the three H100 tasks (see "Run on OpenSandbox" in
+`fern/versions/latest/pages/data/task-folders/compose-tasks.mdx`).
 Select tasks with `--only-tasks` and `--exclude-tasks`. `--agent-type` runs
 another harness on the same tasks; `++tb4_max_steps`, `++tb4_step_timeout_sec`
 and `++tb4_agent_max_timeout_sec` apply to mini-SWE only.

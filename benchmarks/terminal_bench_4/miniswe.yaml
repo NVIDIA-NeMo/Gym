@@ -1,21 +1,20 @@
 # Terminal-Bench 4.0 with mini-SWE 2.4.6, run through the Harbor environment server on the pinned task folders of
 # environments/harbor/terminal_bench_4 (`gym dataset pull terminal_bench_4` fetches them). The server owns each task
-# sandbox, its Compose group and the separate verifier, and lends the sandbox to mini-SWE's agent session; each row
-# carries the official instruction and the task's own agent budget. `--agent-type` runs another harness on the same
-# tasks. See README.md, "Run".
+# sandbox, its Compose group and the separate verifier, and lends the sandbox to mini_swe_agent's agent session; each
+# row carries the official instruction and the task's own agent budget. `--agent-type` runs another harness on the
+# same tasks. See README.md, "Run".
 harbor_target: terminal_bench_4
 config_paths:
-- responses_api_agents/miniswe_sandboxed_agent/configs/miniswe_sandboxed_agent.yaml
+- responses_api_agents/mini_swe_agent/configs/mini_swe_agent_sandboxed.yaml
 
-miniswe_sandboxed_agent:
+mini_swe_agent:
   responses_api_agents:
-    miniswe_sandboxed_agent:
+    mini_swe_agent:
       # Artificial Analysis's methodology: 500 steps and 30 seconds per command.
-      harness:
-        step_limit: ${oc.select:tb4_max_steps,500}
-        step_timeout_sec: ${oc.select:tb4_step_timeout_sec,30}
-      # A cap for smoke runs; it can only shorten each task's own 8-hour budget.
-      agent_max_timeout_sec: ${oc.select:tb4_agent_max_timeout_sec,null}
+      step_limit: ${oc.select:tb4_max_steps,500}
+      step_timeout: ${oc.select:tb4_step_timeout_sec,30}
+      # The longest agent run. A smaller value caps smoke runs; each task's own 8-hour budget can only shorten it.
+      sandbox_runner_timeout_seconds: ${oc.select:tb4_agent_max_timeout_sec,28800}
 
 harbor_environment_server:
   environment_servers:

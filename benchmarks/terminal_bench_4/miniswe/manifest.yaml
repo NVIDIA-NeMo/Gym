@@ -5,7 +5,7 @@ kind: benchmark
 integration_profile: custom-gym-agent-loop
 domain: coding
 description: The pinned 66-task Terminal-Bench 4.0 dataset in its Harbor task folders, run by mini-SWE 2.4.6
-  through the Harbor environment server with separate official verification.
+  agent sessions through the Harbor environment server with separate official verification.
 modality: text
 licensing: unknown
 authors:
@@ -19,7 +19,7 @@ determinism: unknown
 config_path: ../miniswe.yaml
 harbor_target: terminal_bench_4
 resources_server: null
-agent_server: miniswe_sandboxed_agent
+agent_server: mini_swe_agent
 datasets: []
 model_server: policy_model
 canonical_split: benchmark
