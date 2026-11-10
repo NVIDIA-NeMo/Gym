@@ -93,6 +93,35 @@ def test_list_of_mappings_is_written_in_hydra_syntax():
     assert OverridesParser.create().parse_overrides([token])[0].value() == stages
 
 
+@pytest.mark.parametrize(
+    "stages",
+    [
+        [{"num_tasks": 4, "name": "1"}, {"num_tasks": 24, "name": "a,b"}],
+        [{"waivable": [None, True], "limits": {"max": 2}}],
+        [[1, None], ["a b"]],
+        [["", "a"], ["C:\\dir\\"]],
+        [{"suffix": ""}],
+    ],
+    ids=[
+        "strings-hydra-would-retype",
+        "nested-list-and-mapping",
+        "list-of-lists",
+        "empty-and-backslash",
+        "empty-value",
+    ],
+)
+def test_nested_run_values_reach_hydra_unchanged(stages):
+    (arg,) = _flatten_run_args({"run": stages})
+    (token,) = shlex.split(arg)
+    assert OverridesParser.create().parse_overrides([token])[0].value() == stages
+
+
+@pytest.mark.parametrize("key", ["a=b", "null", "true", "1"])
+def test_a_mapping_key_hydra_would_change_is_rejected(key):
+    with pytest.raises(ValueError, match="cannot be written as a Hydra override value"):
+        _flatten_run_args({"run": [{key: 1}]})
+
+
 def test_empty():
     assert _flatten_run_args({}) == []
 
