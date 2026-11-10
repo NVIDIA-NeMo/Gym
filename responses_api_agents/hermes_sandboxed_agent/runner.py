@@ -153,7 +153,8 @@ def run(params):
         },
         "memory": {"memory_enabled": False, "user_profile_enabled": False},
         "toolsets": ["hermes-cli"],
-        "agent": {"max_turns": params["max_turns"]},
+        # One attempt per model request: Hermes would also resend a 404 and wait out any Retry-After (up to 600 s).
+        "agent": {"max_turns": params["max_turns"], "api_max_retries": 1},
         "delegation": {"max_iterations": 50},
         "compression": {"enabled": params["compression_enabled"], "threshold": 0.85},
         # Summarization uses the same model; its separate metadata lookup must

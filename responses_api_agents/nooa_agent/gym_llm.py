@@ -23,6 +23,7 @@ from typing import Any, Literal, Protocol
 
 import aiohttp
 from nooa.agents.summarization import summary_fork_active
+from nooa.runtime.actor import _is_context_window_error
 from nooa.unifiedllm import (
     AssistantPart,
     AssistantReasoning,
@@ -45,6 +46,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseReasoningItem,
 )
+from nemo_gym.server_runtime import is_retryable_dependency_status
 from nemo_gym.trajectory import ModelCallRef, ObservationGap
 
 
@@ -90,6 +92,9 @@ class RolloutLLMState:
 
     max_policy_calls: int | None
     fatal_error: Exception | None = None
+    # A model rejection that sending again cannot fix. NOOA's strategies call the model again after any error, so
+    # once this is set, every later call of the rollout fails with it before any request is sent.
+    rejected_error: aiohttp.ClientResponseError | None = None
     used: int = 0
     calls: list[GymModelCall] = field(default_factory=list)
     gaps: list[ObservationGap] = field(default_factory=list)
@@ -414,6 +419,8 @@ class GymResponsesLLM(UnifiedLLM):
         output_model: type[BaseModel] | None = None,
         **kwargs: Any,
     ) -> LLMResponse:
+        if self._state.rejected_error is not None:
+            raise self._state.rejected_error
         try:
             limits = self.get_context_limits(kwargs)
             input_items, instructions = _responses_input(
@@ -498,6 +505,14 @@ class GymResponsesLLM(UnifiedLLM):
             # must neither poison nor clear the main invocation's failure state.
             if not summary_fork_active():
                 self._state.fatal_error = error
+                # Only 408, 425, 429 and 5xx may clear on another attempt. A context-window 400 is left to NOOA,
+                # which archives events and shrinks the reply budget, so its next request is smaller.
+                if (
+                    isinstance(error, aiohttp.ClientResponseError)
+                    and not is_retryable_dependency_status(error.status)
+                    and not _is_context_window_error(error)
+                ):
+                    self._state.rejected_error = error
             raise
         if not summary_fork_active():
             # A recovered model call no longer vetoes successful completion.

@@ -720,3 +720,59 @@ class TestProviderHistoryMatchesStrictIngress:
         assert assistant.reasoning is not None and assistant.reasoning.signature == "sig-1"
         assert assistant.metadata == {"k": "v"}
         assert assistant.tool_calls[0].signature == "tsig"
+
+
+# ---------------------------------------------------------------------------
+# Model request retries
+# ---------------------------------------------------------------------------
+
+
+def _client_answering(status: int, headers: dict[str, str]) -> tuple[DynamicMaxTokensChatCompletionsClient, list]:
+    """A client whose transport answers every request with ``status``; returns it and the list of sent requests."""
+    import httpx
+
+    sent: list[httpx.Request] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        return httpx.Response(status, json={"error": {"message": "controlled failure"}}, headers=headers)
+
+    client = DynamicMaxTokensChatCompletionsClient(model="m", base_url="http://test/v1", api_key="k")
+    # with_options keeps the client's class, as the sandbox runner's own with_options does.
+    client._client = client._client.with_options(http_client=httpx.AsyncClient(transport=httpx.MockTransport(answer)))
+    return client, sent
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("status", "sends"), [(400, 1), (401, 1), (404, 1), (409, 1), (422, 1), (408, 3), (425, 3)])
+async def test_model_client_resends_only_408_425_429_and_5xx(status: int, sends: int) -> None:
+    import openai
+
+    client, sent = _client_answering(status, {"retry-after-ms": "1"})
+    with pytest.raises(openai.APIStatusError) as caught:
+        await client._client.chat.completions.create(model="m", messages=[{"role": "user", "content": "hi"}])
+    assert caught.value.status_code == status
+    assert len(sent) == sends
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [429, 500, 503])
+async def test_model_client_resends_rate_limits_and_server_errors_twice(status: int) -> None:
+    import openai
+
+    client, sent = _client_answering(status, {"retry-after-ms": "1"})
+    with pytest.raises(openai.APIStatusError):
+        await client._client.chat.completions.create(model="m", messages=[{"role": "user", "content": "hi"}])
+    assert len(sent) == 3
+
+
+def test_model_client_caps_each_retry_after_wait() -> None:
+    import httpx
+    from openai._models import FinalRequestOptions
+
+    client = DynamicMaxTokensChatCompletionsClient(model="m", base_url="http://test/v1", api_key="k")
+    options = FinalRequestOptions.construct(method="post", url="/chat/completions")
+    for retry_after in ("60", "45"):
+        wait = client._client._calculate_retry_timeout(2, options, httpx.Headers({"retry-after": retry_after}))
+        assert wait == 10.0
+    assert client._client._calculate_retry_timeout(2, options, httpx.Headers({"retry-after": "3"})) == 3.0

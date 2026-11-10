@@ -1029,6 +1029,66 @@ async def test_recovered_rate_limit_preserves_prior_evidence_and_summary_fatal_s
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 409, 413, 422])
+async def test_rejected_model_request_ends_the_rollouts_model_requests(status: int) -> None:
+    llm, client, state = make_llm(model_response(), max_policy_calls=3)
+    client.post.side_effect = [RejectedHTTPResponse(status), FakeHTTPResponse(model_response())]
+    with pytest.raises(ClientResponseError) as first:
+        await llm.acall([{"role": "user", "content": "task"}])
+    # NOOA calls again after an error, with its error note appended; nothing is sent.
+    with pytest.raises(ClientResponseError) as second:
+        await llm.acall([{"role": "user", "content": "task"}, {"role": "user", "content": "LLM API error"}])
+
+    assert second.value is first.value is state.rejected_error is state.fatal_error
+    assert first.value.status == status
+    assert client.post.await_count == state.used == llm.calls == len(state.calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "message"),
+    [
+        (408, "request timed out"),
+        (425, "too early"),
+        (500, "internal error"),
+        (503, "overloaded"),
+        (400, "This model's maximum context length is 32768 tokens. However, you requested 32818 tokens."),
+    ],
+)
+async def test_retryable_failure_or_context_window_error_leaves_the_next_request(status: int, message: str) -> None:
+    llm, client, state = make_llm(model_response(), max_policy_calls=3)
+    client.post.side_effect = [
+        RejectedHTTPResponse(status, {"error": {"message": message}}),
+        FakeHTTPResponse(model_response()),
+    ]
+    with pytest.raises(ClientResponseError):
+        await llm.acall([{"role": "user", "content": "task"}])
+    assert state.rejected_error is None
+    await llm.acall([{"role": "user", "content": "task"}])
+
+    assert client.post.await_count == state.used == 2
+    assert state.fatal_error is None
+
+
+@pytest.mark.asyncio
+async def test_summary_fork_rejection_does_not_end_the_rollouts_model_requests() -> None:
+    from nooa.agents.summarization import _in_summary_fork
+
+    llm, client, state = make_llm(model_response(), max_policy_calls=3)
+    client.post.side_effect = [RejectedHTTPResponse(400), FakeHTTPResponse(model_response())]
+    token = _in_summary_fork.set(True)
+    try:
+        with pytest.raises(ClientResponseError):
+            await llm.acall([{"role": "user", "content": "summarize"}])
+    finally:
+        _in_summary_fork.reset(token)
+    await llm.acall([{"role": "user", "content": "task"}])
+
+    assert state.rejected_error is state.fatal_error is None
+    assert client.post.await_count == 2
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("cancel_at", ["post", "backoff"])
 async def test_rate_limit_retry_cancellation_propagates_through_runner(monkeypatch, cancel_at: str) -> None:
     from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming

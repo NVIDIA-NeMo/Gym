@@ -18,6 +18,53 @@ class _SummaryCompatChildren(list):
         super().append(child)
 
 
+# Besides every 5xx, the 4xx a resend may clear: request timeout, too early, too large (Hermes compresses and sends a
+# smaller request) and rate limit.
+_RESENDABLE_CLIENT_ERROR_STATUSES = frozenset({408, 413, 425, 429})
+
+
+class ModelRequestRejected(ValueError):
+    """A model request rejected with a 4xx that sending it again cannot fix; keeps the SDK error's text and status.
+
+    Pinned Hermes resends every OpenAI SDK 400 as transient: it reads the error message one level deeper than the
+    SDK keeps it. It ends the run at once on a ValueError, after its context-length and 413 checks.
+    """
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__(str(error))
+        self.status_code = error.status_code
+        self.body = getattr(error, "body", None)
+        self.response = getattr(error, "response", None)
+
+
+def install_model_retry_policy(agent: Any) -> None:
+    """Resend a failed model request only for 408, 425, 429, 5xx and transport errors (pinned Hermes 26bb847a).
+
+    Hermes's own loop resends 429, 5xx and transport errors three times, 2 s and 4 s apart. The OpenAI SDK under it
+    would also resend each of them, and a 409, twice more.
+    """
+    if getattr(agent, "_gym_model_retry_policy_installed", False):
+        return
+    client_kwargs = getattr(agent, "_client_kwargs", None)
+    api_call = getattr(agent, "_interruptible_api_call", None)
+    if not isinstance(client_kwargs, dict) or not callable(api_call):
+        return
+    # Every request copies these into its own client.
+    client_kwargs["max_retries"] = 0
+
+    def call_model(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return api_call(*args, **kwargs)
+        except Exception as error:
+            status = getattr(error, "status_code", None)
+            if isinstance(status, int) and 400 <= status < 500 and status not in _RESENDABLE_CLIENT_ERROR_STATUSES:
+                raise ModelRequestRejected(error) from error
+            raise
+
+    agent._interruptible_api_call = call_model
+    agent._gym_model_retry_policy_installed = True
+
+
 def _model_api_kwargs(kwargs: dict[str, Any], *, preserve_reasoning_history: bool) -> dict[str, Any]:
     kwargs = kwargs.copy()
     extra_body = dict(kwargs.get("extra_body") or {})
@@ -93,6 +140,9 @@ def install_summary_compat(agent: Any, *, preserve_reasoning_history: bool) -> N
         if not getattr(children, "_gym_child_hook_supported", False):
             children = _SummaryCompatChildren(children)
             agent._active_children = children
-        children._gym_prepare_child = lambda child: install_summary_compat(
-            child, preserve_reasoning_history=preserve_reasoning_history
-        )
+
+        def prepare_child(child: Any) -> None:
+            install_summary_compat(child, preserve_reasoning_history=preserve_reasoning_history)
+            install_model_retry_policy(child)
+
+        children._gym_prepare_child = prepare_child
