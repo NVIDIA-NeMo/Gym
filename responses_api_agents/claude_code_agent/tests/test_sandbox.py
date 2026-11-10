@@ -332,6 +332,8 @@ async def test_native_events_outcome_and_shared_command_options(monkeypatch, tim
     assert "HOME" not in payload["env"]
     # A backgrounded command would keep the CLI, and so the run, alive after the final answer.
     assert payload["env"]["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] == "1"
+    # The CLI would resend a 401 or 409 like a 5xx; it sends each model request once.
+    assert payload["env"]["CLAUDE_CODE_MAX_RETRIES"] == "0"
     assert response.output[0].content[0].text == "partial"
     assert response.status == status
     assert response.usage.total_tokens == 12
