@@ -7,7 +7,7 @@ version = "0.0.0"
 requires-python = ">=3.13.14"
 dependencies = [
     "nemo-gym[dev]",
-    "liteparse",
+    "liteparse==2.5.0",
     "datasets",
     "huggingface_hub",
 ]

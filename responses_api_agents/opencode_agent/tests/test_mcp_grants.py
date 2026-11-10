@@ -115,7 +115,15 @@ def test_mcp_grants_are_configured_and_checked(setup, scenario):  # noqa: F811
         assert closed.status_code == 200, closed.text
     skipped = [gap for gap in closed.json()["agent_observations"]["gaps"] if gap["code"] == "mcp_server_skipped"]
     assert skipped == (
-        [{"code": "mcp_server_skipped", "invocation_id": None, "detail": "extra: failed (connection refused)"}]
+        [
+            {
+                "code": "mcp_server_skipped",
+                "invocation_id": None,
+                "agent_instance": None,
+                "span_id": None,
+                "detail": "extra: failed (connection refused)",
+            }
+        ]
         if scenario == "optional-failed"
         else []
     )
@@ -174,7 +182,7 @@ def test_configured_and_request_grants_are_both_kept(setup):  # noqa: F811
 
 
 def test_static_mcp_servers_in_opencode_config_are_rejected(setup):  # noqa: F811
-    """Session opencode_config allows only permission and tools, so no static MCP server can be overwritten."""
+    """Session opencode_config has no mcp key in its allowlist, so no static MCP server can be overwritten."""
     agent, sandbox = setup
     agent.config.opencode_config = {"mcp": {"task_tools": {"type": "remote", "url": "http://other"}}}
     body = seed().model_dump(mode="json")
@@ -182,7 +190,7 @@ def test_static_mcp_servers_in_opencode_config_are_rejected(setup):  # noqa: F81
     with TestClient(agent.setup_webserver()) as client:
         response = client.post("/v1/agent_sessions", json=body)
     assert response.status_code == 422
-    assert "permission/tools/attachment only" in response.json()["detail"]
+    assert "unsupported: ['mcp']" in response.json()["detail"]
     sandbox.exec.assert_not_awaited()
 
 
