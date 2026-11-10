@@ -13,8 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.agents import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
-from nemo_gym.agents.utils.supervisor_client import LAUNCH_CLAIM_FILE, SUPERVISOR_FILE, SUPERVISOR_PID_FILE
+from nemo_gym.agents import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SUPERVISOR_FILE, SandboxSession
+from nemo_gym.agents.utils.supervisor_client import LAUNCH_CLAIM_FILE, SUPERVISOR_PID_FILE
 from nemo_gym.sandbox import SandboxExecResult
 from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession
 from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import seed
@@ -225,11 +225,12 @@ async def test_lost_launch_is_fenced_before_and_after_directory_retirement(tmp_p
         # The supervisor is still in place, so only the stop's launch claim can fence the delayed command.
         assert (session_dir / SUPERVISOR_FILE).exists()
     await provider.exec(provider.delayed_command, cwd=str(workdir))
+    # Under a broken claim the stop file halts the harness before it writes this; the PID file shows the start.
     assert not (workdir / "started").exists()
     if not retired:
         assert not (session_dir / SUPERVISOR_PID_FILE).exists()
         assert (session_dir / LAUNCH_CLAIM_FILE).readlink() == Path("stop")
-        await state.close(3)
+        await state.close(10)
     assert not session_dir.exists()
 
 

@@ -260,6 +260,8 @@ async def test_stop_claiming_after_the_guard_still_fences_the_launch(session, tm
     try:
         async with asyncio.timeout(60):
             while not reached.exists():
+                if launch.done():
+                    pytest.fail(f"launch finished before its bash -n check: {launch.result()}")
                 await asyncio.sleep(0.01)
         assert not (session_dir / LAUNCH_CLAIM_FILE).is_symlink()
         receipt = await stop_and_confirm_cleanup(
