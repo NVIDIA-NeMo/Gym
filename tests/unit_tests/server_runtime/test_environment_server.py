@@ -732,7 +732,7 @@ def test_cleanup_observations_preserve_the_episode_outcome(primary_kind, cleanup
 
 
 @pytest.mark.parametrize("stage", ["admission", "episode"])
-def test_owned_deadlines_save_an_environment_event_without_changing_retry_routing(stage):
+def test_owned_deadlines_save_an_environment_event_without_changing_live_routing(stage):
     from nemo_gym.core.failure_records import FailureReport
     from nemo_gym.core.typed_exceptions import rebuild_failure
     from nemo_gym.rollouts.rollout_collection import _episode_record
