@@ -178,7 +178,9 @@ also lets the sandbox reach this server's `/mcp` route. Only OpenSandbox enforce
 set `sandbox_network_access: inherit`.
 
 Both need a sandbox image built from `sandbox_image/Dockerfile` (`AGENTIC_MME_SANDBOX_IMAGE`) and the OpenSandbox
-provider (`OPENSANDBOX_DOMAIN`, `OPENSANDBOX_API_KEY`). OpenCode calls the model server from inside the sandbox, and
+provider (`OPENSANDBOX_DOMAIN`, `OPENSANDBOX_API_KEY`). The image holds OpenCode and OpenCode's plugin dependencies,
+which `opencode.yaml` pins by SHA-256; without the dependencies, each offline OpenCode start waits about 70 s. They
+come from the lockfile in `sandbox_image/opencode/`, a copy of `benchmarks/agentic_if/opencode/`. OpenCode calls the model server from inside the sandbox, and
 with server tools also this server's `/mcp` route, so the servers it calls advertise the node's address:
 
     AGENTIC_MME_IMAGE_ROOT=resources_servers/agentic_mme/data/example_images \

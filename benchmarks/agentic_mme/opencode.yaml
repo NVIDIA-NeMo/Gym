@@ -58,6 +58,10 @@ agentic_mme_opencode_agent:
       # resources_servers/agentic_mme/sandbox_image/Dockerfile installs: OpenCode 1.17.11 for glibc x86_64.
       sandbox_executable_path: /opt/opencode/bin/opencode
       sandbox_executable_sha256: 0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded  # pragma: allowlist secret
+      # OpenCode's plugin dependencies, from the same image. Without them, OpenCode tries to install them from npm at
+      # each start, and an offline start waits about 70 s before its first model call.
+      sandbox_plugin_dependencies_path: /opt/opencode/opencode-1.17.11-plugin-dependencies.tar.gz
+      sandbox_plugin_dependencies_sha256: 77b03eba45c8d7fe3d0a58bfc215f6fb99a1db4dd18a7e3d91fd29981fddafb1  # pragma: allowlist secret
       concurrency: 32
       # The served context length minus max_output_tokens.
       context_window: ${oc.select:agentic_mme_opencode_context_window,114688}

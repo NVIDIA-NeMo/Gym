@@ -51,3 +51,19 @@ def test_the_recipe_declares_image_input_for_tool_images(recipe: str) -> None:
     # Without it, OpenCode replaces an image a tool returns with an error text when the prompt has no image.
     agent = load(recipe).agentic_mme_opencode_agent.responses_api_agents.opencode_agent
     assert agent.image_input is True
+
+
+def test_the_sandbox_image_carries_the_pinned_plugin_dependencies() -> None:
+    """The image builds OpenCode's plugin dependencies from agentic_if's lockfile, to the digest the recipe pins."""
+    root = Path(__file__).parents[3]
+    agent = load("opencode").agentic_mme_opencode_agent.responses_api_agents.opencode_agent
+    image = root / "resources_servers" / "agentic_mme" / "sandbox_image"
+    for name in ("package.json", "package-lock.json"):
+        assert (image / "opencode" / name).read_bytes() == (
+            root / "benchmarks/agentic_if/opencode" / name
+        ).read_bytes()
+    dockerfile = (image / "Dockerfile").read_text()
+    archive = Path(agent.sandbox_plugin_dependencies_path)
+    assert f"COPY --from=plugin-archive /{archive.name} {archive.parent}/" in dockerfile
+    # The build checks the archive against the pin, so the image and the recipe cannot drift apart.
+    assert f"{agent.sandbox_plugin_dependencies_sha256}  /{archive.name}" in dockerfile
