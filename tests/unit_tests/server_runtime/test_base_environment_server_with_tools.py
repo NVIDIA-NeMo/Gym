@@ -16,8 +16,8 @@ from nemo_gym.config.config_types import AggregateMetrics, AggregateMetricsReque
 from nemo_gym.core.episode_context import current_rollout_id
 from nemo_gym.core.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeId, MaterializedTask, TaskId
 from nemo_gym.server_runtime.base_environment_server import (
-    BaseEnvironmentServerConfig,
     BaseEnvironmentServerWithTools,
+    BaseEnvironmentServerWithToolsConfig,
     CleanupContext,
     ServedTools,
 )
@@ -81,6 +81,11 @@ class _Counter:
         raise RuntimeError("broken")
 
     @episode_tool
+    async def time_out(self, arguments: _Nothing) -> None:
+        """Raise TimeoutError, as a tool whose own deadline passed does."""
+        raise TimeoutError("the database did not answer")
+
+    @episode_tool
     async def overdraw(self, arguments: _Amount) -> ToolResult:
         """Refuse to take more than the total, with an error result the agent handles."""
         return ToolResult(output={"detail": f"the total is {self.total}"}, is_error=True)
@@ -134,7 +139,7 @@ class _Server(BaseEnvironmentServerWithTools[_Request, _Response]):
 
 
 def _server(agent: Agent | None = None, **overrides: Any) -> tuple[_Server, httpx.AsyncClient]:
-    config = BaseEnvironmentServerConfig(
+    config = BaseEnvironmentServerWithToolsConfig(
         name="counter_environment",
         host="127.0.0.1",
         port=1234,
@@ -385,8 +390,11 @@ def test_a_call_waiting_when_the_episode_ends_does_not_run() -> None:
     ]
 
 
-def test_a_call_cancelled_by_its_client_is_recorded_and_frees_the_episode() -> None:
-    """A tool can change state before its client disconnects, so the record must not lose the call."""
+def test_a_call_whose_request_is_cancelled_is_recorded_and_frees_the_episode() -> None:
+    """A tool can change state before its request is cancelled, so the record must not lose the call.
+
+    uvicorn does not cancel a request whose client disconnects; ``tool_call_timeout_seconds`` bounds such a call.
+    """
     seen: dict[str, Any] = {}
 
     async def agent(server: _Server, counter: _Counter, served: ServedTools) -> None:
@@ -403,6 +411,40 @@ def test_a_call_cancelled_by_its_client_is_recorded_and_frees_the_episode() -> N
 
     assert seen["next"].json() == {"total": 2}
     assert [(call.name, call.is_error) for call in seen["calls"]] == [("slow_add", True), ("add", False)]
+
+
+def test_a_call_that_runs_too_long_is_cancelled_and_frees_the_episode() -> None:
+    """Calls to one episode run one at a time, so a hung call would make the episode's next calls wait."""
+    seen: dict[str, Any] = {}
+
+    async def agent(server: _Server, counter: _Counter, served: ServedTools) -> None:
+        seen["slow"] = await http.post("/slow_add", json={"amount": 1}, headers=_headers(served))
+        seen["next"] = await http.post("/add", json={"amount": 2}, headers=_headers(served))
+        seen["calls"] = [(call.name, call.is_error, call.output) for call in served.calls]
+
+    server, http = _server(agent, tool_call_timeout_seconds=0.1)
+    # Without the timeout, slow_add waits forever; fail instead of hanging.
+    response = asyncio.run(asyncio.wait_for(server.run_request(_request()), timeout=10))
+
+    assert seen["slow"].status_code == 504 and seen["slow"].headers.get(TOOL_ERROR_HEADER) == "true"
+    assert seen["next"].json() == {"total": 2}
+    assert seen["calls"] == [
+        ("slow_add", True, {"detail": "Tool 'slow_add' did not finish within 0.1 seconds"}),
+        ("add", False, {"total": 2}),
+    ]
+    assert response.result == "total=2 calls=2"
+
+
+def test_a_timeout_the_tool_raises_itself_is_a_failure_of_the_tool() -> None:
+    replies: list[httpx.Response] = []
+
+    async def agent(server: _Server, counter: _Counter, served: ServedTools) -> None:
+        replies.append(await http.post("/time_out", json={}, headers=_headers(served)))
+
+    server, http = _server(agent, tool_call_timeout_seconds=60)
+    asyncio.run(server.run_request(_request()))
+
+    assert replies[0].status_code == 500 and "TimeoutError" in replies[0].json()["detail"]
 
 
 def test_a_server_that_exports_checkpoints_is_refused() -> None:

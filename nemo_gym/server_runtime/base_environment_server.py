@@ -569,6 +569,19 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         """Aggregate per-rollout scores into task-level metrics."""
 
 
+class BaseEnvironmentServerWithToolsConfig(BaseEnvironmentServerConfig):
+    """Configure how a ``BaseEnvironmentServerWithTools`` serves its episodes' tools."""
+
+    tool_call_timeout_seconds: PositiveFloat | None = Field(
+        default=None,
+        description=(
+            "How long one tool call may run before the server cancels it and answers 504. Calls to one episode run "
+            "one at a time, so this also bounds how long a hung call, or one whose client disconnected, makes the "
+            "episode's next calls wait. None lets a call run until it returns or the episode ends."
+        ),
+    )
+
+
 @dataclass
 class ServedTools:
     """The grants that give the agent one episode's tools, and the calls it has made so far."""
@@ -623,7 +636,9 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
     ends. A tool call is a separate request to ``POST /<tool name>`` at the server's root, as on a Resources
     Server, with the episode token in the ``X-NeMo-Gym-Episode-Token`` header. A request with an episode token
     reaches only the tools. Calls to one episode run one at a time, each under the episode's rollout, and each is
-    recorded in ``ServedTools.calls``. When the episode ends, a call still running is cancelled.
+    recorded in ``ServedTools.calls``. When the episode ends, a call still running is cancelled. A call that runs
+    longer than ``tool_call_timeout_seconds`` is cancelled and answered 504. A client that disconnects does not
+    cancel its call, because uvicorn does not cancel the request.
 
     The tool route takes every one-segment ``POST`` path that the server does not route when ``setup_webserver``
     returns, so a subclass that adds its own routes gives them more than one path segment.
@@ -632,6 +647,7 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
     grant still names the old one.
     """
 
+    config: BaseEnvironmentServerWithToolsConfig
     _episode_tokens: Optional[EpisodeTokens] = None
     _open_episodes: Optional[dict[EpisodeId, _OpenEpisode]] = None
     _reserved_tool_names: frozenset[str] = frozenset()
@@ -768,8 +784,19 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
                 elif not isinstance(arguments, dict):
                     raise ToolArgumentsError("Tool arguments must be a JSON object")
                 else:
-                    result = await episode.toolset.call(name, arguments)
-                    output, is_error = result.output, result.is_error
+                    timeout = self.config.tool_call_timeout_seconds
+                    deadline = asyncio.timeout(timeout)
+                    try:
+                        async with deadline:
+                            result = await episode.toolset.call(name, arguments)
+                    except TimeoutError:
+                        # A TimeoutError the tool raises itself is a failure of the tool, handled below.
+                        if not deadline.expired():
+                            raise
+                        status, is_error = 504, True
+                        output = {"detail": f"Tool {name!r} did not finish within {timeout} seconds"}
+                    else:
+                        output, is_error = result.output, result.is_error
         except ToolArgumentsError as error:
             status, is_error, output = 422, True, {"detail": str(error)}
         except asyncio.CancelledError:
