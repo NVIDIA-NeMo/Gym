@@ -11,6 +11,7 @@ import socket
 import subprocess
 import sys
 import threading
+from http.client import HTTPException
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError
@@ -31,20 +32,48 @@ def strip_cache_hints(body: dict[str, object]) -> None:
             tool["function"].pop("cache_control", None)
 
 
+# Enough of a failed reply's body for its error envelope, whose code names a context overflow.
+_FAILURE_BODY_BYTES = 4096
+
+
 def model_proxy(base_url: str, *, timeout: float = 300, calls_path: Path | None = None) -> ThreadingHTTPServer:
-    """Bridge Pool's nonstreaming requests to Gym using a loopback-only threaded server."""
+    """Bridge Pool's nonstreaming requests to Gym using a loopback-only threaded server.
+
+    ``calls_path`` records the completed upstream calls and how the last call failed, if it did: its HTTP status and
+    the start of its body (which keeps the endpoint's error code), or ``transport`` when no reply came. A later
+    completed call clears the failure.
+    """
 
     completed = 0
+    last_failure: dict[str, object] | None = None
     lock = threading.Lock()
+
+    def record(*, status: int | None = None, transport: bool = False, body: bytes = b"") -> None:
+        nonlocal completed, last_failure
+        if calls_path is None:
+            return
+        # Persist before delivery so a killed CLI cannot erase completed inference.
+        with lock:
+            if status is not None and 200 <= status < 300:
+                completed, last_failure = completed + 1, None
+            else:
+                last_failure = (
+                    {"transport": True}
+                    if transport
+                    else {"status": status, "body": body[:_FAILURE_BODY_BYTES].decode(errors="replace")}
+                )
+            temporary = calls_path.with_suffix(".tmp")
+            temporary.write_text(json.dumps({"completed": completed, "last_failure": last_failure}))
+            temporary.replace(calls_path)
+
     if calls_path is not None:
-        calls_path.write_text(json.dumps({"completed": 0}))
+        calls_path.write_text(json.dumps({"completed": 0, "last_failure": None}))
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args: object) -> None:
             pass
 
         def do_POST(self) -> None:
-            nonlocal completed
             if self.path != "/v1/chat/completions":
                 self.send_error(404)
                 return
@@ -60,19 +89,18 @@ def model_proxy(base_url: str, *, timeout: float = 300, calls_path: Path | None 
                     },  # pragma: allowlist secret
                 )
                 try:
-                    upstream = urlopen(request, timeout=timeout)
-                except HTTPError as error:
-                    upstream = error
-                with upstream:
-                    status, payload = upstream.status, upstream.read()
-                    content_type = upstream.headers.get("Content-Type", "application/json")
-                if 200 <= status < 300 and calls_path is not None:
-                    # Persist before delivery so a killed CLI cannot erase completed inference.
-                    with lock:
-                        completed += 1
-                        temporary = calls_path.with_suffix(".tmp")
-                        temporary.write_text(json.dumps({"completed": completed}))
-                        temporary.replace(calls_path)
+                    try:
+                        upstream = urlopen(request, timeout=timeout)
+                    except HTTPError as error:
+                        upstream = error
+                    with upstream:
+                        status, payload = upstream.status, upstream.read()
+                        content_type = upstream.headers.get("Content-Type", "application/json")
+                except (OSError, HTTPException):
+                    # Refused, reset, timed out or cut off before a whole reply: the call got no HTTP status.
+                    record(transport=True)
+                    raise
+                record(status=status, body=payload)
             except Exception as error:
                 status, content_type = 502, "application/json"
                 payload = json.dumps({"error": str(error)}).encode()

@@ -33,6 +33,11 @@ class PoolArtifacts:
     runner_hostname: str | None = None
     runner_pid: int | None = None
     completed_model_calls: int = 0
+    # How the last upstream model call failed, when no completed call followed it, as the proxy recorded it: its HTTP
+    # status and the start of its body, or a transport error (no reply).
+    last_model_failure_status: int | None = None
+    last_model_failure_transport: bool = False
+    last_model_failure_body: str | None = None
 
 
 @dataclass
@@ -169,6 +174,9 @@ class PoolSession(AgentSessionState):
         except ValueError:
             model_calls = {}
         completed = model_calls.get("completed") if isinstance(model_calls, dict) else None
+        failure = model_calls.get("last_failure") if isinstance(model_calls, dict) else None
+        failure = failure if isinstance(failure, dict) else {}
+        failure_status = failure.get("status")
         trajectory, trajectory_error = "", None
         try:
             result = await self.session.sandbox.exec(
@@ -191,6 +199,11 @@ class PoolSession(AgentSessionState):
             runner_hostname=hostname if isinstance(hostname, str) and hostname else None,
             runner_pid=pid if type(pid) is int and pid > 0 else None,
             completed_model_calls=completed if type(completed) is int and completed >= 0 else 0,
+            last_model_failure_status=failure_status
+            if type(failure_status) is int and 400 <= failure_status <= 599
+            else None,
+            last_model_failure_transport=failure.get("transport") is True,
+            last_model_failure_body=failure.get("body") if isinstance(failure.get("body"), str) else None,
         )
 
     async def close(self, *, timeout: float) -> None:

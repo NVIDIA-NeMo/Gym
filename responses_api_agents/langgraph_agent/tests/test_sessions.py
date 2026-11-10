@@ -2,13 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from aiohttp import ClientConnectorError, ClientResponseError
 from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 
-from nemo_gym.agents import AgentCloseSessionRequest, AgentSeedSessionRequest
+from nemo_gym.agents import AgentCloseSessionRequest, AgentSeedSessionRequest, OutcomeAction, agent_outcome_policy
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ResourcesServerRef
 from nemo_gym.core import EpisodeId, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, TaskId
@@ -352,3 +355,101 @@ def test_in_process_calls_preserve_unset_sampling_fields(agent_class, config_cla
     assert agent.server_client.post.call_count == len(replies)
     for call in agent.server_client.post.call_args_list:
         assert set(call.kwargs["json"].model_dump(exclude_unset=True)) == {"input"}
+
+
+def _http_error(status: int, code: str | None = None) -> ClientResponseError:
+    info = SimpleNamespace(url="http://model", method="POST", headers={}, real_url="http://model")
+    error = ClientResponseError(info, (), status=status, message="model failed")
+    if code is not None:
+        # The model server's OpenAI error envelope, which Gym's raise_for_status keeps on the error.
+        envelope = {"message": "maximum context length", "type": "invalid_request_error", "param": None, "code": code}
+        error.response_content = json.dumps({"error": envelope}).encode()
+    return error
+
+
+def _activate(agent, answers) -> NeMoGymResponse:
+    """One session activation whose model answers ``answers`` in order (a reply text or an exception)."""
+    agent.server_client.post.side_effect = [
+        answer if isinstance(answer, BaseException) else _mock_model_response(answer) for answer in answers
+    ]
+    with TestClient(agent.setup_webserver()) as client:
+        assert client.post("/v1/agent_sessions", json=_seed().model_dump(mode="json")).status_code == 200
+        response = client.post(f"/ng-rollout/{_seed().episode_id.capture_key}/v1/responses", json={"input": "6 * 7?"})
+    assert response.status_code == 200, response.text
+    return NeMoGymResponse.model_validate(response.json())
+
+
+@pytest.mark.parametrize(
+    "answers,outcome,action,replies",
+    [
+        # main answered 500 for every model error, which lost the status and was retried.
+        ([_http_error(401)], {"failure_kind": "model_request_rejected"}, OutcomeAction.FAIL, 0),
+        (
+            ["draft", _http_error(400)],
+            {"failure_kind": "model_request_error", "status_code": 400},
+            OutcomeAction.VERIFY,
+            1,
+        ),
+        (
+            ["draft", _http_error(503)],
+            {"failure_kind": "model_request_error", "status_code": 503},
+            OutcomeAction.RETRY,
+            1,
+        ),
+        (
+            ["draft", ClientConnectorError(SimpleNamespace(ssl=None, host="model", port=1), OSError("refused"))],
+            {"failure_kind": "model_transport_error"},
+            OutcomeAction.RETRY,
+            1,
+        ),
+    ],
+)
+def test_a_model_error_ends_the_graph_with_a_classified_failed_response(answers, outcome, action, replies):
+    response = _activate(_agent(ReflectionAgent, ReflectionAgentConfig, {}), answers)
+    assert response.status == "failed"
+    assert json.loads(response.metadata["ng_agent_outcome"]) == outcome
+    assert agent_outcome_policy(response) == action
+    # The steps that finished keep their outputs.
+    assert len([item for item in response.output if item.type == "message"]) == replies
+    assert response.error.message.startswith("Model call failed")
+
+
+@pytest.mark.parametrize(
+    "answers,status,outcome",
+    [
+        # A context overflow is graded as incomplete, before or after the first reply (decision 1).
+        ([_http_error(400, "context_length_exceeded")], "incomplete", None),
+        (["draft", _http_error(400, "context_length_exceeded")], "incomplete", None),
+        # A 400 with another code stays a model request error.
+        (
+            ["draft", _http_error(400, "invalid_request")],
+            "failed",
+            {"failure_kind": "model_request_error", "status_code": 400},
+        ),
+    ],
+)
+def test_a_propagated_context_overflow_is_a_graded_incomplete_response(answers, status, outcome):
+    response = _activate(_agent(ReflectionAgent, ReflectionAgentConfig, {}), answers)
+    assert response.status == status
+    assert json.loads(response.metadata.get("ng_agent_outcome", "null")) == outcome
+    assert agent_outcome_policy(response) == OutcomeAction.VERIFY
+    if status == "incomplete":
+        assert response.metadata["ng_agent_stop_reason"] == "context_limit"
+        assert response.error is None
+
+
+def test_parallel_paths_that_all_fail_on_the_model_report_its_error():
+    agent = _agent(ParallelThinkingAgent, ParallelThinkingAgentConfig, {"num_parallel_paths": 2})
+    response = _activate(agent, [_http_error(429), _http_error(429)])
+    assert json.loads(response.metadata["ng_agent_outcome"]) == {
+        "failure_kind": "model_request_error",
+        "status_code": 429,
+    }
+
+
+@pytest.mark.parametrize("agent_class,config_class,replies,options", FLAVORS)
+def test_a_finished_graph_is_a_completed_response(agent_class, config_class, replies, options):
+    response = _activate(_agent(agent_class, config_class, options), replies)
+    assert response.status == "completed"
+    assert response.metadata["ng_agent_stop_reason"] == "completed"
+    assert "ng_agent_outcome" not in response.metadata

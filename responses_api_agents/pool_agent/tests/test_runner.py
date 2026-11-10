@@ -5,6 +5,7 @@
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -113,13 +114,37 @@ def test_proxy_preserves_upstream_status_and_counts_only_successes(tmp_path, sta
             assert caught.value.code == status
             assert caught.value.read() == b'{"error":"capacity"}'
             caught.value.close()
-        assert json.loads(calls.read_text()) == {"completed": int(status == 200)}
+        assert json.loads(calls.read_text()) == {
+            "completed": int(status == 200),
+            "last_failure": None if status == 200 else {"status": status, "body": '{"error":"capacity"}'},
+        }
     finally:
         for server in (proxy, upstream):
             server.shutdown()
             server.server_close()
         for thread in threads:
             thread.join(timeout=5)
+
+
+def test_proxy_records_an_unreachable_model_as_a_transport_failure_until_a_call_completes(tmp_path):
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        closed_port = probe.getsockname()[1]
+    calls = tmp_path / "model_calls.json"
+    proxy = sandbox_runner.model_proxy(f"http://127.0.0.1:{closed_port}/v1", timeout=5, calls_path=calls)
+    thread = threading.Thread(target=proxy.serve_forever, daemon=True)
+    thread.start()
+    try:
+        request = Request(f"http://127.0.0.1:{proxy.server_port}/v1/chat/completions", data=b'{"messages":[]}')
+        with pytest.raises(HTTPError) as caught:
+            urlopen(request, timeout=10)
+        assert caught.value.code == 502
+        caught.value.close()
+        assert json.loads(calls.read_text()) == {"completed": 0, "last_failure": {"transport": True}}
+    finally:
+        proxy.shutdown()
+        proxy.server_close()
+        thread.join(timeout=5)
 
 
 @pytest.mark.skipif(
