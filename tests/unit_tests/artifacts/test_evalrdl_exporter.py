@@ -103,6 +103,13 @@ class _Uploads:
 class Client:
     def __init__(self, url=None, token=None, **kwargs):
         self.uploads = _Uploads(url)
+
+
+def upload_plan(path, label=None):
+    if os.environ.get("FAKE_EVALRDL_PLAN") == "split":
+        return [{"label": name, "dir": str(Path(path) / name), "files": [], "unreadable": [], "bytes": 0}
+                for name in ("run_a", "run_b")]
+    return [{"label": label or Path(path).name, "dir": str(path), "files": [], "unreadable": [], "bytes": 0}]
 """
 
 
@@ -162,7 +169,12 @@ class TestConfig:
         config = EvalRDLExportConfig(rollouts_jsonl_fpath=Path("r.jsonl"))
 
         assert (config.label, config.tags, config.meta, config.url) == (None, [], {}, None)
-        assert (config.parallel, config.wait, config.timeout, config.requirement) == (4, True, 1800, "evalrdl")
+        assert (config.parallel, config.wait, config.timeout, config.requirement) == (
+            4,
+            True,
+            1800,
+            "evalrdl>=0.0.241",
+        )
 
     def test_command_line_containers_become_plain_python(self) -> None:
         overrides = OmegaConf.from_dotlist(["rollouts_jsonl_fpath=r.jsonl", "meta.k=v", "meta.n=3"])
@@ -226,7 +238,7 @@ class TestConfig:
         assert load_run_exporter_class("evalrdl") is EvalRDLExporter
         artifacts = _make_run(tmp_path)
 
-        assert _exporter(artifacts, tmp_path).required_packages() == ("evalrdl",)
+        assert _exporter(artifacts, tmp_path).required_packages() == ("evalrdl>=0.0.241",)
         assert _exporter(artifacts, tmp_path, requirement="evalrdl==1.2.3").required_packages() == ("evalrdl==1.2.3",)
 
 
@@ -446,7 +458,7 @@ class TestUpload:
         call = _sdk_call(fake_sdk)
         assert (call["url"], call["label"], call["meta"], call["tags"]) == (None, None, None, [])
         assert (call["parallel"], call["wait"], call["timeout"]) == (4, True, 1800)
-        assert fake_sdk["requested"] == [("evalrdl",)]
+        assert fake_sdk["requested"] == [("evalrdl>=0.0.241",)]
 
     @pytest.mark.parametrize(
         ("mode", "state", "exit_code"),
@@ -468,6 +480,18 @@ class TestUpload:
         result = _exporter(artifacts, tmp_path).export(artifacts)
 
         assert (result.state, result.exit_code) == (state, exit_code)
+
+    def test_a_directory_the_sdk_would_split_is_refused_before_anything_is_sent(
+        self, tmp_path: Path, fake_sdk: dict[str, Any], monkeypatch: MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("FAKE_EVALRDL_PLAN", "split")
+        artifacts = _make_run(tmp_path)
+
+        result = _exporter(artifacts, tmp_path).export(artifacts)
+
+        assert (result.state, result.exit_code) == (ExportState.FAILED, 1)
+        assert "into 2 uploads" in result.error
+        assert not fake_sdk["log"].exists()
 
     def test_a_committed_upload_reports_the_run_it_created(self, tmp_path: Path, fake_sdk: dict[str, Any]) -> None:
         artifacts = _make_run(tmp_path)
@@ -564,12 +588,14 @@ def test_the_real_sdk_still_has_the_interface_the_worker_calls(tmp_path: Path) -
     )
     check = """
 import inspect
-from evalrdl.sdk.api import Client, IntakeRefused, RdlError
+from pathlib import Path
+from evalrdl.sdk.api import Client, IntakeRefused, RdlError, upload_plan
 upload = inspect.signature(Client(url="stg", token=False).uploads.upload)
 wanted = {"label", "tags", "meta", "parallel", "wait", "timeout"}
 missing = wanted - set(upload.parameters)
 assert not missing, f"upload() no longer takes {missing}"
 assert issubclass(IntakeRefused, RdlError)
+assert [unit["dir"] for unit in upload_plan(".")] == [str(Path(".").resolve())]
 """
     completed = subprocess.run([str(python), "-c", check], capture_output=True, text=True, check=False, cwd=tmp_path)
 
