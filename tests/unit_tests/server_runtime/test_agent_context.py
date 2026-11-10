@@ -107,11 +107,11 @@ def test_a_row_without_agent_context_dumps_as_before() -> None:
     [
         (
             {"responses_create_params": {"input": "Hi"}, "verifier_metadata": {"answer": "a"}, "id": "1"},
-            "071fa6aff13c98228af9549d8ca4f1e8f803be48875cd3e578f5b8b811ec9291",
+            "071fa6aff13c98228af9549d8ca4f1e8f803be48875cd3e578f5b8b811ec9291",  # pragma: allowlist secret
         ),
         (
             {"responses_create_params": {"input": "Hi"}, "task_data": {"id": "1", "answer": "a"}},
-            "7a1bc8b4b123e2a362911dfed752d30838e14515467c5bbb917c423775523de2",
+            "7a1bc8b4b123e2a362911dfed752d30838e14515467c5bbb917c423775523de2",  # pragma: allowlist secret
         ),
     ],
 )
