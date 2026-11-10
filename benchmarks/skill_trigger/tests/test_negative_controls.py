@@ -65,8 +65,18 @@ async def test_separate_controls_preserve_catalog_and_score(release, tmp_path):
     )
     value = trajectory(content="Read these instructions.")
     (paths.agent_dir / "trajectory.json").write_text(value.model_dump_json())
-    assert (await verifier.verify()).rewards == {"reward": 0}
+    assert (await verifier.verify()).rewards == {
+        "reward": 0,
+        "all_skill_openings": 1,
+        "session_start_openings": 0,
+        "unnecessary_skill_openings": 1,
+    }
     value.steps[1].tool_calls = None
     value.steps[1].observation = None
     (paths.agent_dir / "trajectory.json").write_text(value.model_dump_json())
-    assert (await verifier.verify()).rewards == {"reward": 1}
+    assert (await verifier.verify()).rewards == {
+        "reward": 1,
+        "all_skill_openings": 0,
+        "session_start_openings": 0,
+        "unnecessary_skill_openings": 0,
+    }

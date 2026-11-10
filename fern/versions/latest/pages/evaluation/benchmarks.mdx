@@ -156,7 +156,8 @@ The [skill-opening benchmark](https://github.com/NVIDIA-NeMo/Gym/tree/main/bench
 uses five Harbor agent profiles to measure whether successful tool results return
 skill instructions. It measures skill opening, not task completion. The canonical
 110-case selection is positive-only; separate negative controls measure unnecessary
-opening. Nine cases remain blocked by unresolved source terms, and preparation
+task-specific opening, with documented session-start meta-skill reads reported
+separately. Nine cases remain blocked by unresolved source terms, and preparation
 enforces that boundary. Missing or inconclusive evidence remains unscored and must
 be reported alongside each rate. See the linked measurement contract for release
 versions, exclusions, and the supported `gym eval run --split benchmark` workflow.

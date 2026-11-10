@@ -111,8 +111,11 @@ python -m benchmarks.skill_trigger.negative_controls \
   --output /absolute/path/to/new-negative-release
 ```
 
-A negative control earns reward 1 for no verified skill openings and 0 for any
-verified skill opening. Missing evidence or unresolved delegation remains unscored.
+A negative control earns reward 1 for no unnecessary verified skill openings and 0
+otherwise. Addy allows its documented session-start meta-skills, `using-agent-skills`
+and `context-engineering`, when present in the pinned catalog. The control manifest
+records these exemptions. Distinct opened skills are reported as all, session-start,
+and unnecessary reads; exemptions never hide reads. Missing evidence or unresolved delegation remains unscored.
 Report its **unnecessary-opening rate** (1 minus mean reward) separately from the
 positive target-opening rate. Bulk-reading every skill fails the negative controls;
 useful multi-skill behavior on positive cases is not penalized.

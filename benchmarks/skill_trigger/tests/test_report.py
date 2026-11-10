@@ -50,7 +50,14 @@ def test_report_preserves_unscored_pending_and_duplicates():
 
 
 def test_negative_rate_is_opening_not_avoidance():
-    value = attempt("a", status="scored", reward=1).model_copy(update={"case_kind": "negative"})
+    value = attempt("a", status="scored", reward=1).model_copy(
+        update={
+            "case_kind": "negative",
+            "all_skill_openings": 1,
+            "session_start_openings": 1,
+            "unnecessary_skill_openings": 0,
+        }
+    )
     summary = summarize([value])[0]
     assert summary["metric"] == "unnecessary_opening_rate"
     assert summary["rate"] == 0
@@ -63,3 +70,18 @@ def test_invalid_outcome_is_rejected():
         attempt("a", status="unscored", reward=0)
     with pytest.raises(ValueError):
         attempt("a", status="scored")
+
+
+def test_negative_counts_are_required_and_consistent():
+    row = attempt("a", status="scored", reward=1).model_dump()
+    row["case_kind"] = "negative"
+    with pytest.raises(ValueError, match="require all"):
+        Attempt.model_validate(row)
+    row.update(all_skill_openings=1, session_start_openings=1, unnecessary_skill_openings=0)
+    summary = summarize([Attempt.model_validate(row)])[0]
+    assert summary["opening_metrics"]["session_start_openings"]["rate"] == 1
+    assert summary["opening_metrics"]["all_skill_openings"]["numerator"] == 1
+    assert summary["rate"] == 0
+    row["unnecessary_skill_openings"] = 1
+    with pytest.raises(ValueError, match="contradict"):
+        Attempt.model_validate(row)

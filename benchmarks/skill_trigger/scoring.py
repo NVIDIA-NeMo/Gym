@@ -147,9 +147,36 @@ def score_trajectory(trajectory: Trajectory, *, sources: dict[str, str], target:
     return int(matched)
 
 
-def score_negative_trajectory(trajectory: Trajectory, *, sources: dict[str, str], harness: str) -> int:
-    """Reward a complete root session that opens none of its installed skills."""
+def negative_openings(
+    trajectory: Trajectory,
+    *,
+    sources: dict[str, str],
+    harness: str,
+    allowed_session_start_skills: tuple[str, ...] = (),
+) -> dict[str, int]:
+    """Count distinct verified skills, including exempt session-start reads."""
     if not sources:
         raise EvidenceError("Negative control requires a nonempty catalog")
-    opened = [score_trajectory(trajectory, sources=sources, target=name, harness=harness) for name in sources]
-    return int(not any(opened))
+    allowed = set(allowed_session_start_skills)
+    if not allowed.issubset(sources):
+        raise EvidenceError("Session-start exemption absent from catalog")
+    opened = {name for name in sources if score_trajectory(trajectory, sources=sources, target=name, harness=harness)}
+    return {
+        "all_skill_openings": len(opened),
+        "session_start_openings": len(opened & allowed),
+        "unnecessary_skill_openings": len(opened - allowed),
+    }
+
+
+def score_negative_trajectory(
+    trajectory: Trajectory,
+    *,
+    sources: dict[str, str],
+    harness: str,
+    allowed_session_start_skills: tuple[str, ...] = (),
+) -> int:
+    """Reward sessions without unnecessary reads; retain exempt reads separately."""
+    counts = negative_openings(
+        trajectory, sources=sources, harness=harness, allowed_session_start_skills=allowed_session_start_skills
+    )
+    return int(counts["unnecessary_skill_openings"] == 0)

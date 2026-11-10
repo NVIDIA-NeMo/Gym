@@ -22,7 +22,7 @@ from harbor.models.verifier.result import VerifierResult
 from harbor.verifier.base import BaseVerifier
 
 from benchmarks.skill_trigger.prepare import digest, source_path
-from benchmarks.skill_trigger.scoring import EvidenceError, score_negative_trajectory, score_trajectory, text_content
+from benchmarks.skill_trigger.scoring import EvidenceError, negative_openings, score_trajectory, text_content
 
 
 def load_case(release: Path, manifest_sha256: str, task_name: str) -> tuple[dict, dict[str, str]]:
@@ -84,14 +84,21 @@ class SkillOpeningVerifier(BaseVerifier):
     async def verify(self) -> VerifierResult:
         # Harbor collects the agent's trajectory before invoking the host verifier.
         trajectory = Trajectory.model_validate_json((self.trial_paths.agent_dir / "trajectory.json").read_bytes())
+        metrics = {}
         if self.case.get("case_kind") == "negative":
             if has_uncollected_delegation(trajectory):
                 raise EvidenceError("Negative control has uncollected delegation")
-            reward = score_negative_trajectory(trajectory, sources=self.sources, harness=self.harness)
+            metrics = negative_openings(
+                trajectory,
+                sources=self.sources,
+                harness=self.harness,
+                allowed_session_start_skills=tuple(self.case.get("allowed_session_start_skills", [])),
+            )
+            reward = int(metrics["unnecessary_skill_openings"] == 0)
         else:
             reward = score_trajectory(
                 trajectory, sources=self.sources, target=self.case["skill"], harness=self.harness
             )
         if reward == 0 and has_uncollected_delegation(trajectory):
             raise EvidenceError("Delegated outcome has no main-session opening evidence")
-        return VerifierResult(rewards={"reward": reward})
+        return VerifierResult(rewards={"reward": reward, **metrics})

@@ -24,6 +24,9 @@ from benchmarks.skill_trigger.scoring import EvidenceError
 from benchmarks.skill_trigger.verifier import load_case
 
 
+SESSION_START_SKILLS = {"addy": ("using-agent-skills", "context-engineering")}
+
+
 PROMPTS = {
     "bionemo": ["What is 7 + 8? Reply with the number only.", "Repeat this word exactly: sunflower"],
     "skillsbench": ["What is 12 minus 5? Reply with the number only.", "Repeat this word exactly: lantern"],
@@ -45,7 +48,7 @@ def prepare(*, release: str, manifest_sha256: str, output: str) -> Path:
         candidates = sorted((c for c in manifest["cases"] if c["suite"] == suite), key=lambda c: c["id"])
         if not candidates:
             raise EvidenceError(f"Missing cleared collection: {suite}")
-        template, _ = load_case(root, manifest_sha256, candidates[0]["task_name"])
+        template, sources = load_case(root, manifest_sha256, candidates[0]["task_name"])
         for index, prompt in enumerate(prompts):
             identifier = f"negative-{suite}-{index + 1}"
             cases.append(
@@ -55,6 +58,9 @@ def prepare(*, release: str, manifest_sha256: str, output: str) -> Path:
                     "task_name": "case-" + digest(identifier.encode())[:12],
                     "case_kind": "negative",
                     "skill": None,
+                    "allowed_session_start_skills": [
+                        name for name in SESSION_START_SKILLS.get(suite, ()) if name in sources
+                    ],
                     "prompt": prompt,
                     "prompt_sha256": digest(prompt.encode()),
                     "provenance": {"kind": "authored-negative-control", "parent_manifest_sha256": manifest_sha256},

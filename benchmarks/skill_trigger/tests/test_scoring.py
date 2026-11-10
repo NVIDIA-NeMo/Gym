@@ -167,3 +167,22 @@ def test_negative_controls_reject_bulk_reads_and_preserve_uncertainty():
     assert score_negative_trajectory(value, sources=sources, harness="pi") == 1
     with pytest.raises(EvidenceError):
         score_negative_trajectory(trajectory(content=None), sources=sources, harness="pi")
+
+
+def test_session_start_exemption_preserves_read_counts():
+    from benchmarks.skill_trigger.scoring import negative_openings, score_negative_trajectory
+
+    sources = {"target": SKILL, "other": "Different instructions: answer carefully and check all inputs."}
+    kwargs = dict(sources=sources, harness="pi", allowed_session_start_skills=("target",))
+    assert score_negative_trajectory(trajectory(), **kwargs) == 1
+    assert negative_openings(trajectory(), **kwargs) == {
+        "all_skill_openings": 1,
+        "session_start_openings": 1,
+        "unnecessary_skill_openings": 0,
+    }
+    bulk = trajectory(tool="exec_command", content=BODY + "\n" + sources["other"])
+    assert score_negative_trajectory(bulk, **kwargs) == 0
+    with pytest.raises(EvidenceError, match="absent from catalog"):
+        negative_openings(trajectory(), sources=sources, harness="pi", allowed_session_start_skills=("absent",))
+    with pytest.raises(EvidenceError):
+        negative_openings(trajectory(content=None), **kwargs)
