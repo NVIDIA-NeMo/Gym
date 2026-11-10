@@ -127,7 +127,7 @@ context-management controls, not generation budgets.
 
 ## Requests, results, and lifecycle
 
-Input is a string or one text user message, optionally preceded by a system/developer message.
+Input is a string or one user message with text and base64 data-URI `input_image` parts, optionally preceded by a text system/developer message.
 Configured `system_prompt`, request `instructions`, and that preceding message become Codex
 developer instructions in that order. Unsupported conversation/multimodal input, required
 direct HTTP tools, provider overrides, and extra host config are rejected before activation.

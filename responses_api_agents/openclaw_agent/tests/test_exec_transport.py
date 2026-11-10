@@ -9,6 +9,7 @@ import shutil
 import signal
 import sys
 from pathlib import Path
+from time import monotonic
 
 import pytest
 
@@ -32,6 +33,7 @@ class ExecOnlySandbox:
         self.delayed_command = None
         self.disconnected = False
         self.deadline = None
+        self.launched_at = None
 
     async def upload(self, source, destination):
         shutil.copyfile(source, destination)
@@ -45,6 +47,7 @@ class ExecOnlySandbox:
     async def exec(self, command, *, cwd=None, timeout_s=30):
         launch = "--receipt" in command and "process_supervisor.sh" in command
         if launch:
+            self.launched_at = monotonic()
             self.deadline = timeout_s
             self.delayed_command = command
             if self.lost_launch:
@@ -113,6 +116,7 @@ async def test_exec_only_supervision_leaves_task_children_for_sandbox_owner(tmp_
         + {"natural": "print('{}')", "crash": "raise SystemExit(7)"}.get(ending, "time.sleep(60)")
     )
     deadline = 3 if ending == "timeout" else 60
+    started = monotonic()
     task = state.task = asyncio.create_task(
         state.execute(payload(state, code), timeout=deadline, close_timeout=CLOSE_TIMEOUT)
     )
@@ -140,7 +144,9 @@ async def test_exec_only_supervision_leaves_task_children_for_sandbox_owner(tmp_
         child_pid = int((workdir / "child.pid").read_text())
         assert Path(f"/proc/{child_pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
         assert provider.cancelled_launch is False
-        assert provider.deadline == pytest.approx(deadline + CLOSE_TIMEOUT + 30)
+        remaining = provider.deadline - CLOSE_TIMEOUT - 30
+        assert 0 < remaining <= deadline
+        assert remaining >= deadline - (provider.launched_at - started)
         await state.close(CLOSE_TIMEOUT)
         await state.close(CLOSE_TIMEOUT)
         assert provider.disconnected

@@ -54,6 +54,8 @@ Session install/close timeouts default to 600/60 seconds.
 - `max_output_tokens`: most output tokens OpenClaw requests per call for a generated model entry; it
   requests less when its estimate of the input leaves less room in `context_window`. When unset,
   OpenClaw 2026.6.11 uses 8,192.
+- `image_input`: declare image support in sandbox sessions without prompt images (default `false`);
+  prompt images declare it automatically.
 - `workspace_root`: where per-request workspaces are created and deleted
 - `openclaw_agent_id`: passed to `--agent`
 - `thinking`: passed to `--thinking` (off, low, medium, high, ...)
