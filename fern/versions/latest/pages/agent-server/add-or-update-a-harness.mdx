@@ -301,7 +301,9 @@ Validate grant support with an authenticated MCP fixture and a real harness run:
 
 ### Agent context
 
-Some harnesses need task data beyond the initial model input, such as a document to render, images to embed, or the prompt for a later stage. The task row carries that data in `agent_context`, next to `verifier_metadata`, and the `single_agent_turn` Environment Server passes it to the agent in `AgentSeedSessionRequest.agent_context`. Nothing else from the row reaches the agent. The initial conversation stays in `responses_create_params.input`, and verifier data stays with the Resources Server, which does not receive `agent_context`. Do not use `responses_create_params.metadata` to carry task data to the harness.
+Some harnesses need task data beyond the initial model input, such as a document to render, images to embed, or the prompt for a later stage. The Environment Server supplies this data in `AgentSeedSessionRequest.agent_context`. Each seed carries context for one agent session. An Environment Server that starts several agents prepares the appropriate context for each session when it constructs that session's seed.
+
+The `single_agent_turn` Environment Server accepts a task row's `agent_context`, next to `verifier_metadata`, and forwards it to its one agent. It keeps that context out of the task data sent to the Resources Server. The initial conversation stays in `responses_create_params.input`. Do not use `responses_create_params.metadata` to carry task data to the harness.
 
 ```json
 {
@@ -313,6 +315,8 @@ Some harnesses need task data beyond the initial model input, such as a document
   }
 }
 ```
+
+This row format is a convenience for `single_agent_turn` and its flat-row adapter. Other Environment Servers define their own task inputs and prepare each agent's context explicitly; they do not need to adopt a shared role-to-context mapping. An Environment Server must reject supplied context it cannot consume instead of silently ignoring it.
 
 - `values` holds small inline JSON fields. The complete `agent_context`, including artifact references, is limited to 64 KiB as UTF-8 JSON.
 - `artifacts` names files and directories by a path relative to a root the agent configures. The path cannot be absolute or contain `..` or a NUL byte. The content never travels in the seed.

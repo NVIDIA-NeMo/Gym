@@ -16,7 +16,11 @@ from nemo_gym.trajectory.trajectory_record import AgentObservationBundle, Trajec
 
 
 class SingleAgentTurnTaskInput(BaseModel):
-    """Input loaded for one single-agent turn."""
+    """Input loaded for one single-agent turn.
+
+    ``agent_context`` is this environment's row convenience for its one agent session. Environments with
+    several agents define their own task inputs and construct the context for each session explicitly.
+    """
 
     model_config = ConfigDict(extra="forbid")
 

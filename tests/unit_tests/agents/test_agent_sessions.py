@@ -348,6 +348,32 @@ def test_an_agent_reads_the_context_it_declares() -> None:
     assert state.context == _MediaContext(media=AgentContextArtifact(path="figs/1"), tag="figqa2")
 
 
+def test_sessions_in_one_episode_keep_their_own_context() -> None:
+    agent = _context_agent(_MediaAgent)
+    client = TestClient(agent.setup_webserver())
+    seeds = [
+        _seed_request(
+            agent_context=AgentContext(values={"tag": role}, artifacts={"media": {"path": f"figs/{role}"}})
+        ).model_copy(update={"agent_session_id": role})
+        for role in ("user", "assistant")
+    ]
+    for seed in seeds:
+        assert client.post("/v1/agent_sessions", json=seed.model_dump(mode="json")).status_code == 200
+
+    # Seeding another participant must not replace the first participant's context or break its retry.
+    assert client.post("/v1/agent_sessions", json=seeds[0].model_dump(mode="json")).status_code == 200
+    for seed in seeds:
+        state = agent._session_state(seed.agent_session_id)
+        assert state.request.episode_id == seeds[0].episode_id
+        assert state.context == _MediaContext(
+            media=AgentContextArtifact(path=f"figs/{seed.agent_session_id}"), tag=seed.agent_session_id
+        )
+    changed = seeds[0].model_copy(update={"agent_context": seeds[1].agent_context})
+    assert client.post("/v1/agent_sessions", json=changed.model_dump(mode="json")).status_code == 409
+    assert agent._session_state("user").context.tag == "user"
+    assert agent._session_state("assistant").context.tag == "assistant"
+
+
 @pytest.mark.parametrize(
     ("context", "detail"),
     [

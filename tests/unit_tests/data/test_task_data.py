@@ -10,7 +10,7 @@ from typing import get_args
 
 import pytest
 from omegaconf import OmegaConf
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from nemo_gym.config.config_types import (
     EnvironmentServerInstanceConfig,
@@ -27,6 +27,7 @@ from nemo_gym.data.task_data import (
     normalize_task_fields,
     validate_jsonl_rows,
 )
+from nemo_gym.data.tasks.harbor.materialize import HarborTaskInput
 from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnTaskInput
 
 
@@ -45,7 +46,7 @@ class TestNormalizeTaskFields:
         assert conflicts == []
 
     def test_agent_context_is_not_task_data(self):
-        """A row's agent_context goes to the agent, so a server's TaskData schema never reports it as unknown."""
+        """Schema projection excludes single_agent_turn's context field without promising environment support."""
         fields, _ = normalize_task_fields(
             {"verifier_metadata": {"label": "safe"}, "agent_context": {"artifacts": {"media": {"path": "figs/1"}}}}
         )
@@ -170,7 +171,7 @@ class TestTaskDataValidator:
         assert "0/" not in v.report.summary().splitlines()[0]
 
     def test_agent_context_inside_task_data_is_not_a_task_field(self):
-        """The task input lifts agent_context out of the task_data container, so dataset validation skips it there."""
+        """SingleAgentTurnTaskInput lifts context out of task_data, so schema validation skips it there."""
         row = {
             "responses_create_params": {"input": "q"},
             "task_data": {"question": "q", "expected_answer": "a", "agent_context": {"values": {"tag": "figqa2"}}},
@@ -775,6 +776,26 @@ class TestHarborLayoutThroughTheProcessor:
         assert len(paths) == 1 and json.loads(paths[0].read_text())["task_input"]["task_data"] == {
             "_ng_digest": "a" * 64
         }
+
+    @pytest.mark.parametrize("nested", [False, True])
+    def test_schema_filtering_preserves_context_for_environment_validation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nested: bool
+    ) -> None:
+        """Collation must preserve unsupported context so Harbor can refuse it at its request boundary."""
+        row = self._row({"_ng_digest": "a" * 64})
+        context = {"values": {"tag": "figqa2"}}
+        container = row["task_input"]["task_data"] if nested else row["task_input"]
+        container["agent_context"] = context
+        processor, config, in_scope = self._processor_and_configs(tmp_path, monkeypatch, [row])
+
+        paths = processor._collate_samples_single_type(
+            "validation", in_scope, task_data_validation=config.effective_task_data_validation
+        )
+
+        [prepared] = [json.loads(line) for line in paths[0].read_text().splitlines()]
+        assert prepared["task_input"] == row["task_input"]
+        with pytest.raises(ValidationError, match="agent_context"):
+            HarborTaskInput.model_validate(prepared["task_input"])
 
 
 class TestLegacyWrapperLayoutThroughTheProcessor:
