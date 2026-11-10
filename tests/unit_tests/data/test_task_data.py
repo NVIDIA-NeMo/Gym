@@ -852,3 +852,9 @@ class TestLegacyWrapperLayoutThroughTheProcessor:
             "validation", in_scope, task_data_validation=config.effective_task_data_validation
         )
         assert len(paths) == 1 and len(paths[0].read_text().splitlines()) == 1
+
+
+def test_rl_stream_index_is_not_part_of_task_schema() -> None:
+    fields, conflicts = normalize_task_fields({"_rowidx": 7, "_ng_task_index": 3, "task_data": {"answer": "expected"}})
+    assert fields == {"answer": "expected"}
+    assert not conflicts
