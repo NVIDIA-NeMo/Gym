@@ -20,7 +20,9 @@ stem_judge:
       question_extract_regex: null
       extract_problem_from_prompt: false
 
-      # --- Answer contract (a row's answer_format / require_think_end win) ---
+      # --- Answer contract (a row's answer_format wins) ---
+      # The final answer is the assistant message: the policy's model server
+      # must run with a reasoning parser.
       # boxed: 0 without a non-empty \boxed{} in the final answer.
       # free: the judge sees the whole final answer.
       default_answer_format: boxed
@@ -28,8 +30,6 @@ stem_judge:
       # final answer (the setup the offline study measured); "box" shows only
       # the box's content.
       boxed_judge_input: final_answer
-      # 0 when the reasoning never closed. Set false for a thinking-off policy.
-      require_think_end: true
       # Off: some chemistry references run to 4K characters and correct boxes to
       # 5K (3 of 26,880 sampled training rollouts have a box over 2K, all correct).
       max_box_chars: null
@@ -48,7 +48,7 @@ stem_judge:
 
       domain: knowledge
       verified: false
-      description: STEM open-answer grading with an LLM judge (stem_v11 prompt, reasoning guards, boxed/free answers, rubric rows)
+      description: STEM open-answer grading with an LLM judge (stem_v11 prompt, length guards, boxed/free answers, rubric rows)
       value: Improve the STEM RL reward signal
 stem_judge_simple_agent:
   responses_api_agents:

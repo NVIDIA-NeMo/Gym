@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for the stem_judge server: reasoning guards, the boxed/free answer contract,
+"""Tests for the stem_judge server: length guards, the boxed/free answer contract,
 verdict and rubric parsing, and the shipped config."""
 
 import hashlib
@@ -128,7 +128,6 @@ class TestShippedConfig:
         assert config.name == "stem_judge"
         assert config.default_answer_format == "boxed"
         assert config.boxed_judge_input == "final_answer"
-        assert config.require_think_end is True
         assert (config.max_box_chars, config.max_answer_chars) == (None, 16000)
         assert (config.rubric_reward, config.rubric_pass_fraction) == ("fraction", 1.0)
 
@@ -147,30 +146,17 @@ class TestShippedConfig:
 
 
 class TestFinalAnswer:
-    def test_reasoning_item_then_answer(self) -> None:
-        assert final_answer(_split("  The answer is 2.  "), True) == ("The answer is 2.", "ok")
-
-    def test_think_tags_in_message(self) -> None:
-        assert final_answer(_response(_msg("<think>a</think>b</think>\nAnswer: 2")), True) == ("Answer: 2", "ok")
+    def test_the_message_is_the_answer(self) -> None:
+        assert final_answer(_split("  The answer is 2.  ")) == ("The answer is 2.", "ok")
+        assert final_answer(_response(_msg("The answer is 2."))) == ("The answer is 2.", "ok")
 
     @mark.parametrize("answer", ["", "Answer: 2"])
     def test_truncated(self, answer: str) -> None:
-        assert final_answer(_split(answer, truncated=True), True) == (None, "truncated")
+        assert final_answer(_split(answer, truncated=True)) == (None, "truncated")
 
-    def test_reasoning_never_closed(self) -> None:
-        raw = _response(_msg("Let me think... maybe \\boxed{2}"))
-        assert final_answer(raw, True) == (None, "think_not_closed")
-        assert final_answer(raw, False) == ("Let me think... maybe \\boxed{2}", "ok")
-
-    def test_leaked_reasoning_is_dropped(self) -> None:
-        assert final_answer(_split("so maybe \\boxed{3}</think>\\boxed{2}"), True) == ("\\boxed{2}", "ok")
-
-    def test_reopened_reasoning(self) -> None:
-        assert final_answer(_split("\\boxed{2} <think>wait"), True) == (None, "think_reopened")
-
-    @mark.parametrize("response", [_split("  "), _response(_reasoning()), _split("thinking</think>  ")])
+    @mark.parametrize("response", [_split("  "), _response(_reasoning())])
     def test_empty(self, response: NeMoGymResponse) -> None:
-        assert final_answer(response, True) == (None, "empty_final_answer")
+        assert final_answer(response) == (None, "empty_final_answer")
 
 
 class TestParsing:
@@ -193,7 +179,6 @@ class TestParsing:
             ("Judgement: 'yes'", "yes"),
             ("**Judgement:** 'no'", "no"),
             ("Judgement: yes\nOn reflection, Judgement: 'no'", "no"),
-            ("Judgement: 'yes'</think>Judgement: 'no'", "no"),
             ("Final Answer: \\boxed{yes}", "yes"),
             ("The student is right.", None),
         ],
@@ -205,8 +190,8 @@ class TestParsing:
         ids = ["r1", "r2"]
         assert parse_criteria('Criteria: {"r1": true, "r2": false}', ids) == {"r1": True, "r2": False}
         assert parse_criteria('```json\n{"r1": "True", "r2": "false"}\n```', ids) == {"r1": True, "r2": False}
-        # The last object that marks every id wins; the judge's reasoning is ignored.
-        text = '{"r1": false, "r2": false}</think>draft {"r1": true} final {"r1": true, "r2": true}'
+        # The last object that marks every id wins.
+        text = '{"r1": false, "r2": false} draft {"r1": true} final {"r1": true, "r2": true}'
         assert parse_criteria(text, ids) == {"r1": True, "r2": True}
 
     @mark.parametrize(
@@ -261,11 +246,8 @@ class TestVerify:
         "response, status",
         [
             (_split("The answer is 2."), "no_boxed"),
-            (_response(_msg("<think>\\boxed{2}</think>The answer is 2.")), "no_boxed"),
             (_split("y" * 16001 + " \\boxed{2}"), "answer_too_long"),
             (_split("\\boxed{2}", truncated=True), "truncated"),
-            (_response(_msg("maybe \\boxed{2}")), "think_not_closed"),
-            (_split("\\boxed{2}<think>"), "think_reopened"),
             (_response(_reasoning()), "empty_final_answer"),
         ],
     )
@@ -294,11 +276,6 @@ class TestVerify:
         res = await server.verify(_request(_split("Two, because 1+1=2."), answer_format="free"))
         assert (res.reward, res.answer_format) == (approx(1.0), "free")
         assert "**Student Solution**:\nTwo, because 1+1=2." in _judge_prompt(server)
-
-    async def test_row_can_turn_off_the_think_check(self, config: StemJudgeConfig) -> None:
-        server = _server(config, "Judgement: 'yes'")
-        res = await server.verify(_request(_response(_msg("\\boxed{2}")), require_think_end=False))
-        assert res.reward == approx(1.0)
 
     @mark.parametrize(
         "judge, reward, status", [("Judgement: 'no'", 0.0, "judged"), ("I agree.", 0.0, "judge_unparsed")]

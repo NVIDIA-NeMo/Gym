@@ -5,26 +5,25 @@ server: the same judge prompt and verdict parser, with the inherited
 ``equivalence_llm_judge`` machinery (A/B swap, full-generation rescue,
 per-record extraction regexes) removed, and three additions:
 
-1. Reasoning guards. The judge sees only the policy's final answer, never its
-   reasoning, whether the model server splits reasoning into its own output
-   item or leaves ``<think>...</think>`` in the message text.
+1. Length guards. A rollout that hit the policy's length cap, or whose final
+   answer is too long for the judge, scores 0.
 2. A per-row answer contract, ``answer_format``. ``boxed`` rows must put the
    answer in a ``\\boxed{}``. ``free`` rows (proofs, explanations) are judged
    on the whole final answer.
 3. Rubric rows. A row with a ``rubric`` list is graded criterion by criterion;
    the reward is the share of points earned, or pass/fail at a threshold.
 
+The policy and judge model servers are assumed to run with a reasoning parser,
+so the assistant message holds only the final answer and no ``<think>`` tags.
+
 Grading one rollout. Every early return scores 0 without calling the judge and
 records why in ``grading_status``:
 
 1. ``truncated``: the policy hit its length cap.
-2. ``empty_final_answer``: no assistant text, or none after the reasoning.
-3. ``think_not_closed``: the reasoning never closed (no reasoning item and no
-   ``</think>``), when ``require_think_end`` is on.
-4. ``think_reopened``: a ``<think>`` after the last ``</think>``.
-5. ``no_boxed`` / ``box_too_long``: boxed rows without a non-empty box, or
+2. ``empty_final_answer``: no assistant text.
+3. ``no_boxed`` / ``box_too_long``: boxed rows without a non-empty box, or
    with a box over ``max_box_chars``.
-6. ``answer_too_long``: the judge would see the whole final answer and it is
+4. ``answer_too_long``: the judge would see the whole final answer and it is
    over ``max_answer_chars``.
 
 Then one judge call. Answer rows end with ``Judgement: 'yes'|'no'`` (reward 1
@@ -77,14 +76,11 @@ from nemo_gym.openai_utils import (
 from nemo_gym.server_utils import get_response_json
 
 
-THINK_START = "<think>"
-THINK_END = "</think>"
-
 # Same as stem_v11: strips the fixed instruction preamble that ends with the
 # format line "Answer: {your final answer}", leaving only the problem.
 PROBLEM_EXTRACT_REGEX = r"Answer:\s*\{your final answer\}\s*(.*)"
 
-# stem_v11's verdict parser, unchanged. The primary pattern is the format the
+# stem_v11's verdict patterns, unchanged. The primary pattern is the format the
 # prompt asks for; the fallback is consulted only when the primary finds nothing.
 VERDICT_PATTERN = r"\*{0,2}\s*Judgement[\s*]*:[\s*]*['\"]?(yes|no)['\"]?"
 VERDICT_FALLBACK_PATTERN = (
@@ -117,15 +113,12 @@ class StemJudgeConfig(BaseResourcesServerConfig):
     question_extract_regex: Optional[str] = None
     extract_problem_from_prompt: bool = False
 
-    # --- Answer contract. A row's own answer_format / require_think_end win. ---
+    # --- Answer contract. A row's own answer_format wins. ---
     default_answer_format: Literal["boxed", "free"] = "boxed"
     # What the judge sees on boxed rows: "final_answer" gates on the box but shows
     # the judge the whole final answer (the setup the offline study measured);
     # "box" shows only the box's content.
     boxed_judge_input: Literal["final_answer", "box"] = "final_answer"
-    # Score 0 when the reasoning never closed. Set false for a policy that runs
-    # with thinking off.
-    require_think_end: bool = True
     # Off by default: some chemistry references run to 4K characters, and correct
     # boxes to 5K, so a fixed 2K cap zeroes correct answers.
     max_box_chars: Optional[int] = Field(default=None, gt=0)
@@ -166,7 +159,6 @@ class StemJudgeRunRequest(BaseRunRequest):
     expected_answer: Optional[str] = None
     metadata: Optional[dict[str, Any]] = None
     answer_format: Optional[Literal["boxed", "free"]] = None
-    require_think_end: Optional[bool] = None
     rubric: Optional[list[RubricCriterion]] = None
 
     @model_validator(mode="after")
@@ -219,10 +211,6 @@ def _assistant_text(response: NeMoGymResponse) -> str:
     return ""
 
 
-def _has_reasoning_item(response: NeMoGymResponse) -> bool:
-    return any(getattr(item, "type", None) == "reasoning" for item in response.output)
-
-
 def _is_length_truncated(response: NeMoGymResponse) -> bool:
     """True if the policy hit its length cap.
 
@@ -233,25 +221,15 @@ def _is_length_truncated(response: NeMoGymResponse) -> bool:
     return getattr(details, "reason", None) == "max_output_tokens"
 
 
-def final_answer(response: NeMoGymResponse, require_think_end: bool) -> tuple[Optional[str], str]:
-    """The policy's final answer with all reasoning removed, or None and the reason there is none.
+def final_answer(response: NeMoGymResponse) -> tuple[Optional[str], str]:
+    """The policy's final answer, or None and the reason there is none.
 
-    The reasoning counts as closed when the model server split it into a reasoning
-    item, or when the message text still carries ``</think>``. Text before the last
-    ``</think>`` is reasoning that leaked into the message, and is dropped.
+    The reasoning parser has already moved the reasoning out of the message, so
+    the assistant text is the final answer.
     """
     if _is_length_truncated(response):
         return None, "truncated"
-    text = _assistant_text(response)
-    if not text.strip():
-        return None, "empty_final_answer"
-    if require_think_end and not (_has_reasoning_item(response) or THINK_END in text):
-        return None, "think_not_closed"
-    if THINK_END in text:
-        text = text.rsplit(THINK_END, 1)[1]
-    if THINK_START in text:
-        return None, "think_reopened"
-    text = text.strip()
+    text = _assistant_text(response).strip()
     if not text:
         return None, "empty_final_answer"
     return text, "ok"
@@ -280,10 +258,9 @@ def last_boxed(text: str) -> Optional[str]:
 
 
 def parse_verdict(text: str) -> Optional[str]:
-    """The judge's last "yes"/"no" after its own ``</think>``, or None."""
-    search_text = text.split(THINK_END)[-1]
+    """The judge's last "yes"/"no", or None."""
     for pattern in (VERDICT_PATTERN, VERDICT_FALLBACK_PATTERN):
-        matches = re.findall(pattern, search_text, flags=re.IGNORECASE)
+        matches = re.findall(pattern, text, flags=re.IGNORECASE)
         if matches:
             return matches[-1].lower()
     return None
@@ -303,13 +280,12 @@ def _brace_spans(text: str) -> list[tuple[int, int]]:
 def parse_criteria(text: str, ids: list[str]) -> Optional[dict[str, bool]]:
     """The judge's marks for every criterion id, from the last JSON object that covers them all.
 
-    Only the judge's text after its own ``</think>`` is read. A value must be a JSON
-    boolean or the string "true"/"false". Returns None when no object marks every id.
+    A value must be a JSON boolean or the string "true"/"false". Returns None when no
+    object marks every id.
     """
-    search_text = text.split(THINK_END)[-1]
-    for start, end in reversed(_brace_spans(search_text)):
+    for start, end in reversed(_brace_spans(text)):
         try:
-            obj = json.loads(search_text[start : end + 1])
+            obj = json.loads(text[start : end + 1])
         except ValueError:
             continue
         if not isinstance(obj, dict):
@@ -409,12 +385,11 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
         cfg = self.config
         expected = str(body.expected_answer or (body.metadata or {}).get("expected_answer") or "")
         answer_format = body.answer_format or cfg.default_answer_format
-        require_think_end = cfg.require_think_end if body.require_think_end is None else body.require_think_end
 
         def zero(status: str, judged: Optional[str] = None) -> StemJudgeVerifyResponse:
             return self._finish(body, expected, answer_format, status, 0.0, judged, [])
 
-        final, status = final_answer(body.response, require_think_end)
+        final, status = final_answer(body.response)
         if final is None:
             return zero(status)
 
