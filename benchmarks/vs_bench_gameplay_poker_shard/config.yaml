@@ -1,0 +1,13 @@
+# Experimental shard: the full ten-block Poker score requires both shards.
+config_paths:
+  - benchmarks/vs_bench_gameplay/config.yaml
+
+vs_bench_gameplay_benchmark_agent:
+  responses_api_agents:
+    vs_bench_gameplay:
+      datasets:
+      - name: vs_bench_gameplay
+        type: benchmark
+        jsonl_fpath: benchmarks/vs_bench_gameplay_poker_shard/data/vs_bench_poker_shard.jsonl
+        prepare_script: benchmarks/vs_bench_gameplay_poker_shard/prepare.py
+        num_repeats: 1

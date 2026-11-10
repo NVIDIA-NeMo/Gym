@@ -1,0 +1,20 @@
+config_paths:
+  - responses_api_agents/vs_bench_gameplay/configs/vs_bench_gameplay.yaml
+
+vs_bench_gameplay_benchmark_agent:
+  _inherit_from: vs_bench_gameplay_agent
+  responses_api_agents:
+    vs_bench_gameplay:
+      datasets:
+      - name: vs_bench_gameplay
+        type: benchmark
+        jsonl_fpath: benchmarks/vs_bench_gameplay/data/vs_bench_gameplay.jsonl
+        prepare_script: benchmarks/vs_bench_gameplay/prepare.py
+        num_repeats: 1
+
+vs_bench_gameplay_benchmark_environment_server:
+  _inherit_from: vs_bench_gameplay_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: vs_bench_gameplay_benchmark_agent
