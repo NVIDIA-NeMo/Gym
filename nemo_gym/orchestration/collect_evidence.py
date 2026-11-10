@@ -19,6 +19,7 @@ Decisions live in ``nemo_gym.orchestration.recovery``; this module holds the scr
 """
 
 from nemo_gym.core.failure_kinds import (
+    ENVIRONMENT_PROTOCOL_VIOLATION,
     JUDGE_SKIPPED,
     PROVIDER_CREDENTIALS_REJECTED,
     PROVIDER_QUOTA_EXHAUSTED,
@@ -65,6 +66,9 @@ COLLECT_SCRIPT = (
     + "\n"
     + "PROVIDER_CREDENTIALS_REJECTED = "
     + repr(PROVIDER_CREDENTIALS_REJECTED)
+    + "\n"
+    + "ENVIRONMENT_PROTOCOL_VIOLATION = "
+    + repr(ENVIRONMENT_PROTOCOL_VIOLATION)
     + "\n"
     + "JUDGE_SKIPPED = "
     + repr(JUDGE_SKIPPED)
@@ -323,6 +327,8 @@ def grading_facts(r):
         "judge_error": isinstance(r.get("judge_evaluations"), list) and any(
             isinstance(item, dict) and item.get("verdict_label") == "JUDGE_ERROR" for item in r["judge_evaluations"]),
         "judge_unparsed": isinstance(r.get("judge_evaluations"), list) and judge_unparsed(r["judge_evaluations"]),
+        "judge_error_message": isinstance(r.get("judge_error"), str) and bool(r["judge_error"].strip()),
+        "invalid_judge_response": r.get("invalid_judge_response") is True,
         "games_unjudged": games_unjudged(r.get("games")),
         "rubric": rubric(r),
         "library_reward": finite(r.get("library_reward")),
@@ -920,6 +926,7 @@ def chain_continuation_note():
         or CANCELLED_FOLLOWUP_MARKER in line
         or PROVIDER_CREDENTIALS_REJECTED in line
         or PROVIDER_QUOTA_EXHAUSTED in line
+        or ENVIRONMENT_PROTOCOL_VIOLATION in line
         or line.startswith(FOLLOW_UP_SUBMISSION_REFUSED)
     )
     return line[:500] if named else None

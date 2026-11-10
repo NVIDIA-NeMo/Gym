@@ -3,6 +3,7 @@
 
 import asyncio
 import contextlib
+import re
 import runpy
 import time
 from copy import deepcopy
@@ -37,10 +38,12 @@ from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, Resources
 from nemo_gym.core import (
     MODEL_TRANSPORT_ERROR,
     EpisodeId,
+    ModelCallSampling,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NgFailureEvent,
     TaskId,
+    encode_model_sampling,
 )
 from nemo_gym.server_runtime import (
     BaseVerifyRequest,
@@ -66,6 +69,30 @@ def test_module_exports_app_for_multi_worker_import(monkeypatch: pytest.MonkeyPa
     )
 
     assert namespace["app"] is worker_app
+
+
+@pytest.mark.parametrize("token_capture", [False, True])
+def test_the_trained_agents_activation_carries_the_episodes_sampling_values(token_capture: bool) -> None:
+    environment_server, _ = _environment_server(token_capture=token_capture)
+    sampling = ModelCallSampling(temperature=0.6, top_p=0.95, max_output_tokens=64)
+    capture = "/training-token-capture" if token_capture else ""
+
+    path = environment_server._agent_responses_path(_request().model_copy(update={"model_sampling": sampling}))
+
+    assert path == f"/ng-rollout/rollout-a2{capture}/ng-sampling/{encode_model_sampling(sampling)}/v1/responses"
+    # Gym-only evaluation sends no values and gets the path it always had.
+    assert environment_server._agent_responses_path(_request()) == f"/ng-rollout/rollout-a2{capture}/v1/responses"
+
+
+async def test_an_episode_with_sampling_values_runs_and_its_agent_carries_them() -> None:
+    environment_server, client = _environment_server(resources_tool_transports=["direct_http"])
+    sampling = ModelCallSampling(temperature=0.6, top_p=0.95, max_output_tokens=64)
+
+    result = await environment_server.run_request(_request().model_copy(update={"model_sampling": sampling}))
+
+    assert result.failure is None, result.failure
+    assert result.result.reward == 1.0
+    assert client.calls[2][1] == f"/ng-rollout/rollout-a2/ng-sampling/{encode_model_sampling(sampling)}/v1/responses"
 
 
 async def test_single_agent_turn_with_direct_resources_tools() -> None:
@@ -138,6 +165,180 @@ async def test_single_agent_turn_translates_resources_mcp_metadata_to_canonical_
     assert mcp_access.connection.headers == {"Authorization": "Bearer scoped"}
     assert client.calls[1][2]["json"]["tool_accesses"][1]["kind"] == "mcp"
     assert client.calls[1][2]["json"]["tool_accesses"][1]["connection"]["transport"] == "streamable_http"
+
+
+_SEARCH = {"type": "resources_servers", "name": "search"}
+
+
+def _search_environment_server(
+    *,
+    agent_tool_servers: list[dict] | None = None,
+    own_tool_servers: list[dict] | None = None,
+    search_seed: dict | None = None,
+) -> tuple[SingleAgentTurnEnvironmentServer, _Client]:
+    """An environment server whose episodes may also seed a `search` tool server, granted as `tavily`."""
+    configured, client = _environment_server()
+    client.global_config_dict["search"] = {
+        "resources_servers": {
+            "tavily_search": {"host": "search", "port": 8000, "entrypoint": "app.py", "expose_tools_over_mcp": True}
+        }
+    }
+    if agent_tool_servers is not None:
+        client.global_config_dict.agent.responses_api_agents.test.update({"tool_servers": agent_tool_servers})
+    config = SingleAgentTurnEnvironmentServerConfig.model_validate(
+        {**configured.config.model_dump(), "tool_servers": own_tool_servers}
+    )
+    # The search seed and close replies; the fake client echoes each request's session ID.
+    client.responses.insert(
+        1,
+        _Response(
+            search_seed
+            or {
+                "resources_session_id": "search-session",
+                "resources_tools": {"server_name": "tavily", "headers": {"Authorization": "Bearer search-token"}},
+            }
+        ),
+    )
+    client.responses.append(_Response({"resources_session_id": "search-session"}))
+    return SingleAgentTurnEnvironmentServer(config=config, server_client=client), client
+
+
+def _agent_seed_body(client: _Client) -> AgentSeedSessionRequest:
+    return AgentSeedSessionRequest.model_validate(
+        next(kwargs["json"] for _, path, kwargs in client.calls if path == "/v1/agent_sessions")
+    )
+
+
+async def test_the_agents_tool_servers_are_seeded_granted_and_closed() -> None:
+    # An agent moved off the legacy_agent relay keeps the tool servers its /run seeded.
+    environment_server, client = _search_environment_server(agent_tool_servers=[_SEARCH])
+
+    result = await environment_server.run_request(_request())
+
+    assert result.result.reward == 1.0
+    search_calls = [(path, kwargs) for server, path, kwargs in client.calls if server == "search"]
+    assert [path for path, _ in search_calls] == ["/seed_session", "/close_session"]
+    seed_body = ResourcesSeedSessionRequest.model_validate(search_calls[0][1]["json"])
+    close_body = ResourcesCloseSessionRequest.model_validate(search_calls[1][1]["json"])
+    resources_seed_body = ResourcesSeedSessionRequest.model_validate(client.calls[0][2]["json"])
+    assert seed_body.resources_session_id == close_body.resources_session_id
+    assert seed_body.resources_session_id != resources_seed_body.resources_session_id
+    # The tool server sees the episode's task, as its Resources server does.
+    assert seed_body.task_data == {"instance_id": "task"}
+    assert search_calls[1][1]["cookies"] == {"session": "cookie-value"}
+    [access] = _agent_seed_body(client).tool_accesses
+    assert access.name == "tavily"
+    assert access.required is True
+    assert str(access.connection.url) == "http://search:8000/mcp"
+    assert access.connection.headers == {"Authorization": "Bearer search-token"}
+
+
+async def test_tool_server_grants_follow_the_resources_servers_own() -> None:
+    environment_server, client = _search_environment_server(own_tool_servers=[_SEARCH])
+    environment_server.config.resources_tool_transports = ["direct_http"]
+
+    await environment_server.run_request(_request())
+
+    assert [access.name for access in _agent_seed_body(client).tool_accesses] == ["resources.direct_http", "tavily"]
+
+
+async def test_the_environment_servers_own_tool_servers_override_the_agents() -> None:
+    environment_server, client = _search_environment_server(agent_tool_servers=[_SEARCH], own_tool_servers=[])
+    del client.responses[1], client.responses[-1]
+
+    result = await environment_server.run_request(_request())
+
+    assert result.result.reward == 1.0
+    assert not [server for server, _, _ in client.calls if server == "search"]
+    assert _agent_seed_body(client).tool_accesses == []
+
+
+async def test_a_tool_server_without_mcp_tools_fails_the_episode_and_closes_its_session() -> None:
+    environment_server, client = _search_environment_server(
+        agent_tool_servers=[_SEARCH], search_seed={"resources_session_id": "search-session"}
+    )
+
+    result = await environment_server.run_request(_request())
+
+    assert result.failure is not None
+    assert result.failure.stage == "seed"
+    assert result.failure.terminal is True
+    assert "'search' did not return requested MCP metadata" in result.failure.failure_reason
+    assert ("search", "/close_session") in [(server, path) for server, path, _ in client.calls]
+    assert "/v1/agent_sessions" not in [path for _, path, _ in client.calls]
+
+
+async def test_an_episode_that_grants_tool_server_tools_is_a_restart() -> None:
+    environment_server, client = _search_environment_server(agent_tool_servers=[_SEARCH])
+    restarts: list[list[str]] = []
+
+    async def record_restart(request: object) -> None:
+        restarts.append([path for _, path, _ in client.calls])
+
+    object.__setattr__(environment_server, "checkpoint_restart", record_restart)
+    await environment_server.run_request(_request())
+
+    # Marked before the agent receives the token, as for the Resources Server's own MCP grant.
+    assert restarts == [["/seed_session", "/seed_session"]]
+
+
+def test_a_server_that_grants_an_unknown_tool_server_does_not_start() -> None:
+    configured, client = _environment_server()
+    client.global_config_dict.agent.responses_api_agents.test.update({"tool_servers": [_SEARCH]})
+
+    with pytest.raises(ValueError, match="unknown server 'search'"):
+        SingleAgentTurnEnvironmentServer(config=configured.config, server_client=client)
+
+
+@pytest.mark.parametrize("listed_by", ["environment", "agent"])
+@pytest.mark.parametrize(
+    ("name", "block", "error"),
+    [
+        (
+            "policy_model",
+            {"responses_api_models": {"vllm_model": {"host": "model", "port": 8000}}},
+            "'policy_model', which is not a Resources server",
+        ),
+        (
+            "other_agent",
+            {"responses_api_agents": {"simple_agent": {"host": "agent", "port": 8000}}},
+            "'other_agent', which is not a Resources server",
+        ),
+        (
+            "search",
+            {"resources_servers": {"tavily_search": {"host": "search", "port": 8000}}},
+            "'search', which does not serve them; set expose_tools_over_mcp: true",
+        ),
+        ("resources", None, "lists its Resources server 'resources' as a tool server"),
+    ],
+)
+def test_a_server_that_grants_tools_no_resources_server_serves_does_not_start(
+    listed_by: str, name: str, block: dict | None, error: str
+) -> None:
+    configured, client = _environment_server()
+    if block is not None:
+        client.global_config_dict[name] = block
+    ref = {"type": "resources_servers", "name": name}
+    config = configured.config
+    if listed_by == "environment":
+        config = SingleAgentTurnEnvironmentServerConfig.model_validate({**config.model_dump(), "tool_servers": [ref]})
+    else:
+        client.global_config_dict.agent.responses_api_agents.test.update({"tool_servers": [ref]})
+
+    with pytest.raises(ValueError, match=re.escape(error)):
+        SingleAgentTurnEnvironmentServer(config=config, server_client=client)
+
+
+@pytest.mark.parametrize("listed_by", ["environment", "agent"])
+def test_a_server_that_grants_an_mcp_resources_servers_tools_starts(listed_by: str) -> None:
+    own_tool_servers = [_SEARCH] if listed_by == "environment" else None
+    agent_tool_servers = [_SEARCH] if listed_by == "agent" else None
+
+    environment_server, _ = _search_environment_server(
+        own_tool_servers=own_tool_servers, agent_tool_servers=agent_tool_servers
+    )
+
+    assert environment_server.tool_server_names == ["search"]
 
 
 async def test_token_capture_keeps_prefixed_twin_route() -> None:
