@@ -3365,6 +3365,44 @@ async def test_native_model_error_is_reported_with_classification(setup, status,
     assert closed.agent_observations.records[0].status == "failed"
 
 
+# Codex's turn.failed message for an HTTP error is the endpoint's body; here, the model server's envelope for a
+# context overflow it propagates (the text a scripted-model smoke of the pinned CLI recorded).
+CONTEXT_OVERFLOW_BODY = (
+    '{"error":{"message":"This model\'s maximum context length is 32768 tokens. However, you requested 32818 tokens '
+    'in the messages, Please reduce the length of the messages.","type":"invalid_request_error","param":null,'
+    '"code":"context_length_exceeded"}}'
+)
+
+
+# A context limit is graded as incomplete, before or after the first reply (decision 1). It was failed
+# model_request_error 400, and model_request_rejected (never graded) on the first request.
+@pytest.mark.parametrize("after_reply", [False, True])
+async def test_a_propagated_context_overflow_is_a_graded_context_limit(setup, after_reply):
+    agent, sandbox = setup
+    events = [
+        {"type": "turn.started"},
+        *([MODEL_OUTPUT] if after_reply else []),
+        {"type": "turn.failed", "error": {"message": CONTEXT_OVERFLOW_BODY}},
+    ]
+    sandbox.events = "\n".join(json.dumps([float(i), event]) for i, event in enumerate(events))
+    sandbox.result["return_code"] = 1
+    original_publish = sandbox.publish
+
+    def publish():
+        original_publish()
+        attempts = ['{"status":200}'] if after_reply else []
+        sandbox.files[f"{sandbox.directory}/model_attempts.jsonl"] = "\n".join([*attempts, '{"status":400}']) + "\n"
+
+    sandbox.publish = publish
+    request, session_id, task = await activate(agent, sandbox)
+    response = await task
+    assert response.status == "incomplete" and response.error is None
+    assert response.metadata["ng_agent_stop_reason"] == "context_limit"
+    assert "ng_agent_outcome" not in response.metadata
+    assert agent_outcome_policy(response) == OutcomeAction.VERIFY
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+
+
 async def test_native_failure_without_http_status_reports_unknown(setup):
     agent, sandbox = setup
     message = json.dumps({"error": {"message": "rejected", "code": "400"}})

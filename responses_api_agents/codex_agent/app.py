@@ -54,6 +54,7 @@ from nemo_gym.agents import (
     SandboxSession,
     SimpleResponsesAPIAgent,
     decide_outcome,
+    model_http_error_outcome,
     resolve_agent_timeout,
     restrict_sandbox_network,
     stage_skills,
@@ -778,10 +779,13 @@ class CodexAgent(SimpleResponsesAPIAgent):
         """Read Codex 0.144.4's turn.failed error; tested on that pinned version.
 
         Prefer the sandbox forwarder's retained status and body-read failures. Without them, errors
-        remain unknown; a provider's arbitrary error.code is not an HTTP status.
+        remain unknown; a provider's arbitrary error.code is not an HTTP status. For an HTTP error, Codex's
+        message is the endpoint's body, so a propagated context overflow (a 400 whose OpenAI envelope has
+        code ``context_length_exceeded``) is a context limit.
         """
         if native_result.get("type") != "turn.failed":
             return AgentOutcome(failure_kind="unknown")
+        message = str((native_result.get("error") or {}).get("message") or "")
         if "upstream_attempt" in native_result:
             attempt = native_result["upstream_attempt"]
             if "transport_error" in attempt:
@@ -790,8 +794,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             if status is None:
                 return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
             if type(status) is int and 400 <= status <= 599:
-                return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
-        message = str((native_result.get("error") or {}).get("message") or "")
+                return model_http_error_outcome(status, error_body=message)
         match = re.search(r"\bunexpected status ([45]\d{2})\b", message)
         if match:
             return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=int(match[1]))
@@ -1440,7 +1443,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 else "server_error",
                 "message": terminal_error,
             }
-            if reported_model_error
+            # A context limit the ladder grades as incomplete reports no error.
+            if reported_model_error and status == "failed"
             else None,
             tool_choice=body.tool_choice,
             tools=body.tools,

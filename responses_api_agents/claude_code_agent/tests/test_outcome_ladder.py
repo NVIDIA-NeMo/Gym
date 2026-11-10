@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from nemo_gym.agents import OutcomeAction, RunEvidence, agent_outcome_policy
+from nemo_gym.agents import AgentOutcome, OutcomeAction, RunEvidence, agent_outcome_policy
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.claude_code_agent import sandbox as adapter
 from responses_api_agents.claude_code_agent.parsing import parse_stream_json
@@ -103,28 +103,27 @@ def test_http_text_that_did_not_end_the_run_is_not_its_status(case):
 
 
 @pytest.mark.parametrize(
-    ("text", "status", "code"),
+    ("text", "outcome"),
     [
-        (AUTH_FAILURE, 401, "invalid_api_key"),
-        (CONTEXT_OVERFLOW, 400, "context_length_exceeded"),
-        ("API Error: 400 Request validation failed: malformed message sequence", 400, None),
-        ("API Error: 503 Service Unavailable · check status.claude.com", 503, None),
-        ('API Error: 400 ["context_length_exceeded"]', 400, None),
+        (AUTH_FAILURE, AgentOutcome(failure_kind="model_request_error", status_code=401)),
+        (CONTEXT_OVERFLOW, AgentOutcome(failure_kind="model_context_limit")),
+        (
+            "API Error: 400 Request validation failed: malformed message sequence",
+            AgentOutcome(failure_kind="model_request_error", status_code=400),
+        ),
+        (
+            "API Error: 503 Service Unavailable · check status.claude.com",
+            AgentOutcome(failure_kind="model_request_error", status_code=503),
+        ),
+        (
+            'API Error: 400 ["context_length_exceeded"]',
+            AgentOutcome(failure_kind="model_request_error", status_code=400),
+        ),
     ],
 )
-def test_parser_finds_the_status_after_a_prefix_and_keeps_a_raw_json_error_code(text, status, code):
+def test_the_status_is_found_after_a_prefix_and_a_raw_context_overflow_body_is_a_context_limit(text, outcome):
     _, metadata = parse_stream_json("\n".join(map(json.dumps, [api_error(text), error_result(text)])))
-    assert metadata["api_error_status"] == status
-    assert metadata.get("api_error_code") == code
-
-
-def test_only_a_400_with_the_context_length_code_is_a_context_limit():
-    classify = agent().classify_outcome
-    assert classify({"api_error_status": 400, "api_error_code": "context_length_exceeded"}).failure_kind == (
-        "model_context_limit"
-    )
-    assert classify({"api_error_status": 400, "api_error_code": "invalid_request"}).status_code == 400
-    assert classify({"api_error_status": 413, "api_error_code": "context_length_exceeded"}).status_code == 413
+    assert agent().classify_outcome(metadata) == outcome
 
 
 def test_a_subagent_reply_counts_as_a_model_reply_even_under_capture():

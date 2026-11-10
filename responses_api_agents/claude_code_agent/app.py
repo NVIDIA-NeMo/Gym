@@ -51,6 +51,7 @@ from nemo_gym.agents import (
     SandboxSession,
     SimpleResponsesAPIAgent,
     decide_outcome,
+    model_http_error_outcome,
     resolve_agent_timeout,
     restrict_sandbox_network,
     stage_skills,
@@ -58,8 +59,6 @@ from nemo_gym.agents import (
 from nemo_gym.client import apply_rollout_prefix, get_response_json, raise_for_status
 from nemo_gym.config import SKILLS_REF_KEY_NAME, ModelServerRef, ResourcesServerRef, get_first_server_config_dict
 from nemo_gym.core import (
-    MODEL_CONTEXT_LIMIT,
-    MODEL_REQUEST_ERROR,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -597,10 +596,8 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         ``context_length_exceeded`` (the model server propagating a context overflow) is a context limit.
         """
         status = native_result.get("api_error_status")
-        if status == 400 and native_result.get("api_error_code") == "context_length_exceeded":
-            return AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT)
         if type(status) is int and 400 <= status <= 599:
-            return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
+            return model_http_error_outcome(status, error_body=native_result.get("api_error_body"))
         return AgentOutcome(failure_kind="unknown")
 
     def _run_evidence(

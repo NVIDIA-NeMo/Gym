@@ -38,16 +38,6 @@ _API_ERROR_STATUS = re.compile(r"API Error: ([45]\d{2})(?:\s|$)")
 _SYNTHETIC_MODEL = "<synthetic>"
 
 
-def _openai_error_code(body: str) -> Optional[str]:
-    """The ``error.code`` of an ``API Error`` body that is the endpoint's raw OpenAI error JSON, else None."""
-    try:
-        error = json.loads(body).get("error")
-    except (ValueError, AttributeError):
-        return None
-    code = error.get("code") if isinstance(error, dict) else None
-    return code if isinstance(code, str) else None
-
-
 def _extract_text(content: list[Any]) -> str:
     return "".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
 
@@ -274,8 +264,8 @@ def parse_stream_json(stdout: str, *, fold_thinking: bool = True) -> tuple[list[
         and (match := _API_ERROR_STATUS.search(terminal_api_error))
     ):
         metadata["api_error_status"] = int(match[1])
-        if (code := _openai_error_code(terminal_api_error[match.end() :])) is not None:
-            metadata["api_error_code"] = code
+        # The body as Claude Code printed it; ``classify_outcome`` reads a raw OpenAI error envelope's code from it.
+        metadata["api_error_body"] = terminal_api_error[match.end() :].strip()
     return output_items, metadata
 
 
