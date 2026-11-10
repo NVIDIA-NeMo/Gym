@@ -1,17 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# SWE-bench Pro through an EnvironmentServer: Resources seeds the task sandbox, OpenCode works in it through an
+# agent session, Resources grades the patch in a fresh verifier sandbox, then both close.
 config_paths:
-- responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
-- resources_servers/swebench_pro/configs/swebench_pro.yaml
+  - resources_servers/swebench_pro/configs/swebench_pro.yaml
+  - responses_api_agents/opencode_agent/configs/opencode_agent.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
 
 swebench_pro_opencode_resources_server:
   _inherit_from: swebench_pro_resources_server
+  resources_servers:
+    swebench_pro:
+      allowed_agents: [opencode_agent]
 
-swebench_pro_opencode_sandboxed_agent:
-  _inherit_from: opencode_sandboxed_agent
+swebench_pro_opencode_agent:
+  _inherit_from: opencode_agent
   responses_api_agents:
-    opencode_sandboxed_agent:
+    opencode_agent:
       resources_server:
         type: resources_servers
         name: swebench_pro_opencode_resources_server
+      timeout: 10800  # SWE-bench Pro agent budget: 3 hours.
+      # Sessions are process-local to this one worker; leave every collected rollout room to run.
+      concurrency: 1024
+      # Keep the previous benchmark's output budget: the whole context window.
+      max_output_tokens: ${.context_window}
       datasets:
         - name: swebench_pro
           type: benchmark
@@ -20,9 +34,16 @@ swebench_pro_opencode_sandboxed_agent:
           num_repeats: 3
 
 swebench_pro_environment_server:
+  _inherit_from: single_agent_turn_legacy
   environment_servers:
-    legacy_agent:
-      entrypoint: app.py
+    single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: swebench_pro_opencode_resources_server
       agent_server:
         type: responses_api_agents
-        name: swebench_pro_opencode_sandboxed_agent
+        name: swebench_pro_opencode_agent
+      # The previous recipe graded every run. Also grade a run that ends on a final model error (any 4xx
+      # but 408, 425 and 429); transient endpoint failures and unclassified agent errors are still retried.
+      agent_outcome_policy:
+        default_action: verify

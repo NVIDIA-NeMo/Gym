@@ -77,9 +77,9 @@ terminal_bench_2_1_terminus_2_sandboxed_agent:
   responses_api_agents:
     terminus_2_sandboxed_agent:
       datasets: []
-swebench_pro_opencode_sandboxed_agent:
+swebench_pro_opencode_agent:
   responses_api_agents:
-    opencode_sandboxed_agent:
+    opencode_agent:
       datasets: []
 
 ########################################

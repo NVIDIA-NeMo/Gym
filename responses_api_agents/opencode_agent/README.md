@@ -17,12 +17,12 @@ and apply to local calls too. Subagents (`task`) are intentionally enabled for t
 general-purpose integration; the separate `opencode_sandboxed_agent` benchmark
 profile still disables them. Use explicit tool overrides when comparing scores.
 
-Existing flat-row benchmarks keep the `opencode_sandboxed_agent` entrypoint
-and configuration for their Resources-owned lifecycle.
+SWE-bench Pro (`benchmarks/swebench/pro/opencode.yaml`) runs this agent through
+EnvironmentServer sessions. Other existing flat-row benchmarks keep the
+`opencode_sandboxed_agent` entrypoint and configuration for their Resources-owned lifecycle.
 
 The old `opencode_sandboxed_agent` package remains separate; only its shell PATH
-quoting is fixed for directories containing spaces. No benchmark recipes or
-Resources allowlists are migrated by this integration.
+quoting is fixed for directories containing spaces.
 
 ## EnvironmentServer sessions
 
@@ -51,14 +51,14 @@ and use a model endpoint reachable from inside the sandbox:
 ```bash
 gym env start --config run.yaml --model-type openai_model
 
-NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING=1 \
-  gym eval run --no-serve --config run.yaml --model-type openai_model \
+gym eval run --no-serve --config run.yaml --model-type openai_model \
   --agent opencode_agent --input /path/to/prepared-swe-pro.jsonl \
   --output outputs/opencode-rollout.jsonl --limit 1
 ```
 
-The explicit opt-in is needed because SWE-Pro retains its existing `allowed_agents`
-list. It does not change benchmark defaults or establish accuracy. Prepared rows
+SWE-Pro's `allowed_agents` includes `opencode_agent`. The maintained benchmark
+recipe for this composition is `benchmarks/swebench/pro/opencode.yaml`; this
+example does not establish accuracy. Prepared rows
 must contain the full prompt, including requirements and interface; `task_source`,
 when present, must identify the selected Resources server. This bridge accepts
 existing flat rows but orchestrates agent sessions; it does not call agent `/run`.
@@ -139,8 +139,8 @@ training token-ID/logprob support or benchmark accuracy.
 For local calls, OpenCode is installed on first use in a shared background-thread
 task, without blocking the event loop. Failed installs can be retried. A configured `repo_dir` is
 preserved; otherwise the temporary workspace is removed after the call. A local
-working directory is not filesystem isolation. Existing sandboxed benchmarks keep
-using `opencode_sandboxed_agent` directly; there is no bridge or execution-mode flag.
+working directory is not filesystem isolation. Sandboxed benchmarks other than SWE-bench Pro
+keep using `opencode_sandboxed_agent` directly; there is no bridge or execution-mode flag.
 
 `configs/profiles/benchmark.yaml` is a swappable profile for benchmarks whose Resources server supplies no sandbox,
 such as HLE. It leaves `resources_server.name` unset (`???`), so Gym composes this agent onto the benchmark's own

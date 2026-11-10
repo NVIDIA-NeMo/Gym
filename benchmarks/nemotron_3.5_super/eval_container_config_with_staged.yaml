@@ -42,9 +42,9 @@ terminal_bench_2_1_terminus_2_sandboxed_agent:
           prepare_script: benchmarks/terminal_bench_2_1/prepare.py
           num_repeats: 8
 
-swebench_pro_opencode_sandboxed_agent:
+swebench_pro_opencode_agent:
   responses_api_agents:
-    opencode_sandboxed_agent:
+    opencode_agent:
       datasets:
         - name: swebench_pro
           type: benchmark

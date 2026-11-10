@@ -8,6 +8,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig, get_first_server_config_dict
 from nemo_gym.environment import discover_agents
+from responses_api_agents.opencode_agent.app import OpenCodeAgentConfig
 from responses_api_agents.opencode_sandboxed_agent.app import OpenCodeSandboxedAgentConfig
 
 
@@ -68,16 +69,16 @@ def test_permission_profile_is_not_a_standalone_agent_variant(monkeypatch: pytes
 @pytest.mark.parametrize(
     ("recipe", "prefix"),
     [
-        ("deepswe", "deepswe"),
-        ("swebench/verified", "swebench_verified"),
-        ("swebench/multilingual", "swebench_multilingual"),
-        ("swebench/multimodal", "swebench_multimodal"),
-        ("swebench/pro", "swebench_pro"),
-        ("terminal_bench_2_1", "terminal_bench_2_1"),
+        ("deepswe/opencode", "deepswe"),
+        ("swebench/verified/opencode", "swebench_verified"),
+        ("swebench/multilingual/opencode", "swebench_multilingual"),
+        ("swebench/multimodal/opencode", "swebench_multimodal"),
+        ("swebench/pro/opencode_sandboxed", "swebench_pro"),
+        ("terminal_bench_2_1/opencode", "terminal_bench_2_1"),
     ],
 )
 def test_existing_benchmarks_keep_legacy_bindings(recipe: str, prefix: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    config = _resolve_config(f"benchmarks/{recipe}/opencode.yaml", monkeypatch)
+    config = _resolve_config(f"benchmarks/{recipe}.yaml", monkeypatch)
     agent_name = f"{prefix}_opencode_sandboxed_agent"
     assert f"{prefix}_opencode_agent" not in config
     assert list(config[agent_name].responses_api_agents) == ["opencode_sandboxed_agent"]
@@ -101,7 +102,6 @@ def test_nemotron_overlays_still_bind_existing_agents(staged: bool, monkeypatch:
     for prefix, dataset, repeats in (
         ("swebench_verified", "swebench_verified", 3),
         ("swebench_multilingual", "swebench_multilingual", 3),
-        ("swebench_pro", "swebench_pro", 3),
         ("deepswe", "deepswe_v1_1", 5),
     ):
         agent_name = f"{prefix}_opencode_sandboxed_agent"
@@ -116,3 +116,50 @@ def test_nemotron_overlays_still_bind_existing_agents(staged: bool, monkeypatch:
             assert settings.datasets == []
         environment = get_first_server_config_dict(config, f"{prefix}_environment_server")
         assert environment.agent_server.name == agent_name
+
+
+def _swebench_pro_agent_config(config: DictConfig) -> OpenCodeAgentConfig:
+    settings = get_first_server_config_dict(config, "swebench_pro_opencode_agent")
+    return OpenCodeAgentConfig.model_validate(
+        OmegaConf.to_container(settings, resolve=True) | {"name": "swebench_pro_opencode_agent"}
+    )
+
+
+def test_swebench_pro_runs_opencode_sessions_in_the_resources_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _resolve_config("benchmarks/swebench/pro/opencode.yaml", monkeypatch)
+    assert "swebench_pro_opencode_sandboxed_agent" not in config
+    assert list(config.swebench_pro_opencode_agent.responses_api_agents) == ["opencode_agent"]
+    agent_config = _swebench_pro_agent_config(config)
+    assert agent_config.timeout == 10800
+    assert agent_config.max_output_tokens == agent_config.context_window == 262144
+    # Resources lends its task sandbox; the agent never creates one.
+    assert agent_config.sandbox_provider is None
+    assert agent_config.opencode_config["permission"]["bash"]["*git fetch*"] == "deny"
+    settings = get_first_server_config_dict(config, "swebench_pro_opencode_agent")
+    assert [(dataset.name, dataset.num_repeats) for dataset in settings.datasets] == [("swebench_pro", 3)]
+    resources = get_first_server_config_dict(config, "swebench_pro_opencode_resources_server")
+    assert agent_config.resources_server.name == "swebench_pro_opencode_resources_server"
+    assert list(resources.allowed_agents) == ["opencode_agent"]
+    # As before, the task sandbox keeps the provider's network settings.
+    assert resources.get("task_network_policy") is None
+    environment = config.swebench_pro_environment_server.environment_servers
+    assert list(environment) == ["single_agent_turn_legacy"]
+    assert environment.single_agent_turn_legacy.agent_server.name == "swebench_pro_opencode_agent"
+    assert environment.single_agent_turn_legacy.resources_server.name == "swebench_pro_opencode_resources_server"
+    # Runs that end on a final model error are graded, as the relay graded every run.
+    assert environment.single_agent_turn_legacy.agent_outcome_policy.default_action == "verify"
+
+
+@pytest.mark.parametrize("staged", [False, True])
+def test_nemotron_overlays_bind_swebench_pro_opencode_sessions(staged: bool, monkeypatch: pytest.MonkeyPatch) -> None:
+    suffix = "_with_staged" if staged else ""
+    config = _resolve_config(f"benchmarks/nemotron_3.5_super/eval_container_config{suffix}.yaml", monkeypatch)
+    assert "swebench_pro_opencode_sandboxed_agent" not in config
+    # No pre-staged runtime: OpenCode installs its release in each task sandbox.
+    assert _swebench_pro_agent_config(config).sandbox_executable_path is None
+    settings = get_first_server_config_dict(config, "swebench_pro_opencode_agent")
+    assert [(dataset.name, dataset.num_repeats) for dataset in settings.datasets] == (
+        [("swebench_pro", 3)] if staged else []
+    )
+    environment = get_first_server_config_dict(config, "swebench_pro_environment_server")
+    assert environment.agent_server.name == "swebench_pro_opencode_agent"
