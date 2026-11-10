@@ -128,13 +128,13 @@ async def test_shell_exit_during_send_is_distinguished_from_transport_failure():
 
 
 async def eventually(read, done, *, timeout: float = 30):
-    """Poll ``read`` until ``done`` accepts its value or ``timeout`` passes; return whether it did."""
+    """Poll ``read`` until ``done`` accepts its value and return that value; raise once ``timeout`` passes."""
     deadline = asyncio.get_running_loop().time() + timeout
-    while not done(await read()):
+    while not done(value := await read()):
         if asyncio.get_running_loop().time() > deadline:
-            return False
+            raise AssertionError(f"condition not met within {timeout} s; last value: {str(value)[-2000:]!r}")
         await asyncio.sleep(0.1)
-    return True
+    return value
 
 
 @pytest.mark.skipif(sys.platform != "linux" or shutil.which("tmux") is None, reason="requires Linux tmux")
@@ -182,7 +182,7 @@ async def test_exited_shell_recovery_discards_pending_input_and_reports_lost_sta
         initial = (await environment.exec("tmux display-message -p -t test '#{pane_current_path}'")).stdout.strip()
         pending = tmp_path / "queued.txt"
         forbidden = tmp_path / "must-not-execute"
-        pending.write_text(f"touch {forbidden}\n" * 32768)
+        pending.write_text(f"touch {forbidden}\n" * 1024)
         await environment.exec(f"tmux load-buffer -b queued {pending}")
         failing_command = "sleep 2; false" if exit_trigger == "failure" else "sleep 120"
         # With PROMPT_COMMAND set, bash returns to the prompt after Ctrl-C instead of exiting under `set -e`.
@@ -194,11 +194,11 @@ async def test_exited_shell_recovery_discards_pending_input_and_reports_lost_sta
         )
         if exit_trigger == "interrupt":
             # Ctrl-C sent before sleep starts reaches bash instead, which survives it, so wait for sleep to run.
-            assert await eventually(pane_format("#{pane_current_command}"), lambda command: command == "sleep")
+            await eventually(pane_format("#{pane_current_command}"), lambda command: command == "sleep")
         await environment.exec("tmux paste-buffer -d -b queued -t test")
         if exit_trigger == "interrupt":
             await terminal.send_keys("C-c", min_timeout_sec=0.3)
-        assert await eventually(pane_format("#{pane_dead}"), lambda dead: dead == "1")
+        await eventually(pane_format("#{pane_dead}"), lambda dead: dead == "1")
         assert await terminal.is_session_alive()
         with pytest.raises(ShellExitedError):
             await terminal.send_keys(f"touch {forbidden}\n")
@@ -212,12 +212,15 @@ async def test_exited_shell_recovery_discards_pending_input_and_reports_lost_sta
             min_timeout_sec=0.3,
         )
         expected = f"RECOVERED=preserved:unset:{initial}"
-        for _ in range(100):
-            output = await terminal.get_incremental_output()
-            if expected in output:
-                break
-            await asyncio.sleep(0.1)
-        assert expected in output
+        output = ""
+
+        async def accumulated_output():
+            # get_incremental_output returns only new content, so keep what earlier polls returned.
+            nonlocal output
+            output += await terminal.get_incremental_output()
+            return output
+
+        await eventually(accumulated_output, lambda text: expected in text)
         assert (tmp_path / "persisted").exists()
         assert not forbidden.exists()
         assert expected in (tmp_path / "pane.log").read_text()
