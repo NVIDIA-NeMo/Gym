@@ -3,22 +3,49 @@
 """Multi-turn continuation uses ordinary Responses requests and per-activation evidence."""
 
 import asyncio
+import hashlib
 import json
+import shlex
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+import yaml
 from fastapi import Request
 from fastapi.testclient import TestClient
 
-from nemo_gym.agent_activation_types import AgentContinuationRequirements
-from nemo_gym.base_responses_api_agent import AGENT_ACTIVATION_HEADER, AgentCloseSessionRequest
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.agents import (
+    AGENT_ACTIVATION_HEADER,
+    AgentCloseSessionRequest,
+    AgentContinuationRequirements,
+)
+from nemo_gym.core import (
+    PROVIDER_OOM_KILLED,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
+    SandboxFailureDetails,
+)
+from nemo_gym.trajectory import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
 from responses_api_agents.opencode_agent.continuation import classify_opencode_run
-from responses_api_agents.opencode_agent.sandbox_runner import snapshot
-from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import seed, setup  # noqa: F401
+from responses_api_agents.opencode_agent.snapshot import snapshot
+from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import (  # noqa: F401
+    PNG,
+    PNG_URI,
+    count_media_decodes,
+    seed,
+    setup,
+)
+
+
+def sandbox_oom(reason: str, *, sandbox_id: str = "task-5") -> NgFailureEvent:
+    return NgFailureEvent(
+        boundary="sandbox",
+        failure_kind=PROVIDER_OOM_KILLED,
+        failure_reason=reason,
+        details=SandboxFailureDetails(provider="opensandbox", sandbox_id=sandbox_id),
+    )
 
 
 def install_artifact_runner(sandbox, tmp_path):
@@ -34,11 +61,11 @@ def install_artifact_runner(sandbox, tmp_path):
     payloads = []
 
     async def launch(**kwargs):
-        path = [path for path in sandbox.files if path.endswith("/input.json")][-1]
-        payload = json.loads(sandbox.files[path])
+        runner_params = next(arg for arg in shlex.split(kwargs["command"]) if arg.endswith("/params.sh"))
+        directory = runner_params.removesuffix("/params.sh")
+        payload = sandbox.params(directory) | {"directory": directory}
         payloads.append(payload)
         index = len(payloads) - 1
-        directory = payload["directory"]
         sandbox.directory = directory
         sandbox.files[f"{directory}/task-environment.ready"] = "ready\n"
         sandbox.files[f"{directory}/stderr.log"] = ""
@@ -114,7 +141,7 @@ def install_artifact_runner(sandbox, tmp_path):
     download = sandbox.download
 
     async def download_artifacts(source, destination):
-        if source.endswith("/observations.db"):
+        if source.endswith("/opencode.db"):
             Path(destination).write_bytes(database.read_bytes())
         else:
             await download(source, destination)
@@ -154,6 +181,31 @@ def roots(observations):
     return [
         r for r in observations["records"] if r["kind"] == "agent_invocation" and r["parent_invocation_id"] is None
     ]
+
+
+def test_confirmed_oom_activation_retains_failure_observation(setup):
+    agent, sandbox = setup
+    agent.config.report_agent_sandbox_oom = True
+    error = sandbox_oom("Sandbox was OOM-killed", sandbox_id=sandbox.sandbox_id)
+    sandbox.launch.side_effect = error
+
+    with TestClient(agent.setup_webserver()) as client:
+        request = start(client)
+        response = activate(client, 1)
+        assert response.status_code == 200, response.text
+        result = response.json()
+        assert result["status"] == "failed" and result["output"] == []
+        observation = SandboxObservation.model_validate_json(result["metadata"][NG_AGENT_SANDBOX_OBSERVATION_KEY])
+        assert observation.outcome == "oom" and observation.sandbox_id == sandbox.sandbox_id
+        assert result["_ng_agent_observations"]["schema_version"] == "2.0"
+        [invocation] = roots(result["_ng_agent_observations"])
+        assert invocation["activation_id"] == 1
+        assert invocation["status"] == "failed" and invocation["error_type"] == "server_error"
+
+        receipt = close(client, request)
+        assert roots(receipt["agent_observations"]) == [invocation]
+        assert observation.model_dump() in receipt["agent_observations"]["records"]
+    sandbox.disconnect.assert_awaited_once()
 
 
 @pytest.mark.parametrize("activation_count", [1, 2])
@@ -208,7 +260,7 @@ def test_close_retains_recovered_activation_once(setup, tmp_path, monkeypatch, p
             earlier = roots(state.observations.model_dump(mode="json"))[0]
         index = 2 if prior_success else 1
         stop = AsyncMock(side_effect=[RuntimeError("temporary receipt unavailable"), dict(sandbox.result)])
-        monkeypatch.setattr("nemo_gym.agent_utils.sandbox_session.stop_and_confirm_cleanup", stop)
+        monkeypatch.setattr("nemo_gym.agents.utils.sandbox_session.stop_and_confirm_cleanup", stop)
         capture = AsyncMock(wraps=state.collect_artifacts)
         state.collect_artifacts = capture
         assert activate(client, index).status_code == 500
@@ -265,7 +317,7 @@ async def test_close_recovery_preserves_cancelled_activation(setup, tmp_path, mo
     body = seed().model_copy(update={"continuation": AgentContinuationRequirements()})
     await agent.seed_agent_session(request, body)
     stop = AsyncMock(side_effect=[asyncio.CancelledError(), dict(sandbox.result)])
-    monkeypatch.setattr("nemo_gym.agent_utils.sandbox_session.stop_and_confirm_cleanup", stop)
+    monkeypatch.setattr("nemo_gym.agents.utils.sandbox_session.stop_and_confirm_cleanup", stop)
     with pytest.raises(asyncio.CancelledError):
         await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
     stop.assert_awaited_once()
@@ -280,7 +332,7 @@ async def test_close_recovery_preserves_cancelled_activation(setup, tmp_path, mo
 
 
 @pytest.mark.parametrize("cancelled", [False, True])
-@pytest.mark.parametrize("artifact_failure", ["download", "parse"])
+@pytest.mark.parametrize("artifact_failure", ["copy", "parse"])
 @pytest.mark.parametrize("prior_success", [False, True])
 async def test_close_without_recovered_root_preserves_activation(
     setup, tmp_path, monkeypatch, cancelled, artifact_failure, prior_success
@@ -298,7 +350,7 @@ async def test_close_without_recovered_root_preserves_activation(
     request = Request({**request.scope, "headers": [(AGENT_ACTIVATION_HEADER.encode(), str(index).encode())]})
     error = asyncio.CancelledError() if cancelled else RuntimeError("temporary receipt unavailable")
     stop = AsyncMock(side_effect=[error, dict(sandbox.result)])
-    monkeypatch.setattr("nemo_gym.agent_utils.sandbox_session.stop_and_confirm_cleanup", stop)
+    monkeypatch.setattr("nemo_gym.agents.utils.sandbox_session.stop_and_confirm_cleanup", stop)
     with pytest.raises(asyncio.CancelledError if cancelled else RuntimeError):
         await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="next task"))
     retained = state.observations.model_dump(mode="json")
@@ -308,10 +360,9 @@ async def test_close_without_recovered_root_preserves_activation(
     download = sandbox.download
 
     async def broken_observations(source, destination):
-        if source.endswith("/observations.db"):
-            if artifact_failure == "download":
-                raise OSError("observations unavailable")
-            Path(destination).write_bytes(b"not a SQLite database")
+        if source.endswith("/opencode.db"):
+            # The export survives; only the observation store is unusable.
+            Path(destination).write_bytes(b"" if artifact_failure == "copy" else b"not a SQLite database")
         else:
             await download(source, destination)
 
@@ -327,7 +378,13 @@ async def test_close_without_recovered_root_preserves_activation(
     }
     assert observations["gaps"] == [
         *retained["gaps"],
-        {"code": "agent_artifact_unavailable", "invocation_id": None, "detail": None},
+        {
+            "code": "agent_artifact_unavailable",
+            "invocation_id": None,
+            "agent_instance": None,
+            "span_id": None,
+            "detail": None,
+        },
     ]
     assert (receipt.trajectory.model_dump(mode="json") if receipt.trajectory is not None else None) == trajectory
     assert receipt.cleanup_confirmed is True
@@ -374,7 +431,7 @@ def test_plain_http_delta_replay_and_cumulative_close(setup, tmp_path):
         assert payloads[1]["command"][-2:] == ["--session", "opencode-session"]
         assert payloads[0]["env"]["HOME"] == payloads[1]["env"]["HOME"]
         assert payloads[0]["env"]["XDG_DATA_HOME"] == payloads[1]["env"]["XDG_DATA_HOME"]
-        assert set(payloads[1]["previous_message_ids"]) == {"u0", "a0"}
+        assert set(sandbox.snapshots[1]["previous_message_ids"]) == {"u0", "a0"}
         receipt = close(client, request)
         invocations = roots(receipt["agent_observations"])
         assert [r["activation_id"] for r in invocations] == [1, 2]
@@ -387,9 +444,11 @@ def test_plain_http_delta_replay_and_cumulative_close(setup, tmp_path):
     assert sandbox.disconnect.await_count == 1 and sandbox.stop.await_count == 0
 
 
-def test_invalid_delta_and_instructions_leave_activation_available(setup, tmp_path):
+@pytest.mark.parametrize("mode", ["append", "replace"])
+def test_invalid_delta_and_instructions_leave_activation_available(setup, tmp_path, mode):
     agent, sandbox = setup
-    install_artifact_runner(sandbox, tmp_path)
+    agent.config.system_prompt_mode = mode
+    payloads = install_artifact_runner(sandbox, tmp_path)
     with TestClient(agent.setup_webserver()) as client:
         request = start(client)
         assert activate(client, 1, "").status_code == 422
@@ -397,6 +456,18 @@ def test_invalid_delta_and_instructions_leave_activation_available(setup, tmp_pa
         assert activate(client, 2, instructions="Replace instructions").status_code == 422
         assert activate(client, 2, "A valid correction").status_code == 200
         assert sandbox.launch.call_count == 2
+        for index, payload in enumerate(payloads):
+            config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
+            if mode == "replace":
+                assert config["agent"]["build"]["prompt"] == "Keep changes small"
+                assert "instructions" not in config
+            else:
+                assert "instructions" in config
+            assert payload["env"]["NEMO_GYM_OPENCODE_ACTIVATION_ID"] == (
+                f"{request.agent_session_id}:activation-{index + 1}"
+            )
+        continued = payloads[1]["command"]
+        assert continued[continued.index("--session") + 1] == "opencode-session"
         close(client, request)
 
 
@@ -413,7 +484,7 @@ def test_first_expiry_before_launch_can_start_next_activation(setup, tmp_path, s
         return execute.return_value
 
     async def slow_upload(source, destination):
-        if stage == "upload" and destination.endswith("process_supervisor.py"):
+        if stage == "upload" and destination.endswith("process_supervisor.sh"):
             await asyncio.sleep(0.2)
         await upload(source, destination)
 
@@ -548,7 +619,9 @@ def test_opencode_error_during_timeout_fails_http_activation(setup, tmp_path, pr
     async def interrupted(**kwargs):
         result = await launch(**kwargs)
         sandbox.files[f"{payloads[-1]['directory']}/stdout.jsonl"] = (
-            json.dumps({"type": "error"}) if error_event else ""
+            json.dumps({"type": "error", "error": {"name": "APIError", "data": {"statusCode": 400}}})
+            if error_event
+            else ""
         )
         return result
 
@@ -562,6 +635,9 @@ def test_opencode_error_during_timeout_fails_http_activation(setup, tmp_path, pr
         if error_event:
             assert response.status_code == 502
             assert "OpenCode emitted an error event" in response.json()["detail"]
+            assert (
+                '"name": "APIError"' in response.json()["detail"] and '"statusCode": 400' in response.json()["detail"]
+            )
         else:
             assert response.status_code == 200 and response.json()["status"] == "incomplete"
         invocation = roots(close(client, request)["agent_observations"])[-1]
@@ -623,14 +699,14 @@ def test_reported_error_retains_continuation_evidence(
 
 
 def test_collector_and_existing_conformance_keep_two_activation_owners(setup, tmp_path):
-    from nemo_gym.base_responses_api_model import ModelCallRecord
-    from nemo_gym.harness_capabilities.checker import EvidenceScope, inspect_record
-    from nemo_gym.rollout_collection import _build_trajectory_record
-    from nemo_gym.rollout_observability import (
+    from nemo_gym.rollouts.harness_capabilities import EvidenceScope, inspect_record
+    from nemo_gym.rollouts.trajectory_builder import _build_trajectory_record
+    from nemo_gym.trajectory import (
         AgentObservationBundle,
+        ModelCallRecord,
         TrajectoryRecord,
+        join_agent_model_calls,
         join_assistant_message_calls,
-        join_model_call_observations,
     )
 
     agent, sandbox = setup
@@ -670,7 +746,7 @@ def test_collector_and_existing_conformance_keep_two_activation_owners(setup, tm
                 },
             )
         )
-    bundle = join_model_call_observations(AgentObservationBundle.model_validate(receipt["agent_observations"]), calls)
+    bundle = join_agent_model_calls(AgentObservationBundle.model_validate(receipt["agent_observations"]), calls)
     bundle, trajectory = join_assistant_message_calls(
         bundle, TrajectoryRecord.model_validate(receipt["trajectory"]), calls
     )
@@ -743,6 +819,136 @@ def test_ordinary_seed_does_not_add_continuation_capabilities(setup):
         assert response.json() == {"agent_session_id": request.agent_session_id, "supports_task_tool_context": False}
         receipt = close(client, request)
         assert "cleanup_confirmed" not in receipt and "trajectory" not in receipt
+
+
+def test_sessions_return_their_own_turns_by_default():
+    # The harness evidence checks join each captured call to the OpenCode step that made it only through these turns.
+    from responses_api_agents.opencode_agent.app import OpenCodeAgentConfig
+
+    assert OpenCodeAgentConfig.model_fields["return_session_trajectory"].default is True
+    defaults = yaml.safe_load((Path(__file__).parents[1] / "configs" / "opencode_agent.yaml").read_text())
+    assert defaults["opencode_agent"]["responses_api_agents"]["opencode_agent"]["return_session_trajectory"] is True
+
+
+@pytest.mark.parametrize("return_session_trajectory", [False, True])
+def test_returned_session_turns_leave_out_the_compaction_call(setup, tmp_path, return_session_trajectory):
+    from nemo_gym.rollouts.harness_capabilities import EvidenceScope, inspect_record
+    from nemo_gym.rollouts.trajectory_builder import _build_trajectory_record
+    from nemo_gym.trajectory import (
+        AgentObservationBundle,
+        ContextCompactionObservation,
+        ModelCallRecord,
+        TrajectoryRecord,
+        join_agent_model_calls,
+        join_assistant_message_calls,
+    )
+    from responses_api_agents.opencode_agent.tests.test_app import _session_db
+
+    def reply(*parts, **message):
+        info = {"role": "assistant", "finish": "stop", "time": {"created": 1, "completed": 2}, **message}
+        return info, [{"type": "step-start"}, *parts, {"type": "step-finish"}]
+
+    tool = {
+        "type": "tool",
+        "tool": "bash",
+        "callID": "tool-1",
+        "state": {
+            "status": "completed",
+            "input": {"command": "pwd"},
+            "output": "/app",
+            "time": {"start": 1, "end": 2},
+        },
+    }
+    database = _session_db(
+        tmp_path,
+        [
+            ("user", [{"type": "text", "text": "task"}]),
+            reply(tool, finish="tool-calls"),
+            ("user", [{"type": "compaction", "auto": True}]),
+            reply({"type": "text", "text": "summary"}, summary=True, parentID="m2"),
+            reply({"type": "text", "text": "Fixed"}),
+        ],
+    )
+    agent, sandbox = setup
+    agent.config.return_session_trajectory = return_session_trajectory
+    download = sandbox.download
+
+    async def download_database(source, destination):
+        if source.endswith("/opencode.db"):
+            Path(destination).write_bytes(database.read_bytes())
+        else:
+            await download(source, destination)
+
+    sandbox.download = download_database
+    request = seed()
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=request.model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        response = client.post(f"/ng-rollout/{request.episode_id.capture_key}/v1/responses", json={"input": "task"})
+        assert response.status_code == 200, response.text
+        receipt = close(client, request)
+    if not return_session_trajectory:
+        # With false, collection builds the turns from the captured calls.
+        assert "trajectory" not in receipt
+        return
+    trajectory = TrajectoryRecord.model_validate(receipt["trajectory"])
+    assert [turn.source_message_id for turn in trajectory.turns] == ["m1", "m4"]
+
+    output = response.json()
+    calls = [
+        ModelCallRecord(
+            call_index=index,
+            model_call_id=f"capture-{index}",
+            response_id=f"reply-{index}",
+            model_ref=agent.config.model_server,
+            model="fixture",
+            dialect="responses",
+            status_code=200,
+            response_status="completed",
+            client_session_id="root",
+            client_assistant_message_id=message_id,
+            started_at=float(index),
+            completed_at=index + 0.5,
+            tokens_in=13,
+            tokens_out=3,
+            tokens_total=16,
+            tokens_reasoning=1,
+            cached_tokens=3,
+            request={"input": [{"role": "user", "content": "task"}]},
+            response={
+                "id": f"reply-{index}",
+                "status": "completed",
+                "output": output["output"],
+                "usage": output["usage"],
+            },
+        )
+        for index, message_id in enumerate(["m1", "m3", "m4"])
+    ]
+    bundle = join_agent_model_calls(AgentObservationBundle.model_validate(receipt["agent_observations"]), calls)
+    bundle, trajectory = join_assistant_message_calls(bundle, trajectory, calls)
+    [compaction] = [record for record in bundle.records if isinstance(record, ContextCompactionObservation)]
+    assert [ref.model_call_id for ref in compaction.model_calls] == ["capture-1"]
+    row = {
+        "_ng_task_index": 0,
+        "_ng_rollout_index": 0,
+        "task_id": "task",
+        "_ng_rollout_id": request.episode_id.capture_key,
+    }
+    result = {
+        "ng_agent_observations": bundle.model_dump(mode="json"),
+        "ng_trajectory": trajectory.model_dump(mode="json"),
+        "ng_model_call_capture": {"calls": [call.model_dump(mode="json") for call in calls]},
+        "response": output,
+    }
+    canonical = _build_trajectory_record(row, result)
+    assert [[ref.model_call_id for ref in turn.model_calls] for turn in canonical.turns] == [
+        ["capture-0"],
+        ["capture-2"],
+    ]
+    result["ng_trajectory"] = canonical.model_dump(mode="json")
+    report = inspect_record(row | result, scope=EvidenceScope(tools=False, verifier=False))
+    failed = [check for check in report["checks"] if check["status"] == "fail"]
+    assert not failed, failed
 
 
 def test_provider_preparation_timeout_does_not_brick_unstarted_session(setup, tmp_path):
@@ -903,7 +1109,7 @@ def test_first_launched_timeout_without_assistant_can_resume(setup, tmp_path, re
         assert first.status_code == 200 and first.json()["status"] == "incomplete", first.text
         sandbox.result.update(timed_out=False, return_code=0)
         assert activate(client, 2).status_code == 200
-        assert payloads[1]["harness_session_id"] == "opencode-session"
+        assert sandbox.snapshots[1]["harness_session_id"] == "opencode-session"
         assert [r["status"] for r in roots(close(client, request)["agent_observations"])] == [
             "incomplete",
             "completed",
@@ -936,8 +1142,7 @@ def test_snapshot_scopes_delta_and_keeps_cumulative_store(tmp_path):
             )
     activation = tmp_path / "activation"
     activation.mkdir()
-    (activation / "input.json").write_text(json.dumps({"harness_session_id": "root", "previous_message_ids": ["m0"]}))
-    snapshot(activation, session_directory=persistent)
+    snapshot(database, activation, harness_session_id="root", previous_message_ids=["m0"])
     export = json.loads((activation / "export.json").read_text())
     assert export["session_id"] == "root"
     assert export["activation_message_ids"] == ["m1"]
@@ -945,6 +1150,161 @@ def test_snapshot_scopes_delta_and_keeps_cumulative_store(tmp_path):
     assert [info["tokens"]["input"] for info in export["usage_messages"]] == [2]
     with sqlite3.connect(activation / "observations.db") as con:
         assert con.execute("select count(*) from message").fetchone()[0] == 2
-    (activation / "input.json").write_text(json.dumps({"harness_session_id": "wrong"}))
     with pytest.raises(RuntimeError, match="unexpected session"):
-        snapshot(activation, session_directory=persistent)
+        snapshot(database, activation, harness_session_id="wrong", previous_message_ids=[])
+
+
+def test_missing_native_step_diagnostics_survive_http_close(setup, tmp_path):
+    agent, sandbox = setup
+    install_artifact_runner(sandbox, tmp_path)
+    launch = sandbox.launch.side_effect
+
+    async def launch_without_step(**kwargs):
+        result = await launch(**kwargs)
+        with sqlite3.connect(tmp_path / "session.db") as con:
+            con.execute("delete from part where id like 'step-%'")
+        return result
+
+    sandbox.launch.side_effect = launch_without_step
+    with TestClient(agent.setup_webserver()) as client:
+        request = start(client)
+        assert activate(client, 1).status_code == 200
+        receipt = close(client, request)
+        assert receipt["trajectory"]["turns"] == []
+        gap = next(gap for gap in receipt["trajectory"]["gaps"] if gap["code"] == "turns_unavailable")
+        native, lifecycle = gap["detail"].split("; capture_lifecycle=")
+        metadata = json.loads(native.split("; native_capture_diagnostics=")[1])
+        assert [part["type"] for part in metadata["parts"]] == ["text"]
+        capture = json.loads(lifecycle)
+        assert capture["capture_started_at"] <= capture["parse_completed_at"]
+        assert capture["cleanup"] == {"cleanup_confirmed": True, "timed_out": False, "return_code": 0}
+        assert "Answer 0" not in gap["detail"]
+        assert close(client, request) == receipt
+
+
+def test_media_staging_spends_the_activation_budget(setup, tmp_path):
+    agent, sandbox = setup
+    install_artifact_runner(sandbox, tmp_path)
+    upload = sandbox.upload
+    stalled = SimpleNamespace(cancelled=False)
+
+    async def stall_media(source, destination):
+        if "/nemo-gym-media/" not in destination:
+            return await upload(source, destination)
+        try:
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            stalled.cancelled = True
+            raise
+
+    sandbox.upload = stall_media
+    prompt = [
+        {"type": "input_text", "text": "What is shown?"},
+        {"type": "input_image", "image_url": PNG_URI, "detail": "auto"},
+    ]
+    with TestClient(agent.setup_webserver()) as client:
+        request = start(client)
+        result = client.post(
+            "/v1/responses",
+            headers={AGENT_ACTIVATION_HEADER: "1"},
+            json={"input": [{"role": "user", "content": prompt}], "metadata": {"agent_timeout_sec": "0.5"}},
+        )
+        assert result.status_code == 200 and result.json()["status"] == "incomplete", result.text
+        assert stalled.cancelled
+        sandbox.launch.assert_not_awaited()
+        close(client, request)
+
+
+@pytest.mark.parametrize(
+    "failing, result",
+    [
+        # The provider timed out: an outage, unlike the activation's own deadline, which ends it incomplete.
+        (
+            "mkdir -p -- /tmp/nemo-gym-media",
+            SimpleNamespace(return_code=None, stdout="", stderr="", error_type="timeout"),
+        ),
+        (
+            "{ [ ! -d /tmp/nemo-gym-media/",
+            SimpleNamespace(return_code=1, stdout="", stderr="denied", error_type=None),
+        ),
+    ],
+    ids=["provider-timeout", "rename-refused"],
+)
+def test_media_staging_error_fails_the_activation(setup, tmp_path, failing, result):
+    agent, sandbox = setup
+    install_artifact_runner(sandbox, tmp_path)
+    execute = sandbox.exec.side_effect
+
+    async def fail_staging(command, **kwargs):
+        if command.startswith(failing):
+            return result
+        return await execute(command, **kwargs)
+
+    prompt = [
+        {"type": "input_text", "text": "What is shown?"},
+        {"type": "input_image", "image_url": PNG_URI, "detail": "auto"},
+    ]
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+        request = start(client)
+        sandbox.exec.side_effect = fail_staging
+        response = client.post(
+            "/v1/responses",
+            headers={AGENT_ACTIVATION_HEADER: "1"},
+            json={"input": [{"role": "user", "content": prompt}], "metadata": {"agent_timeout_sec": "30"}},
+        )
+        assert response.status_code == 500, response.text
+        receipt = close(client, request)
+        [root] = roots(receipt["agent_observations"])
+        assert root["status"] == "failed" and root["error_type"] == "server_error"
+    sandbox.launch.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "first, declared",
+    [
+        ("text", [False, False]),
+        # OpenCode resends the first prompt's image with the history, so the next activation keeps the declaration.
+        ("image", [True, True]),
+    ],
+)
+def test_continuation_keeps_declaring_image_input_once_a_prompt_has_images(setup, tmp_path, first, declared):
+    agent, sandbox = setup
+    payloads = install_artifact_runner(sandbox, tmp_path)
+    content = [{"type": "input_text", "text": "What is shown?"}]
+    if first == "image":
+        content.append({"type": "input_image", "image_url": PNG_URI, "detail": "auto"})
+    with TestClient(agent.setup_webserver()) as client:
+        request = start(client)
+        assert activate(client, 1, [{"role": "user", "content": content}]).status_code == 200
+        assert activate(client, 2, "Describe it again").status_code == 200
+        close(client, request)
+    models = [
+        json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])["provider"]["nemo_gym"]["models"]["dummy_model"]
+        for payload in payloads
+    ]
+    assert ["modalities" in model for model in models] == declared
+
+
+def test_continuation_decodes_each_activation_image_once(setup, tmp_path, monkeypatch):
+    agent, sandbox = setup
+    payloads = install_artifact_runner(sandbox, tmp_path)
+    decodes = count_media_decodes(monkeypatch)
+    prompt = [
+        {"type": "input_text", "text": "What is shown?"},
+        {"type": "input_image", "image_url": PNG_URI, "detail": "auto"},
+    ]
+    with TestClient(agent.setup_webserver()) as client:
+        request = start(client)
+        result = client.post(
+            "/v1/responses",
+            headers={AGENT_ACTIVATION_HEADER: "1"},
+            json={"input": [{"role": "user", "content": prompt}], "metadata": {"agent_timeout_sec": "30"}},
+        )
+        assert result.status_code == 200 and result.json()["status"] == "completed", result.text
+        # Validation decodes the image, and the activation reuses that result.
+        assert decodes == [PNG_URI]
+        command = payloads[0]["command"]
+        path = command[command.index("--file") + 1]
+        assert path == f"/tmp/nemo-gym-media/{hashlib.sha256(PNG).hexdigest()}.png"
+        assert sandbox.files[path] == PNG
+        close(client, request)

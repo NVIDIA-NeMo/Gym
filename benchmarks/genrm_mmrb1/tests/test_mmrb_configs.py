@@ -5,8 +5,7 @@
 import pytest
 from omegaconf import OmegaConf
 
-from nemo_gym.config_types import BenchmarkDatasetConfig
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config import BenchmarkDatasetConfig, GlobalConfigDictParser, GlobalConfigDictParserConfig
 
 
 @pytest.mark.parametrize("benchmark", ["genrm_mmrb1", "genrm_mmrb2"])
@@ -36,7 +35,7 @@ def test_interfaces(benchmark, mode, config, model_type):
     assert list(resolved.policy_model.responses_api_models) == [model_type]
     assert resolved.judge_mode == mode
     assert resolved.prepare_script_args.judge_mode == mode
-    assert resolved.responses_create_params.max_output_tokens == 16384
+    assert resolved.responses_create_params.max_output_tokens == 32768
     assert resolved.responses_create_params.top_p == 0.95
     dataset = resolved[f"{benchmark}_benchmark_agent"].responses_api_agents.simple_agent.datasets[0]
     assert str(dataset.jsonl_fpath).endswith(f"_{mode}_validation.jsonl")
@@ -86,10 +85,11 @@ def test_runnable_modes_are_discoverable(monkeypatch):
     from itertools import count
     from pathlib import Path
 
-    from nemo_gym.benchmarks import BenchmarkConfig, _benchmark_config_name, _benchmark_config_paths
+    from nemo_gym.environment import BenchmarkConfig
+    from nemo_gym.environment.benchmarks import _benchmark_config_name, _benchmark_config_paths
 
     ports = count(12000)
-    monkeypatch.setattr("nemo_gym.global_config._find_open_port_using_range", lambda **kwargs: next(ports))
+    monkeypatch.setattr("nemo_gym.config.global_config._find_open_port_using_range", lambda **kwargs: next(ports))
     root = Path(__file__).resolve().parents[3] / "benchmarks"
     for benchmark in ("genrm_mmrb1", "genrm_mmrb2"):
         configs = list(_benchmark_config_paths(root / benchmark))

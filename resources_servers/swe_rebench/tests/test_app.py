@@ -356,7 +356,7 @@ class TestSandboxCpuCap:
     This set is the compile-heaviest in the repo, so it is the one that most needs them."""
 
     def test_cpu_cap_env_is_derived_from_the_cpu_limit(self) -> None:
-        from nemo_gym.sandbox.utils import cpu_cap_env
+        from nemo_gym.sandbox import cpu_cap_env
 
         env = cpu_cap_env(4)
         assert env["OMP_NUM_THREADS"] == "4"
@@ -364,7 +364,7 @@ class TestSandboxCpuCap:
         assert env["CARGO_BUILD_JOBS"] == "4"
 
     def test_the_server_applies_them_and_explicit_env_still_wins(self) -> None:
-        from nemo_gym.sandbox.utils import cpu_cap_env
+        from nemo_gym.sandbox import cpu_cap_env
 
         # Mirrors the precedence in _create_sandbox: derived caps first, explicit env over them.
         derived = cpu_cap_env(4)

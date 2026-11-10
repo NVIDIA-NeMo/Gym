@@ -22,21 +22,19 @@ trace_context=True)`` names the agent's current span in the URL instead, and
 opens the server span.
 """
 
-import re
-
 import pytest
 from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from fastapi.testclient import TestClient
 
-from nemo_gym.rollout_correlation import RolloutContextMiddleware, current_rollout_id
-from nemo_gym.server_utils import (
-    _TRACEPARENT_PATTERN,
+from nemo_gym.client.server_client import apply_rollout_prefix, trace_context_path_segment
+from nemo_gym.core.correlation import TRACEPARENT_PATTERN
+from nemo_gym.core.episode_context import current_rollout_id
+from nemo_gym.server_runtime.request_handling.request_context import install_request_context_isolation
+from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
+from nemo_gym.server_runtime.request_handling.trace_context import (
     TraceContextPathMiddleware,
-    apply_rollout_prefix,
-    install_request_context_isolation,
     install_trace_context_path,
-    trace_context_path_segment,
 )
 from tests.unit_tests.telemetry.conftest import requires_lens
 from tests.unit_tests.telemetry.test_propagation import (
@@ -79,7 +77,20 @@ class TestProducer:
         assert no_rollout == f"http://m:8000/ng-trace/{traceparent}"
         assert shared == "http://m:8000", "a URL reused across rollouts must not pin them to this span"
         assert shared_with_rollout == "http://m:8000/ng-rollout/0-0"
-        assert re.fullmatch(_TRACEPARENT_PATTERN, traceparent)
+        assert TRACEPARENT_PATTERN.match(traceparent)
+
+    def test_segment_is_empty_for_a_traceparent_with_a_trailing_newline(self, monkeypatch):
+        import nemo_gym.client.server_client as server_client
+        import nemo_gym.telemetry.contrib as contrib
+
+        monkeypatch.setattr(server_client, "is_trace_exporter_active", lambda: True)
+        monkeypatch.setattr(
+            contrib, "inject_trace_context", lambda carrier: carrier.update(traceparent=TRACEPARENT + "\n")
+        )
+        assert trace_context_path_segment() == ""
+
+        monkeypatch.setattr(contrib, "inject_trace_context", lambda carrier: carrier.update(traceparent=TRACEPARENT))
+        assert trace_context_path_segment() == f"/ng-trace/{TRACEPARENT}"
 
 
 class TestMiddlewarePathRewrite:
@@ -106,6 +117,10 @@ class TestMiddlewarePathRewrite:
                 "/ng-rollout/0-0/training-token-capture/v1/chat/completions",
             ),
             (f"/ng-trace/{TRACEPARENT}/v1/models", "/v1/models"),
+            (
+                f"/ng-rollout/0-0/ng-agent-instance/judge.1/training-token-capture/ng-trace/{TRACEPARENT}/v1/responses",
+                "/ng-rollout/0-0/ng-agent-instance/judge.1/training-token-capture/v1/responses",
+            ),
         ],
     )
     async def test_strips_the_segment_and_adds_the_header(self, recorded, path, routed):
@@ -129,7 +144,7 @@ class TestMiddlewarePathRewrite:
         "path",
         [
             "/ng-rollout/0-0/v1/responses",
-            "/ng-trace/not-a-traceparent/v1/responses",
+            "/ng-rollout/0-0/ng-agent-instance/judge/v1/responses",
             f"/v1/ng-trace/{TRACEPARENT}/responses",
         ],
     )
@@ -139,6 +154,33 @@ class TestMiddlewarePathRewrite:
         assert seen["path"] == path
         assert seen["headers"] == []
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/ng-trace/not-a-traceparent/v1/responses",
+            "/ng-rollout/0-0/training-token-capture/ng-agent-instance/judge/v1/responses",
+            "/ng-rollout/0-0/ng-agent-instance/Judge/v1/responses",
+            "/ng-rollout/0-0/ng-agent-instance/v1/responses",
+            # What a client's "%0A" decodes to: the name or traceparent must not keep the newline.
+            "/ng-rollout/0-0/ng-agent-instance/judge\n/v1/responses",
+            f"/ng-rollout/0-0/ng-trace/{TRACEPARENT}\n/v1/responses",
+            # A malformed value is malformed whether or not a routed path follows it.
+            "/ng-trace/not-a-traceparent",
+            "/ng-rollout/0-0/ng-agent-instance/Judge",
+        ],
+    )
+    async def test_answers_a_malformed_prefix_with_404(self, recorded, path):
+        seen, app = recorded
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        await app({"type": "http", "path": path, "raw_path": path.encode(), "headers": []}, None, send)
+        assert seen == {}
+        assert sent[0]["status"] == 404
+
 
 class TestRedirectLocation:
     """Where the segment goes back into a redirect target, given what the inner layers left in it."""
@@ -147,7 +189,7 @@ class TestRedirectLocation:
     HOST = [(b"host", b"m:8000")]
 
     def _restored(self, location, status=307):
-        from nemo_gym.server_utils import _restore_trace_segment_on_redirect
+        from nemo_gym.server_runtime.request_handling.trace_context import _restore_trace_segment_on_redirect
 
         message = {"type": "http.response.start", "status": status, "headers": [(b"location", location.encode())]}
         return dict(
@@ -163,6 +205,10 @@ class TestRedirectLocation:
                 "http://m:8000/ng-rollout/0-0/training-token-capture/v1/responses",
                 f"http://m:8000/ng-rollout/0-0/training-token-capture/ng-trace/{TRACEPARENT}/v1/responses",
             ),
+            (
+                "/ng-rollout/0-0/ng-agent-instance/user/training-token-capture/v1/responses",
+                f"/ng-rollout/0-0/ng-agent-instance/user/training-token-capture/ng-trace/{TRACEPARENT}/v1/responses",
+            ),
         ],
     )
     def test_segment_goes_after_a_restored_prefix_or_at_the_root(self, location, expected):
@@ -177,6 +223,11 @@ class TestRedirectLocation:
 
     def test_non_redirect_responses_are_untouched(self):
         assert self._restored("/v1/responses", status=200) == "/v1/responses"
+
+    def test_a_target_with_a_malformed_prefix_is_untouched(self):
+        # The follow-up request is refused with its own reason, not one the segment would introduce.
+        location = "/ng-rollout/0-0/ng-agent-instance/Judge/v1/responses"
+        assert self._restored(location) == location
 
 
 @requires_lens
@@ -237,7 +288,7 @@ class TestServerSpanParent:
         """FastAPI redirects the trailing-slash form; the client only has the URL, so the segment must come back.
 
         This app has the plain rollout middleware, which does not restore the rollout prefix on a redirect
-        (the model server's capture middleware does; see test_token_id_capture), so here the segment goes
+        (the model server's capture middleware does; see test_token_capture), so here the segment goes
         back at the root. With the prefix restored it goes right after it: see TestRedirectLocation.
         """
         client = TestClient(app, follow_redirects=False)
@@ -286,8 +337,8 @@ def test_agent_hand_off_urls_carry_the_current_span(traces):  # noqa: F811
 
     from opentelemetry import trace
 
-    from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-    from nemo_gym.server_utils import ServerClient
+    from nemo_gym.agents.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+    from nemo_gym.client.server_client import ServerClient
 
     class _Agent(SimpleResponsesAPIAgent):
         async def responses(self, body=...):
@@ -312,3 +363,29 @@ def test_agent_hand_off_urls_carry_the_current_span(traces):  # noqa: F811
     segment = f"/ng-trace/00-{context.trace_id:032x}-{context.span_id:016x}-{int(context.trace_flags):02x}"
     assert for_run == f"http://m:8000/ng-rollout/3-0{segment}"
     assert resolved == f"http://m:8000/ng-rollout/3-0{segment}/v1"
+
+
+def test_every_agent_that_hands_a_model_url_to_a_sandbox_builds_it_with_the_helpers():
+    """`sandbox_model_base_url` marks an agent that gives a model URL to a process outside Gym.
+
+    Such a URL must come from the shared helpers (or inherit the opencode builder), or the harness's
+    model calls arrive with no parent. Add the helper, not an exception here, when this fails.
+    """
+    from pathlib import Path
+
+    import nemo_gym
+
+    agents_dir = Path(nemo_gym.__file__).resolve().parents[1] / "responses_api_agents"
+    helpers = (
+        "base_url_for_run(",
+        "resolve_model_base_url(",
+        "apply_rollout_prefix(",
+        "trace_context_path_segment(",
+        "_create_opencode_config(",  # vibench rewrites the host of the URL opencode's builder made
+    )
+    missing = []
+    for app in sorted(agents_dir.glob("*/app.py")):
+        source = app.read_text()
+        if "sandbox_model_base_url" in source and not any(h in source for h in helpers):
+            missing.append(app.parent.name)
+    assert missing == [], f"model URL handed to a sandbox without the trace-context helpers: {missing}"

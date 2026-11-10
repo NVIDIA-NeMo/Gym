@@ -9,7 +9,7 @@ def test_importer_emits_catalog_envelope_without_hidden_prompts(tmp_path, monkey
 
     from benchmarks.swe_together import prepare
     from environment_servers.swe_together import task
-    from nemo_gym.base_resources_server import BaseRunRequest
+    from nemo_gym.server_runtime import BaseRunRequest
 
     directory = tmp_path / "source/tasks/fixture"
     directory.mkdir(parents=True)

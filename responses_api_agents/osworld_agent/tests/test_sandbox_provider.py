@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import http.server
 import threading
+from types import SimpleNamespace
 from typing import Any
+from urllib.parse import urlsplit
 
 import pytest
 import requests
@@ -13,6 +15,7 @@ import requests
 from nemo_gym.sandbox import SandboxEndpoint, SandboxStatus
 from responses_api_agents.osworld_agent import sandbox_provider as osworld_sandbox
 from responses_api_agents.osworld_agent.local_forwarder import start_forwarder
+from responses_api_agents.osworld_agent.runtime_errors import OSWorldGuestStartTimeoutError
 
 
 class FakeSandbox:
@@ -522,6 +525,80 @@ def test_local_forwarder_maps_proxy_path_headers_and_cdp_url(monkeypatch) -> Non
         upstream.server_close()
 
 
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        (
+            {"REQUESTS_CA_BUNDLE": "/certs/gateway-ca.pem", "SSL_CERT_FILE": "/certs/other.pem"},
+            "/certs/gateway-ca.pem",
+        ),
+        ({"SSL_CERT_FILE": "/certs/gateway-ca.pem"}, "/certs/gateway-ca.pem"),
+        ({}, True),
+    ],
+    ids=["requests-bundle-first", "ssl-cert-file", "default-trust"],
+)
+def test_local_forwarder_verifies_with_the_configured_ca_bundle(monkeypatch, env, expected) -> None:
+    # The forwarder ignores proxy variables (trust_env = False); it must still honour the
+    # CA bundle the process names, or a gateway signed by a private CA fails verification
+    # and every readiness probe answers 502.
+    from responses_api_agents.osworld_agent import local_forwarder
+
+    for name in ("REQUESTS_CA_BUNDLE", "SSL_CERT_FILE"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    seen: list[tuple[object, object, str]] = []
+
+    class RecordingSession:
+        def __init__(self) -> None:
+            self.trust_env = True
+            self.verify = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+        def request(self, method, url, **kwargs):
+            seen.append((self.verify, self.trust_env, url))
+            response = requests.Response()
+            response.status_code = 204
+            response._content = b""
+            return response
+
+    monkeypatch.setattr(local_forwarder.requests, "Session", RecordingSession, raising=True)
+    real_session = requests.sessions.Session
+    forwarder, port = local_forwarder.start_forwarder("https://gateway.example.invalid/proxy/9222")
+    try:
+        with real_session() as session:
+            session.trust_env = False
+            response = session.get(f"http://127.0.0.1:{port}/json/version", timeout=10)
+        assert response.status_code == 204
+        assert seen == [(expected, False, "https://gateway.example.invalid/proxy/9222/json/version")]
+    finally:
+        forwarder.shutdown()
+        forwarder.server_close()
+
+
+def test_local_forwarder_websocket_tls_uses_the_configured_ca_bundle(monkeypatch) -> None:
+    from responses_api_agents.osworld_agent import local_forwarder
+
+    monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+    monkeypatch.setenv("SSL_CERT_FILE", "/certs/gateway-ca.pem")
+    seen: dict[str, object] = {}
+
+    def create_default_context(*, cafile=None):
+        seen["cafile"] = cafile
+        raise RuntimeError("stop after the context")
+
+    monkeypatch.setattr(local_forwarder.socket, "create_connection", lambda *a, **k: object())
+    monkeypatch.setattr(local_forwarder.ssl, "create_default_context", create_default_context)
+    with pytest.raises(RuntimeError, match="stop after the context"):
+        local_forwarder._open_upstream_socket(scheme="https", host="gateway.example.invalid", port=443)
+    assert seen == {"cafile": "/certs/gateway-ca.pem"}
+
+
 def test_lifecycle_recreates_from_snapshot_and_close_is_idempotent(tmp_path, monkeypatch) -> None:
     FakeSandbox.instances.clear()
     monkeypatch.setattr(osworld_sandbox, "Sandbox", FakeSandbox)
@@ -571,3 +648,104 @@ def test_start_failure_cleans_up_sandbox(tmp_path, monkeypatch) -> None:
     with pytest.raises(RuntimeError, match="forwarder failed"):
         provider.start_emulator(str(vm_path), headless=True, os_type="Ubuntu")
     assert BadEndpointSandbox.instances[-1].stopped == 1
+
+
+@pytest.mark.parametrize(
+    ("reply", "http_status", "infrastructure"),
+    [(502, 502, True), (429, 429, True), (200, 200, True), (404, 404, False), (None, None, True)],
+)
+def test_a_guest_that_never_becomes_ready_raises_a_typed_start_timeout(
+    monkeypatch, reply, http_status, infrastructure
+) -> None:
+    class Session:
+        trust_env = True
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def get(self, *_args, **_kwargs):
+            if reply is None:
+                raise osworld_sandbox.requests.ConnectionError("connection refused")
+            return SimpleNamespace(status_code=reply, content=b"" if reply == 200 else b"bad gateway " * 60)
+
+    monkeypatch.setattr(osworld_sandbox.requests, "Session", Session)
+    provider = osworld_sandbox.GymSandboxDesktopProvider({"docker": {}}, {"image": "osworld:fixed"})
+    provider._ready_timeout_s = 0.05
+    provider._ready_poll_s = 0.01
+    sandbox = SimpleNamespace(status=lambda: SandboxStatus.RUNNING, sandbox_id="sbx-1")
+
+    with pytest.raises(OSWorldGuestStartTimeoutError) as caught:
+        provider._wait_for_vm_ready(sandbox, "guest.example.invalid", 5000)
+
+    error = caught.value
+    assert isinstance(error, TimeoutError)  # callers that catch TimeoutError still do
+    assert str(error).startswith("OSWorld guest did not become ready within 0.05s: ")
+    assert (error.provider, error.http_status, error.is_infrastructure_failure) == (
+        "docker",
+        http_status,
+        infrastructure,
+    )
+    assert (error.sandbox_id, error.url) == ("sbx-1", "http://guest.example.invalid:5000/screenshot")
+    # The first 512 bytes of the last reply; no body when the last probe got no reply or an empty 200.
+    assert error.body_head == ("" if reply in (None, 200) else ("bad gateway " * 60)[:512])
+
+
+def test_a_502_readiness_reply_logs_one_line_with_the_sandbox_the_url_and_the_body(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    body = b"<html><body>502 Bad Gateway</body></html>" + b"x" * 600
+
+    class SandboxWithId(FakeSandbox):
+        sandbox_id = "sbx-1"
+
+        def endpoint(self, port: int) -> SandboxEndpoint:
+            mapped_port = urlsplit(super().endpoint(port).endpoint).port
+            return SandboxEndpoint(endpoint=f"http://guest.example.invalid:{mapped_port}")
+
+    class Session:
+        trust_env = True
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def get(self, *_args, **_kwargs):
+            return SimpleNamespace(status_code=502, content=body)
+
+    FakeSandbox.instances.clear()
+    monkeypatch.setattr(osworld_sandbox, "Sandbox", SandboxWithId)
+    monkeypatch.setattr(osworld_sandbox.requests, "Session", Session)
+    vm_path = tmp_path / "Ubuntu.qcow2"
+    vm_path.write_bytes(b"qcow2")
+    provider = osworld_sandbox.GymSandboxDesktopProvider({"docker": {}}, {"image": "osworld:fixed"})
+    provider._ready_timeout_s = 0.05
+    provider._ready_poll_s = 0.01
+
+    with (
+        caplog.at_level("WARNING", logger=osworld_sandbox.LOG.name),
+        pytest.raises(OSWorldGuestStartTimeoutError) as caught,
+    ):
+        provider.start_emulator(str(vm_path), headless=True, os_type="Ubuntu")
+
+    (line,) = [r.getMessage() for r in caplog.records if "OSWorld sandbox start failed" in r.getMessage()]
+    assert line == (
+        "OSWorld sandbox start failed on provider=docker: OSWorldGuestStartTimeoutError: OSWorld guest did not "
+        f"become ready within 0.05s: HTTP 502, bytes={len(body)} (sandbox_id=sbx-1 "
+        f"url=http://guest.example.invalid:30050/screenshot body={body[:512].decode()!r})"
+    )
+    # The typed failure carries the sandbox id that item 24's row event reports as its operation_id.
+    assert (caught.value.sandbox_id, caught.value.http_status) == ("sbx-1", 502)
+    assert FakeSandbox.instances[0].stopped == 1
+
+
+def test_a_logged_readiness_url_carries_no_credentials() -> None:
+    url = "http://name:password@guest.example.invalid:5000/screenshot?token=abc#frag"  # pragma: allowlist secret
+    assert osworld_sandbox._url_without_credentials(url) == "http://guest.example.invalid:5000/screenshot"
+    assert osworld_sandbox._url_without_credentials("http://[2001:db8::1]:5000/screenshot") == (
+        "http://[2001:db8::1]:5000/screenshot"
+    )

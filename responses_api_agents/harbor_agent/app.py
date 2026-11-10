@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import json
+import logging
 import re
 import sys
 from asyncio import Semaphore
@@ -26,24 +27,27 @@ import ray
 from fastapi import Body, FastAPI
 from pydantic import BaseModel, ConfigDict
 
-from nemo_gym.base_resources_server import (
-    BaseRunRequest,
-    BaseVerifyResponse,
-)
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import (
+from nemo_gym.config import (
+    ModelServerRef,
     get_first_server_config_dict,
     get_global_config_dict,
 )
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.server_runtime import (
+    BaseRunRequest,
+    BaseVerifyResponse,
+)
 from responses_api_agents.harbor_agent.utils import HarborAgentUtils
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class HarborDatasetSourceConfig(BaseModel):
@@ -123,6 +127,15 @@ class HarborRunRequest(BaseRunRequest):
 
 class HarborVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
+
+
+class HarborVerifierSetupError(RuntimeError):
+    """Harbor could not move the verifier's files to or from the sandbox, so the trial was never measured.
+
+    ``/run`` fails with it instead of returning a reward of 0: the collector then records the rollout as a failed
+    ``/run`` (a failures-sidecar row with ``route_failures_to_sidecar``, otherwise the end of the run), so an
+    infrastructure failure is not scored as a model failure.
+    """
 
 
 def _find_trial_dir_with_result(job_dir: Path) -> Optional[Path]:
@@ -221,6 +234,11 @@ class HarborAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
+        LOGGER.warning(
+            "responses_api_agents/harbor_agent is deprecated. The built-in benchmarks that use it will be migrated to "
+            "the harbor environment server (environment_servers/harbor, see its README.md); no action is needed "
+            "from you yet. New work should use the harbor environment server."
+        )
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
@@ -317,6 +335,10 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 input_messages = []
                 usage = None
                 reward = 0.0
+
+            setup_failure = HarborAgentUtils.verifier_setup_failure(trial_result)
+            if setup_failure is not None:
+                raise HarborVerifierSetupError(f"{instance_id}: {setup_failure}")
 
             response = HarborAgentUtils.get_default_response_object()
             response["model"] = policy_model_name

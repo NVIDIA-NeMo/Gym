@@ -23,13 +23,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
 )
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.verification import is_judge_failure
 from resources_servers.finance_sec_search.app import (
     EdgarSearchRequest,
     FinanceAgentResourcesServer,
@@ -1061,7 +1062,17 @@ class TestDownloadAndParseFiling:
         url = "https://www.sec.gov/Archives/edgar/data/320193/000032019325000008/"
         path = server._url_to_filing_path(url)
         assert path is not None
-        assert path.name == "index.txt"
+        assert path.name == "%index.txt"
+        assert path != server._url_to_filing_path(url + "index")
+
+    def test_url_to_filing_path_lossy_names_do_not_collide(self, server) -> None:
+        base = "https://www.sec.gov/Archives/edgar/data/320193/000032019325000008"
+        p_nested = server._url_to_filing_path(f"{base}/exhibits/ex-21.htm")
+        p_flat = server._url_to_filing_path(f"{base}/exhibits_ex-21.htm")
+        p_encoded = server._url_to_filing_path(f"{base}/AAPL%20Report.HTM")
+        p_underscore = server._url_to_filing_path(f"{base}/AAPL_20Report.HTM")
+        assert len({p_nested, p_flat, p_encoded, p_underscore}) == 4
+        assert p_nested.parent == p_flat.parent
 
     def test_url_to_filing_path_invalid(self, server) -> None:
         """Invalid URLs return None."""
@@ -1523,7 +1534,7 @@ class TestVerify:
 
     @pytest.mark.asyncio
     async def test_verify_judge_call_failure_raises_after_retries(self, tmp_path) -> None:
-        """Judge HTTP call failing on every retry → JudgeError, so judge_failsafe
+        """Judge HTTP call failing on every retry → a judge failure, so judge_failsafe
         routes it to the failures sidecar instead of scoring 0.0."""
         server = self._create_server_with_judge(tmp_path)
         server.server_client.post = AsyncMock(side_effect=ConnectionError("judge unavailable"))
@@ -1533,8 +1544,9 @@ class TestVerify:
         )
         req = self._make_verify_request(response, "$391.0 billion")
         with patch("resources_servers.finance_sec_search.app.asyncio.sleep", AsyncMock()):
-            with pytest.raises(JudgeError, match="judge unavailable"):
+            with pytest.raises(NgFailureEvent, match="judge unavailable") as failure:
                 await server.verify(self._mock_request(), req)
+            assert is_judge_failure(failure.value)
 
     @pytest.mark.asyncio
     async def test_verify_extracts_answer_from_submit_tool(self, tmp_path) -> None:
