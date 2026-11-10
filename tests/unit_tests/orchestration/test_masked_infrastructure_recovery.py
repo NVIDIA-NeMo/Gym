@@ -315,3 +315,125 @@ def test_the_store_keeps_a_sandboxed_session_row_it_reads_without_its_trajectory
         output, import_legacy=False, skip_keys=frozenset({"ng_trajectory", "ng_agent_observations"})
     )
     assert store.pending() == []
+
+
+@pytest.mark.parametrize(
+    "stage,expected", [("seed", "retryable"), ("verification", "retryable"), ("agent", "masked"), (None, "masked")]
+)
+def test_masked_oom_recovery_uses_shared_origin_stage(tmp_path, stage, expected):
+    row = _masked("provider_oom_killed") | {
+        "_ng_failure_id": "oom",
+        "_ng_failure_events": {
+            "oom": {
+                "event_id": "oom",
+                "boundary": "sandbox",
+                "failure_kind": "provider_oom_killed",
+                "stage": stage,
+            }
+        },
+    }
+    output, _ = _run(tmp_path, [[row]])
+    store = RolloutStore.read(output, import_legacy=False)
+    assert len(store.pending()) == (1 if expected == "retryable" else 0)
+    _, decision = _decide(tmp_path, allocation_cut=False)
+    assert decision.counts == {"scored": 1, expected: 1}
+    if expected == "retryable":
+        assert _evidence(decision, (1, 0)).attempts == 1
+
+
+@pytest.mark.parametrize("attribution", ["evaluation", "model", "unknown"])
+def test_masked_oom_recovery_honors_the_recorded_retry_action_after_reload(tmp_path, attribution):
+    expected = "retryable"
+    row = _masked("provider_oom_killed") | {
+        "failure_outcome_action": "retry",
+        "failure_outcome_attribution": attribution,
+    }
+    _run(tmp_path, [[row]])
+    _, decision = _decide(tmp_path, allocation_cut=False)
+    assert decision.counts == {"scored": 1, expected: 1}
+
+
+def test_masked_seed_oom_saved_fail_never_becomes_a_retry(tmp_path):
+    row = _masked("provider_oom_killed") | {
+        "failure_outcome_action": "fail",
+        "failure_outcome_attribution": "evaluation",
+        "_ng_failure_stage": "seed",
+    }
+    output, _ = _run(tmp_path, [[row]])
+    assert RolloutStore.read(output, import_legacy=False).pending() == []
+    _, decision = _decide(tmp_path, allocation_cut=False)
+    assert decision.counts == {"scored": 1, "terminal": 1}
+
+
+def test_saved_launcher_classification_drives_store_resume_and_planner(tmp_path):
+    from nemo_gym.core.failure_kinds import FailureClassificationConfig
+
+    job = tmp_path / "benchmark"
+    output, prepare = _run(job, [[_masked("provider_oom_killed") | {"_ng_failure_stage": "agent"}]])
+    assert RolloutStore.read(output).pending() == []
+    classification = FailureClassificationConfig(
+        by_stage={"agent": {"by_failure_kind": {"provider_oom_killed": "evaluation"}}}
+    )
+    (tmp_path / "resolved-config.yaml").write_text(
+        json.dumps(
+            {
+                "driver": {
+                    "benchmarks": {
+                        "benchmark": {
+                            "resumable": {
+                                "recovery_outcome_policy": {"classification": classification.model_dump(mode="json")}
+                            }
+                        }
+                    }
+                }
+            }
+        )
+    )
+    assert len(RolloutStore.read(output).pending()) == 1
+    from nemo_gym.orchestration.recovery import decide_from_collected
+
+    collected, _ = _decide(job, allocation_cut=False)
+    decision = decide_from_collected(
+        collected,
+        max_infra_retries=2,
+        max_walltime_s=None,
+        live_job=False,
+        outcome_policy=RecoveryOutcomePolicyConfig(classification=classification),
+    )
+    assert decision.counts == {"scored": 1, "retryable": 1}
+    with RolloutStore.start_or_resume(output, prepare, resume=True) as store:
+        pending = store.pending()
+        assert [(row["_ng_task_index"], row["_ng_attempt_index"]) for row in pending] == [(1, 1)]
+        store.record_dispatch(pending[0])
+        store.record_outcome(pending[0] | {"reward": 1.0})
+    assert RolloutStore.read(output).pending() == []
+
+
+@pytest.mark.parametrize("classification", [{"by_failure_kind": {"provider_oom_killed": "typo"}}, [], False])
+def test_store_refuses_malformed_saved_classification(tmp_path, classification):
+    from nemo_gym.config.config_types import ConfigError
+
+    output, _ = _run(tmp_path / "benchmark", [[_masked("session_lost")]])
+    (tmp_path / "resolved-config.yaml").write_text(
+        json.dumps(
+            {
+                "driver": {
+                    "benchmarks": {
+                        "benchmark": {"resumable": {"recovery_outcome_policy": {"classification": classification}}}
+                    }
+                }
+            }
+        )
+    )
+    with pytest.raises(ConfigError, match="saved failure classification"):
+        RolloutStore.read(output)
+
+
+@pytest.mark.parametrize("section", [{"resumable": []}, {"resumable": {"recovery_outcome_policy": False}}])
+def test_store_refuses_malformed_saved_policy_sections(tmp_path, section):
+    from nemo_gym.config.config_types import ConfigError
+
+    output, _ = _run(tmp_path / "benchmark", [[_masked("session_lost")]])
+    (tmp_path / "resolved-config.yaml").write_text(json.dumps({"driver": {"benchmarks": {"benchmark": section}}}))
+    with pytest.raises(ConfigError, match="must be a mapping"):
+        RolloutStore.read(output)

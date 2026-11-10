@@ -24,6 +24,8 @@ cd "${repo_root}"
 source "${ci_dir}/sanitize_env.sh"
 gym_ci_sanitize_environment core
 unset -f gym_ci_sanitize_environment
+# shellcheck source=scripts/ci/test_worker_env.sh
+source "${ci_dir}/test_worker_env.sh"
 # shellcheck source=scripts/ci/setup_dev.sh
 source "${ci_dir}/setup_dev.sh"
 # The telemetry extra pulls in nemo-lens so the lens-present unit tests under
@@ -34,7 +36,7 @@ source "${ci_dir}/setup_dev.sh"
 # paths (tests/unit_tests/artifacts/test_exporters.py, tests/unit_tests/data/test_gitlab_utils.py), so both
 # extras must be present here.
 uv sync --extra dev --extra ray --extra telemetry --extra mlflow --extra wandb
-pytest_addopts='-m "not sandbox" --cov-report= --cov-fail-under=0 --color=yes'
+pytest_addopts='-m "not sandbox" -n 4 --dist=loadfile --cov-report= --cov-fail-under=0 --color=yes'
 if [[ $# -eq 2 ]]; then
     pytest_addopts+=" --core-shard-index=$1 --core-num-shards=$2"
 fi

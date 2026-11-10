@@ -29,6 +29,7 @@ from openai.types.completion_usage import CompletionUsage
 from openai.types.responses.response_create_params import ToolParam
 from pydantic import BaseModel, Field
 
+from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.core.responses_api_types import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionAssistantMessageForTrainingParam,
@@ -148,7 +149,7 @@ def chat_completion_usage_to_response_usage(usage: Optional[CompletionUsage]) ->
     )
 
 
-class ResponsesConverterState(BaseModel):
+class ChatCompletionsConverterState(BaseModel):
     return_token_id_information: bool
 
     messages: List[NeMoGymChatCompletionMessageParam] = Field(default_factory=list)
@@ -265,7 +266,7 @@ CustomToolStrategy = Literal["passthrough", "function_bridge"]
 _BRIDGE_GRAMMAR_DROP_WARNED: set = set()
 
 
-class ResponsesConverter(BaseModel):
+class ChatCompletionsConverter(BaseModel):
     """Converts between OpenAI Responses API and Chat Completions API formats."""
 
     return_token_id_information: bool
@@ -360,7 +361,7 @@ class ResponsesConverter(BaseModel):
                 "server that passes Responses through."
             )
 
-        state = ResponsesConverterState(return_token_id_information=self.return_token_id_information)
+        state = ChatCompletionsConverterState(return_token_id_information=self.return_token_id_information)
 
         response_input = responses_create_params.pop("input")
         if isinstance(response_input, str):
@@ -564,7 +565,7 @@ class ResponsesConverter(BaseModel):
     def _format_function_call_output(
         self,
         m: dict,
-        state: ResponsesConverterState,
+        state: ChatCompletionsConverterState,
         *,
         drop_unrepresentable_request_fields: bool = False,
     ) -> None:
@@ -603,7 +604,9 @@ class ResponsesConverter(BaseModel):
             content = [
                 {"type": "text", "text": part["text"]}
                 if part["type"] == "input_text"
-                else self._tool_output_image_to_chat(part)
+                else self._tool_output_image_to_chat(
+                    part, drop_unrepresentable_request_fields=drop_unrepresentable_request_fields
+                )
                 for part in output
             ]
         else:  # pragma: no cover - guarded by NeMoGymFunctionCallOutput validation
@@ -619,9 +622,16 @@ class ResponsesConverter(BaseModel):
         )
         state.messages.append(converted)
 
-    def _tool_output_image_to_chat(self, part: dict) -> dict:
+    def _tool_output_image_to_chat(self, part: dict, *, drop_unrepresentable_request_fields: bool) -> dict:
         """What the chat tool message carries for an ``input_image`` part of a tool call output."""
         if not self.inline_tool_output_images:
+            return {"type": "text", "text": _IMAGE_OUTPUT_PLACEHOLDER}
+        image_url = part.get("image_url")
+        if isinstance(image_url, dict):
+            image_url = image_url.get("url")
+        if not image_url and drop_unrepresentable_request_fields:
+            # A file_id or an empty URL has nothing to inline. Dropping keeps its place as the placeholder;
+            # raising would fail every later turn too, since the whole transcript is converted each turn.
             return {"type": "text", "text": _IMAGE_OUTPUT_PLACEHOLDER}
         if part.get("detail") == "original":
             # Chat has no "original" detail (full resolution). The Codex CLI sends it when the model
@@ -650,7 +660,7 @@ class ResponsesConverter(BaseModel):
     def _format_message(
         self,
         m: dict,
-        state: ResponsesConverterState,
+        state: ChatCompletionsConverterState,
         *,
         drop_unrepresentable_request_fields: bool = False,
     ) -> None:
@@ -787,7 +797,7 @@ class ResponsesConverter(BaseModel):
     def _format_reasoning(
         self,
         m: dict,
-        state: ResponsesConverterState,
+        state: ChatCompletionsConverterState,
     ) -> None:
         """
         Collects text from 'reasoning' messages in responses api and appends it to a buffer.
@@ -810,7 +820,7 @@ class ResponsesConverter(BaseModel):
     def _format_function_call(
         self,
         m: dict,
-        state: ResponsesConverterState,
+        state: ChatCompletionsConverterState,
     ) -> None:
         state.assistant_item_buffered = True
         assert "call_id" in m
@@ -829,7 +839,7 @@ class ResponsesConverter(BaseModel):
     def _format_custom_tool_call(
         self,
         m: dict,
-        state: ResponsesConverterState,
+        state: ChatCompletionsConverterState,
     ) -> None:
         """Replay a custom tool call in its function-bridged form.
 
@@ -1417,5 +1427,8 @@ def split_responses_input_output_items(
 
 
 # Backward-compatible aliases
-VLLMConverter = ResponsesConverter
-VLLMConverterResponsesToChatCompletionsState = ResponsesConverterState
+VLLMConverter = ChatCompletionsConverter
+VLLMConverterResponsesToChatCompletionsState = ChatCompletionsConverterState
+
+# Names this module had before ResponsesConverter was renamed ChatCompletionsConverter, with a warning.
+__getattr__ = moved_names_getattr(__name__)

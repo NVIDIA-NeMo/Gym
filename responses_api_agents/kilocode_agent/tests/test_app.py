@@ -492,6 +492,16 @@ class TestLocalRunOutcome:
         stdout = _events({"type": "error", "error": {"name": "APIError"}})
         self._assert_failed(self._respond(tmp_path, _fake_kilo(tmp_path, stdout=stdout)), "execution error")
 
+    def test_model_http_error_preserves_status(self, tmp_path) -> None:
+        error = {"name": "APIError", "data": {"message": "controlled model failure", "statusCode": 400}}
+        stdout = _events({"type": "error", "error": error})
+        response = self._respond(tmp_path, _fake_kilo(tmp_path, stdout=stdout, exit_code=1))
+        self._assert_failed(response, "controlled model failure")
+        assert json.loads(response.metadata["ng_agent_outcome"]) == {
+            "failure_kind": "model_request_error",
+            "status_code": 400,
+        }
+
     def test_rollout_calls_carry_observations_with_the_run_outcome(self, tmp_path) -> None:
         stdout = _events({"type": "error", "error": {"name": "APIError"}})
         response = self._respond(tmp_path, _fake_kilo(tmp_path, stdout=stdout), rollout_id="task0-rollout1")

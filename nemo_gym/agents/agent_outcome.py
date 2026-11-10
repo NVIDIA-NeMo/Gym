@@ -3,29 +3,53 @@
 
 """Agent-reported causes, independent of environment grading and retry policy."""
 
-from enum import StrEnum
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, ClassVar
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, field_validator, model_validator
+from aiohttp import ClientResponseError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from nemo_gym.client.openai_client import MODEL_RESPONSE_TIMEOUT_REASON
 from nemo_gym.core.failure_kinds import (
     AGENT_INVALID_OUTPUT,
     AGENT_LIMIT,
     FAILURE_KINDS,
+    MODEL_POLICY_RESPONSE_TIMEOUT,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
+    PROVIDER_COMMAND_OUTCOME_UNKNOWN,
+    PROVIDER_INTERNAL_ERROR,
+    PROVIDER_IO_TIMEOUT,
+    PROVIDER_OOM_KILLED,
+    PROVIDER_PROTOCOL_ERROR,
+    PROVIDER_PTY_UNAVAILABLE,
+    PROVIDER_REQUEST_FAILED,
+    PROVIDER_STATUS_UNAVAILABLE,
+    PROVIDER_UNAVAILABLE,
+    FailureClassificationConfig,
+    classify_failure,
 )
 from nemo_gym.core.failure_records import FailureBoundary, FailureReport, ModelFailureDetails
+from nemo_gym.core.failure_transport import FailureHeader
+
+# Compatibility imports for existing agent/environment policy consumers.
+from nemo_gym.core.outcome_policy import OutcomeAction as OutcomeAction
+from nemo_gym.core.outcome_policy import OutcomePolicyConfig as OutcomePolicyConfig
+from nemo_gym.core.outcome_policy import choose_action as choose_action
+from nemo_gym.core.outcome_policy import failure_outcome_policy as failure_outcome_policy
+from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.server_runtime.base_environment_server import is_retryable_dependency_status
 
 
 if TYPE_CHECKING:
     from nemo_gym.core.responses_api_types import NeMoGymResponse
-    from nemo_gym.core.typed_exceptions import NgFailureEvent
 
 
 AGENT_OUTCOME_METADATA_KEY = "ng_agent_outcome"
+# Response metadata a harness adapter sets to "true" when the last prompt made at least as many model calls as the
+# harness's own step limit allows. The harness may only ask for a final answer at that limit (OpenCode adds a note and
+# still offers the tools), so the mark says the limit was reached, not how the model answered. The environment decides
+# whether a marked answer is scored.
+HARNESS_STEP_LIMIT_METADATA_KEY = "harness_step_limit_reached"
 
 
 class AgentOutcome(BaseModel):
@@ -55,50 +79,35 @@ class AgentOutcome(BaseModel):
         return self
 
 
-class OutcomeAction(StrEnum):
-    """Mutually exclusive grading or episode-failure action."""
-
-    VERIFY = "verify"
-    RETRY = "retry"
-    FAIL = "fail"
-    COUNT_AS_ZERO = "count_as_zero"
-
-
-class OutcomePolicyConfig(BaseModel):
-    """Select an action from explicit failure evidence; partial overrides retain boundary defaults."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    by_failure_kind: dict[str, OutcomeAction] = Field(default_factory=dict)
-    by_status_code: dict[Annotated[int, Field(ge=400, le=599)], OutcomeAction] = Field(default_factory=dict)
-    default_action: OutcomeAction
-
-    @field_validator("by_failure_kind", "by_status_code")
-    @classmethod
-    def merge_default_rules(
-        cls, value: dict[str | int, OutcomeAction], info: ValidationInfo
-    ) -> dict[str | int, OutcomeAction]:
-        """Merge validated overrides so JSON status keys are normalized before replacing defaults."""
-        return cls.model_fields[info.field_name].get_default(call_default_factory=True) | value
-
-    @field_validator("by_failure_kind")
-    @classmethod
-    def require_registered_kinds(cls, value: dict[str, OutcomeAction]) -> dict[str, OutcomeAction]:
-        """Reject misspelled failure names at configuration load, before starting an evaluation."""
-        invalid = value.keys() - FAILURE_KINDS - {"unknown"}
-        if invalid:
-            raise ValueError(f"Unregistered failure kinds: {sorted(invalid)}")
-        return value
-
-
 class AgentOutcomePolicyConfig(OutcomePolicyConfig):
     """Existing Environment Server defaults for classified failed agent responses."""
+
+    supported_actions: ClassVar[frozenset[OutcomeAction]] = frozenset(
+        {OutcomeAction.VERIFY, OutcomeAction.RETRY, OutcomeAction.FAIL}
+    )
+    classification: FailureClassificationConfig = Field(default_factory=FailureClassificationConfig)
 
     by_failure_kind: dict[str, OutcomeAction] = Field(
         default_factory=lambda: {
             AGENT_INVALID_OUTPUT: OutcomeAction.VERIFY,
             AGENT_LIMIT: OutcomeAction.VERIFY,
             MODEL_TRANSPORT_ERROR: OutcomeAction.RETRY,
+            # Transient sandbox-provider failures reported by an agent: the episode runs again, which is not a
+            # replay of the uncertain operation inside the provider.
+            **dict.fromkeys(
+                (
+                    PROVIDER_UNAVAILABLE,
+                    PROVIDER_IO_TIMEOUT,
+                    PROVIDER_STATUS_UNAVAILABLE,
+                    PROVIDER_COMMAND_OUTCOME_UNKNOWN,
+                    PROVIDER_PROTOCOL_ERROR,
+                    PROVIDER_REQUEST_FAILED,
+                    PROVIDER_INTERNAL_ERROR,
+                    PROVIDER_PTY_UNAVAILABLE,
+                ),
+                OutcomeAction.RETRY,
+            ),
+            PROVIDER_OOM_KILLED: OutcomeAction.VERIFY,
             "unknown": OutcomeAction.RETRY,
         }
     )
@@ -110,30 +119,12 @@ class AgentOutcomePolicyConfig(OutcomePolicyConfig):
     )
     default_action: OutcomeAction = OutcomeAction.FAIL
 
-    @model_validator(mode="after")
-    def require_environment_actions(self) -> "AgentOutcomePolicyConfig":
-        """These boundaries can verify or fail an episode, but cannot execute an explicit-zero action."""
-        if OutcomeAction.COUNT_AS_ZERO in [
-            self.default_action,
-            *self.by_failure_kind.values(),
-            *self.by_status_code.values(),
-        ]:
-            raise ValueError("Environment Server policy does not support count_as_zero")
-        return self
-
-
-def choose_action(*, failure_kind: str, http_status: int | None, config: OutcomePolicyConfig) -> OutcomeAction:
-    """Select by status, then kind, then default; parsing and execution belong to the boundary."""
-    return config.by_status_code.get(http_status, config.by_failure_kind.get(failure_kind, config.default_action))
-
-
-def failure_outcome_policy(failure: "NgFailureEvent", *, config: OutcomePolicyConfig) -> OutcomeAction:
-    """Adapt only this event's selected kind and status, without searching its causal chain."""
-    return choose_action(failure_kind=failure.failure_kind, http_status=failure.http_status, config=config)
-
 
 def agent_outcome_policy(
-    response: "NeMoGymResponse", *, config: AgentOutcomePolicyConfig | None = None
+    response: "NeMoGymResponse",
+    *,
+    config: AgentOutcomePolicyConfig | None = None,
+    classification: FailureClassificationConfig | None = None,
 ) -> OutcomeAction:
     """Apply configured grading/retry rules to a classified failed response.
 
@@ -149,7 +140,16 @@ def agent_outcome_policy(
         # Keep malformed classification in the partial response for diagnosis, not scoring.
         return OutcomeAction.FAIL
     config = config or AgentOutcomePolicyConfig()
-    return choose_action(failure_kind=outcome.failure_kind, http_status=outcome.status_code, config=config)
+    return choose_action(
+        failure_kind=outcome.failure_kind,
+        http_status=outcome.status_code,
+        config=config,
+        failure_class=classify_failure(
+            failure_kind=outcome.failure_kind,
+            http_status=outcome.status_code,
+            config=classification or config.classification,
+        ),
+    )
 
 
 def confirmed_policy_response_timeout(report: FailureReport | None) -> bool:
@@ -188,3 +188,28 @@ def confirmed_policy_response_timeout(report: FailureReport | None) -> bool:
             for event in attempts
         )
     )
+
+
+# The classified policy-request timeout whose outcome an agent boundary selects.
+POLICY_TIMEOUT_OPERATION = "agent.policy_request"
+
+
+def policy_timeout_failure(error: ClientResponseError) -> NgFailureEvent | None:
+    """The agent's policy-timeout failure for a failed model reply, or ``None``.
+
+    The reply's report must show that the final model call timed out after its upload on every attempt
+    (``confirmed_policy_response_timeout``). The failure is caused by ``error``, so its reply keeps the model's
+    attempts; raise it ``from error``.
+    """
+    report = FailureHeader.decode(error.headers)
+    if not confirmed_policy_response_timeout(report):
+        return None
+    failure = NgFailureEvent(
+        boundary=FailureBoundary.AGENT,
+        failure_kind=MODEL_POLICY_RESPONSE_TIMEOUT,
+        failure_reason="Policy model request timed out on every attempt",
+        operation=POLICY_TIMEOUT_OPERATION,
+        operation_id=report.events[report.failure_id].operation_id,
+    )
+    failure.__cause__ = error
+    return failure
