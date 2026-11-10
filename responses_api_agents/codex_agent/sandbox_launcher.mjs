@@ -48,6 +48,22 @@ const isObject = (value) => typeof value === "object" && value !== null && !Arra
 /** Parse UTF-8 JSON bytes, or throw on malformed text, as Python's json.loads does. */
 const parseJson = (bytes) => JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
 
+/** Scope child calls to their Codex thread, retaining the episode's capture route. */
+export function invocationForRequest(body, invocationId) {
+    try {
+        const metadata = parseJson(body)?.client_metadata;
+        if (!isObject(metadata)) return invocationId;
+        const thread = metadata.thread_id;
+        const session = metadata.session_id;
+        if (typeof thread !== "string" || !thread || typeof session !== "string" || !session) {
+            return `${invocationId}.unattributed`;
+        }
+        return thread === session ? invocationId : `${invocationId}.${thread}`;
+    } catch {
+        return `${invocationId}.unattributed`;
+    }
+}
+
 function messageText(content) {
     if (typeof content === "string") return content;
     if (!Array.isArray(content)) return "";
@@ -173,7 +189,7 @@ async function forward(incoming, outgoing, url, invocationId, record, timeoutMs)
         if (!DROPPED_REQUEST_HEADERS.has(name)) headers[name] = incoming.rawHeaders[index + 1];
     }
     headers["content-length"] = body.length;
-    headers["x-session-id"] = invocationId;
+    headers["x-session-id"] = invocationForRequest(body, invocationId);
     for (let attempt = 0; ; attempt++) {
         let upstream;
         try {

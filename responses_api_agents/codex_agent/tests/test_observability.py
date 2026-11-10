@@ -364,3 +364,88 @@ def test_compaction_requires_native_event_and_unique_session_helper(damage):
         event = next(r for r in repeated.records if isinstance(r, ContextCompactionObservation))
         assert not event.model_calls and repeated.gaps
         assert not repeated.records[0].model_calls
+
+
+def test_codex_child_contexts_and_status_are_not_flattened_into_parent():
+    def session(identity, source, items, terminal):
+        events = [{"type": "session_meta", "payload": {"id": identity, "source": source}}]
+        events += [{"type": "response_item", "timestamp": "2026-11-09T12:00:00Z", "payload": item} for item in items]
+        events.append({"type": "event_msg", "payload": {"type": terminal}})
+        return "\n".join(json.dumps(event, ensure_ascii=False) for event in events)
+
+    parent = session(
+        "parent",
+        "exec",
+        [
+            {
+                "type": "function_call",
+                "name": "spawn_agent",
+                "call_id": "spawn",
+                "arguments": '{ "message": "child task" }',
+            },
+            {"type": "function_call_output", "call_id": "spawn", "output": '{"agent_id":"child"}'},
+            {
+                "type": "message",
+                "role": "assistant",
+                "id": "final",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "Parent final", "annotations": []}],
+            },
+        ],
+        "task_complete",
+    )
+    child = session(
+        "child",
+        {"subagent": {"thread_spawn": {"parent_thread_id": "parent"}}},
+        [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Child-only\n α\u2028β"}]},
+        ],
+        "task_started",
+    )
+    bundle = parse_codex_observations(child + "\n" + parent, "episode", returncode=0, timed_out=False)
+    owners = {r.invocation_id: r for r in bundle.records if isinstance(r, AgentInvocation)}
+    assert set(owners) == {"episode", "episode.child"}
+    assert owners["episode"].status == "completed"
+    assert owners["episode.child"].status == "incomplete"
+    assert owners["episode.child"].parent_invocation_id == "episode"
+    assert owners["episode.child"].spawned_by_tool_call_id == "spawn"
+    assert len(owners["episode"].conversation) == 3
+    assert owners["episode.child"].conversation[0].content[0]["text"] == "Child-only\n α\u2028β"
+    assert not any(g.code == "subagent_hierarchy_unavailable" for g in bundle.gaps)
+
+
+@pytest.mark.parametrize("parent", ["root", "missing", "child"])
+def test_child_compaction_keeps_ownership_and_invalid_parent_is_explicit(parent):
+    from nemo_gym.config import ModelServerRef
+    from nemo_gym.trajectory import ContextCompactionObservation
+    from responses_api_agents.codex_agent.observability import _COMPACTION_PREFIX, associate_codex_compaction_calls
+
+    transcript = "\n".join(
+        json.dumps(event)
+        for event in [
+            {"type": "session_meta", "payload": {"id": "root", "source": "exec"}},
+            {
+                "type": "session_meta",
+                "payload": {"id": "child", "source": {"subagent": {"thread_spawn": {"parent_thread_id": parent}}}},
+            },
+            {
+                "type": "compacted",
+                "timestamp": "2026-11-09T12:00:00Z",
+                "payload": {"message": _COMPACTION_PREFIX + "Child summary"},
+            },
+            {"type": "event_msg", "payload": {"type": "task_complete"}},
+        ]
+    )
+    bundle = parse_codex_observations(transcript, "episode", returncode=0, timed_out=False)
+    bundle = associate_codex_compaction_calls(
+        bundle,
+        [{"status": 200, "compaction_response": {"response_id": "summary", "summary": "Child summary"}}],
+        model_ref=ModelServerRef(type="responses_api_models", name="policy"),
+    )
+    owners = {r.invocation_id: r for r in bundle.records if isinstance(r, AgentInvocation)}
+    event = next(r for r in bundle.records if isinstance(r, ContextCompactionObservation))
+    assert not owners["episode"].conversation and not owners["episode"].model_calls
+    assert event.invocation_id == "episode.child"
+    assert owners["episode.child"].model_calls == event.model_calls
+    assert event.model_calls[0].response_id == "summary"
+    assert any(g.code == "subagent_hierarchy_unavailable" for g in bundle.gaps) == (parent != "root")

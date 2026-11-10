@@ -223,6 +223,15 @@ container's memory cgroup. The runner records the change in the supervisor's `ou
 
 Native session transcripts supply tool-call IDs and outcomes. Codex disables its native HTTP 429 retries, so `sandbox_launcher.mjs` runs it behind a loopback forwarder on the runtime's Node that retries a 429 twice, honoring `Retry-After` up to 30 seconds. The forwarder retains request statuses and invocation correlation across retries; native cumulative usage supplements CLI totals when a failed turn omits them. Missing/default-zero cache and reasoning details remain unknown, with observation gaps.
 Compare CLI totals with captured model calls; do not interpret unavailable usage as zero.
+
+Session transcripts remain separate per Codex thread. The root keeps the episode invocation
+ID; children use `<episode-invocation-id>.<codex-thread-id>`. The request forwarder applies
+the same mapping to capture headers, without changing the rollout route or request body.
+Parent links come from session metadata, and spawning tool references come from the parent's
+`spawn_agent` result. A child's completion status comes from its own terminal events, not
+the root process exit. Unsupported or incomplete hierarchy metadata remains an observation
+gap; it must not be treated as a fully attributed training trajectory. This mapping is tested
+with Codex 0.144.4, including child compaction.
 Known model-metadata/compaction warnings remain visible as gaps after clean completion or a gradable model/wall-time limit.
 
 `sandbox_install_timeout_seconds` defaults to 600 and `session_close_timeout_seconds` to 60;

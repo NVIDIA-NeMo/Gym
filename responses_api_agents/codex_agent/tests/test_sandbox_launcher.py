@@ -465,3 +465,38 @@ def test_snapshot_keeps_every_line_of_a_long_rollout_file(tmp_path):
 def test_snapshot_without_native_sessions_writes_nothing(tmp_path):
     subprocess.run(["node", str(LAUNCHER), "--snapshot", str(tmp_path)], check=True, capture_output=True, timeout=10)
     assert not (tmp_path / "native_session.jsonl").exists()
+
+
+def test_child_requests_keep_the_capture_route_but_have_separate_owners(tmp_path):
+    from responses_api_agents.codex_agent.transport import _invocation_for_request
+
+    requests = []
+
+    class Upstream(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def do_POST(self):
+            requests.append(
+                (self.path, self.headers["x-session-id"], self.rfile.read(int(self.headers["Content-Length"])))
+            )
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"data: done\n\n")
+
+    bodies = [
+        json.dumps({"client_metadata": {"session_id": "root", "thread_id": thread}, "input": "Exact\n α"}).encode()
+        for thread in ["root", "child", "grandchild", "child"]
+    ]
+    with (
+        upstream_server(Upstream) as upstream,
+        rate_limit_proxy(f"{upstream}/ng-rollout/0-0/v1", tmp_path / "attempts", timeout=10) as proxy,
+    ):
+        for body in bodies:
+            with urlopen(Request(f"{proxy}/responses", data=body)) as response:
+                assert response.read() == b"data: done\n\n"
+    expected = ["invocation", "invocation.child", "invocation.grandchild", "invocation.child"]
+    assert [r[1] for r in requests] == expected
+    assert [_invocation_for_request(body, "invocation") for body in bodies] == expected
+    assert all(r[0] == "/ng-rollout/0-0/v1/responses" for r in requests)
+    assert [r[2] for r in requests] == bodies
