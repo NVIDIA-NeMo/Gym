@@ -144,7 +144,7 @@ async def test_exec_only_supervision_reaps_harness_group(tmp_path, ending, detac
         # Natural CLI exit has no stop cutoff; the sandbox owner tears down a detached tool.
         assert (stat.rpartition(")")[2].split()[0] in ("Z", "X")) is not (detached and ending == "natural")
         assert provider.cancelled_launch is False
-        assert provider.deadline > deadline + 3 * 1
+        assert provider.deadline == pytest.approx(deadline + CLOSE_TIMEOUT + 30)
         await state.close(timeout=CLOSE_TIMEOUT)
         await state.close(timeout=CLOSE_TIMEOUT)
         assert provider.disconnected
