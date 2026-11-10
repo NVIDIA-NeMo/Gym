@@ -304,6 +304,25 @@ class OpenCodeMultimodalAgent(MultimodalSessionMixin, OpenCodeAgent):
             }
         )
 
+    def _request_config(
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        network_access: SandboxNetworkAccess,
+        allowed_tools: list[str] | None,
+    ) -> OpenCodeMultimodalAgentConfig:
+        """Apply per-request controls to a copy, keeping concurrent episodes independent."""
+        native_config = copy.deepcopy(self.config.opencode_config)
+        self._deep_merge(native_config, {"agent": {"build": {"temperature": body.temperature, "top_p": body.top_p}}})
+        return self.config.model_copy(
+            update={
+                "network_access": network_access,
+                "allowed_tools": allowed_tools,
+                "opencode_config": native_config,
+                "max_output_tokens": body.max_output_tokens or self.config.max_output_tokens,
+            }
+        )
+
     def _build_opencode_config(self, rollout_id: str | None = None) -> dict[str, Any]:
         config = super()._build_opencode_config(rollout_id)
         # The parent's correlation plugin uses a host-side file URI. The private
@@ -484,28 +503,8 @@ class OpenCodeMultimodalAgent(MultimodalSessionMixin, OpenCodeAgent):
             except ValueError as error:
                 raise HTTPException(422, str(error)) from error
             system_prompt = "\n\n".join(part for part in [self.config.system_prompt, input_system] if part) or None
-            native_config = copy.deepcopy(self.config.opencode_config)
-            self._deep_merge(
-                native_config,
-                {
-                    "agent": {
-                        "build": {
-                            "temperature": body.temperature,
-                            "top_p": body.top_p,
-                        }
-                    }
-                },
-            )
-            # Request-local clone: sampling and files cannot leak between concurrent episodes.
-            episode_config = self.config.model_copy(
-                update={
-                    "network_access": network_access,
-                    "allowed_tools": allowed_tools,
-                    "opencode_config": native_config,
-                    "max_output_tokens": body.max_output_tokens or self.config.max_output_tokens,
-                    "extra_args": ["--agent", "build", "--file", *map(str, images), "--"],
-                }
-            )
+            episode_config = self._request_config(body, network_access=network_access, allowed_tools=allowed_tools)
+            episode_config.extra_args = ["--agent", "build", "--file", *map(str, images), "--"]
             runner = self.model_copy(update={"config": episode_config})
             database = directory / "opencode.db"
             trajectory = TrajectoryRecord(task_id="unscoped", rollout_id=rollout_id or "unscoped")

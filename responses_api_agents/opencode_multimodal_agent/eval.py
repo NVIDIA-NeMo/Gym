@@ -46,7 +46,6 @@ class OpenCodeMultimodalEvalConfig(OpenCodeMultimodalAgentConfig):
     # Zero places the advisory threshold at the full trajectory limit.
     final_answer_turn_headroom: int = Field(default=2, ge=0)
     sandbox: EvalSandboxConfig | None = None
-    preserve_image_format: bool = True
     # Optional image naming convention for checkpoints trained with image_0.png.
     input_image_prefix: Literal["input-", "image_"] = "input-"
     command_exec_timeout: int = Field(default=120, gt=0)

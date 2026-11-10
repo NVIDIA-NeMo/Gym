@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Multimodal inputs over the shared OpenCode sandbox/session lifecycle."""
 
-import copy
 import json
 import shlex
 from dataclasses import dataclass
@@ -248,20 +247,9 @@ class MultimodalSessionMixin:
                 for item in body.model_dump()["input"]
                 for part in (item["content"] if not isinstance(item["content"], str) else [])
             )
-            native_config = copy.deepcopy(self.config.opencode_config)
-            self._deep_merge(
-                native_config, {"agent": {"build": {"temperature": body.temperature, "top_p": body.top_p}}}
-            )
             runner = self.model_copy(
                 update={
-                    "config": self.config.model_copy(
-                        update={
-                            "network_access": network_access,
-                            "allowed_tools": allowed_tools,
-                            "opencode_config": native_config,
-                            "max_output_tokens": body.max_output_tokens or self.config.max_output_tokens,
-                        }
-                    )
+                    "config": self._request_config(body, network_access=network_access, allowed_tools=allowed_tools)
                 }
             )
             runner._write_opencode_config(directory, state.request.episode_id.capture_key)
@@ -276,15 +264,13 @@ class MultimodalSessionMixin:
                 await state.session.sandbox.upload(local, remote)
                 plugins.append(Path(remote).as_uri())
             config["plugin"] = plugins + inherited.get("plugin", [])
-            for key in ("mcp", "instructions"):
+            for key in ("mcp", "instructions", "autoupdate", "share"):
                 if key in inherited:
                     config[key] = inherited[key]
             config.update(
                 model=runner._effective_model(),
                 small_model=runner._effective_model(),
                 enabled_providers=["nemo"],
-                autoupdate=False,
-                share="disabled",
             )
             payload["env"]["OPENCODE_CONFIG_CONTENT"] = json.dumps(config)
             payload["env"].update(runner._web_tool_environment())
