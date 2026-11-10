@@ -47,7 +47,9 @@ Server opens an agent session, sends the task and closes the session.
 The config needs the following:
 
 1. Build the sandbox image from `sandbox_image/Dockerfile` and set `VISUAL_CODING_OPENCODE_SANDBOX_IMAGE` to it. The
-   image has the Python toolkit and OpenCode under `/opt/opencode/bin`.
+   image has the Python toolkit, OpenCode under `/opt/opencode/bin` and OpenCode's plugin dependencies, which the
+   config pins by SHA-256. The plugin dependencies come from the lockfile in `sandbox_image/opencode/`, a copy of
+   `benchmarks/agentic_if/opencode/`.
 2. Set `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY` for the OpenSandbox provider.
 3. Run on a host whose address the sandbox can reach. The config sets `use_absolute_ip`, and only the model servers
    advertise that address. The egress rule of the lent sandbox allows that host only.

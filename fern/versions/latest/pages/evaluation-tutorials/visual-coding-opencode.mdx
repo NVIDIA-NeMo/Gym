@@ -32,7 +32,7 @@ Complete [Installation](/get-started/installation). Then check the following:
 - **A vision-language policy.** The policy endpoint must accept image input, because the puzzle image is attached to the first user message and OpenCode's `read` tool returns the model's crops and plots as images.
 - **The BabyVision TSV.** `prepare.py` reads BabyVision in VLMEvalKit's TSV format (`BabyVision.tsv`) and checks its md5 against the two known copies.
 - **An OpenAI API key for the judge**, in `OPENAI_API_KEY`. The judge defaults to `gpt-4o-mini` on the OpenAI API.
-- **The sandbox image.** Build it from `resources_servers/visual_coding_opencode/sandbox_image/Dockerfile` and set `VISUAL_CODING_OPENCODE_SANDBOX_IMAGE` to it. It holds the Python image toolkit and OpenCode 1.17.11 under `/opt/opencode/bin`, pinned by its SHA-256 in the config, because the sandbox cannot download it.
+- **The sandbox image.** Build it from `resources_servers/visual_coding_opencode/sandbox_image/Dockerfile` and set `VISUAL_CODING_OPENCODE_SANDBOX_IMAGE` to it. It holds the Python image toolkit, OpenCode 1.17.11 under `/opt/opencode/bin` and OpenCode's plugin dependencies, each pinned by its SHA-256 in the config, because the sandbox cannot download them.
 - **A sandbox provider.** The config uses [OpenSandbox](/main/infrastructure/sandbox/opensandbox): set `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY`.
 - **A host address the sandbox can reach.** OpenCode in the sandbox calls the policy model server by address. The config sets `use_absolute_ip`, and only the policy model server advertises this host's address. Every other Gym server, the judge included, sets the address `127.0.0.1`, so the sandbox cannot reach it.
 

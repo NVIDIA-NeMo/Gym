@@ -6,8 +6,31 @@
 # sandbox that reaches only the model server can run it. visual_coding_opencode.yaml pins that binary's SHA-256, so a
 # new OpenCode version here needs a new pin there.
 #
+# The image also carries OpenCode's plugin dependencies (/opt/opencode/opencode-1.17.11-plugin-dependencies.tar.gz).
+# opencode_agent always configures a plugin, and OpenCode 1.17.11 then installs @opencode-ai/plugin from npm at each
+# start unless the dependencies are present; offline, the start stalls about 70 s before the install fails. The first
+# two stages build the archive from the lockfile in opencode/ (a copy of benchmarks/agentic_if/opencode) with the
+# recipe in benchmarks/agentic_if/README.md, so its bytes match the SHA-256 that visual_coding_opencode.yaml pins.
+#
 #   docker build --platform linux/amd64 -t <registry>/visual-coding-opencode-sandbox:<tag> \
 #       resources_servers/visual_coding_opencode/sandbox_image
+
+# npm 11.12.1 installs the dependencies that the lockfile pins. npm records the folder name, so it stays "opencode".
+FROM node:24.15.0-bookworm-slim AS plugin-dependencies
+WORKDIR /build/opencode
+COPY opencode/package.json opencode/package-lock.json ./
+RUN npm ci --ignore-scripts --no-audit --no-fund
+
+# GNU tar 1.34 and GNU gzip 1.10 (Debian 11), the versions of the pinned digest: another gzip build changes the
+# compressed bytes. The build fails here if the archive does not match the pin.
+FROM debian:bullseye-slim AS plugin-archive
+COPY --from=plugin-dependencies /build/opencode /build/opencode
+RUN tar -C /build/opencode --sort=name --mtime=@1792627200 --owner=0 --group=0 --numeric-owner \
+        --mode=u+rwX,go+rX,go-w --hard-dereference --format=gnu -cf - package.json package-lock.json node_modules \
+        | gzip -n -9 > /opencode-1.17.11-plugin-dependencies.tar.gz \
+    && echo "77b03eba45c8d7fe3d0a58bfc215f6fb99a1db4dd18a7e3d91fd29981fddafb1  /opencode-1.17.11-plugin-dependencies.tar.gz" \
+        | sha256sum -c -
+
 FROM python:3.13-slim-bookworm
 
 # bash for OpenCode's shell tool, ripgrep for its grep and glob tools, curl and tar for the OpenCode download below.
@@ -35,5 +58,6 @@ RUN mkdir -p /opt/opencode/bin \
     && curl -fsSL "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-x64-baseline.tar.gz" \
         | tar -xz -C /opt/opencode/bin opencode \
     && test "$(/opt/opencode/bin/opencode --version)" = "${OPENCODE_VERSION}"
+COPY --from=plugin-archive /opencode-1.17.11-plugin-dependencies.tar.gz /opt/opencode/
 
 WORKDIR /workspace
