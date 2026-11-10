@@ -98,6 +98,20 @@ def _objects(value: object) -> list[dict]:
     return [v for v in value if isinstance(v, dict)] if isinstance(value, list) else []
 
 
+def _failed_attempt(call: dict) -> bool:
+    """Whether a model call returned no policy response: an HTTP error reply, or a request cut before any reply.
+
+    A cut request, such as one cancelled when a run deadline ends the harness, has no status code, no response and an
+    error category: the shape ``calls.response`` accepts for a call that never answered.
+    """
+    metadata = _mapping(call.get("response_metadata"))
+    status = metadata.get("status_code")
+    if type(status) is int:
+        return status >= 400
+    category = metadata.get("error_category")
+    return status is None and call.get("response") is None and isinstance(category, str) and bool(category.strip())
+
+
 def _missing_content(value: object) -> bool:
     """Reject unresolved media/opaque references; validate inline image data."""
     if isinstance(value, list):
@@ -1026,25 +1040,22 @@ class Inspector:
             )
         )
         policy = set(range(len(self.calls))) - helpers
-        # The collector retains HTTP failures as invocation-owned attempts, not
-        # model turns (#4045). A producer may still link retries to a persisted
-        # assistant message, but absence of that optional link is not data loss.
-        http_errors = {
-            i
-            for i in policy
-            if type(status := _mapping(self.calls[i].get("response_metadata")).get("status_code")) is int
-            and status >= 400
-        }
+        # The collector retains failed attempts (HTTP failures and requests cut
+        # before any reply) as invocation-owned calls, not model turns (#4045).
+        # A producer may still link retries to a persisted assistant message,
+        # but absence of that optional link is not data loss.
+        failed_attempts = {i for i in policy if _failed_attempt(self.calls[i])}
         self.results.run(
             SemanticCheck(
                 id="steps.attempt_accounting",
                 tier="P0",
                 evidence=("TE-9",),
                 location="$.ng_trajectory.turns[*].model_calls",
-                reason="every policy response needs one step; HTTP errors may be unbound and auxiliary calls stay separate",
+                reason="every policy response needs one step; failed attempts (HTTP errors, requests cut before a "
+                "reply) may be unbound and auxiliary calls stay separate",
                 predicate=lambda: bool(policy)
-                and all((refs[i] == 1 for i in policy - http_errors))
-                and all((refs[i] <= 1 for i in http_errors))
+                and all((refs[i] == 1 for i in policy - failed_attempts))
+                and all((refs[i] <= 1 for i in failed_attempts))
                 and (not any((refs[i] for i in helpers))),
                 available=self.available,
                 applies=self.scope.steps,

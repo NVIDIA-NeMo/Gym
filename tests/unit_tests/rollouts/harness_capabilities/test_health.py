@@ -86,9 +86,10 @@ def test_expected_fault_must_actually_occur(tmp_path, record):
     [
         ("retry_429", 429, None),
         ("retry_500", 500, None),
-        ("model_error", 400, 0),
         ("model_error", 400, None),
+        ("model_error", 400, 0),
         ("model_error", 400, 1),
+        ("model_401", 401, None),
     ],
 )
 def test_owned_http_failures_match_the_declared_scenario(tmp_path, record, name, status, aggregate_usage):
@@ -105,24 +106,61 @@ def test_owned_http_failures_match_the_declared_scenario(tmp_path, record, name,
         trajectory["model_calls"] = [failed]
         trajectory["turns"] = []
         trajectory["invocations"][0]["model_calls"] = [ref]
-        record["response"] = {"output": []}
+        # The ladder reports a rejected request, which the Environment Server fails: its failure row has no response.
+        del record["response"]
         if aggregate_usage is not None:
-            record["response"]["usage"] = {
-                "input_tokens": aggregate_usage,
-                "output_tokens": 0,
-                "total_tokens": aggregate_usage,
+            # A graded failed response, as an adapter reported a 4xx as model_request_error before the ladder.
+            record["response"] = {
+                "output": [],
+                "usage": {"input_tokens": aggregate_usage, "output_tokens": 0, "total_tokens": aggregate_usage},
             }
     else:
         trajectory["model_calls"].insert(0, failed)
         trajectory["turns"][0]["model_calls"].insert(0, ref)
         trajectory["invocations"][0]["model_calls"].insert(0, ref)
     checks = inspect(tmp_path, [record], scenario.health_expectations, steps=scenario.steps)
-    if scenario.terminal_error and aggregate_usage != 0:
+    if scenario.terminal_error and aggregate_usage is not None:
         assert [key for key, value in checks.items() if value["status"] == "fail"] == ["rollout_token_count_mismatch"]
-        actual = "unobserved" if aggregate_usage is None else "unhealthy"
-        assert checks["rollout_token_count_mismatch"]["reasons"] == [f"expected healthy; observed {actual}"]
+        actual = "healthy" if aggregate_usage == 0 else "unhealthy"
+        assert checks["rollout_token_count_mismatch"]["reasons"] == [f"expected unobserved; observed {actual}"]
     else:
         assert gate_passes(list(checks.values())), checks
+
+
+@pytest.mark.parametrize("name", ["deadline_before_reply", "deadline_after_reply"])
+def test_a_deadline_ends_the_run_on_the_model_call_it_cancelled(tmp_path, record, name):
+    scenario = next(s for s in SCENARIOS if s.name == name)
+    trajectory = record["ng_trajectory"]
+    held = deepcopy(trajectory["model_calls"][-1])
+    held.update(model_call_id="held", started_at=10.0, completed_at=30.0, token_stats={}, response=None)
+    held["response_metadata"].update(
+        response_id=None, status_code=None, error_category="cancelled", response_status=None, finish_reason=None
+    )
+    ref = {"model_call_id": "held", "model_ref": held["response_metadata"]["model_ref"]}
+    if scenario.steps:
+        trajectory["model_calls"].append(held)
+        trajectory["invocations"][0]["model_calls"].append(ref)
+    else:
+        trajectory["model_calls"] = [held]
+        trajectory["turns"] = []
+        trajectory["invocations"][0]["model_calls"] = [ref]
+        record["response"]["usage"] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    record["response"]["status"] = "incomplete"
+    checks = inspect(tmp_path, [record], scenario.health_expectations, steps=scenario.steps)
+    assert gate_passes(list(checks.values())), checks
+    findings = json.loads((tmp_path / "health/rollout_verdicts.jsonl").read_text())["findings"]
+    [finding] = [f for f in findings if f["check"] == "rollout_ended_on_failed_model_call"]
+    assert finding["locator"] == {"call_id": "held"} and finding["detail"]["error_category"] == "cancelled"
+
+
+def test_the_no_result_failure_row_has_no_usage_to_reconcile(tmp_path, record):
+    scenario = next(s for s in SCENARIOS if s.name == "harness_no_result")
+    # The failure row of the retried run keeps the trajectory but no response, so it has no aggregate usage.
+    del record["response"]
+    checks = inspect(tmp_path, [record], scenario.health_expectations, steps=scenario.steps)
+    assert gate_passes(list(checks.values())), checks
+    verdict = json.loads((tmp_path / "health/rollout_verdicts.jsonl").read_text())
+    assert verdict["findings"] == [] and verdict["unobserved"] == ["rollout_token_count_mismatch"]
 
 
 @pytest.mark.parametrize("delivery", ["missing", "empty", "malformed", "failure_sidecar"])

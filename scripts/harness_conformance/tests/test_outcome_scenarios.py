@@ -12,6 +12,7 @@ import socket
 import subprocess
 import sys
 import time
+from copy import deepcopy
 from pathlib import Path
 
 import aiohttp
@@ -30,6 +31,7 @@ from nemo_gym.core import NeMoGymChatCompletion, NeMoGymResponseCreateParamsNonS
 from nemo_gym.models import VLLMConverter
 from nemo_gym.models.token_capture import CONTEXT_LENGTH_EXCEEDED_ERROR_CODE
 from nemo_gym.rollouts.harness_capabilities import json_rows
+from tests.unit_tests.rollouts.harness_capabilities.synthetic import evidence_and_witness
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -369,3 +371,28 @@ def test_no_result_episode_is_judged_from_its_failure_row(tmp_path, outcome, ter
     # A killed harness returns no tool result and no answer, and a retried run is never verified.
     for key in ("tools.executed", "model.finished", "verifier.outcome", "evaluation.reward"):
         assert checks[key] == "not_applicable", key
+
+
+@pytest.mark.parametrize("cut", [True, False])
+def test_a_deadline_after_a_reply_ends_on_the_request_it_cancelled(tmp_path, cut):
+    record, _ = evidence_and_witness()
+    trajectory = record["ng_trajectory"]
+    if cut:
+        # The capture keeps the held request the deadline cancelled: no status, no response.
+        held = deepcopy(trajectory["model_calls"][-1])
+        held.update(model_call_id="held", started_at=10.0, completed_at=30.0, token_stats={}, response=None)
+        held["response_metadata"].update(
+            response_id=None, status_code=None, error_category="cancelled", response_status=None, finish_reason=None
+        )
+        trajectory["model_calls"].append(held)
+        trajectory["invocations"][0]["model_calls"].append({"model_call_id": "held"})
+    record["response"].update(status="incomplete", usage={"input_tokens": 20, "output_tokens": 10, "total_tokens": 30})
+    _episode(tmp_path, response={"status": "incomplete", "metadata": {}}, failure_row=None)
+    (tmp_path / "rollouts.jsonl").write_text(json.dumps(record) + "\n")
+    result = inspect_episode(SCENARIO["deadline_after_reply"], tmp_path, {"returncode": 0, "timed_out": False})
+    checks = {c["id"]: c for c in result["checks"]}
+    # The cancelled request needs no step: the model never answered it.
+    assert checks["steps.attempt_accounting"]["status"] == "pass"
+    health = checks["health.rollout_ended_on_failed_model_call"]
+    assert health["status"] == ("pass" if cut else "fail")
+    assert health["reasons"] == ([] if cut else ["expected unhealthy; observed healthy"])

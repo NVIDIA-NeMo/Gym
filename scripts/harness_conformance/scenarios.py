@@ -23,6 +23,8 @@ FAILED_MODEL_HEALTH: dict[str, Verdict] = {
     "rollout_ended_on_failed_model_call": "unhealthy",
     "rollout_token_count_mismatch": "unobserved",
 }
+# The harness's run deadline cancels the held model request, so the run ends on a failed model call.
+DEADLINE_HEALTH: dict[str, Verdict] = {"rollout_ended_on_failed_model_call": "unhealthy"}
 
 
 @dataclass(frozen=True)
@@ -110,12 +112,9 @@ SCENARIOS = (
         terminal_error=True,
         expected_reward=0.0,
         steps=False,  # The first request fails permanently; no model decision is returned.
-        health_expectations={
-            "rollout_ended_on_failed_model_call": "unhealthy",
-            # Aggregate usage counts finished responses: an initial rejection must
-            # retain a known zero total, even though the failed attempt has no usage.
-            "rollout_token_count_mismatch": "healthy",
-        },
+        # The Environment Server fails a model_request_rejected run without retrying it, so, as for model_401, the
+        # run ends in a failure row.
+        health_expectations=FAILED_MODEL_HEALTH,
     ),
     Scenario(
         "context_overflow",
@@ -158,6 +157,7 @@ SCENARIOS = (
         ending="no_reply",
         expected_reward=0.0,
         steps=False,  # No model decision is ever returned.
+        health_expectations=DEADLINE_HEALTH,
         run_deadline_seconds=20,
         outcomes=(GRADED_INCOMPLETE, ExpectedOutcome("failed", "retry", "unknown")),
         target_outcome=GRADED_INCOMPLETE,
@@ -171,6 +171,7 @@ SCENARIOS = (
         tool_steps=1,
         ending="no_reply",
         expected_reward=0.0,
+        health_expectations=DEADLINE_HEALTH,
         run_deadline_seconds=20,
         outcomes=(GRADED_INCOMPLETE,),
         requires=("run_deadline",),
@@ -183,6 +184,9 @@ SCENARIOS = (
         tool_steps=1,
         kill_harness=True,
         expected_reward=0.0,
+        # The Environment Server keeps a failure row for the retried run, and a failure row has no response usage to
+        # reconcile.
+        health_expectations={"rollout_token_count_mismatch": "unobserved"},
         outcomes=(ExpectedOutcome("failed", "retry", AGENT_RUN_ERROR),),
         requires=("harness_process",),
     ),

@@ -192,7 +192,10 @@ Each harness's run deadline comes from its adapter's deadline key
 OpenClaw, and `sandbox_runner_timeout_seconds` for Hermes, Stirrup and NOOA. A
 scenario's `run_deadline_seconds` sets it, well under the episode timeout;
 otherwise it is the probe `--timeout`. A never-answered request is held until the
-harness disconnects, and the witness keeps it without a status.
+harness disconnects, and the witness keeps it without a status. Gym's model-call
+capture keeps it as a cancelled call with no response: the run ends on a failed
+model call (`rollout_ended_on_failed_model_call` is expected unhealthy), and the
+call, like an HTTP error, needs no step.
 
 `harness_no_result` uses the process supervisor's marker: the tool call walks up to
 the harness that carries `NEMO_GYM_SUPERVISOR=<identity>`, kills it and every
