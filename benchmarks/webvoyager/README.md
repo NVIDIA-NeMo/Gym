@@ -131,41 +131,56 @@ check the system browser prerequisites, and prepare the hash-pinned dataset:
 
 ```bash
 uv lock --check
-uv sync --frozen --extra dev
+uv sync --locked --extra dev
 command -v Xvfb
 command -v xvfb-run
 command -v xclip
-uv run --project resources_servers/visual_browser playwright install chromium
+uv run --locked --project resources_servers/visual_browser playwright install chromium
 ./.venv/bin/gym eval prepare --benchmark webvoyager
 ```
 
-The component servers run from their own venvs. Current Gym prepares the
-repository-managed components from each component's committed `uv.lock` with
-`uv sync --locked`; the root sync does not prepare those environments. Their
-locks inherit the same shared resolver policy as other Gym components and were
-seeded with the existing WebVoyager reference versions. Pillow remains 12.3.0
-and the visual browser remains Playwright 1.55.0. Update and check them with the
-repository's `scripts/component_locks.py`, as for other managed components.
+The component servers are independent Gym projects with their own committed
+`pyproject.toml` and `uv.lock`. Gym prepares them through its standard locked
+setup and parent-dependency compatibility checks. The root sync does not prepare
+those environments. The visual browser image also uses the visual browser
+component's `uv.lock` with `uv sync --locked`.
 
-The constraints below retain the scored-runtime contract for older Gym setup
-paths and direct `uv pip` image builds. They do not replace the managed component
-locks. For those legacy installs, pass the component constraints when creating
-the venvs:
+After changing dependency declarations, use the repository's standard updater
+and checker from the development environment:
 
 ```bash
-export UV_CONSTRAINT="$PWD/benchmarks/webvoyager/component-constraints.txt"
+uv run --extra dev python scripts/component_locks.py --update
+uv run --extra dev python scripts/component_locks.py
 ```
 
-Without it, a later build picks up newer releases (Pillow 13 instead of 12.3,
-for example); full runs on such venvs had two to three times as many
-unparseable model actions. The visual browser image installs the same versions
-from
-`resources_servers/visual_browser/docker/requirements.lock`.
+The updater synchronizes the shared resolver policy and retains existing locked
+versions that still satisfy the component's requirements. Each component may
+resolve different versions within that policy. Playwright is constrained to
+1.55.0 in the browser component because it must match the image's Chromium bundle.
 
 Install missing Xvfb or xclip system packages before starting the browser. The
 prepare command downloads the maintained source, verifies its SHA-256 and exact
 552-task denominator, renders the dated questions for the reference date in
 `provenance.yaml`, and writes `benchmarks/webvoyager/data/webvoyager.jsonl`.
+
+#### Historical dependency constraints
+
+`component-constraints.txt` retains the reference runtime's version table and
+its documented compatibility adjustments. The older `uv pip` component setup
+used this command when creating venvs:
+
+```bash
+export UV_CONSTRAINT="$PWD/benchmarks/webvoyager/component-constraints.txt"
+```
+
+Without those constraints, later builds picked up newer releases (Pillow 13
+instead of 12.3, for example); full runs on those venvs had two to three times
+as many unparseable model actions. The former visual browser image installed
+matching versions from `resources_servers/visual_browser/docker/requirements.lock`.
+Both tables remain available with the historical evidence. Current component
+and image setup use the component locks; `UV_CONSTRAINT` does not override
+`uv sync --locked`. Historical recipes that compare every installed package
+against the old table retain their original source/runtime requirements.
 
 ### Configure external services
 

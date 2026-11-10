@@ -62,10 +62,7 @@ RUN uv python install 3.13.14
 
 COPY . /opt/nemo-gym
 WORKDIR /opt/nemo-gym/resources_servers/visual_browser
-RUN uv venv --python 3.13.14 .venv \
-    && uv pip install --python .venv/bin/python \
-        -c docker/requirements.lock \
-        -e /opt/nemo-gym -e . \
+RUN uv sync --locked --project . --python 3.13.14 --no-dev \
     && xvfb-run -a -s "-screen 0 1920x1080x24" .venv/bin/python -c \
         "import nemo_gym.web.browser_instance, resources_servers.visual_browser.backend, playwright, pyautogui; print(pyautogui.size())" \
     && test -x /ms-playwright/chromium-1187/chrome-linux/chrome

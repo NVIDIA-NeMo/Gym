@@ -1,4 +1,7 @@
-# Pins for the visual-browser runtime image. Same versions as the visual_browser component
+# Historical image constraints. The current image installs from the visual_browser
+# component's uv.lock with uv sync --locked; retain this table for older runtime records.
+#
+# Pins for the former visual-browser runtime image. Same versions as the visual_browser component
 # venv of the WebVoyager 552 reference runtime (Gym ed29912c8, cw-dfw, 2026-10-11) and as
 # benchmarks/webvoyager/component-constraints.txt. Editable Gym installs are omitted; the
 # image installs the checked-out source editable on top of these pins.

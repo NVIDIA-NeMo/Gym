@@ -5,10 +5,8 @@ import re
 import tomllib
 from pathlib import Path
 
-from packaging.markers import Marker, default_environment
 from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
-from packaging.utils import canonicalize_name
 from packaging.version import Version
 
 
@@ -47,44 +45,24 @@ def test_image_lock_agrees_with_component_constraints() -> None:
     assert not mismatched, mismatched
 
 
-def test_root_runtime_dependency_closure_is_constrained() -> None:
-    """A new core dependency must not silently float in rebuilt browser roles."""
-    constraints = _pins(CONSTRAINTS)
-    image = _pins(IMAGE_LOCK)
-    project = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
-    for raw in project["project"]["dependencies"]:
-        requirement = Requirement(raw)
-        name = canonicalize_name(requirement.name)
-        assert name in constraints, f"unconstrained core dependency: {name}"
-        assert Version(constraints[name]) in requirement.specifier, raw
+def test_browser_image_playwright_matches_component_dependency() -> None:
+    """The Python client must use the browser revision bundled by the base image."""
+    component = REPO_ROOT / "resources_servers/visual_browser"
+    project = tomllib.loads((component / "pyproject.toml").read_text())
+    requirement = next(
+        requirement
+        for raw in project["project"]["dependencies"]
+        if (requirement := Requirement(raw)).name == "playwright"
+    )
+    dockerfile = IMAGE_LOCK.with_name("visual-browser-runtime.Dockerfile").read_text()
+    image = re.search(r"^ARG PLAYWRIGHT_IMAGE=mcr.microsoft.com/playwright/python:v([^-]+)-", dockerfile, re.MULTILINE)
+    assert image is not None
+    image_version = Version(image.group(1))
+    assert image_version in requirement.specifier
 
-    lock = tomllib.loads((REPO_ROOT / "uv.lock").read_text())
-    packages = {package["name"]: package for package in lock["package"]}
-    environment = {
-        **default_environment(),
-        "python_version": "3.13",
-        "python_full_version": "3.13.14",
-        "sys_platform": "linux",
-        "os_name": "posix",
-        "platform_machine": "x86_64",
-        "platform_system": "Linux",
-        "extra": "",
-    }
-    pending = [dependency["name"] for dependency in packages["nemo-gym"]["dependencies"]]
-    runtime_packages = set()
-    while pending:
-        name = pending.pop()
-        if name in runtime_packages:
-            continue
-        runtime_packages.add(name)
-        pending.extend(
-            dependency["name"]
-            for dependency in packages[name].get("dependencies", [])
-            if not dependency.get("marker") or Marker(dependency["marker"]).evaluate(environment)
-        )
-
-    assert not runtime_packages - constraints.keys(), sorted(runtime_packages - constraints.keys())
-    assert not runtime_packages - image.keys(), sorted(runtime_packages - image.keys())
+    lock = tomllib.loads((component / "uv.lock").read_text())
+    locked_versions = {Version(package["version"]) for package in lock["package"] if package["name"] == "playwright"}
+    assert locked_versions == {image_version}
 
 
 def test_browser_image_uv_satisfies_the_core_requirement() -> None:

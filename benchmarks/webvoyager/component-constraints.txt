@@ -1,3 +1,6 @@
+# Historical reference for the former uv pip setup. Current repository-managed components
+# use their own uv.lock through Gym's standard installer; this file does not govern them.
+#
 # Version lock for the WebVoyager component venvs (web_agent, openai_model, vllm_model,
 # visual_browser, webvoyager_judge, legacy_agent), applied as uv constraints when the venvs
 # are built:  UV_CONSTRAINT=benchmarks/webvoyager/component-constraints.txt gym ... prefetch
