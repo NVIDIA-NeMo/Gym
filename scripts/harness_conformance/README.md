@@ -101,13 +101,16 @@ The P1 `model_timeout_recovered` and `model_timeout_exhausted` scenarios put the
 real Gym `vllm_model` server and its model client between the harness and a local
 scripted provider. The provider consumes the request, then delays response headers
 beyond the client's deadline. Recovery must retain its timeout event alongside
-the successful answer; exhaustion must retain all three failed attempts without
-starting another harness retry budget. Both cases check unchanged event IDs and
+the successful answer; exhaustion must retain the events from every observed
+failed attempt. Both cases check unchanged event IDs and
 facts at the model-server reply, the EnvironmentServer's received agent reply,
 and Collection's canonical saved failure map. Missing persistence is a P1 failure,
 including when events survive only in a nested partial response.
 
-These scenarios use the existing model client's three-attempt transport bound.
+The Gym model client makes one provider attempt per harness model call
+(`max_num_tries: 1`). The harness controls any further model calls. The current
+exhaustion checks still expect three failed attempts; updating those expectations
+is a separate change.
 They do not certify shared configurable retry settings or sandbox retry handling.
 They run for every selected harness; missing adapter support remains visible as
 failed or unavailable evidence. Byte-for-byte scripted exchange comparisons are
