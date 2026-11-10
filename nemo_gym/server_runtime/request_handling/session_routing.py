@@ -446,9 +446,11 @@ class ResourcesSessionLifetimes:
       The caller's retried or cleanup close reaches the owner within that window.
       A delayed seed after a close reaches it too, where the server refuses it while the session is fenced.
     - A failed seed or close of an open session leaves it open.
+    - A server can end a session with a retention deadline when its remaining metadata
+      must still be reached by late requests. Later requests cannot shorten that deadline.
 
     So ownership outlives the session's last request by at most the close retry window,
-    except for a session never closed, which keeps its owner as long as the server keeps the session.
+    unless the server supplies a retention deadline or never closes the session.
     """
 
     def __init__(
@@ -473,6 +475,8 @@ class ResourcesSessionLifetimes:
         self._queued: set[str] = set()
         # Sessions a checkpoint retire released, whose ownership lasts until ``ended`` whatever requests for them do.
         self._retained: set[str] = set()
+        # Finite deadlines for server metadata that remains after a session ends.
+        self._retain_until: dict[str, float] = {}
 
     def holds(self, session_id: str) -> bool:
         return session_id in self._retained or self._until.get(session_id, 0.0) > monotonic()
@@ -485,7 +489,7 @@ class ResourcesSessionLifetimes:
             # A successful score can leave failed cleanup; its close must still reach this worker after the window.
             self._until[session_id] = math.inf
         elif succeeded and self._starts.fullmatch(path):
-            self._until[session_id] = math.inf
+            self.opened(session_id)
         elif is_open and not (succeeded and self._ends.fullmatch(path) and not self._close_follows_in(scope)):
             pass
         else:
@@ -500,11 +504,20 @@ class ResourcesSessionLifetimes:
             name.lower() == self._close_follows and value == b"1" for name, value in scope["headers"]
         )
 
-    def ended(self, session_id: str) -> None:
-        """End a session this worker owns, from a route that ends a session under another name."""
+    def ended(self, session_id: str, *, retain_until: Optional[float] = None) -> None:
+        """End a session this worker owns, keeping its owner for the close retry window.
+
+        ``retain_until`` is an optional finite monotonic deadline for metadata the server
+        still needs to answer late requests. Subsequent requests or calls to ``ended``
+        cannot shorten it; a successful seed or restore starts a fresh lifetime.
+        """
+        if retain_until is not None and not math.isfinite(retain_until):
+            raise ValueError("retain_until must be a finite monotonic deadline")
         retained = session_id in self._retained
         self._retained.discard(session_id)
         if retained or session_id in self._until:
+            if retain_until is not None:
+                self._retain_until[session_id] = max(retain_until, self._retain_until.get(session_id, 0.0))
             self._expire_after_window(session_id)
 
     def retain(self, session_id: str) -> None:
@@ -516,15 +529,25 @@ class ResourcesSessionLifetimes:
 
     def opened(self, session_id: str) -> None:
         """Open a session a checkpoint restore installed on this worker, as a successful seed would."""
+        self._clear_retention_deadline(session_id)
         self._until[session_id] = math.inf
 
     def forget(self, session_id: str) -> None:
         """Drop a session whose install a failed restore undid, so its ownership can be released at once."""
         self._until.pop(session_id, None)
         self._retained.discard(session_id)
+        self._clear_retention_deadline(session_id)
+
+    def _clear_retention_deadline(self, session_id: str) -> None:
+        if self._retain_until.pop(session_id, None) is not None and session_id in self._queued:
+            # A reused ID may close before its old metadata deadline. Remove that heap entry
+            # so its next end schedules a sweep at the new session's earlier close deadline.
+            self._expiries = [(until, sid) for until, sid in self._expiries if sid != session_id]
+            heapq.heapify(self._expiries)
+            self._queued.discard(session_id)
 
     def _expire_after_window(self, session_id: str) -> None:
-        until = monotonic() + self.close_retry_window_seconds
+        until = max(monotonic() + self.close_retry_window_seconds, self._retain_until.get(session_id, 0.0))
         self._until[session_id] = until
         if session_id not in self._queued:
             self._queued.add(session_id)
@@ -541,6 +564,7 @@ class ResourcesSessionLifetimes:
                 self._queued.discard(session_id)
             elif until <= now:
                 del self._until[session_id]
+                self._retain_until.pop(session_id, None)
                 self._queued.discard(session_id)
                 expired.append(session_id)
             else:

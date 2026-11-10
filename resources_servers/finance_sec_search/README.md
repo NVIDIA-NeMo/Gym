@@ -388,6 +388,15 @@ gym eval run --no-serve \
 gym env test --resources-server finance_sec_search
 ```
 
+## Sessions
+
+Each rollout has its own session, which holds the documents `parse_html_page` stored and the start of the rollout's time budget (`max_rollout_time_seconds`). The judge reads only the verify request, so the reward does not depend on this state.
+
+- **Seed.** An Environment Server sends an episode seed, a `ResourcesSeedSessionRequest` keyed by `resources_session_id`. A retry of the same seed keeps the stored documents, and a seed that binds the ID to another episode or task gets 409. An Agent's `/run` sends an agent-run seed, `{}`, which starts the session afresh and returns `{}`. An agent-run seed with an episode session's cookie gets 409, so it cannot wipe that session's documents or restart its time budget.
+- **Release.** `/close_session` releases an episode session by `resources_session_id`, with or without the session cookie, and is idempotent; a close that names another episode than the seed's gets 409, also after `/verify`. `/verify` releases an agent-run session, because an Agent's `/run` never closes it; an episode session keeps its documents until its close. A `/verify` for a session that was already closed returns a masked sample (`failure_kind=session_lost`), as on every server that follows this contract. A seed for a session closed within `session_close_retry_window_seconds` gets 409.
+- **Lost sessions.** `parse_html_page` and `retrieve_information` answer 404 with `failure_kind: session_lost` when the session is not open, instead of creating storage that nothing would release. The search tools keep no session state.
+- **Abandoned sessions.** Each seed discards sessions older than `session_ttl_seconds` (default 6 hours) that were never verified or closed, such as a rollout whose `/run` failed before `/verify`. Its tool calls after that get 404, so its `/verify` returns a masked sample (`failure_kind=session_expired`); an episode session is also fenced as after a close. Set it longer than the longest rollout. The expiration record masks verification for one more TTL after eviction. Routing retains the owning worker through that deadline, including after a late verify or close; afterward the record no longer masks stateless reverify.
+
 ## Verification
 
 Uses LLM-as-judge with a financial grading rubric (0/1/2 scale). `reward_mode: binary` gives reward 1.0 only to fully correct answers (`[[2]]`); `reward_mode: scaled` also gives partially correct answers (`[[1]]`) 0.5. The judge additionally requires grounding: an answer that restates general financial knowledge without filing-specific figures, dates, or disclosures scores `[[0]]` even when it is conceptually correct. The judge prompt and rubric are defined in /prompt_templates.
