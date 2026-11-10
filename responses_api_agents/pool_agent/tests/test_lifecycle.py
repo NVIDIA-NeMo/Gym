@@ -308,13 +308,16 @@ async def test_activation_uses_proxy_evidence_when_cli_has_no_model_output(tmp_p
             "model_endpoint",
             return_value=MagicMock(base_url=f"http://127.0.0.1:{upstream.server_port}/ng-rollout/test/v1"),
         ):
-            call = server._activate(state, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+            response = await asyncio.wait_for(
+                server._activate(state, NeMoGymResponseCreateParamsNonStreaming(input="task")), timeout=20
+            )
             if mode == "stall":
-                with pytest.raises(RuntimeError, match="before any model response"):
-                    await asyncio.wait_for(call, timeout=20)
-                assert state.failure == "RuntimeError"
+                # The proxy recorded the stalled call as a transport failure, so the deadline was the model server's:
+                # failed with that kind and retried (HTTP 200). It was a RuntimeError (HTTP 500).
+                assert response.status == "failed" and response.output == []
+                assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "model_transport_error"}
+                assert state.failure == "model_transport_error"
             else:
-                response = await asyncio.wait_for(call, timeout=20)
                 assert response.status == "incomplete" and response.output == []
         assert paths == ["/ng-rollout/test/v1/chat/completions"]
         assert state.session.artifacts.completed_model_calls == int(mode == "lost")
