@@ -734,3 +734,55 @@ def test_compression_auxiliary_uses_episode_model_route(tmp_path, restore_proces
     config = yaml.safe_load((tmp_path / "hermes-home/config.yaml").read_text())
     assert config["auxiliary"]["compression"]["base_url"] == server.base_url
     assert config["auxiliary"]["compression"]["model"] == "policy_model"
+
+
+@pytest.mark.parametrize("image_only", [False, True])
+def test_prompt_images_reach_pinned_hermes_model_requests(tmp_path, restore_process_globals, image_only) -> None:
+    """Exercise the installed Hermes loop, not a mock of its multimodal input handling."""
+    from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+
+    image_uri = (
+        "data:image/png;base64,"
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII="
+    )
+    content = [
+        {"type": "input_text", "text": "before"},
+        {"type": "input_image", "image_url": image_uri, "detail": "high"},
+        {"type": "input_text", "text": "after"},
+    ]
+    if image_only:
+        content = [content[1]]
+    adapter = HermesAgent(
+        config=HermesAgentConfig(
+            host="127.0.0.1",
+            port=0,
+            name="hermes",
+            entrypoint="app.py",
+            model_server={"type": "responses_api_models", "name": "model"},
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    body = adapter._validate_request(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {"role": "user", "content": content},
+                {"role": "assistant", "content": "prior answer"},
+                {"role": "user", "content": content},
+            ]
+        )
+    )
+    with _ModelServer([_completion({"content": "done"})]) as server:
+        # Hermes marks a response at its iteration ceiling incomplete, even with a final answer.
+        output = _run(_payload(server.base_url, max_turns=4, **adapter._conversation_params(body)), tmp_path)
+    expected = [
+        {"type": "text", "text": "before"},
+        {"type": "image_url", "image_url": {"url": image_uri, "detail": "high"}},
+        {"type": "text", "text": "after"},
+    ]
+    if image_only:
+        expected = [expected[1]]
+    assert output["result"]["completed"], output["result"]
+    assert len(server.requests) == 1
+    user_messages = [message for message in server.requests[0]["messages"] if message["role"] == "user"]
+    assert [message["content"] for message in user_messages] == [expected, expected]
+    assert any(message["content"] == "prior answer" for message in server.requests[0]["messages"])

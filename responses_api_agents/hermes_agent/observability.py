@@ -53,6 +53,22 @@ def normalize_hermes_messages(messages: Iterable[Any], *, id_prefix: str = "herm
             continue
         role, content = message.get("role"), _text(message.get("content"))
         if role in {"system", "user", "developer"}:
+            raw_content = message.get("content")
+            if (
+                role == "user"
+                and isinstance(raw_content, list)
+                and any(isinstance(part, dict) and part.get("type") == "image_url" for part in raw_content)
+            ):
+                content = [
+                    {
+                        "type": "input_image",
+                        "image_url": part["image_url"]["url"],
+                        "detail": part["image_url"].get("detail", "auto"),
+                    }
+                    if isinstance(part, dict) and part.get("type") == "image_url"
+                    else {"type": "input_text", "text": _text([part])}
+                    for part in raw_content
+                ]
             output.append(NeMoGymEasyInputMessage(role=role, content=content))
         elif role == "assistant":
             reasoning = message.get("reasoning")

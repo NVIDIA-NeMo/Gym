@@ -137,7 +137,7 @@ Host and sandbox execution use the same request rules. User tasks remain user me
 Request `model` must match the configured model. Unsupported non-default controls return
 HTTP 422, including `top_p` (even `1.0`), `store`, `service_tier`, and request metadata.
 `max_output_tokens` also returns 422: Hermes does not enforce a total response token budget.
-Config `max_tokens` limits each model call. `context_length` sets Hermes' `model.context_length`, the window context compression reads (at `compression_threshold` of it); unset, Hermes probes the endpoint, which the Gym model server does not answer, and assumes 128,000 tokens. Only text input is supported; `developer` messages
+Config `max_tokens` limits each model call. `context_length` sets Hermes' `model.context_length`, the window context compression reads (at `compression_threshold` of it); unset, Hermes probes the endpoint, which the Gym model server does not answer, and assumes 128,000 tokens. User messages support text and base64 data-URI `input_image` parts; `developer` messages
 are rejected.
 
 Compatibility: the host path previously let config `system_prompt` replace the dataset's
