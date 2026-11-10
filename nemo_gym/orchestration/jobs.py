@@ -49,13 +49,13 @@ import os
 import re
 import secrets
 import socket
-import subprocess
 import sys
 from datetime import datetime, timezone
-from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
+
+from nemo_gym._moved_paths import moved_names_getattr
 
 
 logger = logging.getLogger(__name__)
@@ -85,61 +85,6 @@ EVAL_EXIT_FILENAME = "eval.exit"
 EVAL_SUCCEEDED_FILENAME = "eval.succeeded"
 # `<exports dir>/<exporter><suffix>`: the outcome of one export.
 EXPORT_RESULT_SUFFIX = ".result.json"
-
-
-# The nemo_gym package directory of the code that is running, however it got
-# onto sys.path: an install, an editable checkout, or a plain source tree.
-_PACKAGE_DIR = Path(__file__).resolve().parents[1]
-
-
-def installed_gym_commit() -> str | None:
-    """Return the git commit of the nemo-gym that is running, or None when it cannot be determined.
-
-    A git install (``pip install git+...``) records its commit in the distribution
-    metadata. Otherwise the running package's own source tree is asked: a git
-    checkout reports its HEAD, suffixed ``-dirty`` when it has uncommitted changes.
-    """
-    commit = _git_install_commit()
-    if commit is not None:
-        return commit
-    return _source_checkout_commit(_PACKAGE_DIR)
-
-
-def _git_install_commit() -> str | None:
-    """The commit recorded in the distribution's PEP 610 ``direct_url.json``, or None."""
-    try:
-        raw = distribution("nemo-gym").read_text("direct_url.json")
-    except PackageNotFoundError:
-        return None
-    if raw is None:
-        return None
-    commit = (json.loads(raw).get("vcs_info") or {}).get("commit_id")
-    return str(commit) if commit else None
-
-
-def _source_checkout_commit(package_dir: Path) -> str | None:
-    """HEAD of the git checkout ``package_dir`` is tracked in, ``-dirty`` when it has uncommitted changes."""
-    try:
-        tracked = _git(package_dir, "ls-files", "--error-unmatch", "__init__.py")
-    except FileNotFoundError:
-        return _unknown_commit("git is not available to inspect %s.", package_dir)
-    if tracked.returncode != 0:
-        return _unknown_commit("nemo-gym is not a git install and %s is not tracked in a git checkout.", package_dir)
-    head = _git(package_dir, "rev-parse", "HEAD")
-    status = _git(package_dir, "status", "--porcelain")
-    if head.returncode != 0 or status.returncode != 0:
-        return _unknown_commit("git failed in %s: %s", package_dir, (head.stderr or status.stderr).strip())
-    commit = head.stdout.strip()
-    return f"{commit}-dirty" if status.stdout.strip() else commit
-
-
-def _git(directory: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", "-C", str(directory), *args], capture_output=True, text=True)
-
-
-def _unknown_commit(reason: str, *args: object) -> None:
-    logger.warning("Cannot determine the installed Gym commit: " + reason, *args)
-    return None
 
 
 class BenchmarkJob(BaseModel):
@@ -215,7 +160,7 @@ class SubmissionRecord(BaseModel):
     leave it None.
 
     `gym_commit` is the commit of the Gym that wrote the record, when its install
-    records one (see `installed_gym_commit`). A `-dirty` suffix marks a checkout
+    records one (see `nemo_gym.utils.gym_commit.installed_gym_commit`). A `-dirty` suffix marks a checkout
     with uncommitted changes: the commit alone does not reproduce that Gym.
     """
 
@@ -386,6 +331,19 @@ def new_gym_job_id(now: datetime) -> str:
     return f"gym-job-{now.strftime('%Y%m%dT%H%M%SZ')}-{secrets.token_hex(3)}"
 
 
+def benchmark_artifact_dirs(target: str) -> dict[str, Path] | None:
+    """The artifacts directory of each benchmark of the submission `target` names, or None when no record is found.
+
+    `target` is a run directory holding the submission's manifest, or a Gym job ID in this machine's job index.
+    """
+    path = Path(target)
+    record_path = path / MANIFEST_NAME if path.is_dir() else local_index_dir() / f"{target}.json"
+    if not record_path.is_file():
+        return None
+    record = SubmissionRecord.load(json.loads(record_path.read_text()))
+    return {benchmark.benchmark: Path(benchmark.job_dir) / "artifacts" for benchmark in record.benchmarks}
+
+
 def local_index_dir() -> Path:
     """Where this machine remembers its own submissions."""
     base = os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache")
@@ -406,3 +364,6 @@ def load_submission_record(gym_job_id: str) -> SubmissionRecord:
     if manifest.is_file():
         record = SubmissionRecord.load(json.loads(manifest.read_text(encoding="utf-8")))
     return record
+
+
+__getattr__ = moved_names_getattr(__name__)

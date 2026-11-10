@@ -47,6 +47,7 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     current_rollout_id,
+    current_session_key,
     failure_report_for,
 )
 from nemo_gym.models import (
@@ -488,10 +489,26 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
             "call once more with that budget lowered to the window minus the prompt minus a small margin. The prompt "
             "length is the one the refusal states, or else the engine's `/tokenize` count. The model call's capture "
             "records `requested_max_tokens` and `applied_max_tokens` and an `output_budget_refit` event with the "
-            "window, which the gate's facts count. A budget within the window is never changed: "
+            "window, which the gate's facts count. A budget within the window is not changed by this setting: "
             "when the prompt and that budget together overflow, the call keeps the `context_length_exceeded` refusal "
-            "(or empty completion), so a harness that compacts its history still gets the cue. A prompt that leaves "
+            "(or empty completion), so a harness that compacts its history still gets the cue; "
+            "`refit_output_budget_to_prompt` opts in to lowering that budget too. A prompt that leaves "
             "no output token keeps the refusal too. Turn it off to keep every length refusal."
+        ),
+    )
+    refit_output_budget_to_prompt: bool = Field(
+        default=False,
+        description=(
+            "Opt in to the same single resend for the other length refusal: the requested output budget fits the "
+            "context window by itself, but the prompt and that budget together overflow it. The call is sent once "
+            "more with the budget lowered to the window minus the prompt minus the same small margin, so the model "
+            "answers with what the window leaves instead of the call ending on an empty `length` completion once the "
+            "prompt passes the window minus the budget. The prompt length and the capture are those of "
+            "`refit_output_budget_to_window`, whose setting does not matter here. A prompt that alone fills the "
+            "window leaves no output token and keeps the `context_length_exceeded` refusal, as does any refusal that "
+            "names no window. Off by default: with it off a prompt and budget that overflow together always keep the "
+            "refusal, which is the cue a harness that compacts its history relies on. Enable it for a benchmark whose "
+            "agent does not compact and whose output budget is large against the window."
         ),
     )
 
@@ -622,6 +639,9 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # Total time limit for each HTTP attempt to the engine, not for the whole call; None means no limit.
     # A timed-out attempt is retried like any other transport error, so the call's attempt count is unchanged.
     request_timeout_seconds: Optional[PositiveFloat] = None
+    # Wall-clock cap on connection-error retries per model call, on every client including
+    # rebuilt endpoint clients. None waits without limit so a training run can ride out an engine restart.
+    endpoint_connection_retry_timeout_s: Optional[float] = Field(default=None, gt=0)
 
     # Expose the Gym session (one per rollout) as the backend's conversation id.
     # ``conversation_params`` is a TensorRT-LLM extension outside the OpenAI Chat Completions
@@ -813,15 +833,20 @@ class VLLMModel(SimpleResponsesAPIModel):
     ) -> bool:
         """Lower ``outbound``'s output budget, in place, to what the window the refusal names leaves after the prompt.
 
-        Returns whether the budget was lowered, in which case the caller sends ``outbound`` once more. Only a budget
-        that by itself exceeds the window is lowered, the refusal ``_length_refusal_category`` calls
-        ``invalid_output_token_parameter``. Nothing changes when the setting is off, when ``error`` is not a length
-        refusal naming the window, when the call has no budget, when the budget fits the window (prompt and budget
-        together overflowing stays a ``context_length_exceeded`` refusal, the cue for a harness to compact), or when
-        the window minus the prompt minus the margin leaves no output token. Calls admitted by an external capture worker are left alone: the worker has
-        settled the refused call, so a second send under the same call id is not this server's to make.
+        Returns whether the budget was lowered, in which case the caller sends ``outbound`` once more. A budget that by
+        itself exceeds the window, the refusal ``_length_refusal_category`` calls ``invalid_output_token_parameter``, is
+        lowered when ``refit_output_budget_to_window`` is on. A budget that fits the window while the prompt and the
+        budget together overflow it is lowered only when ``refit_output_budget_to_prompt`` is on; with it off the call
+        keeps the ``context_length_exceeded`` refusal, the cue for a harness to compact. Nothing changes when the
+        setting for the refusal's case is off, when ``error`` is not a length refusal naming the window, when the call
+        has no budget, when the window minus the prompt minus the margin leaves no output token (a prompt that alone
+        fills the window), or when the lowered budget would not be lower. Calls admitted by an external capture worker
+        are left alone: the worker has settled the refused call, so a second send under the same call id is not this
+        server's to make.
         """
-        if not self.config.refit_output_budget_to_window or not _is_context_length_error(error):
+        if not (
+            self.config.refit_output_budget_to_window or self.config.refit_output_budget_to_prompt
+        ) or not _is_context_length_error(error):
             return False
         context = current_capture_context()
         if context is not None and context.external_staging:
@@ -830,7 +855,13 @@ class VLLMModel(SimpleResponsesAPIModel):
         budget = None if key is None else outbound[key]
         message, _, _ = context_overflow_error_fields(error)
         window = _CONTEXT_WINDOW_SIZE.search(message)
-        if type(budget) is not int or window is None or budget <= int(window.group(1)):
+        if type(budget) is not int or window is None:
+            return False
+        if not (
+            self.config.refit_output_budget_to_window
+            if budget > int(window.group(1))
+            else self.config.refit_output_budget_to_prompt
+        ):
             return False
         prompt_tokens = _stated_prompt_tokens(message)
         if prompt_tokens is None:
@@ -838,7 +869,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             if prompt_tokens is None:
                 return False
         applied = int(window.group(1)) - prompt_tokens - _REFIT_MARGIN_TOKENS
-        if applied < 1:
+        if applied < 1 or applied >= budget:
             return False
         outbound[key] = applied
         execution.update(
@@ -979,6 +1010,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 max_rate_limit_wait_seconds=0,
                 max_http_attempts=self.config.max_http_attempts,
                 max_num_tries=self.config.max_num_tries,
+                connection_retry_timeout_s=self.config.endpoint_connection_retry_timeout_s,
             )
             for base_url in self.config.base_url
         ]
@@ -2465,6 +2497,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 max_http_attempts=self.config.max_http_attempts,
                 max_num_tries=self.config.max_num_tries,
                 request_timeout_seconds=self.config.request_timeout_seconds,
+                connection_retry_timeout_s=self.config.endpoint_connection_retry_timeout_s,
             )
         ]
         # Every session re-resolves onto the new host.
@@ -2494,10 +2527,11 @@ class VLLMModel(SimpleResponsesAPIModel):
 
     def _resolve_client(self, request: Request) -> NeMoGymAsyncOpenAI:
         self._maybe_rebind_endpoint()
-        # Route by rollout when the call carries one: agents that drop cookies get a new
+        # Route by session when the call carries a rollout: agents that drop cookies get a new
         # session per call, which scatters a rollout's turns and lets the slowest endpoint
-        # collect them. Keying on the rollout keeps its turns on one endpoint.
-        session_id = current_rollout_id() or request.session[SESSION_ID_KEY]
+        # collect them. Keying on the session keeps its turns on one endpoint. This is the same key
+        # the outbound session header carries, so an upstream router and this server agree.
+        session_id = current_session_key() or request.session[SESSION_ID_KEY]
         client = self._session_id_to_client.get(session_id)
         if self.config.route_around_failing_endpoints:
             hashed = self._hashed_client(session_id)
