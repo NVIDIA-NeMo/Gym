@@ -19,6 +19,7 @@ from nemo_gym.config import AggregateMetricsRequest
 from nemo_gym.config.secret_utils import recursively_hide_secrets
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, maybe_rollout_id_from_run_body
 from nemo_gym.models import CaptureStore
+from nemo_gym.orchestration import jobs
 from nemo_gym.rollouts import rollout_collection, run_health_checks
 from nemo_gym.rollouts.harness_capabilities import EvidenceScope, inspect_record
 from nemo_gym.utils import materialized_path_for
@@ -45,6 +46,7 @@ from responses_api_agents.simple_agent.tests.test_app import _make_agent, _mock_
 def test_adaptive_capture_selected_parameters_and_resume(
     tmp_path, monkeypatch, complete_stage, fail_last_dispatch, interrupted, fresh_resume, multiple, reasoning_effort
 ):
+    monkeypatch.setattr(jobs, "installed_gym_commit", lambda: "runtime-revision")
     create(tmp_path / "data", examples=interrupted or multiple)
     dataset = core.Dataset(tmp_path / "data", synthetic=True)
     prepared = tmp_path / "prepared.jsonl"
@@ -463,6 +465,8 @@ def test_adaptive_capture_selected_parameters_and_resume(
         assert not [finding for finding in findings if finding["assertion"].startswith(("steps.", "ownership."))]
     before = {path: core.digest(path) for path in [*store.root.glob("*"), *verifier.receipt_dir.rglob("*.json")]}
     config.resume_from_cache = True
+    # Another component's generated output must not invalidate a completed run.
+    monkeypatch.setattr(jobs, "installed_gym_commit", lambda: "runtime-revision-dirty")
     asyncio.run(rollout_driver.run_rollout_collection(config, settings))
     assert inventory_path.read_bytes() == inventory_bytes
     assert len(calls) == last_stage + 1 and len(judge_calls) == int(complete_stage is not None)
@@ -470,6 +474,19 @@ def test_adaptive_capture_selected_parameters_and_resume(
     assert all(core.digest(path) == digest for path, digest in before.items())
     assert core.read(tmp_path / "out.jsonl").get("response") == record.get("response")
     artifacts = {path: path.read_bytes() for path in artifacts}
+    original_digest = core.digest
+    with monkeypatch.context() as context:
+        context.setattr(
+            core,
+            "digest",
+            lambda path: "changed-source"
+            if path.as_posix().endswith("simple_agent/app.py")
+            else original_digest(path),
+        )
+        with pytest.raises(ValueError, match="fingerprint mismatch"):
+            asyncio.run(rollout_driver.run_rollout_collection(config, settings))
+    assert all(path.read_bytes() == saved for path, saved in artifacts.items())
+    assert len(calls) == last_stage + 1 and len(judge_calls) == int(complete_stage is not None)
     model_settings = settings["policy_model"]["responses_api_models"]["agentic_if_text"]
     model_settings["reasoning_effort"] = "max" if reasoning_effort is None else None
     with pytest.raises(ValueError, match="fingerprint mismatch"):
@@ -520,9 +537,17 @@ def test_adaptive_capture_selected_parameters_and_resume(
         assert len(calls) == last_stage + 1 and len(judge_calls) == 1
 
 
-def test_runtime_fingerprint_covers_active_agent_and_core(monkeypatch):
-    from nemo_gym.orchestration import jobs
+@pytest.mark.parametrize("revision", [None, "runtime-revision", "runtime-revision-dirty"])
+def test_runtime_fingerprint_normalizes_only_checkout_dirtiness(monkeypatch, revision):
+    monkeypatch.setattr(jobs, "installed_gym_commit", lambda: revision)
+    before = core.runtime_identity()
+    assert before["gym_commit"] == ("runtime-revision" if revision is not None else None)
+    monkeypatch.setattr(jobs, "installed_gym_commit", lambda: "different-revision-dirty")
+    assert core.runtime_identity() != before
 
+
+@pytest.mark.parametrize("source", ["simple_agent/app.py", "nemo_gym/rollouts/rollout_collection.py"])
+def test_runtime_fingerprint_covers_active_agent_and_core(monkeypatch, source):
     monkeypatch.setattr(jobs, "installed_gym_commit", lambda: "runtime-revision")
     before = core.runtime_identity()
     assert before["gym_commit"] == "runtime-revision"
@@ -534,6 +559,6 @@ def test_runtime_fingerprint_covers_active_agent_and_core(monkeypatch):
     monkeypatch.setattr(
         core,
         "digest",
-        lambda path: "modified-agent" if path.as_posix().endswith("simple_agent/app.py") else digest(path),
+        lambda path: "modified-source" if path.as_posix().endswith(source) else digest(path),
     )
     assert core.runtime_identity() != before

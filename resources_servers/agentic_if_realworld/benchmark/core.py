@@ -429,10 +429,15 @@ def runtime_identity() -> dict:
         for p in (component_root / boundary).rglob("*.py"):
             if ".venv" not in p.parts:
                 sources["gym/" + str(p.relative_to(component_root))] = digest(p)
+    # Workspace outputs can toggle Git's checkout-wide dirty flag between calls.
+    # Source hashes above, not that flag, detect edits to the code used by a run.
+    gym_commit = installed_gym_commit()
+    if gym_commit is not None:
+        gym_commit = gym_commit.removesuffix("-dirty")
     return {
         "python": sys.version,
         "dependencies": versions,
         "sources": sources,
-        "gym_commit": installed_gym_commit(),
+        "gym_commit": gym_commit,
         "source_gym_commit": read(ROOT / "source_manifest.json")["gym_commit"],
     }

@@ -117,8 +117,12 @@ resume preserves the saved output and reports. Use a new run directory for chang
 settings. Historical grades and recovery waves
 remain historical; this adaptive protocol does not reproduce them.
 The runtime identity records the running Gym revision and hashes its agent/core
-source separately from the historical source pin. Older journals are rejected
-after this recovery fix; start a new run directory rather than migrating them.
+source separately from the historical source pin. It ignores the checkout-wide
+`-dirty` suffix: generated outputs outside the hashed Python sources must not
+invalidate resume. Source-byte, revision, dependency and configuration changes
+still reject resume. Older journals that recorded a `-dirty` revision are not
+compatible with this normalization; start a new run directory rather than
+migrating them. Older journals from before the recovery fix are also rejected.
 Each delivery attempt has its own Gym capture identity. The main rollout retains
 the selected attempt's actual request settings and trajectory; all earlier
 attempts remain in the private journal and capture sidecars.
