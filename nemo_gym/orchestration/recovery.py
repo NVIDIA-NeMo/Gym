@@ -84,7 +84,6 @@ from nemo_gym.core.failure_kinds import (
     MODEL_POLICY_RESPONSE_TIMEOUT,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
-    PROVIDER_CREDENTIALS_REJECTED,
     PROVIDER_QUOTA_EXHAUSTED,
     ROLLOUT_ALLOCATION_ENDED,
     SERVER_START_FAILED,
@@ -746,7 +745,6 @@ def _now() -> float:
 def _judge_state(
     row: Mapping[str, Any], policy: "RecoveryOutcomePolicyConfig", *, fallback_kind: str = JUDGE_FAILED
 ) -> "IdentityState":
-
     """A judge failure's treatment: verify re-judges the saved answer only (none saved: stop), fail leaves it
     ungraded; any other action would run the policy again, so it stops."""
     if row.get(TERMINAL) is True or row.get("failure_outcome_action") == OutcomeAction.FAIL:
