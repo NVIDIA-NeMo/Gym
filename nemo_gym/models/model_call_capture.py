@@ -50,6 +50,7 @@ from nemo_gym.models._checkpoint import (
 from nemo_gym.models.responses_streaming import (
     is_responses_lifecycle_chunk,
 )
+from nemo_gym.models.token_capture import capture_metrics
 from nemo_gym.models.token_capture.config import token_capture_config
 from nemo_gym.models.token_capture.control_routes import install_rollout_control_routes
 from nemo_gym.models.token_capture.lineage import FileLineageStore, InMemoryLineageStore
@@ -61,7 +62,7 @@ from nemo_gym.models.token_capture.protocols import (
     installed_token_sink,
 )
 from nemo_gym.models.token_capture.records import UNCOMMITTED_CALL_REASON
-from nemo_gym.models.token_capture.sink import CaptureContext, reset_token_sink, set_token_sink
+from nemo_gym.models.token_capture.sink import CaptureContext, record_ledger_failure, reset_token_sink, set_token_sink
 from nemo_gym.models.token_capture.store import make_token_store
 from nemo_gym.server_runtime.request_handling.rollout_context import scope_with_routed_path
 
@@ -738,7 +739,7 @@ async def _fail_uncommitted_external_call(context: CaptureContext | None) -> Non
     try:
         # A disconnected caller must not cancel the write before it reaches the ledger.
         await asyncio.shield(
-            ledger.record_failure(context.capture_key, context.model_call_id, UNCOMMITTED_CALL_REASON)
+            record_ledger_failure(ledger, context.capture_key, context.model_call_id, UNCOMMITTED_CALL_REASON)
         )
     except Exception:
         logger.exception(
@@ -860,6 +861,7 @@ class _CaptureMiddleware:
                 marked_incomplete = True
                 try:
                     await token_sink.mark_incomplete(rollout_from_path, "")
+                    capture_metrics.count("marked_incomplete", "unclassified_request")
                     logger.warning(
                         f"Marked rollout {rollout_from_path} incomplete because unclassified model request "
                         f"{method} {path} {reason}. Declare the exact request on the model server only if its "

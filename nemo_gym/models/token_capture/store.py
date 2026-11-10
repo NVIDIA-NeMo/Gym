@@ -42,6 +42,7 @@ from uuid import uuid4
 
 import orjson
 
+from nemo_gym.models.token_capture import capture_metrics
 from nemo_gym.models.token_capture.protocols import (
     RolloutRemovalPayload,
     TokenCaptureFrozenError,
@@ -100,9 +101,15 @@ class TokenCaptureStore:
         return self._root / f"{validate_rollout_id(rollout_id)}.tokens.lock"
 
     @contextmanager
-    def _locked(self, rollout_id: str, *, shared: bool = False):
+    def _locked(self, rollout_id: str, *, shared: bool = False, waiter: object | None = None):
+        # ``waiter`` labels the lock-wait metric with the store that waited, such as a ledger sharing this lock.
         with self.lock_path_for(rollout_id).open("a+b") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
+            # Uncontended acquisitions take microseconds; only real waits are worth a histogram sample.
+            with capture_metrics.timed(
+                "file_lock.wait", component=waiter if waiter is not None else self, threshold_ms=0.1
+            ):
+                fcntl.flock(handle.fileno(), fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
+            capture_metrics.count("lock_acquired", "shared" if shared else "exclusive")
             try:
                 yield
             finally:
@@ -251,6 +258,10 @@ class TokenCaptureStore:
 
     def append(self, entry: TokenEntry) -> None:
         """Idempotently append one entry and fsync."""
+        with capture_metrics.timed("sink.put.in_thread", component=self, tokens=entry.cum_len):
+            self._append(entry)
+
+    def _append(self, entry: TokenEntry) -> None:
         canonical = orjson.dumps(entry.model_dump(mode="json"), option=orjson.OPT_SORT_KEYS)
         line = canonical + b"\n"
         digest = self._entry_digest(canonical)
@@ -426,23 +437,29 @@ class TokenCaptureStore:
 
     async def drop(self, rollout_id: str, *, snapshot_id: str, version: int) -> bool:
         """Delete snapshot payloads while retaining its fence."""
+        return (await self.drop_with_reason(rollout_id, snapshot_id=snapshot_id, version=version))[0]
+
+    async def drop_with_reason(self, rollout_id: str, *, snapshot_id: str, version: int) -> tuple[bool, str]:
+        """``drop``, also saying why it refused: ``not_frozen`` or ``stale_snapshot``.
+
+        Retirement after delivery calls this when it exists, and ``drop`` delegates to it, so a subclass that
+        overrides ``drop`` must override this too.
+        """
         return await asyncio.to_thread(self._drop, rollout_id, snapshot_id, version)
 
-    def _drop(self, rollout_id: str, snapshot_id: str, version: int) -> bool:
+    def _drop(self, rollout_id: str, snapshot_id: str, version: int) -> tuple[bool, str]:
         with self._locked(rollout_id):
             state = self._read_state(rollout_id)
-            if (
-                not state.get("frozen", False)
-                or state.get("snapshot_id") != snapshot_id
-                or int(state.get("version", 0)) != version
-            ):
-                return False
+            if not state.get("frozen", False):
+                return False, "not_frozen"
+            if state.get("snapshot_id") != snapshot_id or int(state.get("version", 0)) != version:
+                return False, "stale_snapshot"
             # The same two phases as ``retire_now``: a durable fence first, then the records.
             self._write_fence_unlocked(rollout_id, state)
             self._fsync_root()
             self._remove_record_files(rollout_id)
             self._fsync_root()
-            return True
+            return True, ""
 
     def _write_fence_unlocked(self, rollout_id: str, state: dict[str, Any]) -> None:
         # The fence stays until ``delete``: a late writer from this attempt must still observe it. It is written,

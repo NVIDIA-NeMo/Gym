@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from nemo_gym.models.token_capture import capture_metrics
 from nemo_gym.models.token_capture.staging.digest import (
     build_staging_delta,
     compute_chain_hash,
@@ -245,15 +246,19 @@ class RolloutTokenCapture:
         """
         admission = call.admission
         try:
-            record = self.build_prefix_record(
-                call,
-                prompt_token_ids=prompt_token_ids,
-                generated_token_ids=generated_token_ids,
-                generated_logprobs=generated_logprobs,
-                extras=extras,
-            )
+            # The private builder: the public one times checkpoint cuts, and this call is timed as staging.
+            with capture_metrics.timed("staging.build_record") as timer:
+                record = self._build_prefix_record(
+                    call,
+                    prompt_token_ids=prompt_token_ids,
+                    generated_token_ids=generated_token_ids,
+                    generated_logprobs=generated_logprobs,
+                    extras=extras,
+                )
+                timer.tokens = record.cum_len
         except (TypeError, ValueError, OverflowError):
             self._claim_completion(call)
+            capture_metrics.count("capture_failed", "build")
             LOGGER.exception(
                 "token capture could not build rollout %s call %s",
                 call.capture_key,
@@ -271,16 +276,18 @@ class RolloutTokenCapture:
             # is passed exactly when the caller supplied attachments so such a
             # sink fails loudly (TypeError -> capture_failed) instead of having
             # its attachments silently dropped by a retry without them.
-            if attachments is None:
-                result = self._sink.stage(record)
-            else:
-                result = self._sink.stage(record, attachments=attachments)
+            with capture_metrics.timed("staging_sink.stage", component=self._sink, tokens=record.cum_len):
+                if attachments is None:
+                    result = self._sink.stage(record)
+                else:
+                    result = self._sink.stage(record, attachments=attachments)
             if not isinstance(result, StageResult):
                 raise TypeError(f"StagingSink.stage returned {type(result).__name__}, expected StageResult")
         except Exception:
             # The sink is framework code outside Gym's exception hierarchy.
             # This deliberately broad boundary keeps capture failure from
             # failing the model completion.
+            capture_metrics.count("capture_failed", "staging_sink_error")
             LOGGER.exception(
                 "token staging failed for rollout %s call %s",
                 admission.capture_key,
@@ -288,6 +295,7 @@ class RolloutTokenCapture:
             )
             return self._failed_coords(call)
         if not result.ok:
+            capture_metrics.count("capture_failed", "staging_sink_rejected")
             LOGGER.warning(
                 "token staging sink rejected rollout %s call %s: %s",
                 admission.capture_key,
@@ -324,7 +332,28 @@ class RolloutTokenCapture:
 
         A checkpoint backend uses this to persist a cut while the same physical request remains live.
         Unlike :meth:`complete_call`, this method neither claims nor mutates the call's single-completion state.
+        It is timed as the ``cut.build_prefix_record`` capture operation.
         """
+        with capture_metrics.timed("cut.build_prefix_record") as timer:
+            record = self._build_prefix_record(
+                call,
+                prompt_token_ids=prompt_token_ids,
+                generated_token_ids=generated_token_ids,
+                generated_logprobs=generated_logprobs,
+                extras=extras,
+            )
+            timer.tokens = record.cum_len
+        return record
+
+    def _build_prefix_record(
+        self,
+        call: ActiveCall,
+        *,
+        prompt_token_ids: list[int],
+        generated_token_ids: list[int],
+        generated_logprobs: list[float],
+        extras: dict[str, Any] | None = None,
+    ) -> StagedCallRecord:
         admission = call.admission
         if admission.mode == "token_in" and prompt_token_ids[: admission.prev_len] != call.prefix_token_ids:
             raise ValueError("generation prompt does not begin with the gate-authorized token prefix")
@@ -381,7 +410,25 @@ class RolloutTokenCapture:
         generated_logprobs: list[float],
         extras: dict[str, Any] | None = None,
     ) -> StagedCallRecord:
-        """Build one independently validated generated-token-only cut chunk."""
+        """Build one independently validated generated-token-only cut chunk.
+
+        It is timed as the ``cut.build_chunk_record`` capture operation.
+        """
+        with capture_metrics.timed("cut.build_chunk_record") as timer:
+            record = self._build_generation_chunk_record(
+                call, generated_token_ids=generated_token_ids, generated_logprobs=generated_logprobs, extras=extras
+            )
+            timer.tokens = record.cum_len
+        return record
+
+    def _build_generation_chunk_record(
+        self,
+        call: ActiveCall,
+        *,
+        generated_token_ids: list[int],
+        generated_logprobs: list[float],
+        extras: dict[str, Any] | None = None,
+    ) -> StagedCallRecord:
         if not generated_token_ids:
             raise ValueError("generation chunk must contain at least one token")
         if len(generated_token_ids) != len(generated_logprobs):

@@ -36,6 +36,7 @@ from __future__ import annotations
 import warnings
 
 from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
+from nemo_gym.models.token_capture import capture_metrics
 from nemo_gym.models.token_capture.consumer import trajectories_from_source
 from nemo_gym.models.token_capture.protocols import TokenSource
 from nemo_gym.models.token_capture.records import apply_capture_incomplete_verdict
@@ -141,7 +142,8 @@ async def finalize_rollout_token_capture(
         if rollout_id is None:
             return None
         try:
-            snapshot = await source.freeze(rollout_id)
+            with capture_metrics.timed("source.freeze", component=source):
+                snapshot = await source.freeze(rollout_id)
         except Exception:
             warnings.warn(f"could not freeze redundant records for rollout {rollout_id}.", stacklevel=2)
             return None
@@ -247,15 +249,25 @@ async def retire_rollout_token_capture(
     if not isinstance(snapshot, dict):
         warnings.warn(f"rollout {rollout_id} has no frozen capture identity to retire.", stacklevel=2)
         return False
+    snapshot_id, version = str(snapshot["snapshot_id"]), int(snapshot["version"])
+    # Optional extension: a source that says why it refused gets that reason on the metric.
+    drop_with_reason = getattr(source, "drop_with_reason", None)
     try:
-        return await source.drop(
-            rollout_id,
-            snapshot_id=str(snapshot["snapshot_id"]),
-            version=int(snapshot["version"]),
-        )
+        with capture_metrics.timed("source.drop", component=source):
+            if drop_with_reason is None:
+                retired, refusal = await source.drop(rollout_id, snapshot_id=snapshot_id, version=version), ""
+            else:
+                retired, refusal = await drop_with_reason(rollout_id, snapshot_id=snapshot_id, version=version)
     except Exception:
         warnings.warn(f"could not retire the records for rollout {rollout_id}.", stacklevel=2)
         return False
+    if not retired:
+        capture_metrics.count("retire_skipped", capture_metrics.bounded_reason(refusal, _DROP_REFUSAL_REASONS))
+    return retired
+
+
+# Reasons ``drop_with_reason`` gives; anything else a source reports is counted as ``other``.
+_DROP_REFUSAL_REASONS = frozenset({"stale_snapshot", "not_frozen"})
 
 
 def capture_build_can_retire(built: dict | None) -> bool:

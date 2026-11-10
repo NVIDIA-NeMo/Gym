@@ -51,6 +51,7 @@ from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX
 from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.core.responses_api_types import SSE_KEEPALIVE
 from nemo_gym.models.responses_streaming import is_responses_lifecycle_chunk
+from nemo_gym.models.token_capture import capture_metrics
 from nemo_gym.models.token_capture.config import token_capture_enabled_for_agent
 from nemo_gym.models.token_capture.external_capture import publish_deferred_commit
 from nemo_gym.models.token_capture.fingerprint import conversation_digest
@@ -695,7 +696,8 @@ async def retire_ledgers(ledger: Optional[CheckpointableLedger], episode_ids: It
         for attempt in range(episode_id.attempt + 1)
     ]
     if ledger is not None and keys:
-        await ledger.retire(keys)
+        with capture_metrics.timed("ledger.retire", component=ledger):
+            await ledger.retire(keys)
 
 
 def ledger_removal_refusal(app: Any) -> Optional[str]:
