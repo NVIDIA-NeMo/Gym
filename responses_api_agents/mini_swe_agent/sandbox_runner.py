@@ -89,7 +89,8 @@ def start_mcp(cli: Path, *, required: list[str], log: Path) -> tuple[Any, dict, 
     unavailable = [{"server": name, "error": entry["error"]} for name, entry in listing.items() if "error" in entry]
     missing = sorted(name for name in required if "error" in listing.get(name, {"error": "absent"}))
     if missing:
-        raise MCPUnavailable("Required MCP servers did not connect: " + ", ".join(missing))
+        reasons = (f"{name} ({str(listing.get(name, {}).get('error', 'absent'))[:500]})" for name in missing)
+        raise MCPUnavailable("Required MCP servers did not connect: " + "; ".join(reasons))
     tools = {name: entry["tools"] for name, entry in listing.items() if "tools" in entry}
     return process, tools, unavailable
 
@@ -141,6 +142,10 @@ def run(payload: dict[str, Any], session_dir: Path, output_path: Path) -> int:
         exit_code = MCP_UNAVAILABLE_EXIT
     except BaseException as error:
         output["error"] = {"type": type(error).__name__, "message": str(error), "traceback": traceback.format_exc()}
+        # LiteLLM's exception class does not say the HTTP status (a 403 and a 413 are both APIError); its attribute does.
+        status_code = getattr(error, "status_code", None)
+        if type(status_code) is int:
+            output["error"]["status_code"] = status_code
         exit_code = 1
     finally:
         signal.signal(signal.SIGTERM, signal.SIG_IGN)

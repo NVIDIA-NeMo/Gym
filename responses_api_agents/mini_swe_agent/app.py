@@ -122,6 +122,10 @@ MODEL_ERROR_STATUS_CODES = {
     "ServiceUnavailableError": 503,
 }
 MODEL_TRANSPORT_EXIT_STATUSES = frozenset({"APIConnectionError", "Timeout", "APIError"})
+# LiteLLM exceptions that end a model call with no HTTP answer, whatever status attribute they carry.
+MODEL_NO_ANSWER_EXIT_STATUSES = frozenset({"APIConnectionError", "Timeout"})
+# Set by Gym's vLLM Model Server on the empty reply it returns for a prompt over the context window.
+CONTEXT_WINDOW_EXCEEDED_METADATA_KEY = "nemo_gym_context_window_exceeded"
 # The sandbox runner's own exit statuses (see sandbox_runner.py).
 RUNNER_MCP_UNAVAILABLE_EXIT = 3
 
@@ -237,6 +241,10 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
         exit_status = native_result.get("exit_status")
         if _context_overflow(exit_status, str(native_result.get("error") or "")):
             return AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT)
+        status = native_result.get("status_code")
+        if exit_status not in MODEL_NO_ANSWER_EXIT_STATUSES and type(status) is int and 400 <= status <= 599:
+            # The status of the HTTP answer that ended the run, from the LiteLLM exception that recorded it.
+            return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
         if exit_status in MODEL_ERROR_STATUS_CODES:
             return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=MODEL_ERROR_STATUS_CODES[exit_status])
         if exit_status in MODEL_TRANSPORT_EXIT_STATUSES:
@@ -451,6 +459,9 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             raise HTTPException(422, "mini-SWE request model must match the configured model")
         if body.stream:
             raise HTTPException(422, "mini-SWE agent sessions do not stream")
+        if body.tool_choice not in (None, "auto", "required"):
+            # The model is offered only mini-SWE's bash tool, so it can neither name another tool nor call none.
+            raise HTTPException(422, "mini-SWE accepts only tool_choice auto or required: its only tool is bash")
         if body.metadata and set(body.metadata) - {AGENT_TIMEOUT_METADATA_KEY}:
             raise HTTPException(422, f"mini-SWE accepts only {AGENT_TIMEOUT_METADATA_KEY} in the request metadata")
         for name, field in type(body).model_fields.items():
@@ -544,8 +555,26 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             )
         if state.runtime_info is None:
             gaps.append(ObservationGap(code="runtime_info_unavailable"))
+        if artifacts.mcp_calls_unread:
+            gaps.append(
+                ObservationGap(
+                    code="mcp_call_records_unavailable",
+                    invocation_id=invocation.invocation_id,
+                    detail="mcp_calls.jsonl was larger than the size Gym reads, so its MCP calls are not reported",
+                )
+            )
+        unavailable = ((artifacts.output or {}).get("mcp") or {}).get("unavailable") or []
+        if unavailable:
+            # Optional MCP servers that did not connect; the prompt left them out.
+            gaps.append(
+                ObservationGap(
+                    code="mcp_server_unavailable",
+                    invocation_id=invocation.invocation_id,
+                    detail=json.dumps(unavailable)[:2000],
+                )
+            )
         if artifacts.invalid_mcp_calls:
-            # Lines of mcp_calls.jsonl that are not a call record for one of the run's MCP servers; left out.
+            # Lines of mcp_calls.jsonl that are not a call record; left out.
             gaps.append(
                 ObservationGap(
                     code="mcp_call_record_invalid",
@@ -607,7 +636,20 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
         projection = project(artifacts.trajectory, artifacts.mcp_calls)
         if projection.invalid_response:
             raise RuntimeError("mini-SWE saved a model response that is not a valid Responses API object")
-        native_result = {"exit_status": exit_status, "error": error}
+        runner_error = output.get("error") if isinstance(output.get("error"), dict) else {}
+        native_result = {
+            "exit_status": exit_status,
+            "error": error,
+            # Only the exception that ended mini-SWE's loop, which it records as the exit status, says the status.
+            "status_code": runner_error.get("status_code") if runner_error.get("type") == exit_status else None,
+        }
+        # Gym's vLLM Model Server answers a prompt over the context window with an empty reply that it marks; mini-SWE
+        # rejects that reply for its format until it gives up.
+        context_limit = _context_overflow(exit_status, error) or (
+            exit_status in ("RepeatedFormatError", "FormatError")
+            and bool(projection.responses)
+            and (projection.responses[-1].metadata or {}).get(CONTEXT_WINDOW_EXCEEDED_METADATA_KEY) == "true"
+        )
         failed = False
         if timed_out and not projection.responses and not state.session.expired:
             # The supervisor proves the deadline, not whether a model request started or failed in transport.
@@ -619,8 +661,8 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             termination, status = "timeout", "incomplete"
         elif exit_status == "Submitted":
             termination, status = "completed", "completed"
-        elif _context_overflow(exit_status, error) or exit_status in LIMIT_EXIT_STATUSES:
-            termination, status = exit_status, "incomplete"
+        elif context_limit or exit_status in LIMIT_EXIT_STATUSES:
+            termination, status = "ContextWindowExceededError" if context_limit else exit_status, "incomplete"
         elif exit_status is None:
             # mini-SWE records an exit status whenever its loop ends, even on an exception, so a saved trajectory
             # without one means the run was stopped by close or killed mid-step: by the agent's own command, or by an
@@ -661,7 +703,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
         state.observations = self._observations(
             state, artifacts, stopped=stopped, status="failed" if failed else status
         )
-        if projection.usage is None and projection.responses:
+        if projection.usage is None and (projection.responses or projection.model_calls):
             state.observations.gaps.append(ObservationGap(code="usage_unavailable"))
         response = self.report_rollout_stop(response, state.session)
         return self.report_outcome(response, native_result)

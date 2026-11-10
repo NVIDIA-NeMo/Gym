@@ -192,7 +192,11 @@ def test_a_required_mcp_server_that_did_not_connect_stops_the_run_before_any_mod
     assert sandbox_runner.run(payload(tmp_path, mcp=mcp), tmp_path, tmp_path / "output.json") == 3
     assert built == []
     error = json.loads((tmp_path / "output.json").read_text())["error"]
-    assert error == {"type": "mcp_unavailable", "message": "Required MCP servers did not connect: task_tools"}
+    # The reason each required server did not connect stays in the failure.
+    assert error == {
+        "type": "mcp_unavailable",
+        "message": "Required MCP servers did not connect: task_tools (ConnectError: refused)",
+    }
 
 
 def test_an_mcp_server_process_that_exits_before_it_is_ready_stops_the_run(tmp_path, monkeypatch) -> None:
@@ -449,3 +453,18 @@ def test_a_background_process_holding_stdout_open_does_not_hang_the_run(tmp_path
     first = next(m for m in trajectory["messages"] if m.get("type") == "function_call_output")
     # mini-SWE kills the command's process group at the command timeout, background job included.
     assert first["extra"]["exception_type"] == "TimeoutExpired"
+
+
+def test_a_model_failure_records_the_http_status_of_its_answer(tmp_path, monkeypatch) -> None:
+    class APIError(Exception):
+        # LiteLLM 1.106.0 raises APIError for a 402, 403, 409, 413 or 425 answer, with the status on the exception.
+        status_code = 403
+
+    def fail():
+        raise APIError("forbidden")
+
+    monkeypatch.setattr(sandbox_runner, "build_agent", lambda payload, attribute_calls: FakeAgent(fail))
+
+    assert sandbox_runner.run(payload(tmp_path), tmp_path, tmp_path / "output.json") == 1
+    error = json.loads((tmp_path / "output.json").read_text())["error"]
+    assert (error["type"], error["status_code"]) == ("APIError", 403)

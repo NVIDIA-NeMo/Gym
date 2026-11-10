@@ -37,6 +37,10 @@ SESSION_ROOT = "/tmp/nemo-gym-mini-swe-sessions"
 TASK_CONTEXT_FILE = "/tmp/.nemo-gym/task.json"
 # Bounds the runner and MCP logs copied back to the agent server.
 LOG_TAIL_BYTES = 1024 * 1024
+# The MCP call records cross the provider and go into the response: a larger file is not read, and each call keeps at
+# most this much of its output (the model saw at most mini-SWE's 10,000-character view of it).
+MCP_CALLS_MAX_BYTES = 16 * 1024 * 1024
+MCP_CALL_OUTPUT_MAX_CHARS = 64 * 1024
 _RUNTIME_FILES = Path(__file__).with_name("runtime")
 
 
@@ -87,7 +91,7 @@ class MiniSWEArtifacts:
     ``trajectory`` is mini-SWE's native transcript, saved after every step; ``None`` when the run saved none.
     ``output`` is the runner's account of how the run ended; ``None`` when the runner was killed before writing it.
     ``invalid_mcp_calls`` counts the lines of ``mcp_calls.jsonl`` that are not a call record; they are left out of
-    ``mcp_calls``.
+    ``mcp_calls``. ``mcp_calls_unread`` is set when the file was larger than ``MCP_CALLS_MAX_BYTES`` and not read.
     """
 
     trajectory: dict[str, JsonValue] | None
@@ -95,6 +99,7 @@ class MiniSWEArtifacts:
     mcp_calls: list[dict[str, JsonValue]]
     log: str
     invalid_mcp_calls: int = 0
+    mcp_calls_unread: bool = False
 
 
 @dataclass
@@ -198,7 +203,7 @@ class MiniSWESession(AgentSessionState):
         output = await self._read_json(f"{directory}/output.json")
         if output is not None:
             self.runtime_info = parse_runtime_info(output.get("runtime"))
-        mcp_calls, invalid_mcp_calls = await self._read_mcp_calls(f"{directory}/mcp_calls.jsonl")
+        mcp_calls, invalid_mcp_calls, mcp_calls_unread = await self._read_mcp_calls(f"{directory}/mcp_calls.jsonl")
         logs = []
         # Trimmed in the sandbox: a long run's output need not cross the provider.
         for name in (OUTPUT_LOG_FILE, "mcp.log"):
@@ -213,17 +218,21 @@ class MiniSWESession(AgentSessionState):
             mcp_calls=mcp_calls,
             log="\n".join(logs),
             invalid_mcp_calls=invalid_mcp_calls,
+            mcp_calls_unread=mcp_calls_unread,
         )
 
-    async def _read_mcp_calls(self, path: str) -> tuple[list[dict[str, JsonValue]], int]:
-        """The MCP call records, and how many lines were not one.
+    async def _read_mcp_calls(self, path: str) -> tuple[list[dict[str, JsonValue]], int, bool]:
+        """The MCP call records, how many lines were not one, and whether the file was too large to read.
 
         The model's commands run as the user that appends to the file, so a line can be partial, malformed or written
         by the model itself. A run without MCP servers made no calls, and its file is not read. A call to a server the
         run was not granted is kept: the CLI records it as a failed call.
         """
         if not self.mcp_servers:
-            return [], 0
+            return [], 0, False
+        size = await self.session.sandbox.exec(f"wc -c < {quote(path)} 2>/dev/null || true", cwd="/", timeout_s=30)
+        if (size.stdout or "").strip().isdigit() and int(size.stdout) > MCP_CALLS_MAX_BYTES:
+            return [], 0, True
         calls: list[dict[str, JsonValue]] = []
         invalid = 0
         for line in (await self._read_optional(path) or "").split("\n"):
@@ -241,10 +250,15 @@ class MiniSWESession(AgentSessionState):
                 and isinstance(call.get("output"), str)
                 and isinstance(call.get("tool_call_id"), str | None)
             ):
+                if len(call["output"]) > MCP_CALL_OUTPUT_MAX_CHARS:
+                    omitted = len(call["output"]) - MCP_CALL_OUTPUT_MAX_CHARS
+                    call["output"] = (
+                        f"{call['output'][:MCP_CALL_OUTPUT_MAX_CHARS]}\n[{omitted} characters omitted by NeMo Gym]"
+                    )
                 calls.append(call)
             else:
                 invalid += 1
-        return calls, invalid
+        return calls, invalid, False
 
     async def _read_optional(self, path: str) -> str | None:
         exists = await self.session.sandbox.exec(f"test -f {quote(path)}", cwd="/", timeout_s=30)

@@ -378,3 +378,33 @@ async def test_mcp_jsonl_preserves_unicode_record_content(state, monkeypatch, se
 
     assert artifacts.mcp_calls == [record]
     assert artifacts.invalid_mcp_calls == 0
+
+
+async def test_an_mcp_record_file_too_large_to_read_is_reported_as_unread(state, monkeypatch) -> None:
+    state.mcp_servers = [{"name": "task_tools"}]
+    read = AsyncMock()
+
+    async def exec_(command, **kwargs):
+        if command.startswith("wc -c"):
+            return result(stdout=f"{sandbox_module.MCP_CALLS_MAX_BYTES + 1}\n")
+        return result(return_code=1 if command.startswith("test -f ") else 0)
+
+    state.session.sandbox.exec = AsyncMock(side_effect=exec_)
+    monkeypatch.setattr(sandbox_module, "read_text", read)
+
+    assert await state._read_mcp_calls(f"{state.session.session_dir}/mcp_calls.jsonl") == ([], 0, True)
+    read.assert_not_awaited()
+
+
+async def test_an_mcp_call_keeps_a_bounded_output(state, monkeypatch) -> None:
+    state.mcp_servers = [{"name": "task_tools"}]
+    record = json.loads(mcp_record())
+    record["output"] = "x" * (sandbox_module.MCP_CALL_OUTPUT_MAX_CHARS + 10)
+    stage_mcp_calls(state, monkeypatch, [json.dumps(record)])
+
+    artifacts = await state.collect()
+
+    [call] = artifacts.mcp_calls
+    assert call["output"].startswith("x" * sandbox_module.MCP_CALL_OUTPUT_MAX_CHARS)
+    assert call["output"].endswith("[10 characters omitted by NeMo Gym]")
+    assert not artifacts.mcp_calls_unread

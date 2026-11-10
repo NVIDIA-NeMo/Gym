@@ -1079,3 +1079,102 @@ def test_invalid_owned_sandbox_spec_is_refused_before_provider_allocation(agent,
     create.assert_not_called()
     sandbox.box.start.assert_not_awaited()
     assert not agent._session_records
+
+
+@pytest.mark.parametrize(
+    ("exit_status", "status_code", "failure_kind"),
+    [
+        # LiteLLM 1.106.0 maps these answers to classes whose names do not say the status.
+        ("APIError", 403, "model_request_error"),
+        ("APIError", 413, "model_request_error"),
+        ("BadRequestError", 422, "model_request_error"),
+        ("ContentPolicyViolationError", 400, "model_request_error"),
+        # No answer came; a Timeout carries a status attribute of its own.
+        ("Timeout", 408, "model_transport_error"),
+    ],
+)
+async def test_a_model_failure_is_typed_from_the_status_of_its_answer(agent, exit_status, status_code, failure_kind):
+    trajectory = native_trajectory()
+    trajectory["info"]["exit_status"] = exit_status
+    trajectory["messages"][-1] = {"role": "exit", "content": "", "extra": {"exit_status": exit_status}}
+    state = state_for(agent)
+    output = {
+        "runtime": {"hostname": "box", "pid": 7, "python": "/py"},
+        "error": {"type": exit_status, "message": "refused", "status_code": status_code},
+    }
+    finish_run(state, trajectory=trajectory, return_code=1, output=output)
+
+    response = await agent._activate(state, body())
+
+    assert response.status == "failed"
+    outcome = json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY])
+    expected = {"failure_kind": failure_kind}
+    if failure_kind == "model_request_error":
+        expected["status_code"] = status_code
+    assert outcome == expected
+
+
+async def test_the_vllm_context_window_reply_ends_the_run_incomplete(agent) -> None:
+    trajectory = native_trajectory()
+    trajectory["info"]["exit_status"] = "RepeatedFormatError"
+    # Gym's vLLM Model Server answered the overflowing prompt with an empty reply that it marked; mini-SWE rejected it.
+    rejected = model_response("resp_overflow")
+    rejected["output"] = []
+    rejected["metadata"] = {"nemo_gym_context_window_exceeded": "true"}
+    trajectory["messages"][-1] = {
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": "format error"}],
+        "extra": {"interrupt_type": "FormatError", "response": rejected},
+    }
+    trajectory["messages"].append(
+        {"role": "exit", "content": "", "extra": {"exit_status": "RepeatedFormatError", "exception_str": ""}}
+    )
+    state = state_for(agent)
+    finish_run(state, trajectory=trajectory)
+
+    response = await agent._activate(state, body())
+
+    assert response.status == "incomplete"
+    assert response.metadata["mini_swe_termination"] == "ContextWindowExceededError"
+    assert AGENT_OUTCOME_METADATA_KEY not in response.metadata
+
+
+@pytest.mark.parametrize("tool_choice", [{"type": "function", "name": "get_weather"}, "none"])
+def test_a_tool_choice_the_bash_tool_cannot_serve_is_refused(agent, tool_choice) -> None:
+    with pytest.raises(HTTPException) as refused:
+        agent._validate_request(body(tool_choice=tool_choice))
+    assert refused.value.status_code == 422
+    agent._validate_request(body(tool_choice="required"))
+
+
+async def test_a_model_call_that_saved_no_response_leaves_usage_unknown_with_a_gap(agent) -> None:
+    trajectory = {
+        "info": {"exit_status": "RateLimitError", "model_stats": {"api_calls": 1}},
+        "messages": [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Please solve this issue: fix it"},
+            {"role": "exit", "content": "", "extra": {"exit_status": "RateLimitError", "exception_str": "429"}},
+        ],
+    }
+    state = state_for(agent)
+    finish_run(state, trajectory=trajectory, return_code=1)
+
+    response = await agent._activate(state, body())
+
+    assert (response.status, response.usage) == ("failed", None)
+    assert "usage_unavailable" in [gap.code for gap in state.observations.gaps]
+
+
+async def test_an_optional_mcp_server_that_did_not_connect_is_a_gap(agent) -> None:
+    state = state_for(agent)
+    output = {
+        "runtime": {"hostname": "box", "pid": 7, "python": "/py"},
+        "mcp": {"servers": ["task_tools"], "unavailable": [{"server": "extra", "error": "ConnectError"}]},
+    }
+    finish_run(state, trajectory=native_trajectory(), output=output)
+
+    await agent._activate(state, body())
+
+    [gap] = [gap for gap in state.observations.gaps if gap.code == "mcp_server_unavailable"]
+    assert json.loads(gap.detail) == [{"server": "extra", "error": "ConnectError"}]

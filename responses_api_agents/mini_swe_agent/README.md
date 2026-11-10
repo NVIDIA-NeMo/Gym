@@ -124,9 +124,10 @@ Every model call goes to the rollout-prefixed Model Server URL as `openai/<model
 episode's capture key, which is also the reported invocation ID. LiteLLM's and mini-SWE's own retries are off; the
 Model Server keeps its retry policy. Request fields are handled as follows:
 
-- Forwarded to every model call: `instructions`, `temperature`, `top_p`, `reasoning`, `parallel_tool_calls`,
-  `tool_choice`. LiteLLM drops a field that an OpenAI model in its cost map does
-  not support (`mini.yaml` sets `drop_params`).
+- Forwarded to every model call: `instructions`, `temperature`, `top_p`, `reasoning`, `parallel_tool_calls`, and
+  `tool_choice` when it is `auto` or `required`. Any other `tool_choice` is refused with HTTP 422: the model is offered
+  only the bash tool, so it can neither name another tool nor call none. LiteLLM drops a field that an OpenAI model in
+  its cost map does not support (`mini.yaml` sets `drop_params`).
 - Read by the adapter: the text of every `input` message in order is the task; `metadata.agent_timeout_sec` and the
   seed's `agent_timeout_sec` can only shorten `sandbox_runner_timeout_seconds`; `model` must match the configured
   model. `tools` is not forwarded: mini-SWE offers the model only its bash tool, and granted tools are reached through it.
@@ -158,13 +159,17 @@ servers are:
   also grants is connected once.
 
 A required server, and every server a task declares, must connect before the first model call; otherwise the
-activation fails without inference. An optional server that does not connect is left out of the prompt. Each MCP
+activation fails without inference, and its error names each server with the reason it did not connect. An optional
+server that does not connect is left out of the prompt and reported as an `mcp_server_unavailable` gap. Each MCP
 call is placed in the response after the bash call that made it, as `mcp__<server>__<tool>` with its result, so
 verifiers that read tool calls see it. It is not a tool-call observation of its own: the model requested the bash call.
 The CLI's call records are written inside the sandbox by the user that runs the agent's commands, so a model command
 can append records too. A line that is not a call record is left out and declared as an `mcp_call_record_invalid`
 gap, and a run without MCP servers reports no MCP call. A call to a server the run was not granted is reported as the
-failed call the CLI recorded.
+failed call the CLI recorded. Each call keeps at most 64 KiB of its output in the response, and a record file over
+16 MiB is not read (an `mcp_call_records_unavailable` gap). The rest of the session directory, mini-SWE's trajectory
+included, is writable by that user too, so a model command can also alter the run Gym reports; the verifier reads the
+task's own state, not these files.
 mini-SWE saves no observation for its submission command; the runner keeps that command's output, which ends the
 response and the reported conversation.
 
@@ -173,11 +178,11 @@ response and the reported conversation.
 | mini-SWE ended with | Response | Verified |
 | --- | --- | --- |
 | `Submitted` | `completed` | Yes |
-| `LimitsExceeded`, `TimeExceeded`, a context-window error, Gym's deadline after a model call returned, or a rollout stop | `incomplete`; `mini_swe_termination` names it | Yes |
+| `LimitsExceeded`, `TimeExceeded`, a context-window error (including the empty reply that Gym's vLLM Model Server marks `nemo_gym_context_window_exceeded`, which mini-SWE rejects until `RepeatedFormatError`), Gym's deadline after a model call returned, or a rollout stop | `incomplete`; `mini_swe_termination` names it | Yes |
 | Gym's deadline before any model call returned | `failed`, `AgentDeadline`, with `ng_agent_outcome` `unknown`; no model transport cause is inferred | By the outcome policy, which retries it by default |
 | No exit status: the run was killed mid-step, by its own command or an OOM kill. The runner saves before each step's commands run, so the step's model call is kept. | `incomplete`, `killed` | Yes |
 | No exit status: close stopped the run | `incomplete`, `cancelled` | No: a closed episode is not verified |
-| A model call that failed (LiteLLM's error, such as `RateLimitError`) or `RepeatedFormatError` | `failed` with `ng_agent_outcome` | By the Environment Server's outcome policy |
+| A model call that failed (LiteLLM's error, such as `RateLimitError`) or `RepeatedFormatError` | `failed` with `ng_agent_outcome`: `model_request_error` with the HTTP status of the answer that ended the call (LiteLLM's exception class alone does not say it: a 403 and a 413 are both `APIError`), `model_transport_error` when no answer came, `agent_invalid_output` for the format error | By the Environment Server's outcome policy |
 | No trajectory (the runner died before its first model call returned), a required MCP server that did not connect, or another exception | HTTP 500, retryable | No |
 
 Each model call may take the whole run's budget, so a first call slower than the whole budget is retried rather than
