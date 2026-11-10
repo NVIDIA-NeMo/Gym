@@ -1,0 +1,10 @@
+# Judge model instance for the chartography resources server: any OpenAI-compatible endpoint that supports
+# JSON-schema structured output. Set judge_base_url, judge_api_key and judge_model_name in env.yaml.
+
+judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.select:judge_base_url,https://inference-api.nvidia.com/v1}
+      openai_api_key: ${oc.select:judge_api_key,null}
+      openai_model: ${oc.select:judge_model_name,gcp/google/gemini-3.5-flash}

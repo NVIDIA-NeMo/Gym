@@ -193,9 +193,9 @@ prompt. From the call at the limit on, OpenCode adds an assistant message to eac
 asks for a text answer. It still offers the tools, so a model that keeps calling them runs past
 the limit. OpenCode counts each pass of its session loop toward the limit, compaction passes included,
 and compaction does not restart the count. A response whose prompt reached the limit carries
-`metadata.harness_step_limit_reached: "true"`. Token capture joins a call that carries this message
-to the earlier calls of the rollout only when `nemo_gym.models.token_capture.harness_notes` knows
-the message; without it, a session with token capture on refuses `agent.build.steps`.
+`metadata.harness_step_limit_reached: "true"`. Token capture recognizes this message
+(`nemo_gym.models.token_capture.harness_notes`) and joins the calls after it to the earlier calls of
+the rollout.
 
 Text, reasoning, tool results, partial output and usage come from the persisted
 session tree. Unavailable artifacts or usage details are reported as observation
