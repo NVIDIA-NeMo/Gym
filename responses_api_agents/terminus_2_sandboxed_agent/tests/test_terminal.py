@@ -612,3 +612,33 @@ async def test_killed_interrupt_leaves_no_reader_behind(tmp_path, caplog, signal
         assert not forbidden.exists()
     finally:
         await environment.exec("tmux kill-server")
+
+
+@pytest.mark.skipif(sys.platform != "linux" or shutil.which("tmux") is None, reason="requires Linux tmux")
+@pytest.mark.asyncio
+async def test_interrupt_that_outlasts_its_deadline_fails_and_stops_its_reader(tmp_path, caplog, monkeypatch):
+    """Input that keeps arriving past the deadline fails the interrupt before the exec timeout, without a reader left."""
+    caplog.set_level(logging.INFO, logger="harbor.utils.logger")
+    environment = LocalTmuxEnvironment(tmp_path)
+    try:
+        terminal, forbidden = await start_job_behind_paste(environment, lines=1024)
+        tty, shell = await environment.pane("pane_tty"), int(await environment.pane("pane_pid"))
+        # The slow reader needs far longer than two seconds for this paste.
+        write_slow_reader(tmp_path / "shims")
+        environment.shims = tmp_path / "shims"
+        monkeypatch.setattr("responses_api_agents.terminus_2_sandboxed_agent.terminal._INTERRUPT_DEADLINE_S", 2)
+        with pytest.raises(RuntimeError, match="still arriving after 2 seconds") as error:
+            await terminal.send_keys("C-c")
+        assert not isinstance(error.value, ShellExitedError)
+        environment.shims = None
+        monkeypatch.undo()
+        await eventually(lambda: asyncio.sleep(0, readers_of(tty, shell=shell)), lambda readers: not readers)
+        assert not list(environment.temp.iterdir())
+        # The failed interrupt left the paste pending, so interrupt again before checking that later input arrives.
+        await terminal.send_keys("C-c")
+        await eventually(lambda: environment.pane("pane_current_command"), lambda command: command != "sleep")
+        await terminal.send_keys("echo TERMINAL_RECOVERED\n", min_timeout_sec=0.3)
+        await eventually(terminal.capture_pane, lambda pane: "\nTERMINAL_RECOVERED\n" in pane)
+        assert not forbidden.exists()
+    finally:
+        await environment.exec("tmux kill-server")
