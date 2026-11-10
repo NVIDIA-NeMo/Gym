@@ -88,3 +88,17 @@ def test_clean_timeout_override_does_not_stop_infrastructure_timeout():
     )
     assert result.evidence[0].state == "retryable"
     assert result.evidence[0].failure_kind == "agent_timeout_infrastructure"
+
+
+@pytest.mark.parametrize("kind", ["provider_quota_exhausted", "provider_credentials_rejected"])
+@pytest.mark.parametrize("action,state", [("verify", "judge_recoverable"), ("fail", "terminal"), ("retry", "unknown")])
+def test_provider_stopped_judge_obeys_policy_without_resampling(kind, action, state):
+    row = saved_row_evidence(_xstest_row(None)) | {
+        "mask_sample": True,
+        "failure_kind": kind,
+        "failure_reason": "provider unavailable",
+        "_ng_failure_class": "judge_failed",
+    }
+    result = decide(row, {"by_failure_kind": {kind: action}})
+    assert result.evidence[0].state == state
+    assert result.action.value != "resubmit"
