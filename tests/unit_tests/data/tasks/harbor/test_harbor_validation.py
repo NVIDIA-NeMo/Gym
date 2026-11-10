@@ -11,7 +11,7 @@ import yaml
 
 import nemo_gym.cli.main as main_module
 import nemo_gym.config.global_config as global_config
-import nemo_gym.orchestration.server_supervisor
+import nemo_gym.server_runtime.supervisor.server_supervisor
 from nemo_gym.data.tasks.harbor.prepare import build_run, prepare_target, resolve_agent
 from nemo_gym.data.tasks.harbor.validation_report import summarize_validation
 from nemo_gym.utils.path_utils import failures_path_for, materialized_path_for
@@ -360,7 +360,7 @@ def test_validate_needs_no_model_even_with_unused_endpoint_settings(tmp_path, mo
         for key, value in settings.items():
             assert config[key] == value
         monkeypatch.setattr(
-            nemo_gym.orchestration.server_supervisor,
+            nemo_gym.server_runtime.supervisor.server_supervisor,
             "_probe_endpoint",
             lambda *args: pytest.fail("Oracle must not probe an unused model"),
         )
