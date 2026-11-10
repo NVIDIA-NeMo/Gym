@@ -14,7 +14,7 @@ from omegaconf import OmegaConf
 from environments.nemo_user_sim import prepare as prepare_module
 from nemo_gym.config import DatasetConfig
 from nemo_gym.data import materialize_task
-from resources_servers.nemo_user_sim.app import UserSimResourcesServerConfig, installed_usersim_revision
+from resources_servers.nemo_user_sim.app import installed_usersim_revision
 from resources_servers.nemo_user_sim.task_data import TaskData
 
 
@@ -58,16 +58,18 @@ def test_user_model_has_no_default_endpoint() -> None:
 
 
 def test_usersim_revision_pins_are_aligned() -> None:
-    requirement_paths = (
-        prepare_module.PREPARE_PROJECT_FPATH,
-        REPOSITORY_ROOT / "environment_servers/nemo_user_sim/pyproject.toml",
-        REPOSITORY_ROOT / "resources_servers/nemo_user_sim/pyproject.toml",
-    )
-    requirement_revisions = []
-    for path in requirement_paths:
-        match = re.search(r"UserSim\.git@([0-9a-f]{40})", path.read_text())
-        assert match is not None, f"Missing UserSim revision in {path}"
-        requirement_revisions.append(match.group(1))
+    # Every project that installs UserSim, including servers added later, must pin the same commit.
+    requirement_revisions = {}
+    for path in REPOSITORY_ROOT.glob("*/*/pyproject.toml"):
+        for revision in re.findall(r"UserSim\.git@([0-9a-f]+)", path.read_text()):
+            requirement_revisions[path.relative_to(REPOSITORY_ROOT).as_posix()] = revision
+    assert {
+        "environments/nemo_user_sim/pyproject.toml",
+        "environment_servers/nemo_user_sim/pyproject.toml",
+        "resources_servers/nemo_user_sim/pyproject.toml",
+    } <= requirement_revisions.keys()
+    requirement_revisions = list(requirement_revisions.values())
+    assert all(len(revision) == 40 for revision in requirement_revisions), requirement_revisions
 
     # The pyproject pins are the only copies; preparation and the Resources Server derive theirs from them.
     assert len(set(requirement_revisions)) == 1, requirement_revisions
@@ -82,8 +84,6 @@ def test_usersim_revision_pins_are_aligned() -> None:
 def test_persona_pins_cover_every_usersim_locale() -> None:
     from usersim.engine.core.locale import supported_locales
 
-    versions_factory = UserSimResourcesServerConfig.model_fields["nemotron_personas_versions"].default_factory
-    assert versions_factory() == prepare_module.NEMOTRON_PERSONAS_VERSIONS
     assert set(prepare_module.NEMOTRON_PERSONAS_SHA256) == set(prepare_module.NEMOTRON_PERSONAS_VERSIONS)
     assert set(prepare_module.NEMOTRON_PERSONAS_VERSIONS) == set(supported_locales())
     assert all(re.fullmatch(r"[0-9a-f]{64}", digest) for digest in prepare_module.NEMOTRON_PERSONAS_SHA256.values())
@@ -314,7 +314,7 @@ def test_prepare_materializes_every_registered_probe_with_usersim(
 
     monkeypatch.setattr(prepare_module.subprocess, "run", fake_materialize)
 
-    result = prepare_module.prepare(random_seed=1042)
+    result = prepare_module.prepare(locales=["en_US"], random_seed=1042)
 
     assert result == tasks_path.absolute()
     rows = [json.loads(line) for line in tasks_path.read_text().splitlines()]
@@ -397,8 +397,15 @@ def test_materialization_skips_probes_without_a_bank_for_the_locale(
     assert materialized == ["general_open_ended"]
 
 
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [
+        ({"locales": ["en_US", "ko_KR", "en_US"]}, [("en_US", "0.0.2"), ("ko_KR", "0.0.1")]),
+        ({}, [("en_US", "0.0.2"), ("de_DE", "0.0.1"), ("ja_JP", "0.0.2"), ("hi_Deva_IN", "0.0.2")]),
+    ],
+)
 def test_prepare_materializes_each_requested_locale_with_its_persona_version(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, arguments: dict, expected: list[tuple[str, str]]
 ) -> None:
     tasks_path = tmp_path / "nemo_user_sim.jsonl"
     monkeypatch.setattr(prepare_module, "TASKS_FPATH", tasks_path)
@@ -419,11 +426,11 @@ def test_prepare_materializes_each_requested_locale_with_its_persona_version(
 
     monkeypatch.setattr(prepare_module.subprocess, "run", fake_materialize)
 
-    prepare_module.prepare(locales=["en_US", "ko_KR", "en_US"])
+    prepare_module.prepare(**arguments)
 
-    assert environments == [("en_US", "0.0.2"), ("ko_KR", "0.0.1")]
+    assert environments == expected
     rows = [json.loads(line) for line in tasks_path.read_text().splitlines()]
-    assert [row["task_id"] for row in rows] == ["usersim-en_US", "usersim-ko_KR"]
+    assert [row["task_id"] for row in rows] == [f"usersim-{locale}" for locale, _ in expected]
 
 
 @pytest.mark.parametrize("locales", [[], ["en_US", "xx_XX"]])

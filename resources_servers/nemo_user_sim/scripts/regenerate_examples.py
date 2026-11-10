@@ -6,8 +6,9 @@
 The example rows are prepared UserSim rows with a synthetic persona, so they carry
 no Nemotron-Personas data. After a UserSim bump, run
 ``gym eval prepare --config environments/nemo_user_sim/config.yaml`` and then this
-script. For each example it takes the prepared row of the same probe and keeps the
-example's synthetic persona fields and task id. Collect ``example_rollouts.jsonl``
+script. For each example it takes the prepared row with the same probe and locale
+and keeps the example's synthetic persona fields and task id, so the preparation
+must include every example locale, as the default preparation does. Collect ``example_rollouts.jsonl``
 again afterwards: each rollout records a digest of its example row.
 """
 
@@ -28,15 +29,17 @@ def _is_synthetic_field(name: str) -> bool:
 
 
 def regenerate(examples: list[dict], prepared: list[dict]) -> list[dict]:
-    """Return ``examples`` rebuilt on the prepared row of each example's probe."""
-    prepared_by_probe = {row["resolved_row"]["probe_type"]: row["resolved_row"] for row in prepared}
+    """Return ``examples`` rebuilt on the prepared row of each example's probe and locale."""
+    prepared_by_key = {
+        (row["resolved_row"]["probe_type"], row["resolved_row"]["locale"]): row["resolved_row"] for row in prepared
+    }
     rebuilt = []
     for example in examples:
         synthetic = example["resolved_row"]
-        probe = synthetic["probe_type"]
-        if probe not in prepared_by_probe:
-            raise ValueError(f"No prepared row for probe {probe!r}")
-        row = {name: value for name, value in prepared_by_probe[probe].items() if not _is_synthetic_field(name)}
+        key = (synthetic["probe_type"], synthetic["locale"])
+        if key not in prepared_by_key:
+            raise ValueError(f"No prepared row for probe {key[0]!r} in locale {key[1]!r}")
+        row = {name: value for name, value in prepared_by_key[key].items() if not _is_synthetic_field(name)}
         row.update({name: value for name, value in synthetic.items() if _is_synthetic_field(name)})
         row["trajectory_id"] = example["task_id"]
         provenance = json.loads(row["usersim_provenance"])

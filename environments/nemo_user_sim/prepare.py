@@ -59,6 +59,8 @@ NEMOTRON_PERSONAS_SHA256: dict[str, str] = {
     "ko_KR": "8128b83c300c0f9f128580f6a5f0aafadf9b87c4fb9a6fff7ad8c141be320332",  # pragma: allowlist secret
     "pt_BR": "b69dfd37feef5939de467976d2520a8ed6427ce9baddc045e7b79131ee1b89c0",  # pragma: allowlist secret
 }
+# Validation locales prepared when none are requested: three scripts and four languages, 56 tasks.
+DEFAULT_LOCALES = ("en_US", "de_DE", "ja_JP", "hi_Deva_IN")
 # Probes the pinned UserSim has no bank for in a locale. Preparation skips these pairs.
 UNSUPPORTED_PROBE_LOCALES = frozenset({("financial_services", "en_SG"), ("financial_services", "pt_BR")})
 _MATERIALIZE_SCRIPT = """
@@ -281,7 +283,7 @@ def _write_tasks(tasks: list[dict[str, object]]) -> None:
 
 
 def prepare(
-    locales: Sequence[str] = ("en_US",),
+    locales: Sequence[str] = DEFAULT_LOCALES,
     random_seed: int = 1042,
     uv_executable: str = "uv",
     timeout_seconds: float = 3_600,
@@ -289,7 +291,8 @@ def prepare(
     """Materialize one canonical resolved row for each registered UserSim probe in each locale.
 
     Each locale needs its own Nemotron-Personas download (0.3 to 4.5 GB), so only the locales asked for are
-    prepared. Select more with ``++prepare_script_args.locales='[en_US,ja_JP]'``.
+    prepared. The default spans three scripts and downloads about 10 GB the first time; select others with
+    ``++prepare_script_args.locales='[en_US]'``.
     """
     locales = list(dict.fromkeys(locales))
     unknown = [locale for locale in locales if locale not in NEMOTRON_PERSONAS_VERSIONS]

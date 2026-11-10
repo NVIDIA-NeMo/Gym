@@ -2,8 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import re
 from pathlib import Path
 
+from environments.nemo_user_sim.prepare import DEFAULT_LOCALES
 from nemo_gym.data import materialize_task
 from resources_servers.nemo_user_sim.app import (
     UserSimResourcesServerConfig,
@@ -25,15 +27,19 @@ def test_examples_are_safe_task_rows_that_materialize_as_task_data() -> None:
     rows = _jsonl(DATA_DIR / "example.jsonl")
 
     assert len(rows) == 5
+    # Each example covers a different probe, and together they cover every default preparation locale.
+    assert len({row["resolved_row"]["probe_type"] for row in rows}) == 5
+    assert {row["resolved_row"]["locale"] for row in rows} == set(DEFAULT_LOCALES)
     for index, row in enumerate(rows):
         task_id = row["task_id"]
         resolved_row = row["resolved_row"]
         persona = resolved_row["persona"]
         assert isinstance(task_id, str)
         assert task_id == resolved_row["trajectory_id"]
-        assert persona["first_name"] == f"Example{index + 1}"
+        assert re.fullmatch(r"Example\d+", persona["first_name"])
         assert persona["last_name"] == "User"
-        assert persona["email_address"] == f"example{index + 1}@example.invalid"
+        assert persona["email_address"] == f"{persona['first_name'].lower()}@example.invalid"
+        assert persona["locale"] == resolved_row["locale"]
         assert persona["national_id"] == "000-00-0000"
         assert "assets_dir" not in resolved_row["usersim_config"]
 
@@ -60,7 +66,7 @@ def test_rollouts_match_examples_and_do_not_duplicate_episode_evidence() -> None
     rollouts = _jsonl(rollouts_path)
 
     assert len(rollouts) == len(examples) == 5
-    assert rollouts_path.stat().st_size < 1_200_000
+    assert rollouts_path.stat().st_size < 1_000_000
     for index, (example, rollout) in enumerate(zip(examples, rollouts, strict=True)):
         assert rollout["_ng_task_index"] == index
         assert rollout["_ng_task_id"] == {

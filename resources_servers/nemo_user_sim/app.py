@@ -19,6 +19,7 @@ from typing import Any
 from fastapi import HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from environments.nemo_user_sim.prepare import NEMOTRON_PERSONAS_VERSIONS
 from nemo_gym.client import SESSION_ID_KEY, get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, get_first_server_config_dict
 from nemo_gym.core import (
@@ -70,20 +71,8 @@ ASSISTANT_QUALITY_AXES = ("helpfulness", "accuracy", "coherence")
 SIMULATION_FAILED = "usersim:simulation_failed"
 # UserSim records commits in git's 12-character short form.
 USERSIM_REVISION_LENGTH = 12
-# Matches the pins in environments/nemo_user_sim/prepare.py; a test keeps the two aligned.
-NEMOTRON_PERSONAS_VERSIONS = {
-    "de_DE": "0.0.1",
-    "en_GB": "0.0.1",
-    "en_IN": "0.0.2",
-    "en_SG": "0.0.1",
-    "en_US": "0.0.2",
-    "fr_FR": "0.0.1",
-    "hi_Deva_IN": "0.0.2",
-    "hi_Latn_IN": "0.0.2",
-    "ja_JP": "0.0.2",
-    "ko_KR": "0.0.1",
-    "pt_BR": "0.0.1",
-}
+# A revision is either that short form or the full 40-character commit.
+REVISION_PATTERN = re.compile(r"[0-9a-f]{12}(?:[0-9a-f]{28})?")
 logger = logging.getLogger(__name__)
 
 
@@ -93,11 +82,15 @@ def installed_usersim_revision() -> str:
     A git install records its commit in ``direct_url.json`` (PEP 610), so the
     ``pyproject.toml`` pin is the only place the revision is written down.
     """
-    for name in metadata.packages_distributions().get("usersim", []):
-        raw = metadata.distribution(name).read_text("direct_url.json")
-        commit = (json.loads(raw).get("vcs_info") or {}).get("commit_id") if raw else None
-        if isinstance(commit, str) and commit:
-            return commit[:USERSIM_REVISION_LENGTH]
+    # Read only the declared distribution. An environment upgraded in place can still hold the
+    # superseded nemo-usersim distribution, which provides the same import package.
+    try:
+        raw = metadata.distribution("usersim").read_text("direct_url.json")
+    except metadata.PackageNotFoundError:
+        raw = None
+    commit = (json.loads(raw).get("vcs_info") or {}).get("commit_id") if raw else None
+    if isinstance(commit, str) and commit:
+        return commit[:USERSIM_REVISION_LENGTH]
     raise RuntimeError(
         "The installed UserSim records no git commit. Install it from the pinned git revision "
         "or set usersim_revision in the Resources Server config."
@@ -567,7 +560,11 @@ def _validate_resolved_row(
     provenance = _decode_provenance(row.get("usersim_provenance"))
     # Rows record either the full commit or UserSim's short form; both start with the expected revision.
     code_sha = provenance.get("code_sha")
-    if not isinstance(code_sha, str) or not code_sha.startswith(expected_revision):
+    if (
+        not isinstance(code_sha, str)
+        or REVISION_PATTERN.fullmatch(code_sha) is None
+        or not code_sha.startswith(expected_revision)
+    ):
         raise ValueError(f"Resolved UserSim row revision {code_sha!r} does not match {expected_revision!r}")
     personas_version = provenance.get("nemotron_personas_version")
     locale = row.get("locale")

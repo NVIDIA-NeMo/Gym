@@ -220,6 +220,56 @@ def test_resolved_row_rejects_invalid_provenance(provenance: object, message: st
         _validate_resolved_row(row, expected_revision=REVISION, expected_personas_versions=PERSONAS_VERSIONS)
 
 
+def _distribution(commit: str | None) -> SimpleNamespace:
+    direct_url = json.dumps({"vcs_info": {"commit_id": commit}}) if commit else None
+    return SimpleNamespace(read_text=lambda filename: direct_url if filename == "direct_url.json" else None)
+
+
+def test_installed_revision_ignores_the_superseded_distribution(monkeypatch: pytest.MonkeyPatch) -> None:
+    distributions = {
+        "nemo-usersim": _distribution("a5f676bf6dc5a73914c8a0860f97c10dd2c214ee"),
+        "usersim": _distribution("e6282672a5e5359bccbed20f42753c3054dd6209"),
+    }
+    monkeypatch.setattr(usersim_app.metadata, "distribution", distributions.__getitem__)
+    monkeypatch.setattr(
+        usersim_app.metadata, "packages_distributions", lambda: {"usersim": ["nemo-usersim", "usersim"]}
+    )
+
+    assert installed_usersim_revision() == "e6282672a5e5"
+
+
+@pytest.mark.parametrize("distributions", [{}, {"usersim": _distribution(None)}])
+def test_installed_revision_requires_a_git_install_of_usersim(
+    monkeypatch: pytest.MonkeyPatch, distributions: dict[str, SimpleNamespace]
+) -> None:
+    distributions = {"nemo-usersim": _distribution("a5f676bf6dc5a73914c8a0860f97c10dd2c214ee"), **distributions}
+
+    def distribution(name: str) -> SimpleNamespace:
+        if name not in distributions:
+            raise usersim_app.metadata.PackageNotFoundError(name)
+        return distributions[name]
+
+    monkeypatch.setattr(usersim_app.metadata, "distribution", distribution)
+
+    with pytest.raises(RuntimeError, match="records no git commit"):
+        installed_usersim_revision()
+
+
+@pytest.mark.parametrize("suffix", ["", "359bccbed20f42753c3054dd6209"])
+def test_resolved_row_accepts_short_and_full_revisions(suffix: str) -> None:
+    row = _resolved_row()
+    row["usersim_provenance"] = json.dumps({"code_sha": REVISION + suffix, "nemotron_personas_version": "synthetic"})
+    _validate_resolved_row(row, expected_revision=REVISION, expected_personas_versions=PERSONAS_VERSIONS)
+
+
+@pytest.mark.parametrize("suffix", ["-not-a-commit", "0", "0" * 27, "0" * 29])
+def test_resolved_row_rejects_malformed_revisions_that_share_the_prefix(suffix: str) -> None:
+    row = _resolved_row()
+    row["usersim_provenance"] = json.dumps({"code_sha": REVISION + suffix, "nemotron_personas_version": "synthetic"})
+    with pytest.raises(ValueError, match="does not match"):
+        _validate_resolved_row(row, expected_revision=REVISION, expected_personas_versions=PERSONAS_VERSIONS)
+
+
 @pytest.mark.asyncio
 async def test_seed_requires_pinned_personas_version_for_validation_tasks() -> None:
     server = _server()
