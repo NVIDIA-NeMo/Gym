@@ -103,7 +103,8 @@ class PolicyToolGenerationAgent(SimpleResponsesAPIAgent):
             model_server = self.config.policy_model_server if role == "policy" else self.config.judge_model_server
             model_response = await self.server_client.post(
                 server_name=model_server.name,
-                url_path=self.url_path_for_run("/v1/chat/completions", body),
+                # A training framework trains the policy, not the judge, which keeps its own sampling.
+                url_path=self.url_path_for_run("/v1/chat/completions", body, trained=role == "policy"),
                 json=message_only_payload(prompt),
                 cookies=request.cookies,
             )
