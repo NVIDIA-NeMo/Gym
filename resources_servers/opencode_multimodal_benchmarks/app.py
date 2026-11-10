@@ -11,7 +11,9 @@ import aiohttp
 from pydantic import Field, PrivateAttr, model_validator
 
 from nemo_gym.client import request
+from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.core import NeMoGymChatCompletion
+from nemo_gym.metrics import compute_aggregate_metrics
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     ReverifyMode,
@@ -96,6 +98,17 @@ class VisualBenchmarksServer(VisualVerifier, SimpleResourcesServer):
                                 policy_servers.add(reference["name"])
             if self.config.judge_server in policy_servers:
                 raise JudgeError("judge_server must not point at the policy model")
+            if self.config.judge_server is not None:
+                block = global_config.get(self.config.judge_server) if isinstance(global_config, Mapping) else None
+                models = block.get("responses_api_models") if isinstance(block, Mapping) else None
+                if (
+                    not isinstance(models, Mapping)
+                    or len(models) != 1
+                    or not all(isinstance(model, Mapping) for model in models.values())
+                ):
+                    raise JudgeError(
+                        f"judge_server {self.config.judge_server!r} must name one configured model server"
+                    )
             self._judge_credentials()
 
     def _judge_credentials(self) -> str | None:
@@ -186,7 +199,27 @@ class VisualBenchmarksServer(VisualVerifier, SimpleResourcesServer):
             await asyncio.sleep(min(30, 2 ** (attempt + 1)))
         raise AssertionError("Judge attempts exhausted")
 
-    def compute_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
+    async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
+        """Keep received repeat identities before the shared aggregator removes masked rows."""
+        expected_repeats: dict[tuple[str, str], set[int]] = {}
+        for row in body.verify_responses:
+            metadata = row["verifier_metadata"]
+            identity = (metadata["benchmark"], metadata["index"])
+            expected_repeats.setdefault(identity, set()).add(row.get(ROLLOUT_INDEX_KEY_NAME, 0))
+        return compute_aggregate_metrics(
+            body.verify_responses,
+            compute_metrics_fn=lambda tasks: self.compute_metrics(tasks, expected_repeats=expected_repeats),
+            get_key_metrics_fn=self.get_key_metrics,
+            compute_repeat_metrics_fn=self.compute_repeat_metrics,
+        )
+
+    def compute_metrics(
+        self,
+        tasks: list[list[dict[str, Any]]],
+        *,
+        expected_repeats: Mapping[tuple[str, str], set[int]] | None = None,
+    ) -> dict[str, Any]:
+        """Report headline scores only when every received attempt has a valid measurement."""
         grouped = {}
         for repeats in tasks:
             if repeats:
@@ -197,27 +230,41 @@ class VisualBenchmarksServer(VisualVerifier, SimpleResourcesServer):
             averaged, balanced = average_repeats(benchmark_tasks)
             rows = [row["verifier_metadata"] | {"hit": row["reward"]} for row in averaged]
             report = benchmark_report(benchmark, rows)
-            value = sum(row["hit"] for row in rows) / len(rows)
-            if benchmark == "HRBench8K":
+            value = sum(row["hit"] for row in rows) / len(rows) if rows else None
+            if benchmark == "HRBench8K" and rows:
                 value = next(row["accuracy"] for row in report if row["cycle"] == "Average" and row["type"] == "all")
             mean_accuracy = value
             if benchmark == "ZeroBench":
                 value = pass_at_k(benchmark_tasks, k=5)
                 report = [{"split": "zerobench", "count": len(rows), "pass@5": value, "pass@1": mean_accuracy}]
-            if any("expected_samples" not in row for row in rows):
+            metadata_rows = [row["verifier_metadata"] for repeats in benchmark_tasks for row in repeats]
+            if any("expected_samples" not in metadata for metadata in metadata_rows):
                 raise ValueError("Benchmark metrics require expected_samples on every task")
-            expected_values = {row["expected_samples"] for row in rows}
+            expected_values = {metadata["expected_samples"] for metadata in metadata_rows}
             if len(expected_values) > 1:
                 raise ValueError("Inconsistent prepared dataset sample counts")
             expected = next(iter(expected_values))
-            complete = balanced and len(rows) == expected and value is not None
+            received_repeats_complete = True
+            if expected_repeats is not None:
+                observed = {
+                    (benchmark, repeats[0]["verifier_metadata"]["index"]): {
+                        row.get(ROLLOUT_INDEX_KEY_NAME, 0) for row in repeats
+                    }
+                    for repeats in benchmark_tasks
+                }
+                received = {
+                    identity: indices for identity, indices in expected_repeats.items() if identity[0] == benchmark
+                }
+                received_repeats_complete = observed == received
+            complete = balanced and received_repeats_complete and len(rows) == expected and value is not None
             metrics[f"{benchmark}/completed"] = len(rows)
             metrics[f"{benchmark}/expected"] = expected
             metrics[f"{benchmark}/complete"] = complete
             if value is not None:
                 metrics[f"{benchmark}/" + ("accuracy" if complete else "partial_accuracy")] = value
             if benchmark == "ZeroBench":
-                metrics["ZeroBench/pass@1"] = mean_accuracy
+                if mean_accuracy is not None:
+                    metrics["ZeroBench/pass@1"] = mean_accuracy
                 if value is not None:
                     metrics["ZeroBench/" + ("pass@5" if complete else "partial_pass@5")] = value
             metrics[f"{benchmark}/report"] = report

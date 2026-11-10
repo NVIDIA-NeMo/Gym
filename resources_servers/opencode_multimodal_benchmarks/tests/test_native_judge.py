@@ -323,3 +323,58 @@ async def test_native_retry_policy_follows_remote_cause_not_proxy_carrier(monkey
     with pytest.raises(NgFailureEvent):
         await server._judge("extract the option")
     assert call.await_count == attempts
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        None,
+        {"resources_servers": {"judge": {"entrypoint": "app.py"}}},
+        {"responses_api_agents": {"judge": {"entrypoint": "app.py"}}},
+        {"responses_api_models": {}},
+        {"responses_api_models": {"openai_model": None}},
+        {"responses_api_models": {"openai_model": {}, "vllm_model": {}}},
+    ],
+)
+def test_required_judge_route_must_resolve_to_one_model_at_startup(block):
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {"visual_judge": block} if block is not None else {}
+    with pytest.raises(JudgeError, match="configured model server"):
+        VisualBenchmarksServer(
+            config=VisualBenchmarksConfig(
+                host="localhost",
+                port=1,
+                name="visual",
+                entrypoint="app.py",
+                judge_required=True,
+                judge_model="judge",
+                judge_server="visual_judge",
+            ),
+            server_client=client,
+        )
+    client.post.assert_not_called()
+
+
+@pytest.mark.parametrize("model_type", ["openai_model", "vllm_model"])
+def test_required_judge_route_accepts_a_configured_model(model_type, monkeypatch):
+    from omegaconf import OmegaConf
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = OmegaConf.create(
+        {"visual_judge": {"responses_api_models": {model_type: {"entrypoint": "app.py"}}}}
+    )
+    server = VisualBenchmarksServer(
+        config=VisualBenchmarksConfig(
+            host="localhost",
+            port=1,
+            name="visual",
+            entrypoint="app.py",
+            judge_required=True,
+            judge_model="judge",
+            judge_server="visual_judge",
+        ),
+        server_client=client,
+    )
+    assert server.config.judge_server == "visual_judge"
+    client.post.assert_not_called()
