@@ -168,6 +168,7 @@ def test_only_agent_classes_defined_in_app_py_are_inspected(tmp_path, monkeypatc
 def _inspect_written(tmp_path, monkeypatch, component, files):
     for name, text in files.items():
         write(tmp_path, f"{component}/{name}", text)
+    monkeypatch.setattr(sys, "path", list(sys.path))
     monkeypatch.syspath_prepend(str(tmp_path))
     monkeypatch.chdir(tmp_path)
     try:
@@ -205,6 +206,34 @@ def test_the_entry_point_named_by_the_default_config_is_inspected(tmp_path, monk
         },
     )
     assert [f["path"] for f in results if f["rule"] == "A1"] == [f"{component}/main.py"]
+
+
+@pytest.mark.parametrize("root_main", [{"main.py": "NOT_AN_AGENT = True\n"}, {}])
+def test_an_entry_point_in_a_subdirectory_is_inspected_at_its_own_path(tmp_path, monkeypatch, root_main):
+    component = "responses_api_agents/compliance_probe"
+    # The inspection subprocess has the component root on its path; its sibling of the same name must not win.
+    monkeypatch.syspath_prepend(str(tmp_path / component))
+    try:
+        results = _inspect_written(
+            tmp_path,
+            monkeypatch,
+            component,
+            {
+                **root_main,
+                "compliance_sibling.py": "raise ImportError('the component root shadowed the entry point directory')\n",
+                "impl/compliance_sibling.py": "VALUE = 1\n",
+                "impl/main.py": "from compliance_sibling import VALUE\n" + RUNNING_AGENT,
+                "configs/compliance_probe.yaml": (
+                    "probe:\n  responses_api_agents:\n    own:\n      entrypoint: impl/main.py\n"
+                ),
+            },
+        )
+    finally:
+        sys.modules.pop("compliance_sibling", None)
+    assert [(f["rule"], f["path"], f["line"]) for f in results] == [
+        ("A1", f"{component}/impl/main.py", 9),
+        ("A2", f"{component}/impl/main.py", 5),
+    ]
 
 
 @pytest.mark.parametrize("entrypoint", ["???", "missing.py"])
