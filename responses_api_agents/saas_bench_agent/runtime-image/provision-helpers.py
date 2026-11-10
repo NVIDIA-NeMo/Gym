@@ -32,7 +32,7 @@ def main() -> None:
             target.chmod(0o755 if source.stat().st_mode & 0o111 else 0o644)
         files[str(relative)] = {"source": str(source), "sha256": digest}
 
-    for name in ("ip", "unsquashfs", "mksquashfs"):
+    for name in ("ip", "ss", "unsquashfs", "mksquashfs"):
         binary = shutil.which(name)
         if not binary:
             raise FileNotFoundError(f"Required host tool: {name}")

@@ -95,7 +95,7 @@ semantics. Adapter, preparation, lifecycle, and protocol tests run on the actual
 Gym response schemas; the benchmark is experimental until a full reference
 score has been reproduced and reviewed.
 
-The helper release also provides `ip`, `unsquashfs`, `mksquashfs`, and libraries
+The helper release also provides `ip`, `ss`, `unsquashfs`, `mksquashfs`, and libraries
 missing from the base image. Runtime setup prepends its `usr/bin` and `usr/sbin`
 to PATH and its library directory to LD_LIBRARY_PATH. Exact tool hashes are in
 `runtime/enroot/saas-eval-tools.json`. To recreate these additions on SVG, run
