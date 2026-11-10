@@ -1994,6 +1994,10 @@ class HarborEnvironmentServer(
             # Compose group the adapter already created the /logs paths main bound, before its command; this mkdir
             # is idempotent there and still makes the whole tree.
             session.workdir = await self._prepare_workdir(sandbox, task, task.workdir)
+            # The task's skills are in place before its entrypoint, healthcheck and agent, as a Dockerfile `COPY`
+            # would leave them. A Compose group's main was already started by the adapter (command and image
+            # healthcheck included), so there they reach the agent only.
+            await self._upload_task_skills(sandbox, task, session.workdir)
             # A Compose group's main was started by the adapter, its entrypoint run and its image healthcheck waited.
             managed = compose is not None
             launch = session.entrypoint = await self._start_entrypoint(
@@ -2004,7 +2008,7 @@ class HarborEnvironmentServer(
             await self._wait_healthy(
                 sandbox, task, launch, user=image_user, workdir=session.workdir, compose_managed=managed
             )
-            await self._write_task_context(sandbox, task)
+            await self._write_task_context(sandbox, task, session.workdir)
             if launch is not None:
                 # The last look before the hand-over: an entrypoint that died during the seed's remaining steps
                 # (a setup script failing after its first lines) is a seed failure, not a rollout on an empty task.

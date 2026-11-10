@@ -404,8 +404,10 @@ class SwebenchResourcesServer(SandboxSessionResourcesServer):
 
     def _make_test_spec(self, body: SWEBenchInstanceRequest) -> TestSpec:
         test_spec = make_test_spec(
-            # This accepts a SWEbenchInstance which is identically our body.
-            body.model_dump(),
+            # This accepts a SWEbenchInstance: our body's instance fields, without the agent's request and response.
+            # SWE-bench reads some optional keys whenever they are present, such as image_assets for JavaScript,
+            # so an unset optional field is left out rather than sent as null.
+            body.model_dump(include=set(SWEBenchInstanceRequest.model_fields), exclude_none=True),
             namespace="swebench",  # Dockerhub namespace
             instance_image_tag=LATEST,
             env_image_tag=LATEST,

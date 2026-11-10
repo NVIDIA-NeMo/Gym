@@ -83,17 +83,9 @@ harness on the Gym host. Hermes derives the sandbox's lifetime from its own time
 It sets `network_access: model_only`, so the sandbox reaches only the model server; a search preset
 overrides it with `model_and_tools`.
 
-The pairing also needs one Environment Server setting. HLE's Environment Server, like those of HLE Diamond, GPQA and
-APEX Shortlist, grants the agent its Resources server over `direct_http`, which this agent cannot use, so every seed
-fails with a 422. The judge offers the agent no tools, so load this alongside the benchmark, the profile and the
-model config, under the benchmark's own Environment Server name (`gym env resolve` shows it):
-
-```yaml
-hle_equivalence_llm_judge_environment_server:
-  environment_servers:
-    single_agent_turn_legacy:
-      resources_tool_transports: []
-```
+HLE, HLE Diamond, GPQA and APEX Shortlist need no Environment Server setting: their judges serve no tools, so their
+Environment Servers grant the agent none. This agent rejects a required `direct_http` grant with a 422, so a
+benchmark whose Resources server serves its tools over direct HTTP does not pair with it.
 
 ## Configuration example
 
@@ -145,7 +137,7 @@ Host and sandbox execution use the same request rules. User tasks remain user me
 Request `model` must match the configured model. Unsupported non-default controls return
 HTTP 422, including `top_p` (even `1.0`), `store`, `service_tier`, and request metadata.
 `max_output_tokens` also returns 422: Hermes does not enforce a total response token budget.
-Config `max_tokens` limits each model call. Only text input is supported; `developer` messages
+Config `max_tokens` limits each model call. `context_length` sets Hermes' `model.context_length`, the window context compression reads (at `compression_threshold` of it); unset, Hermes probes the endpoint, which the Gym model server does not answer, and assumes 128,000 tokens. Only text input is supported; `developer` messages
 are rejected.
 
 Compatibility: the host path previously let config `system_prompt` replace the dataset's
@@ -165,19 +157,19 @@ to run `hermes_agent` through an Environment Server. For Hermes specifically:
   deadline, whose shipped default is 21600 against the removed default of 2700;
   `cleanup_timeout` becomes this agent's own `session_close_timeout_seconds`, default 30 and
   used for individual cleanup operations rather than one aggregate teardown deadline,
-  against the removed default of 120; and `chat_template_kwargs` becomes the narrower
+  against the removed default of 120; `chat_template_kwargs` becomes the narrower
   `chat_template_kwargs_enabled` boolean, so arbitrary template keyword arguments now belong
-  on the Model Server. Removed with no counterpart: `runtime_python`, `remote_run_root`,
-  `results_dir`, `api_timeout`, and `context_length`. These require migration rather than
-  renaming. `api_timeout` is no longer an adapter setting, but the pinned Hermes runtime still
-  passes an SDK request timeout of 1800 seconds by default, configurable with `HERMES_API_TIMEOUT`
-  in the sandbox environment. `sandbox_runner_timeout_seconds` separately bounds the whole
-  activation. `context_length` set both Hermes' main context window and the summarization
-  auxiliary's; without that override, Hermes resolves the window through its runtime metadata
-  and fallback logic, which can change when compaction fires on long trajectories.
-  `results_dir` kept per-run artifacts on the host; update consumers
-  to use Environment Server rollout and agent-observation records. A successful session close
-  returns available observations or capture-gap diagnostics even when activation fails.
+  on the Model Server; and `context_length` keeps its name but sets only Hermes'
+  `model.context_length`, the window context compression reads, where the removed adapter
+  also wrote the summarization auxiliary's `auxiliary.compression.context_length`. Removed
+  with no counterpart: `runtime_python`, `remote_run_root`, `results_dir`, and `api_timeout`.
+  These require migration rather than renaming. `api_timeout` is no longer an adapter
+  setting, but the pinned Hermes runtime still passes an SDK request timeout of 1800 seconds
+  by default, configurable with `HERMES_API_TIMEOUT` in the sandbox environment.
+  `sandbox_runner_timeout_seconds` separately bounds the whole activation. `results_dir` kept
+  per-run artifacts on the host; update consumers to use Environment Server rollout and
+  agent-observation records. A successful session close returns available observations or
+  capture-gap diagnostics even when activation fails.
 - The Environment Server's `default_episode_timeout_seconds` and `cleanup_timeout_seconds`
   bound the episode and each registered cleanup callback, respectively. The agent and
   Resources Server still own sandbox teardown. Note that the
