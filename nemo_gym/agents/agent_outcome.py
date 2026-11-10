@@ -9,6 +9,7 @@ applies it to a response. The Environment Servers then choose verify, retry or f
 ``agent_response_action``.
 """
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, ClassVar, Literal
@@ -48,6 +49,7 @@ from nemo_gym.core.outcome_policy import OutcomePolicyConfig as OutcomePolicyCon
 from nemo_gym.core.outcome_policy import choose_action as choose_action
 from nemo_gym.core.outcome_policy import failure_outcome_policy as failure_outcome_policy
 from nemo_gym.core.typed_exceptions import NgFailureEvent, rebuild_failure
+from nemo_gym.models.token_capture.records import CONTEXT_LENGTH_EXCEEDED_ERROR_CODE
 from nemo_gym.server_runtime.base_environment_server import is_retryable_dependency_status
 
 
@@ -364,6 +366,30 @@ def decide_outcome(evidence: RunEvidence) -> RunDecision:
     if evidence.has_result:
         return RunDecision("completed", "completed")
     return RunDecision("failed", "no_result", AgentOutcome(failure_kind=AGENT_RUN_ERROR))
+
+
+def model_http_error_outcome(status: int, *, error_body: bytes | str | None = None) -> AgentOutcome:
+    """Classify a model request that failed with HTTP ``status``, for ``RunEvidence.error``.
+
+    ``error_body`` is the endpoint's error body when the harness exposes it: an HTTP client's response content, or
+    the raw JSON a CLI prints verbatim. A 400 whose body is OpenAI's error envelope with code
+    ``context_length_exceeded`` is ``model_context_limit``: Gym's model servers answer a context overflow they
+    propagate that way, and the ladder grades it as incomplete, before or after the first reply. Any other failure is
+    ``model_request_error`` with its status.
+    """
+    if status == 400 and _openai_error_code(error_body) == CONTEXT_LENGTH_EXCEEDED_ERROR_CODE:
+        return AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT)
+    return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
+
+
+def _openai_error_code(body: bytes | str | None) -> str | None:
+    """The ``error.code`` string of an OpenAI error envelope (``{"error": {"code": ...}}``), else ``None``."""
+    try:
+        error = json.loads(body or b"").get("error")
+    except (TypeError, ValueError, AttributeError):
+        return None
+    code = error.get("code") if isinstance(error, dict) else None
+    return code if isinstance(code, str) else None
 
 
 # --- Environment Server side: what to do with an agent's response before grading ---------------------------------- #
