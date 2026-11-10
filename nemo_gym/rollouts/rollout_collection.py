@@ -95,6 +95,7 @@ from nemo_gym.config.global_config import (
 from nemo_gym.core.episode_context import check_rollout_id_length, maybe_rollout_id_from_run_body
 from nemo_gym.core.episode_types import EpisodeId, TaskId, is_materialized_task_row
 from nemo_gym.core.failure_kinds import (
+    AGENT_ROUTE_FAILED,
     CANCELLED,
     COLLECTION_DISPATCH_FAILED,
     ENVIRONMENT_PROTOCOL_VIOLATION,
@@ -111,6 +112,7 @@ from nemo_gym.core.failure_records import EpisodeFailure, FailureBoundary, Failu
 from nemo_gym.core.failure_transport import FailureHeader, FailureReportRow
 from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for
 from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
+from nemo_gym.models.model_call_capture import ModelCallCaptureConfig
 from nemo_gym.rollouts.batch_status import (
     BatchStatusTracker,
     RunStatusTracker,
@@ -180,6 +182,7 @@ from nemo_gym.telemetry.gym_metrics import (
 from nemo_gym.telemetry.observer import MeteredAdmission, count_resident, driver_metrics, observe_event_loop
 from nemo_gym.telemetry.setup import is_metrics_exporter_active, is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
+from nemo_gym.trajectory.trajectory_format import project_result_v1
 from nemo_gym.trajectory.trajectory_record import (
     NG_AGENT_OBSERVATIONS_KEY,
     NG_TRAJECTORY_KEY,
@@ -729,11 +732,32 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
     return record
 
 
+def _episode_reply_violation(response: Any) -> NgFailureEvent:
+    """The typed failure for a reply that is neither an episode result nor a failure.
+
+    It names what the reply held (its type and top-level keys, never values), so a producer that answers an
+    episode request with another shape is found from the failure record alone.
+    """
+    shape = (
+        f"an object with keys {sorted(str(key) for key in response)[:20]}"
+        if isinstance(response, Mapping)
+        else f"a {type(response).__name__}"
+    )
+    return NgFailureEvent(
+        boundary=FailureBoundary.COLLECTION,
+        failure_kind=ENVIRONMENT_PROTOCOL_VIOLATION,
+        failure_reason=f"Environment server replied to an episode request with {shape}, not an episode result or failure",
+        operation="collection.run",
+    )
+
+
 def _native_episode_record(row: Dict, response: Any) -> Dict:
     """Validate the dispatched episode identity before translating its outcome."""
     try:
         if not _is_episode_response(response):
-            raise ValueError("Environment server must return an episode result or failure.")
+            raise InvalidRolloutResult(
+                "Environment server must return an episode result or failure."
+            ) from _episode_reply_violation(response)
         request = _episode_request_body(row)
         if EpisodeId.model_validate(response["episode_id"]) != EpisodeId.model_validate(request["episode_id"]):
             raise StaleRolloutResult("Episode response does not match the dispatched rollout attempt.")
@@ -742,7 +766,7 @@ def _native_episode_record(row: Dict, response: Any) -> Dict:
         if (response.get("result") is None) == (response.get("failure") is None):
             raise ValueError("Episode response requires exactly one result or failure.")
         return _episode_record(response)
-    except StaleRolloutResult:
+    except InvalidRolloutResult:
         raise
     except (ValueError, TypeError) as error:
         raise InvalidRolloutResult(str(error)) from error
@@ -883,6 +907,7 @@ async def enrich_run_result(
     include_payloads: bool = True,
     rollout_latency_ms: Optional[float] = None,
     delete_capture: bool = False,
+    trajectory_schema_version: Literal["1.0", "2.0"] = "1.0",
 ) -> dict[str, Any]:
     """Attach a finished rollout's collected evidence to its ``/run`` result, in place.
 
@@ -914,6 +939,8 @@ async def enrich_run_result(
     # The capture file may go only once its bodies are safely on the record: writes drained, readback complete,
     # nothing unreadable, and the bodies kept (not redacted).
     safe_to_delete = False
+    redacted = _has_observation_gap(result, "multimodal_history_redacted")
+    payloads_kept = include_payloads and not redacted
     if capture_dirs and (
         not no_persist
         or NG_AGENT_OBSERVATIONS_KEY in result
@@ -927,8 +954,12 @@ async def enrich_run_result(
         quiesced = False
         if rollout_id_for_capture is not None:
             quiesced = await await_model_call_capture_quiescence(rollout_id_for_capture, capture_dirs)
-        payloads_kept = include_payloads and not _has_observation_gap(result, "multimodal_history_redacted")
-        merge_model_call_capture_into_record(result, capture_dirs, include_payloads=payloads_kept)
+        # Available unredacted responses verify exact tool requests before output omission.
+        merge_model_call_capture_into_record(
+            result,
+            capture_dirs,
+            include_payloads=not redacted if trajectory_schema_version == "2.0" else payloads_kept,
+        )
         capture = result.get("ng_model_call_capture")
         safe_to_delete = quiesced and payloads_kept and isinstance(capture, dict) and not capture.get("gaps")
 
@@ -938,7 +969,36 @@ async def enrich_run_result(
         or NG_TRAJECTORY_KEY in result
         or NG_VERIFIER_INVOCATIONS_KEY in result
     ):
-        _attach_trajectory_record(row, result)
+        _attach_trajectory_record(
+            row, result, schema_version=trajectory_schema_version, include_payloads=payloads_kept
+        )
+        trajectory = result.get(NG_TRAJECTORY_KEY)
+        if isinstance(trajectory, dict):
+            if not payloads_kept:
+                for call in trajectory.get("model_calls", []):
+                    call["request"] = None
+                    call["response"] = None
+                if trajectory_schema_version == "2.0":
+                    gaps = trajectory.setdefault("gaps", [])
+                    for tool in trajectory.get("tool_calls", []):
+                        gap = {
+                            "code": "tool_request_payload_unavailable",
+                            "invocation_id": tool["invocation_id"],
+                            "agent_instance": tool.get("agent_instance"),
+                            "span_id": tool["span_id"],
+                            "detail": None,
+                        }
+                        if tool.get("model_call_id") is not None and gap not in gaps:
+                            gaps.append(gap)
+
+    # Omission applies even when malformed capture prevents trajectory projection.
+    if not payloads_kept:
+        capture = result.get("ng_model_call_capture")
+        calls = capture.get("calls") if isinstance(capture, dict) else None
+        for call in calls if isinstance(calls, list) else []:
+            if isinstance(call, dict):
+                for key in ("request", "response", "request_raw", "response_raw"):
+                    call.pop(key, None)
 
     # Assembles ng_perf from ng_trajectory when observability is enabled.
     _attach_ng_perf(result, observability_enabled=observability_enabled, rollout_latency_ms=rollout_latency_ms)
@@ -949,6 +1009,19 @@ async def enrich_run_result(
 
 
 _ENRICHMENT_KEYS = ("ng_model_call_capture", NG_TRAJECTORY_KEY, NG_PERF_KEY)
+
+
+def _returned_observation_envelopes(result: Any) -> list[tuple[dict[str, Any], str, str]]:
+    """Known evidence locations, preserving a returned episode's outer shape."""
+    if not isinstance(result, dict):
+        return []
+    envelopes = [(result, NG_TRAJECTORY_KEY, NG_AGENT_OBSERVATIONS_KEY)]
+    if _is_episode_response(result):
+        if isinstance(result.get("result"), dict):
+            envelopes.append((result["result"], NG_TRAJECTORY_KEY, NG_AGENT_OBSERVATIONS_KEY))
+        if isinstance(result.get("failure"), dict):
+            envelopes.append((result["failure"], "trajectory", "agent_observations"))
+    return envelopes
 
 
 async def _enrich_returned_result(
@@ -1105,6 +1178,13 @@ def _reflect_enrichment(result: Any, record: Dict[str, Any]) -> None:
     """Add a stored record's enrichment and identity keys to the reply ``run_examples`` returns in its own shape."""
     if record is result or not isinstance(result, dict):
         return
+    # Enrichment already made one projection decision over the collected evidence.
+    # Reflect that decision into existing nested producer slots instead of running
+    # ID restoration again without the collector's complete join/collision evidence.
+    for container, trajectory_key, bundle_key in _returned_observation_envelopes(result):
+        for target, source in ((trajectory_key, NG_TRAJECTORY_KEY), (bundle_key, NG_AGENT_OBSERVATIONS_KEY)):
+            if container.get(target) is not None and source in record:
+                container[target] = copy.deepcopy(record[source])
     for key in (*_ENRICHMENT_KEYS, *_SHARD_IDENTITY_KEYS):
         if key in record and key not in result:
             result[key] = record[key]
@@ -1449,6 +1529,17 @@ class SharedRolloutCollectionConfig(
         ),
     )
 
+    environment_protocol_violation_stop_after: int = Field(
+        default=3,
+        ge=0,
+        description=(
+            "Stop the run when this many results from one environment server (all of them, if it serves fewer) "
+            "have all been replies the collector cannot use (environment_protocol_violation). Such a reply is a "
+            "producer bug that every later task repeats. Takes effect with route_failures_to_sidecar; with it "
+            "off, the first invalid reply ends the run. 0 turns the stop off."
+        ),
+    )
+
     route_failures_to_sidecar: bool = Field(
         default=False,
         description=(
@@ -1507,8 +1598,33 @@ class SharedRolloutCollectionConfig(
         made_progress: bool,
         final_zero_rows: Sequence[Mapping[str, Any]] = (),
     ) -> None:
-        """Reject unfinished work; allow omissions alongside completed tasks.
+        """Raise the strict run's rejection, if any; see :meth:`completion_rejection` for the arguments."""
+        rejection = self.completion_rejection(
+            expected=expected,
+            results=results,
+            completed=completed,
+            intentionally_omitted=intentionally_omitted,
+            retryable=retryable,
+            made_progress=made_progress,
+            final_zero_rows=final_zero_rows,
+        )
+        if rejection is not None:
+            raise rejection
 
+    def completion_rejection(
+        self,
+        *,
+        expected: int,
+        results: List[Dict[str, Any]],
+        completed: int | None = None,
+        intentionally_omitted: int = 0,
+        retryable: bool,
+        made_progress: bool,
+        final_zero_rows: Sequence[Mapping[str, Any]] = (),
+    ) -> IncompleteEvaluationError | None:
+        """The error that rejects unfinished work, or None; omissions alongside completed tasks are allowed.
+
+        Collection decides this before it computes the aggregate, so a rejected run publishes no score.
         Drivers must supply whether any tasks can still be retried and whether
         this invocation saved outcomes that made progress (not just interruptions). Assuming either can cause endless
         automatic restarts when a driver has no work left or makes no progress.
@@ -1518,7 +1634,7 @@ class SharedRolloutCollectionConfig(
         passes ``completed`` has already counted them.
         """
         if not self.require_complete and not intentionally_omitted:
-            return
+            return None
         if completed is None:
             completed = len(
                 {
@@ -1542,17 +1658,18 @@ class SharedRolloutCollectionConfig(
                 expected,
                 intentionally_omitted,
             )
-            return
+            return None
         if not self.require_complete:
-            return
+            return None
         if completed < expected:
-            raise IncompleteEvaluationError(
+            return IncompleteEvaluationError(
                 f"EVAL FAILED: {completed}/{expected} samples completed. "
                 f"Partial artifacts retained at {self.output_jsonl_fpath}."
                 + (" No tasks are eligible for retry." if not retryable else ""),
                 retryable=retryable,
                 made_progress=made_progress,
             )
+        return None
 
 
 def _credentials_rejected_stop(failures: Sequence[Mapping[str, Any]]) -> IncompleteEvaluationError | None:
@@ -1567,6 +1684,18 @@ def _credentials_rejected_stop(failures: Sequence[Mapping[str, Any]]) -> Incompl
         "with gym eval resubmit --recover.",
         retryable=False,
         failure_kind=PROVIDER_CREDENTIALS_REJECTED,
+    )
+
+
+def _protocol_violation_stop(server: str, answered: int) -> IncompleteEvaluationError:
+    """The end of a run whose environment server has answered every request so far with a reply the collector cannot
+    use: the producer is wrong, and no attempt can change that."""
+    return IncompleteEvaluationError(
+        f"EVAL STOPPED: the environment server {server} answered {answered} of {answered} requests with a reply "
+        f"the collector cannot use ({ENVIRONMENT_PROTOCOL_VIOLATION}); this is a producer bug, retrying cannot help. "
+        "Fix the server or the benchmark pairing, then `gym eval submit` again.",
+        retryable=False,
+        failure_kind=ENVIRONMENT_PROTOCOL_VIOLATION,
     )
 
 
@@ -2300,7 +2429,7 @@ def _dispatch_span(row: Mapping[str, Any], dispatch_name: str, *, server_name: s
 
 def _record_rollout_outcome(result: Dict[str, Any], outcome: str, dispatch_name: str) -> None:
     """Count a persisted attempt, including its numeric reward when scored."""
-    if not is_span_group_enabled(GymSpanGroup.ROLLOUT):
+    if not is_metrics_exporter_active():
         return
     # These are the dispatch's original routing fields, captured before the
     # canonical persisted record maps kinds to sidecar classes. Keep main's
@@ -2376,7 +2505,32 @@ def _record_rollout_health(
         logger.debug("Could not record rollout health telemetry.", exc_info=True)
 
 
-def _agent_request_failure_row(exc: BaseException, status: Optional[int]) -> Dict[str, Any]:
+# Kinds that only say where a failure passed. The kind a row carries is the first cause that says more.
+_ROUTING_FAILURE_KINDS = frozenset({AGENT_ROUTE_FAILED, COLLECTION_DISPATCH_FAILED, AGENT_RUN_ERROR_FAILURE_CLASS})
+
+
+def _reply_failure_kind(headers: Any) -> Optional[str]:
+    """The kind of the outermost failure in the chain an agent's failed reply selected that is not a routing kind.
+
+    ``None`` without a report, with an omitted or broken chain, or when every failure on it only routes.
+    """
+    report = FailureHeader.decode(headers) if headers is not None else None
+    if report is None or report.omitted:
+        return None
+    seen: set[str] = set()
+    current = report.failure_id
+    while current is not None and current not in seen:
+        seen.add(current)
+        event = report.events.get(current)
+        if event is None:
+            return None
+        if event.failure_kind not in _ROUTING_FAILURE_KINDS:
+            return event.failure_kind
+        current = event.cause_id
+    return None
+
+
+def _agent_request_failure_row(exc: BaseException, status: Optional[int], headers: Any = None) -> Dict[str, Any]:
     """One sidecar row for a `/run` call that came back without a result.
 
     No reward and no response: an infrastructure failure is not a verifier score of zero, and a
@@ -2393,8 +2547,11 @@ def _agent_request_failure_row(exc: BaseException, status: Optional[int]) -> Dic
         observations = failure_observations(orjson.loads(body)) if body else {}
     except (TypeError, ValueError):
         observations = {}
+    # A reply that ran and broke names its cause's kind, so the row is typed instead of a bare agent_run_error.
+    kind = _reply_failure_kind(headers) if rollout_ran else None
     return {
         **observations,
+        **({"_ng_failure_kind": kind} if kind is not None else {}),
         NG_FAILURE_CLASS_KEY: (AGENT_RUN_ERROR_FAILURE_CLASS if rollout_ran else AGENT_REQUEST_FAILED_FAILURE_CLASS),
         "_ng_failure_type": type(exc).__name__,
         "_ng_failure_message": str(exc) or repr(exc),
@@ -4086,6 +4243,9 @@ executions → not run again (left to recovery)
         # Rollouts that never reach the main output at all, kept apart from quality.
         agent_name_to_dropped = defaultdict(Counter)
         counts_left = Counter(self._dispatch_name(row) for row in input_rows)
+        server_requests = Counter(counts_left)
+        server_answers: Counter = Counter()
+        server_violations: Counter = Counter()
         dispatched_per_agent = Counter(counts_left)
         start_time = time.time()
         environment_routes = Counter(
@@ -4279,6 +4439,9 @@ executions → not run again (left to recovery)
                     capture_dirs=capture_dirs,
                     observability_enabled=observability_enabled,
                     rollout_latency_ms=rollout_latency_ms,
+                    trajectory_schema_version=ModelCallCaptureConfig.model_validate(
+                        global_config.get("model_call_capture") or {}
+                    ).trajectory_schema_version,
                 )
 
                 # Freeze and rebuild tokens only for participating agents.
@@ -4416,6 +4579,16 @@ executions → not run again (left to recovery)
                 if counts_left[dispatch_name] <= 0:
                     counts_left.pop(dispatch_name)
 
+                server_answers[dispatch_name] += 1
+                server_violations[dispatch_name] += failure_class == ENVIRONMENT_PROTOCOL_VIOLATION
+                stop_after = min(config.environment_protocol_violation_stop_after, server_requests[dispatch_name])
+                if (
+                    stop_after
+                    and server_answers[dispatch_name] >= stop_after
+                    and server_violations[dispatch_name] == server_answers[dispatch_name]
+                ):
+                    raise _protocol_violation_stop(dispatch_name, server_answers[dispatch_name])
+
                 if batch_tracker is not None and getattr(batch_tracker, "enabled", True):
                     batch_tracker.write_status(batch_completed_rows, batch_failure_rows)
 
@@ -4519,8 +4692,10 @@ executions → not run again (left to recovery)
             f"Rollout coverage: {completion['successful']}/{completion['expected']} completed, "
             f"of which {completion['measured']} measured, {completion['masked']} masked, "
             f"and {completion['unscored']} unscored; "
-            f"{completion['failed']} failed, {completion['intentionally_omitted']} intentionally omitted, "
-            f"{completion['not_started']} not started, {completion['missing']} missing outcomes. "
+            f"{completion['failed']} failed ({completion['failed_masked']} masked, not scored as zero), "
+            f"{completion['intentionally_omitted']} intentionally omitted, "
+            f"{completion['not_started']} not started, {completion['missing']} missing outcomes; "
+            f"{completion['open']} open (no final result). "
             f"Details: {coverage_path_for(output_fpath)}"
         )
         # Explicitly counted failures can provide a score even when no rollout
@@ -4588,10 +4763,36 @@ executions → not run again (left to recovery)
         # Aggregate persisted results plus explicitly counted metrics-only failures and missing
         # rollouts, matching `gym eval aggregate` without changing either rollout artifact.
         imputed: List[Dict[str, Any]] = []
+        # A strict run publishes no score until it is complete: decide before the aggregate is computed or
+        # exported, and raise once the per-row artifacts, coverage and status are saved.
+        # A producer-marked final zero settles its rollout: resume does not run it again, so it is complete and in
+        # the denominator, while health still reports it as a failure and no verifier execution is recorded for it.
+        rejection: Optional[BaseException] = None
+        if config.require_complete:
+            rejection = await asyncio.to_thread(
+                lambda: _credentials_rejected_stop(store.failures()) or _quota_exhausted_stop(store.failures())
+            )
+        if rejection is None:
+            rejection = config.completion_rejection(
+                expected=completion["expected"],
+                results=persisted_results,
+                completed=completion["successful"] - completion.get("masked_retryable", 0) + completion["final_zeros"],
+                intentionally_omitted=completion["intentionally_omitted"],
+                retryable=completion["retryable"] > 0,
+                made_progress=store.progress_outcomes_recorded > 0,
+            )
         if config.disable_aggregation:
             print(
                 "Skipping aggregate-metrics computation because disable_aggregation=True. "
                 "Run `gym eval aggregate` after all shards finish to compute the global metrics."
+            )
+            aggregate_metrics_fpath = None
+        elif rejection is not None:
+            # An aggregate an earlier segment left describes a different set of rows: remove it with the score.
+            await asyncio.to_thread(aggregate_metrics_path_for(output_fpath).unlink, missing_ok=True)
+            print(
+                "Not computing aggregate metrics: the run is incomplete and require_complete is set. "
+                "Resume it; the aggregate is written when the run completes."
             )
             aggregate_metrics_fpath = None
         else:
@@ -4635,7 +4836,9 @@ executions → not run again (left to recovery)
         expected_rollouts = completion["expected"]
         scored_rollouts = completion["successful"] - completion["unscored"] + len(counted)
         store.write_coverage(
-            scored=scored_rollouts, failures_counted_as_zero=len(counted) - len(imputed), imputed=len(imputed)
+            scored=scored_rollouts,
+            failures_counted_as_zero=len(counted) - len(imputed) + completion.get("counted_zeros_in_successful", 0),
+            imputed=len(imputed),
         )
         coverage = _coverage_report(
             expected_rollouts, scored_rollouts, failure_counts, failures_fpath, imputed=len(imputed)
@@ -4658,9 +4861,11 @@ executions → not run again (left to recovery)
                     "coverage/masked": completion["masked"],
                     "coverage/unscored": completion["unscored"],
                     "coverage/failed": completion["failed"],
+                    "coverage/failed_masked": completion["failed_masked"],
                     "coverage/omitted": completion["intentionally_omitted"],
                     "coverage/not_started": completion["not_started"],
                     "coverage/missing_outcomes": completion["missing"],
+                    "coverage/open": completion["open"],
                     "coverage/failure_budget_exhausted": completion["failure_budget_exhausted"],
                     **({"coverage/imputed": len(imputed)} if config.count_missing_rollouts_as_zero else {}),
                     **failure_metrics,
@@ -4672,22 +4877,8 @@ Fully materialized inputs: {config.materialized_jsonl_fpath}
 Rollouts: {output_fpath}
 Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
-        if config.require_complete and (
-            stop := await asyncio.to_thread(
-                lambda: _credentials_rejected_stop(store.failures()) or _quota_exhausted_stop(store.failures())
-            )
-        ):
-            raise stop
-        # A producer-marked final zero settles its rollout: resume does not run it again, so it is complete and in
-        # the denominator, while health still reports it as a failure and no verifier execution is recorded for it.
-        config.check_completion(
-            expected=completion["expected"],
-            results=persisted_results,
-            completed=completion["successful"] - completion.get("masked_retryable", 0) + completion["final_zeros"],
-            intentionally_omitted=completion["intentionally_omitted"],
-            retryable=completion["retryable"] > 0,
-            made_progress=store.progress_outcomes_recorded > 0,
-        )
+        if rejection is not None:
+            raise rejection
         return results
 
     async def _call_aggregate_metrics(
@@ -5364,7 +5555,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     # The status comes from the error when it carries one, and from the response
                     # when the body was the part that failed.
                     status = getattr(e, "status", None) or getattr(res, "status", None)
-                    failure = _agent_request_failure_row(e, status)
+                    failure = _agent_request_failure_row(
+                        e, status, getattr(e, "headers", None) or getattr(res, "headers", None)
+                    )
                     if (
                         (typed_outcomes or validate_results)
                         and isinstance(e, (InvalidRolloutResult, orjson.JSONDecodeError))
@@ -5425,6 +5618,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         semaphore: Optional[Semaphore] = None,
         *,
         run_id: str | None = None,
+        max_num_tries: Optional[int] = None,
+        connect_grace_s: Optional[float] = None,
     ) -> _RowResultIterator:
         """Yield ``(row, completed_dict | RolloutFailureRecord)`` in completion order.
 
@@ -5435,6 +5630,11 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         a run, overriding any row stamp. Without it, existing row stamps are preserved;
         unstamped rows share a new invocation ID. Returned rows are invocation-owned copies;
         input rows are not modified. ``run_examples`` retains its behavior.
+
+        A refused or dropped connection is resent without limit unless the caller bounds it. ``max_num_tries`` limits
+        how often a ``/run`` whose connection was made and then dropped is sent, and ``connect_grace_s`` is how long a
+        ``/run`` whose every connection was refused (so it was never delivered) keeps being resent; ``gym eval run``
+        uses 2 and ``dispatch_connect_grace_s``. With a bound, the failure record's ``delivery`` can say ``not_sent``.
 
         On early stopping, await the iterator's ``aclose()`` to cancel and join unfinished
         client tasks, or ``aclose_and_drain()`` to also retrieve settled, unconsumed outcomes.
@@ -5449,7 +5649,12 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         return _RowResultIterator(
             self._run_examples_with_metadata(
-                examples, head_server_config=head_server_config, semaphore=semaphore, typed_outcomes=True
+                examples,
+                head_server_config=head_server_config,
+                semaphore=semaphore,
+                typed_outcomes=True,
+                _max_num_tries=max_num_tries,
+                _connect_grace_s=connect_grace_s,
             ),
         )
 
@@ -5468,6 +5673,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         retry_requests: bool = True,
         enrich_results: bool = False,
         include_model_call_payloads: bool = True,
+        trajectory_schema_version: Literal["1.0", "2.0"] | None = None,
         delete_model_call_capture: bool = False,
         record_output_dir: Optional[Path | str] = None,
         record_shard: Optional[str] = None,
@@ -5535,6 +5741,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         Connections that were never established can still be retried safely.
         It does not convert failures to successful result rows.
 
+        ``trajectory_schema_version`` also applies when ``enrich_results=False``: v1 projects returned producer
+        observations without reading captures or adding records; v2 retains their original qualified evidence.
+        The explicit choice overrides ``model_call_capture.trajectory_schema_version`` (default v1).
+
         ``enrich_results`` runs :func:`enrich_run_result` on each result before it is returned, so the caller receives
         what ``ng_collect_rollouts`` records: the row's rollout identity, the captured model calls
         (``ng_model_call_capture``, with request and response bodies unless ``include_model_call_payloads`` is false),
@@ -5576,6 +5786,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     observability_enabled=observability_enabled,
                     include_payloads=include_model_call_payloads,
                     delete_capture=delete_model_call_capture,
+                    trajectory_schema_version=trajectory_schema_version
+                    or ModelCallCaptureConfig.model_validate(
+                        global_config.get("model_call_capture") or {}
+                    ).trajectory_schema_version,
                 )
                 if writer is None:
                     await _enrich_returned_result(
@@ -5595,6 +5809,43 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 )
                 _reflect_enrichment(completed.result, record)
                 writer.write(record)
+
+        else:
+            returned_schema = trajectory_schema_version
+
+            async def enrich(completed: _CompletedRollout) -> None:
+                # Raw producer evidence stays qualified until the caller-facing boundary.
+                # Choosing a wire version does not opt into capture reads or enrichment.
+                nonlocal returned_schema
+                envelopes = _returned_observation_envelopes(completed.result)
+                if not any(
+                    isinstance(container.get(key), dict) and container[key].get("schema_version") == "2.0"
+                    for container, trajectory_key, bundle_key in envelopes
+                    for key in (trajectory_key, bundle_key)
+                ):
+                    return
+                if returned_schema is None:
+                    global_config = self.setup_server_client(head_server_config).global_config_dict
+                    returned_schema = ModelCallCaptureConfig.model_validate(
+                        global_config.get("model_call_capture") or {}
+                    ).trajectory_schema_version
+                if returned_schema == "2.0":
+                    return
+                for container, trajectory_key, bundle_key in envelopes:
+                    trajectory, bundle = container.get(trajectory_key), container.get(bundle_key)
+                    if trajectory is not None and not isinstance(trajectory, dict):
+                        continue
+                    if bundle is not None and not isinstance(bundle, dict):
+                        continue
+                    try:
+                        projected, projected_bundle = project_result_v1(trajectory or {}, bundle)
+                    except (AttributeError, KeyError, TypeError, ValueError):
+                        # Keep malformed producer evidence intact, as raw dispatch did.
+                        continue
+                    if trajectory_key in container and trajectory is not None:
+                        container[trajectory_key] = projected
+                    if bundle_key in container and projected_bundle is not None:
+                        container[bundle_key] = projected_bundle
 
         dispatched = examples
         run_id = None
@@ -6147,6 +6398,7 @@ class RolloutAggregationHelper(BaseModel):
             "unscored": unscored_rollouts,
             "failed": sum(c["failed"] for c in components) if inventory_known else None,
             "failed_final": sum(c["failed_final"] for c in components) if inventory_known else None,
+            "failed_masked": sum(c["failed_masked"] for c in components) if inventory_known else None,
             "failed_not_final": sum(c["failed_not_final"] for c in components) if inventory_known else None,
             "failed_by_class": dict(sum((Counter(c["failed_by_class"]) for c in components), Counter()))
             if inventory_known
@@ -6154,6 +6406,7 @@ class RolloutAggregationHelper(BaseModel):
             "intentionally_omitted": sum(c["intentionally_omitted"] for c in components) if inventory_known else None,
             "not_started": sum(c["not_started"] for c in components) if inventory_known else None,
             "missing": sum(c["missing"] for c in components) if inventory_known else None,
+            "open": sum(c["open"] for c in components) if inventory_known else None,
             "failure_budget_exhausted": sum(c["failure_budget_exhausted"] for c in components)
             if inventory_known
             else None,
@@ -6166,7 +6419,10 @@ class RolloutAggregationHelper(BaseModel):
             "complete": inventory_known and all(c["complete"] for c in components),
             "coverage_known": inventory_known,
             "scored": scored_rollouts,
-            "failures_counted_as_zero": len(counted) - len(missing),
+            "failures_counted_as_zero": len(counted)
+            - len(missing)
+            + sum(c.get("counted_zeros_in_successful", 0) for c in components),
+            "counted_zero_kinds": dict(sum((Counter(c.get("counted_zero_kinds", {})) for c in components), Counter())),
             "imputed": len(missing),
             "shards": components,
             "shards_without_inventory": [str(path) for path in legacy_paths],
@@ -6188,9 +6444,10 @@ class RolloutAggregationHelper(BaseModel):
             coverage += (
                 f"\nCoverage: {completion['successful']} completed "
                 f"({completion['measured']} measured, {completion['masked']} masked, {completion['unscored']} unscored), "
-                f"{completion['failed']} failed, "
+                f"{completion['failed']} failed ({completion['failed_masked']} masked, not scored as zero), "
                 f"{completion['intentionally_omitted']} intentionally omitted, "
-                f"{completion['not_started']} not started, {completion['missing']} missing outcomes. "
+                f"{completion['not_started']} not started, {completion['missing']} missing outcomes; "
+                f"{completion['open']} open (no final result). "
                 f"Details: {report_path}"
             )
         if get_exporters():  # pragma: no cover
@@ -6215,9 +6472,11 @@ class RolloutAggregationHelper(BaseModel):
                 metrics["coverage/missing"] = completion["missing"]
                 metrics["coverage/not_scored"] = completion["expected"] - scored_rollouts
                 metrics["coverage/failed"] = completion["failed"]
+                metrics["coverage/failed_masked"] = completion["failed_masked"]
                 metrics["coverage/omitted"] = completion["intentionally_omitted"]
                 metrics["coverage/not_started"] = completion["not_started"]
                 metrics["coverage/missing_outcomes"] = completion["missing"]
+                metrics["coverage/open"] = completion["open"]
                 metrics["coverage/failure_budget_exhausted"] = completion["failure_budget_exhausted"]
             export_metrics(metrics)
 

@@ -35,7 +35,16 @@ default stops at ten seconds and a sandbox start routinely takes a minute.
 ``gym.sandbox.create_retry_total`` (counter): one per create attempt a provider retried.
 Retrying is provider-internal, so each provider that retries records it from its own loop.
 
-All four carry ``nemo.gym.sandbox.provider``.
+``gym.sandbox.transfer_duration_ms`` (histogram): wall-clock of one file transfer into or out of a sandbox,
+including the seed files ``AsyncSandbox.start()`` writes after the provider returns the sandbox.
+It carries ``nemo.gym.sandbox.transfer.direction`` (``upload`` or ``download``)
+and ``nemo.gym.sandbox.transfer.outcome`` (``ok``, ``error`` or ``cancelled``).
+Sidecar downloads are not counted.
+
+``gym.sandbox.transfer_bytes_total`` (counter, bytes): the size of each regular file a transfer moved successfully,
+by direction.
+
+All six carry ``nemo.gym.sandbox.provider``.
 
 Server startup
 --------------
@@ -68,11 +77,14 @@ Compare its value with the queue-duration histogram count to calculate the queue
 Rollout outcomes
 ----------------
 ``gym.rollout.completed_total`` (counter): one per rollout attempt the collection driver finished
-handling, recorded after the recovery store accepts the saved outcome. An attempt is one dispatch of
+handling, recorded (for the collection driver) after the recovery store accepts the saved outcome. An attempt is one dispatch of
 one row in one collection run; a retry on a later resume run is another attempt, and an HTTP-level
-re-send of ``/run`` inside one dispatch is not. Only ``run_from_config`` (``gym eval run`` with
-serving) records it: ``--no-serve`` initialises no telemetry, and ``run_examples`` callers,
-reverification and the GDPVal multistage driver do not call the recorder.
+re-send of ``/run`` inside one dispatch is not. Two producers record it. The collection driver is
+``run_from_config`` (``gym eval run`` with serving): ``--no-serve`` initialises no telemetry, and ``run_examples``
+callers, reverification and the GDPVal multistage driver do not call the recorder. ``TaskRunner.run_task``, the
+in-process API, also records each rollout outcome it returns, without a recovery-store write: for it ``failed``
+means the outcome has a failure (labeled with its kind only), ``scored`` a reward and no failure, and ``unscored``
+neither. ``gym.rollout.rewarded_total`` counts only the finite rewards of scored rollouts, masked ones included.
 
 ``nemo.gym.rollout.outcome`` is ``scored`` (main output, including masked, forced-zero and supported
 unscored completions), ``failed`` (saved failures, including kill-shaped) or ``omitted`` (saved
@@ -150,7 +162,7 @@ by ``nemo.gym.checkpoint.event``:
 import logging
 import threading
 from collections.abc import Callable, Iterable, Sequence
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 
 logger = logging.getLogger(__name__)
@@ -160,6 +172,12 @@ SANDBOX_ACTIVE_INSTRUMENT = "gym.sandbox.active"
 SANDBOX_STARTUP_INSTRUMENT = "gym.sandbox.startup_duration_ms"
 SANDBOX_EXEC_INSTRUMENT = "gym.sandbox.exec_duration_ms"
 SANDBOX_CREATE_RETRY_INSTRUMENT = "gym.sandbox.create_retry_total"
+SANDBOX_TRANSFER_DURATION_INSTRUMENT = "gym.sandbox.transfer_duration_ms"
+SANDBOX_TRANSFER_BYTES_INSTRUMENT = "gym.sandbox.transfer_bytes_total"
+SANDBOX_TRANSFER_DIRECTION_ATTRIBUTE = "nemo.gym.sandbox.transfer.direction"
+SANDBOX_TRANSFER_OUTCOME_ATTRIBUTE = "nemo.gym.sandbox.transfer.outcome"
+SandboxTransferDirection = Literal["upload", "download"]
+SandboxTransferOutcome = Literal["ok", "error", "cancelled"]
 SERVER_STARTUP_STAGE_INSTRUMENT = "gym.server.startup_stage_duration_ms"
 SERVER_NAME_ATTRIBUTE = "nemo.gym.server.name"
 SERVER_TYPE_ATTRIBUTE = "nemo.gym.server.type"
@@ -208,6 +226,27 @@ SANDBOX_DURATION_BOUNDARIES_MS: tuple[float, ...] = (
     300_000,
     600_000,
     1_800_000,
+)
+
+#: Milliseconds.
+#: Copying a small file into a local container takes tens of milliseconds, while a large file to a remote sandbox
+#: can take minutes, so the boundaries start lower than the lifecycle ones.
+SANDBOX_TRANSFER_DURATION_BOUNDARIES_MS: tuple[float, ...] = (
+    10,
+    25,
+    50,
+    100,
+    250,
+    500,
+    1_000,
+    2_500,
+    5_000,
+    10_000,
+    30_000,
+    60_000,
+    120_000,
+    300_000,
+    600_000,
 )
 
 #: Milliseconds.
@@ -370,6 +409,34 @@ def record_sandbox_create_retry(*, provider: str) -> None:
         "Sandbox-create attempts a provider retried.",
         {SANDBOX_PROVIDER_ATTRIBUTE: provider},
     )
+
+
+def record_sandbox_transfer(
+    duration_ms: float,
+    *,
+    provider: str,
+    direction: SandboxTransferDirection,
+    outcome: SandboxTransferOutcome,
+    size_bytes: int | None,
+) -> None:
+    """Record one file transfer's wall-clock and, when it succeeded, the bytes it moved."""
+    attributes = {SANDBOX_PROVIDER_ATTRIBUTE: provider, SANDBOX_TRANSFER_DIRECTION_ATTRIBUTE: direction}
+    _record_histogram(
+        SANDBOX_TRANSFER_DURATION_INSTRUMENT,
+        "ms",
+        "Wall-clock time to move one file into or out of a sandbox.",
+        duration_ms,
+        {**attributes, SANDBOX_TRANSFER_OUTCOME_ATTRIBUTE: outcome},
+        boundaries=SANDBOX_TRANSFER_DURATION_BOUNDARIES_MS,
+    )
+    if size_bytes is not None:
+        _record_counter(
+            SANDBOX_TRANSFER_BYTES_INSTRUMENT,
+            "Bytes of files moved into or out of sandboxes.",
+            attributes,
+            size_bytes,
+            unit="By",
+        )
 
 
 def _server_attributes(server_name: str, server_type: Optional[str]) -> dict[str, Any]:

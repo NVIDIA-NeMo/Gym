@@ -48,6 +48,9 @@ from nemo_gym.config import (
     get_global_config_dict,
 )
 from nemo_gym.core import (
+    AGENT_LIMIT,
+    AGENT_TIMEOUT,
+    MODEL_CONTEXT_LIMIT,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -235,6 +238,14 @@ class SearchVerifyRequest(SearchRunRequest, BaseVerifyRequest):
 # eval_timed_out/agent_timed_out arm). Like the other two it is RECORDED, not excluded from
 # the mean -- see aggregate_metrics.
 MASKED_TERMINAL_REASONS = frozenset({"max_iteration", "context_window", "agent_timed_out"})
+
+# The diagnostics each masked terminal reason reports on the verify response. They describe the
+# ending only; they do not change the reward or the mask.
+MASKED_TERMINAL_FAILURES = {
+    "max_iteration": (AGENT_LIMIT, "The agent reached its maximum number of iterations"),
+    "context_window": (MODEL_CONTEXT_LIMIT, "The conversation exceeded the model's context window"),
+    "agent_timed_out": (AGENT_TIMEOUT, "The agent ran past its time limit"),
+}
 
 
 class SearchVerifyResponse(BaseVerifyResponse):
@@ -574,7 +585,9 @@ class SearchResourcesServer(SimpleResourcesServer):
         await self._release_sandbox(request.session[SESSION_ID_KEY])
 
         # Forwarded by the agent from the turn-budget plugin's stderr line; "" on a normal ending.
-        masked = getattr(body, "opencode_terminal_reason", "") in MASKED_TERMINAL_REASONS
+        terminal_reason = getattr(body, "opencode_terminal_reason", "")
+        masked = terminal_reason in MASKED_TERMINAL_REASONS
+        failure_kind, failure_reason = MASKED_TERMINAL_FAILURES.get(terminal_reason, (None, None))
 
         final_text = _last_assistant_text(body.response)
         if not final_text.strip():
@@ -589,6 +602,8 @@ class SearchResourcesServer(SimpleResourcesServer):
                 judge_attempts=0,
                 judge_time_taken=0.0,
                 mask_sample=masked,
+                failure_kind=failure_kind,
+                failure_reason=failure_reason,
             )
 
         result = await self._judge_answer(
@@ -606,6 +621,8 @@ class SearchResourcesServer(SimpleResourcesServer):
             judge_attempts=result["judge_attempts"],
             judge_time_taken=result["judge_time_taken"],
             mask_sample=masked,
+            failure_kind=failure_kind,
+            failure_reason=failure_reason,
         )
 
 

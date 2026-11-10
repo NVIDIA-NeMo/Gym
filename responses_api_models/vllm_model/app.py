@@ -31,6 +31,7 @@ from fastapi.responses import JSONResponse
 from openai.types.completion_usage import CompletionTokensDetails, CompletionUsage, PromptTokensDetails
 from openai.types.shared import ReasoningEffort
 from pydantic import Field, PositiveFloat, PrivateAttr, TypeAdapter, ValidationError, model_validator
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from nemo_gym.client import MAX_NUM_TRIES, SESSION_ID_KEY, NeMoGymAsyncOpenAI
 from nemo_gym.client.http_client import _redacted_url
@@ -46,6 +47,7 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     current_rollout_id,
+    current_session_key,
     failure_report_for,
 )
 from nemo_gym.models import (
@@ -67,6 +69,7 @@ from nemo_gym.models import (
     validate_framework_context_options,
 )
 from nemo_gym.models.base_responses_api_model import _request_messages, _validate_responses_params
+from nemo_gym.models.model_call_capture import note_finish_reason
 from nemo_gym.models.token_capture import (
     CAPTURE_REFUSAL_HEADER,
     CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
@@ -429,6 +432,43 @@ def _set_reasoning(message_dict: dict[str, Any], reasoning: str, mode: Reasoning
         message_dict["reasoning"] = reasoning
 
 
+class _ContextErrorMiddleware:
+    """Return an engine refusal the client must see, such as a context overflow, instead of Gym's generic 500.
+
+    The engine's message and param are preserved verbatim inside OpenAI's error envelope.
+    The code says whether compacting the prompt is the remedy.
+    Every other error, and any error after the reply has started, propagates.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        started = False
+
+        async def send_tracking_start(message: Message) -> None:
+            nonlocal started
+            started = started or message["type"] == "http.response.start"
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_tracking_start)
+        except ClientResponseError as error:
+            if started or not is_propagated_refusal(error):
+                raise
+            message, code, param = context_overflow_error_fields(error)
+            response = JSONResponse(
+                content={"error": {"message": message, "type": "invalid_request_error", "param": param, "code": code}},
+                status_code=error.status,
+                headers=FailureHeader.encode(failure_report_for(error)),
+            )
+            await response(scope, receive, send)
+
+
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
     base_url: Union[str, List[str]]
     # Where each backend takes generation cuts, aligned with `base_url`,
@@ -583,6 +623,9 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # Total time limit for each HTTP attempt to the engine, not for the whole call; None means no limit.
     # A timed-out attempt is retried like any other transport error, so the call's attempt count is unchanged.
     request_timeout_seconds: Optional[PositiveFloat] = None
+    # Wall-clock cap on connection-error retries per model call, on every client including
+    # rebuilt endpoint clients. None waits without limit so a training run can ride out an engine restart.
+    endpoint_connection_retry_timeout_s: Optional[float] = Field(default=None, gt=0)
 
     # Expose the Gym session (one per rollout) as the backend's conversation id.
     # ``conversation_params`` is a TensorRT-LLM extension outside the OpenAI Chat Completions
@@ -839,29 +882,8 @@ class VLLMModel(SimpleResponsesAPIModel):
         return len(tokens) if isinstance(tokens, list) else None
 
     def setup_exception_middleware(self, app) -> None:
-        @app.middleware("http")
-        async def context_error_middleware(request: Request, call_next):
-            try:
-                return await call_next(request)
-            except ClientResponseError as error:
-                if is_propagated_refusal(error):
-                    # The engine's message and param are preserved verbatim inside OpenAI's error
-                    # envelope; the code says whether compacting the prompt is the remedy.
-                    message, code, param = context_overflow_error_fields(error)
-                    return JSONResponse(
-                        content={
-                            "error": {
-                                "message": message,
-                                "type": "invalid_request_error",
-                                "param": param,
-                                "code": code,
-                            }
-                        },
-                        status_code=error.status,
-                        headers=FailureHeader.encode(failure_report_for(error)),
-                    )
-                raise
-
+        # Registered before Gym's exception middleware, so it runs inside it and sees the error first.
+        app.add_middleware(_ContextErrorMiddleware)
         super().setup_exception_middleware(app)
 
     def setup_webserver(self) -> FastAPI:
@@ -959,6 +981,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 max_rate_limit_wait_seconds=0,
                 max_http_attempts=self.config.max_http_attempts,
                 max_num_tries=self.config.max_num_tries,
+                connection_retry_timeout_s=self.config.endpoint_connection_retry_timeout_s,
             )
             for base_url in self.config.base_url
         ]
@@ -1079,6 +1102,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         )
 
         execution = getattr(request.state, "nemo_gym_model_execution", {})
+        note_finish_reason(request, chat_completion_response.choices[0].finish_reason)
         if isinstance(execution, dict) and execution.get("local_response_reason") == "context_length_exceeded":
             response.metadata = {**(response.metadata or {}), "nemo_gym_context_window_exceeded": "true"}
         return response
@@ -1316,7 +1340,18 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         if self.config.uses_reasoning_parser and not self.config.preserve_reasoning_in_assistant_content:
             for message_dict in body_dict["messages"]:
-                if message_dict.get("role") != "assistant" or "content" not in message_dict:
+                if message_dict.get("role") != "assistant":
+                    continue
+
+                # External harnesses can supply reasoning separately from content.
+                # Normalize that history too: newer vLLM ignores reasoning_content.
+                reasoning = message_dict.get("reasoning_content") or message_dict.get("reasoning")
+                if reasoning and self.config.uses_interleaved_reasoning:
+                    message_dict.pop("reasoning_content", None)
+                    message_dict.pop("reasoning", None)
+                    _set_reasoning(message_dict, reasoning, self.config.reasoning_field)
+
+                if "content" not in message_dict:
                     continue
 
                 content = message_dict["content"]
@@ -2431,6 +2466,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 max_http_attempts=self.config.max_http_attempts,
                 max_num_tries=self.config.max_num_tries,
                 request_timeout_seconds=self.config.request_timeout_seconds,
+                connection_retry_timeout_s=self.config.endpoint_connection_retry_timeout_s,
             )
         ]
         # Every session re-resolves onto the new host.
@@ -2460,10 +2496,11 @@ class VLLMModel(SimpleResponsesAPIModel):
 
     def _resolve_client(self, request: Request) -> NeMoGymAsyncOpenAI:
         self._maybe_rebind_endpoint()
-        # Route by rollout when the call carries one: agents that drop cookies get a new
+        # Route by session when the call carries a rollout: agents that drop cookies get a new
         # session per call, which scatters a rollout's turns and lets the slowest endpoint
-        # collect them. Keying on the rollout keeps its turns on one endpoint.
-        session_id = current_rollout_id() or request.session[SESSION_ID_KEY]
+        # collect them. Keying on the session keeps its turns on one endpoint. This is the same key
+        # the outbound session header carries, so an upstream router and this server agree.
+        session_id = current_session_key() or request.session[SESSION_ID_KEY]
         client = self._session_id_to_client.get(session_id)
         if self.config.route_around_failing_endpoints:
             hashed = self._hashed_client(session_id)

@@ -497,7 +497,8 @@ class Inspector:
         )
 
     def structure(self) -> None:
-        for field in ("task_id", "rollout_id"):
+        capture_field = "capture_key" if self.trajectory.get("schema_version") == "2.0" else "rollout_id"
+        for field in ("task_id", capture_field):
             self.results.run(
                 SchemaCheck(
                     id="trajectory." + field,

@@ -99,6 +99,7 @@ def append_opencode_turns(
     *,
     model_ref: ModelServerRef | None = None,
     gym_reasoning: bool = False,
+    normalized_call_ids: dict[str, str] | None = None,
 ) -> None:
     """Membership comes only from persisted IDs; row order numbers turns within a session.
 
@@ -190,7 +191,7 @@ def append_opencode_turns(
                     {
                         "id": part_id,
                         "type": "function_call",
-                        "call_id": part.get("callID"),
+                        "call_id": (normalized_call_ids or {}).get(part_id, part.get("callID")),
                         "name": part["tool"],
                         "arguments": state.get("input"),
                     }
@@ -201,8 +202,17 @@ def append_opencode_turns(
             unavailable.add(message_id)
             if not answer and not reasoning and not text_parts:
                 continue
-        if text_parts:
-            answer.insert(0, {"id": message_id, "type": "message", "role": "assistant", "content": text_parts})
+        # Match the invocation's Responses shape: native text-part identity belongs to
+        # the output message, not to output_text (which has no id field).
+        answer[:0] = [
+            {
+                "id": part["id"],
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": part["text"], "annotations": []}],
+            }
+            for part in text_parts
+        ]
         trajectory.turns.append(
             TrajectoryTurn(
                 invocation_id=session_id,
