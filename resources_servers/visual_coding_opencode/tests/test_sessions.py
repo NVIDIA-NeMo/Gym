@@ -51,7 +51,6 @@ def _config(**fields) -> VisualCodingOpenCodeConfig:
         port=8080,
         entrypoint="",
         judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
-        judge_model="gpt",
         **fields,
     )
 
@@ -161,6 +160,38 @@ def test_without_a_sandbox_provider_the_server_stays_stateless() -> None:
     assert seeded.status_code == 200
     assert seeded.json()["sandbox_access"] is None
     check_resources_session_contract(server.setup_webserver(), _seed("stateless"), keeps_state=False)
+
+
+# A malformed typed seed: it names a resources session but has no episode, task or task_data.
+_ID_ONLY_SEED = {"resources_session_id": "s"}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _ID_ONLY_SEED,
+        {**_seed().model_dump(mode="json"), "task_data": None},
+        # A cookie seed, as an agent's own /run posts: a dataset row with a scalar task_id.
+        {"task_id": "task-1", "expected_answer": "(4,7)", "question": "Which cell?"},
+    ],
+)
+def test_a_lending_server_lends_only_to_a_typed_episode_seed(root, stopped, body) -> None:
+    server = _server(root)
+    client = TestClient(server.setup_webserver())
+
+    refused = client.post("/seed_session", json=body)
+
+    assert refused.status_code == 422, refused.text
+    assert server._lent_sandboxes.get("s") is None and server._lent_sandboxes.get("session") is None
+    assert stopped == []
+
+
+def test_a_stateless_server_refuses_a_malformed_typed_seed_and_accepts_a_cookie_seed() -> None:
+    server = VisualCodingOpenCodeServer(config=_config(), server_client=MagicMock(spec=ServerClient))
+    client = TestClient(server.setup_webserver())
+
+    assert client.post("/seed_session", json=_ID_ONLY_SEED).status_code == 422
+    assert client.post("/seed_session", json={"task_id": "task-1"}).status_code == 200
 
 
 @pytest.mark.parametrize(

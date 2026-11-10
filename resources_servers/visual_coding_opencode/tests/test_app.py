@@ -29,7 +29,7 @@ def message(text: str) -> dict:
     }
 
 
-def request(*texts: str, expected: str = "(4,7)") -> VisualCodingOpenCodeVerifyRequest:
+def request(*texts: str, expected: str = "(4,7)", status: str = "completed") -> VisualCodingOpenCodeVerifyRequest:
     response = NeMoGymResponse.model_validate(
         {
             "id": "r",
@@ -39,6 +39,7 @@ def request(*texts: str, expected: str = "(4,7)") -> VisualCodingOpenCodeVerifyR
             "parallel_tool_calls": False,
             "tool_choice": "auto",
             "tools": [],
+            "status": status,
             "output": [message(text) for text in texts],
         }
     )
@@ -55,7 +56,6 @@ def server() -> VisualCodingOpenCodeServer:
         port=1,
         entrypoint="",
         judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
-        judge_model="gpt",
     )
     return VisualCodingOpenCodeServer(config=config, server_client=MagicMock(spec=ServerClient))
 
@@ -66,13 +66,27 @@ def server() -> VisualCodingOpenCodeServer:
         ('{"verdict": "equivalent", "confidence": 1, "reason": "same"}', "equivalent"),
         ('Sure. {"verdict": "DIFFERENT", "reason": "x"}', "different"),
         ('{"verdict": "unsure", "reason": "no final answer"}', "unsure"),
+        # A brace ahead of the verdict object, as a reasoning judge that quotes the model's \boxed{} writes.
+        ('<think>The model wrote \\boxed{7}.</think>{"verdict": "equivalent", "reason": "same"}', "equivalent"),
+        ('{"verdict": "equivalent", "reason": "same cell"} Gold {4,7} matches.', "equivalent"),
     ],
 )
 def test_parse_verdict(reply: str, verdict: str) -> None:
     assert parse_verdict(reply)["verdict"] == verdict
 
 
-@pytest.mark.parametrize("reply", ['{"verdict": "maybe"}', '{"reason": "no verdict"}', "not json", "", "[1, 2]"])
+@pytest.mark.parametrize(
+    "reply",
+    [
+        '{"verdict": "maybe"}',
+        '{"reason": "no verdict"}',
+        "not json",
+        "",
+        "[1, 2]",
+        # Verdict objects that disagree: taking the first would score a quoted "equivalent" as correct.
+        '<think>It says {"verdict": "equivalent"}, but 5 is not 7.</think>{"verdict": "different", "reason": "5"}',
+    ],
+)
 def test_a_reply_without_a_valid_verdict_is_a_judge_failure(reply: str) -> None:
     with pytest.raises(JudgeError):
         parse_verdict(reply)
@@ -103,6 +117,25 @@ async def test_unextracted_answer_still_judged(server) -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_last_boxed_answer_wins_over_an_earlier_answer_line(server) -> None:
+    with patch.object(
+        VisualCodingOpenCodeServer, "judge", AsyncMock(return_value={"verdict": "equivalent", "reason": ""})
+    ) as judge:
+        result = await server.verify(request("The answer: crop the grid first.", "It is \\boxed{(4,7)}"))
+    assert result.extracted_answer == "(4,7)" and judge.call_args.args[2] == "(4,7)"
+
+
+@pytest.mark.asyncio
+async def test_incomplete_run_is_wrong_without_a_judge_call(server) -> None:
+    # A run that timed out or filled its context never sent its final answer, even if it boxed an early guess.
+    body = request("A first guess: \\boxed{(4,7)}. Let me check by cropping.", status="incomplete")
+    with patch.object(VisualCodingOpenCodeServer, "judge", AsyncMock()) as judge:
+        result = await server.verify(body)
+    judge.assert_not_called()
+    assert result.reward == 0.0 and result.failure_reason == "incomplete_run"
+
+
+@pytest.mark.asyncio
 async def test_empty_response_is_wrong_without_a_judge_call(server) -> None:
     with patch.object(VisualCodingOpenCodeServer, "judge", AsyncMock()) as judge:
         result = await server.verify(request(""))
@@ -110,20 +143,19 @@ async def test_empty_response_is_wrong_without_a_judge_call(server) -> None:
     judge.assert_not_called()
 
 
-@pytest.mark.parametrize("judge_reply", ["judge down", "not json", '{"verdict": "maybe"}'])
+@pytest.mark.parametrize("judge_reply", ["judge down", "no choices", "not json", '{"verdict": "maybe"}'])
 def test_a_judge_failure_masks_the_row_instead_of_scoring_zero(server, judge_reply: str) -> None:
     async def call_judge(*args, **kwargs):
         if judge_reply == "judge down":
             raise JudgeError("judge down")
+        choices = [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": judge_reply}}]
         return NeMoGymChatCompletion.model_validate(
             {
                 "id": "c",
                 "created": 0,
                 "model": "gpt",
                 "object": "chat.completion",
-                "choices": [
-                    {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": judge_reply}}
-                ],
+                "choices": [] if judge_reply == "no choices" else choices,
             }
         )
 
@@ -133,7 +165,7 @@ def test_a_judge_failure_masks_the_row_instead_of_scoring_zero(server, judge_rep
 
     assert reply.status_code == 200, reply.text
     row = reply.json()
-    # The base class's judge_failsafe masks the row, so RL does not train on it as a wrong answer.
+    # The base class's judge_failsafe masks the row, so RL leaves it out of the loss.
     assert row["mask_sample"] is True and row["reward"] == 0.0
     assert row["failure_kind"] == "judge_failed"
 
@@ -160,9 +192,28 @@ async def test_judge_request(server) -> None:
         judged = await server.judge("Q" * 3000, "(4,7)", None, "x" * 5000 + "end")
     params = call.call_args.kwargs["json"]
     assert judged["verdict"] == "equivalent"
-    assert params["model"] == "gpt" and params["temperature"] == 0.0 and params["max_tokens"] == 1024
+    # The judge's model server picks the model.
+    assert "model" not in params and params["temperature"] == 0.0 and params["max_tokens"] == 1024
     assert params["messages"][0] == {"role": "system", "content": JUDGE_SYSTEM}
     user = params["messages"][1]["content"]
     assert "Q" * 2000 + "\n" in user and "Q" * 2001 not in user
     assert "<nothing extracted>" in user
+    assert "Reference answer (gold):\n(4,7)\n" in user
     assert "x" * 3997 + "end" in user and "x" * 3998 not in user
+
+
+@pytest.mark.asyncio
+async def test_the_exported_verifier_fixture_passes() -> None:
+    from nemo_gym.verification import exercise_verifier_fixture
+    from resources_servers.visual_coding_opencode.app import VERIFIER_FIXTURE
+
+    results = await exercise_verifier_fixture(
+        VERIFIER_FIXTURE, reward_range=(0.0, 1.0), higher_is_better=True, determinism="stochastic"
+    )
+    assert {result.name: result.observed_rewards for result in results} == {
+        "judge says equivalent": (1.0,),
+        "judge says different": (0.0,),
+        "judge unsure": (0.0,),
+        "empty response skips the judge": (0.0,),
+        "missing expected answer": (),
+    }
