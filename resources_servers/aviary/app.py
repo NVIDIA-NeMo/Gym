@@ -18,10 +18,6 @@ from abc import ABC
 from collections import defaultdict
 from typing import Generic, TypeVar, cast
 
-from fastapi import FastAPI, Request
-from openai.types.responses import FunctionToolParam
-from pydantic import ConfigDict, Field
-
 from aviary.core import (
     Environment,
     EnvStateMessage,
@@ -33,6 +29,10 @@ from aviary.core import (
     ToolRequestMessage,
     ToolResponseMessage,
 )
+from fastapi import FastAPI, Request
+from openai.types.responses import FunctionToolParam
+from pydantic import ConfigDict, Field
+
 from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymFunctionCallOutput
 from nemo_gym.server_runtime import SimpleResourcesServer
 

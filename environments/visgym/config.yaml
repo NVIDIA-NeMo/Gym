@@ -1,0 +1,57 @@
+visgym_resources_server:
+  resources_servers:
+    visgym:
+      entrypoint: app.py
+      allowed_agents: [visgym_agent]
+      domain: games
+      verified: false
+      num_workers: 1
+      description: Env-id-parametric wrapper around VisGym visual environments.
+      value: Train visual reasoning policies through stateful, multi-turn image interactions.
+      task_jsonl_fpaths: []
+      image_format: PNG
+      image_jpeg_quality: 90
+      skip_images: false
+      enforce_horizon_cap: true
+      require_audited_binary_success: true
+      return_transitions: false
+      include_env_feedback: true
+      render_on_missing_image: true
+visgym_agent:
+  responses_api_agents:
+    visgym_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: visgym_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      # The generated 11x11 curriculum has a worst-case-safe horizon of 52.
+      # Keep this independent agent backstop above every default task cap.
+      max_steps: 64
+      done_if_no_boxed_answer: true
+      unboxed_action_regex: "^\\('(?:move|stop)',\\s*(?:[0-3]|'stop')\\)$"
+      return_transitions: false
+      system_prompt: |-
+        You control a visual maze one action at a time. Read the environment
+        instructions and inspect the current image. Choose one legal action
+        and put its tuple in \boxed{...} as the final item in your response.
+        If the blue circle is on the red target, emit ('stop', 'stop') to end
+        the episode and receive the task score.
+      re_emit_rules_each_turn: true
+      rules_summary_template: |-
+        Put exactly one legal action tuple in \boxed{...} as the final item.
+        If the blue circle is on the target, emit ('stop', 'stop').
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/visgym/data/example.jsonl
+
+visgym_agent_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: visgym_agent

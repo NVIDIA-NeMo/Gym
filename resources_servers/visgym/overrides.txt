@@ -1,0 +1,18 @@
+# Re-enable OpenCV for this server.
+#
+# The root pyproject.toml drops opencv-python-headless from every server venv
+# via [tool.uv] override-dependencies ("opencv-python-headless;
+# sys_platform == 'never'") because its binary wheels bundle codecs that may
+# incur MPEG-LA royalties, and server venvs inherit that list through the
+# editable nemo-gym install. Listing it in requirements.txt is therefore
+# silently a no-op: the venv builds fine and cv2 simply is not there.
+#
+# VisGym needs it at reset, not at import, so the omission does not surface
+# until a rollout: a 16-node run failed 514 times with
+# `ModuleNotFoundError: No module named 'cv2'` while every unit test passed,
+# because the local test venv had opencv installed by hand.
+#
+# VisGym renders and resizes frames with cv2; it decodes no video and links no
+# codec path, so re-enabling it here does not reintroduce the royalty concern
+# the root override is guarding against.
+opencv-python-headless>=4.11

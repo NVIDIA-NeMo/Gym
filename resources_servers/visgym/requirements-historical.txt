@@ -1,0 +1,18 @@
+-e nemo-gym[dev] @ ../../
+# VisGym's Gymnasium fork, pinned to the source-only packaging repair.
+# Provider Python files are unchanged from upstream 927271d107ad0196ad6aa597095ca57d01c6ddbb.
+gymnasium @ git+https://github.com/aroshanghias-nvd/VisGym.git@33f996cda320db5f127b1e2a858c5653bebc90fc
+opencv-python-headless>=4.11
+# referring_dot_pointing (refcoco_plus) and counting read their datasets
+# through these; without them those environments fail at reset rather than at
+# import, which surfaces as a failed rollout batch mid-run.
+scikit-image>=0.22
+pycocotools>=2,<3
+trimesh>=4,<5
+ursina>=6,<8
+mujoco>=3,<4
+pygame>=2.1.3,<3
+pillow==12.3.0
+gprof2dot>=2025.4.14
+pydot>=4,<5
+pytest>=8

@@ -27,6 +27,24 @@ external executable (GPL-2.0-or-later). Its source and binaries are **not**
 included in this repository. The optional Linux startup installer downloads
 revision `6441b478418350b338589cbfb1b4397fed4a490e` (abc2midi 4.88) into an ignored local directory.
 
+## VisGym external source dependency
+
+`resources_servers/visgym/` installs the
+[VisGym packaging fork](https://github.com/aroshanghias-nvd/VisGym/commit/33f996cda320db5f127b1e2a858c5653bebc90fc)
+at `33f996cda320db5f127b1e2a858c5653bebc90fc`, based on upstream revision
+`927271d107ad0196ad6aa597095ca57d01c6ddbb`. No provider source or wheel is vendored
+in Gym. The fork removes only three duplicate optional-dependency aliases;
+provider Python code and assets are unchanged.
+
+The upstream Apache-2.0 LICENSE and NOTICE (Copyright 2026, The VisGym Authors)
+remain unchanged in the external repository. Upstream package metadata still
+says MIT; that discrepancy is recorded without assigning new license terms.
+The original MIT notice from
+[Gymnasium v1.1.1](https://github.com/Farama-Foundation/Gymnasium/blob/17eff00220d210beda933f78b0e52850022b0690/LICENSE)
+is retained in `resources_servers/visgym/vendor_licenses/gymnasium-v1.1.1-LICENSE`
+for the inherited Gymnasium code. The source pin and installation checks prevent
+confusing the fork with the similarly named stock Gymnasium distribution.
+
 ## Python Package Dependencies
 
 | Component | Version | License | URL |

@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[project]
+name = "gym-responses-api-agents-visgym-agent"
+version = "0.0.0"
+requires-python = ">=3.13.14"
+dependencies = [
+    "nemo-gym[dev]",
+    "aiohttp",
+]
+
+[tool.uv]
+package = false
+required-version = ">=0.13.4"
+
+[tool.uv.sources]
+nemo-gym = { path = "../..", editable = true }
+
+[tool.uv.workspace]
+members = []

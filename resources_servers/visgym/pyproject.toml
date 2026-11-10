@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[project]
+name = "gym-resources-servers-visgym"
+version = "0.0.0"
+requires-python = ">=3.13.14"
+dependencies = [
+    "nemo-gym[dev]",
+    "gymnasium",
+    "opencv-python-headless>=4.11",
+    "scikit-image>=0.22",
+    "pycocotools>=2,<3",
+    "trimesh>=4,<5",
+    "ursina>=6,<8",
+    "mujoco>=3,<4",
+    "pygame>=2.1.3,<3",
+    "pillow==12.3.0",
+    "gprof2dot>=2025.4.14",
+    "pydot>=4,<5",
+    "pytest>=8",
+    "matplotlib>=3.10",
+]
+
+[tool.uv]
+package = false
+required-version = ">=0.13.4"
+
+[tool.uv.sources]
+gymnasium = { git = "https://github.com/aroshanghias-nvd/VisGym.git", rev = "33f996cda320db5f127b1e2a858c5653bebc90fc" }
+nemo-gym = { path = "../..", editable = true }
+
+[tool.uv.workspace]
+members = []

@@ -1,0 +1,14 @@
+# Optional extras for the VisGym robotics (fetch_*) and counting tasks.
+#
+# Gymnasium-Robotics is built from the source tree inside a supplied VisGym
+# checkout. lvis is the pinned public release downloaded by the same script.
+# Build them once before using the optional environments:
+#
+#   scripts/build_vendor_wheels.sh /path/to/VisGym
+#
+# then install this file alongside requirements.txt. maze_2d and every other
+# purely rendered task run without it.
+-r requirements.txt
+./vendor_wheels/gymnasium_robotics-1.4.1-py3-none-any.whl
+./vendor_wheels/lvis-0.5.3-py3-none-any.whl
+pycocotools>=2,<3
