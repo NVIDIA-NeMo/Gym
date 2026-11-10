@@ -369,12 +369,20 @@ def _read_events(
     transcripts: ClaudeCodeTranscripts, gaps: list[ObservationGap]
 ) -> list[tuple[int, str, dict[str, Any]]]:
     gaps.extend(transcripts.gaps)
-    events = [
-        (origin, record)
-        for origin, record in zip(transcripts.origins, transcripts.records, strict=True)
-        if isinstance(record.get("sessionId"), str)
-    ]
-    return [(index, origin, record) for index, (origin, record) in enumerate(events)]
+    events: list[tuple[int, str, dict[str, Any]]] = []
+    # Identical copies of one persisted record are replay, not new activity. Records that
+    # share a UUID but differ remain separate; UUID-less records keep their file positions.
+    seen: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for origin, record in zip(transcripts.origins, transcripts.records, strict=True):
+        if not isinstance(record.get("sessionId"), str):
+            continue
+        record_uuid = record.get("uuid")
+        if isinstance(record_uuid, str) and record_uuid:
+            if record in seen[record_uuid]:
+                continue
+            seen[record_uuid].append(record)
+        events.append((len(events), origin, record))
+    return events
 
 
 def _would_create_parent_cycle(
@@ -653,7 +661,10 @@ def extract_claude_code_observations(
                             ordinal,
                             _record_key(event, record_id, tool_result_indexes[0], "tool_result"),
                         )
-                        if child_id in parents and parents[child_id][:2] != parent[:2]:
+                        # A different result record is a competing link even for the same native ID.
+                        if child_id in parents and (
+                            parents[child_id][:2] != parent[:2] or parents[child_id][4] != parent[4]
+                        ):
                             parents.pop(child_id)
                             ambiguous_parents.add(child_id)
                             gaps.append(_gap("conflicting_subagent_parent", invocation_id=child_id))
