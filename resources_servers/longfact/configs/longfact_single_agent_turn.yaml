@@ -26,7 +26,7 @@ longfact_simple_agent:
         - name: example
           type: example
           jsonl_fpath: resources_servers/longfact/data/example.jsonl
-          license: CC-BY-4.0
+          license: Creative Commons Attribution 4.0 International
 
 longfact_environment_server:
   environment_servers:

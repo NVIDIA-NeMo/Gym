@@ -2,11 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from omegaconf import OmegaConf
 
 from benchmarks.longfact.prepare import (
     BENCHMARK_VARIANT,
@@ -16,7 +18,84 @@ from benchmarks.longfact.prepare import (
     build_rows,
     select_rows,
 )
+from nemo_gym.config.config_types import BenchmarkDatasetConfig, DatasetConfig
+from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.data.task_materialization import materialize_task
+
+
+@pytest.mark.parametrize("pairing", ["native", "gymnasium"])
+@pytest.mark.parametrize("benchmark", [False, True])
+def test_published_configs_resolve_example_data_and_hosted_judge(monkeypatch, pairing, benchmark):
+    root = Path(__file__).resolve().parents[3]
+    for key in tuple(os.environ):
+        if key.startswith("LONGFACT_"):
+            monkeypatch.delenv(key)
+    for key, value in {
+        "LONGFACT_EVALUATOR_BASE_URL": "https://offline.invalid/v1",
+        "LONGFACT_EVALUATOR_API_KEY": "offline-placeholder",
+        "LONGFACT_EVALUATOR_MODEL": "offline-o3",
+        "LONGFACT_EVALUATOR_RESPONSE_MODEL": "offline-o3",
+        "LONGFACT_SEARCH_BACKEND": "tavily",
+        "TAVILY_API_KEY": "offline-placeholder",
+    }.items():
+        monkeypatch.setenv(key, value)
+    if benchmark:
+        selected = "benchmarks/longfact/config.yaml" if pairing == "native" else "benchmarks/longfact/gymnasium.yaml"
+    else:
+        selected = (
+            "resources_servers/longfact/configs/longfact_single_agent_turn.yaml"
+            if pairing == "native"
+            else "resources_servers/longfact/configs/longfact.yaml"
+        )
+    resolved = GlobalConfigDictParser().parse(
+        GlobalConfigDictParserConfig(
+            initial_global_config_dict=OmegaConf.create(
+                {
+                    "config_paths": [
+                        str(root / selected),
+                        str(root / "benchmarks/longfact/evaluator_openai.yaml"),
+                        str(root / "benchmarks/longfact/gpt5_card.yaml"),
+                        str(root / "responses_api_models/openai_model/configs/openai_model.yaml"),
+                    ],
+                    "policy_base_url": "https://offline.invalid/v1",
+                    "policy_api_key": "offline-placeholder",
+                    "policy_model_name": "offline-policy",
+                }
+            ),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+            offline=True,
+            skip_exporters=True,
+        )
+    )
+    agent_type = "simple_agent" if pairing == "native" else "gymnasium_agent"
+    prefix = "longfact_longfact" if benchmark else "longfact"
+    agent_name = f"{prefix}_{agent_type}"
+    agent = resolved[agent_name]["responses_api_agents"][agent_type]
+    [dataset] = agent["datasets"]
+    dataset = OmegaConf.to_container(dataset, resolve=True)
+    if benchmark:
+        benchmark_dataset = BenchmarkDatasetConfig.model_validate(dataset)
+        assert benchmark_dataset.prepare_script == Path("benchmarks/longfact/prepare.py")
+    else:
+        example = DatasetConfig.model_validate(dataset)
+        rows = [json.loads(line) for line in (root / example.jsonl_fpath).read_text().splitlines()]
+        assert example.type == "example" and len(rows) == 5
+        assert example.license == "Creative Commons Attribution 4.0 International"
+        metrics = json.loads((root / "resources_servers/longfact/data/example_metrics.json").read_text())
+        assert DatasetConfig.model_validate(metrics).license == example.license
+    assert agent["model_server"]["name"] == "policy_model"
+    assert agent["resources_server"]["name"] == (f"{prefix}_resources_server" if benchmark else "longfact")
+    resources = resolved[agent["resources_server"]["name"]]["resources_servers"]["longfact"]
+    assert resources["evaluator_model_server"]["name"] == "longfact_openai_evaluator_model"
+    assert resources["fact_check_mode"] == "gpt5_card_batch"
+    assert (
+        resolved["longfact_openai_evaluator_model"]["responses_api_models"]["openai_model"]["openai_model"]
+        == "offline-o3"
+    )
+    environment_type = "single_agent_turn_legacy" if pairing == "native" else "legacy_agent"
+    environment = resolved[f"{prefix}_environment_server"]["environment_servers"][environment_type]
+    assert environment["agent_server"]["name"] == agent_name
 
 
 def test_source_path_uses_official_layout():
