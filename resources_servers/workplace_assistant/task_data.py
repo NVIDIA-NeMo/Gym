@@ -4,7 +4,7 @@
 
 Stateful workplace tool-use environment (email/calendar/analytics/project-management/CRM tool
 envs seeded per session). Task fields ride at the row top level with no verifier_metadata, and
-all four are required by ``WorkbenchVerifyRequest`` (app.py:44). verify() replays both the
+all four are required by ``WorkbenchVerifyRequest``. verify() replays both the
 predicted and the ``ground_truth`` actions in fresh tool environments and compares the resulting
 state (utils.is_correct); each ground-truth item is hard-indexed as ``action["name"]`` and
 ``json.loads(action["arguments"])`` — ``arguments`` is a JSON-ENCODED STRING here, unlike
