@@ -45,6 +45,10 @@ from responses_api_agents.simple_agent.tests.test_app import _make_agent, _mock_
 def test_adaptive_capture_selected_parameters_and_resume(
     tmp_path, monkeypatch, complete_stage, fail_last_dispatch, interrupted, fresh_resume, multiple, reasoning_effort
 ):
+    # Other CI component workers can change unrelated files in the shared checkout.
+    # Keep this resume scenario's runtime fixed; identity hashing is tested separately.
+    runtime = core.runtime_identity()
+    monkeypatch.setattr(rollout_driver, "runtime_identity", lambda: copy.deepcopy(runtime))
     create(tmp_path / "data", examples=interrupted or multiple)
     dataset = core.Dataset(tmp_path / "data", synthetic=True)
     prepared = tmp_path / "prepared.jsonl"
