@@ -113,6 +113,14 @@ session, and then calls `/verify`. The agent's side of that contract:
 - **Close** cancels a graph that is still running. Close returns no resources cookie jar, so `/verify` receives
   the seed's cookies unchanged. It returns an observation bundle with the gaps `agent_transcript_unavailable` and
   `model_call_ownership_unavailable` (see [Open gaps](#open-gapslimitations)).
+- **Request fields.** `input`, `instructions` (as a system message), and `temperature`, `top_p` and `reasoning`
+  apply to every model call, on legacy `/run` as well. The request's `tools` are ignored: the graph calls only its
+  own Tavily search. `concurrency` bounds only the builtin profile's sandbox runs.
+- **Model errors.** A Model Server status that another episode attempt can change (408, 425, 429 or 5xx), or a
+  connection failure, fails the activation, and the Environment Server runs the episode again. Any other HTTP
+  error ends the session's run with a reply that has no output: `incomplete` with `metadata.stop_reason:
+  context_limit` for the error code `context_length_exceeded`, which is verified, and otherwise `failed` with
+  `model_request_error` and the HTTP status in `ng_agent_outcome`. Legacy `/run` raises every model error.
 - The agent does not enforce a task's agent timeout (`metadata.agent_timeout_sec`), and it does not support
   rollout stops (`/rollouts/<id>/stop` answers 501).
 - **`execute_tools: false`** is rejected when the config loads: the graph always runs its own tools.
@@ -305,7 +313,9 @@ request - it gets the compacted version.
   reported, so that alone accounts for most of the risk. That's considered safe enough to ship as-is; the
   exception-type mismatch itself is still unfixed, so if compaction ever lags (e.g. `max_input_tokens` set
   too high relative to the real limit, compounded by the approximate token counting above), the failure
-  mode is still an opaque `ClientResponseError` rather than a graceful retry. 
+  mode is still an aiohttp `ClientResponseError` rather than a graceful retry. A session's run then ends
+  `incomplete` with no output (see the search profile's **Model errors** above); the builtin profile keeps the
+  messages finished before the error.
 
 - **Known lossy points in the LangChain ↔ Responses translation layer** — see the table and list above:
   unrecognized input item types are dropped silently on one side but raise on the other, `usage_metadata`

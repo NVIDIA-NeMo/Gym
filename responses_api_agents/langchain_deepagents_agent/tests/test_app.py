@@ -891,3 +891,121 @@ async def test_retirement_cancels_a_shielded_in_process_graph():
     with pytest.raises(asyncio.CancelledError):
         await activation
     assert order == ["cancelled"]
+
+
+def test_entrypoint_class_declares_that_its_default_profile_calls_the_model_from_the_sandbox():
+    # Harbor reads this literal from the class the entrypoint runs, not through inheritance.
+    assert DeepAgentsAgent.__dict__["calls_model_from_sandbox"] is True
+    assert "calls_model_from_sandbox" not in ReasoningSearchDeepAgent.__dict__
+
+
+def _model_refusal(status: int, body: dict) -> MagicMock:
+    """A Model Server reply that `raise_for_status()` raises as a ClientResponseError with this status and body."""
+    from aiohttp import ClientResponseError, RequestInfo
+    from multidict import CIMultiDict, CIMultiDictProxy
+    from yarl import URL
+
+    url = URL("http://policy-model/v1/responses")
+    error = ClientResponseError(
+        RequestInfo(url, "POST", CIMultiDictProxy(CIMultiDict()), url), (), status=status, message="refused"
+    )
+    response = MagicMock()
+    response.ok = False
+    response.content.read = AsyncMock(return_value=orjson.dumps(body))
+    response.raise_for_status = MagicMock(side_effect=error)
+    return response
+
+
+@pytest.mark.asyncio
+async def test_in_process_session_applies_instructions_and_sampling_to_every_model_call():
+    agent = _make_agent()
+    agent.server_client.post = AsyncMock(return_value=_model_response("done"))
+    request = _request()
+    await agent.seed_agent_session(request, _seed_body())
+    body = NeMoGymResponseCreateParamsNonStreaming(
+        input="go", instructions="Answer briefly.", temperature=0.3, top_p=0.7
+    )
+
+    await agent.responses(request, Response(), body)
+
+    sent = agent.server_client.post.call_args.kwargs["json"]
+    assert (sent["temperature"], sent["top_p"]) == (0.3, 0.7)
+    assert {"type": "message", "role": "system", "content": "Answer briefly."} in sent["input"]
+    await agent.close_agent_session(request, _close_body())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error_code", "status", "outcome"),
+    [
+        ("context_length_exceeded", "incomplete", None),
+        ("invalid_request_error", "failed", {"failure_kind": "model_request_error", "status_code": 400}),
+    ],
+)
+async def test_in_process_session_types_a_final_model_refusal(error_code, status, outcome):
+    agent = _make_agent()
+    agent.server_client.post = AsyncMock(
+        return_value=_model_refusal(400, {"error": {"code": error_code, "message": "too long"}})
+    )
+    request = _request()
+    await agent.seed_agent_session(request, _seed_body())
+
+    result = await agent.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="go"))
+
+    assert (result.status, result.output, result.usage) == (status, [], None)
+    metadata = result.metadata or {}
+    reported = metadata.get("ng_agent_outcome")
+    assert (orjson.loads(reported) if reported else None) == outcome
+    if outcome is None:
+        assert metadata["stop_reason"] == "context_limit" and result.error is None
+    else:
+        assert "Model Server HTTP 400" in result.error.message
+    await agent.close_agent_session(request, _close_body())
+
+
+@pytest.mark.asyncio
+async def test_in_process_model_errors_still_raise_when_retryable_or_outside_a_session():
+    from aiohttp import ClientResponseError
+
+    refusal = {"error": {"code": "invalid_request_error", "message": "bad"}}
+    agent = _make_agent()
+    agent.server_client.post = AsyncMock(side_effect=[_model_refusal(503, refusal), _model_refusal(400, refusal)])
+    request = _request()
+    await agent.seed_agent_session(request, _seed_body())
+    # The Environment Server reruns an episode whose activation fails with a retryable status.
+    with pytest.raises(ClientResponseError) as retryable:
+        await agent.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="go"))
+    assert retryable.value.status == 503
+    await agent.close_agent_session(request, _close_body())
+
+    # Legacy /run dispatches without a session and keeps raising every model error.
+    legacy = MagicMock()
+    legacy.cookies = {}
+    legacy.path_params = {"rollout_id": "legacy"}
+    legacy.url.path = "/ng-rollout/legacy/v1/responses"
+    legacy.headers = {}
+    legacy.session = {}
+    with pytest.raises(ClientResponseError) as raised:
+        await agent.responses(legacy, Response(), NeMoGymResponseCreateParamsNonStreaming(input="go"))
+    assert raised.value.status == 400
+
+
+@pytest.mark.asyncio
+async def test_in_process_session_does_not_type_a_tool_http_error_as_a_model_refusal():
+    from aiohttp import ClientResponseError, RequestInfo
+    from multidict import CIMultiDict, CIMultiDictProxy
+    from yarl import URL
+
+    url = URL("http://search-api/search")
+    tool_error = ClientResponseError(
+        RequestInfo(url, "POST", CIMultiDictProxy(CIMultiDict()), url), (), status=400, message="bad query"
+    )
+    graph = MagicMock()
+    graph.ainvoke = AsyncMock(side_effect=tool_error)
+    agent = _make_agent()
+    request = await _seed_with_graph(agent, graph)
+
+    with pytest.raises(ClientResponseError) as raised:
+        await agent.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="go"))
+    assert raised.value is tool_error
+    await agent.close_agent_session(request, _close_body())

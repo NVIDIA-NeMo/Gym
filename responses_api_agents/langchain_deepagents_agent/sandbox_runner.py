@@ -33,7 +33,10 @@ from langchain_core.messages import messages_from_dict, messages_to_dict  # noqa
 from langgraph.errors import GraphRecursionError  # noqa: E402
 from pydantic import Field  # noqa: E402
 
-from responses_api_agents.langchain_deepagents_agent.responses_chat_model import ResponsesChatModel  # noqa: E402
+from responses_api_agents.langchain_deepagents_agent.responses_chat_model import (  # noqa: E402
+    ResponsesChatModel,
+    is_context_limit,
+)
 
 
 # deepagents' own files (offloaded conversation history, evicted large tool results) stay in graph state under this
@@ -52,13 +55,7 @@ class ModelRequestError(RuntimeError):
     def __init__(self, status: int, body: str) -> None:
         super().__init__(f"Model Server HTTP {status}: {body[:2000]}")
         self.status = status
-        try:
-            document = json.loads(body)
-        except (TypeError, ValueError):
-            document = None
-        error = document.get("error") if isinstance(document, dict) else None
-        # HTTP status alone cannot prove a context limit; use the provider's explicit error code.
-        self.context_limit = isinstance(error, dict) and error.get("code") == "context_length_exceeded"
+        self.context_limit = is_context_limit(body)
 
 
 class ModelTransportError(RuntimeError):

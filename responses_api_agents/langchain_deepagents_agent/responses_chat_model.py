@@ -22,6 +22,17 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.utils.function_calling import convert_to_openai_tool
 
 
+def is_context_limit(error_body: str) -> bool:
+    """Whether a Model Server error body reports a context limit. HTTP status alone cannot prove one, so this reads
+    the provider's explicit error code."""
+    try:
+        document = json.loads(error_body)
+    except (TypeError, ValueError):
+        return False
+    error = document.get("error") if isinstance(document, dict) else None
+    return isinstance(error, dict) and error.get("code") == "context_length_exceeded"
+
+
 def message_text(content: Any) -> str:
     """The text of a LangChain message's or a Responses input item's content, which may be a list of parts."""
     if isinstance(content, str):
