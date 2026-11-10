@@ -465,6 +465,7 @@ class OpenCodeMultimodalAgent(MultimodalSessionMixin, OpenCodeAgent):
             raise HTTPException(409, "Configured session sandbox requires an Environment Server and agent session")
         if body.temperature is None or body.top_p is None:
             raise ValueError("Explicit temperature and top_p are required for on-policy generation")
+        await self._ensure_local_runtime()
         with TemporaryDirectory(prefix="gym-opencode-multimodal-") as temporary:
             directory = Path(temporary)
             text, input_system, images = await asyncio.to_thread(

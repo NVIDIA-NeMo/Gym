@@ -290,10 +290,13 @@ async def test_concurrent_episodes_use_parent_runner_and_keep_capture_scope(tmp_
     captures = []
     fake_runner(monkeypatch, database(tmp_path), captures)
     obj = agent(monkeypatch, workspace_root=str(tmp_path / "workspaces"))
+    versions = []
+    monkeypatch.setattr("responses_api_agents.opencode_agent.app.ensure_opencode", versions.append)
     episodes = await asyncio.gather(
         obj._create_episode(body(), rollout_id="r1"),
         obj._create_episode(body(temperature=0.5), rollout_id="r2"),
     )
+    assert versions == ["1.17.11"]
     # Threaded image staging may finish in either order; match by rollout identity.
     captures.sort(key=lambda c: c["config"]["provider"]["nemo"]["options"]["baseURL"])
     assert [c["config"]["agent"]["build"]["temperature"] for c in captures] == [1.0, 0.5]
