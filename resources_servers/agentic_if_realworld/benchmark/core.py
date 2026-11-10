@@ -428,7 +428,8 @@ def runtime_identity() -> dict:
     component_root = ROOT.parents[2]
     for boundary in ["benchmarks", "resources_servers", "responses_api_models", "responses_api_agents", "nemo_gym"]:
         for p in (component_root / boundary).rglob("*.py"):
-            if ".venv" not in p.parts:
+            # Other components prepare hidden checkouts and caches during concurrent runs.
+            if not any(part.startswith(".") for part in p.relative_to(component_root).parts):
                 sources["gym/" + str(p.relative_to(component_root))] = digest(p)
     # Workspace outputs can toggle Git's checkout-wide dirty flag between calls.
     # Source hashes above, not that flag, detect edits to the code used by a run.

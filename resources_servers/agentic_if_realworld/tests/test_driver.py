@@ -566,8 +566,8 @@ def test_runtime_fingerprint_covers_active_agent_and_core(monkeypatch, source):
     assert core.runtime_identity() != before
 
 
-@pytest.mark.parametrize("change", ["judge_schema", "generated_output"])
-def test_pending_resume_binds_live_judge_schema(tmp_path, monkeypatch, change):
+@pytest.mark.parametrize("change", ["judge_schema", "active_python", "generated_output", "generated_python"])
+def test_pending_resume_binds_runtime_inputs(tmp_path, monkeypatch, change):
     create(tmp_path / "data")
     dataset = core.Dataset(tmp_path / "data", synthetic=True)
     benchmark = tmp_path / "Gym/resources_servers/agentic_if_realworld/benchmark"
@@ -597,12 +597,20 @@ def test_pending_resume_binds_live_judge_schema(tmp_path, monkeypatch, change):
         kind = value["properties"]["constraints"]["items"]["properties"]["response_evidence"]["properties"]["kind"]
         kind["enum"] = ["missing_required_element"]
         core.write(schema, value)
+    elif change == "active_python":
+        source = benchmark.parents[2] / "responses_api_agents/simple_agent/app.py"
+        source.parent.mkdir(parents=True)
+        source.write_text("# Active agent source added after the run started\n")
+    elif change == "generated_python":
+        source = benchmark.parents[2] / "resources_servers/ether0/.ether0/src/ether0/runtime.py"
+        source.parent.mkdir(parents=True)
+        source.write_text("# Another component's generated checkout\n")
     else:
         (benchmark / "generated-output.txt").write_text("Unrelated workspace output")
     monkeypatch.setattr(jobs, "installed_gym_commit", lambda: "runtime-revision-dirty")
     after = core.runtime_identity()
     args["settings"] = {"runtime": after}
-    if change == "judge_schema":
+    if change in {"judge_schema", "active_python"}:
         assert after != before
         for validate_only in [True, False]:
             with pytest.raises(ValueError, match="fingerprint mismatch"):
@@ -612,7 +620,7 @@ def test_pending_resume_binds_live_judge_schema(tmp_path, monkeypatch, change):
         assert asyncio.run(run_cell(dataset, "synthetic", **args, resume=True, validate_only=True)) is None
     assert all(path.read_bytes() == data for path, data in saved.items())
     assert generate.await_count == 1 and verify.await_count == 0
-    if change == "generated_output":
+    if change in {"generated_output", "generated_python"}:
         with pytest.raises(RetryableTransportError, match="before dispatch"):
             asyncio.run(run_cell(dataset, "synthetic", **args, resume=True))
         assert generate.await_count == 2 and verify.await_count == 0
