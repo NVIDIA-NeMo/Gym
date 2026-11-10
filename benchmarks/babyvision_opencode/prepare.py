@@ -1,18 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Convert the BabyVision TSV (VLMEvalKit format, 388 rows) into Gym benchmark JSONL.
+"""Convert BabyVision (388 rows) into Gym benchmark JSONL.
 
-Reads $BABYVISION_TSV, else $LMUData/BabyVision.tsv. Each row is one user message: the
-image as a data URL, then a visual-reasoning instruction (INSTRUCTION), "---", the question
-and the boxed-answer suffix.
+Downloads the BabyVision release (UnipatAI/BabyVision on Hugging Face, MIT license) at a pinned
+revision and checks its parquet file's SHA-256. $BABYVISION_PARQUET reads a local copy of that
+file instead, for a host without internet access.
+Each row is one user message: the image as a PNG data URL, then a visual-reasoning instruction
+(INSTRUCTION), "---", the question and the boxed-answer suffix.
 With question_only (benchmarks/babyvision_opencode_question_only) the message is only the
 question and the suffix, for models trained on OpenCode's own system prompt.
 The gold answer stays out of the prompt (expected_answer).
 """
 
 import base64
-import csv
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -21,8 +23,13 @@ from pathlib import Path
 BENCHMARK_DIR = Path(__file__).parent
 OUTPUT_FPATH = BENCHMARK_DIR / "data" / "babyvision_opencode_benchmark.jsonl"
 NUM_ROWS = 388
-# Two known copies of the same 388 rows (in one, 175 PNG images are re-encoded as JPEG).
-KNOWN_MD5 = {"b3a93182cce0e658e4f81601275e1f04", "4216333e6620668edb267b032250f635"}  # pragma: allowlist secret
+
+REPO_ID = "UnipatAI/BabyVision"
+REVISION = "849cbeea2b1d00ad334e9e1e2b49a1960c9ff3f3"  # pragma: allowlist secret
+PARQUET_FILENAME = "data/train-00000-of-00001.parquet"
+PARQUET_SHA256 = "7f6ce0d1daff90165b635f60c900fa71f92db1f6d5b38c10b0116d1f026ff3b1"  # pragma: allowlist secret
+PARQUET_URL = f"https://huggingface.co/datasets/{REPO_ID}/resolve/{REVISION}/{PARQUET_FILENAME}"
+CHOICE_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 INSTRUCTION = """You are a meticulous visual-reasoning agent and you are provided with a question and a set of images.
 
@@ -35,19 +42,49 @@ tool and you have access to tools including bash, read, glob, grep, write, edit,
 SUFFIX = "\nPlease answer the question and put the final answer within \\boxed{}."
 
 
-def tsv_path() -> Path:
-    if os.environ.get("BABYVISION_TSV"):
-        return Path(os.environ["BABYVISION_TSV"])
-    if os.environ.get("LMUData"):
-        return Path(os.environ["LMUData"]) / "BabyVision.tsv"
-    raise FileNotFoundError("set BABYVISION_TSV or LMUData (the directory holding BabyVision.tsv)")
+def parquet_path() -> Path:
+    if os.environ.get("BABYVISION_PARQUET"):
+        return Path(os.environ["BABYVISION_PARQUET"])
+    from huggingface_hub import hf_hub_download
+
+    return Path(hf_hub_download(REPO_ID, PARQUET_FILENAME, repo_type="dataset", revision=REVISION))
 
 
-def convert(row: dict, question_only: bool = False) -> dict:
-    image = base64.b64decode(row["image"])
-    mime = "image/png" if image[:8] == b"\x89PNG\r\n\x1a\n" else "image/jpeg"
-    question = row["question"].strip()
+def load_records(path: Path) -> list[dict]:
+    import pyarrow.parquet as pq
+
+    sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+    if sha256 != PARQUET_SHA256:
+        raise ValueError(f"{path} has SHA-256 {sha256}, expected {PARQUET_SHA256} ({PARQUET_URL})")
+    records = pq.read_table(path).to_pylist()
+    if len(records) != NUM_ROWS:
+        raise ValueError(f"{path} has {len(records)} rows, expected {NUM_ROWS}")
+    return records
+
+
+def png_base64(image: bytes) -> str:
+    """The image as a base64 RGB PNG. The release stores PNGs, JPEGs and WebPs; one lossless format
+    keeps every decoded pixel (the release's alpha channels are fully opaque)."""
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.open(io.BytesIO(image)).convert("RGB").save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode()
+
+
+def convert(record: dict, question_only: bool = False) -> dict:
+    """One release record as a benchmark row. A multiple-choice question lists its options as
+    (A), (B), … after "Choices:", and its answer is the option's letter."""
+    question = record["question"]
+    if record["ansType"] == "choice":
+        options = "\n".join(f"({CHOICE_LETTERS[i]}) {option}" for i, option in enumerate(record["options"]))
+        question = f"{question}\nChoices:\n{options}"
+        answer = CHOICE_LETTERS[record["choiceAns"]]
+    else:
+        answer = record["blankAns"]
+    question = question.strip()
     text = f"{question}{SUFFIX}" if question_only else f"{INSTRUCTION}\n\n---\n\n{question}{SUFFIX}"
+    image_url = f"data:image/png;base64,{png_base64(record['image']['bytes'])}"
     return {
         "responses_create_params": {
             "input": [
@@ -55,38 +92,30 @@ def convert(row: dict, question_only: bool = False) -> dict:
                     "role": "user",
                     "type": "message",
                     "content": [
-                        {"type": "input_image", "image_url": f"data:{mime};base64,{row['image']}", "detail": "auto"},
+                        {"type": "input_image", "image_url": image_url, "detail": "auto"},
                         {"type": "input_text", "text": text},
                     ],
                 }
             ]
         },
-        "expected_answer": row["answer"],
+        "expected_answer": answer,
         "question": question,
-        # The TSV index is the stable id that `gym eval plan` and task selection need (row order is not).
-        "task_id": str(row["index"]),
-        "source_id": row["index"],
-        "category": row["category"],
-        "l2_category": row["l2_category"],
-        "ans_type": row["ans_type"],
+        # BabyVision's taskId is the stable id that `gym eval plan` and task selection need (row order is not).
+        "task_id": str(record["taskId"]),
+        "source_id": str(record["taskId"]),
+        "category": record["type"],
+        "l2_category": record["subtype"],
+        "ans_type": record["ansType"],
     }
 
 
 def prepare(output_fpath: Path = OUTPUT_FPATH, question_only: bool = False) -> Path:
-    path = tsv_path()
-    md5 = hashlib.md5(path.read_bytes()).hexdigest()
-    if md5 not in KNOWN_MD5:
-        raise ValueError(f"{path} has md5 {md5}, expected one of {sorted(KNOWN_MD5)}")
-    csv.field_size_limit(10**9)
-    with path.open(newline="") as f:
-        rows = list(csv.DictReader(f, delimiter="\t"))
-    if len(rows) != NUM_ROWS:
-        raise ValueError(f"{path} has {len(rows)} rows, expected {NUM_ROWS}")
+    records = load_records(parquet_path())
     output_fpath.parent.mkdir(parents=True, exist_ok=True)
     with output_fpath.open("w") as f:
-        for row in rows:
-            f.write(json.dumps(convert(row, question_only)) + "\n")
-    print(f"Wrote {len(rows)} rows to {output_fpath}")
+        for record in records:
+            f.write(json.dumps(convert(record, question_only)) + "\n")
+    print(f"Wrote {len(records)} rows to {output_fpath}")
     return output_fpath
 
 

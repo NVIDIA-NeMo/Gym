@@ -29,12 +29,12 @@ class TaskData(BaseModel):
     )
     task_id: Optional[str] = Field(
         default=None,
-        description="Stable task id for eval planning and task selection (BabyVision's TSV index as a string).",
+        description="Stable task id for eval planning and task selection (BabyVision's taskId as a string).",
         json_schema_extra={"consumed_by": ["provenance"]},
     )
     source_id: Optional[Union[str, int]] = Field(
         default=None,
-        description="Row id in the source dataset (BabyVision's TSV index).",
+        description="Row id in the source dataset (BabyVision's taskId).",
         json_schema_extra={"consumed_by": ["provenance"]},
     )
     category: Optional[str] = Field(
