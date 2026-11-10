@@ -119,28 +119,26 @@ def test_real_model_timeout_reaches_environment(tmp_path, exhausted):
 
     measured = inspect_episode(scenario, tmp_path, {"returncode": result.returncode, "timed_out": False})
     checks = {check["id"]: check for check in measured["checks"]}
-    # The current SimpleAgent stops after its first confirmed timeout. Keep the
-    # conformance failure visible; this test establishes that the fixture works.
-    assert measured["verdict"] == "not_fulfilled"
-    assert checks["timeout.attempts"]["status"] == "fail"
+    assert checks["timeout.model_events"]["status"] == "pass"
     if exhausted:
         assert measured["p0_verdict"] == "fulfilled", measured["issues"]
-        assert {key for key, check in checks.items() if check["status"] == "fail"} == {
-            "timeout.attempts",
-            "timeout.model_events",
-        }
+        assert measured["verdict"] == "fulfilled", measured["issues"]
+        assert not {key for key, check in checks.items() if check["status"] == "fail"}
     else:
+        # SimpleAgent stops after one timeout instead of recovering. The fixture
+        # must keep this genuine conformance failure visible.
+        assert measured["verdict"] == "not_fulfilled"
+        assert checks["timeout.attempts"]["status"] == "fail"
         assert checks["timeout.recovered_outcome"]["status"] == "fail"
 
 
-def case(exhausted):
-    count = 3 if exhausted else 1
+def case(exhausted, count=3):
     events = {
         f"model-{index}": {
             "boundary": "model",
             "failure_kind": "model_request_error",
             "operation": "model_request",
-            "operation_id": "model-operation",
+            "operation_id": f"operation-{index}",
             "attempt_id": f"attempt-{index}",
             "failure_reason": MODEL_RESPONSE_TIMEOUT_REASON,
             "details": {"request_upload_complete": True},
@@ -170,9 +168,14 @@ def case(exhausted):
         "failure_report": final.model_dump(mode="json"),
     }
     witness = {
-        "timeout_attempts": [{"request": {"messages": ["request"]}, "timed_out": True} for _ in range(count)]
-        + ([] if exhausted else [{"request": {"messages": ["request"]}, "timed_out": False}]),
-        "model_server_failure_reports": [model.model_dump(mode="json")],
+        "timeout_attempts": [
+            {"request": {"messages": ["request"]}, "request_id": f"request-{index}", "timed_out": True}
+            for index in range(count)
+        ]
+        + ([] if exhausted else [{"request": {"messages": ["request"]}, "request_id": "success", "timed_out": False}]),
+        "model_server_failure_reports": [
+            FailureReport(events={key: event}, failure_id=key).model_dump(mode="json") for key, event in events.items()
+        ],
         "caller_failure_reports": [model.model_dump(mode="json")],
         "agent_responses": [response],
         "verifications": [],
@@ -193,8 +196,9 @@ def failures(witness, record, *, exhausted):
 
 
 @pytest.mark.parametrize("exhausted", [False, True])
-def test_complete_timeout_evidence(exhausted):
-    assert not failures(*case(exhausted), exhausted=exhausted)
+@pytest.mark.parametrize("count", [1, 3, 5])
+def test_complete_timeout_evidence(exhausted, count):
+    assert not failures(*case(exhausted, count), exhausted=exhausted)
 
 
 @pytest.mark.parametrize("target", ["caller_failure_reports", "model_server_failure_reports"])
@@ -310,3 +314,36 @@ def test_malformed_attempts_fail_without_raising(attempts):
     witness, record = case(False)
     witness["timeout_attempts"] = attempts
     assert "timeout.attempts" in failures(witness, record, exhausted=False)
+
+
+@pytest.mark.parametrize("request_id", [None, "", "request-1"])
+def test_missing_or_reused_request_id_cannot_hide_transport_retries(request_id):
+    witness, record = case(True)
+    witness["timeout_attempts"][0]["request_id"] = request_id
+    assert "timeout.attempts" in failures(witness, record, exhausted=True)
+
+
+def test_missing_earlier_model_reply_fails():
+    witness, record = case(True)
+    witness["model_server_failure_reports"].pop(0)
+    assert "timeout.model_events" in failures(witness, record, exhausted=True)
+
+
+def test_conflicting_repeated_model_event_fails():
+    witness, record = case(True)
+    conflict = deepcopy(witness["model_server_failure_reports"][0])
+    conflict["events"]["model-0"]["foreign_error"]["message"] = "changed"
+    witness["model_server_failure_reports"].append(conflict)
+    assert "timeout.model_events" in failures(witness, record, exhausted=True)
+
+
+def test_repeated_operation_cannot_hide_transport_retries():
+    witness, record = case(True)
+    witness["model_server_failure_reports"][1]["events"]["model-1"]["operation_id"] = "operation-0"
+    assert "timeout.model_events" in failures(witness, record, exhausted=True)
+
+
+def test_terminal_cause_must_select_last_model_call():
+    witness, record = case(True)
+    witness["agent_responses"][0]["failure_report"]["events"]["agent"]["cause_id"] = "model-0"
+    assert "timeout.terminal_outcome" in failures(witness, record, exhausted=True)

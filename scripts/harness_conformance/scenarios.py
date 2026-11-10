@@ -11,7 +11,6 @@ from nemo_gym.rollouts.harness_capabilities import PriorityTier
 
 SUITE = "harness-probes/v2"
 ALL_EVIDENCE = tuple(f"TE-{i}" for i in range(1, 10))
-MODEL_TIMEOUT_ATTEMPTS = 3
 
 
 @dataclass(frozen=True)

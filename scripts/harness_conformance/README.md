@@ -108,9 +108,9 @@ and Collection's canonical saved failure map. Missing persistence is a P1 failur
 including when events survive only in a nested partial response.
 
 The Gym model client makes one provider attempt per harness model call
-(`max_num_tries: 1`). The harness controls any further model calls. The current
-exhaustion checks still expect three failed attempts; updating those expectations
-is a separate change.
+(`max_num_tries: 1`). The harness controls any further model calls. Checks compare
+independently observed provider attempts with model failure events across those
+calls, without requiring a fixed total number of calls.
 They do not certify shared configurable retry settings or sandbox retry handling.
 They run for every selected harness; missing adapter support remains visible as
 failed or unavailable evidence. Byte-for-byte scripted exchange comparisons are
