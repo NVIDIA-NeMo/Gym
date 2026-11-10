@@ -59,10 +59,14 @@ to write the next function directly.
 
 ## Dependencies
 
-The resources server executes generated SciCode solutions in its own venv, so its
-`requirements.txt` pins `scipy<1.14` — the last range that keeps `scipy.integrate.simps` (used by
-some test cases, removed in scipy 1.14) while still providing Python 3.12 wheels — plus `numpy`,
-`matplotlib`, `h5py`, and `sympy`.
+SciCode executes generated solutions in a separate Python 3.11 environment with
+pinned scientific dependencies; see [Grading environment](#grading-environment).
+
+Problems 13 and 62 each have one sub-step the benchmark prefills with reference code instead of
+generating it (13.6 builds `class Maxwell`, 62.1 builds `class Block` and `class EnlargedBlock`);
+every later step of the problem uses that class. The agent inserts the official reference files for
+these two steps whole, from `responses_api_agents/scicode_agent/prefilled_steps/`, so the cumulative
+program defines the classes. This also shows the model the whole class in the later steps' prompts.
 
 ## Running servers
 
@@ -135,3 +139,22 @@ model-generated, so treat the rollout file accordingly.
 
 Code: Apache 2.0
 Data (`SciCode1/SciCode`, `test_data.h5`): Apache 2.0
+
+## Grading environment
+
+For local grading without explicit `grading_interpreters`, the resources server
+prepares an isolated Python 3.11 environment using `uv` and
+`resources_servers/scicode/grading-requirements.lock`, including resolved transitive
+dependencies. SciPy 1.10.1 provides
+`scipy.integrate.simps`, which the problem dependencies require. Gym keeps its
+own Python interpreter and does not install the grading packages into it.
+
+Sandbox grading uses the interpreters and test data in the configured image and
+does not prepare this local environment.
+
+The first start requires Python/package download access and a writable
+`grading_venv_path` (default `resources_servers/scicode/.grading_venv`). Set this
+path to persistent writable storage when running from a read-only checkout.
+Subsequent starts reuse a matching environment offline. A lock or Python-version
+change recreates it and synchronizes packages with `uv pip sync`. See the
+[resources-server README](../../resources_servers/scicode/README.md) for lock regeneration.

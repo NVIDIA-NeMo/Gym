@@ -14,9 +14,10 @@
 # limitations under the License.
 
 import json
+import math
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 from uuid import uuid4
 
 from openai.types.responses import ResponseInputTextParam
@@ -39,6 +40,8 @@ from nemo_gym.trajectory import (
     ObservationGap,
     ToolCallObservation,
     TrajectoryRecord,
+    normalize_operation_timing,
+    tool_attempt_id,
 )
 from responses_api_agents.opencode_agent.observability import (
     append_opencode_turns,
@@ -57,7 +60,7 @@ def _load_json(value: Any) -> dict[str, Any]:
 
 def _milliseconds(value: Any) -> Optional[float]:
     """Convert OpenCode's Date.now()-based epoch milliseconds to seconds."""
-    if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or value < 0:
         return None
     return float(value) / 1000
 
@@ -107,10 +110,17 @@ def _parse_opencode_session(
     model_ref: ModelServerRef | None = None,
     require_terminal_finish: bool = False,
     message_ids: set[str] | None = None,
+    agent_instance: str | None = None,
+    clock_domain: str | None = None,
+    observation_schema_version: Literal["1.0", "2.0"] = "1.0",
 ) -> AgentObservationBundle:
-    """Read OpenCode's persisted session tree before its workspace is removed."""
+    """Read persisted sessions; opt into v2 for qualified timings and stable attempt IDs."""
+    if observation_schema_version not in {"1.0", "2.0"}:
+        raise ValueError("observation_schema_version must be 1.0 or 2.0")
+    qualified = observation_schema_version == "2.0"
     if not db_path.is_file():
         return AgentObservationBundle(
+            schema_version=observation_schema_version,
             source="opencode",
             records=[AgentInvocation(invocation_id=fallback_invocation_id)],
             gaps=[
@@ -135,6 +145,14 @@ def _parse_opencode_session(
     finally:
         con.close()
 
+    # Persisted part identity is stable even when later attempts reuse a native call ID.
+    # These are observation IDs only; model execution retains OpenCode's native callID.
+    decoded_parts = {row["id"]: _load_json(row["data"]) for row in part_rows}
+    normalized_ids = (
+        {row["id"]: f"call:{row['id']}" for row in part_rows if decoded_parts[row["id"]].get("type") == "tool"}
+        if qualified
+        else {}
+    )
     all_part_rows = part_rows
     if message_ids is not None:
         all_messages = {row["id"]: _load_json(row["data"]) for row in message_rows}
@@ -169,7 +187,7 @@ def _parse_opencode_session(
                     # The conversation below emits a split reply's reasoning item first.
                     item_id = f"{row['id']}-reasoning"
             elif part.get("type") == "tool":
-                item_id = part.get("callID")
+                item_id = normalized_ids[row["id"]] if qualified else part.get("callID")
             else:
                 continue
             session_id = row["session_id"] or all_message_sessions.get(row["message_id"])
@@ -277,7 +295,7 @@ def _parse_opencode_session(
             state = part.get("state") if isinstance(part.get("state"), dict) else {}
             opencode_call_id = part.get("callID")
             observed_call_id = opencode_call_id if isinstance(opencode_call_id, str) and opencode_call_id else None
-            call_id = observed_call_id or f"call-{uuid4().hex[:8]}"
+            call_id = normalized_ids[row["id"]] if qualified else observed_call_id or f"call-{uuid4().hex[:8]}"
             tool_input = state.get("input") or {}
             arguments = json.dumps(tool_input) if isinstance(tool_input, (dict, list)) else str(tool_input)
             opencode_status = state.get("status")
@@ -305,66 +323,113 @@ def _parse_opencode_session(
             if outcome.gap is not None:
                 gaps.append(ObservationGap(code=outcome.gap, invocation_id=session_id, detail=observed_call_id))
 
-            opencode_start = opencode_time.get("start")
-            opencode_end = opencode_time.get("end")
-            valid_interval = (
-                isinstance(opencode_start, (int, float))
-                and not isinstance(opencode_start, bool)
-                and isinstance(opencode_end, (int, float))
-                and not isinstance(opencode_end, bool)
-                and opencode_end >= opencode_start
-            )
-            started_at = _milliseconds(opencode_start) if valid_interval else None
-            completed_at = _milliseconds(opencode_end) if valid_interval else None
-            duration_ms = float(opencode_end - opencode_start) if valid_interval else None
-            status = outcome.status
-            if observed_call_id is not None:
+            if qualified:
+                started_at = _milliseconds(opencode_time.get("start"))
+                completed_at = _milliseconds(opencode_time.get("end"))
+                duration_ms = (
+                    float(opencode_time["end"]) - float(opencode_time["start"])
+                    if started_at is not None and completed_at is not None
+                    else None
+                )
+                timing, timing_gaps = normalize_operation_timing(
+                    boundary="lifecycle",
+                    timing_source="opencode.tool_part",
+                    clock_domain=clock_domain,
+                    started_at=started_at,
+                    completed_at=completed_at,
+                    duration_ms=duration_ms,
+                    duration_source="wall_clock" if duration_ms is not None else None,
+                )
+                producer_id = f"opencode:{fallback_invocation_id}"
+                span_id = tool_attempt_id(producer_id=producer_id, invocation_id=session_id, operation_key=row["id"])
                 tools.append(
                     ToolCallObservation(
                         invocation_id=session_id,
-                        tool_call_id=observed_call_id,
+                        agent_instance=agent_instance,
+                        tool_call_id=call_id,
+                        native_tool_call_id=observed_call_id,
+                        span_id=span_id,
+                        producer_id=producer_id,
+                        source_message_id=message_id,
+                        source_model_ref=model_ref,
                         tool_name=part.get("tool") if isinstance(part.get("tool"), str) else None,
-                        started_at=started_at,
-                        completed_at=completed_at,
-                        duration_ms=duration_ms,
-                        timing_source="artifact" if started_at is not None else None,
-                        status=status,
+                        timings=[timing] if timing is not None else [],
+                        status=outcome.status,
                         error_type=outcome.error_type,
                     )
                 )
+                if observed_call_id is None:
+                    timing_gaps.append("tool_call_identity_unavailable")
+                if started_at is None:
+                    timing_gaps.append("tool_start_unavailable")
+                if completed_at is None:
+                    timing_gaps.append("tool_completion_unavailable")
+                gaps.extend(
+                    ObservationGap(code=code, invocation_id=session_id, agent_instance=agent_instance, span_id=span_id)
+                    for code in timing_gaps
+                )
             else:
-                gaps.append(
-                    ObservationGap(
-                        code="tool_call_identity_unavailable",
-                        invocation_id=session_id,
-                        detail=row["id"],
-                    )
+                opencode_start = opencode_time.get("start")
+                opencode_end = opencode_time.get("end")
+                valid_interval = (
+                    isinstance(opencode_start, (int, float))
+                    and not isinstance(opencode_start, bool)
+                    and isinstance(opencode_end, (int, float))
+                    and not isinstance(opencode_end, bool)
+                    and opencode_end >= opencode_start
                 )
-                # The tool ran but has no observation to time, so the tool history read is not complete.
-                gaps.append(
-                    ObservationGap(
-                        code="tool_timing_unavailable",
-                        invocation_id=session_id,
-                        detail=row["id"],
+                started_at = _milliseconds(opencode_start) if valid_interval else None
+                completed_at = _milliseconds(opencode_end) if valid_interval else None
+                duration_ms = float(opencode_end - opencode_start) if valid_interval else None
+                if observed_call_id is not None:
+                    tools.append(
+                        ToolCallObservation(
+                            invocation_id=session_id,
+                            tool_call_id=observed_call_id,
+                            tool_name=part.get("tool") if isinstance(part.get("tool"), str) else None,
+                            started_at=started_at,
+                            completed_at=completed_at,
+                            duration_ms=duration_ms,
+                            timing_source="artifact" if started_at is not None else None,
+                            status=outcome.status,
+                            error_type=outcome.error_type,
+                        )
                     )
-                )
-            if observed_call_id is not None and (
-                started_at is None or (opencode_status in {"completed", "error"} and completed_at is None)
-            ):
-                gaps.append(
-                    ObservationGap(
-                        code="tool_timing_unavailable",
-                        invocation_id=session_id,
-                        detail=observed_call_id,
+                else:
+                    gaps.append(
+                        ObservationGap(
+                            code="tool_call_identity_unavailable",
+                            invocation_id=session_id,
+                            detail=row["id"],
+                        )
                     )
-                )
+                    # The tool ran but has no observation to time, so the tool history read is not complete.
+                    gaps.append(
+                        ObservationGap(
+                            code="tool_timing_unavailable",
+                            invocation_id=session_id,
+                            detail=row["id"],
+                        )
+                    )
+                if observed_call_id is not None and (
+                    started_at is None or (opencode_status in {"completed", "error"} and completed_at is None)
+                ):
+                    gaps.append(
+                        ObservationGap(
+                            code="tool_timing_unavailable",
+                            invocation_id=session_id,
+                            detail=observed_call_id,
+                        )
+                    )
             metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
             if not metadata and isinstance(part.get("metadata"), dict):
                 metadata = part["metadata"]
             child_id = metadata.get("sessionId")
             if isinstance(child_id, str) and observed_call_id is not None:
-                child_tools.setdefault(child_id, set()).add(observed_call_id)
-                child_status[child_id] = {"timeout": "incomplete", "cancelled": "incomplete"}.get(status, status)
+                child_tools.setdefault(child_id, set()).add(call_id)
+                child_status[child_id] = {"timeout": "incomplete", "cancelled": "incomplete"}.get(
+                    outcome.status, outcome.status
+                )
             continue
         if ptype == "compaction":
             compaction_parts.append((session_id, message_id, _milliseconds(row["time_created"]), part))
@@ -448,6 +513,7 @@ def _parse_opencode_session(
         invocations.append(
             AgentInvocation(
                 invocation_id=invocation_id,
+                agent_instance=agent_instance if qualified else None,
                 parent_invocation_id=parent_id,
                 spawned_by_tool_call_id=next(iter(spawn_candidates)) if len(spawn_candidates) == 1 else None,
                 status=(
@@ -464,10 +530,17 @@ def _parse_opencode_session(
 
     if trajectory is not None:
         append_opencode_turns(
-            trajectory, session_ids, message_rows, part_rows, model_ref=model_ref, gym_reasoning=model_ref is not None
+            trajectory,
+            session_ids,
+            message_rows,
+            part_rows,
+            model_ref=model_ref,
+            gym_reasoning=model_ref is not None,
+            normalized_call_ids=normalized_ids,
         )
 
     return AgentObservationBundle(
+        schema_version=observation_schema_version,
         source="opencode",
         records=[*invocations, *tools, *compactions],
         gaps=gaps,

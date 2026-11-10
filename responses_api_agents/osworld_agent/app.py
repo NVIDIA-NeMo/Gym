@@ -1955,8 +1955,8 @@ def _served_model_call_output(
 
 # Runtime-admission reasons the policy did not cause: the row is a retryable ``infrastructure_error``. A sandbox guest
 # that never became ready has its own typed fields (``_sandbox_start_failure_fields``); a configuration refusal (a
-# task without a spec, a proxy that is required but disabled or misconfigured) stays an untyped masked row, since a
-# retry would meet the same configuration.
+# task without a spec, a proxy that is required but disabled or misconfigured) is typed ``CONFIGURATION_ERROR``
+# without a failure event, since a retry would meet the same configuration.
 _INFRASTRUCTURE_ADMISSION_REASONS = frozenset(
     {
         "timeout",
@@ -1969,6 +1969,12 @@ _INFRASTRUCTURE_ADMISSION_REASONS = frozenset(
         "evaluation_incomplete",
     }
 )
+# Runtime-admission reasons that refuse a rollout because its configuration is wrong. They are typed, but not as an
+# ``infrastructure_error``: a retry would meet the same configuration.
+_CONFIGURATION_ADMISSION_REASONS = frozenset(
+    {"task_configuration_error", "proxy_configuration_error", "proxy_required_but_disabled"}
+)
+CONFIGURATION_ERROR = "osworld_agent:configuration_error"
 # Runtime-admission reasons a failed policy call caused: the row is a model failure of the kind the call shows.
 _MODEL_ADMISSION_REASONS = frozenset({"model_call_failed", "model_timeout"})
 _HTTP_STATUS_IN_ERROR = re.compile(r"(?:Error code|status(?:_code)?)[:= ]+\s*(\d{3})\b")
@@ -2000,7 +2006,8 @@ def _admission_failure_fields(result: Mapping[str, Any], runtime_admission: Mapp
     a crashed or errored rollout, a runner that recorded no terminal state) is an ``infrastructure_error`` with an
     agent failure event, so the row reaches the failures sidecar and the default retry; a failed policy call is a
     model failure of the kind the call shows (``_model_failure_kind``). Reward and mask stay as they are, so no score
-    changes. Legacy results and configuration refusals are left as they were.
+    changes. A configuration refusal is typed ``osworld_agent:configuration_error`` without a failure event, so it is
+    not retried. Legacy results are left as they were.
     """
     if (
         runtime_admission["runtime_eligible"]
@@ -2028,6 +2035,12 @@ def _admission_failure_fields(result: Mapping[str, Any], runtime_admission: Mapp
             operation=f"osworld.{reason}",
             stage="agent",
         )
+    elif reason in _CONFIGURATION_ADMISSION_REASONS:
+        # No failure event and no failure class: the row stays out of the failures sidecar and its retry.
+        return {
+            "failure_kind": CONFIGURATION_ERROR,
+            "failure_reason": f"OSWorld refused the rollout ({reason}): {detail}"[:2000],
+        }
     else:
         return {}
     return {

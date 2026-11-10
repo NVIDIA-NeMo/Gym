@@ -891,9 +891,10 @@ def _eval_status(args: argparse.Namespace, overrides: list[str]) -> None:
     if overrides != expected_overrides:
         args._parser.error("status does not accept Hydra overrides")
     from nemo_gym.cli.eval import eval_status
+    from nemo_gym.orchestration.jobs import benchmark_artifact_dirs
 
     try:
-        eval_status(args.run, json_output=args.json)
+        eval_status(args.run, json_output=args.json, job_artifact_dirs=benchmark_artifact_dirs)
     except (OSError, ValueError) as exc:
         args._parser.error(str(exc))
 

@@ -19,6 +19,7 @@ import logging
 import threading
 import time
 from collections.abc import Iterator
+from contextvars import copy_context
 
 import httpx
 import pytest
@@ -46,7 +47,7 @@ def _echo_app() -> RequestContextIsolationMiddleware:
         return {"rollout_id": current_rollout_id(), "path": request.url.path}
 
     app.add_middleware(RolloutContextMiddleware)
-    return RequestContextIsolationMiddleware(app)
+    return RequestContextIsolationMiddleware(app, base_context=copy_context())
 
 
 @pytest.fixture

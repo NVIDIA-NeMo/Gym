@@ -43,7 +43,6 @@ model call (same shape as simple_agent).
 """
 
 import json
-import logging
 from time import perf_counter, time
 from typing import List
 
@@ -66,9 +65,17 @@ from nemo_gym.core import (
     accumulate_response_usage,
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
+from nemo_gym.trajectory import (
+    AgentInvocation,
+    AgentObservationBundle,
+    ModelCallRef,
+    ObservationGap,
+    TrajectoryRecord,
+    TrajectoryTurn,
+)
 
 
-LOG = logging.getLogger(__name__)
+_INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
 
 
 class SpeedBenchAgentConfig(BaseResponsesAPIAgentConfig):
@@ -157,21 +164,75 @@ class SpeedBenchAgent(SimpleResponsesAPIAgent):
         last_response: NeMoGymResponse = None
         model_server_cookies = None
         resources_server_cookies = request.cookies
+        rollout_id = request.path_params.get("rollout_id")
+        invocation = None
+        observations = None
+        turns: list[TrajectoryTurn] = []
+        if self._model_call_capture_enabled() and isinstance(rollout_id, str):
+            invocation = AgentInvocation(invocation_id="root", in_session=False)
+            observations = AgentObservationBundle(
+                source="speed_bench_agent",
+                records=[invocation],
+            )
+            # The inner route has no task identity; only /run publishes a bound trajectory.
+            request.state.nemo_gym_agent_observations = observations
 
         async def _call_model(turn_input):
             new_body = body.model_copy(update={"input": turn_input})
-            model_response = await self.server_client.post(
-                server_name=self.config.model_server.name,
-                url_path=self.url_path_for_request("/v1/responses", request),
-                json=new_body,
-                cookies=model_server_cookies,
-            )
-            await raise_for_status(model_response)
-            payload = await get_response_json(model_response)
+            turn_timestamp = time()
             try:
-                parsed = NeMoGymResponse.model_validate(payload)
-            except ValidationError as e:
-                raise RuntimeError(f"Received an invalid response from model server: {json.dumps(payload)}") from e
+                model_response = await self.server_client.post(
+                    server_name=self.config.model_server.name,
+                    url_path=self.url_path_for_request("/v1/responses", request),
+                    json=new_body,
+                    cookies=model_server_cookies,
+                    **({"headers": {"x-session-id": "root"}} if invocation is not None else {}),
+                )
+                await raise_for_status(model_response)
+                payload = await get_response_json(model_response)
+                try:
+                    parsed = NeMoGymResponse.model_validate(payload)
+                except ValidationError as e:
+                    raise RuntimeError(f"Received an invalid response from model server: {json.dumps(payload)}") from e
+            except BaseException as error:
+                if invocation is not None:
+                    invocation.status = "failed" if isinstance(error, Exception) else "incomplete"
+                    invocation.error_type = type(error).__name__
+                raise
+            if invocation is not None:
+                refs = [ModelCallRef(model_ref=self.config.model_server, response_id=parsed.id)] if parsed.id else []
+                invocation.model_calls.extend(refs)
+                invocation.conversation = [*turn_input, *parsed.output]
+                status = parsed.status
+                if status == "cancelled":
+                    status = "incomplete"
+                elif status not in ("completed", "failed", "incomplete"):
+                    status = "unknown"
+                priority = {"completed": 0, "unknown": 1, "incomplete": 2, "failed": 3}
+                if not turns or priority[status] > priority[invocation.status]:
+                    invocation.status = status
+                turn_no = len(turns) + 1
+                if not refs:
+                    observations.gaps.append(
+                        ObservationGap(
+                            code="model_call_reference_unavailable", invocation_id="root", detail=f"turn:{turn_no}"
+                        )
+                    )
+                reasoning = [item.model_dump(mode="json") for item in parsed.output if item.type == "reasoning"]
+                turns.append(
+                    TrajectoryTurn(
+                        invocation_id="root",
+                        task_id="unknown",
+                        rollout_id=rollout_id,
+                        turn_no=turn_no,
+                        timestamp=turn_timestamp,
+                        question=list(turn_input),
+                        answer=[item for item in parsed.output if item.type != "reasoning"],
+                        reasoning_content=reasoning or None,
+                        step_count=0,
+                        model_calls=refs,
+                    )
+                )
             # Retain every turn, including missing metrics, so partial reporting
             # cannot silently produce an apparently complete acceptance rate.
             request_metrics.append(parsed.metrics)
@@ -221,9 +282,43 @@ class SpeedBenchAgent(SimpleResponsesAPIAgent):
             "generation_finished_at": generation_started_at + duration,
             "generation_duration": duration,
         }
+        if observations is not None:
+            trajectory = TrajectoryRecord(
+                task_id="unknown",
+                rollout_id=rollout_id,
+                invocations=[invocation],
+                turns=turns,
+                gaps=observations.gaps,
+            )
+            last_response = last_response.model_copy(
+                update={_INTERNAL_TRAJECTORY_KEY: trajectory.model_dump(mode="json")}
+            )
         return last_response
 
     async def run(self, request: Request, body: SpeedBenchAgentRunRequest) -> SpeedBenchAgentVerifyResponse:
+        def bind_trajectory(raw: object) -> TrajectoryRecord:
+            trajectory = TrajectoryRecord.model_validate(raw)
+            task = body.model_extra or {}
+            task_id = next(
+                (
+                    str(task[key])
+                    for key in ("task_id", "problem_id", "instance_id", "_ng_task_index")
+                    if task.get(key) is not None
+                ),
+                "unknown",
+            )
+            rollout_id = self.rollout_id_from_run(body)
+            if rollout_id is None or trajectory.rollout_id != rollout_id:
+                raise ValueError("SPEED-Bench trajectory does not match this run's rollout")
+            trajectory = trajectory.model_copy(
+                update={
+                    "task_id": task_id,
+                    "turns": [turn.model_copy(update={"task_id": task_id}) for turn in trajectory.turns],
+                }
+            )
+            request.state.nemo_gym_agent_trajectory = trajectory
+            return trajectory
+
         cookies = request.cookies
 
         seed_session_response = await self.server_client.post(
@@ -243,9 +338,12 @@ class SpeedBenchAgent(SimpleResponsesAPIAgent):
         )
         await raise_for_status(api_response)
         cookies = api_response.cookies
+        model_response_json = await get_response_json(api_response)
+        raw_trajectory = model_response_json.pop(_INTERNAL_TRAJECTORY_KEY, None)
+        trajectory = bind_trajectory(raw_trajectory) if raw_trajectory is not None else None
 
         verify_request = SpeedBenchAgentVerifyRequest.model_validate(
-            body.model_dump() | {"response": await get_response_json(api_response)}
+            body.model_dump() | {"response": model_response_json}
         )
         verify_response = await self.server_client.post(
             server_name=self.config.resources_server.name,
@@ -254,7 +352,12 @@ class SpeedBenchAgent(SimpleResponsesAPIAgent):
             cookies=cookies,
         )
         await raise_for_status(verify_response)
-        return SpeedBenchAgentVerifyResponse.model_validate(await get_response_json(verify_response))
+        result = await get_response_json(verify_response)
+        if trajectory is not None:
+            for invocation in trajectory.invocations:
+                invocation.verification_skipped = False
+            result["ng_trajectory"] = trajectory.model_dump(mode="json")
+        return SpeedBenchAgentVerifyResponse.model_validate(result)
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         api_response = await self.server_client.post(

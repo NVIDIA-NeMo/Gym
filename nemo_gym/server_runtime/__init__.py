@@ -106,6 +106,7 @@ if TYPE_CHECKING:
     from nemo_gym.server_runtime.ray_support import entrypoint_ray_enabled
     from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
     from nemo_gym.server_runtime.request_handling.session_routing import SESSION_OWNER_HEADER, install_session_routing
+    from nemo_gym.server_runtime.sandbox_lending import LentSandboxes
     from nemo_gym.server_runtime.single_agent_turn_types import (
         SingleAgentTurnFailure,
         SingleAgentTurnRequest,
@@ -162,6 +163,7 @@ _PUBLIC_API = {
     "LegacyRun": "_checkpoint.agent",
     "MCPStreamableHTTPConnection": "tool_access",
     "MCPTool": "mcp_auto_exposure",
+    "LentSandboxes": "sandbox_lending",
     "MCPToolAccess": "tool_access",
     "NEMO_GYM_MCP_METADATA_KEY": "base_resources_server",
     "NEMO_GYM_MCP_SESSION_TOKEN_HEADER": "base_resources_server",

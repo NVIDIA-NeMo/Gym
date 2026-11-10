@@ -15,8 +15,10 @@
 import asyncio
 import io
 import json
+import logging
 import multiprocessing
 import signal
+import threading
 import time
 from contextlib import redirect_stderr, redirect_stdout
 from typing import Dict, Optional
@@ -31,10 +33,16 @@ from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
+    BaseSeedSessionRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ResourcesSessionLostError,
     SimpleResourcesServer,
+    lost_session_verification,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class PythonExecutorResourcesServerConfig(BaseResourcesServerConfig):
@@ -55,6 +63,11 @@ class ExecutePythonResponse(BaseModel):
 
 def _session_worker(child_conn, max_execution_time: int):
     """Runs forever in its own process, keeping globals between calls."""
+    # A forkserver child starts with the forkserver's default handlers, so this reset is defensive. A worker forked
+    # from the server itself would inherit uvicorn's SIGTERM handler, which turns _SessionHandle.close's terminate()
+    # into a no-op and leaves only SIGKILL after the waits time out.
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
     exec_globals = {
         "__builtins__": {
             "print": print,
@@ -118,9 +131,16 @@ class _SessionHandle:
     """Light wrapper around one long-lived worker process."""
 
     def __init__(self, max_execution_time: int):
-        parent_conn, child_conn = multiprocessing.Pipe()
+        """Start the worker; the first one blocks for seconds while the forkserver starts, so call this in a thread."""
+        # A worker forked from the server would retain its listening and accepted sockets and keep idle connections
+        # open. The forkserver is a fresh interpreter without them that imports this module once, so each worker
+        # forks in milliseconds. "__main__" preloads a server started as a script, __name__ a module import (tests).
+        context = multiprocessing.get_context("forkserver")
+        context.set_forkserver_preload(["__main__", __name__])
+        parent_conn, child_conn = context.Pipe()
         self._conn = parent_conn
-        self._proc = multiprocessing.Process(
+        self._exec_lock = threading.Lock()
+        self._proc = context.Process(
             target=_session_worker,
             args=(child_conn, max_execution_time),
             daemon=True,
@@ -129,19 +149,48 @@ class _SessionHandle:
         self.last_used = time.time()
 
     def exec(self, code: str):
-        self._conn.send({"cmd": "exec", "code": code})
-        reply = self._conn.recv()
-        self.last_used = time.time()
-        if reply["ok"]:
-            return reply["out"], reply["err"], reply["res"]
-        raise RuntimeError(reply["error"])
+        # A Connection has one reply stream: parallel tool calls must not consume each other's replies.
+        # Keep the lock in the executor thread so cancelling its HTTP waiter cannot release it mid-execution.
+        with self._exec_lock:
+            if not self._proc.is_alive():
+                raise RuntimeError("Python worker has already stopped")
+            self._conn.send({"cmd": "exec", "code": code})
+            reply = self._conn.recv()
+            self.last_used = time.time()
+            if reply["ok"]:
+                return reply["out"], reply["err"], reply["res"]
+            raise RuntimeError(reply["error"])
 
-    def close(self):
-        try:
-            self._conn.send({"cmd": "close"})
-        except (BrokenPipeError, EOFError):
-            pass
-        self._proc.join(timeout=1)
+    async def close(self) -> None:
+        """Stop the worker, escalating to terminate and then kill; raise if it is still alive.
+
+        It waits on the event loop rather than in an executor thread: execs hold executor threads for as long as the
+        model's code runs, and a close queued behind them could never stop the workers that would free them.
+        """
+        # Do not write into a concurrent exec's pipe frame or wait behind its blocking recv.
+        # A busy worker is stopped below even if its executor thread cannot make progress.
+        if self._exec_lock.acquire(blocking=False):
+            try:
+                self._conn.send({"cmd": "close"})
+            except (BrokenPipeError, EOFError, OSError):
+                pass
+            finally:
+                self._exec_lock.release()
+        await self._wait_for_exit(1)
+        if self._proc.is_alive():
+            # Still running user code, which the alarm stops only after max_execution_time.
+            self._proc.terminate()
+            await self._wait_for_exit(5)
+        if self._proc.is_alive():
+            self._proc.kill()
+            await self._wait_for_exit(5)
+        if self._proc.is_alive():
+            raise RuntimeError(f"Python worker process {self._proc.pid} is still alive after SIGKILL")
+
+    async def _wait_for_exit(self, timeout_s: float) -> None:
+        deadline = time.monotonic() + timeout_s
+        while self._proc.is_alive() and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
 
 
 # ------------------------------
@@ -167,6 +216,7 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
     config: PythonExecutorResourcesServerConfig
 
     _sessions: Dict[str, _SessionHandle] = PrivateAttr(default_factory=dict)
+    _starting_sessions: Dict[str, asyncio.Task[_SessionHandle]] = PrivateAttr(default_factory=dict)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -179,41 +229,83 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
         # _sessions dict already initialised by default_factory
 
     async def execute_python(self, request: Request, body: ExecutePythonRequest) -> ExecutePythonResponse:
+        sid = request.session[SESSION_ID_KEY]
         loop = asyncio.get_running_loop()
+        # Close awaits the worker's stop before marking the fence. Serialize publication with that whole operation,
+        # so a tool cannot create an untracked replacement in the gap, even if its request is cancelled.
+        async with self.session_lock(sid):
+            if self.session_is_closed(sid) or self.session_is_verified(sid):
+                raise ResourcesSessionLostError(f"math_with_code session {sid} is closed or already verified")
+            try:
+                if sid not in self._sessions:
+                    if sid not in self._starting_sessions:
+                        self._starting_sessions[sid] = asyncio.create_task(
+                            asyncio.to_thread(_SessionHandle, self.config.max_execution_time)
+                        )
+                    starting = self._starting_sessions[sid]
+                    # Cancelling the HTTP request cannot stop its constructor thread. Keep that task owned
+                    # until a later call or cleanup collects the worker it creates.
+                    try:
+                        self._sessions[sid] = await asyncio.shield(starting)
+                    except Exception:
+                        self._starting_sessions.pop(sid, None)
+                        raise
+                    self._starting_sessions.pop(sid, None)
+                handle = self._sessions[sid]
+            except Exception as e:
+                logger.exception("Python worker failed to start for resources session %s", sid)
+                return ExecutePythonResponse(success=False, stdout="", stderr="", error_message=str(e))
         try:
-            sid = request.session[SESSION_ID_KEY]
-            if sid not in self._sessions:
-                self._sessions[sid] = _SessionHandle(self.config.max_execution_time)
-            handle = self._sessions[sid]
-
             stdout, stderr, result = await loop.run_in_executor(
                 None,
                 handle.exec,
                 body.code,
             )
-            return ExecutePythonResponse(
+            response = ExecutePythonResponse(
                 success=True,
                 stdout=stdout,
                 stderr=stderr,
                 result=result,
             )
         except Exception as e:
-            return ExecutePythonResponse(
+            response = ExecutePythonResponse(
                 success=False,
                 stdout="",
                 stderr="",
                 error_message=str(e),
             )
+        if self.session_is_closed(sid):
+            # The session closed while this call ran, so its result is discarded; close already stopped the worker.
+            raise ResourcesSessionLostError(f"math_with_code session {sid} closed during the call")
+        return response
 
     async def end_session(self, request: Request) -> ExecutePythonResponse:
         session_id = request.session[SESSION_ID_KEY]
-        self._cleanup_session(session_id)
+        async with self.session_lock(session_id):
+            await self._cleanup_session(session_id)
         return ExecutePythonResponse(success=True, stdout="", stderr="")
+
+    def has_session_state(self, session_id: str) -> bool:
+        return session_id in self._sessions or session_id in self._starting_sessions
+
+    async def initialize_session_state(self, session_id: str, body: BaseSeedSessionRequest) -> None:
+        """The worker starts on the first tool call; the base releases a prior cookie run."""
+
+    async def release_session_state(self, session_id: str) -> None:
+        """Release the worker, retaining its reference if cleanup fails."""
+        await self._cleanup_session(session_id)
 
     async def verify(self, request: Request, body: PythonMathVerifyRequest) -> PythonMathVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
+        async with self.verifying(session_id, allow_missing=True) as verification:
+            if verification.is_lost:
+                # An Environment Server verifies before it closes, so this verify is out of order; mask it.
+                return PythonMathVerifyResponse(
+                    **(body.model_dump() | lost_session_verification(f"math_with_code session {session_id} is closed"))
+                )
 
-        try:
+            # The retry request carries the answer and grading data; no Python worker state is required.
+            verification.retain(None)
             expected = body.expected_result
 
             # Extract actual answer from final assistant message
@@ -252,14 +344,26 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
                 extracted_answer=actual,
                 accuracy=accuracy,
             )
-        finally:
-            self._cleanup_session(session_id)
 
-    def _cleanup_session(self, session_id: str) -> None:
-        """Clean up subprocess for the given session."""
-        if session_id in self._sessions:
-            self._sessions[session_id].close()
-            del self._sessions[session_id]
+    async def _cleanup_session(self, session_id: str) -> None:
+        """Stop the session's worker process; one that survives stays registered, so a later cleanup retries it."""
+        starting = self._starting_sessions.get(session_id)
+        if starting is not None:
+            try:
+                self._sessions[session_id] = await asyncio.shield(starting)
+            except Exception:
+                # A failed constructor returned no worker. Retrieving its exception also avoids leaving an
+                # unobserved task when its requesting HTTP call was cancelled.
+                logger.warning("Python worker startup failed for resources session %s", session_id, exc_info=True)
+                self._starting_sessions.pop(session_id, None)
+            else:
+                self._starting_sessions.pop(session_id, None)
+        handle = self._sessions.get(session_id)
+        if handle is not None:
+            await handle.close()
+            # A concurrent cleanup may already have dropped it, and a later call may have started another.
+            if self._sessions.get(session_id) is handle:
+                del self._sessions[session_id]
 
 
 def _normalize_answer(s: str) -> str:

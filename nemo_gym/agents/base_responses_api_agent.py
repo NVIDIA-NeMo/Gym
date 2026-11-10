@@ -58,6 +58,7 @@ from nemo_gym.config.config_types import (
 )
 from nemo_gym.config.global_config import (
     OBSERVABILITY_ENABLED_KEY_NAME,
+    ROLLOUT_CORRELATION_KEY_NAME,
     TOKEN_CAPTURE_BLOCK,
     get_first_server_config_dict,
 )
@@ -1176,6 +1177,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
         Evaluation uses ``/ng-rollout/<id>/...`` for every agent.
         Training capture uses ``/ng-rollout/<id>/training-token-capture/...``.
+        ``rollout_correlation`` adds the prefix without any capture, e.g. so a model server can route by rollout.
         Training capture requires ``token_id_capture.enabled``.
         It also requires the static agent flag or run-level ``all_agents``.
         Partial-rollout checkpointing also needs it for this agent.
@@ -1183,6 +1185,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         """
         return (
             self._model_call_capture_enabled()
+            or self._rollout_correlation_enabled()
             or self._token_id_capture_enabled()
             # Checkpointing keys a legacy /run by its rollout, so its self-dispatch must carry the rollout.
             or self._checkpoint_participant is not None
@@ -1195,6 +1198,13 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         if not isinstance(global_config, Mapping):
             return False
         return bool(global_config.get(OBSERVABILITY_ENABLED_KEY_NAME, False))
+
+    def _rollout_correlation_enabled(self) -> bool:
+        """Whether the run asked for rollout prefixes without capture."""
+        global_config = getattr(self.server_client, "global_config_dict", None)
+        if not isinstance(global_config, Mapping):
+            return False
+        return bool(global_config.get(ROLLOUT_CORRELATION_KEY_NAME, False))
 
     def _token_id_capture_enabled(self) -> bool:
         """Whether this agent explicitly opted into training-token capture."""
@@ -1298,9 +1308,22 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         pass
 
-    @abstractmethod
     async def run(self, body: BaseRunRequest = Body()) -> BaseVerifyResponse:
-        pass
+        """Run a whole episode in the agent, including the resources server's ``seed_session`` and ``verify``.
+
+        Deprecated: rollout collection reaches an agent's own ``/run`` only through the ``legacy_agent`` environment
+        server. Agents implement agent sessions (``/v1/agent_sessions``) and need not override ``run()``, so that an
+        environment server drives the episode. To customize how an episode runs, implement an environment server on
+        ``BaseEnvironmentServer`` instead of overriding ``run()``.
+
+        The default answers 422, not a 5xx: environment servers and rollout recovery retry every 5xx, and a missing
+        ``/run`` does not go away on retry.
+        """
+        raise HTTPException(
+            422,
+            f"{type(self).__name__} does not implement /run; "
+            "drive it through agent sessions from an environment server",
+        )
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         """Default: same RewardProfiler aggregation as resources server. Override to proxy."""

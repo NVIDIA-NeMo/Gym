@@ -17,6 +17,11 @@ name: Unit tests
 on:
   workflow_call:
     inputs:
+      checkout-ref:
+        description: Exact revision selected by the caller; empty keeps the event default
+        type: string
+        required: false
+        default: ""
       base-ref:
         description: Base commit or ref used to classify changes
         required: false
@@ -44,6 +49,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: ${{ inputs.checkout-ref }}
           submodules: 'recursive'
           fetch-depth: 0
 
@@ -52,6 +58,7 @@ jobs:
         uses: ./.github/actions/classify-changes
         with:
           base-ref: ${{ inputs.base-ref || github.event.pull_request.base.sha || '' }}
+          head-sha: ${{ inputs.checkout-ref }}
           force-run-all: ${{ inputs.base-ref == '' && github.event_name != 'pull_request' }}
 
       # The multi-worker session routing test starts real servers, so it runs only when the routing,
@@ -62,6 +69,7 @@ jobs:
         uses: step-security/changed-files@3dbe17c78367e7d60f00d78ae6781a35be47b4a1 # v45.0.1
         with:
           base_sha: ${{ inputs.base-ref || github.event.pull_request.base.sha || '' }}
+          sha: ${{ inputs.checkout-ref || github.sha }}
           files: |
             nemo_gym/server_runtime/request_handling/session_routing.py
             nemo_gym/server_runtime/base_server.py
@@ -90,6 +98,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: ${{ inputs.checkout-ref }}
           submodules: 'recursive'
 
       - name: Reclaim runner disk
@@ -140,6 +149,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: ${{ inputs.checkout-ref }}
           submodules: 'recursive'
 
       - name: Reclaim runner disk
@@ -183,6 +193,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.checkout-ref }}
 
       - name: Cache uv dependencies
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -217,6 +229,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: ${{ inputs.checkout-ref }}
           submodules: 'recursive'
 
       - name: Reclaim runner disk
@@ -308,6 +321,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: ${{ inputs.checkout-ref }}
           submodules: 'recursive'
 
       - name: Cache uv dependencies
@@ -345,6 +359,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: ${{ inputs.checkout-ref }}
           submodules: 'recursive'
 
       - name: Reclaim runner disk

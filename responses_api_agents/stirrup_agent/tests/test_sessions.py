@@ -664,3 +664,10 @@ def test_a_sandbox_that_cannot_be_reached_closes_the_provider(client, borrow, mo
         _seed(client, sandbox_access=_sandbox_access())
 
     assert provider.closed
+
+
+def test_legacy_run_route_is_not_supported(client):
+    response = client.post("/run", json={"responses_create_params": {"input": []}})
+
+    assert response.status_code == 422
+    assert "StirrupAgentWrapper does not implement /run" in response.json()["detail"]

@@ -515,6 +515,74 @@ class TestAbortingErrorType:
 # ---------------------------------------------------------------------------
 
 
+class TestRolloutCorrelation:
+    """A rollout's id reaches the model server through both HTTP hops, so a router can pin its session."""
+
+    @staticmethod
+    def _run_flow(agent: FinanceAgent) -> list[dict]:
+        calls: list[dict] = []
+        model_response = _text_response("done")
+
+        def post(**kwargs):
+            calls.append(kwargs)
+            if kwargs["url_path"] == "/verify":
+                return _dotjson_mock({"responses_create_params": _INPUT, "response": model_response, "reward": 1.0})
+            return _dotjson_mock({} if kwargs["url_path"] == "/seed_session" else model_response)
+
+        agent.server_client.post.side_effect = post
+        return calls
+
+    def test_the_model_call_of_a_prefixed_request_keeps_the_rollout_prefix(self) -> None:
+        agent, client = _make_agent_and_client(_make_config(max_steps=1))
+        agent.server_client.post.return_value = _dotjson_mock(_text_response("Hello!"))
+
+        res = client.post("/ng-rollout/3-1/v1/responses", json=_INPUT)
+
+        assert res.status_code == 200
+        assert agent.server_client.post.call_args.kwargs["url_path"] == "/ng-rollout/3-1/v1/responses"
+
+    def test_the_model_call_of_an_unprefixed_request_stays_unprefixed(self) -> None:
+        agent, client = _make_agent_and_client(_make_config(max_steps=1))
+        agent.server_client.post.return_value = _dotjson_mock(_text_response("Hello!"))
+
+        client.post("/v1/responses", json=_INPUT)
+
+        assert agent.server_client.post.call_args.kwargs["url_path"] == "/v1/responses"
+
+    def test_the_self_dispatch_of_a_run_carries_the_rollout_when_correlation_is_on(self) -> None:
+        agent, client = _make_agent_and_client(_make_config(max_steps=1))
+        agent.server_client.global_config_dict = {"rollout_correlation": True}
+        calls = self._run_flow(agent)
+
+        res = client.post(
+            "/run", json={"responses_create_params": _INPUT, "_ng_task_index": 3, "_ng_rollout_index": 1}
+        )
+
+        assert res.status_code == 200
+        self_calls = [call for call in calls if call["server_name"] == agent.config.name]
+        assert [call["url_path"] for call in self_calls] == ["/ng-rollout/3-1/v1/responses"]
+
+    def test_the_self_dispatch_stays_unprefixed_when_correlation_is_off(self) -> None:
+        agent, client = _make_agent_and_client(_make_config(max_steps=1))
+        agent.server_client.global_config_dict = {}
+        calls = self._run_flow(agent)
+
+        client.post("/run", json={"responses_create_params": _INPUT, "_ng_task_index": 3, "_ng_rollout_index": 1})
+
+        self_calls = [call for call in calls if call["server_name"] == agent.config.name]
+        assert [call["url_path"] for call in self_calls] == ["/v1/responses"]
+
+    def test_the_self_dispatch_stays_unprefixed_without_a_rollout_identity(self) -> None:
+        agent, client = _make_agent_and_client(_make_config(max_steps=1))
+        agent.server_client.global_config_dict = {"rollout_correlation": True}
+        calls = self._run_flow(agent)
+
+        client.post("/run", json={"responses_create_params": _INPUT})
+
+        self_calls = [call for call in calls if call["server_name"] == agent.config.name]
+        assert [call["url_path"] for call in self_calls] == ["/v1/responses"]
+
+
 class TestResponses:
     @pytest.mark.parametrize("prose_only_behavior", ["nudge", "finish"])
     def test_text_only_turn_ends_episode_when_continue_if_not_tool_call_is_false(

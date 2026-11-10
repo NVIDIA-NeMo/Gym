@@ -14,8 +14,18 @@ from nemo_gym.orchestration.recovery import CollectedEvidence, RecoveryAction, R
 from tests.unit_tests.orchestration.test_slurm_judge_only_job import _rendered_gym_commands, _unrecognized_flags
 
 
+@pytest.fixture
+def login_umask():
+    """The usual login umask: what the run's other artifacts are created under, and what sbatch hands to the job."""
+    import os
+
+    previous = os.umask(0o022)
+    yield 0o022
+    os.umask(previous)
+
+
 @pytest.mark.parametrize("case", ["ok", "large", "exhausted", "unknown", "stale", "live"])
-def test_cpu_rejudge_existing_accounting(tmp_path, monkeypatch, case):
+def test_cpu_rejudge_existing_accounting(tmp_path, monkeypatch, case, login_umask):
     large = case == "large"
     if large:
         case = "ok"
@@ -78,7 +88,7 @@ def test_cpu_rejudge_existing_accounting(tmp_path, monkeypatch, case):
     bins.mkdir()
     for name, body in {
         "squeue": ("echo 10" if case == "live" else "true"),
-        "sbatch": f"echo call >> {tmp_path}/calls; echo 11",
+        "sbatch": f"echo call >> {tmp_path}/calls; umask > {tmp_path}/sbatch_umask; echo 11",
     }.items():
         f = bins / name
         f.write_text("#!/bin/bash\n" + body + "\n")
@@ -159,3 +169,8 @@ def test_cpu_rejudge_existing_accounting(tmp_path, monkeypatch, case):
         assert "--withdraw-unresolved-admissions" in script  # dispatched only with no allocation of the run live
         assert "gym eval run" not in script and "afternotok" not in script
         assert "#SBATCH --time=00:05:00" in script
+        # Only the staged driver script is owner-only; the job inherits the caller's umask, so what it creates (the
+        # reverification folder and its files) stays readable to the run's other readers.
+        (script_path,) = job.glob("reverify-*.sh")
+        assert script_path.stat().st_mode & 0o777 == 0o600
+        assert (tmp_path / "sbatch_umask").read_text().strip() == "0022"

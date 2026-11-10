@@ -79,8 +79,10 @@ from nemo_gym.core import (
     NeMoGymSummary,
     NgFailureEvent,
     SandboxFailureDetails,
+    agent_route_failure,
     observe_failure,
 )
+from nemo_gym.core.failure_kinds import PROVIDER_COMMAND_OUTCOME_UNKNOWN
 from nemo_gym.models import ChatCompletionsConverter
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -91,6 +93,7 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
     resolve_provider_metadata,
 )
+from nemo_gym.sandbox.failures import sandbox_failure
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from nemo_gym.trajectory import (
     NG_AGENT_SANDBOX_OBSERVATION_KEY,
@@ -1481,17 +1484,29 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             ) from error
 
         if result.error_type != "timeout" and (result.error_type is not None or result.return_code == -1):
-            raise NgFailureEvent(
-                boundary="harness",
-                failure_kind=AGENT_ROUTE_FAILED,
-                failure_reason=self._agent_sandbox_facts(
+            # The provider returned a result that does not say how the command ended: an error type, or the -1
+            # signal-death sentinel. That is sandbox evidence, not a contradiction inside the harness, so it keeps
+            # the registered provider kind (an environment fault, ungraded and rerun under the attempt cap) and the
+            # harness failure only routes it. Neither value is an observed process exit, so no exit code is recorded.
+            handle = getattr(sandbox, "_handle", None)
+            provider = getattr(handle, "provider_name", None)
+            sandbox_id = getattr(handle, "sandbox_id", None)
+            provider_failure = sandbox_failure(
+                operation="exec",
+                failure_kind=PROVIDER_COMMAND_OUTCOME_UNKNOWN,
+                reason=self._agent_sandbox_facts(
                     sandbox,
                     exit_code=result.return_code,
                     reason=result.error_type if isinstance(result.error_type, str) else None,
                 )
                 + "Sandbox command outcome cannot be classified",
-                operation="opencode.execute",
+                provider=provider if isinstance(provider, str) else None,
+                sandbox_id=sandbox_id if isinstance(sandbox_id, str) else None,
+                provider_status_reason=result.error_type if isinstance(result.error_type, str) else None,
             )
+            raise agent_route_failure(
+                provider_failure, operation="opencode.execute", stage="agent"
+            ) from provider_failure
         result_stdout = result.stdout or ""
         stdout_parts = result_stdout.rsplit("Shell: ", maxsplit=1)
         if len(stdout_parts) < 2:

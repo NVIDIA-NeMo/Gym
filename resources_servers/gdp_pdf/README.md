@@ -100,7 +100,7 @@ the agent raises an error naming the exact command to run.
 | Field | Default | Meaning |
 |---|---|---|
 | `judge_model_server` | `judge_model` | Model server used for grading |
-| `judge_chat_create_params` | `max_tokens: 1024` | Judge sampling params (Chat Completions) |
+| `judge_chat_create_params` | `reasoning_effort: medium`, `max_completion_tokens: 16384` | Judge sampling params (Chat Completions); the budget covers the judge's reasoning and its verdict |
 | `judge_prompt_template_fpath` | `prompt_templates/judge.txt` | Per-criterion judge prompt |
 | `judge_max_attempts` | 5 | Attempts on parse failure before the row is excluded (see Grading) |
 | `judge_endpoint_max_concurrency` | 64 | Caps concurrent judge calls; a single task fans out to up to 30 |

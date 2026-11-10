@@ -1,0 +1,11 @@
+# Generated rollout sidecar artifacts
+example_rollouts_materialized_inputs.jsonl
+example_rollouts_aggregate_metrics.json
+example_rollouts_failures.jsonl
+example_rollouts_coverage.json
+example_rollouts_manifest.json
+example_rollouts_manifest.identity.json
+example_rollouts_resolved_config.yaml
+example_rollouts_run.lock
+rollout_verdicts.jsonl
+quality_summary.json

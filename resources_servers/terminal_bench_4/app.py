@@ -46,7 +46,12 @@ from nemo_gym.server_runtime import (
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.terminal_bench_4 import lifecycle
-from resources_servers.terminal_bench_4.environment import EnvironmentConfig, ExecLimitConfigurationError
+from resources_servers.terminal_bench_4.environment import (
+    EnvironmentConfig,
+    ExecLimitConfigurationError,
+    ProviderCapabilityError,
+    resolve_environment_provider,
+)
 from resources_servers.terminal_bench_4.lifecycle import NATIVE_VERSION, Session
 from resources_servers.terminal_bench_4.models import (
     AgentTermination,
@@ -93,6 +98,8 @@ class TerminalBench4Config(BaseResourcesServerConfig):
 # the sandbox's default user, which is root for every image this server provisions.
 _DEFAULT_AGENT_USERS = (None, "root", 0, "0")
 _RESOURCES_SESSION_KEY = "tb4_resources_session_id"
+# Setup errors that no retry can fix: the attempt ends as a final infrastructure failure.
+_DETERMINISTIC_SETUP = frozenset({ExecLimitConfigurationError.__name__, ProviderCapabilityError.__name__})
 
 
 def atomic_json(path, value):
@@ -208,6 +215,9 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         # Overrides are known before any task loads; package budgets are checked when each task loads.
         for name, timeout_sec in environment.verifier_timeout_overrides.items():
             environment.require_exec_limit_covers(name, timeout_sec)
+        if isinstance(environment.sandbox_provider, str):
+            # A reference to a missing sandbox block fails at startup, not once per task.
+            resolve_environment_provider(environment.sandbox_provider)
         self._sessions: dict[str, Session] = {}
         self._by_identity: dict[str, str] = {}
         # Episode sessions: resources_session_id -> Terminal-Bench 4 session ID, the fences of closed IDs
@@ -510,12 +520,11 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         key = session.resources_request.resources_session_id
         await self._prepare_session(session)
         if session.seed_response.termination is not None:
-            # Invalid execution limits are deterministic; preserve other setup retry behavior.
-            invalid_limits = (session.result.get("exception_info") or {}).get(
-                "exception_type"
-            ) == ExecLimitConfigurationError.__name__
+            # Invalid execution limits and tasks the provider cannot host are deterministic; preserve other setup
+            # retry behavior.
+            deterministic = (session.result.get("exception_info") or {}).get("exception_type") in _DETERMINISTIC_SETUP
             session.resources_error = (
-                422 if invalid_limits else 503,
+                422 if deterministic else 503,
                 f"Task sandbox setup failed: {session.termination.detail}",
             )
             self._start_fence_expiry(key, session)
@@ -710,7 +719,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             legacy_failure["_ng_failure_class"] = "infrastructure_error"
             if failure_type:
                 legacy_failure["_ng_failure_type"] = failure_type
-            if failure_type == ExecLimitConfigurationError.__name__:
+            if failure_type in _DETERMINISTIC_SETUP:
                 legacy_failure[NG_TERMINAL_KEY] = True
         return SandboxedVerifyResponse(
             **(

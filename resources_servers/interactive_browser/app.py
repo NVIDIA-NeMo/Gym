@@ -40,7 +40,7 @@ from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from nemo_gym.client import SESSION_ID_KEY
-from nemo_gym.core import EpisodeId, TaskId
+from nemo_gym.core import VERIFIER_ERROR, EpisodeId, TaskId
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
@@ -361,7 +361,11 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
 
     # ----- reward -------------------------------------------------------- #
     def _verify_response(
-        self, body: BrowserVerifyRequest, reward: float, failure_reason: Optional[str] = None
+        self,
+        body: BrowserVerifyRequest,
+        reward: float,
+        failure_reason: Optional[str] = None,
+        failure_kind: Optional[str] = None,
     ) -> BaseVerifyResponse:
         """Build the response without letting a request field collide with a response one.
 
@@ -373,6 +377,7 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
             **{k: v for k, v in body.model_dump().items() if k not in _RESPONSE_OWNED_FIELDS},
             reward=reward,
             failure_reason=failure_reason,
+            failure_kind=failure_kind,
         )
 
     async def verify(self, request: Request, body: BrowserVerifyRequest) -> BaseVerifyResponse:
@@ -387,17 +392,18 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
                 **lost_session_verification("browser session not found at verify"),
             )
 
-        reward, failure_reason = 0.0, None
+        reward, failure_reason, failure_kind = 0.0, None, None
         try:
             reward = await self._score(st)
         except _ScoringUnavailable as exc:
             # The browser died before it could be read. The rollout itself may have been
             # fine; what failed is the measurement. Raising here would abort the whole
             # collection run, because only JudgeError is converted to a routed row.
-            failure_reason = str(exc)
+            # The kind names the failed measurement; the row stays unmasked, as it was.
+            failure_reason, failure_kind = str(exc), VERIFIER_ERROR
         finally:
             await self._release(session_id)
-        return self._verify_response(body, reward=reward, failure_reason=failure_reason)
+        return self._verify_response(body, reward=reward, failure_reason=failure_reason, failure_kind=failure_kind)
 
     async def _score(self, st: _SessionState) -> float:
         gt = st.gt or {}

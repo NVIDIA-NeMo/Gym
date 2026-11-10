@@ -16,6 +16,7 @@ hle_verified_vision_equivalence_llm_judge_resources_server:
       judge_system_message: ""
       judge_equal_label: "Judgement: yes"
       judge_not_equal_label: "Judgement: no"
+      judge_labels_case_insensitive: true
       judge_prompt_template_fpath: ../../benchmarks/hle/prompts/judge.txt
       response_extract_regex: null
       question_extract_regex: null

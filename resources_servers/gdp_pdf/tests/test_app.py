@@ -676,7 +676,9 @@ def _row(document_manifest: str, source_pdf: str = "media/pdfs/x.pdf") -> dict:
     }
 
 
-def _write_stub_manifest(document_dir: Path, *, page_count: int = 1, page_size: int = 200) -> Path:
+def _write_stub_manifest(
+    document_dir: Path, *, page_count: int = 1, page_size: int = 200, parser_version: Optional[str] = None
+) -> Path:
     """A minimal manifest + page PNGs, standing in for a real prepare_document() output."""
     pages_dir = document_dir / "pages"
     pages_dir.mkdir(parents=True, exist_ok=True)
@@ -694,6 +696,8 @@ def _write_stub_manifest(document_dir: Path, *, page_count: int = 1, page_size: 
         "page_count": page_count,
         "pages": pages,
     }
+    if parser_version is not None:
+        manifest["parser_version"] = parser_version
     manifest_path = document_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest))
     return manifest_path
@@ -863,9 +867,10 @@ class TestFetchExampleMedia:
 
         def _fake_prepare_document(pdf_path: Path, document_dir: Path, **kwargs: Any) -> Path:
             rendered.append(pdf_path.name)
-            return _write_stub_manifest(document_dir)
+            return _write_stub_manifest(document_dir, parser_version="2.5.0")
 
         monkeypatch.setattr(prepare_module, "prepare_document", _fake_prepare_document)
+        monkeypatch.setattr(prepare_module, "_liteparse_version", lambda: "2.5.0")
 
     def test_downloads_and_renders_only_the_referenced_documents(self, monkeypatch, tmp_path: Path) -> None:
         self._write_example_jsonl(tmp_path, ["a.pdf", "b.pdf"])
@@ -882,7 +887,7 @@ class TestFetchExampleMedia:
 
     def test_skips_documents_already_rendered(self, monkeypatch, tmp_path: Path) -> None:
         self._write_example_jsonl(tmp_path, ["a.pdf", "b.pdf"])
-        _write_stub_manifest(tmp_path / "test_media/documents/a")
+        _write_stub_manifest(tmp_path / "test_media/documents/a", parser_version="2.5.0")
         downloaded: list = []
         rendered: list = []
         self._patch(monkeypatch, downloaded, rendered)
@@ -892,6 +897,21 @@ class TestFetchExampleMedia:
         assert downloaded == ["pdfs/b.pdf"]
         assert rendered == ["b.pdf"]
         assert n == 1
+
+    @pytest.mark.parametrize("parser_version", ["2.16.0", None])
+    def test_renders_again_a_document_from_another_liteparse_version(
+        self, monkeypatch, tmp_path: Path, parser_version: Optional[str]
+    ) -> None:
+        self._write_example_jsonl(tmp_path, ["a.pdf"])
+        _write_stub_manifest(tmp_path / "test_media/documents/a", parser_version=parser_version)
+        downloaded: list = []
+        rendered: list = []
+        self._patch(monkeypatch, downloaded, rendered)
+
+        assert fetch_example_media(tmp_path) == 1
+        assert rendered == ["a.pdf"]
+        manifest = json.loads((tmp_path / "test_media/documents/a/manifest.json").read_text())
+        assert manifest["parser_version"] == "2.5.0"
 
     def test_missing_example_jsonl_is_actionable(self, tmp_path: Path) -> None:
         with raises(FileNotFoundError, match="prepare.py"):

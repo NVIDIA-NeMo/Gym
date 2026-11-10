@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from starlette.requests import Request
 
@@ -944,3 +945,9 @@ async def test_eula_opt_in_is_required_before_any_sandbox_work(borrowed):
     config.assert_not_called()
     provider.assert_not_called()
     install.assert_not_called()
+
+
+def test_legacy_run_route_is_not_supported():
+    response = TestClient(agent().setup_webserver()).post("/run", json={"responses_create_params": {"input": []}})
+    assert response.status_code == 422
+    assert "PoolAgent does not implement /run" in response.json()["detail"]

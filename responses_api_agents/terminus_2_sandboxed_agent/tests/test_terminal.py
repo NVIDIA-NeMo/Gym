@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from nemo_gym.core import NgFailureEvent
 from responses_api_agents.terminus_2_sandboxed_agent.terminal import (
     TerminusJSONParser,
     TerminusTmuxSession,
@@ -259,3 +260,45 @@ async def test_ctrl_c_recovers_a_full_pty_input_queue_without_executing_pending_
         assert "78 79 03 7a" in await terminal.capture_pane()
     finally:
         await environment.exec("tmux kill-server")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["alive", "inspect", "drain", "recover"])
+async def test_ordinary_nonzero_exits_stay_terminal_failures_not_provider_failures(stage):
+    """Exit 127 (a missing stty), a killed tmux server or a failed respawn is the task's state on a responding sandbox."""
+
+    async def execute(command, **kwargs):
+        if "pane_dead" in command:
+            if stage == "inspect":
+                return SimpleNamespace(return_code=1, stdout="", stderr="no server")
+            return SimpleNamespace(return_code=0, stdout="0\n", stderr="")
+        return SimpleNamespace(return_code=127, stdout="", stderr="stty: command not found")
+
+    terminal = session(SimpleNamespace(exec=execute))
+    if stage == "alive":
+        call = terminal.is_session_alive()
+    elif stage == "inspect":
+        call = terminal.get_incremental_output()
+    elif stage == "recover":
+        call = terminal.recover_shell()
+    else:
+        call = terminal.send_keys("C-c\n")
+    with pytest.raises(RuntimeError) as error:
+        await call
+    assert not isinstance(error.value, NgFailureEvent)
+
+
+@pytest.mark.asyncio
+async def test_provider_failure_from_the_exec_layer_passes_through_the_terminal_unchanged():
+    event = NgFailureEvent(
+        boundary="sandbox", failure_kind="provider_unavailable", failure_reason="sandbox gone", http_status=503
+    )
+
+    async def execute(command, **kwargs):
+        if "pane_dead" in command:
+            return SimpleNamespace(return_code=0, stdout="0\n", stderr="")
+        raise event
+
+    with pytest.raises(NgFailureEvent) as error:
+        await session(SimpleNamespace(exec=execute)).send_keys("C-c\n")
+    assert error.value is event

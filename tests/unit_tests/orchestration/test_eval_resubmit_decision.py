@@ -2670,7 +2670,13 @@ def _graded(task: int) -> dict:
     """A scored row whose verifier recorded one programmatic grading operation bound to its saved answer and score."""
     from nemo_gym.trajectory.trajectory_record import grading_result_binding
 
-    row = ident(task, reward=1.0, response={"id": f"resp-{task}", "status": "completed", "output": []})
+    row = ident(
+        task,
+        _ng_environment_server="environment",
+        _ng_result_type="single_agent_turn",
+        reward=1.0,
+        response={"id": f"resp-{task}", "status": "completed", "output": []},
+    )
     operation = {"operation_id": f"grade-{task}", "kind": "programmatic", "outcome": "completed"}
     operation["result_binding_sha256"] = grading_result_binding(row)
     verifier = {"invocation_id": f"verify-{task}", "status": "completed", "grading_operations": [operation]}
@@ -2679,9 +2685,19 @@ def _graded(task: int) -> dict:
 
 def _quality_naming(server: str, expected: int) -> dict:
     agent = {"kind": "responses_api_agents", "implementation": "demo_agent", "resources_server": server}
+    environment = {
+        "kind": "environment_servers",
+        "implementation": "single_agent_turn",
+        "agent_server": "agent",
+        "resources_server": server,
+    }
     return unit_quality(
         expected=expected,
-        provenance={"resolved_config": "read", "route_failures_to_sidecar": None, "servers": {"agent": agent}},
+        provenance={
+            "resolved_config": "read",
+            "route_failures_to_sidecar": None,
+            "servers": {"environment": environment, "agent": agent, server: {"kind": "resources_servers"}},
+        },
     )
 
 
@@ -2724,6 +2740,19 @@ def test_a_mixed_run_reports_observed_healthy_unhealthy_and_unobserved_trials(tm
     [health] = [w for w in task["warnings"] if w.startswith("response/trial health")]
     assert "trial: UNOBSERVED 50 of 100 expected trials" in health
     assert "observed healthy 49, unhealthy 1" in health
+
+    # A grading binding alone cannot establish ownership when the environment provenance is missing.
+    quality = _quality_naming("demo_verifier", 100)
+    del quality["provenance"]["servers"]["environment"]
+    _, unowned = gate_of(job, quality=quality)
+    assert {key: unowned["trial_counts"][key] for key in ("observed_healthy", "unhealthy", "unobserved")} == {
+        "observed_healthy": 0,
+        "unhealthy": 1,
+        "unobserved": 99,
+    }
+    [health] = [w for w in unowned["warnings"] if w.startswith("response/trial health")]
+    assert "trial: UNOBSERVED 99 of 100 expected trials" in health
+    assert "observed healthy 0, unhealthy 1" in health
 
 
 _CURRENT_RECEIPT = {

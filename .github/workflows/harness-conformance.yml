@@ -6,10 +6,19 @@ name: Harness conformance
 on:
   workflow_call:
     inputs:
+      checkout-ref:
+        description: Exact revision selected by the caller; empty keeps the event default
+        type: string
+        required: false
+        default: ""
       base-ref:
         description: Base ref for the full PR diff; empty runs all registered harnesses
         type: string
         default: ""
+
+env:
+  # Check publication targets the event head; evidence identifies the checked-out tree.
+  TESTED_SHA: ${{ inputs.checkout-ref || github.sha }}
 
 permissions:
   contents: read
@@ -27,6 +36,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
+          ref: ${{ inputs.checkout-ref }}
           fetch-depth: 0
           persist-credentials: false
       - name: Select affected harnesses
@@ -61,6 +71,7 @@ jobs:
         run: apt-get update && apt-get install -y --no-install-recommends git curl
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
+          ref: ${{ inputs.checkout-ref }}
           submodules: recursive
           persist-credentials: false
       - name: Trust checkout for NOOA container builds
@@ -151,6 +162,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
+          ref: ${{ inputs.checkout-ref }}
           persist-credentials: false
       - name: Publish result from this attempt's evidence
         env:
@@ -171,6 +183,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
+          ref: ${{ inputs.checkout-ref }}
           persist-credentials: false
       - name: Install table renderer dependencies
         timeout-minutes: 8
@@ -181,7 +194,7 @@ jobs:
         run: |
           .venv/bin/python -m scripts.harness_conformance.ci_table \
             --repo "$GITHUB_REPOSITORY" --run-id "$GITHUB_RUN_ID" \
-            --run-attempt "$GITHUB_RUN_ATTEMPT" --commit "$GITHUB_SHA" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" --commit "$TESTED_SHA" \
             --output "$RUNNER_TEMP/harness-conformance-docs/table.mdx"
       - name: Upload rendered documentation table
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

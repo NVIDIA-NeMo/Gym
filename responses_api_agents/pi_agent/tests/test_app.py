@@ -846,7 +846,10 @@ async def test_mcp_setup_exit_is_request_failure_and_cleans_workspace(tmp_path, 
         communicate=AsyncMock(return_value=(b"", b"setup failed")),
         returncode=78,
     )
-    with patch("responses_api_agents.pi_agent.app.asyncio.create_subprocess_exec", AsyncMock(return_value=process)):
+    with (
+        patch("responses_api_agents.pi_agent.app.ensure_pi"),
+        patch("responses_api_agents.pi_agent.app.asyncio.create_subprocess_exec", AsyncMock(return_value=process)),
+    ):
         with pytest.raises(RuntimeError, match="Required Gym MCP"):
             await agent._run_pi("task", None, collect_observations=collect_observations)
     assert not list(tmp_path.iterdir())
@@ -881,6 +884,7 @@ async def test_task_timeout_reaches_local_subprocess_wait(tmp_path: Path, budget
     process.communicate = AsyncMock(return_value=(b"", b""))
     module = "responses_api_agents.pi_agent.app"
     with (
+        patch(f"{module}.ensure_pi"),
         patch(f"{module}.asyncio.create_subprocess_exec", AsyncMock(return_value=process)),
         patch(f"{module}.asyncio.wait_for", wraps=asyncio.wait_for) as wait,
     ):

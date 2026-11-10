@@ -14,11 +14,12 @@ from fastapi import Request
 
 import resources_servers.terminal_bench_2_1.app as terminal_bench_app
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
-from nemo_gym.core import NeMoGymResponse
+from nemo_gym.core import FailureHeader, NeMoGymResponse, NgFailureEvent, RequestFailureLog, SandboxFailureDetails
 from resources_servers.terminal_bench_2_1.app import (
     _BULLSEYE_SECURITY_SNAPSHOT_SETUP,
     GOLDEN_PATCH_SOLVE_SH_PATCHES,
     TEST_SH_PATCHES,
+    TerminalBench21OutcomePolicyConfig,
     TerminalBench21ResourcesServer,
     TerminalBench21ResourcesServerConfig,
     TerminalBench21SeedSessionRequest,
@@ -89,7 +90,13 @@ class TestApp:
                 destination.write_text(reward_text)
 
         sandbox = MagicMock()
-        sandbox.exec = AsyncMock(return_value=SimpleNamespace(stdout="verifier output", stderr="", return_code=0))
+
+        async def execute(command, **kwargs):
+            return SimpleNamespace(
+                stdout="verifier output", stderr="", return_code=1 if command.startswith("test -f") else 0
+            )
+
+        sandbox.exec = AsyncMock(side_effect=execute)
         sandbox.download = AsyncMock(side_effect=download_reward)
         sandbox.stop = AsyncMock()
         server._upload_folder = AsyncMock()
@@ -223,7 +230,9 @@ class TestApp:
             command = command.replace("/logs/verifier", quote(str(verifier_dir)))
             command = command.replace("/tests/test.sh", quote(str(script)))
             result = subprocess.run(["bash", "-c", command], capture_output=True, text=True, timeout=10)
-            return MagicMock(return_code=result.returncode, stdout=result.stdout, stderr=result.stderr)
+            return MagicMock(
+                return_code=result.returncode, stdout=result.stdout, stderr=result.stderr, error_type=None
+            )
 
         async def download(remote_path, local_path):
             assert remote_path == "/logs/verifier/reward.txt"
@@ -318,7 +327,7 @@ def _server() -> TerminalBench21ResourcesServer:
 
 def _recording_sandbox(uploads: dict[str, str]) -> AsyncMock:
     sandbox = AsyncMock()
-    sandbox.exec.return_value = MagicMock(return_code=0)
+    sandbox.exec.return_value = MagicMock(return_code=0, error_type=None)
 
     async def upload(*, local_path: str, remote_path: str) -> None:
         uploads[remote_path] = Path(local_path).read_text()
@@ -392,3 +401,366 @@ def _configured_patches() -> list[tuple[str, str, str]]:
 def test_configured_patches_match_the_pinned_task_scripts(subfolder: str, task: str, old: str) -> None:
     scripts = (PINNED_TASKS / task.split("/", 1)[1] / subfolder).rglob("*.sh")
     assert any(old in script.read_text() for script in scripts)
+
+
+def _infra_server(tmp_path: Path, exec_side_effect, download_side_effect=None):
+    server = TerminalBench21ResourcesServer(
+        config=TerminalBench21ResourcesServerConfig(
+            sandbox_provider="test", sandbox_config={}, evaluation_timeout=30, host="", port=0, entrypoint="", name=""
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    sandbox = MagicMock()
+    sandbox.exec = AsyncMock(side_effect=exec_side_effect)
+    sandbox.download = AsyncMock(side_effect=download_side_effect)
+    sandbox.stop = AsyncMock()
+    server._upload_folder = AsyncMock()
+    server._session_id_to_sandbox["s"] = sandbox
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "s"}
+    return server, request
+
+
+def _ok(stdout="", return_code=0, error_type=None):
+    return SimpleNamespace(stdout=stdout, stderr="", return_code=return_code, error_type=error_type)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failing", ["upload", "mkdir_raises", "mkdir_sandbox_error", "test_raises", "test_sandbox_error"]
+)
+async def test_verifier_infrastructure_failure_is_masked(tmp_path: Path, failing: str) -> None:
+    async def execute(command, **kwargs):
+        if failing == "mkdir_raises" and command.startswith("mkdir"):
+            raise ConnectionError("sandbox gone")
+        if failing == "mkdir_sandbox_error" and command.startswith("mkdir"):
+            return _ok(return_code=125, error_type="sandbox")
+        if failing == "test_raises" and "test.sh" in command:
+            raise ConnectionError("sandbox gone")
+        if failing == "test_sandbox_error" and "test.sh" in command:
+            return _ok(return_code=125, error_type="sandbox")
+        return _ok()
+
+    server, request = _infra_server(tmp_path, execute)
+    if failing == "upload":
+        server._upload_folder.side_effect = ConnectionError("upload failed")
+
+    result = await server.verify(request, _verify_request(tmp_path))
+
+    assert result.mask_sample is True
+    assert result.failure_kind == "verifier_error"
+    assert result.failure_reason
+    assert result.reward == 0.0 and result.evaluation_completed is False
+
+
+@pytest.mark.asyncio
+async def test_reward_download_connection_failure_is_masked(tmp_path: Path) -> None:
+    async def execute(command, **kwargs):
+        return _ok()  # the probe finds reward.txt present
+
+    server, request = _infra_server(tmp_path, execute, ConnectionError("lost"))
+    result = await server.verify(request, _verify_request(tmp_path))
+    assert result.mask_sample is True and result.failure_kind == "verifier_error"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "download_error", [FileNotFoundError("reward.txt"), RuntimeError("provider says no such file")]
+)
+async def test_absent_reward_file_is_still_scored_zero(tmp_path: Path, download_error: Exception) -> None:
+    async def execute(command, **kwargs):
+        return _ok(return_code=1) if command.startswith("test -f") else _ok()
+
+    server, request = _infra_server(tmp_path, execute, download_error)
+    result = await server.verify(request, _verify_request(tmp_path))
+    assert result.mask_sample is False and result.failure_kind is None
+    assert result.reward == 0.0 and result.evaluation_completed is False
+
+
+@pytest.mark.asyncio
+async def test_test_script_timeout_result_is_still_scored_zero(tmp_path: Path) -> None:
+    async def execute(command, **kwargs):
+        if "test.sh" in command:
+            return _ok(return_code=125, error_type="timeout")
+        return _ok(return_code=1) if command.startswith("test -f") else _ok()
+
+    server, request = _infra_server(tmp_path, execute, FileNotFoundError("reward.txt"))
+    result = await server.verify(request, _verify_request(tmp_path))
+    assert result.mask_sample is False and result.failure_kind is None
+    assert result.reward == 0.0 and result.evaluation_completed is False
+
+
+@pytest.mark.asyncio
+async def test_raised_timeout_from_the_test_run_is_not_a_deadline(tmp_path: Path) -> None:
+    async def execute(command, **kwargs):
+        if "test.sh" in command:
+            raise TimeoutError("Timed out during OpenSandbox command status after 10s")
+        return _ok()
+
+    server, request = _infra_server(tmp_path, execute)
+    result = await server.verify(request, _verify_request(tmp_path))
+    assert result.mask_sample is True and result.failure_kind == "verifier_error"
+    assert result.reward == 0.0 and result.evaluation_completed is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("download_error", [FileNotFoundError("reward.txt"), ConnectionError("lost")])
+@pytest.mark.parametrize("probe", ["raises", 0, 2, 137, -9])
+async def test_inconclusive_reward_probe_masks_the_failed_download(
+    tmp_path: Path, download_error: Exception, probe: str | int
+) -> None:
+    async def execute(command, **kwargs):
+        if command.startswith("test -f"):
+            if probe == "raises":
+                raise ConnectionError("probe lost")
+            return _ok(return_code=probe)
+        return _ok()
+
+    server, request = _infra_server(tmp_path, execute, download_error)
+    result = await server.verify(request, _verify_request(tmp_path))
+    assert result.mask_sample is True and result.failure_kind == "verifier_error"
+    assert result.reward == 0.0 and result.evaluation_completed is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mkdir_result", ["task_failure", "sandbox_error", "raises"])
+async def test_upload_directory_failure_is_scored_only_when_the_task_caused_it(
+    tmp_path: Path, mkdir_result: str
+) -> None:
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test.sh").write_text("exit 0\n")
+
+    async def execute(command, **kwargs):
+        if command.startswith("mkdir -p /tests"):
+            if mkdir_result == "raises":
+                raise ConnectionError("sandbox gone")
+            return _ok(return_code=1) if mkdir_result == "task_failure" else _ok(return_code=125, error_type="sandbox")
+        return _ok()
+
+    server, request = _infra_server(tmp_path, execute, FileNotFoundError("reward.txt"))
+    del server._upload_folder  # use the real helper
+    server._session_id_to_sandbox["s"].upload = AsyncMock()
+    result = await server.verify(request, _verify_request(tmp_path))
+    masked = mkdir_result != "task_failure"
+    assert result.mask_sample is masked
+    assert result.failure_kind == ("verifier_error" if masked else None)
+    assert result.reward == 0.0 and result.evaluation_completed is False
+
+
+def _provider_event() -> NgFailureEvent:
+    return NgFailureEvent(
+        boundary="sandbox",
+        failure_kind="provider_unavailable",
+        failure_reason="Sandbox command did not run to completion",
+        http_status=503,
+        details=SandboxFailureDetails(provider="p", sandbox_id="s-1", provider_status_reason="sandbox"),
+        operation="sandbox.exec",
+        stage="verification",
+    )
+
+
+async def _verify_with_failure_log(server, request, tmp_path: Path):
+    with RequestFailureLog.capture() as log:
+        result = await server.verify(request, _verify_request(tmp_path))
+    return result, log.reply_report(None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing", ["upload", "mkdir", "test_run", "download"])
+async def test_provider_event_at_verify_is_retained_as_the_cause_of_the_verifier_event(
+    tmp_path: Path, failing: str
+) -> None:
+    provider_event = _provider_event()
+
+    async def execute(command, **kwargs):
+        if failing == "mkdir" and command.startswith("mkdir"):
+            raise provider_event
+        if failing == "test_run" and "test.sh" in command:
+            raise provider_event
+        return _ok()
+
+    server, request = _infra_server(tmp_path, execute, provider_event if failing == "download" else None)
+    if failing == "upload":
+        server._upload_folder.side_effect = provider_event
+
+    sandbox = server._session_id_to_sandbox["s"]
+    result, report = await _verify_with_failure_log(server, request, tmp_path)
+
+    assert result.mask_sample is True and result.failure_kind == "provider_unavailable"
+    assert "Sandbox command did not run to completion" in result.failure_reason
+    assert result.reward == 0.0 and result.evaluation_completed is False
+    # The report survives the reply header with the provider event's own identity and the cause link.
+    sent = FailureHeader.decode(FailureHeader.encode(report))
+    [verifier] = [event for event in sent.events.values() if event.event_id != provider_event.event_id]
+    assert (verifier.boundary, verifier.operation, verifier.stage) == ("resources_server", "verify", "verification")
+    assert (verifier.failure_kind, verifier.http_status) == ("provider_unavailable", 503)
+    assert verifier.cause_id == provider_event.event_id
+    provider = sent.events[provider_event.event_id]
+    assert (provider.failure_kind, provider.http_status) == ("provider_unavailable", 503)
+    assert provider.details == provider_event.details
+    assert provider.boundary == "sandbox"
+    # A typed failure on the verifier's own operations needs no probe; a typed download failure does, because
+    # it does not say whether reward.txt is absent.
+    probes = [c for c in sandbox.exec.await_args_list if c.args[0].startswith("test -f")]
+    assert bool(probes) == (failing == "download")
+
+
+@pytest.mark.asyncio
+async def test_verifier_side_exception_is_a_verifier_error_with_its_cause_and_a_concise_reason(tmp_path: Path) -> None:
+    server, request = _infra_server(tmp_path, lambda command, **kwargs: _ok())
+    server._upload_folder.side_effect = ValueError("tests/ is unreadable: token=abc123")
+
+    result, report = await _verify_with_failure_log(server, request, tmp_path)
+
+    assert result.mask_sample is True and result.failure_kind == "verifier_error"
+    assert "abc123" not in result.failure_reason
+    [verifier] = report.events.values()
+    assert verifier.failure_kind == "verifier_error" and verifier.exception_type == "ValueError"
+    assert verifier.foreign_error.exception_type == "ValueError"
+    assert "abc123" not in verifier.failure_reason
+
+
+@pytest.mark.asyncio
+async def test_structured_sandbox_error_reason_carries_the_error_type_only(tmp_path: Path) -> None:
+    async def execute(command, **kwargs):
+        if "test.sh" in command:
+            return SimpleNamespace(stdout="secret", stderr="secret", return_code=125, error_type="sandbox")
+        return _ok()
+
+    server, request = _infra_server(tmp_path, execute)
+    result, report = await _verify_with_failure_log(server, request, tmp_path)
+    assert result.mask_sample is True and "sandbox" in result.failure_reason and "secret" not in result.failure_reason
+    [verifier] = report.events.values()
+    assert verifier.cause_id is None and verifier.exception_type == "_VerifierInfraError"
+
+
+def _typed_not_found() -> NgFailureEvent:
+    return NgFailureEvent(
+        boundary="sandbox",
+        failure_kind="provider_unavailable",
+        failure_reason="Sandbox provider request failed",
+        http_status=404,
+        details=SandboxFailureDetails(provider="p", sandbox_id="s-1"),
+        operation="sandbox.download",
+        stage="verification",
+    )
+
+
+@pytest.mark.asyncio
+async def test_typed_404_download_of_an_absent_reward_is_still_scored_zero(tmp_path: Path) -> None:
+    async def execute(command, **kwargs):
+        return _ok(return_code=1) if command.startswith("test -f") else _ok()
+
+    server, request = _infra_server(tmp_path, execute, _typed_not_found())
+    result = await server.verify(request, _verify_request(tmp_path))
+    assert result.mask_sample is False and result.failure_kind is None
+    assert result.reward == 0.0 and result.evaluation_completed is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("probe", ["raises", 0])
+async def test_typed_404_download_with_an_inconclusive_probe_is_masked(tmp_path: Path, probe: str | int) -> None:
+    async def execute(command, **kwargs):
+        if command.startswith("test -f"):
+            if probe == "raises":
+                raise ConnectionError("probe lost")
+            return _ok(return_code=probe)
+        return _ok()
+
+    server, request = _infra_server(tmp_path, execute, _typed_not_found())
+    result = await server.verify(request, _verify_request(tmp_path))
+    assert result.mask_sample is True and result.failure_kind == "provider_unavailable"
+    assert result.reward == 0.0 and result.evaluation_completed is False
+
+
+@pytest.mark.asyncio
+async def test_configured_outcome_policy_selects_the_outcome_and_keeps_the_provider_event(tmp_path: Path) -> None:
+    provider_event = _provider_event()
+
+    async def execute(command, **kwargs):
+        if "test.sh" in command:
+            raise provider_event
+        return _ok()
+
+    outcomes = {}
+    for name, policy in {
+        "default": {},
+        "zero": {"by_failure_kind": {"provider_unavailable": "count_as_zero"}},
+    }.items():
+        server, request = _infra_server(tmp_path, execute)
+        server.config = server.config.model_copy(
+            update={"outcome_policy": TerminalBench21OutcomePolicyConfig.model_validate(policy)}
+        )
+        result, report = await _verify_with_failure_log(server, request, tmp_path)
+        outcomes[name] = result
+        assert result.failure_kind == "provider_unavailable" and result.reward == 0.0
+        assert provider_event.event_id in report.events
+
+    assert outcomes["default"].mask_sample is True
+    assert outcomes["zero"].mask_sample is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("policy_action", ["retry", "count_as_zero"])
+async def test_applied_outcome_decision_is_part_of_the_result_and_survives_a_saved_row(
+    tmp_path: Path, policy_action: str
+) -> None:
+    """A configured verifier zero is a saved decision, so recovery counts it without a successful verification."""
+    from nemo_gym.core.outcome_policy import is_policy_counted_zero
+    from tests.unit_tests.orchestration.test_evaluation_health import _gate
+    from tests.unit_tests.orchestration.test_shared_fault_classes import _policy_zero
+
+    async def execute(command, **kwargs):
+        if "test.sh" in command:
+            raise ConnectionError("sandbox connection dropped")
+        return _ok()
+
+    server, request = _infra_server(tmp_path, execute)
+    server.config = server.config.model_copy(
+        update={"outcome_policy": TerminalBench21OutcomePolicyConfig(default_action=policy_action)}
+    )
+    result = await server.verify(request, _verify_request(tmp_path))
+
+    counted = policy_action == "count_as_zero"
+    assert result.failure_kind == "verifier_error" and result.evaluation_completed is False and result.reward == 0.0
+    assert result.mask_sample is (not counted)
+    assert (result.failure_outcome_action, result.failure_outcome_attribution) == (policy_action, "evaluation")
+
+    # The saved row, as the Environment Server returns it, carries the decision to recovery.
+    collected = _policy_zero(kind=result.failure_kind)
+    row = collected.results[0]
+    row.pop("failure_outcome_action", None)  # only what the verifier returned may decide the row
+    row.update(
+        result.model_dump(
+            include={
+                "reward",
+                "mask_sample",
+                "evaluation_completed",
+                "failure_kind",
+                "failure_reason",
+                "failure_outcome_action",
+                "failure_outcome_attribution",
+            },
+            exclude_none=True,
+        )
+    )
+    assert is_policy_counted_zero(row) is counted
+    decision, _, _ = _gate(collected)
+    assert decision.counts == ({"scored": 1} if counted else {"masked": 1})
+
+
+@pytest.mark.asyncio
+async def test_scored_task_failure_carries_no_failure_outcome_decision(tmp_path: Path) -> None:
+    async def execute(command, **kwargs):
+        return _ok(return_code=1) if command.startswith("test -f") else _ok()
+
+    server, request = _infra_server(tmp_path, execute, FileNotFoundError("reward.txt"))
+    result = await server.verify(request, _verify_request(tmp_path))
+    assert result.mask_sample is False and result.reward == 0.0
+    assert result.failure_outcome_action is None and result.failure_outcome_attribution is None
+
+
+@pytest.mark.parametrize("action", ["fail", "verify"])
+def test_verifier_outcome_policy_rejects_actions_it_cannot_execute(action: str) -> None:
+    with pytest.raises(ValueError, match="only retry and count_as_zero"):
+        TerminalBench21OutcomePolicyConfig(default_action=action)

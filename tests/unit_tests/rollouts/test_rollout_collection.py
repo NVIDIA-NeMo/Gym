@@ -155,7 +155,6 @@ from nemo_gym.rollouts.trajectory_builder import (
 from nemo_gym.server_runtime.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.server_runtime.request_handling.disconnect import ClientDisconnectCancellationMiddleware
 from nemo_gym.telemetry.gym_metrics import ROLLOUT_COMPLETED_INSTRUMENT
-from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.trajectory.trajectory_record import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
 from nemo_gym.utils.path_utils import aggregation_sources_path_for, failures_path_for, materialized_path_for
 
@@ -2815,7 +2814,7 @@ class TestRolloutCollection:
             require_complete=require_complete,
         )
         outcomes: list[dict] = []
-        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "is_span_group_enabled", lambda group: True)
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "is_metrics_exporter_active", lambda: True)
         monkeypatch.setattr(
             nemo_gym.rollouts.rollout_collection,
             "record_rollout_completed",
@@ -3513,9 +3512,7 @@ class TestRolloutCollection:
             return FakeResponse(200, replies[json["x"]])
 
         install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
-        monkeypatch.setattr(
-            nemo_gym.rollouts.rollout_collection, "is_span_group_enabled", lambda group: group == GymSpanGroup.ROLLOUT
-        )
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "is_metrics_exporter_active", lambda: True)
 
         await RolloutCollectionHelper().run_from_config(
             RolloutCollectionConfig(
@@ -9035,7 +9032,7 @@ class TestDispatchBudget:
 
         monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "finalize_rollout_token_capture", finalize)
         outcomes: list[str] = []
-        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "is_span_group_enabled", lambda group: True)
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "is_metrics_exporter_active", lambda: True)
         monkeypatch.setattr(
             nemo_gym.rollouts.rollout_collection,
             "record_rollout_completed",

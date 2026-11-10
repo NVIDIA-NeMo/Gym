@@ -13,6 +13,7 @@ from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import SandboxHandle, SandboxResourceAmounts, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
 from nemo_gym.sandbox.providers.opensandbox.resource_telemetry import parse_allocation, resource_amounts
+from nemo_gym.telemetry import _fallbacks as telemetry_fallbacks
 from tests.unit_tests.sandbox.test_sandbox import FakeSandboxProvider
 
 
@@ -99,6 +100,7 @@ async def test_sampler_preserves_identity_and_finishes_before_delete(records, mo
     sandbox._resource_attributes = {"nemo.gym.rollout.id": "rollout-1"}
     # Keep the test independent of global Lens span configuration.
     monkeypatch.setattr(api, "is_span_group_enabled", lambda group: False)
+    monkeypatch.setattr(telemetry_fallbacks, "is_span_group_enabled", lambda group: False)
     await sandbox.start()
     await asyncio.sleep(0)
     await sandbox.stop()

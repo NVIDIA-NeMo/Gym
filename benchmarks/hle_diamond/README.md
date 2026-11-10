@@ -188,12 +188,13 @@ judge call (`failure_reason: empty_final_answer`). The judge defaults to the pol
 self-judged numbers are not comparable with the published table (see Quickstart).
 
 The verdict labels are matched case-insensitively: `judge_labels_case_insensitive: true` on the single
-judge server instance every preset shares (`str.casefold` on the judge text and on the labels; the
-recorded `verdict_label` is always the configured spelling). Upstream reads a structured
+judge server instance every preset shares (`str.casefold` on the judge text and on the labels, with bold,
+italic and code marks and the spacing around colons ignored, so `Judgement: **no**` reads as
+`Judgement: no`; the recorded `verdict_label` is always the configured spelling). Upstream reads a structured
 `correct: yes|no` field whose case cannot vary, whereas Gym finds the label in free text, and on the
 gold sweep (Harness validation) o3-mini wrote `Judgement: Yes` on 1 of 1000 rows, which the byte-exact
-default scored 0 as `no_verdict`. The knob is off everywhere else, so `hle` and `hle_verified` are
-unchanged; when it is on, labels that differ only in case are rejected at config time.
+default scored 0 as `no_verdict`. The knob is off by default; `hle` and `hle_verified` turn it on as well.
+When it is on, labels that differ only in case or markup are rejected at config time.
 
 Judge request: the judge call carries no `max_output_tokens` and no reasoning parameter
 (`judge_responses_create_params: {input: []}`), so the judge model runs at its default effort and its

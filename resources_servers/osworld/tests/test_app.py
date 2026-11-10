@@ -4,12 +4,13 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
+from nemo_gym.core import FailureHeader, failure_report_for
 from resources_servers.osworld.app import OSWorldResourcesServer
 from resources_servers.osworld.config import OSWorldResourcesServerConfig
 from resources_servers.osworld.models import OSWorldEvaluateResponse, OSWorldVerifyRequest
@@ -120,7 +121,39 @@ async def test_a_failed_evaluation_is_masked_as_a_verifier_error(tmp_path, extra
     dumped = result.model_dump()
     assert (dumped["reward"], dumped["osworld_score"], dumped["mask_sample"]) == (0.0, 0.0, True)
     assert dumped["failure_kind"] == "verifier_error"
-    assert dumped["failure_reason"] == "OSWorld evaluation raised RuntimeError: evaluator crashed"
+    assert dumped["failure_reason"] == "OSWorld evaluation raised RuntimeError"
+    server._manager.close_session.assert_awaited_once_with("s1")
+
+
+async def test_a_failed_evaluation_is_recorded_as_a_verifier_failure(tmp_path) -> None:
+    server = _verify_server(tmp_path, AsyncMock(side_effect=RuntimeError("evaluator crashed")))
+
+    with patch("resources_servers.osworld.app.observe_failure") as observed:
+        await server.verify(SimpleNamespace(session={SESSION_ID_KEY: "s1"}), _verify_request())
+
+    [failure] = [call.args[0] for call in observed.call_args_list]
+    assert (failure.failure_kind, failure.operation, failure.stage) == ("verifier_error", "verify", "verification")
+    assert failure.failure_reason == "OSWorld evaluation raised RuntimeError"
+    assert failure.exception_type == "RuntimeError"
+    assert isinstance(failure.__cause__, RuntimeError)
+
+
+async def test_a_long_evaluation_error_is_not_copied_into_the_reason_or_the_event(tmp_path) -> None:
+    marker = "private-response-body-marker"
+    server = _verify_server(tmp_path, AsyncMock(side_effect=RuntimeError(marker + "x" * 5000)))
+
+    with patch("resources_servers.osworld.app.observe_failure") as observed:
+        result = await server.verify(SimpleNamespace(session={SESSION_ID_KEY: "s1"}), _verify_request())
+
+    [failure] = [call.args[0] for call in observed.call_args_list]
+    assert (result.reward, result.mask_sample, result.failure_kind) == (0.0, True, "verifier_error")
+    assert result.failure_reason == failure.failure_reason == "OSWorld evaluation raised RuntimeError"
+    # The cause stays linked; the selected diagnostics carry its type and no message.
+    assert isinstance(failure.__cause__, RuntimeError)
+    report = failure_report_for(failure)
+    assert marker not in report.model_dump_json() and marker not in result.model_dump_json()
+    assert report.events[failure.event_id].foreign_error.message == ""
+    assert len(FailureHeader.encode(report)[FailureHeader.NAME]) < FailureHeader.MAX_BYTES
     server._manager.close_session.assert_awaited_once_with("s1")
 
 

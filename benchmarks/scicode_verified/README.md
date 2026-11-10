@@ -54,9 +54,7 @@ stacks as the NumPy 1.26/SciPy 1.13 era and the 2025 current era, but does not d
 environment lockfiles. Use the exact interpreter paths from the run being reproduced and record
 their package inventories with the result.
 
-The benchmark requires two resolved interpreters and fails with a clear error otherwise. The
-original `scicode` benchmark remains backward-compatible and continues to use its resources
-server's current interpreter unless `grading_interpreters` is configured.
+The benchmark requires two resolved interpreters and fails with a clear error otherwise.
 
 ## Run
 

@@ -410,7 +410,7 @@ def runtime_identity() -> dict:
     import importlib.metadata
     import sys
 
-    from nemo_gym.orchestration.jobs import installed_gym_commit
+    from nemo_gym.utils import installed_gym_commit
 
     # Creation time is a receipt field, not part of the stable fingerprint.
     versions = {
@@ -424,15 +424,22 @@ def runtime_identity() -> dict:
         ]
     }
     sources = {str(p.relative_to(ROOT)): digest(p) for p in ROOT.rglob("*.py")}
+    sources["policy/judge_output.schema.json"] = digest(ROOT / "policy/judge_output.schema.json")
     component_root = ROOT.parents[2]
     for boundary in ["benchmarks", "resources_servers", "responses_api_models", "responses_api_agents", "nemo_gym"]:
         for p in (component_root / boundary).rglob("*.py"):
-            if ".venv" not in p.parts:
+            # Other components prepare hidden checkouts and caches during concurrent runs.
+            if not any(part.startswith(".") for part in p.relative_to(component_root).parts):
                 sources["gym/" + str(p.relative_to(component_root))] = digest(p)
+    # Workspace outputs can toggle Git's checkout-wide dirty flag between calls.
+    # Source hashes above, not that flag, detect edits to the code used by a run.
+    gym_commit = installed_gym_commit()
+    if gym_commit is not None:
+        gym_commit = gym_commit.removesuffix("-dirty")
     return {
         "python": sys.version,
         "dependencies": versions,
         "sources": sources,
-        "gym_commit": installed_gym_commit(),
+        "gym_commit": gym_commit,
         "source_gym_commit": read(ROOT / "source_manifest.json")["gym_commit"],
     }

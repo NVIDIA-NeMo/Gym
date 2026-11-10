@@ -102,6 +102,10 @@ class TestApp:
     async def test_sanity(self) -> None:
         self._setup_server()
 
+    async def test_session_key_headers_reach_the_upstream_client(self):
+        assert self._setup_server(session_key_headers=["X-Session"])._client.session_key_headers == ["X-Session"]
+        assert self._setup_server()._client.session_key_headers == []
+
     async def test_retry_configuration_is_scoped_to_model_server(self):
         judge = self._setup_server(max_http_attempts=5)
         policy = self._setup_server()

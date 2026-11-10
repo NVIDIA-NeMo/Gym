@@ -33,7 +33,7 @@ from nemo_gym.agents.utils.supervisor_client import (
 )
 from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.sandbox.providers.base import SandboxExecResult
-from nemo_gym.sandbox.utils import read_text, upload_text
+from nemo_gym.sandbox.utils import download_bytes, read_text, upload_bytes, upload_text
 
 
 class LocalSandbox:
@@ -68,6 +68,28 @@ async def test_file_transport_keeps_contents_out_of_shell(session):
     assert await read_text(sandbox, path=path) == payload
     Path(path).write_bytes(b"partial output\xff\n")
     assert await read_text(sandbox, path=path) == "partial output\ufffd\n"
+    sandbox.exec.assert_not_awaited()
+
+
+async def test_text_transfer_writes_utf8_and_reads_line_endings_as_newlines(session):
+    sandbox, session_dir = session
+    path = str(session_dir / "prompt.txt")
+    text = "caf\u00e9 \u2713 \u56fe\n"
+    await upload_text(sandbox, path=path, text=text)
+    assert Path(path).read_bytes() == text.encode("utf-8")
+    assert await read_text(sandbox, path=path) == text
+    Path(path).write_bytes(b"windows\r\nprogress\rdone\n")
+    assert await read_text(sandbox, path=path) == "windows\nprogress\ndone\n"
+
+
+async def test_byte_transfer_keeps_binary_contents_unchanged(session):
+    sandbox, session_dir = session
+    sandbox.exec = AsyncMock(side_effect=AssertionError("file transfer must not invoke a shell"))
+    path = str(session_dir / "image.png")
+    payload = b"\x89PNG\r\n\x1a\n\x00\xff\xfe"
+    await upload_bytes(sandbox, path=path, data=payload)
+    assert Path(path).read_bytes() == payload
+    assert await download_bytes(sandbox, path=path) == payload
     sandbox.exec.assert_not_awaited()
 
 

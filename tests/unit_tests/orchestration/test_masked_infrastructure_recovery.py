@@ -341,10 +341,9 @@ def test_masked_oom_recovery_uses_shared_origin_stage(tmp_path, stage, expected)
         assert _evidence(decision, (1, 0)).attempts == 1
 
 
-@pytest.mark.parametrize(
-    "attribution,expected", [("evaluation", "retryable"), ("model", "masked"), ("unknown", "masked")]
-)
-def test_masked_oom_recovery_keeps_applied_class_after_reload(tmp_path, attribution, expected):
+@pytest.mark.parametrize("attribution", ["evaluation", "model", "unknown"])
+def test_masked_oom_recovery_honors_the_recorded_retry_action_after_reload(tmp_path, attribution):
+    expected = "retryable"
     row = _masked("provider_oom_killed") | {
         "failure_outcome_action": "retry",
         "failure_outcome_attribution": attribution,
