@@ -7,6 +7,9 @@ config_paths:
 swebench_pro_v2_opencode_sandboxed_agent:
   responses_api_agents:
     opencode_sandboxed_agent:
+      resources_server:
+        type: resources_servers
+        name: swebench_pro_v2_opencode_resources_server
       datasets:
         - name: example
           type: example
