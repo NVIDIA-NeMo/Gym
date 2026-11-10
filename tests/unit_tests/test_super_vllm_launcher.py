@@ -769,6 +769,79 @@ sleep() { "$TEST_SLEEP" 0.01; }
                         else:
                             self.assertNotIn("router", recorded)
 
+    def test_independent_prefill_with_multinode_dp_decode(self) -> None:
+        config = Path(self.workdir) / "multinode-decode.sh"
+        env = {
+            "NUM_NODES": "4",
+            "NUM_PREFILL_NODES": "2",
+            "NUM_DECODE_NODES": "2",
+            "ALL_NODES": "node0 node1 node2 node3",
+            "VLLM_PREFILL_ENGINES_PER_NODE": "4",
+            "VLLM_DECODE_ENGINES_PER_NODE": "1",
+        }
+        for dp_args in (
+            "--data-parallel-size 8 --data-parallel-size-local 4",
+            "--data-parallel-size=8 --data-parallel-size-local=4",
+            "-dp 8 -dpl 4",
+        ):
+            config.write_text(
+                "VLLM_COMMON_ARGS=(--tensor-parallel-size 1 --pipeline-parallel-size 1 "
+                "--data-parallel-size 4 --data-parallel-size-local 4)\n"
+                "VLLM_PREFILL_ARGS=(--data-parallel-size 1 --data-parallel-size-local 1 "
+                "--dwdp-config '{\"world_size\":4}')\n"
+                f"VLLM_DECODE_ARGS=({dp_args} --enable-expert-parallel --api-server-count 1)\n"
+            )
+            for rank in (0, 2, 3):
+                with self.subTest(dp_args=dp_args, rank=rank):
+                    status, _, stderr, recorded = self.run_independent_services(
+                        mode="pd",
+                        rank=rank,
+                        engines_per_node=4 if rank == 0 else 1,
+                        config_path=config,
+                        env_overrides=env,
+                    )
+                    self.assertEqual(status, 7, stderr)
+                    engines = {key: args for key, args in recorded.items() if key.startswith("engine-")}
+                    self.assertEqual(len(engines), 4 if rank == 0 else 1)
+                    for args in engines.values():
+                        self.assertNotIn("--headless", args)
+                        if rank == 0:
+                            self.assertNotIn("--data-parallel-start-rank", args)
+                            self.assertEqual(args[args.index("--data-parallel-size") + 1], "1")
+                        else:
+                            self.assertEqual(args[0], "GPU-d,GPU-b,GPU-a,GPU-c")
+                            self.assertEqual(args[args.index("--data-parallel-start-rank") + 1], str((rank - 2) * 4))
+                            self.assertEqual(args[args.index("--data-parallel-address") + 1], "node2")
+                            self.assertEqual(args[args.index("--data-parallel-rpc-port") + 1], "13346")
+                            self.assertEqual(args[args.index("--port") + 1], "8001")
+                            self.assertIn("--enable-expert-parallel", args)
+                            for arg in shlex.split(dp_args):
+                                self.assertIn(arg, args)
+                    if rank == 0:
+                        self.assert_router_arguments(
+                            recorded["router"],
+                            [f"http://node{node}:{8001 + engine}" for node in (0, 1) for engine in range(4)],
+                            ["http://node2:8001", "http://node3:8001"],
+                        )
+
+    def test_multinode_decode_rejects_wrong_node_count_or_router_rank_expansion(self) -> None:
+        config = Path(self.workdir) / "invalid-multinode-decode.sh"
+        config.write_text(
+            "VLLM_COMMON_ARGS=()\n"
+            "VLLM_PREFILL_ARGS=()\n"
+            "VLLM_DECODE_ARGS=(--data-parallel-size 8 --data-parallel-size-local 4)\n"
+        )
+        for overrides, error in (
+            ({"NUM_DECODE_NODES": "3"}, "must equal NUM_DECODE_NODES"),
+            ({"ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE": "4"}, "vLLM balances local ranks"),
+        ):
+            with self.subTest(overrides=overrides):
+                env = {"VLLM_CONFIG": str(config), "NUM_DECODE_NODES": "2"} | overrides
+                _, command = self.generate_commands(env=env)
+                status, _, stderr = self.run_shell(command, env=env)
+                self.assertEqual(status, 1, stderr)
+                self.assertIn(error, stderr)
+
     def test_dwdp_prefill_and_dp_decode_launch(self) -> None:
         config = SCRIPT.parent / "vllm_configs/nemotron_3.5_super_dwdp.sh"
         for rank in (0, 1):
