@@ -103,7 +103,7 @@ LOG = logging.getLogger(__name__)
 
 # Request fields an agent session forwards to every model call, as mini-SWE's model_kwargs.
 FORWARDED_REQUEST_FIELDS = frozenset(
-    {"instructions", "temperature", "top_p", "reasoning", "parallel_tool_calls", "tool_choice"}
+    {"instructions", "temperature", "top_p", "max_output_tokens", "reasoning", "parallel_tool_calls", "tool_choice"}
 )
 # Read by the adapter: the input is the task, metadata may carry the task's time budget, and model must match.
 # ``tools`` is not forwarded: mini-SWE offers the model only its bash tool, and granted MCP tools are called through it.
@@ -472,17 +472,16 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
 
     @staticmethod
     def _validate_output_budget(body: NeMoGymResponseCreateParamsNonStreaming) -> None:
-        """Refuse an aggregate budget neither supported execution mode can enforce."""
+        """Refuse a token limit the legacy SWE-Gym fork cannot forward."""
         if body.max_output_tokens is not None:
             raise HTTPException(
                 422,
-                "mini-SWE cannot enforce request max_output_tokens across model calls; "
-                "omit it and configure a per-call limit on the Model Server instead",
+                "mini-SWE legacy /run does not support request max_output_tokens; "
+                "use agent sessions for a per-call limit, or configure it on the legacy model endpoint",
             )
 
     def _validate_request(self, body: NeMoGymResponseCreateParamsNonStreaming) -> None:
         """Apply, consume or reject every request field, so no control is dropped silently."""
-        self._validate_output_budget(body)
         if body.model is not None and body.model != self._model_name():
             raise HTTPException(422, "mini-SWE request model must match the configured model")
         if body.stream:
@@ -516,6 +515,9 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             for name, value in body.model_dump(mode="json", exclude_none=True).items()
             if name in FORWARDED_REQUEST_FIELDS
         }
+        # LiteLLM raises small OpenAI token caps to 16; extra_body preserves the caller's exact per-call limit.
+        if "max_output_tokens" in model_kwargs:
+            model_kwargs["extra_body"] = {"max_output_tokens": model_kwargs.pop("max_output_tokens")}
         directory = state.session.session_dir
         capture_key = state.request.episode_id.capture_key
         model_kwargs.update(

@@ -60,12 +60,13 @@ response output are rebuilt from the CLI's records; the model emitted only the b
 
 ### mini-SWE adapters
 
-[`miniswe_sandboxed_agent`](../miniswe_sandboxed_agent/README.md) also runs mini-SWE 2.4.6 through agent sessions, and
+[`miniswe_sandboxed_agent`](../miniswe_sandboxed_agent/README.md) is deprecated but remains available. It also runs mini-SWE 2.4.6 through agent sessions, and
 the Terminal Bench 4 and Terminal-Bench-Science presets use it. It installs mini-SWE in the sandbox at setup, as the
 task user, from PyPI, so the sandbox needs PyPI access, and it reports `miniswe_termination`. This adapter installs a
 runtime built on the agent server at seed, so the sandbox needs no network; it runs mini-SWE under Gym's process
-supervisor, can start its own sandbox, serves `mcp` tool grants, and reports `mini_swe_termination`. Which of the two
-stays Gym's session adapter for mini-SWE is not decided yet.
+supervisor, can start its own sandbox, serves `mcp` tool grants, and reports `mini_swe_termination`. Use this adapter
+for new integrations that satisfy the limits below. Existing legacy `/run` presets and tasks with `[agent].user`
+must keep the older adapter until they have a supported migration path.
 
 ### Pairings and limits
 
@@ -130,7 +131,7 @@ Every model call goes to the rollout-prefixed Model Server URL as `openai/<model
 episode's capture key, which is also the reported invocation ID. LiteLLM's and mini-SWE's own retries are off; the
 Model Server keeps its retry policy. Request fields are handled as follows:
 
-- Forwarded to every model call: `instructions`, `temperature`, `top_p`, `reasoning`, `parallel_tool_calls`, and
+- Forwarded to every model call: `instructions`, `temperature`, `top_p`, `max_output_tokens`, `reasoning`, `parallel_tool_calls`, and
   `tool_choice` when it is `auto` or `required`. Any other `tool_choice` is refused with HTTP 422: the model is offered
   only the bash tool, so it can neither name another tool nor call none. LiteLLM drops a field that an OpenAI model in
   its cost map does not support (`mini.yaml` sets `drop_params`).
@@ -140,14 +141,15 @@ Model Server keeps its retry policy. Request fields are handled as follows:
   A request with `tools` and no MCP server to reach them is refused with HTTP 422; set `resources_tool_transports: [mcp]`.
 - Any other field with a non-default value is refused with HTTP 422.
 
-Agent sessions and the legacy SWE-Gym `/run` reject request-level `max_output_tokens` with HTTP 422 before binding
-the activation or starting legacy work: mini-SWE cannot enforce a shared output-token budget across its model calls.
-Previously sessions reused this value as a separate cap on every call, while the legacy fork accepted it without
-enforcing it. Remove `responses_create_params.max_output_tokens` from task rows (or omit `max_output_tokens`
-from direct activation requests). To retain a per-call cap with the Chat Completions vLLM Model Server, set
-`policy_model.responses_api_models.vllm_model.extra_body.max_tokens`, for example `8192`; for a Responses-native
-Model Server, set its `extra_body.max_output_tokens` instead. These server settings remain per-call limits. If the
-legacy `/run` uses `policy_base_url` to bypass the Gym Model Server, configure the limit at that model endpoint.
+Agent sessions apply `max_output_tokens` separately to every model call, consistent with other session harnesses.
+It is not a shared token budget for the whole episode. The exact cap, including values below 16, reaches the Model
+Server through LiteLLM's `extra_body`; omitting it leaves the Model Server's configured default in effect.
+
+The legacy SWE-Gym `/run` still rejects request-level `max_output_tokens` with HTTP 422 before starting work because
+that fork cannot forward it. For legacy runs, omit `responses_create_params.max_output_tokens` and configure the
+per-call limit on the Model Server (`policy_model.responses_api_models.vllm_model.extra_body.max_tokens` for the
+Chat Completions vLLM adapter, or `extra_body.max_output_tokens` for a Responses-native adapter). If `policy_base_url`
+bypasses the Gym Model Server, configure the limit at that endpoint.
 
 ### Tools
 

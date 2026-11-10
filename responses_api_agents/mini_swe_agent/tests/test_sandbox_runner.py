@@ -370,6 +370,8 @@ def test_real_mini_swe_runs_the_task_through_the_rollout_url_and_submits(tmp_pat
     output = json.loads((session_dir / "output.json").read_text())
     assert output["exit_status"] == "Submitted" and output["error"] is None
     # Every call carries the rollout path, its owner, mini-SWE's bash tool, and the request's sampling.
+    assert len(model.requests) == 2
+    assert [request["body"]["max_output_tokens"] for request in model.requests] == [8, 8]
     first = model.requests[0]
     assert first["path"] == "/ng-rollout/rollout-7/v1/responses"
     assert first["headers"]["x-session-id"] == "rollout-7"
