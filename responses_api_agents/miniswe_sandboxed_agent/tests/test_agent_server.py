@@ -14,8 +14,7 @@ from httpx import ASGITransport, AsyncClient
 from starlette.middleware.sessions import SessionMiddleware
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
-from nemo_gym.server_runtime import RolloutContextMiddleware
-from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
+from nemo_gym.server_runtime import RolloutContextMiddleware, refuse_unsupported_num_workers
 from nemo_gym.utils import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
 from responses_api_agents.miniswe_sandboxed_agent import app as module
 from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessOutcome

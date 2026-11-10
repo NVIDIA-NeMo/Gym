@@ -702,7 +702,7 @@ def test_concurrent_oracle_traces_name_their_task_and_episode(monkeypatch, caplo
 
 def test_several_workers_are_allowed() -> None:
     """Oracle sessions are agent sessions, which session routing follows by agent_session_id."""
-    from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
+    from nemo_gym.server_runtime import refuse_unsupported_num_workers
 
     config = OracleAgentConfig(host="0.0.0.0", port=8081, entrypoint="", name="harbor_oracle_agent", num_workers=2)
     agent = OracleAgent(config=config, server_client=MagicMock(spec=ServerClient))

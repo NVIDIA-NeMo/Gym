@@ -702,7 +702,7 @@ def test_several_workers_are_allowed() -> None:
     from unittest.mock import MagicMock
 
     from nemo_gym.client import ServerClient
-    from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
+    from nemo_gym.server_runtime import refuse_unsupported_num_workers
     from responses_api_agents.browsecomp_agent.app import BrowsecompAgent, BrowsecompAgentConfig
 
     config = BrowsecompAgentConfig(

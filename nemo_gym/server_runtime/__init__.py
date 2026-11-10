@@ -93,6 +93,7 @@ if TYPE_CHECKING:
     from nemo_gym.server_runtime.base_server import (
         SimpleServer,
         async_rollout_prefix_hook,
+        refuse_unsupported_num_workers,
         rollout_prefix_hook,
         with_rollout_prefix,
     )
@@ -134,6 +135,7 @@ if TYPE_CHECKING:
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
     "async_rollout_prefix_hook": "base_server",
+    "refuse_unsupported_num_workers": "base_server",
     "rollout_prefix_hook": "base_server",
     "with_rollout_prefix": "base_server",
     "Activation": "_checkpoint.agent",

@@ -30,8 +30,8 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
+    refuse_unsupported_num_workers,
 )
-from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
 from resources_servers.voicebench.legacy import replay_rule_rows
 from resources_servers.voicebench.metrics import MetricValue, compute_voicebench_metrics
 from resources_servers.voicebench.scorers.base import ScoringResult

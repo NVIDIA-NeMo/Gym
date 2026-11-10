@@ -19,8 +19,8 @@ from nemo_gym.server_runtime import (
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
     check_resources_session_contract,
+    refuse_unsupported_num_workers,
 )
-from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
 from resources_servers.enterpriseops_gym import app as app_module
 from resources_servers.enterpriseops_gym.app import (
     EnterpriseOpsGymResourcesServer,

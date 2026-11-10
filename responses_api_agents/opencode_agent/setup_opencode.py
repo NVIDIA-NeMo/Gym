@@ -23,7 +23,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-from nemo_gym.utils.install_lock import adopt_recorded_install, install_lock, record_install
+from nemo_gym.utils import adopt_recorded_install, install_lock, record_install
 from responses_api_agents.opencode_agent.runtime import OPENCODE_VERSION
 
 

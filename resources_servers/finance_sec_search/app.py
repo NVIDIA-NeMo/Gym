@@ -53,8 +53,8 @@ from nemo_gym.server_runtime import (
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
+    refuse_unsupported_num_workers,
 )
-from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import JUDGE_FAILURES, call_judge, is_judge_failure, reraise_judge_errors
 from resources_servers.sec_local_index.cache import atomic_write, make_shared_dirs

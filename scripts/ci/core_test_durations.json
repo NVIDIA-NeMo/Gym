@@ -295,7 +295,7 @@
     "tests/unit_tests/trajectory/test_atif_reverification.py": 0.88,
     "tests/unit_tests/trajectory/test_trajectory_record.py": 0.16,
     "tests/unit_tests/utils/test_cli_compat.py": 1.65,
-    "tests/unit_tests/utils/test_install_lock.py": 0.08,
+    "tests/unit_tests/utils/test_local_install.py": 0.08,
     "tests/unit_tests/verification/test_judge.py": 0.11,
     "tests/unit_tests/verification/test_verifier_fixture.py": 1.22,
     "tests/unit_tests/tooling/test_agent_environment_default_configs.py": 123.65,

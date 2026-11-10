@@ -12,8 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""General helpers shared across nemo_gym: paths, decorators, text, process information, progress bars, and import
-compatibility."""
+"""General helpers shared across nemo_gym: paths, decorators, text, process information, local tool installs,
+progress bars, and import compatibility."""
 
 # Public API
 from typing import TYPE_CHECKING
@@ -24,6 +24,7 @@ from nemo_gym._public_api import lazy_exports
 if TYPE_CHECKING:
     from nemo_gym.utils.exception_inspection import bounded_text, explicit_causes
     from nemo_gym.utils.gym_commit import installed_gym_commit
+    from nemo_gym.utils.local_install import adopt_recorded_install, async_install_lock, install_lock, record_install
     from nemo_gym.utils.path_utils import (
         aggregation_sources_path_for,
         failures_path_for,
@@ -43,14 +44,18 @@ if TYPE_CHECKING:
 _PUBLIC_API = {
     "IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME": "server_process",
     "IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME": "server_process",
+    "adopt_recorded_install": "local_install",
     "aggregation_sources_path_for": "path_utils",
+    "async_install_lock": "local_install",
     "bounded_text": "exception_inspection",
     "explicit_causes": "exception_inspection",
     "failures_path_for": "path_utils",
+    "install_lock": "local_install",
     "installed_gym_commit": "gym_commit",
     "is_nemo_gym_fastapi_entrypoint": "server_process",
     "is_nemo_gym_fastapi_worker": "server_process",
     "materialized_path_for": "path_utils",
+    "record_install": "local_install",
     "resubmit_offset_path_for": "path_utils",
 }
 __getattr__, __dir__ = lazy_exports(__name__, _PUBLIC_API)
