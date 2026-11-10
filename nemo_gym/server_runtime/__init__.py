@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     )
     from nemo_gym.server_runtime._checkpoint.steps import (
         CHECKPOINT_CLOSE_FOLLOWS_HEADER,
+        CHECKPOINT_RESTART_HEADER,
         StepType,
         seed_rebinds_tool_accesses,
         seed_resources_session_id,
@@ -184,6 +185,7 @@ _PUBLIC_API = {
     "BaseVerifyRequest": "base_resources_server",
     "BaseVerifyResponse": "base_resources_server",
     "CHECKPOINT_CLOSE_FOLLOWS_HEADER": "_checkpoint.steps",
+    "CHECKPOINT_RESTART_HEADER": "_checkpoint.steps",
     "CheckpointMode": "_checkpoint.control",
     "CheckpointRequest": "_checkpoint.control",
     "CleanupContext": "base_environment_server",
