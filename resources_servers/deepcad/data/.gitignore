@@ -1,0 +1,14 @@
+*train.jsonl
+*validation.jsonl
+*_prepare.jsonl
+*_prepare.*.jsonl
+views/
+*.report.json
+*.difficulty.jsonl
+*_metrics.json
+*.step
+!0000_00000178.step
+!0000_00001260.step
+!0001_00010868.step
+!0001_00017026.step
+!0001_00017027.step
