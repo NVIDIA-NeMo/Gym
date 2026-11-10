@@ -840,12 +840,15 @@ async def test_judge_only_reads_selected_source_into_separate_output(
 
     async def verify(row):
         verified.append(row)
-        return row, {"reward": 1.0, "response": row["response"]}
+        return row, {
+            "reward": 1.0,
+            "response": row["response"],
+            "ng_verifier_invocations": [{"invocation_id": "fresh-verifier", "status": "completed", "model_calls": []}],
+        }
 
     monkeypatch.setattr(
         reverify, "_run_verification_payloads", lambda payloads, **kwargs: [verify(row) for row in payloads]
     )
-    monkeypatch.setattr(reverify, "setup_server_client", lambda: Mock(global_config_dict={}))
     config = reverify.RolloutReverificationConfig(
         materialized_inputs_jsonl_fpath=str(materialized_path_for(output)),
         rollouts_jsonl_fpath=str(output),
@@ -861,7 +864,12 @@ async def test_judge_only_reads_selected_source_into_separate_output(
     else:
         await reverify.RolloutReverificationHelper().run_from_config(config)
         assert [row["response"] for row in verified] == [{"answer": "saved answer"}]
-        assert [row["reward"] for row in read_records(destination)] == [0.25, 1.0]
+        [carried, recovered] = list(read_records(destination))
+        assert [carried["reward"], recovered["reward"]] == [0.25, 1.0]
+        assert recovered["ng_verifier_invocations"] == [
+            {"invocation_id": "fresh-verifier", "status": "completed", "model_calls": []}
+        ]
+        assert "ng_trajectory" not in recovered and "ng_model_call_capture" not in recovered
     assert all((output.parent / name).read_bytes() == data for name, data in before.items())
 
 

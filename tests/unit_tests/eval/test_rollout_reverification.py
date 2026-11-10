@@ -74,7 +74,6 @@ from nemo_gym.eval.rollout_reverification import (
     summarize_cache_usage,
 )
 from nemo_gym.rollouts.rollout_collection import NG_OMITTED_ROLLOUT_KEY, NG_TERMINAL_KEY
-from nemo_gym.rollouts.rollout_records import logical_rollout_id
 from nemo_gym.server_runtime.base_resources_server import ReverifyMode
 from nemo_gym.trajectory.atif_reverification import AtifProjectionError
 from nemo_gym.utils.path_utils import aggregation_sources_path_for
@@ -86,19 +85,6 @@ _TOOL_TRAJECTORY_SHA256 = (
 _RESPONSES_TRAJECTORY_SHA256 = (
     "8d9c3c2d21c4ef0a8d9488eac560b1fdfaa532712b8a4fc628023a94d0bab825"  # pragma: allowlist secret
 )
-
-
-def _prepared_stub_payloads(payloads):
-    from nemo_gym.eval.rollout_reverification import _reverification_context
-
-    def prepare(*_args, context_out, **_kwargs):
-        for row in payloads:
-            context_out[(logical_rollout_id(row), row.get("_ng_attempt_index", 0))] = _reverification_context(
-                InputRolloutPair(input=row, rollout={}), row
-            )
-        return payloads
-
-    return prepare
 
 
 class TestRolloutReverificationConfig:
@@ -1419,6 +1405,8 @@ class TestPreparePayloads:
         inputs.write_bytes(orjson.dumps(row) + b"\n")
         source.write_bytes(orjson.dumps(rollout) + b"\n")
         context = {}
+        [ordinary_payload] = _prepare_payloads(inputs, source, self._paths(tmp_path), False)
+        assert "_ng_rollout_id" not in ordinary_payload and "_ng_attempt_index" not in ordinary_payload
         [payload] = _prepare_payloads(inputs, source, self._paths(tmp_path), False, context_out=context)
         assert payload == {
             "_ng_task_index": 0,
@@ -2437,9 +2425,7 @@ class TestRolloutReverificationRunFromConfig:
     def _patch_common(self, monkeypatch: pytest.MonkeyPatch, pairs: list[tuple[dict, dict]]) -> None:
         """Patch the delegates that run_from_config calls."""
         payloads = [row for row, _ in pairs]
-        monkeypatch.setattr(
-            "nemo_gym.eval.rollout_reverification._prepare_payloads", _prepared_stub_payloads(payloads)
-        )
+        monkeypatch.setattr("nemo_gym.eval.rollout_reverification._prepare_payloads", lambda *_a, **_kw: payloads)
 
         async def fake_future(row: dict, result: dict) -> tuple[dict, dict]:
             return row, result
@@ -2452,10 +2438,6 @@ class TestRolloutReverificationRunFromConfig:
             "nemo_gym.eval.rollout_reverification._call_aggregate_metrics", AsyncMock(return_value=None)
         )
         monkeypatch.setattr("nemo_gym.eval.rollout_reverification._guard_reverify_mode", AsyncMock(return_value=None))
-        monkeypatch.setattr(
-            "nemo_gym.eval.rollout_reverification.setup_server_client",
-            lambda: MagicMock(global_config_dict={}),
-        )
         monkeypatch.setattr("nemo_gym.eval.rollout_reverification.get_exporters", list)
         # run_from_config resolves the input paths for real; the files don't exist in these tests, so stub it out.
         monkeypatch.setattr("nemo_gym.eval.rollout_reverification._resolve_under_cwd_or_install", lambda p: Path(p))
@@ -2466,164 +2448,6 @@ class TestRolloutReverificationRunFromConfig:
         return [orjson.loads(line) for line in path.read_bytes().splitlines() if line.strip()]
 
     # ------------------------------------------------------------------ tests
-
-    @pytest.mark.parametrize("judge_failed_only", [False, True])
-    @pytest.mark.parametrize(
-        "schema_version,redacted,observability_enabled",
-        [("1.0", False, True), ("1.0", True, True), ("2.0", False, True), ("2.0", True, True), ("1.0", False, False)],
-    )
-    async def test_separate_reverification_preserves_saved_policy_context(
-        self, tmp_path, monkeypatch, judge_failed_only, schema_version, redacted, observability_enabled
-    ) -> None:
-        from nemo_gym.models.model_call_capture import CaptureStore
-        from nemo_gym.rollouts.rollout_collection import enrich_run_result
-        from nemo_gym.rollouts.rollout_recovery import RunManifest
-        from nemo_gym.rollouts.rollout_store import RolloutStore
-        from tests.unit_tests.rollouts.test_rollout_collection import FakeResponse
-
-        captures = CaptureStore(tmp_path / "captures")
-        config = {
-            "observability_enabled": observability_enabled,
-            "model_call_capture_dir": str(captures.root),
-            "model_call_capture": {"trajectory_schema_version": schema_version},
-            "agent": {"responses_api_agents": {"simple_agent": {"resources_server": {"name": "judge_rs"}}}},
-            "judge_rs": {"resources_servers": {"synthetic": {}}},
-        }
-        row = self._make_row("agent", 0) | {"_ng_rollout_id": "saved-context"}
-        source = tmp_path / "inputs.jsonl"
-        source.write_bytes(orjson.dumps(row) + b"\n")
-        answer = {"id": "saved-answer", "status": "completed", "output": []}
-        sentinel = "data:image/png;base64,synthetic-private-image"
-
-        def exchange(call_id, *, verifier=None):
-            return {
-                "model_call_id": call_id,
-                "dialect": "responses",
-                "model_ref": {"type": "responses_api_models", "name": "judge" if verifier else "policy"},
-                "status_code": 200,
-                "request": {"input": [{"type": "input_image", "image_url": sentinel}]},
-                "response": {
-                    "id": f"response-{call_id}",
-                    "status": "completed",
-                    "output": [],
-                    "usage": {
-                        "input_tokens": 11 if verifier is None else 100,
-                        "output_tokens": 7 if verifier is None else 100,
-                    },
-                },
-                "verifier_invocation_id": verifier,
-            }
-
-        def verifier(invocation_id, call_id):
-            return {
-                "invocation_id": invocation_id,
-                "status": "completed",
-                "model_calls": [{"model_call_id": call_id}],
-            }
-
-        captures.record("saved-context", exchange("policy-call"))
-        captures.record("saved-context", exchange("old-judge-call", verifier="old-verifier"))
-        previous = {
-            "response": answer,
-            "reward": 1.0,
-            "ng_verifier_invocations": [verifier("old-verifier", "old-judge-call")],
-            "ng_agent_observations": {
-                "schema_version": schema_version,
-                "source": "synthetic",
-                "records": [
-                    {
-                        "kind": "agent_invocation",
-                        "invocation_id": "policy-agent",
-                        "status": "completed",
-                        "model_calls": [{"model_call_id": "policy-call"}],
-                    }
-                ],
-                "gaps": [{"code": "multimodal_history_redacted"}] if redacted else [],
-            },
-        }
-        if judge_failed_only:
-            previous |= {
-                "_ng_failure_class": "judge_failed",
-                "_ng_failure_id": "old-failure",
-                "failure_kind": "judge_failed",
-            }
-        await enrich_run_result(
-            row,
-            previous,
-            capture_dirs=[captures.root],
-            observability_enabled=observability_enabled,
-            trajectory_schema_version=schema_version,
-            rollout_latency_ms=42000,
-        )
-        source_output = tmp_path / "source-rollouts.jsonl"
-        with RolloutStore.start_or_resume(
-            source_output, lambda: ([row], RunManifest.create(source, [row], {}, config)), resume=False
-        ) as store:
-            [dispatched] = store.pending()
-            store.record_dispatch(dispatched)
-            store.record_outcome(dispatched | previous)
-        captures.record("saved-context", exchange("fresh-judge-call", verifier="fresh-verifier"))
-        capture_bytes = captures.path_for("saved-context").read_bytes()
-        posted = []
-
-        async def post(*, server_name, url_path, json, **kwargs):
-            assert server_name == "judge_rs" and url_path == "/verify"
-            assert not {"ng_trajectory", "ng_agent_observations", "ng_perf", "task_input"}.intersection(json)
-            posted.append(json)
-            return FakeResponse(
-                200,
-                {
-                    "response": json["response"],
-                    "reward": 0.5,
-                    "ng_verifier_invocations": [verifier("fresh-verifier", "fresh-judge-call")],
-                },
-            )
-
-        client = MagicMock(
-            global_config_dict=config, post=post, get=AsyncMock(return_value=FakeResponse(200, "stateless"))
-        )
-        monkeypatch.setattr("nemo_gym.eval.rollout_reverification.setup_server_client", lambda: client)
-        monkeypatch.setattr("nemo_gym.eval.rollout_reverification.get_exporters", list)
-        destination = tmp_path / "rescored.jsonl"
-        [result] = await RolloutReverificationHelper().run_from_config(
-            RolloutReverificationConfig(
-                materialized_inputs_jsonl_fpath=str(
-                    source_output.with_name("source-rollouts_materialized_inputs.jsonl")
-                ),
-                rollouts_jsonl_fpath=str(source_output),
-                output_jsonl_fpath=str(destination),
-                judge_failed_only=judge_failed_only,
-                disable_aggregation=True,
-            )
-        )
-        assert len(posted) == 1 and posted[0]["response"] == answer == result["response"]
-        assert result["reward"] == 0.5
-        if redacted:
-            assert sentinel.encode() not in destination.read_bytes()
-        trajectory = result["ng_trajectory"]
-        assert trajectory["schema_version"] == schema_version
-        assert [item["invocation_id"] for item in trajectory["invocations"]] == ["policy-agent"]
-        assert [item["invocation_id"] for item in trajectory["verifier_invocations"]] == ["fresh-verifier"]
-        assert {call["model_call_id"] for call in trajectory["model_calls"]} == (
-            {"policy-call", "fresh-judge-call"} if observability_enabled else {"policy-call"}
-        )
-        if redacted:
-            assert all(call["request"] is None and call["response"] is None for call in trajectory["model_calls"])
-            assert any(gap["code"] == "multimodal_history_redacted" for gap in trajectory["gaps"])
-        elif observability_enabled:
-            fresh = next(call for call in trajectory["model_calls"] if call["model_call_id"] == "fresh-judge-call")
-            assert fresh["request"]["input"][0]["image_url"] == sentinel
-            assert fresh["response"]["id"] == "response-fresh-judge-call"
-        if observability_enabled:
-            fresh = next(call for call in trajectory["model_calls"] if call["model_call_id"] == "fresh-judge-call")
-            assert fresh["response_metadata"]["response_id"] == "response-fresh-judge-call"
-            assert fresh["response_metadata"]["response_status"] == "completed"
-        assert captures.path_for("saved-context").read_bytes() == capture_bytes
-        if observability_enabled:
-            assert result["ng_perf"]["total_latency_ms"] == 42000
-            assert result["ng_perf"]["prompt_tokens"] == 11 and result["ng_perf"]["completion_tokens"] == 7
-        else:
-            assert "ng_perf" not in result
 
     async def test_atif_manifest_uses_only_its_selected_stateless_verifier_and_persists_provenance(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -2697,7 +2521,12 @@ class TestRolloutReverificationRunFromConfig:
             if response is reverify_mode_response:
                 return ReverifyMode.STATELESS
             assert response is verify_response
-            return {"reward": 1.0}
+            return {
+                "reward": 1.0,
+                "ng_verifier_invocations": [
+                    {"invocation_id": "fresh-verifier", "status": "completed", "model_calls": []}
+                ],
+            }
 
         mock_client.post = capture_verify
         monkeypatch.setattr("nemo_gym.eval.rollout_reverification.setup_server_client", lambda: mock_client)
@@ -2727,6 +2556,17 @@ class TestRolloutReverificationRunFromConfig:
         assert all(item["call_id"] != "fc_56a9401eb39a449c982424abb3b0fdc2" for item in correlated_items)
         assert returned == self._read_jsonl(tmp_path / "output.jsonl")
         assert returned[0]["reward"] == 1.0
+        assert returned[0]["ng_verifier_invocations"] == [
+            {"invocation_id": "fresh-verifier", "status": "completed", "model_calls": []}
+        ]
+        assert set(returned[0]) == {
+            "reward",
+            "ng_verifier_invocations",
+            TASK_INDEX_KEY_NAME,
+            ROLLOUT_INDEX_KEY_NAME,
+            AGENT_REF_KEY_NAME,
+            ATIF_PROVENANCE_KEY,
+        }
         assert returned[0][ATIF_PROVENANCE_KEY] == {
             "trajectory_id": "relay-887-live-trajectory",
             "session_id": "relay-887-live-session",
@@ -2980,13 +2820,15 @@ class TestRolloutReverificationRunFromConfig:
             (self._make_row("agent_b", task=2), {"reward": 0.5}),
             (self._make_row("agent_b", task=3), {"reward": 0.3}),
         ]
-        payloads = [row for row, _ in pairs]
-        monkeypatch.setattr(
-            "nemo_gym.eval.rollout_reverification._prepare_payloads", _prepared_stub_payloads(payloads)
+        inputs, source = tmp_path / "inputs.jsonl", tmp_path / "rollouts.jsonl"
+        inputs.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row, _ in pairs))
+        saved_answer = {"id": "saved-answer", "output": []}
+        source.write_bytes(
+            b"".join(orjson.dumps(row | result | {"response": saved_answer}) + b"\n" for row, result in pairs)
         )
+        source_bytes = source.read_bytes()
 
-        # Wire _run_verification_payloads through its real impl so routing is exercised.
-        # Patch the hooks it relies on instead.
+        # Prepare actual saved inputs and dispatch through the ordinary reverify route.
         mock_client = MagicMock()
         mock_client.global_config_dict = {}
         verify_calls: list[tuple[str, dict]] = []
@@ -3004,7 +2846,17 @@ class TestRolloutReverificationRunFromConfig:
         monkeypatch.setattr("nemo_gym.eval.rollout_reverification.raise_for_status", AsyncMock())
         monkeypatch.setattr(
             "nemo_gym.eval.rollout_reverification.get_response_json",
-            AsyncMock(side_effect=[{"reward": 1.0}, {"reward": 0.8}, {"reward": 0.5}, {"reward": 0.3}]),
+            AsyncMock(
+                side_effect=[
+                    {
+                        "reward": reward,
+                        "ng_verifier_invocations": [
+                            {"invocation_id": f"fresh-{index}", "status": "completed", "model_calls": []}
+                        ],
+                    }
+                    for index, reward in enumerate((1.0, 0.8, 0.5, 0.3))
+                ]
+            ),
         )
 
         agg_mock = AsyncMock(return_value=None)
@@ -3028,13 +2880,27 @@ class TestRolloutReverificationRunFromConfig:
             assert payload[AGENT_REF_KEY_NAME]["name"] == "agent_a"
         for _, payload in rs_b_calls:
             assert payload[AGENT_REF_KEY_NAME]["name"] == "agent_b"
+        assert all(payload["response"] == saved_answer for _, payload in verify_calls)
+        assert source.read_bytes() == source_bytes
 
         # output file: all 4 results, exact field set matches verify response + stamped metadata
         output_rows = self._read_jsonl(tmp_path / "output.jsonl")
         assert len(output_rows) == 4
-        expected_keys = {"reward", TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, AGENT_REF_KEY_NAME}
+        expected_keys = {
+            "reward",
+            "ng_verifier_invocations",
+            TASK_INDEX_KEY_NAME,
+            ROLLOUT_INDEX_KEY_NAME,
+            AGENT_REF_KEY_NAME,
+        }
         for row in output_rows:
             assert set(row.keys()) == expected_keys
+        assert sorted(row["ng_verifier_invocations"][0]["invocation_id"] for row in output_rows) == [
+            "fresh-0",
+            "fresh-1",
+            "fresh-2",
+            "fresh-3",
+        ]
 
         # both agents present in what aggregate metrics receives
         agg_results = agg_mock.call_args.args[0]
@@ -3071,7 +2937,7 @@ class TestRunFromConfigForceFlag:
         async def fake_future() -> tuple[dict, dict]:
             return row, result
 
-        monkeypatch.setattr("nemo_gym.eval.rollout_reverification._prepare_payloads", _prepared_stub_payloads([row]))
+        monkeypatch.setattr("nemo_gym.eval.rollout_reverification._prepare_payloads", lambda *_a, **_kw: [row])
         monkeypatch.setattr(
             "nemo_gym.eval.rollout_reverification._guard_reverify_mode",
             AsyncMock(return_value=force_warning),
@@ -3082,10 +2948,6 @@ class TestRunFromConfigForceFlag:
         )
         monkeypatch.setattr(
             "nemo_gym.eval.rollout_reverification._call_aggregate_metrics", AsyncMock(return_value=None)
-        )
-        monkeypatch.setattr(
-            "nemo_gym.eval.rollout_reverification.setup_server_client",
-            lambda: MagicMock(global_config_dict={}),
         )
         monkeypatch.setattr("nemo_gym.eval.rollout_reverification.get_exporters", list)
         monkeypatch.setattr("nemo_gym.eval.rollout_reverification._resolve_under_cwd_or_install", lambda p: Path(p))
@@ -3177,10 +3039,6 @@ class TestRunFromConfigResumeFromCache:
         monkeypatch.setattr("nemo_gym.eval.rollout_reverification._guard_reverify_mode", AsyncMock(return_value=None))
         monkeypatch.setattr(
             "nemo_gym.eval.rollout_reverification._call_aggregate_metrics", AsyncMock(return_value=None)
-        )
-        monkeypatch.setattr(
-            "nemo_gym.eval.rollout_reverification.setup_server_client",
-            lambda: MagicMock(global_config_dict={}),
         )
         monkeypatch.setattr("nemo_gym.eval.rollout_reverification.get_exporters", list)
 
@@ -3635,10 +3493,6 @@ class TestRunFromConfigJudgeFailedOnly:
         monkeypatch.setattr("nemo_gym.eval.rollout_reverification._guard_reverify_mode", guard_mock)
         agg_mock = AsyncMock(return_value=None)
         monkeypatch.setattr("nemo_gym.eval.rollout_reverification._call_aggregate_metrics", agg_mock)
-        monkeypatch.setattr(
-            "nemo_gym.eval.rollout_reverification.setup_server_client",
-            lambda: MagicMock(global_config_dict={}),
-        )
         monkeypatch.setattr("nemo_gym.eval.rollout_reverification.get_exporters", list)
         return guard_mock, agg_mock
 

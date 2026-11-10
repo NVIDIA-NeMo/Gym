@@ -4,7 +4,7 @@
 """Re-score selected saved answers without changing their source run's recovery history."""
 
 from pathlib import Path
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock
 
 import orjson
 import pytest
@@ -57,7 +57,6 @@ async def test_rescore_uses_only_selected_completed_answers(prepared_run, monkey
         return row, {"response": row["response"], "reward": 0.75}
 
     monkeypatch.setattr(reverify, "_run_verification_payloads", lambda payloads, **_: [judge(r) for r in payloads])
-    monkeypatch.setattr(reverify, "setup_server_client", lambda: Mock(global_config_dict={}))
     destination = output.parent / "rescored" / "rollouts.jsonl"
     config = _config(source, destination)
     config.materialized_inputs_jsonl_fpath = str(materialized_path_for(output))
@@ -90,7 +89,6 @@ async def test_rescore_accepts_a_judge_failure_settled_by_the_stack(tmp_path, mo
         return row, {"response": row["response"], "reward": 0.5}
 
     monkeypatch.setattr(reverify, "_run_verification_payloads", lambda payloads, **_: [judge(r) for r in payloads])
-    monkeypatch.setattr(reverify, "setup_server_client", lambda: Mock(global_config_dict={}))
     result = await reverify.RolloutReverificationHelper().run_from_config(
         _config(output, tmp_path / "rescored" / "rollouts.jsonl")
     )
@@ -169,7 +167,6 @@ async def test_rescore_rejects_malformed_completion_and_can_resume(prepared_run,
         return row, reply
 
     monkeypatch.setattr(reverify, "_run_verification_payloads", lambda rows, **_: [malformed(r) for r in rows[:1]])
-    monkeypatch.setattr(reverify, "setup_server_client", lambda: Mock(global_config_dict={}))
     config = _config(output, destination)
     with pytest.raises(ConfigError, match="response object and a finite numeric reward"):
         await reverify.RolloutReverificationHelper().run_from_config(config)
@@ -218,7 +215,6 @@ def _install_scoring_judge(monkeypatch, status="success"):
         return row, result
 
     monkeypatch.setattr(reverify, "_run_verification_payloads", lambda rows, **_: [judge(row) for row in rows])
-    monkeypatch.setattr(reverify, "setup_server_client", lambda: Mock(global_config_dict={}))
     return seen
 
 
@@ -377,7 +373,6 @@ async def test_rescore_limit_does_not_interpret_unrequested_completion(prepared_
         return row, {"response": row["response"], "reward": 1.0}
 
     monkeypatch.setattr(reverify, "_run_verification_payloads", lambda rows, **_: [judge(row) for row in rows])
-    monkeypatch.setattr(reverify, "setup_server_client", lambda: Mock(global_config_dict={}))
     config = _config(output, output.parent / "rescored" / "rollouts.jsonl", limit=limit)
     config.rollouts_jsonl_fpath = str(source)
     if limit == 1:

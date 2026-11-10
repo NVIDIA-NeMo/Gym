@@ -9,7 +9,7 @@ import multiprocessing
 import os
 import signal
 from pathlib import Path
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock
 
 import orjson
 import pytest
@@ -761,7 +761,6 @@ async def test_ordinary_reverification_reads_fresh_manifest_without_changing_sou
     monkeypatch.setattr(
         reverify, "_run_verification_payloads", lambda payloads, **kwargs: [verify(row) for row in payloads]
     )
-    monkeypatch.setattr(reverify, "setup_server_client", lambda: Mock(global_config_dict={}))
     await reverify.RolloutReverificationHelper().run_from_config(
         reverify.RolloutReverificationConfig(
             materialized_inputs_jsonl_fpath=str(materialized_path_for(output)),
@@ -864,7 +863,6 @@ def fake_reverification(monkeypatch):
 
     monkeypatch.setattr(reverify, "get_exporters", list)
     monkeypatch.setattr(reverify, "_guard_reverify_mode", AsyncMock(return_value=None))
-    monkeypatch.setattr(reverify, "setup_server_client", lambda: Mock(global_config_dict={}))
 
     async def verify(row):
         return row, {"reward": 1.0, "response": row["response"]}

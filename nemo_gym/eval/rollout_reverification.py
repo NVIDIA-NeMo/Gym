@@ -798,13 +798,7 @@ def _build_verify_payload(pair: InputRolloutPair) -> Dict:
         payload["saved_model_patch_sha256"] = pair.rollout["model_patch_sha256"]
     # The Environment Server that ran the rollout routes the row and groups its result as in the run; the
     # materialized input never carries it. It is not sent to /verify (see _IDENTITY_KEYS).
-    for key in (
-        ROLLOUT_ID_KEY_NAME,
-        ATTEMPT_INDEX_KEY_NAME,
-        *_IDENTITY_KEYS,
-        _SOURCE_RUN_ID_KEY,
-        _SOURCE_ANSWER_KEY,
-    ):
+    for key in (*_IDENTITY_KEYS, _SOURCE_RUN_ID_KEY, _SOURCE_ANSWER_KEY):
         if key in pair.rollout:
             payload[key] = pair.rollout[key]
     return payload
@@ -970,6 +964,9 @@ def _prepare_payloads(
     ):
         payload = _build_verify_payload(pair)
         if context_out is not None:
+            for identity in (ROLLOUT_ID_KEY_NAME, ATTEMPT_INDEX_KEY_NAME):
+                if identity in pair.rollout:
+                    payload[identity] = pair.rollout[identity]
             key = (logical_rollout_id(payload), payload.get(ATTEMPT_INDEX_KEY_NAME, 0))
             if key in context_out:
                 raise ConfigError(
@@ -2028,7 +2025,7 @@ class RolloutReverificationHelper(BaseModel):
                 config.limit,
                 rollout_predicate=rollout_predicate,
                 retry_terminal_timeouts=config.retry_terminal_timeouts,
-                context_out=source_contexts,
+                **({"context_out": source_contexts} if config.settle_into_source else {}),
                 **({"selected_rollouts": _selected_rescoring_rows(source_store)} if source_store is not None else {}),
             )
             if config.settle_into_source and settle_binding["saved_results"]:
@@ -2045,7 +2042,7 @@ class RolloutReverificationHelper(BaseModel):
                     context_out=source_contexts,
                 )
 
-        if config.input_format != "atif":
+        if config.settle_into_source:
             for row in payloads_to_reverify:
                 key = (logical_rollout_id(row), row.get(ATTEMPT_INDEX_KEY_NAME, 0))
                 if key not in source_contexts:
@@ -2101,12 +2098,13 @@ class RolloutReverificationHelper(BaseModel):
         failure_counts: Counter = Counter()
         completed = 0  # number of rows re-verified this run (for progress reporting)
         sources_dropped = False
-        global_config = setup_server_client().global_config_dict
-        capture_dirs = model_call_capture_dirs_from_config(global_config)
-        observability_enabled = observability_enabled_from_config(global_config)
-        trajectory_schema_version = ModelCallCaptureConfig.model_validate(
-            global_config.get("model_call_capture") or {}
-        ).trajectory_schema_version
+        if config.settle_into_source:
+            global_config = setup_server_client().global_config_dict
+            capture_dirs = model_call_capture_dirs_from_config(global_config)
+            observability_enabled = observability_enabled_from_config(global_config)
+            trajectory_schema_version = ModelCallCaptureConfig.model_validate(
+                global_config.get("model_call_capture") or {}
+            ).trajectory_schema_version
         try:
             for future in _run_verification_payloads(payloads_to_reverify, semaphore=semaphore):
                 row, result = await future
@@ -2128,32 +2126,25 @@ class RolloutReverificationHelper(BaseModel):
                     if key in row:
                         result[key] = row[key]
 
-                source_context = source_contexts.get((logical_rollout_id(row), row.get(ATTEMPT_INDEX_KEY_NAME, 0)))
-                if source_context is None and config.input_format != "atif":
-                    raise ConfigError("reverify: returned payload has no paired source context")
-                if source_context is not None:
-                    _apply_reverification_context(result, source_context)
-                excluded_verifiers = source_context.prior_verifier_ids if source_context is not None else frozenset()
                 if config.settle_into_source:
-                    predecessor = settle_binding["failures"][logical_rollout_id(row)]
+                    source_context = source_contexts.get((logical_rollout_id(row), row.get(ATTEMPT_INDEX_KEY_NAME, 0)))
+                    if source_context is None:
+                        raise ConfigError("reverify: returned payload has no paired source context")
                     result["_ng_rejudge_verifier_invocation_ids"] = [
                         item["invocation_id"] for item in result.get("ng_verifier_invocations", [])
                     ]
-                    excluded_verifiers = _predecessor_verifier_ids(predecessor)
-                    for key in ("ng_agent_observations", "ng_trajectory"):
-                        if key in predecessor and key not in result:
-                            result[key] = deepcopy(predecessor[key])
-                # Reverification shares the source attempt's capture key. Keep the raw store and drain writes
-                # before either the recovery output or canonical settlement snapshots the new verifier evidence.
-                await enrich_run_result(
-                    source_context.row if source_context is not None else row,
-                    result,
-                    capture_dirs=capture_dirs,
-                    observability_enabled=observability_enabled,
-                    trajectory_schema_version=trajectory_schema_version,
-                    excluded_verifier_invocation_ids=excluded_verifiers,
-                    rollout_latency_ms=source_context.rollout_latency_ms if source_context is not None else None,
-                )
+                    _apply_reverification_context(result, source_context)
+                    # Settlement shares the source attempt's capture key. Drain writes before persisting
+                    # its fresh verifier evidence, without changing the raw capture store.
+                    await enrich_run_result(
+                        source_context.row,
+                        result,
+                        capture_dirs=capture_dirs,
+                        observability_enabled=observability_enabled,
+                        trajectory_schema_version=trajectory_schema_version,
+                        excluded_verifier_invocation_ids=source_context.prior_verifier_ids,
+                        rollout_latency_ms=source_context.rollout_latency_ms,
+                    )
 
                 no_persist = bool(result.get(NG_NO_PERSIST_KEY))
                 failure_class = result.get(NG_FAILURE_CLASS_KEY)

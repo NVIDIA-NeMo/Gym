@@ -10,7 +10,6 @@ import hashlib
 import json
 import os
 from collections import Counter
-from collections.abc import Iterator
 from pathlib import Path
 
 from .policy import validate_response_judge as judge
@@ -406,13 +405,6 @@ def source_preflight(
     }
 
 
-def _source_files(directory: Path) -> Iterator[Path]:
-    """Yield Python sources outside private dependency directories."""
-    for path in directory.rglob("*.py"):
-        if not any(part.startswith(".") for part in path.relative_to(directory).parts[:-1]):
-            yield path
-
-
 def runtime_identity() -> dict:
     """Record dependency versions and actual source bytes in resume fingerprints."""
     import importlib.metadata
@@ -431,11 +423,12 @@ def runtime_identity() -> dict:
             "openai",
         ]
     }
-    sources = {str(p.relative_to(ROOT)): digest(p) for p in _source_files(ROOT)}
+    sources = {str(p.relative_to(ROOT)): digest(p) for p in ROOT.rglob("*.py")}
     component_root = ROOT.parents[2]
     for boundary in ["benchmarks", "resources_servers", "responses_api_models", "responses_api_agents", "nemo_gym"]:
-        for p in _source_files(component_root / boundary):
-            sources["gym/" + str(p.relative_to(component_root))] = digest(p)
+        for p in (component_root / boundary).rglob("*.py"):
+            if ".venv" not in p.parts:
+                sources["gym/" + str(p.relative_to(component_root))] = digest(p)
     return {
         "python": sys.version,
         "dependencies": versions,

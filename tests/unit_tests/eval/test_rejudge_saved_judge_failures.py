@@ -272,7 +272,7 @@ async def test_the_real_reverify_path_settles_a_saved_judge_failure_without_any_
     assert len(posted) == 1
 
 
-@pytest.mark.parametrize("schema_version,redacted", [("1.0", False), ("2.0", False), ("2.0", True)])
+@pytest.mark.parametrize("schema_version,redacted", [("1.0", False), ("1.0", True), ("2.0", False), ("2.0", True)])
 @pytest.mark.parametrize(
     "attempt,explicit,capture_mode,input_shape",
     [

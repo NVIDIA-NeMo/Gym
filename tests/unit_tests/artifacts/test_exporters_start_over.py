@@ -331,7 +331,6 @@ class TestReverificationThroughTheHelper:
         monkeypatch.setattr(
             reverification_module, "_run_verification_payloads", lambda payloads, **_kw: [verify(p) for p in payloads]
         )
-        monkeypatch.setattr(reverification_module, "setup_server_client", lambda: MagicMock(global_config_dict={}))
         monkeypatch.setattr(reverification_module, "_guard_reverify_mode", MagicMock(return_value=_none()))
         (exporter,) = setup_exporters(store)
         assert exporter.run_id == old_run
