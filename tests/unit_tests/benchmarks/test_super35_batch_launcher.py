@@ -399,23 +399,20 @@ def test_recipes_resolve_without_local_pilot_files_or_credentials(
             "swebench_verified_opencode_sandboxed_agent",
             "swebench_multilingual_opencode_sandboxed_agent",
         }
-        assert rollout.num_repeats == 3 and rollout.num_repeats_add_seed is False
-        assert all(dataset.num_repeats == 3 for server in members for dataset in server.datasets)
+        assert rollout.num_repeats_add_seed is False
+        # A run-level count replaces each dataset's own, so the recipe's must mirror its members' counts.
+        assert all(dataset.num_repeats == rollout.num_repeats for server in members for dataset in server.datasets)
     else:
-        assert rollout.num_repeats == {
-            "tau2_benchmark_agent": 8,
-            "tau2_banking_knowledge_bm25_grep_artificial_analysis_agent": 8,
-            "scicode_benchmark_agent": 8,
-            "hle_equivalence_llm_judge_simple_agent": 1,
-            "gpqa_mcqa_simple_agent": 8,
-            "omniscience_omniscience_simple_agent": 10,
-            "aalcr_benchmark_simple_agent": 16,
-            "apex_shortlist_math_with_judge_simple_agent": 16,
-            "lmarena_v2_benchmark_agent": 3,
-            "livecodebench_v6_cascade_code_gen_simple_agent": 3,
-            "ifbench_benchmark_simple_agent": 8,
-            "_default": 1,
-        }
+        # Every member is listed, with no _default, and mirrors its own benchmark's count, so the two sources cannot
+        # drift. APEX and LMArena take their repeats from the batch alone.
+        run_level_only = {"apex_shortlist_math_with_judge_simple_agent", "lmarena_v2_benchmark_agent"}
+        assert set(rollout.num_repeats) == {server.name for server in members}
+        for server in members:
+            own = {dataset.num_repeats for dataset in server.datasets}
+            if server.name in run_level_only:
+                assert own <= {None, 1} and rollout.num_repeats[server.name] > 1
+            else:
+                assert own == {rollout.num_repeats[server.name]}, server.name
         assert rollout.num_repeats_add_seed == {
             "apex_shortlist_math_with_judge_simple_agent": True,
             "lmarena_v2_benchmark_agent": True,

@@ -8,7 +8,8 @@ config_paths:
   - benchmarks/nemotron_3.5_super/shared_model_endpoints.yaml
 
 num_samples_in_parallel: 512
-# A run-level num_repeats replaces each dataset's own, so every member lists its attempts per task.
+# A run-level num_repeats replaces each dataset's own, so every member lists its attempts per task, mirroring
+# its benchmark's own count. No _default: a member without an entry stops the run instead of getting one attempt.
 num_repeats:
   tau2_benchmark_agent: 8
   tau2_banking_knowledge_bm25_grep_artificial_analysis_agent: 8
@@ -21,7 +22,6 @@ num_repeats:
   lmarena_v2_benchmark_agent: 3
   livecodebench_v6_cascade_code_gen_simple_agent: 3
   ifbench_benchmark_simple_agent: 8
-  _default: 1
 num_repeats_add_seed:
   apex_shortlist_math_with_judge_simple_agent: true
   lmarena_v2_benchmark_agent: true

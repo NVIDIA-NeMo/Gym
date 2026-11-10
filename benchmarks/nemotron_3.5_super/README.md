@@ -89,11 +89,11 @@ Submit either full batch with [benchmarks/nemotron_3.5_super/submit_batch.sh](su
 
   ```yaml
   num_samples_in_parallel: 512
-  num_repeats: {_default: 1, gpqa_mcqa_simple_agent: 8, lmarena_v2_benchmark_agent: 3}  # core.yaml lists every member
+  num_repeats: {gpqa_mcqa_simple_agent: 8, lmarena_v2_benchmark_agent: 3}  # core.yaml lists every member
   num_repeats_add_seed: {_default: false, lmarena_v2_benchmark_agent: true}
   ```
 
-  All agents share the 512 slots. In this example GPQA gets eight attempts per task and LMArena three, with added seeds for LMArena; any agent not listed gets one attempt and no added seed. When a run sets `num_repeats`, preparation writes each task once and collection creates the repeats. Collection multiplies the copies actually present in the supplied input, so inputs that already hold repeated copies need `num_repeats=1` to avoid multiplying them.
+  All agents share the 512 slots. In this example GPQA gets eight attempts per task and LMArena three, with added seeds for LMArena; an agent not in `num_repeats_add_seed` gets no added seed. `num_repeats` has no `_default`, so an agent missing from it stops the run instead of silently getting one attempt; each member's count mirrors its own benchmark's, which `tests/unit_tests/benchmarks/test_super35_batch_launcher.py` checks. When a run sets `num_repeats`, preparation writes each task once and collection creates the repeats. Collection multiplies the copies actually present in the supplied input, so inputs that already hold repeated copies need `num_repeats=1` to avoid multiplying them.
 
 - When `batch_manifest_fpath` is supplied, Gym validates the declared members and input fingerprints before dispatch, then writes per-agent progress and aggregation state to `batch_status.json` beside the manifest. Tracking currently requires legacy agent-style rows with `agent_ref.name` and `task_source`, plus non-negative integer `_ng_task_index` and `_ng_rollout_index`; leave `batch_manifest_fpath` unset for native rows (`task_id.taskset` plus `task_input`) or mixed-format batches. A shared metrics file alone does not prove every member is complete; inspect each member's counts and aggregation state. Successful collection also does not replace a review of infrastructure failures and score validity.
 
