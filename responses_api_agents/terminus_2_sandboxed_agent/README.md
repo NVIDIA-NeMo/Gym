@@ -53,7 +53,8 @@ until it becomes quiet before delivering the interrupt, allowing cancellation
 behind a long queued paste. The drain keeps going while input arrives and fails
 explicitly if the input stops draining. If a foreground process that Ctrl-C
 would end keeps running once input has stopped arriving, the interrupt fails
-instead of reporting success. Raw applications retain their own Ctrl-C handling.
+instead of reporting success. The whole interrupt fails after 90 seconds, within
+its 120-second command timeout. Raw applications retain their own Ctrl-C handling.
 
 If the interactive shell exits, the agent preserves its final output and starts
 a fresh shell. Files remain, while shell variables, options, and the working

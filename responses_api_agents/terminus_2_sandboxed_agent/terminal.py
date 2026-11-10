@@ -67,9 +67,18 @@ class TerminusXMLParser(TerminusXMLPlainParser):
 # start-up nor a slow paste can be mistaken for quiet. A starved tmux can
 # still hold input that the kernel has not seen, so after Ctrl-C the script
 # waits until every foreground process that SIGINT would kill has exited or
-# has SIGINT pending, and fails if input stops arriving first.
+# has SIGINT pending, and fails if input stops arriving first. Both waits share
+# one bound on polls without progress.
+#
+# The deadline keeps the script inside the exec timeout. A provider that kills
+# only its client on timeout (docker) leaves the script running until the
+# deadline, and the EXIT trap then stops the reader. The reader stays in the
+# script's process group, so a provider that kills the group kills it too.
+# A reader left behind would consume the agent's later keystrokes.
+_INTERRUPT_DEADLINE_S = 90
+_INTERRUPT_EXEC_TIMEOUT_S = 120
 _INTERRUPT_SCRIPT = r"""
-target=$1
+target=$1 deadline=$2
 fail() { echo "$1" >&2; exit 1; }
 info=$(tmux display-message -p -t "$target" '#{pane_pid} #{pane_tty}') || exit
 shell_pid=${info%% *}
@@ -84,15 +93,17 @@ sink=$(mktemp) || exit
 reader=
 trap 'exit 1' HUP INT TERM
 trap '[ -n "$reader" ] && kill "$reader" 2>/dev/null; rm -f "$sink"' EXIT
-# The timeout only bounds a reader orphaned by a killed script.
-timeout 900 cat <&3 >"$sink" &
+cat <&3 >"$sink" 2>/dev/null &
 reader=$!
 
-size=0 idle=0 polls=0 sent=
+size=0 idle=0 sent=
+patience=100
 poll() {
-  sleep 0.1
-  polls=$((polls + 1))
-  [ "$polls" -le 1200 ] || fail "Pending terminal input was still arriving after 1200 polls"
+  sleep 0.1 || exit
+  if [ "$SECONDS" -ge "$deadline" ]; then
+    [ -n "$sent" ] || fail "Pending terminal input was still arriving after $deadline seconds"
+    fail "Ctrl-C did not reach the foreground job within $deadline seconds"
+  fi
   # The reader also stops when the interrupted shell exits and hangs up the
   # terminal; after Ctrl-C, only a still-running target makes that a failure.
   kill -0 "$reader" 2>/dev/null || [ -n "$sent" ] || fail "The terminal input reader stopped"
@@ -110,7 +121,7 @@ while :; do
   poll
   if [ "$idle" -ge 5 ]; then
     read -t 0 -u 3 || break
-    [ "$idle" -lt 100 ] || fail "Pending terminal input stopped draining"
+    [ "$idle" -lt "$patience" ] || fail "Pending terminal input stopped draining"
   fi
 done
 
@@ -148,14 +159,18 @@ interrupted() {
 }
 idle=0
 while [ "${#targets[@]}" -gt 0 ]; do
+  # Check the reader before the targets: a reader that the exiting shell hung
+  # up stops only after Ctrl-C has ended the job.
+  reader_alive=
+  kill -0 "$reader" 2>/dev/null && reader_alive=1
   pending=()
   for item in "${targets[@]}"; do
     interrupted "${item%%:*}" "${item#*:}" || pending+=("$item")
   done
   targets=("${pending[@]}")
   [ "${#targets[@]}" -gt 0 ] || break
-  kill -0 "$reader" 2>/dev/null || fail "The terminal input reader stopped before Ctrl-C took effect"
-  [ "$idle" -lt 30 ] || fail "Ctrl-C did not reach the foreground job (process ${targets[0]%%:*})"
+  [ -n "$reader_alive" ] || fail "The terminal input reader stopped before Ctrl-C took effect"
+  [ "$idle" -lt "$patience" ] || fail "Ctrl-C did not reach the foreground job (process ${targets[0]%%:*})"
   poll
 done
 """
@@ -246,7 +261,10 @@ class TerminusTmuxSession(TmuxSession):
     async def _interrupt(self) -> None:
         """Send Ctrl-C after discarding pending input, and confirm that it reached the foreground job."""
         result = await self.environment.exec(
-            f"bash -c {shlex.quote(_INTERRUPT_SCRIPT)} interrupt {shlex.quote(self._session_name)}", user=self._user
+            f"bash -c {shlex.quote(_INTERRUPT_SCRIPT)} interrupt {shlex.quote(self._session_name)} "
+            f"{_INTERRUPT_DEADLINE_S}",
+            timeout_sec=_INTERRUPT_EXEC_TIMEOUT_S,
+            user=self._user,
         )
         if result.return_code != 0:
             raise RuntimeError(f"Could not interrupt the terminal: {result.stderr}")
