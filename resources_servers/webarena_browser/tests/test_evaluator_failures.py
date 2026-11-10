@@ -3,11 +3,17 @@
 
 import copy
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from nemo_gym.web import EvaluatorInfrastructureError, WebObservation, snapshot_target_key
+from nemo_gym.web import (
+    EvaluatorInfrastructureError,
+    VisualBrowserEvaluationContext,
+    WebObservation,
+    WebTask,
+    snapshot_target_key,
+)
 from resources_servers.webarena_browser.evaluators import WebArenaTaskEvaluator, _reference_task_config
 from resources_servers.webarena_browser.reference_evaluation import classic_evaluation as classic
 from resources_servers.webarena_browser.reference_evaluation import eval_snapshots as snapshots
@@ -127,10 +133,11 @@ async def test_dom_capture_disconnect_cannot_create_positive_delta(monkeypatch, 
         def fail(*args, **kwargs):
             raise ConnectionError("disconnected")
 
-        page = SimpleNamespace(evaluate=fail, close=lambda: None)
+        page = SimpleNamespace(evaluate=Mock(side_effect=fail), goto=Mock(), close=Mock())
         root = SimpleNamespace(context=SimpleNamespace(new_page=lambda: page))
-        monkeypatch.setattr(snapshots, "goto", lambda *args, **kwargs: None)
         before = snapshots.collect_browser_snapshots_sync(root, plan)
+        page.goto.assert_called_once()
+        page.evaluate.assert_called_once()
     after = {"program_html": [{"key": spec["key"], "value": "existing"}]}
     with pytest.raises(EvaluatorInfrastructureError):
         snapshots.build_snapshot_context(plan, before, after)
@@ -165,3 +172,72 @@ def test_deployment_substitution_rekeys_prepared_collision_targets(monkeypatch) 
     )
     matched = classic._program_html_snapshot_records(resolved, context)
     assert classic._score_program_html_snapshot_records(resolved["required_contents"], matched) == 1
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize(
+    "outcomes,expected",
+    [
+        (["error"], None),
+        (["error", "error"], None),
+        (["error", "miss"], None),
+        (["miss", "error"], None),
+        (["miss", "miss"], 0.0),
+        (["error", "match"], 1.0),
+        (["match", "error"], 1.0),
+    ],
+)
+@pytest.mark.asyncio
+async def test_last_cart_rule_candidate_service_failures(monkeypatch, asynchronous, outcomes, expected):
+    import json
+    from pathlib import Path
+
+    task = json.loads((Path(__file__).parent / "fixtures/task699.json").read_text())["web_task"]
+    config = task["original_metadata"]
+    target = config["eval"]["program_html"][0]
+    assert target["url"] == "last" and "shopping_admin_get_cart_price_rule" in target["locator"]
+    monkeypatch.setenv("WA_SHOPPING_ADMIN", "https://admin.example.test")
+    monkeypatch.setattr(classic, "_shopping_admin_get_auth_token", lambda: "test-token")
+    remaining = iter(outcomes)
+
+    def get(*args, **kwargs):
+        outcome = next(remaining)
+        if outcome == "error":
+            raise TimeoutError("Magento GET timeout")
+        name = kwargs["params"]["searchCriteria[filter_groups][0][filters][0][value]"]
+        item = {"name": name, "customer_group_ids": [0, 1, 2, 3], "simple_action": "by_percent", "discount_amount": 10}
+        # Preserve real HTTP/helper execution; vary the final predicate independently of canonical rule values.
+        return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {"items": [item]}, outcome=outcome)
+
+    # The helper's serialized rule is checked by the real scorer. Use a distinctive discount for each outcome.
+    def response_get(*args, **kwargs):
+        response = get(*args, **kwargs)
+        payload = response.json()
+        payload["items"][0]["discount_amount"] = 42 if response.outcome == "match" else 17
+        response.json = lambda: payload
+        return response
+
+    monkeypatch.setattr(classic.httpx, "get", response_get)
+    target["required_contents"] = {"must_include": ['"discount_amount": "42"']}
+    pages = [SimpleNamespace(url="https://admin.example.test/cart") for _ in outcomes]
+    page = SimpleNamespace(context=SimpleNamespace(pages=pages))
+
+    async def evaluate():
+        if asynchronous:
+            return await classic.evaluate_classic_task(config, {"answer": "done"}, page)
+        public_task = WebTask.model_validate(task)
+        evaluator = WebArenaTaskEvaluator(config=_config())
+        context = VisualBrowserEvaluationContext(page=page, browser_context=page.context, evidence=())
+        evaluator.prepare(task=public_task, observation=WebObservation(), browser_context=context)
+        result = evaluator.evaluate(
+            task=public_task, observation=WebObservation(), final_answer="done", browser_context=context
+        )
+        assert result.valid_sample
+        return result.reward, ""
+
+    if expected is None:
+        with pytest.raises(EvaluatorInfrastructureError):
+            await evaluate()
+    else:
+        result = await evaluate()
+        assert result[0] == expected

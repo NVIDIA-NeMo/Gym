@@ -1,5 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Original source: https://gitlab-master.nvidia.com/mingjiel/osworld_internal
+# Revision: 3b775dc538931ead0cb6b4922349da9c6d493dab
+# Original file: webarena/common/eval_snapshots.py
+# Original license: Apache-2.0; Copyright 2024 XLANG NLP Lab.
+# Adapted for Gym; see resources_servers/webarena_browser/reference_evaluation/PROVENANCE.md.
 """Structured before/after snapshots for collision-prone evaluators."""
 
 from __future__ import annotations

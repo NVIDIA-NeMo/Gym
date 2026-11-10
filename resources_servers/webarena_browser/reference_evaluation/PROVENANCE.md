@@ -31,3 +31,17 @@ missing, extra, or changed AST bodies in the final audit.
 Public benchmark credentials are resolved through the WebArena site's
 environment-aware login boundary. No model checkpoint, deployment secret, or
 site state is vendored here.
+
+## Source URL, license and original notices
+
+Source repository: https://gitlab-master.nvidia.com/mingjiel/osworld_internal. Revision: `3b775dc538931ead0cb6b4922349da9c6d493dab` (`nemotron-v3`).
+
+The root [LICENSE](https://gitlab-master.nvidia.com/mingjiel/osworld_internal/-/blob/3b775dc538931ead0cb6b4922349da9c6d493dab/LICENSE) at that exact revision is Apache-2.0 and contains `Copyright 2024 XLANG NLP Lab`. The complete original text is retained in `SOURCE_LICENSE`. The pinned tree has no additional LICENSE, COPYING or NOTICE files, and the three original module headers contain no separate copyright notices.
+
+| Original file | Gym file |
+| --- | --- |
+| `webarena/common/classic_evaluation.py` | `resources_servers/webarena_browser/reference_evaluation/classic_evaluation.py` |
+| `webarena/common/eval_snapshots.py` | `resources_servers/webarena_browser/reference_evaluation/eval_snapshots.py` |
+| `webarena/common/eval_collision.py` | `nemo_gym/web/evaluation_collision.py` |
+
+The 92-definition AST comparison above describes the initial port only. Subsequent Gym changes include infrastructure error classification, snapshot validation, per-tab failure propagation and deployment-normalized keys; current code is not claimed to have unchanged AST bodies.

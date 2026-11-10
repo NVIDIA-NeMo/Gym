@@ -1,0 +1,64 @@
+{
+  "responses_create_params": {
+    "input": [],
+    "metadata": {
+      "benchmark": "webarena",
+      "task_id": "699"
+    }
+  },
+  "web_task": {
+    "benchmark": "webarena",
+    "task_id": "699",
+    "intent": "Create a new marketing cart price rule called \"spring sale\" for all registered customers that offers a 20 percent discount site-wide",
+    "start_urls": [
+      "__SHOPPING_ADMIN__"
+    ],
+    "sites": [
+      "shopping_admin"
+    ],
+    "input_images": [],
+    "runtime_profile": "visual_browser",
+    "observation_profile": "screenshot",
+    "action_profile": "computer_use",
+    "verifier_profile": "webarena_classic",
+    "auth_profile": null,
+    "seed": 0,
+    "task_kwargs": {
+      "collision_plan": {
+        "snapshot_adapters": {},
+        "target_overrides": {}
+      }
+    },
+    "original_metadata": {
+      "web_name": [
+        "shopping_admin"
+      ],
+      "id": "webarena-699",
+      "ques": "Create a new marketing cart price rule called \"spring sale\" for all registered customers that offers a 20 percent discount site-wide",
+      "web": [
+        "__SHOPPING_ADMIN__"
+      ],
+      "eval": {
+        "eval_types": [
+          "program_html"
+        ],
+        "reference_answers": null,
+        "reference_url": "",
+        "program_html": [
+          {
+            "url": "last",
+            "locator": "func:shopping_admin_get_cart_price_rule('spring sale')",
+            "required_contents": {
+              "must_include": [
+                "\"name\": \"spring sale\"",
+                "\"customer_group_ids\": [1]",
+                "\"simple_action\": \"by_percent\"",
+                "\"discount_amount\": \"20\""
+              ]
+            }
+          }
+        ]
+      }
+    }
+  }
+}

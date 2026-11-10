@@ -1,5 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Original source: https://gitlab-master.nvidia.com/mingjiel/osworld_internal
+# Revision: 3b775dc538931ead0cb6b4922349da9c6d493dab
+# Original file: webarena/common/classic_evaluation.py
+# Original license: Apache-2.0; Copyright 2024 XLANG NLP Lab.
+# Adapted for Gym; see resources_servers/webarena_browser/reference_evaluation/PROVENANCE.md.
 """Classic WebArena JSONL evaluation helpers.
 
 This mirrors the original WebArena evaluator behavior for the benchmark format
@@ -938,14 +943,18 @@ async def _program_html(task_config: dict, page, eval_context: dict[str, Any] | 
             if not pages:
                 pages = [page]
             target_score = 0.0
+            candidate_errors: list[Exception] = []
             logger.info("program_html checking %d open tab(s) for locator=%s", len(pages), target.get("locator"))
             for idx, candidate in enumerate(pages):
                 try:
                     candidate_score = await _program_html_target(target, candidate, eval_context)
                     logger.info("program_html tab %d score=%s url=%s", idx, candidate_score, candidate.url)
                     target_score = max(target_score, candidate_score)
-                except Exception:
-                    logger.info("program_html tab %d check failed url=%s", idx, candidate.url, exc_info=True)
+                except Exception as exc:
+                    candidate_errors.append(exc)
+                    logger.info("program_html tab %d check failed", idx, exc_info=True)
+            if candidate_errors and target_score < 1.0:
+                raise EvaluatorInfrastructureError("program_html candidate evaluation failed") from candidate_errors[0]
             score *= target_score
         else:
             score *= await _program_html_target(target, page, eval_context)
@@ -1045,14 +1054,18 @@ def _program_html_sync(task_config: dict, page, eval_context: dict[str, Any] | N
             if not pages:
                 pages = [page]
             target_score = 0.0
+            candidate_errors: list[Exception] = []
             logger.info("program_html checking %d open tab(s) for locator=%s", len(pages), target.get("locator"))
             for idx, candidate in enumerate(pages):
                 try:
                     candidate_score = _program_html_target_sync(target, candidate, eval_context)
                     logger.info("program_html tab %d score=%s url=%s", idx, candidate_score, candidate.url)
                     target_score = max(target_score, candidate_score)
-                except Exception:
-                    logger.info("program_html tab %d check failed url=%s", idx, candidate.url, exc_info=True)
+                except Exception as exc:
+                    candidate_errors.append(exc)
+                    logger.info("program_html tab %d check failed", idx, exc_info=True)
+            if candidate_errors and target_score < 1.0:
+                raise EvaluatorInfrastructureError("program_html candidate evaluation failed") from candidate_errors[0]
             score *= target_score
         else:
             score *= _program_html_target_sync(target, page, eval_context)
