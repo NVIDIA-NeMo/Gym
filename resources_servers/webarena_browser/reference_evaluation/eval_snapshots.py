@@ -14,6 +14,8 @@ from typing import Any
 
 import httpx
 
+from nemo_gym.web import EvaluatorInfrastructureError
+
 from .classic_evaluation import _shopping_get_auth_token, _site_url
 from .navigation import goto
 
@@ -84,7 +86,7 @@ def fetch_shopping_orders(page_size: int = 50) -> list[dict[str, Any]]:
     )
     response.raise_for_status()
     records = []
-    for order in response.json().get("items", []):
+    for order in _record_list(response.json()["items"], "shopping orders"):
         items = order.get("items") or []
         records.append(
             {
@@ -118,7 +120,7 @@ def fetch_shopping_reviews(skus: list[str]) -> dict[str, list[dict[str, Any]]]:
         )
         response.raise_for_status()
         records = []
-        for review in response.json():
+        for review in _record_list(response.json(), "shopping reviews"):
             ratings = review.get("ratings") or []
             first_rating = ratings[0] if ratings else {}
             records.append(
@@ -138,23 +140,23 @@ def fetch_shopping_reviews(skus: list[str]) -> dict[str, list[dict[str, Any]]]:
 
 
 def collect_snapshots(plan: dict[str, Any] | None) -> dict[str, Any]:
-    """Collect all requested snapshots. Failures are logged and skipped."""
+    """Collect requested API snapshots, propagating unavailable baselines."""
     snapshots: dict[str, Any] = {}
     adapters = (plan or {}).get("snapshot_adapters") or {}
 
     if "shopping_orders" in adapters:
         try:
             snapshots["shopping_orders"] = fetch_shopping_orders()
-        except Exception:
-            logger.warning("Failed to collect shopping order snapshot", exc_info=True)
+        except Exception as exc:
+            raise EvaluatorInfrastructureError("Failed to collect shopping order snapshot") from exc
 
     review_params = adapters.get("shopping_reviews")
     if review_params:
         skus = [str(sku) for sku in review_params.get("skus", []) if sku]
         try:
             snapshots["shopping_reviews"] = fetch_shopping_reviews(skus)
-        except Exception:
-            logger.warning("Failed to collect shopping review snapshot", exc_info=True)
+        except Exception as exc:
+            raise EvaluatorInfrastructureError("Failed to collect shopping review snapshot") from exc
 
     return snapshots
 
@@ -181,12 +183,8 @@ async def _get_query_text(page, selector: str) -> str:
         await page.evaluate(
             """
         (selector) => {
-            try {
-                const el = document.querySelector(selector);
-                return el ? el.textContent : '';
-            } catch (e) {
-                return '';
-            }
+            const el = document.querySelector(selector);
+            return el ? el.textContent : '';
         }
         """,
             selector,
@@ -215,8 +213,8 @@ async def _gitlab_member_role(page, account_name: str) -> str:
                 account_idx,
             )
         )
-    except Exception:
-        return ""
+    except Exception as exc:
+        raise EvaluatorInfrastructureError("Browser snapshot capture failed") from exc
 
 
 async def _reddit_comment_tree(page) -> dict[str, Any]:
@@ -242,8 +240,8 @@ async def _reddit_comment_tree(page) -> dict[str, Any]:
             )
             or {}
         )
-    except Exception:
-        return {}
+    except Exception as exc:
+        raise EvaluatorInfrastructureError("Browser snapshot capture failed") from exc
 
 
 def _latest_comment_by_username(tree: dict[str, Any], username: str) -> tuple[dict[str, Any], dict[str, Any] | None]:
@@ -278,13 +276,13 @@ async def _select_program_html_snapshot(target: dict[str, Any], page) -> str:
     if locator.startswith("document.") or locator.startswith("[...document."):
         try:
             return str(await page.evaluate(f"() => {locator}") or "")
-        except Exception:
-            return ""
+        except Exception as exc:
+            raise EvaluatorInfrastructureError("Browser snapshot capture failed") from exc
     if locator.startswith("lambda:"):
         try:
             return str(await page.evaluate(locator.removeprefix("lambda:")) or "")
-        except Exception:
-            return ""
+        except Exception as exc:
+            raise EvaluatorInfrastructureError("Browser snapshot capture failed") from exc
     if locator.startswith("func:"):
         helper, args = _parse_func_args(locator)
         if helper in {"get_query_text", "get_query_text_lowercase"} and len(args) >= 2:
@@ -382,8 +380,8 @@ async def _collect_image_urls(page, locator: str) -> list[str]:
             )
             or []
         )
-    except Exception:
-        return []
+    except Exception as exc:
+        raise EvaluatorInfrastructureError("Browser snapshot capture failed") from exc
 
 
 async def _collect_page_image_snapshots(page, queries: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -458,12 +456,8 @@ def _get_query_text_sync(page, selector: str) -> str:
         page.evaluate(
             """
         (selector) => {
-            try {
-                const el = document.querySelector(selector);
-                return el ? el.textContent : '';
-            } catch (e) {
-                return '';
-            }
+            const el = document.querySelector(selector);
+            return el ? el.textContent : '';
         }
         """,
             selector,
@@ -492,8 +486,8 @@ def _gitlab_member_role_sync(page, account_name: str) -> str:
                 account_idx,
             )
         )
-    except Exception:
-        return ""
+    except Exception as exc:
+        raise EvaluatorInfrastructureError("Browser snapshot capture failed") from exc
 
 
 def _reddit_comment_tree_sync(page) -> dict[str, Any]:
@@ -519,8 +513,8 @@ def _reddit_comment_tree_sync(page) -> dict[str, Any]:
             )
             or {}
         )
-    except Exception:
-        return {}
+    except Exception as exc:
+        raise EvaluatorInfrastructureError("Browser snapshot capture failed") from exc
 
 
 def _select_program_html_snapshot_sync(target: dict[str, Any], page) -> str:
@@ -530,13 +524,13 @@ def _select_program_html_snapshot_sync(target: dict[str, Any], page) -> str:
     if locator.startswith("document.") or locator.startswith("[...document."):
         try:
             return str(page.evaluate(f"() => {locator}") or "")
-        except Exception:
-            return ""
+        except Exception as exc:
+            raise EvaluatorInfrastructureError("Browser snapshot capture failed") from exc
     if locator.startswith("lambda:"):
         try:
             return str(page.evaluate(locator.removeprefix("lambda:")) or "")
-        except Exception:
-            return ""
+        except Exception as exc:
+            raise EvaluatorInfrastructureError("Browser snapshot capture failed") from exc
     if locator.startswith("func:"):
         helper, args = _parse_func_args(locator)
         if helper in {"get_query_text", "get_query_text_lowercase"} and len(args) >= 2:
@@ -633,8 +627,8 @@ def _collect_image_urls_sync(page, locator: str) -> list[str]:
             )
             or []
         )
-    except Exception:
-        return []
+    except Exception as exc:
+        raise EvaluatorInfrastructureError("Browser snapshot capture failed") from exc
 
 
 def _collect_page_image_snapshots_sync(page, queries: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -712,11 +706,65 @@ def merge_snapshots(*snapshots: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
+def _record_list(value: Any, label: str) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or any(not isinstance(record, dict) for record in value):
+        raise EvaluatorInfrastructureError(f"Malformed {label} snapshot")
+    if any(record.get("error") for record in value):
+        raise EvaluatorInfrastructureError(f"Failed {label} snapshot")
+    return value
+
+
+def _validate_snapshots(plan: dict[str, Any], snapshots: dict[str, Any], phase: str) -> None:
+    adapters = plan.get("snapshot_adapters") or {}
+    for adapter in ("shopping_orders", "shopping_reviews", "program_html", "page_image_query"):
+        if adapter not in adapters and adapter not in snapshots:
+            continue
+        params = adapters.get(adapter) or {}
+        if adapter == "shopping_reviews":
+            skus = params.get("skus", [])
+            value = snapshots.get(adapter)
+            if not isinstance(value, dict) or value.get("error") or not set(skus).issubset(value):
+                raise EvaluatorInfrastructureError(f"Missing or failed {phase} {adapter} snapshot")
+            for sku, records in value.items():
+                _record_list(records, f"{phase} {adapter}/{sku}")
+            continue
+        specs = params.get("targets" if adapter == "program_html" else "queries", [])
+        records = _record_list(snapshots.get(adapter), f"{phase} {adapter}")
+        if adapter == "shopping_orders":
+            continue
+        keys = [record.get("key") for record in records]
+        expected = {spec["key"] for spec in specs}
+        if any(not isinstance(key, str) for key in keys) or len(set(keys)) != len(keys) or not expected.issubset(keys):
+            raise EvaluatorInfrastructureError(f"Missing or malformed {phase} {adapter} target keys")
+        for record in records:
+            if adapter == "program_html":
+                valid = isinstance(record.get("value"), str)
+            else:
+                urls = record.get("image_urls")
+                valid = isinstance(urls, list) and all(isinstance(url, str) for url in urls)
+            if not valid:
+                raise EvaluatorInfrastructureError(f"Malformed {phase} {adapter} capture")
+
+
 def build_snapshot_context(
     plan: dict[str, Any] | None,
     before: dict[str, Any],
     after: dict[str, Any],
 ) -> dict[str, Any]:
+    # Validate both captures before deriving any positive mutation. An empty
+    # successful capture is valid; missing/failed/malformed data is not empty.
+    required = dict((plan or {}).get("snapshot_adapters") or {})
+    for adapter, collection in (
+        ("shopping_reviews", "skus"),
+        ("program_html", "targets"),
+        ("page_image_query", "queries"),
+    ):
+        if not (required.get(adapter) or {}).get(collection) and adapter not in before and adapter not in after:
+            required.pop(adapter, None)
+    for adapter in set(before) | set(after):
+        required.setdefault(adapter, {})
+    for phase, captures in (("before", before), ("after", after)):
+        _validate_snapshots({"snapshot_adapters": required}, captures, phase)
     deltas: dict[str, Any] = {}
 
     if "shopping_orders" in before or "shopping_orders" in after:

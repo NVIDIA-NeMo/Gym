@@ -21,7 +21,7 @@ from typing import Any
 
 import httpx
 
-from nemo_gym.web import extract_helper_calls, snapshot_target_key
+from nemo_gym.web import EvaluatorInfrastructureError, extract_helper_calls, snapshot_target_key
 
 from .navigation import goto, resolve_after_navigation_sync
 from .site_config import DEFAULT_CREDENTIALS
@@ -1091,7 +1091,7 @@ async def evaluate_classic_task(
                 messages.append(f"{eval_type}: score={cur_score}")
         return score, "; ".join(messages)
     except Exception as e:
-        return 0.0, f"Classic evaluation error: {e}"
+        raise EvaluatorInfrastructureError(f"Classic evaluation failed: {e}") from e
 
 
 def evaluate_classic_task_sync(
@@ -1126,4 +1126,4 @@ def evaluate_classic_task_sync(
                 messages.append(f"{eval_type}: score={cur_score}")
         return score, "; ".join(messages)
     except Exception as e:
-        return 0.0, f"Classic evaluation error: {e}"
+        raise EvaluatorInfrastructureError(f"Classic evaluation failed: {e}") from e

@@ -19,6 +19,7 @@ from nemo_gym.web import (
     WebVerifierResult,
     build_collision_plan,
     has_collision_mitigation,
+    snapshot_target_key,
 )
 from resources_servers.webarena_browser.config import WebArenaBrowserResourcesServerConfig
 from resources_servers.webarena_browser.site_auth import configured_site_urls, resolve_site_templates
@@ -78,6 +79,16 @@ def _reference_task_config(
     source_plan = task.task_kwargs.get("collision_plan")
     collision_plan = copy.deepcopy(source_plan) if isinstance(source_plan, dict) else build_collision_plan(task_config)
     collision_plan = resolve_site_templates(collision_plan, site_urls)
+    # Prepared plans carry hashes of unresolved targets. Capture and scoring
+    # must identify the same deployment-resolved target; keep the plan's
+    # population-level collision decisions and locks unchanged.
+    adapters = collision_plan.get("snapshot_adapters") or {}
+    for adapter, collection, target in (
+        ("program_html", "targets", "target"),
+        ("page_image_query", "queries", "query"),
+    ):
+        for spec in (adapters.get(adapter) or {}).get(collection, []):
+            spec["key"] = snapshot_target_key(spec[target])
     return task_config, collision_plan
 
 
