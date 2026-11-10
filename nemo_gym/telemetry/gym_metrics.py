@@ -82,9 +82,9 @@ one row in one collection run; a retry on a later resume run is another attempt,
 re-send of ``/run`` inside one dispatch is not. Two producers record it. The collection driver is
 ``run_from_config`` (``gym eval run`` with serving): ``--no-serve`` initialises no telemetry, and ``run_examples``
 callers, reverification and the GDPVal multistage driver do not call the recorder. ``TaskRunner.run_task``, the
-in-process API, also records each rollout outcome it returns, without a recovery-store write: for it ``scored``
-means a reward is present and ``failed`` means none is, and a reported failure kind labels either outcome.
-``gym.rollout.rewarded_total`` counts only finite rewards, masked ones included.
+in-process API, also records each rollout outcome it returns, without a recovery-store write: for it ``failed``
+means the outcome has a failure (labeled with its kind only), ``scored`` a reward and no failure, and ``unscored``
+neither. ``gym.rollout.rewarded_total`` counts only the finite rewards of scored rollouts, masked ones included.
 
 ``nemo.gym.rollout.outcome`` is ``scored`` (main output, including masked, forced-zero and supported
 unscored completions), ``failed`` (saved failures, including kill-shaped) or ``omitted`` (saved

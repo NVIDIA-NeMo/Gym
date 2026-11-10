@@ -303,16 +303,29 @@ class TestRolloutMetrics:
                         ("failed",),
                         {
                             "dispatch_name": "agent",
-                            "failure_class": "agent_request_failed",
                             "failure_kind": "agent_request_failed",
                             "failure_type": "ClientResponseError",
                         },
                     ),
                 ],
             ),
+            (
+                {"reward": 0.0, "mask_sample": True, "failure_kind": "judge_failed"},
+                [
+                    (
+                        "completed",
+                        ("failed",),
+                        {"dispatch_name": "agent", "failure_kind": "judge_failed", "failure_type": None},
+                    ),
+                ],
+            ),
+            (
+                {"response": {"output": []}, "execute_only": True},
+                [("completed", ("unscored",), {"dispatch_name": "agent"})],
+            ),
         ],
     )
-    async def test_a_rollout_is_scored_when_it_has_a_reward_and_failed_when_it_has_none(
+    async def test_a_failure_makes_the_rollout_failed_and_a_reward_without_one_makes_it_scored(
         self, monkeypatch: pytest.MonkeyPatch, recorded: list[tuple], raw, expected: list[tuple]
     ) -> None:
         runner = TaskRunner([_row("a")], registry_server=HEAD)
@@ -332,26 +345,57 @@ class TestRolloutMetrics:
 
         assert recorded[0] == ("completed", ("scored",), {"dispatch_name": "agent"})
 
-    async def test_a_scored_rollout_that_carries_a_kind_is_counted_under_it(
+    async def test_a_scored_rollout_never_carries_a_failure_label(
+        self, monkeypatch: pytest.MonkeyPatch, recorded: list[tuple]
+    ) -> None:
+        raws = [
+            {"reward": 1.0},
+            {"reward": 0.0, "mask_sample": True},
+            {"reward": 0.0, "failure_kind": "judge_failed"},
+            {"response": {"output": []}, "execute_only": True},
+            _record(delivery="possibly_delivered", http_status=502, exception_type="ClientResponseError"),
+        ]
+        for raw in raws:
+            runner = TaskRunner([_row("a")], registry_server=HEAD)
+            monkeypatch.setattr(RolloutCollectionHelper, "run_outcomes", _FakeResults(raw))
+            await runner.run_task("a")
+
+        counted = [call for call in recorded if call[0] == "completed"]
+        assert [call[1][0] for call in counted] == ["scored", "scored", "failed", "unscored", "failed"]
+        for _, (outcome,), labels in counted:
+            assert outcome == "failed" or set(labels) == {"dispatch_name"}
+
+    async def test_a_failed_rollout_adds_nothing_to_the_reward_count(
         self, monkeypatch: pytest.MonkeyPatch, recorded: list[tuple]
     ) -> None:
         runner = TaskRunner([_row("a")], registry_server=HEAD)
         monkeypatch.setattr(
-            RolloutCollectionHelper, "run_outcomes", _FakeResults({"reward": 0.0, "failure_kind": "judge_failed"})
+            RolloutCollectionHelper,
+            "run_outcomes",
+            _FakeResults({"reward": 0.0, "mask_sample": True, "failure_kind": "judge_failed"}),
         )
 
         await runner.run_task("a")
 
-        assert recorded[0] == (
-            "completed",
-            ("scored",),
-            {
-                "dispatch_name": "agent",
-                "failure_class": "judge_failed",
-                "failure_kind": "judge_failed",
-                "failure_type": None,
-            },
+        assert [call[0] for call in recorded] == ["completed"]
+
+    async def test_a_row_without_an_agent_or_environment_server_is_counted_under_unknown(
+        self, monkeypatch: pytest.MonkeyPatch, recorded: list[tuple]
+    ) -> None:
+        async def completed(row):
+            return row, {"reward": 1.0}
+
+        runner = TaskRunner([_collated_row("a")], registry_server=HEAD)
+        monkeypatch.setattr(
+            RolloutCollectionHelper,
+            "run_outcomes",
+            lambda self, rows, head_server_config, **bounds: _Completions([completed(row) for row in rows]),
         )
+
+        outcome = await runner.run_task("a")
+
+        assert outcome.reward == 1.0
+        assert recorded[0] == ("completed", ("scored",), {"dispatch_name": "unknown"})
 
     async def test_a_reward_that_is_not_finite_is_counted_but_not_ranged(
         self, monkeypatch: pytest.MonkeyPatch, recorded: list[tuple]
