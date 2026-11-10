@@ -278,7 +278,15 @@ class MCPAtlasResourcesServer(SimpleResourcesServer):
             with contextlib.suppress(asyncio.CancelledError):
                 await self._reaper
         if self._pool is not None:
-            await self._pool.close()
+            try:
+                await self._pool.close()
+            except SandboxError as exc:
+                logger.error(
+                    "MCP-Atlas shutdown could not stop every sandbox; manual cleanup may be required "
+                    "(Apptainer does not enforce ttl_s): %s",
+                    exc,
+                )
+                raise
 
     async def seed_session(self, request: Request, body: MCPAtlasSeedSessionRequest) -> BaseSeedSessionResponse:
         session_id = request.session[SESSION_ID_KEY]

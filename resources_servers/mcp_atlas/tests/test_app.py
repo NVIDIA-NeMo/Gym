@@ -382,6 +382,32 @@ async def test_checkpoint_retirement_retries_failed_teardown_and_releases_capaci
     await server._shutdown()
 
 
+async def test_shutdown_warns_about_manual_cleanup_and_preserves_retryable_ownership(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    server = make_server("http://unused", judge_client())
+    server._pool = pool(TOOLS, stop_errors=1)
+    await seed(server)
+    box = server._rollouts["s1"].box
+    try:
+        with caplog.at_level("ERROR", logger="resources_servers.mcp_atlas.app"):
+            with pytest.raises(SandboxError, match="1 sandboxes did not stop"):
+                await server._shutdown()
+        assert server._pool.get("s1") is box
+        assert not box.stopped
+        messages = [
+            record.getMessage() for record in caplog.records if record.name == "resources_servers.mcp_atlas.app"
+        ]
+        assert any(
+            "manual cleanup may be required" in text and "Apptainer does not enforce ttl_s" in text
+            for text in messages
+        )
+    finally:
+        await server._shutdown()
+    assert box.stopped
+    assert server._pool.get("s1") is None
+
+
 async def test_retirement_drops_only_local_state_for_a_shared_development_environment(environment) -> None:
     env, url = environment
     server = make_server(url, judge_client())

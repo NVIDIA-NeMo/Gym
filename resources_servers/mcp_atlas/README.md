@@ -69,6 +69,11 @@ boundary is required before this configuration can support benchmark scores. See
 4. The sandbox needs internet access to the services and to PyPI, npm and GitHub, because some servers install
    packages when they start. `sandbox_files` pins that resolution to the image date (2026-07-17).
 
+`sandbox_ttl_s` controls this server's in-process idle reaper. The default Apptainer provider does not enforce
+`ttl_s`, so instances are not guaranteed to expire after the server exits. Shutdown reports failed stops and
+propagates the error, retaining ownership for a later cleanup retry while the process is alive. If cleanup
+cannot finish before process exit, an operator must inspect and stop the remaining instances.
+
 For development, `sandbox_base_url` points at one running agent-environment
 (`docker run -p 1984:1984 --env-file .env ghcr.io/scaleapi/mcp-atlas:1.2.7`). Every rollout then shares it, so
 stateful servers leak between tasks: do not use it for scores.
