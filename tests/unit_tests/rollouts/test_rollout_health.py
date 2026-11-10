@@ -21,7 +21,7 @@ from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, Rollou
 from nemo_gym.rollouts.rollout_health import CHECK_REGISTRY, RolloutStore, run_health_checks
 from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.trajectory.model_call_record import build_model_call_record
-from nemo_gym.trajectory.trajectory_record import TrajectoryRecord
+from nemo_gym.trajectory.trajectory_record import AgentInvocation, TrajectoryModelCall, TrajectoryRecord
 
 
 MODEL_CALL_CHECKS = {
@@ -452,7 +452,7 @@ async def test_health_on_and_off_leave_collection_and_metrics_byte_identical(
 
         if not disabled:
             assert stdout.rstrip().endswith(str(run_dir / "quality_summary.json"))
-            assert stdout.index("Finished rollout collection") < stdout.index("Rollout checks")
+            assert stdout.index("Finished rollout collection") < stdout.index("run health (failures vs limit)")
             assert not caplog.records
 
     assert artifacts[False] == artifacts[True]
@@ -1200,6 +1200,10 @@ _REASONING_ONLY = {
     "responses": {"output": [{"type": "reasoning", "summary": [{"type": "summary_text", "text": "partial"}]}]},
     "chat": {"choices": [{"message": {"content": "", "reasoning_content": "partial"}}]},
     "messages": {"content": [{"type": "thinking", "thinking": "partial"}]},
+    "messages_redacted": {"content": [{"type": "redacted_thinking", "data": "opaque"}]},
+    "messages_signature_only": {"content": [{"type": "thinking", "thinking": "", "signature": "sig"}]},
+    # A chat content part typed as thinking is reasoning too, never an answer.
+    "chat_thinking_part": {"choices": [{"message": {"content": [{"type": "thinking", "thinking": "partial"}]}}]},
 }
 _ACTIONABLE = {
     "responses_function_call": {
@@ -1257,6 +1261,49 @@ def test_a_length_limited_call_with_only_reasoning_is_a_runaway_generation(
 
     flagged_calls = [f.locator["call_id"] for f in digest.findings if f.check == "model_call_runaway_generation"]
     assert flagged_calls == (["clipped"] if flagged else [])
+
+
+_MESSAGES_TURN_CONTENT = {
+    "thinking": ([{"type": "thinking", "thinking": "inspect first", "signature": ""}], False),
+    "redacted_thinking": ([{"type": "redacted_thinking", "data": "opaque"}], False),
+    "signature_only": ([{"type": "thinking", "thinking": "", "signature": "sig"}], False),
+    "text": ([{"type": "text", "text": "Answer: 18"}], False),
+    "tool_use": ([{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}], False),
+    "no_content": ([], True),
+    "empty_thinking": ([{"type": "thinking", "thinking": "", "signature": ""}], True),
+    "empty_redacted_thinking": ([{"type": "redacted_thinking", "data": ""}], True),
+}
+
+
+@pytest.mark.parametrize(
+    ("content", "hollow"), list(_MESSAGES_TURN_CONTENT.values()), ids=list(_MESSAGES_TURN_CONTENT)
+)
+def test_a_messages_turn_with_only_thinking_is_not_hollow(tmp_path: Path, content: list[dict], hollow: bool) -> None:
+    """A turn built from a captured Anthropic Messages call counts its thinking blocks as content, the way a
+    Responses reasoning item counts; only a turn with nothing in it is hollow."""
+    response = {"type": "message", "role": "assistant", "content": content, "stop_reason": "end_turn"}
+    call = TrajectoryModelCall.model_validate(
+        {
+            "model_call_id": "c1",
+            "started_at": 1.0,
+            "request": {"messages": [{"role": "user", "content": "question"}]},
+            "response": response,
+            "response_metadata": {"response_id": "r1", "status_code": 200, "response_status": "completed"},
+        }
+    )
+    root = AgentInvocation.model_validate({"invocation_id": "root", "model_calls": [{"model_call_id": "c1"}]})
+    turns = trajectory_builder._turns_from_model_calls("0", "0-0", [root], [call], resolved=True)
+    [turn] = turns
+    # The turn keeps the captured blocks: thinking is its reasoning, never its answer.
+    thinking = [block for block in content if block["type"] in ("thinking", "redacted_thinking")]
+    assert turn.reasoning_content == (thinking or None)
+    record = _record(0, 0)
+    record["ng_trajectory"]["turns"] = [turn.model_dump(mode="json")]
+    rollout_path = _write_fixture(tmp_path, [(record, [_call(response=response, finish_reason="stop")])])
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    assert any(finding.check == "agent_turn_hollow" for finding in digest.findings) is hollow
 
 
 def test_runaway_generation_is_unobserved_without_a_saved_response(tmp_path: Path) -> None:
@@ -1411,7 +1458,7 @@ def test_process_pool_success_path_and_explicit_rollout_file(
     result = health.health_check_run_dir(run_dir, workers=2)
 
     assert len(result.rollouts) == 2
-    assert "2 checked" in capsys.readouterr().out
+    assert "rollout quality: 0 healthy / 2 unhealthy / 0 unobserved" in capsys.readouterr().out
 
     custom_path = run_dir / "custom-name.jsonl"
     rollout_path.rename(custom_path)
@@ -3903,8 +3950,8 @@ def test_console_distinguishes_rollout_checks_from_response_population(responses
     report = health.format_health_report(
         SimpleNamespace(summary=summary, summary_path=tmp_path / "quality_summary.json")
     )
-    assert "Rollout checks: 1600 checked, 1599 passed, 1 flagged, 0 unobserved" in report
-    assert "Rollout health:" not in report
+    assert "rollout quality: 1599 healthy / 1 unhealthy / 0 unobserved" in report
+    assert "run health (failures vs limit): not evaluated; limit final none, not final none" in report
     if responses is None:
         assert "Model responses:" not in report
     else:
@@ -3912,6 +3959,30 @@ def test_console_distinguishes_rollout_checks_from_response_population(responses
         assert f"{responses['unknown']} rollout scopes unobserved" in report
         assert f"{responses['duplicated']} duplicate call IDs" in report
     assert summary == original
+
+
+@pytest.mark.parametrize(
+    ("healthy", "reasons", "status"),
+    [(True, [], "healthy"), (False, ["final failures 3 of 100 (3.0%), limit 2%"], "UNHEALTHY")],
+)
+def test_console_reports_failure_counts_and_the_two_limits(healthy, reasons, status, tmp_path):
+    from types import SimpleNamespace
+
+    artifacts = {
+        "healthy": healthy,
+        "expected": 100,
+        "failed": {"final": 3, "not_final": 5},
+        "limits": {"max_final_failure_fraction": 0.02, "max_not_final_failure_fraction": 0.1},
+        "unhealthy_reasons": reasons,
+    }
+    summary = {
+        "run": {"verdicts": {"healthy": 100, "unhealthy": 0, "unobserved": 0}, "stats": {}, "artifacts": artifacts}
+    }
+    report = health.format_health_report(
+        SimpleNamespace(summary=summary, summary_path=tmp_path / "quality_summary.json")
+    )
+    expected = f"run health (failures vs limit): {status}; failed 3 final, 5 not final of 100 expected; limit final 2%, not final 10%"
+    assert expected + ("; " + reasons[0] if reasons else "") in report
 
 
 @pytest.mark.parametrize("mode", ["enabled", "disabled", "missing", "relative"])
@@ -4079,3 +4150,22 @@ def test_missing_agent_turns_detail_is_unchanged_without_a_named_resource_limit(
     finding = _missing_turns_finding(tmp_path, **updates)
 
     assert finding.detail == {"reason": "no agent turn with model activity"}
+
+
+@pytest.mark.parametrize("schema,key", [("1.0", "rollout_id"), ("2.0", "capture_key")])
+@pytest.mark.parametrize("outer", [None, "outer"])
+def test_health_identity_falls_back_to_schema_capture_identity(schema, key, outer):
+    record = {"ng_trajectory": {"schema_version": schema, "task_id": "task", key: "capture"}}
+    if outer:
+        record[health.ROLLOUT_ID_KEY] = outer
+    assert health.evaluate_record(record, frozenset()).rollout_id == (outer or "capture")
+
+
+@pytest.mark.parametrize("status", ["timeout", "cancelled", "incomplete"])
+def test_interrupted_tool_label_preserves_failure_marker_health(tmp_path, status):
+    _, findings = _tool_call_failed_findings(
+        tmp_path,
+        [_tool_call(1, "ripgrep execution failed: spawn rg ENOENT") | {"status": status}],
+    )
+    assert len(findings) == 1
+    assert findings[0].detail["count"] == 1

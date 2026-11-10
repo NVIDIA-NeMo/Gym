@@ -17,6 +17,7 @@ import hashlib
 import json
 import logging
 import os
+import socket
 import time
 from contextlib import nullcontext
 from copy import deepcopy
@@ -24,7 +25,7 @@ from types import SimpleNamespace
 from typing import Any, Union
 from unittest.mock import AsyncMock, MagicMock
 
-from aiohttp import ClientResponseError, RequestInfo
+from aiohttp import ClientConnectorError, ClientResponseError, ClientSession, RequestInfo
 from fastapi import HTTPException, Response
 from fastapi.testclient import TestClient
 from multidict import CIMultiDict, CIMultiDictProxy
@@ -71,7 +72,14 @@ from nemo_gym.core import (
     NgFailureEvent,
     rollout_context,
 )
-from nemo_gym.models import PolicyModelParticipant, VLLMWorkerCaptureHandler, generation_cut_requester
+from nemo_gym.models import (
+    PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
+    ChatCompletionsConverter,
+    PolicyModelParticipant,
+    VLLMWorkerCaptureHandler,
+    generation_cut_requester,
+    start_model_execution,
+)
 from nemo_gym.models.token_capture import (
     CaptureContext,
     InMemoryLineageStore,
@@ -98,10 +106,10 @@ from responses_api_agents.simple_agent.app import (
     SimpleAgentRunRequest,
 )
 from responses_api_models.vllm_model.app import (
-    VLLMConverter,
     VLLMModel,
     VLLMModelConfig,
     _append_transport_io,
+    _ContextErrorMiddleware,
     _redacted_error_repr,
     _transport_images,
     _transport_log_context,
@@ -3808,9 +3816,9 @@ class TestApp:
         assert data == expected_dict
 
 
-class TestVLLMConverter:
+class TestChatCompletionsConverter:
     def setup_method(self, _):
-        self.converter = VLLMConverter(return_token_id_information=False)
+        self.converter = ChatCompletionsConverter(return_token_id_information=False)
 
     def test_responses_input_types_EasyInputMessageParam(self) -> None:
         """
@@ -4149,7 +4157,7 @@ class TestVLLMConverter:
         assert expected_output == chat_completion_create_params.model_dump(exclude=OPENAI_2_44_OPTIONAL_CHAT_FIELDS)
 
     def test_round_trip_chat_completions_return_token_id_information(self) -> None:
-        converter = VLLMConverter(return_token_id_information=True)
+        converter = ChatCompletionsConverter(return_token_id_information=True)
 
         message = NeMoGymChatCompletionMessageForTraining(
             content="<think>I'm thinking</think>I'm chatting!",
@@ -4910,6 +4918,33 @@ class TestReasoningFieldConfig:
             ("reasoning_content", {"reasoning_content"}),
         ],
     )
+    @mark.parametrize("content", [None, "visible answer", [{"type": "text", "text": "visible answer"}]])
+    def test_explicit_harness_reasoning_reaches_selected_backend_fields(
+        self, reasoning_field: str, expected_keys: set[str], content: Any
+    ) -> None:
+        model = _make_reasoning_history_model(preserve_content=False, reasoning_field=reasoning_field)
+        body = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(
+            {
+                "model": "caller-model",
+                "messages": [{"role": "assistant", "content": content, "reasoning_content": "prior reasoning"}],
+            }
+        )
+        assistant = model._preprocess_chat_completion_create_params(MagicMock(), body.model_dump(exclude_unset=True))[
+            "messages"
+        ][0]
+
+        assert assistant["content"] == content
+        assert {key for key in ("reasoning", "reasoning_content") if key in assistant} == expected_keys
+        assert all(assistant[key] == "prior reasoning" for key in expected_keys)
+
+    @mark.parametrize(
+        "reasoning_field,expected_keys",
+        [
+            ("both", {"reasoning", "reasoning_content"}),
+            ("reasoning", {"reasoning"}),
+            ("reasoning_content", {"reasoning_content"}),
+        ],
+    )
     @mark.parametrize(
         "content",
         ["<think>reason</think>act", [{"type": "text", "text": "<think>reason</think>act"}]],
@@ -5583,7 +5618,7 @@ class TestCompletionsBackendRawRender:
         assert prompt == "Hello world"
 
     def test_input_text_block_type_accepted(self) -> None:
-        # VLLMConverter._format_message rewrites input_text → text, but be
+        # ChatCompletionsConverter._format_message rewrites input_text → text, but be
         # defensive: accept the input_text variant directly too.
         model = _make_completions_backend_model()
         prompt = model._render_messages_to_prompt(
@@ -7122,6 +7157,37 @@ class TestEndpointFile:
         # Without route-around or an endpoint file, the same list keeps unbounded retries.
         server = self._make_server(tmp_path, endpoint_file=None, base_url=static_urls)
         assert [client.max_connection_retries for client in server._clients] == [None, None]
+
+    def test_connection_retry_timeout_reaches_every_client(self, tmp_path) -> None:
+        static_urls = ["http://engine-0:8712/v1", "http://engine-1:8712/v1"]
+        server = self._make_server(tmp_path, endpoint_file=None, base_url=static_urls)
+        assert [client.connection_retry_timeout_s for client in server._clients] == [None, None]
+
+        server = self._make_server(
+            tmp_path, endpoint_file=None, base_url=static_urls, endpoint_connection_retry_timeout_s=30.0
+        )
+        assert [client.connection_retry_timeout_s for client in server._clients] == [30.0, 30.0]
+
+        (tmp_path / "endpoint.txt").write_text("http://new-host:8712/v1\n")
+        server = self._make_server(tmp_path, endpoint_connection_retry_timeout_s=30.0)
+        server._maybe_rebind_endpoint()
+        assert [client.connection_retry_timeout_s for client in server._clients] == [30.0]
+
+    async def test_a_dead_engine_fails_the_call_within_the_retry_timeout(
+        self, tmp_path, monkeypatch: MonkeyPatch
+    ) -> None:
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            refused_url = f"http://127.0.0.1:{sock.getsockname()[1]}/v1"
+        server = self._make_server(
+            tmp_path, endpoint_file=None, base_url=refused_url, endpoint_connection_retry_timeout_s=1.0
+        )
+        async with ClientSession() as session:
+            monkeypatch.setattr(nemo_gym.client.http_client, "get_global_aiohttp_client", lambda: session)
+            started = time.monotonic()
+            with raises(ClientConnectorError):
+                await server._clients[0].create_chat_completion(model="dummy_model", messages=[])
+            assert time.monotonic() - started < 1.8
 
     def test_unpublished_endpoint_grace_lifecycle(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
         endpoint_file = tmp_path / "endpoint.txt"
@@ -9064,3 +9130,41 @@ async def test_a_400_for_an_unsupported_parameter_value_records_invalid_request_
     execution = request.state.nemo_gym_model_execution
     assert execution["upstream_status_code"] == 400
     assert execution.get("error_category") == category
+
+
+@mark.parametrize("finish_reason", ["stop", "tool_calls", "length"])
+async def test_responses_notes_the_chat_finish_reason_for_model_call_capture(
+    monkeypatch: MonkeyPatch, finish_reason: str
+) -> None:
+    model = _refit_model(monkeypatch, False)
+    completion = PARAMETERIZE_DATA[0][2].model_copy(deep=True)
+    completion.choices[0].finish_reason = finish_reason
+    monkeypatch.setattr(VLLMModel, "chat_completions", AsyncMock(return_value=completion))
+    request = _refit_request()
+    start_model_execution(request, upstream_attempted=True)
+
+    await model.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="hi"))
+
+    assert request.state.nemo_gym_model_execution["finish_reason"] == finish_reason
+
+
+async def test_a_context_refusal_after_the_reply_started_propagates() -> None:
+    # The status is already sent, so the error envelope cannot replace it.
+    error = ClientResponseError(MagicMock(real_url="http://vllm.test/v1/chat/completions"), (), status=400)
+    error.response_content = b'{"error":{"message":"maximum context length","code":400}}'
+    setattr(error, PROPAGATED_REFUSAL_CODE_ATTRIBUTE, "context_length_exceeded")
+
+    async def streams_then_refuses(scope, receive, send) -> None:
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        raise error
+
+    sent = []
+
+    async def send(message) -> None:
+        sent.append(message)
+
+    with raises(ClientResponseError) as raised:
+        await _ContextErrorMiddleware(streams_then_refuses)({"type": "http"}, AsyncMock(), send)
+
+    assert raised.value is error
+    assert [message["status"] for message in sent] == [200]
