@@ -112,6 +112,7 @@ if TYPE_CHECKING:
     from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
     from nemo_gym.server_runtime.request_handling.session_routing import SESSION_OWNER_HEADER, install_session_routing
     from nemo_gym.server_runtime.single_agent_turn_types import (
+        SingleAgentTurnAgentContext,
         SingleAgentTurnFailure,
         SingleAgentTurnRequest,
         SingleAgentTurnResponse,
@@ -194,6 +195,7 @@ _PUBLIC_API = {
     "SESSION_OWNER_HEADER": "request_handling.session_routing",
     "SimpleResourcesServer": "base_resources_server",
     "SimpleServer": "base_server",
+    "SingleAgentTurnAgentContext": "single_agent_turn_types",
     "SingleAgentTurnFailure": "single_agent_turn_types",
     "SingleAgentTurnRequest": "single_agent_turn_types",
     "SingleAgentTurnResponse": "single_agent_turn_types",

@@ -278,7 +278,7 @@ class TestEpisode:
         assert "sb-1" not in response.text and "sandbox" not in payload["result"]
         assert sandbox.stopped
 
-    @pytest.mark.parametrize("context", [None, {}, {"values": {"tag": "figure"}}])
+    @pytest.mark.parametrize("context", [None, {}, {"agent": {"values": {"tag": "figure"}}}])
     @pytest.mark.parametrize("nested", [False, True], ids=["flat", "task_data"])
     def test_run_rejects_unsupported_agent_context_before_setup(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, context: object, nested: bool
