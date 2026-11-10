@@ -14,10 +14,11 @@
 # limitations under the License.
 """Manifest, configuration, and report contracts for benchmark-suite comparisons."""
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from nemo_gym.config.config_types import BaseNeMoGymCLIConfig
 from nemo_gym.eval.comparison.schema import ReportFormat
@@ -82,8 +83,16 @@ class SuiteRunSource(_SuiteModel):
 
 
 class SuiteRunPair(_SuiteModel):
-    baseline: SuiteRunSource
-    candidate: SuiteRunSource
+    """Nonempty source collections, accepting a single mapping as shorthand in YAML."""
+
+    baseline: list[SuiteRunSource] = Field(min_length=1)
+    candidate: list[SuiteRunSource] = Field(min_length=1)
+
+    @field_validator("baseline", "candidate", mode="before")
+    @classmethod
+    def normalize_sources(cls, value: object) -> object:
+        """Choose the source shape before validation so errors describe only that shape."""
+        return [value] if isinstance(value, (Mapping, SuiteRunSource)) else value
 
 
 class SuiteManifest(_SuiteModel):
@@ -110,10 +119,13 @@ class SuiteSampleSummary(_SuiteModel):
     sample_variance: float
 
 
+CoverageStatus = Literal["verified", "unverified", "incomplete"]
+
+
 class SuiteCoverage(_SuiteModel):
     """Recorded and planned task-coverage evidence for one selected agent."""
 
-    status: Literal["verified", "unverified", "incomplete"]
+    status: CoverageStatus
     recorded_task_count: int
     planned_task_count: int | None = None
     notes: list[str] = Field(default_factory=list)
@@ -164,6 +176,13 @@ class SuiteFailureSummary(_SuiteModel):
 
 
 class SuiteRunSummary(_SuiteModel):
+    """One source or pooled repeats, with full per-source provenance under ``sources``.
+
+    For pooled repeats, path and selector fields identify the first source for
+    compatibility. Local repeat identities and saved failure accounting live under ``sources``.
+    """
+
+    sources: list["SuiteRunSummary"] = Field(default_factory=list)
     rollouts: Path
     aggregate_metrics: Path
     materialized_inputs: Path | None = None
@@ -176,6 +195,11 @@ class SuiteRunSummary(_SuiteModel):
     summary: SuiteSampleSummary | None = None
     coverage: SuiteCoverage
     failures: SuiteFailureSummary | None = None
+
+
+def summary_sources(summary: SuiteRunSummary) -> tuple[SuiteRunSummary, ...]:
+    """Return constituent provenance, preserving a standalone source's report contract."""
+    return tuple(summary.sources) if summary.sources else (summary,)
 
 
 class SuiteMetricResult(_SuiteModel):
@@ -250,6 +274,7 @@ class SuiteComparisonResult(_SuiteModel):
             "Deltas are candidate minus baseline on the normalized score scale; positive deltas favor the candidate.",
             "Benchmarks form a fixed suite; uncertainty describes independent repeat collections.",
             "Baseline and candidate repeats are unpaired and independent within and across cells.",
+            "Pooled source runs must use independent repeats, the same tasks, and comparable evaluation settings.",
             "Metrics are equally averaged within each repeat before estimating benchmark variance.",
             "Eligible benchmarks have equal model weights; eligible model-benchmark cells have equal overall weights.",
         ]

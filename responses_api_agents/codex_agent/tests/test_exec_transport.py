@@ -12,17 +12,21 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.agents import SandboxSession
+from nemo_gym.agents import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
 from nemo_gym.sandbox import SandboxExecResult
-from responses_api_agents.codex_agent import sandbox_runner
-from responses_api_agents.codex_agent.sandbox import CodexSandboxSession
+from responses_api_agents.codex_agent.sandbox import LAUNCHER_FILE, CodexSandboxSession
 from responses_api_agents.codex_agent.tests.test_sandbox_sessions import seed
 
 
-pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux process supervision required")
+pytestmark = pytest.mark.skipif(
+    sys.platform != "linux" or shutil.which("node") is None, reason="Linux process supervision and Node required"
+)
 
 
 class ExecOnlySandbox:
+    # File copies do not wait for the supervised exec in this local provider.
+    uploads_independent_of_execs = True
+
     def __init__(self):
         self.cancelled_launch = False
         self.lost_launch = False
@@ -77,7 +81,10 @@ def make_session(tmp_path):
         ),
         runtime=str(tmp_path / "runtime"),
     )
-    shutil.copyfile(sandbox_runner.__file__, directory / "sandbox_runner")
+    (tmp_path / "runtime/node/bin").mkdir(parents=True)
+    (tmp_path / "runtime/node/bin/node").symlink_to(shutil.which("node"))
+    shutil.copyfile(HARNESS_RUNNER_SCRIPT, directory / HARNESS_RUNNER_FILE)
+    shutil.copyfile(Path(__file__).parents[1] / LAUNCHER_FILE, directory / LAUNCHER_FILE)
     return state, provider, workdir
 
 
@@ -94,7 +101,8 @@ def payload(state, code, timeout=0.5):
 
 
 @pytest.mark.parametrize("ending", ["natural", "crash", "timeout", "cancel", "close"])
-async def test_exec_only_supervision_leaves_task_children_for_sandbox_owner(tmp_path, ending):
+@pytest.mark.parametrize("startup_delay", [0, 0.6])
+async def test_exec_only_supervision_leaves_task_children_for_sandbox_owner(tmp_path, ending, startup_delay):
     state, provider, workdir = make_session(tmp_path)
     # Complete the tool before interruption so its detached service is already adopted.
     tool = (
@@ -105,18 +113,25 @@ async def test_exec_only_supervision_leaves_task_children_for_sandbox_owner(tmp_
     )
     code = (
         "import os,subprocess,sys,time,pathlib; "
+        f"time.sleep({startup_delay}); "
         f"subprocess.run([sys.executable,'-c',{tool!r}],check=True); "
         "pathlib.Path('ready').touch(); "
         + {"natural": "print('{}')", "crash": "raise SystemExit(7)"}.get(ending, "time.sleep(60)")
     )
-    deadline = 0.5 if ending == "timeout" else 60
+    # Expire only after the detached child is ready; startup speed is not under test.
+    deadline = 60
     task = state.task = asyncio.create_task(
         state.execute(payload(state, code, timeout=deadline), timeout=deadline, close_timeout=3)
     )
     try:
-        async with asyncio.timeout(5):
+        async with asyncio.timeout(30):
             while not (workdir / "ready").exists():
+                if task.done():
+                    await task
+                    pytest.fail("Harness exited before its detached child was ready")
                 await asyncio.sleep(0.01)
+        if ending == "timeout":
+            assert await state.session.expire(timeout=3)
         if ending == "cancel":
             task.cancel()
             with pytest.raises(asyncio.CancelledError):

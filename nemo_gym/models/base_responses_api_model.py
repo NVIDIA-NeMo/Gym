@@ -81,6 +81,7 @@ from nemo_gym.models.responses_streaming import (
     validate_streaming_responses_params,
 )
 from nemo_gym.models.token_capture.config import NonGeneratingRequest, token_capture_config
+from nemo_gym.models.token_capture.harness_notes import trailing_harness_note
 from nemo_gym.models.token_capture.protocols import (
     CaptureAdmissionError,
     CaptureInputError,
@@ -744,10 +745,14 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             completion_json = (
                 completion.model_dump(mode="json") if isinstance(completion, BaseModel) else dict(completion)
             )
-            return await self._stream_served_response(
+            streamed = await self._stream_served_response(
                 completion_json,
                 synthesize_chat_completion_sse(completion_json, include_usage=include_usage),
             )
+            if "usage" in completion_json:
+                # A client without stream_options.include_usage gets no usage chunk; capture records Gym's own usage.
+                request.state.nemo_gym_internal_usage = completion_json["usage"]
+            return streamed
 
         # The middleware resets the request's log before the body streams; keep this request's log object.
         failure_log = RequestFailureLog.current()
@@ -843,7 +848,16 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # Exact prefix supply and capture share this decision.
         if current_capture_context() is not None:
             self._validate_capture_request(params)
-            request_messages = _request_messages(params)
+            note = trailing_harness_note(list(params.messages))
+            if note is not None:
+                # The harness, not the model, wrote this assistant message, and its next request drops it. The
+                # model reads it as a user message, and lineage leaves it out (see harness_notes).
+                params = params.model_copy(
+                    update={"messages": [*params.messages[:-1], {"role": "user", "content": note}]}
+                )
+                request_messages = _request_messages(params)[:-1]
+            else:
+                request_messages = _request_messages(params)
             try:
                 await resolve_parent(request_messages)
                 await register_call_intent()
