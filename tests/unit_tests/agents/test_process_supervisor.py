@@ -408,15 +408,20 @@ worker.write_text("import os, pathlib, signal, subprocess, sys, time\n"
 timed_out = ending in ('timeout', 'grace', 'stubborn')
 process = None
 try:
-    process = subprocess.Popen(['bash', supervisor, '--timeout', '1.5' if timed_out else '10',
-        '--cleanup-timeout', '0.5', '--receipt', str(root / 'cleanup.json'), '--stop-file', str(root / 'stop'), '--',
+    process = subprocess.Popen(['bash', supervisor, '--timeout', '10',
+        '--cleanup-timeout', '0.5', '--receipt', str(root / 'cleanup.json'), '--stop-file', str(root / 'stop'),
+        '--expire-file', str(root / 'expire'), '--',
         sys.executable, str(worker), ending], cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if ending == 'cancel':
+    if ending == 'cancel' or timed_out:
+        # Interrupt the completed-tool phase, not Python or service startup.
         deadline = time.monotonic() + 5
         while not (root / 'ready').exists():
             assert process.poll() is None and time.monotonic() < deadline
             time.sleep(0.01)
-        process.send_signal(signal.SIGTERM)
+        if timed_out:
+            (root / 'expire').touch()
+        else:
+            process.send_signal(signal.SIGTERM)
     stdout, stderr = process.communicate(timeout=15)
     assert process.returncode == 0, (stdout, stderr)
     receipt = json.loads((root / 'cleanup.json').read_text())
