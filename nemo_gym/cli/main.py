@@ -891,9 +891,10 @@ def _eval_status(args: argparse.Namespace, overrides: list[str]) -> None:
     if overrides != expected_overrides:
         args._parser.error("status does not accept Hydra overrides")
     from nemo_gym.cli.eval import eval_status
+    from nemo_gym.orchestration.jobs import benchmark_artifact_dirs
 
     try:
-        eval_status(args.run, json_output=args.json)
+        eval_status(args.run, json_output=args.json, job_artifact_dirs=benchmark_artifact_dirs)
     except (OSError, ValueError) as exc:
         args._parser.error(str(exc))
 
@@ -2012,7 +2013,7 @@ COMMANDS = {
                     "--max-unhealthy-fraction",
                     type=float,
                     metavar="FRACTION",
-                    help="With --recover: the per-rollout health criterion, reported in warnings; it does not change the verdict.",
+                    help="With --recover: the rollout quality criterion, reported in warnings; it does not change the verdict.",
                 ),
             ),
             Flag(
@@ -2060,7 +2061,7 @@ COMMANDS = {
     ),
     "eval compare": Command(
         target="nemo_gym.cli.eval:compare",
-        summary="Compare a baseline eval run against candidate runs.",
+        summary="Compare baseline and candidate runs, optionally pooling independent repeats.",
         flags=(
             _value_flag(
                 "baseline",
@@ -2074,6 +2075,18 @@ COMMANDS = {
                 "Candidate run's rollouts JSONL. Comma-separated list; one candidate is supported today.",
                 metavar="PATH[,PATH...]",
             ),
+            _comma_list_flag(
+                "baseline-runs",
+                "baseline_rollouts_jsonl_fpaths",
+                "Pool independent baseline runs into one repeat sample. Use instead of --baseline.",
+                metavar="PATH[,PATH...]",
+            ),
+            _comma_list_flag(
+                "candidate-runs",
+                "pooled_candidate_rollouts_jsonl_fpaths",
+                "Pool independent candidate runs into one repeat sample. Use instead of --candidates.",
+                metavar="PATH[,PATH...]",
+            ),
             _value_flag(
                 "baseline-agg-metrics",
                 "baseline_aggregate_metrics_fpath",
@@ -2081,9 +2094,15 @@ COMMANDS = {
                 quote=True,
             ),
             _comma_list_flag(
+                "baseline-runs-agg-metrics",
+                "baseline_aggregate_metrics_fpaths",
+                "Aggregate-metrics overrides, one per --baseline-runs source in the same order.",
+                metavar="PATH[,PATH...]",
+            ),
+            _comma_list_flag(
                 "candidates-agg-metrics",
                 "candidate_aggregate_metrics_fpaths",
-                "Candidates' aggregate-metrics JSON, in --candidates order, when not siblings of --candidates.",
+                "Candidate aggregate-metrics overrides, in --candidates or --candidate-runs order.",
                 metavar="PATH[,PATH...]",
             ),
             _value_flag("agent", "agent_name", "Agent to compare on both sides (default: all shared agents)."),
@@ -2091,19 +2110,25 @@ COMMANDS = {
                 "confidence-level",
                 "confidence_level",
                 "Delta confidence level as a fraction between 0 and 1 (default: 0.95). "
-                "Baseline/candidate intervals remain the recorded 95%% intervals.",
+                "Side intervals stay at 95%% and are recomputed for pooled sides.",
             ),
             _value_flag("baseline-agent", "baseline_agent_name", "Agent to read from the baseline's metrics."),
             _comma_list_flag(
+                "baseline-agents",
+                "baseline_agent_names",
+                "Agent to read from each pooled baseline source, in --baseline-runs order.",
+                metavar="NAME[,NAME...]",
+            ),
+            _comma_list_flag(
                 "candidate-agents",
                 "candidate_agent_names",
-                "Agent to read from each candidate's metrics, in --candidates order.",
+                "Agent to read from each candidate source, in --candidates or --candidate-runs order.",
                 metavar="NAME[,NAME...]",
             ),
             _value_flag(
                 "output-dir",
                 "output_dirpath",
-                "Where to write the report (default: the candidate run's own directory).",
+                "Where to write the report (default: the last candidate source's directory).",
                 aliases=("-o",),
                 quote=True,
             ),

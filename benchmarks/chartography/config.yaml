@@ -1,0 +1,36 @@
+# Chain to the existing resources server + agent config.
+# The judge config is chained separately so a user who wants a different judge endpoint
+# can drop judge_model_openai.yaml and supply their own.
+config_paths:
+  - resources_servers/chartography/configs/chartography.yaml
+  - resources_servers/chartography/configs/judge_model_openai.yaml
+
+# We use `_inherit_from` directives to inherit from and not use the generic config above to ensure this benchmark config is isolated.
+chartography_benchmark_resources_server:
+  _inherit_from: chartography
+
+chartography_benchmark_simple_agent:
+  _inherit_from: chartography_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: chartography_benchmark_resources_server
+      datasets:
+      # num_repeats: 10 matches the published protocol -- Chartography's headline all-pass rate
+      # is reported over ten runs per task.
+      - name: chartography
+        type: benchmark
+        jsonl_fpath: benchmarks/chartography/data/chartography_benchmark.jsonl
+        prompt_config: null
+        prepare_script: benchmarks/chartography/prepare.py
+        num_repeats: 10
+        license: Creative Commons Attribution 4.0 International
+
+chartography_benchmark_environment_server:
+  _inherit_from: chartography_environment_server
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_server:
+        name: chartography_benchmark_resources_server
+      agent_server:
+        name: chartography_benchmark_simple_agent
