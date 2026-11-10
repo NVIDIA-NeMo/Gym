@@ -170,6 +170,7 @@ def test_long_workspace_caches_keep_native_socket_paths_short(tmp_path, monkeypa
             context.setenv(name, os.environ[name])
         runtime.configure_cache(str(root))
         assert os.environ["XDG_CACHE_HOME"].startswith(str(root))
+        assert Path(os.environ["TMPDIR"]).resolve().is_relative_to(root)
         with tempfile.TemporaryDirectory(prefix="saas-visual-", dir=os.environ["TMPDIR"]) as directory:
             with socket.socket(socket.AF_UNIX) as sock:
                 sock.bind(str(Path(directory) / "browser.sock"))

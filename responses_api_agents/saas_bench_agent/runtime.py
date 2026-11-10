@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Bundled benchmark locations and explicit writable runtime paths."""
 
+import atexit
+import hashlib
 import os
 import socket
 from pathlib import Path
@@ -47,9 +49,26 @@ def configure_cache(root: str) -> Path:
         existing_libraries = os.environ.get("LD_LIBRARY_PATH", "")
         os.environ["LD_LIBRARY_PATH"] = libraries + (os.pathsep + existing_libraries if existing_libraries else "")
     os.environ["PATH"] = os.pathsep.join(paths) + os.pathsep + os.environ.get("PATH", "")
-    # Native refresh sockets must fit Linux's 108-byte Unix socket limit.
-    # Browser profiles and sockets are transient; persistent caches stay above.
-    os.environ["TMPDIR"] = "/tmp"
+    # Native refresh sockets need short names; their storage stays workspace-backed.
+    temporary = cache / "tmp"
+    temporary.mkdir(exist_ok=True)
+    if len(str(temporary).encode()) > 60:
+        digest = hashlib.sha256(str(temporary).encode()).hexdigest()[:8]
+        alias = Path(f"/tmp/saas-{os.getuid()}-{os.getpid()}-{digest}")
+        if alias.is_symlink():
+            if alias.resolve() != temporary:
+                raise ValueError("Temporary alias points outside this workspace cache")
+        else:
+            alias.symlink_to(temporary, target_is_directory=True)
+
+        def remove_alias() -> None:
+            if alias.is_symlink() and os.readlink(alias) == str(temporary):
+                alias.unlink()
+
+        atexit.register(remove_alias)
+        os.environ["TMPDIR"] = str(alias)
+    else:
+        os.environ["TMPDIR"] = str(temporary)
     os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
     os.environ["SAAS_UID_SHIM"] = str(cache / "saas-uid-shim.so")
     return cache

@@ -66,8 +66,10 @@ its input/output hashes. Each task owns and tears down its own application state
 Use account `nemotron_n4_omni`; CPU allocations on SVG use partition `cpu`, QoS
 `cpu-short`, with a four-hour limit. GPU-serving examples use `batch/normal`.
 Keep all caches/artifacts outside `/root` and `/home/pritamb`.
-Transient browser profiles and Unix refresh sockets use node-local `/tmp`;
-putting sockets beneath a long Lustre path exceeds Linux's socket-path limit.
+Browser profiles and temporary data stay in the workspace cache. When its
+path is too long for Unix sockets, a process-owned short `/tmp` symlink points
+into that cache; the symlink is removed on exit. In containers, `/cache` itself
+is already a short bind alias into the workspace.
 
 ## Results and failure semantics
 
