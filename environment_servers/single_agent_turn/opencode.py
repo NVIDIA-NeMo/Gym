@@ -83,14 +83,18 @@ class OpenCodeEnvironmentServer(SingleAgentTurnLegacyEnvironmentServer):
         tools = evidence.tool_reward
         raw_config = self._agent_options().get("tool_rewards", {})
         base_reward = float(result.reward)
-        if raw_config is not None:
+        # Main may verify an incomplete model response; its tool execution evidence is not final.
+        shape_rewards = raw_config is not None and agent_response.status != "incomplete"
+        if not shape_rewards:
+            tools = None
+        if shape_rewards:
             if tools is None:
                 raise ValueError("Missing native tool evidence for reward shaping")
             tools = tools.for_answer(base_reward, OpenCodeToolRewardConfig.model_validate(raw_config))
         return result.model_copy(
             update={
                 "response": agent_response,
-                "reward": base_reward + (tools.auxiliary_reward if raw_config is not None else 0.0),
+                "reward": base_reward + (tools.auxiliary_reward if shape_rewards else 0.0),
                 "resolved": base_reward == 1.0,
                 "opencode_tool_reward": tools,
                 "turns_used": evidence.turns_used,

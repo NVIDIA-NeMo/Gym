@@ -105,3 +105,45 @@ def test_http_bridge_preserves_reward_and_training_tokens(wire_format):
         "/verify",
         "/close_session",
     ]
+
+
+@pytest.mark.parametrize("base_reward", [0.0, 1.0])
+async def test_incomplete_response_without_final_tool_evidence_preserves_base_reward_and_tokens(base_reward):
+    base, client = _environment_server(token_capture=True)
+    response = _agent_response().model_dump(mode="json")
+    response["status"] = "incomplete"
+    response["incomplete_details"] = {"reason": "max_output_tokens"}
+    response["opencode_evidence"] = {"turns_used": 1, "finished_naturally": False, "tool_reward": None}
+    client.responses[2] = _Response(response)
+    verified = json.loads(client.responses[4].body)
+    verified["reward"] = base_reward
+    client.responses[4] = _Response(verified)
+    server = OpenCodeEnvironmentServer(config=base.config, server_client=client)
+    result = await server.run_request(_request())
+    assert result.failure is None
+    assert result.result.reward == base_reward
+    saved = result.result.model_dump(mode="json")
+    assert saved["opencode_tool_reward"] is None
+    assert saved["finished_naturally"] is False
+    assert saved["response"]["output"] == response["output"]
+    assert saved["response"]["output"][0]["generation_token_ids"] == [3, 4]
+    assert [path for _, path, _ in client.calls][-2:] == ["/verify", "/close_session"]
+
+
+async def test_completed_response_still_requires_native_evidence_for_shaping():
+    from environment_servers.single_agent_turn.app import SessionHandles
+
+    base, client = _environment_server()
+    response = _agent_response().model_copy(update={"status": "completed"})
+    response.__pydantic_extra__["opencode_evidence"] = {
+        "turns_used": 1,
+        "finished_naturally": True,
+        "tool_reward": None,
+    }
+    # Direct verification needs only the verifier reply, after the episode has already closed the agent.
+    client.responses = [client.responses[4]]
+    server = OpenCodeEnvironmentServer(config=base.config, server_client=client)
+    with pytest.raises(ValueError, match="Missing native tool evidence"):
+        await server._verify(
+            _request(), SessionHandles(resources_session_id="resource", agent_session_id="agent"), response, None
+        )
