@@ -175,7 +175,7 @@ class VibenchAgent(OpenCodeSandboxedAgent):
         build technically succeeded.
         """
         config = await super()._create_opencode_config(request, image_input=image_input)
-        options = ((config.get("provider") or {}).get("nemo_gym") or {}).get("options")
+        options = ((config.get("provider") or {}).get(self.config.opencode_provider_id) or {}).get("options")
         if not isinstance(options, dict) or not isinstance(options.get("baseURL"), str):
             return config
 

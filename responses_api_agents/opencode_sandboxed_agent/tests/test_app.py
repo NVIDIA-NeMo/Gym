@@ -921,6 +921,27 @@ class TestOpenCodeSandboxedAgent:
         assert sandbox.upload.await_count == 3
         assert len(set(remote_paths)) == 3
 
+    @mark.asyncio
+    async def test_seeded_sandbox_rejects_row_provider_options_and_cleans_up(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch
+    ) -> None:
+        seed = SimpleNamespace(ok=True, cookies={}, json=AsyncMock(return_value={"sandbox_handle": "seed"}))
+        client = MagicMock(spec=ServerClient)
+        client.post = AsyncMock(return_value=seed)
+        server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=client)
+        sandbox = MagicMock(stop=AsyncMock())
+        monkeypatch.setattr(server, "_start_sandbox", AsyncMock(return_value=sandbox))
+        request = Request({"type": "http", "headers": [], "session": {SESSION_ID_KEY: "seeded-opts"}})
+        body = OpenCodeSandboxedAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "Solve"}]},
+            sandbox_provider_options={"image": "x"},
+        )
+
+        with raises(ValueError, match="seed-supplied"):
+            await server.run(request, body)
+
+        sandbox.stop.assert_awaited_once()
+
     @mark.parametrize(
         "error_type,expected_attempts",
         [(TimeoutError, 2), (sandbox_io_timeout, 2), (PermissionError, 1), (FileNotFoundError, 1)],
@@ -1110,19 +1131,32 @@ class TestOpenCodeSandboxedAgent:
         # Different questions spread over the pool rather than all landing on one key.
         assert len({server._resolve_opencode_env(f"question {i}")["EXA_API_KEY"] for i in range(50)}) == 4
 
+    def test_resolve_opencode_env_exports_provider_id(self) -> None:
+        config = self._create_config()
+        config.opencode_provider_id = "custom"
+        config.opencode_env = {"NEMO_GYM_OPENCODE_PROVIDER_ID": "user"}
+        server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        assert server._resolve_opencode_env("q")["NEMO_GYM_OPENCODE_PROVIDER_ID"] == "custom"
+
     def test_resolve_opencode_env_edge_cases(self) -> None:
         config = self._create_config()
         server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
         # No pool configured -> nothing invented.
         config.opencode_env = {"OPENCODE_ENABLE_EXA": "true"}
-        assert server._resolve_opencode_env("q") == {"OPENCODE_ENABLE_EXA": "true"}
+        assert server._resolve_opencode_env("q") == {
+            "OPENCODE_ENABLE_EXA": "true",
+            "NEMO_GYM_OPENCODE_PROVIDER_ID": "nemo_gym",
+        }
         # An explicit single key wins over the pool.
         config.opencode_env = {"EXA_API_KEY": "pinned", "EXA_API_KEYS": "k0:k1"}
-        assert server._resolve_opencode_env("q") == {"EXA_API_KEY": "pinned"}
+        assert server._resolve_opencode_env("q") == {
+            "EXA_API_KEY": "pinned",
+            "NEMO_GYM_OPENCODE_PROVIDER_ID": "nemo_gym",
+        }
         # An empty pool is not a key.
         config.opencode_env = {"EXA_API_KEYS": "  "}
-        assert server._resolve_opencode_env("q") == {}
+        assert server._resolve_opencode_env("q") == {"NEMO_GYM_OPENCODE_PROVIDER_ID": "nemo_gym"}
 
     @mark.parametrize("via_stdin", [False, True], ids=("argv", "stdin"))
     async def test_responses_builds_opencode_command(

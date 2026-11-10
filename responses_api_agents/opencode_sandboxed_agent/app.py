@@ -1122,6 +1122,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         if pool and not env.get("EXA_API_KEY"):
             digest = hashlib.sha256(query.encode("utf-8")).digest()
             env["EXA_API_KEY"] = pool[int.from_bytes(digest[:8], "big") % len(pool)]
+        env["NEMO_GYM_OPENCODE_PROVIDER_ID"] = self.config.opencode_provider_id
         return env
 
     def _opencode_export_to_usages(self, opencode_export: Dict[str, Any]) -> List[NeMoGymResponseUsage]:
@@ -1922,6 +1923,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         request.state._ng_observation_invocation_id = rollout_id
         observations = None
         try:
+            if seed_session_result.get("sandbox_handle") and body.sandbox_provider_options:
+                raise ValueError("sandbox_provider_options cannot apply to a seed-supplied sandbox")
             await self._upload_inputs(sandbox, body.sandbox_uploads)
             response = await self.responses(request, body.responses_create_params)
             run_result = self._sandbox_id_to_run_result.get(session_key, {}).copy()

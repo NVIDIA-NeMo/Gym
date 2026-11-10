@@ -304,9 +304,10 @@ class TestSandboxModelUrl:
         assert rewrite_loopback_url_for_docker("http://10.0.0.8:9000") == "http://10.0.0.8:9000"
 
     @pytest.mark.asyncio
-    async def test_opencode_config_rewrites_only_the_host(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("provider_id", ["nemo_gym", "custom"])
+    async def test_opencode_config_rewrites_only_the_host(self, tmp_path, monkeypatch, provider_id):
         """Loopback is the container itself inside a bridged sandbox."""
-        agent = make_agent(tmp_path)
+        agent = make_agent(tmp_path, opencode_provider_id=provider_id)
         monkeypatch.setattr(agent, "_uses_docker_provider", lambda: True)
         monkeypatch.setattr(
             "nemo_gym.agents.agent_tools.get_server_url",
@@ -315,7 +316,7 @@ class TestSandboxModelUrl:
 
         config = await agent._create_opencode_config(_FakeRequest())
 
-        assert config["provider"]["nemo_gym"]["options"]["baseURL"] == "http://host.docker.internal:9000/v1"
+        assert config["provider"][provider_id]["options"]["baseURL"] == "http://host.docker.internal:9000/v1"
 
     @pytest.mark.asyncio
     async def test_the_runs_capture_path_survives_the_rewrite(self, tmp_path, monkeypatch):
