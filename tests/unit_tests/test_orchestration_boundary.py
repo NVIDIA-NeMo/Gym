@@ -15,7 +15,8 @@
 """Only the CLI entrypoint may import ``nemo_gym.orchestration``; anything else belongs in a lower package.
 
 Covers ``nemo_gym/`` and the code built on it (servers with their own tests, benchmarks, scripts). The core suite under
-``tests/`` is not scanned: those tests move together with the code they cover.
+``tests/`` is not scanned: those tests move together with the code they cover. Only files git knows about are scanned
+(tracked, or untracked and not ignored), so installed copies of Gym, such as a server's `.venv`, are left out.
 
 ``KNOWN_VIOLATIONS`` lists the imports that break the rule today, as (file, imported module). Each goes away when the
 imported code moves into the package that owns it. The test fails on an import that is not listed and on a listed
@@ -24,6 +25,7 @@ entry that no longer matches an import, so the list can only shrink.
 
 import ast
 import functools
+import subprocess
 from pathlib import Path
 
 
@@ -103,11 +105,24 @@ def _orchestration_imports(node: ast.AST, current: str, is_package: bool) -> lis
     return []
 
 
+def _python_files(repo_root: Path, scanned_roots: list[Path]) -> list[Path]:
+    """The Python files under `scanned_roots` that git tracks, or that it does not ignore."""
+    listed = subprocess.run(
+        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "*.py"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split("\0")
+    paths = (repo_root / name for name in listed if name)
+    return sorted(p for p in paths if p.is_file() and any(p.is_relative_to(root) for root in scanned_roots))
+
+
 @functools.cache
 def _imports() -> dict[tuple[str, str], list[str]]:
     """Every import of orchestration outside it and the CLI entrypoint, as (file, module) to its source lines."""
     found: dict[tuple[str, str], list[str]] = {}
-    for path in sorted(p for root in SCANNED_ROOTS if root.is_dir() for p in root.rglob("*.py")):
+    for path in _python_files(REPO_ROOT, SCANNED_ROOTS):
         if path.is_relative_to(ORCHESTRATION) or path in ALLOWED_IMPORTERS:
             continue
         source = path.read_text()
@@ -136,3 +151,13 @@ def test_known_violations_are_still_violations() -> None:
     assert not stale, "These no longer import orchestration; remove them from KNOWN_VIOLATIONS:\n" + "\n".join(
         f"{path}: {module}" for path, module in stale
     )
+
+
+def test_python_files_skips_ignored_trees_and_unscanned_roots(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / ".gitignore").write_text(".venv/\n")
+    for relative in ("scripts/a.py", "scripts/.venv/lib/installed.py", "elsewhere/b.py"):
+        (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / relative).write_text("")
+
+    assert _python_files(tmp_path, [tmp_path / "scripts"]) == [tmp_path / "scripts" / "a.py"]
