@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import json
 from abc import abstractmethod
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
@@ -37,12 +36,11 @@ from nemo_gym.agents import (
     RunEvidence,
     SimpleResponsesAPIAgent,
     confirmed_policy_response_timeout,
+    model_http_error_outcome,
 )
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
-    MODEL_CONTEXT_LIMIT,
-    MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
     FailureHeader,
     NeMoGymResponse,
@@ -101,28 +99,12 @@ def _model_call_error(error: BaseException) -> ClientResponseError | ClientConne
 def _model_error_outcome(error: ClientResponseError | ClientConnectionError) -> AgentOutcome:
     """The outcome ladder's error for the failed model call a graph ended on.
 
-    With ``propagate_context_overflow_errors`` on, Gym's model server answers a context overflow with HTTP 400 and
-    OpenAI's error envelope, code ``context_length_exceeded``; ``raise_for_status`` keeps that body on the error as
-    ``response_content``. That is a context limit. Another HTTP error keeps its status; no reply is a transport error.
+    ``raise_for_status`` keeps the model server's error body on the error as ``response_content``, so a propagated
+    context overflow is a context limit. No reply is a transport error.
     """
     if not isinstance(error, ClientResponseError):
         return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
-    if (
-        error.status == 400
-        and _openai_error_code(getattr(error, "response_content", None)) == "context_length_exceeded"
-    ):
-        return AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT)
-    return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=error.status)
-
-
-def _openai_error_code(body: bytes | str | None) -> str | None:
-    """The ``error.code`` of an OpenAI error envelope, or ``None`` for any other body."""
-    try:
-        error = json.loads(body or b"").get("error")
-    except (TypeError, ValueError, AttributeError):
-        return None
-    code = error.get("code") if isinstance(error, dict) else None
-    return code if isinstance(code, str) else None
+    return model_http_error_outcome(error.status, error_body=getattr(error, "response_content", None))
 
 
 class LangGraphAgentConfig(BaseResponsesAPIAgentConfig):
