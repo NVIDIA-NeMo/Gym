@@ -52,7 +52,7 @@ IDENTIFIER_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,127}\Z")
 def bounded_json(value: Any, *, max_bytes: int | None = MAX_WIRE_BYTES, max_depth: int = 3 * MAX_DEPTH + 8) -> None:
     """Check exact JSON types and limits; ``max_bytes=None`` keeps only structure/type checks.
 
-    HTTP prompt/response envelopes already have an ingress byte limit. Task and wire values keep their own bounds.
+    Prompt/response envelopes use the standard HTTP transport policy. Task and wire values keep their own bounds.
     """
     pending = [(value, 0)]
     nodes = size = 0

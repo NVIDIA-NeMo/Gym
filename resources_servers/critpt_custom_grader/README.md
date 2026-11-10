@@ -237,17 +237,14 @@ grader call itself raised.
 
 | Status | Category | When |
 |---|---|---|
-| 413 | `request_limit` | the request body exceeds `max_request_bytes` (default 10 MiB) |
 | 422 | `request_invalid` | not a JSON object, or a bad request shape (see below) |
 | 422 | `task_invalid` | `/seed_session` only: the task fields fail validation |
 | 503 | `server_not_ready` | `/verify` with the grader not running, once the request, task and source checks pass |
 
 A bad request shape is invalid prompt parameters, tools or `tool_choice`, or, on `/verify`, a `response` that is not a
 valid response. Prompt and response envelopes retain JSON node, depth and type limits (including integers wider
-than 63 bits and non-finite numbers), but have no separate byte cap. The overall HTTP request is bounded by
-`max_request_bytes`; raise that positive integer in the resources-server config when supporting longer contexts,
-allowing room for both prompt history and the saved response, JSON escaping and task data. Oversized requests return
-`request_limit` before grading. Task, executable-source and result limits are unchanged.
+than 63 bits and non-finite numbers), but have no byte cap in this grader. HTTP transport limits follow the
+standard Gym server/deployment policy. Task, executable-source and result limits are unchanged.
 
 On `/verify` an invalid task is not an error status: it is a 200 row with category `task_invalid`,
 terminal. `server_not_ready` is answered only after the request, task and source checks have passed, so while the

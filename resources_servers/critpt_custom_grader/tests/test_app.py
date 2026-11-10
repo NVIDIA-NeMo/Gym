@@ -371,12 +371,10 @@ async def test_sandbox_observations_and_cleanup_status_are_reported(make_server)
 
 
 @pytest.mark.asyncio
-async def test_malformed_and_oversized_bodies_answer_category_only(make_server, caplog):
+async def test_malformed_body_answers_category_only(make_server, caplog):
     server, app, fake = make_server()
     status, result = await post(app, "/verify", raw=b'{"not json')
     assert (status, result) == (422, {"error": {"category": "request_invalid"}})
-    status, result = await post(app, "/verify", raw=b"x" * (server.config.max_request_bytes + 1))
-    assert (status, result) == (413, {"error": {"category": "request_limit"}})
     status, result = await post(app, "/verify", payload(entrypoint=""))
     assert status == 200 and result["category"] == "task_invalid"
     assert REFERENCE_MARKER not in caplog.text
@@ -774,12 +772,11 @@ async def test_pre_endpoint_privacy_survives_late_handler_registration(
 
 
 @pytest.mark.asyncio
-async def test_malformed_saved_response_and_ingress_limit(make_server):
-    _, app, fake = make_server(max_request_bytes=64 * 1024)
+async def test_malformed_saved_response_answers_category_only(make_server):
+    _, app, fake = make_server()
     row = payload()
     row["response"] = {"private": REFERENCE_MARKER}
     assert await post(app, "/verify", row) == (422, {"error": {"category": "request_invalid"}})
-    assert await post(app, "/verify", raw=b" " * (64 * 1024 + 1)) == (413, {"error": {"category": "request_limit"}})
     fake.grade.assert_not_awaited()
 
 
@@ -1840,45 +1837,21 @@ async def test_long_reasoning_preserves_response_and_executable_limits(make_serv
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", ["/verify", "/seed_session"])
-async def test_configurable_ingress_limit_is_the_envelope_byte_bound(make_server, caplog, path):
+async def test_large_request_uses_standard_transport_without_a_grader_byte_cap(make_server, caplog, path):
     _, app, fake = make_server()
     row = payload()
     row["responses_create_params"]["input"] = "private_prompt_marker" * 600_000
+    assert len(json.dumps(row).encode()) > 10 * 1024 * 1024
     if path == "/seed_session":
         row.pop("response")
-    assert await post(app, path, row) == (413, {"error": {"category": "request_limit"}})
-    fake.grade.assert_not_awaited()
-    _, larger_app, larger_fake = make_server(max_request_bytes=16 * 1024 * 1024)
-    status, result = await post(larger_app, path, row)
+    status, result = await post(app, path, row)
     assert status == 200
     if path == "/verify":
         assert result["category"] == "passed"
-        larger_fake.grade.assert_awaited_once()
+        fake.grade.assert_awaited_once()
+    else:
+        fake.grade.assert_not_awaited()
     assert "private_prompt_marker" not in caplog.text
-
-
-@pytest.mark.asyncio
-async def test_stream_limit_stops_before_reading_remaining_chunks(make_server):
-    server, _, fake = make_server(max_request_bytes=8)
-    receive = AsyncMock(
-        side_effect=[
-            {"type": "http.request", "body": b"12345", "more_body": True},
-            {"type": "http.request", "body": b"6789", "more_body": True},
-            {"type": "http.request", "body": b"unread", "more_body": False},
-        ]
-    )
-    value, error = await server._read_json(adapter.Request({"type": "http"}, receive))
-    assert value is None
-    assert error.status_code == 413
-    assert json.loads(error.body) == {"error": {"category": "request_limit"}}
-    assert receive.await_count == 2
-    fake.grade.assert_not_awaited()
-
-
-@pytest.mark.parametrize("limit", [0, -1, True, 1.5, "100"])
-def test_ingress_limit_requires_a_positive_integer(make_server, limit):
-    with pytest.raises(ValidationError):
-        make_server(max_request_bytes=limit)
 
 
 def test_unbounded_envelope_bytes_still_enforce_json_structure_and_types():

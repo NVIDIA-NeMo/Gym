@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Stateless HTTP adapter over the sandbox-API grader.
 
-Standard SimpleResourcesServer routes. ``/verify`` and ``/seed_session`` read the request body up to
-``config.max_request_bytes``, then parse and validate it inside the handler, so a malformed or oversized request answers a
+Standard SimpleResourcesServer routes. ``/verify`` and ``/seed_session`` parse and validate the request body
+inside the handler, so a malformed request answers a
 category-only error and never reaches core's body-logging validation handler. These two handlers never log request
 bodies, validation details, provider exceptions or task sources; the stock typed routes (``/close_session``,
 ``/aggregate_metrics``) keep core's behaviour.
@@ -143,7 +143,6 @@ class CritPtCustomGraderConfig(BaseResourcesServerConfig):
     sandbox_spec: SandboxSpecConfig = Field(default_factory=SandboxSpecConfig)
     execution: ExecutionPolicy = Field(default_factory=ExecutionPolicy)
     comparison: ComparisonDefaults = Field(default_factory=ComparisonDefaults)
-    max_request_bytes: int = Field(default=10 * 1024 * 1024, gt=0, strict=True)
     reference_cache_dir: str | None = None
     startup_probe: bool = True
     score_comparator_uncertain_as_incorrect: bool = False
@@ -417,12 +416,9 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
                 self._grader = self._provider = None
                 self._probe_info = {}
 
-    async def _read_json(self, request: Request) -> tuple[dict | None, JSONResponse | None]:
-        body = bytearray()
-        async for chunk in request.stream():
-            if len(body) + len(chunk) > self.config.max_request_bytes:
-                return None, _error("request_limit", 413)
-            body.extend(chunk)
+    @staticmethod
+    async def _read_json(request: Request) -> tuple[dict | None, JSONResponse | None]:
+        body = await request.body()
         try:
             value = json.loads(body.decode("utf-8"))
         except (ValueError, UnicodeError, RecursionError):
