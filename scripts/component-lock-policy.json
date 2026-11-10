@@ -126,7 +126,9 @@
       "alibabacloud-ecs20140526",
       "alibabacloud-tea-openapi",
       "alibabacloud-tea-util",
-      "volcengine-python-sdk"
+      "volcengine-python-sdk",
+      "paddleocr",
+      "paddlepaddle"
     ],
     "override-dependencies": [
       "grpcio-status==1.71.2",
