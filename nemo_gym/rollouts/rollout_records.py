@@ -24,7 +24,7 @@ import os
 import re
 import warnings
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -192,6 +192,18 @@ class RolloutRecord:
             if actual != self.expected_identity:
                 raise ConfigError(f"Saved record identity changed after indexing {self.path} at byte {self.offset}.")
         return row
+
+
+def read_record_rows(records: Iterable[RolloutRecord]) -> list[dict]:
+    """Read records in order through one open handle per file, for random access without an open per record."""
+    with ExitStack() as files:
+        handles = {}
+        rows = []
+        for record in records:
+            if record.path not in handles:
+                handles[record.path] = files.enter_context(record.path.open("rb"))
+            rows.append(record._read(handles[record.path]))
+        return rows
 
 
 @dataclass(frozen=True, slots=True)
@@ -816,14 +828,7 @@ class RolloutRecords:
     def selected(self, disposition: str) -> list[dict]:
         # Existing consumers explicitly request materialized results. Keep reads
         # out of reconciliation/coverage and reuse handles for random access.
-        with ExitStack() as files:
-            handles = {}
-            rows = []
-            for record in self.selected_records(disposition).values():
-                if record.path not in handles:
-                    handles[record.path] = files.enter_context(record.path.open("rb"))
-                rows.append(record._read(handles[record.path]))
-            return rows
+        return read_record_rows(self.selected_records(disposition).values())
 
     def _retryable(self, identity: str) -> bool:
         payload = self.payloads.get((identity, self.latest.get(identity)))

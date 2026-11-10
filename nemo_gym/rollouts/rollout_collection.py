@@ -135,6 +135,7 @@ from nemo_gym.rollouts.rollout_records import (
     coverage_path_for,
     journal_path_for,
     logical_rollout_id,
+    read_record_rows,
     resolve_rollout_path,
 )
 from nemo_gym.rollouts.rollout_recovery import (
@@ -4794,7 +4795,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         # Group results by the environment server they ran through.
         servers_by_agent = _environment_servers_by_agent(global_config_dict)
         server_results: Dict[str, List[Dict]] = {}
-        server_agents: Dict[str, Optional[str]] = {}
+        server_rows: List[Tuple[str, Optional[str]]] = []
         for row, result in zip(rows, results):
             agent_name = (row.get(AGENT_REF_KEY_NAME) or result.get(AGENT_REF_KEY_NAME) or {}).get("name")
             server_name = row.get(NG_ENVIRONMENT_SERVER_KEY) or result.get(NG_ENVIRONMENT_SERVER_KEY)
@@ -4809,17 +4810,13 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     f"running config (available: {available_servers}); aggregate with the config that produced them"
                 )
             server_results.setdefault(server_name, []).append(result)
-            if server_name not in server_agents:
-                if agent_name is None:
-                    # A materialized row names no agent; the environment server's own binding does.
-                    agent_name = self._agent_name_for_row({NG_ENVIRONMENT_SERVER_KEY: server_name}, global_config_dict)
-                server_agents[server_name] = agent_name
+            server_rows.append((server_name, agent_name))
 
         # One entry per environment server, labelled by the agent it binds so metric names and
         # `agent_ref` keep today's shape. Servers that front the same agent (a session-based server and its
         # legacy_agent twin) are each labelled by their own name, whatever order their rows arrive in.
         if labels is None:
-            labels = label_runs(server_agents)
+            labels = label_runs(self._server_agents(server_rows, global_config_dict))
         first_error: Optional[Exception] = None
 
         async def _fetch_agent_metrics(server_name: str, agent_name: str, agent_result_list: List[Dict]) -> Dict:
@@ -4979,15 +4976,30 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         """
         global_config_dict = self.setup_server_client().global_config_dict
         servers_by_agent = _environment_servers_by_agent(global_config_dict)
+        server_rows = [
+            (server_name, (sample.get(AGENT_REF_KEY_NAME) or {}).get("name"))
+            for sample in samples.values()
+            if (server_name := _metrics_group(sample, lambda: servers_by_agent)) is not None
+        ]
+        return label_runs(self._server_agents(server_rows, global_config_dict))
+
+    def _server_agents(
+        self, server_rows: Iterable[Tuple[str, Optional[str]]], global_config_dict: DictConfig
+    ) -> Dict[str, Optional[str]]:
+        """The agent each environment server's entry is labelled by (``label_runs``): its first row's agent.
+
+        A materialized row names no agent, so the environment server's own binding does. Both the run-wide
+        aggregate and the completion files label their entries from this mapping.
+        """
         server_agents: Dict[str, Optional[str]] = {}
-        for sample in samples.values():
-            server_name = _metrics_group(sample, lambda: servers_by_agent)
-            if server_name is not None and server_name not in server_agents:
-                agent_name = (sample.get(AGENT_REF_KEY_NAME) or {}).get("name")
-                if agent_name is None:
-                    agent_name = self._agent_name_for_row({NG_ENVIRONMENT_SERVER_KEY: server_name}, global_config_dict)
-                server_agents[server_name] = agent_name
-        return label_runs(server_agents)
+        for server_name, agent_name in server_rows:
+            if server_name not in server_agents:
+                server_agents[server_name] = (
+                    agent_name
+                    if agent_name is not None
+                    else self._agent_name_for_row({NG_ENVIRONMENT_SERVER_KEY: server_name}, global_config_dict)
+                )
+        return server_agents
 
     async def _write_agent_complete(
         self,
@@ -5032,8 +5044,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
             success_records = agent_records("success")
             other_records = agent_records("failure") + agent_records("omitted")
-            results = await asyncio.to_thread(lambda: [record.read() for record in success_records])
-            others = await asyncio.to_thread(lambda: [record.read() for record in other_records])
+            results = await asyncio.to_thread(read_record_rows, success_records)
+            others = await asyncio.to_thread(read_record_rows, other_records)
             scored_keys = {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) for r in results}
             failed_keys = {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) for r in others}
             if scored_keys | failed_keys != keys:

@@ -1137,6 +1137,15 @@ class TestRolloutCollection:
             return FakeResponse(200, {"response": {}, "reward": 1.0 if rollout_index == 0 else 0.0})
 
         install_fake_server_client(monkeypatch, AsyncMock(side_effect=post), agent_names=("alpha", "beta"))
+        from nemo_gym.rollouts.rollout_store import RolloutStore
+
+        # The store selects rollouts in materialized order; reversed here, only the completion file's sort restores it.
+        selected_records = RolloutStore.selected_records
+        monkeypatch.setattr(
+            RolloutStore,
+            "selected_records",
+            lambda self, disposition: dict(reversed(list(selected_records(self, disposition).items()))),
+        )
 
         await RolloutCollectionHelper().run_from_config(config)
 
@@ -1612,6 +1621,64 @@ class TestRolloutCollection:
             for entry in orjson.loads((tmp_path / "rollouts_aggregate_metrics.json").read_bytes())
         }
         assert alpha["aggregate"] == run_aggregate["alpha"]
+
+    async def test_two_environment_servers_fronting_one_agent_each_get_the_run_wide_label(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        """Each server's file is named and labelled as its run-wide entry, and equals it."""
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_text(
+            "\n".join(
+                json.dumps(
+                    {
+                        "task_id": {"taskset": taskset, "task_id": "t"},
+                        "task_input": {"responses_create_params": {"input": taskset}, "task_data": {"id": taskset}},
+                    }
+                )
+                for taskset in ("set_a", "set_b")
+            )
+            + "\n"
+        )
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
+            environment_server_routes={"set_a": "env_a", "set_b": "env_b"},
+            disable_health_check=True,
+        )
+
+        async def post(server_name: str, url_path: str, json, **kwargs) -> FakeResponse:
+            if url_path == "/aggregate_metrics":
+                return FakeResponse(
+                    200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump()
+                )
+            return self._episode_reply(json, {"reward": 1.0 if server_name == "env_a" else 0.0})
+
+        client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        client.global_config_dict = OmegaConf.create(
+            {
+                "alpha": {"responses_api_agents": {"impl": {}}},
+                **{
+                    server: {"environment_servers": {"legacy_agent": {"agent_server": {"name": "alpha"}}}}
+                    for server in ("env_a", "env_b")
+                },
+            }
+        )
+
+        await RolloutCollectionHelper().run_from_config(config)
+
+        run_aggregate = {
+            entry[NG_ENVIRONMENT_SERVER_KEY]: entry
+            for entry in orjson.loads((tmp_path / "rollouts_aggregate_metrics.json").read_bytes())
+        }
+        complete_dir = tmp_path / "rollouts_agent_complete"
+        files = {path.name: orjson.loads(path.read_bytes()) for path in complete_dir.iterdir()}
+        assert sorted(files) == ["env_a.json", "env_b.json"]
+        for server in ("env_a", "env_b"):
+            completion = files[f"{server}.json"]
+            assert (
+                completion[AGENT_REF_KEY_NAME]["name"] == run_aggregate[server][AGENT_REF_KEY_NAME]["name"] == server
+            )
+            assert completion["aggregate"] == run_aggregate[server]
 
     @pytest.mark.parametrize(
         "resume_from_cache, existing_rollouts",
