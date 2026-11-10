@@ -184,8 +184,8 @@ jobs:
           echo "One or more server-suite shards failed (result: ${{ needs.server-suite.result }})."
           exit 1
 
-  # Stacks every shard's dependency cache onto gym:main as gym:main-offline, an image that runs
-  # the server suite without network access. Layers are stacked in the registry, not rebuilt.
+  # Merges every shard's dependency cache into one layer on top of gym:main as gym:main-offline,
+  # an image that runs the server suite without network access.
   offline-image:
     name: Publish offline server image
     runs-on: nemo-ci-aws-cpu-4-16
@@ -198,22 +198,29 @@ jobs:
         env:
           AWS_REGION: us-east-1
 
-      - name: Stack shard caches onto gym:main
+      # Shards download shared wheels (torch, CUDA libraries) into separate uv archives. Each
+      # shard's links replace the previous shard's, and pruning drops the archives left unlinked.
+      - name: Merge shard caches onto gym:main
+        shell: bash
         env:
           REPOSITORY: ${{ steps.ecr.outputs.registry }}/gym
         run: |
           curl -fsSL "$CRANE_URL" -o "$RUNNER_TEMP/crane.tar.gz"
           echo "$CRANE_SHA256  $RUNNER_TEMP/crane.tar.gz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/crane.tar.gz" -C "$RUNNER_TEMP" crane
+          curl -LsSf "$UV_INSTALL_URL" | env UV_UNMANAGED_INSTALL="$RUNNER_TEMP/uv" sh
           crane="$RUNNER_TEMP/crane"
-          layers=()
+          merged="$RUNNER_TEMP/merged"
+          mkdir -p "$merged"
           for shard in $(seq 0 $((NUM_SHARDS - 1))); do
             digest="$("$crane" manifest "$REPOSITORY:main-cache-$shard" |
               python3 -c 'import json, sys; print(json.load(sys.stdin)["layers"][0]["digest"])')"
-            "$crane" blob "$REPOSITORY@$digest" > "$RUNNER_TEMP/cache-$shard.tar.gz"
-            layers+=(--new_layer "$RUNNER_TEMP/cache-$shard.tar.gz")
+            "$crane" blob "$REPOSITORY@$digest" | tar -xzf - -C "$merged"
+            "$RUNNER_TEMP/uv/uv" cache prune --cache-dir "$merged/opt/nemo-gym/cache/uv"
           done
-          "$crane" append --base "$REPOSITORY:main" "${layers[@]}" \
+          tar -C "$merged" --numeric-owner --owner=65532 --group=65532 \
+            -czf "$RUNNER_TEMP/cache.tar.gz" opt/nemo-gym/cache
+          "$crane" append --base "$REPOSITORY:main" --new_layer "$RUNNER_TEMP/cache.tar.gz" \
             --new_tag "$REPOSITORY:main-offline" --set-base-image-annotations
 
   test-wheel-install:
