@@ -24,6 +24,7 @@ import pytest
 import yaml
 from fastapi import Request
 
+from nemo_gym.agents import decide_outcome
 from nemo_gym.client import ServerClient
 from nemo_gym.config import SKILLS_REF_KEY_NAME
 from nemo_gym.core import (
@@ -43,10 +44,10 @@ from responses_api_agents.claude_code_agent.app import (
     ModelServerRef,
     ResourcesServerRef,
     _extract_instruction,
-    _invocation_outcome,
     parse_stream_json,
 )
 from responses_api_agents.claude_code_agent.observability import extract_claude_code_observations
+from responses_api_agents.claude_code_agent.parsing import invocation_error_type
 
 
 def _write_skill_dir(root: Path, name: str = "cot_enhanced") -> Path:
@@ -896,22 +897,35 @@ class TestExtractInstruction:
 
 
 class TestParseStreamJson:
+    # (result metadata, exit code, observed error type, ladder status, ng_agent_outcome kind). Before the outcome
+    # ladder a nonzero exit was failed without a kind (graded) and a missing result incomplete (graded); both are
+    # now agent_run_error (retried by default), and an error result with no HTTP status is unknown (retried).
     @pytest.mark.parametrize(
-        ("metadata", "returncode", "expected"),
+        ("metadata", "returncode", "error_type", "status", "kind"),
         [
-            ({"subtype": "success"}, 0, ("completed", None)),
-            ({"subtype": "success"}, 7, ("failed", "process_exit_7")),
-            ({"subtype": "error_max_turns", "is_error": True}, 0, ("incomplete", "error_max_turns")),
-            ({"subtype": "error_during_execution", "is_error": True}, 0, ("failed", "error_during_execution")),
-            ({"subtype": "success", "is_error": True}, 0, ("failed", "agent_error")),
-            ({"is_error": True}, 0, ("failed", "agent_error")),
-            ({"subtype": "error_max_turns", "is_error": True}, 7, ("incomplete", "error_max_turns")),
-            ({}, 7, ("failed", "process_exit_7")),
-            ({}, 0, ("incomplete", "result_missing")),
+            ({"subtype": "success"}, 0, None, "completed", None),
+            ({"subtype": "success"}, 7, "process_exit_7", "failed", "agent_run_error"),
+            ({"subtype": "error_max_turns", "is_error": True}, 0, "error_max_turns", "incomplete", None),
+            (
+                {"subtype": "error_during_execution", "is_error": True},
+                0,
+                "error_during_execution",
+                "failed",
+                "unknown",
+            ),
+            ({"subtype": "success", "is_error": True}, 0, "agent_error", "failed", "unknown"),
+            ({"is_error": True}, 0, "agent_error", "failed", "unknown"),
+            ({"subtype": "error_max_turns", "is_error": True}, 7, "error_max_turns", "incomplete", None),
+            ({}, 7, "process_exit_7", "failed", "agent_run_error"),
+            ({}, 0, "result_missing", "failed", "agent_run_error"),
         ],
     )
-    def test_invocation_outcome(self, metadata: dict, returncode: int, expected: tuple[str, str | None]) -> None:
-        assert _invocation_outcome(metadata, returncode) == expected
+    def test_invocation_outcome(
+        self, metadata: dict, returncode: int, error_type: str | None, status: str, kind: str | None
+    ) -> None:
+        assert invocation_error_type(metadata, returncode) == error_type
+        decision = decide_outcome(_make_agent()._run_evidence(metadata, returncode=returncode, timed_out=False))
+        assert (decision.status, decision.outcome and decision.outcome.failure_kind) == (status, kind)
 
     def _assistant(self, content: list) -> str:
         return _event("assistant", message={"content": content, "usage": {"input_tokens": 10, "output_tokens": 5}})
@@ -924,7 +938,7 @@ class TestParseStreamJson:
     def test_empty(self) -> None:
         items, usage = parse_stream_json("")
         assert items == []
-        assert usage == {"input_tokens": 0, "output_tokens": 0}
+        assert usage == {"input_tokens": 0, "output_tokens": 0, "model_replied": False}
 
     def test_text_message(self) -> None:
         line = self._assistant([{"type": "text", "text": "hello"}])
@@ -1043,25 +1057,30 @@ class TestParseStreamJson:
             "subtype": "success",
             "is_error": False,
             "duration_ms": 1234,
+            "model_replied": False,
         }
 
     @pytest.mark.parametrize(
-        ("text", "expected"),
+        ("text", "error_type", "status"),
         [
+            # A refusal is the model's answer and is graded (decision 5); it was a failed response before.
             (
                 "API Error: Claude Code is unable to respond to this request, which appears to violate our Usage "
                 "Policy (https://www.anthropic.com/legal/aup). Try rephrasing the request.",
-                ("failed", "refusal"),
+                "refusal",
+                "completed",
             ),
-            ("API Error: 500 upstream unavailable", ("failed", "agent_error")),
+            # The status counts only with Claude Code's own error message before the result (test_outcome_ladder.py).
+            ("API Error: 500 upstream unavailable", "agent_error", "failed"),
         ],
     )
-    def test_error_result_with_success_subtype_is_classified(self, text: str, expected: tuple[str, str]) -> None:
+    def test_error_result_with_success_subtype_is_classified(self, text: str, error_type: str, status: str) -> None:
         # Claude Code 2.1.108 reports a model refusal or API error with subtype "success" and is_error true.
         result = _event("result", subtype="success", is_error=True, result=text, stop_reason="stop_sequence")
         _, metadata = parse_stream_json(result)
         assert metadata["error_message"] == text
-        assert _invocation_outcome(metadata, 0) == expected
+        assert invocation_error_type(metadata, 0) == error_type
+        assert decide_outcome(_make_agent()._run_evidence(metadata, returncode=0, timed_out=False)).status == status
 
     def test_num_turns_absent_when_no_result_event(self) -> None:
         assistant = self._assistant([{"type": "text", "text": "hi"}])

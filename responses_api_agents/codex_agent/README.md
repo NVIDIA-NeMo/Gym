@@ -191,19 +191,20 @@ does not end Codex, as it would not under Harbor.
 
 Responses and close observations preserve text, reasoning, tool events, partial output,
 CLI aggregate usage, and sandbox hostname/PID/version. Wall-time and the pinned CLI's explicit
-model-output-limit event yield incomplete, potentially gradable work. Reported provider failures retain partial output and classified cause; the Environment Server decides grading and episode retries. Worker and cleanup failures remain execution errors. Only Resources determines reward.
+model-output-limit event yield incomplete, potentially gradable work. A run that hit its time limit is graded unless the forwarder's last recorded model attempt failed to connect, was cut short, or answered 408, 425, 429 or a 5xx: then the deadline was spent on the endpoint, and the response is `failed` with that model error, which is retried. Reported provider failures retain partial output and classified cause; the Environment Server decides grading and episode retries. A reported 400 whose body is the model server's context-overflow envelope (code `context_length_exceeded`) is a context limit: `incomplete` and graded, even on the first request. A run that leaves no usable result (a nonzero or signalled exit, a failed turn, a missing `turn.completed`) is a `failed` response with `agent_run_error`, retried by default. Supervisor, cleanup and capture failures remain execution errors. The shared outcome ladder decides each status (see the harness guide). Only Resources determines reward.
 
 `verify_after_agent_error: true` grades a failed run the way Harbor grades after any agent
-exit: a nonzero or signalled Codex exit, a failed turn, or a missing `turn.completed` returns a
-`failed` response (`incomplete` if the run also hit its time limit; the error is in
-`metadata.graded_agent_error`) with no classified cause instead of an execution error, so the
-Environment Server still verifies it. It applies only when Codex started a turn, the supervisor
-confirmed cleanup, the Codex error that ended the run names no model-endpoint transport or
-429/5xx failure, and the sandbox still reports running and answers a probe command. A lost or
-unresponsive sandbox, an unconfirmed cleanup, and an endpoint outage stay execution errors, so
-the episode is retried. A reported provider failure keeps its classified cause, so the
-Environment Server's outcome policy decides it as before, and a run that failed before its first
-turn stays an execution error that carries Codex's stderr.
+exit: a nonzero or signalled Codex exit, a failed turn, or a missing `turn.completed` counts the
+work left in the sandbox as the run's result, so the response is `completed` (`incomplete` if
+the run also hit its time limit; the error is in `metadata.graded_agent_error`) instead of
+`failed` with `agent_run_error`, and the Environment Server verifies it. It applies only when
+Codex started a turn, the supervisor confirmed cleanup, the Codex error that ended the run names
+no model-endpoint transport or 429/5xx failure, and the sandbox still reports running and
+answers a probe command. A lost or unresponsive sandbox and an endpoint outage stay
+`agent_run_error`, and an unconfirmed cleanup stays an execution error, so the episode is
+retried. A reported provider failure keeps its classified cause, so the Environment Server's
+outcome policy decides it as before, and a run that failed before its first turn stays
+`agent_run_error` with Codex's stderr in its error.
 
 The endpoint check reads only the failure that ended the run, after its last model output:
 `turn.failed` and the last error event before it, or the last event when Codex was killed while
