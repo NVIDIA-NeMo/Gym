@@ -40,11 +40,13 @@ import io
 import ipaddress
 import json
 from typing import Any, Literal
-from urllib.parse import urlsplit
+from urllib.parse import quote, quote_plus, urlsplit
 
-from aiohttp import FormData
+from aiohttp import ClientResponseError, FormData, RequestInfo
+from multidict import CIMultiDict, CIMultiDictProxy
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, model_validator
+from yarl import URL
 
 from nemo_gym.client import request
 from responses_api_agents.agentic_mme_agent.search_cache import shared_cache
@@ -173,21 +175,67 @@ def public_url(url: str) -> str:
 
 
 async def http_payload(config: RetrievalConfig, method: str, url: str, **kwargs: Any) -> bytes:
-    # The timeout covers Gym's retry loop as well as reading the response.
-    async with asyncio.timeout(config.timeout_seconds):
-        response = await request(method, url, allow_redirects=False, **kwargs)
-        try:
-            if not 200 <= response.status < 300:
-                # Do not expose provider URLs, request headers, or secrets in tool errors.
-                raise ValueError(f"retrieval provider returned HTTP {response.status}")
-            payload = bytearray()
-            async for chunk in response.content.iter_chunked(65536):
-                payload.extend(chunk)
-                if len(payload) > config.max_response_bytes:
-                    raise ValueError("retrieval response exceeds the configured byte limit")
-            return bytes(payload)
-        finally:
-            response.release()
+    secrets = {config.provider_key(provider) for provider in (*SEARCH_PROVIDERS, "jina")} - {""}
+    redactions = sorted(
+        {encoded for secret in secrets for encoded in (secret, quote(secret, safe=""), quote_plus(secret))},
+        key=len,
+        reverse=True,
+    )
+
+    def redact(text: str) -> str:
+        for secret in redactions:
+            text = text.replace(secret, "[redacted]")
+        return text
+
+    safe_url = URL(redact(str(URL(url).with_query(None).with_fragment(None))))
+    safe_info = RequestInfo(safe_url, method, CIMultiDictProxy(CIMultiDict()))
+
+    def redact_transport(error: Exception, _upload_complete: bool | None) -> None:
+        # The shared client invokes this before logging or retrying the original exception.
+        pending: list[BaseException] = [error]
+        seen: set[int] = set()
+        while pending:
+            current = pending.pop()
+            if id(current) not in seen:
+                seen.add(id(current))
+                pending.extend(item for item in (current.__cause__, current.__context__) if item is not None)
+                pending.extend(item for item in current.args if isinstance(item, BaseException))
+                if isinstance(current, ClientResponseError):
+                    current.request_info = safe_info
+                    current.history = ()
+                    current.headers = None
+                    current.message = redact(current.message)
+                    current.args = (safe_info, ())
+                else:
+                    current.args = tuple(redact(item) if isinstance(item, str) else item for item in current.args)
+                    if isinstance(getattr(current, "message", None), str):
+                        current.message = redact(current.message)
+                if isinstance(current, OSError) and isinstance(current.strerror, str):
+                    current.strerror = redact(current.strerror)
+                if hasattr(current, "__notes__"):
+                    current.__notes__ = [redact(note) for note in current.__notes__]
+
+    try:
+        # The timeout covers Gym's retry loop as well as reading the response.
+        async with asyncio.timeout(config.timeout_seconds):
+            response = await request(
+                method, url, allow_redirects=False, _on_transport_failure=redact_transport, **kwargs
+            )
+            try:
+                if not 200 <= response.status < 300:
+                    raise ValueError(f"retrieval provider returned HTTP {response.status}")
+                payload = bytearray()
+                async for chunk in response.content.iter_chunked(65536):
+                    payload.extend(chunk)
+                    if len(payload) > config.max_response_bytes:
+                        raise ValueError("retrieval response exceeds the configured byte limit")
+                return bytes(payload)
+            finally:
+                response.release()
+    except Exception as error:
+        # Body-read failures also leave this boundary without credential-bearing diagnostics.
+        redact_transport(error, None)
+        raise
 
 
 # Serper accepts a bare "zh"; SerpAPI rejects it (HTTP 400 "Unsupported `zh` interface language").

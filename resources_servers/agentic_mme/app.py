@@ -44,12 +44,16 @@ def strip_closed_reasoning(text: str) -> str:
     Same result as re.sub(r"<(think|thinking)>.*?</\\1>", "", text, flags=re.S | re.I), which rescans the
     rest of the text for every unclosed opening tag.
     """
-    tags = [(m.start(), m.end(), m.group(1) == "/", m.group(2).lower()) for m in _REASONING_TAG.finditer(text)]
-    next_close: dict[str, list[int]] = {"think": [], "thinking": []}
+    # Unicode regex backreferences fold İ to i but keep ı distinct.
+    tags = [
+        (m.start(), m.end(), m.group(1) == "/", m.group(2).replace("İ", "i").lower())
+        for m in _REASONING_TAG.finditer(text)
+    ]
+    next_close: dict[str, list[int]] = {name: [] for _, _, _, name in tags}
     for index, (_, _, closing, name) in enumerate(tags):
         if closing:
             next_close[name].append(index)
-    cursors = {"think": 0, "thinking": 0}
+    cursors = {name: 0 for name in next_close}
     kept, position = [], 0
     for index, (start, end, closing, name) in enumerate(tags):
         closes = next_close[name]
@@ -235,6 +239,8 @@ class AgenticMMEServer(SimpleResourcesServer):
             elif item.type == "message" and item.role == "assistant":
                 terminal = [part.text for part in item.content if part.type == "output_text"]
         if body.response.incomplete_details:
+            # A cut-off episode scores zero in both metrics, keeping the same sample denominator.
+            result.string_match_reward = 0.0
             result.failure_reason = "incomplete_response"
             return result
         final_text = "\n".join(terminal)
