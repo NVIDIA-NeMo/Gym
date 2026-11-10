@@ -1,0 +1,183 @@
+# CONTEXT #
+You will be given a STEM problem, its reference answer, and the student’s solution.
+
+# OBJECTIVE #
+Judge whether the student’s solution is correct.
+Exact rules and examples below.
+
+# GUIDELINES #
+
+<rule>
+If the student's final answer matches exactly the reference answer, mark the solution as correct, do not apply the other rules and reply right away.
+</rule>
+
+<rule>
+If the student’s final answer is physically, numerically, or symbolically equivalent to the reference answer, mark the solution as correct. Mark the solution as correct if the difference is due to rounding, unit conversion, standard rounded physical constants, or the omission of a physically negligible quantity. Do not accept answers that have a wrong scale, an incorrect order of magnitude, or do not meet the required precision. Neglecting a quantity is acceptable only if it is not explicitly required by the problem and is physically negligible in the problem context.
+Example of physical equivalence: Student’s final answer does not match the reference answer because the student has used the approximate value $c = 3.0 \times 10^8\,\mathrm{{m/s}}$ for the speed of light.
+Example of non-equivalence: In a decay-rate problem, $\Gamma = 1.0 \times 10^{{-8}}\,\mathrm{{s}}^{{-1}}$ and $\Gamma = 1.0 \times 10^{{-9}}\,\mathrm{{s}}^{{-1}}$ are not physically equivalent. They differ by a factor of $10$, so the corresponding lifetimes differ by a factor of $10$.
+Example of acceptable neglect: An answer using the reduced mass and an answer neglecting the electron mass are equivalent when the setup allows $m_e \ll m_p$ and the problem does not ask for reduced-mass effects. </rule>
+
+<rule>
+Handling multi-part questions, item counts, and alternatives:
+- Multi-Part & Item Count Strictness: When a question asks for multiple sub-questions or a specific quantity of items (e.g., "list 3 factors"), all requested parts/items must be provided and correct.
+- Joint vs. Alternative Answers:
+- Reference answers joined by "AND" (or distinct required components) are all required.
+- Reference answers joined by "OR" (or listed variants for a singular prompt, e.g., "cyclopropane OR propene") are alternatives. Supplying any ONE valid alternative is sufficient.
+- Ambiguous Questions: If a problem statement allows multiple valid interpretations and the reference provides distinct answers for each, mark the student correct if their solution consistently satisfies one reasonable interpretation.
+</rule>
+
+<rule>
+Evaluating qualitative explanations and mechanisms:
+- Core Cause vs. Extra Detail: The student must state the main cause or mechanism that answers "why" or "how." Extra background details provided in the reference answer are optional unless explicitly requested by the question.
+- Avoid Rephrasing: Simply repeating the prompt or rephrasing the question using synonyms does not count as a valid explanation.
+- Alternative Valid Explanations: If the student gives a scientifically sound reason or mechanism that differs from the reference answer, mark it as correct—unless the prompt explicitly required a specific method or theory.
+- Brevity and Formatting: Do not penalize answers for being concise or structured differently than the reference. Mark incorrect only if the core cause is missing, the mechanism is wrong, or the cause-and-effect relationship is reversed.
+Example: If asked why birds cannot navigate in total darkness, stating that they require light for visual navigation is sufficient. Reference details about retinal rod cell counts are extra details and not required unless explicitly asked.
+</rule>
+
+
+
+<rule>
+The student may use a different unit system from the reference answer, such as SI, cgs, Imperial, natural units, or atomic units, and still be correct. The solution is correct, only if the student's final answer can be converted to the reference answer, while preserving the same physical meaning, dimensions, and magnitude. All formulas and expressions in the student’s solution must be consistent with the chosen system of units.
+Example of acceptable conversion: The formula $a_0 = 1$ in atomic units is equivalent to $a_0 = \frac{{4\pi\epsilon_0\hbar^2}}{{m_e e^2}}$ in SI.
+Example of acceptable conversion: The values $0.511\,\mathrm{{MeV}}/c^{{2}}$ and $9.11 \times 10^{{-31}}\,\mathrm{{kg}}$ are equivalent forms of the electron mass.
+Example of incorrect system unit conversion: A student writes $\mathbf{{E}} = -\nabla \phi - \frac{{1}}{{c}}\frac{{\partial \mathbf{{A}}}}{{\partial t}}$ while treating $\phi$, $\mathbf{{A}}$, and $\mathbf{{E}}$ as SI quantities. This is incorrect because the equation mixes the natural-unit convention $A^\mu = (\phi, \mathbf{{A}})$, where $c = 1$, with the SI four-derivative convention $\partial^\mu = \left(\frac{{1}}{{c}}\partial_t, \nabla\right)$.
+</rule>
+
+<rule>
+If the expected answer is a symbolic formula, and the student correctly derives that formula, it is acceptable for the student to also substitute numerical values. However, the substitutions must be valid: the numerical values should either be provided in the problem statement or be standard known constants. Mark the solution incorrect if the student replaces variables with arbitrary or random numerical values just to produce a numerical answer, even if the symbolic formula is correct.
+Examples of acceptable substitutions
+  - inferred from problem conditions - substitution of pion mass $m_\pi$ with its value 139.57 MeV/c^{{2}}.
+  - a known physical or mathematical constant - $c$, $\hbar$, $k_B$, $G$, $\pi$, or $e$.
+  - a substitution made during a system unit conversion - using atomic units setting $\hbar$, $m_e$, $e$, or $4\pi\epsilon_0$ constants to $1$.
+Examples of unacceptable substitutions
+  - setting symbolic parameters like mass ($m$) for example to $1$.
+  - assuming the atom is in the ground state and setting $n=1$, unless the problem explicitly specifies that state.
+</rule>
+
+<rule>
+A solution is incorrect if it leaves a general formula, arbitrary constant, or placeholder in the final answer when the problem provides enough information to determine it. The student must apply all explicit conditions, such as boundary conditions, limits or initial values. If additional values or constants can be determined from physical constraints, for example continuity, finiteness, or symmetry of a particular physical entity, those constraints must also be applied.
+</rule>
+<rule>
+If the student’s answer is a general case of the expected answer and the problem does not explicitly say which one is necessary, mark it as correct.
+</rule>
+<rule>
+If the problem explicitly requires a particular method, theorem, approximation, or formula to be used for the solution, mark an answer incorrect if the student does not use that required method, even if the final result is correct.
+</rule>
+<rule>
+If the problem is open-ended or has non-unique solutions (such as asking for an example), verify the student's example against the problem’s constraints and mark it as correct only if the student's response fully satisfies the problem’s stated conditions.
+</rule>
+<rule>
+When signs in student’s and expected answers differ, mark the answer incorrect if the sign changes the physical interpretation of the result or contradicts non-conventional physical facts, such as predicting attraction instead of repulsion, energy gain instead of loss or a converging lens instead of a diverging lens.
+Acceptable sign difference: A gravitational or electrostatic potential energy may differ by an additive constant, if all physical differences in energy are consistent.
+Unacceptable sign difference: In optics, a sign difference is not acceptable if it changes a real image into a virtual image.
+</rule>
+
+<rule>
+If the student offers two competing final answers without committing to one, mark incorrect. The student must actually commit to an answer. A solution that stops at intermediate work, or that presents only code or a procedure without stating the result it produces, is incorrect however sound the method — you are grading a stated answer, not a promising approach.
+</rule>
+
+<rule>
+A vector answer requires both magnitude and direction when the question asks for a vector, and the frame must match the one the problem sets up.
+Example: the reference gives the force $\frac{{Qqr}}{{2\pi\varepsilon_0R^{{2}}}}\left(1-\frac{{v^{{2}}}}{{c^{{2}}}}\right)\boldsymbol{{e}}_{{r}}$ and the student's derivation establishes the same radial vector but the final line quotes only the magnitude. The work establishes the direction, so this is correct; a solution that never establishes the direction is not.
+Example of a frame error: a velocity computed in the centre-of-mass frame reported as the answer to a question posed in the laboratory frame.
+</rule>
+
+
+<rule>
+Compare chemical identity, not typography or presentation:
+- Structural formulas, line notations (SMILES), chemical markup, systematic IUPAC names, and accepted common names are equivalent only when they denote the exact same chemical species. Ignore harmless differences in brackets, subscript rendering, charge placement, and ion order.
+- Distinguish resonance contributors from tautomers and isomers. Resonance structures describe a single species (electron delocalization). Tautomers (e.g., keto-enol), constitutional isomers, regioisomers, different hydration/oxidation states, and stereoisomers represent distinct chemical substances.
+- If stereochemistry is requested, omitting or changing an R/S, E/Z, cis/trans, D/L, or alpha/beta descriptor is incorrect. Meso compounds are achiral despite having stereocenters; do not treat them as chiral enantiomers.
+- Where both a name and formula are requested, both are required. For coordination complexes, metal identity, oxidation state, ligand identities, counts, and overall charge must match. 
+Example of chemical equivalence: Ethanol can be written as \ce{{CH3CH2OH}}, \ce{{C2H5OH}}, or expressed via SMILES as CCO.
+Example of non-equivalence: [\ce{{Co(CN)6}}]^{{3-}} (hexacyanobaltate(III)) and [\ce{{Co(CN)6}}]^{{4-}} (hexacyanobaltate(II)) are different species due to oxidation state.
+</rule>
+
+<rule>
+For equations, stoichiometry, and mechanisms:
+- A reaction equation must balance both atoms and charge. Any common integer multiple of coefficients is equivalent. A net ionic equation may omit spectator ions, but a full equation must include them. Physical states, reversibility, catalysts, and conditions are required when explicitly asked or when they define specific reactivity.
+- Reversing or scaling a reaction changes associated thermodynamic quantities consistently: reversing a reaction flips the sign of \Delta H and \Delta G and replaces K with 1/K; scaling coefficients scales extensive quantities and raises K to that power.
+- A reaction mechanism must evaluate the pathway, not just the final product. A different intermediate, elementary step order, rate-determining step, or named pathway (e.g., \mathrm{{S_N1}} vs \mathrm{{S_N2}}) is incorrect when a mechanism or pathway is explicitly requested, even if both routes yield the same product.
+</rule>
+
+<rule>
+In open-ended organic synthesis and reactivity:
+- Every proposed step must be chemically viable under the stated reagents and conditions, yielding the requested connectivity, oxidation state, regiochemistry (e.g., Markovnikov vs. anti-Markovnikov), and stereochemistry. Do not award credit for an impossible or competing reaction step merely because the student writes the correct target molecule at the end.
+Example of unviable route: Proposing tert-butyl bromide + sodium methoxide to synthesize tert-butyl methyl ether via Williamson ether synthesis. The tertiary halide undergoes E2 elimination rather than \mathrm{{S_N2}} substitution. (The correct route uses methyl bromide + sodium tert-butoxide).
+- When the problem mandates a specific named reaction, reagent, or method, using a different synthesis fails the method requirement.
+</rule>
+
+<rule>
+In thermodynamics, kinetics, and equilibrium:
+- Strictly separate thermodynamic state functions from kinetic rates. A catalyst lowers activation energy ($E_a$) and increases rate constants ($k$), but **never** shifts equilibrium constants ($K$), Gibbs free energy ($\Delta G^\circ$), or final equilibrium yields.
+- Thermodynamic and electrochemical signs carry physical meaning. Reversing exothermic/endothermic ($\Delta H$), spontaneous/non-spontaneous ($\Delta G$), or oxidation/reduction (anode vs. cathode potentials) is an error, not a typographical difference.
+- Quantitative chemistry depends on the exact chemical quantity and regime. Molarity is not molality, amount is not concentration, mass percent is not mole fraction, and K_p and K_c require conversion unless \Delta n = 0.
+- A rate law must reflect the correct limiting regime. In Michaelis-Menten kinetics, v \approx V_{{\max}} applies at saturation (zero-order), whereas v \approx \frac{{V_{{\max}}}}{{K_m}}[S] applies at low substrate concentration (first-order). Using the incorrect regime for the problem conditions is incorrect.
+</rule>
+
+<rule>
+Distinguish experimental or measured results from nominal, theoretical, or prepared values:
+- If a problem asks for a concentration derived from experimental data (e.g., titration or Beer-Lambert calibration curve), reporting the nominal concentration used during sample preparation is incorrect.
+- In spectroscopy or structure determination (NMR, IR, MS), the proposed structure must satisfy all given analytical evidence. Different plausible peak assignments are acceptable if they consistently yield the same overall correct structure; an incorrect molecular framework or functional group assignment is not.
+</rule>
+
+
+<rule>
+Compare the exact biological entity, taxonomy, and level of detail requested. Recognized synonyms, standard symbols, and abbreviated binomials are equivalent only when denoting the exact same entity. Capitalization and plurality represent presentation unless biological naming conventions carry distinct meaning (e.g., gene vs. protein symbol conventions).
+Related entities are not automatically equivalent: a disease is not its symptom, a structure is not its function, and a molecule is not the process it participates in.
+A broader answer is insufficient when a narrower level is requested. A genus is not a species, and a species is not a specific strain when that distinction is asked.
+Example of incorrect level of detail: Answering "Prophase I" when the problem specifically asks for the sub-stage performing synapsis ("Zygotene").
+Example of non-equivalence: "Coronary stenosis" describes structural narrowing, whereas "atherosclerosis" names the underlying disease process.
+</rule>
+
+<rule>
+For nucleic-acid sequences, protein sequences, and phylogenetics:
+- Directionality, strand role, and reading frame are required. A complement sequence is not a reverse complement; coding and template strands are not interchangeable; sequences written $3'\!\to\!5'$ are not equivalent to $5'\!\to\!3'$; T and U interchange only during DNA/RNA conversions; and a codon is not its anticodon.
+- Amino acids written as one-letter codes, three-letter codes, or full names are equivalent.
+- For phylogenetic trees and evolutionary relationships, cladistic topology and shared ancestry govern. Rotating nodes around a clade does not change the tree topology. Mark student topologies correct if sister-group relationships and basal branching match the reference, regardless of the left-to-right visual order of taxa.
+</rule>
+
+<rule>
+In genetics, pedigree analysis, and population dynamics:
+- Verify exact conditional probabilities and inheritance models. Distinguish the probability of an offspring inheriting a trait from carrier risk conditioned on an unaffected phenotype (e.g., a $2/3$ carrier probability among unaffected siblings vs. a $1/4$ disease risk in autosomal recessive traits).
+- Allelic mechanisms are not interchangeable: loss-of-function, gain-of-function, dominant negative, and haploinsufficiency represent distinct biological mechanisms. Stating that a gene is "mutated" or "turned off" is insufficient when the specific mode of dominance or functional impact is required.
+- Genetic allele symbols are acceptable as long as the student's dominance convention and symbol mapping are explicit and internally consistent.
+</rule>
+
+<rule>
+In metabolic pathways, cell signaling, physiology, and regulatory cascades:
+- Evaluate the net systemic outcome of regulation. An even number of inhibitory steps produces net activation (disinhibition). Do not mark a student wrong for stating that an inhibitor "increases" an outcome if it inhibits a repressor of that outcome.
+- Compartmentalization matters: a step placed in the wrong organelle, cell type, or tissue changes the biology and is incorrect.
+- Do not conflate measurements across different biological tiers: DNA presence, mRNA expression, protein abundance, protein activity, and metabolic flux are related but distinct. Increased mRNA expression alone does not establish increased enzyme activity or pathway flux unless explicitly linked by context.
+</rule>
+
+<rule>
+For biological explanations, identify the core causal or functional claim requested. A correct conclusion reached via a mechanism that contradicts biological facts is incorrect when "why", "how", or a mechanism is being evaluated. When only the final conclusion is asked, extra mechanistic details do not invalidate the answer unless they introduce an explicit contradiction.
+When a question explicitly asks for multiple contrasts or causal links, all required components must be addressed.
+Example of sufficient explanation: If asked why birds cannot navigate in total darkness, stating that they rely on visual input and light perception is correct; specific details about rod cell density are supporting details unless retinal architecture was explicitly asked.
+</rule>
+
+<rule>
+For open-ended lists and quantitative biology:
+- For non-unique lists, the scientific category and requested count govern. (e.g., If asked for five protein-based biopharmaceuticals, listing five protein-rich food items like chicken or eggs is incorrect). Conversely, any scientifically accurate choice satisfying a broad category (e.g., "any valid conservation measure") is correct even if the reference answer used a different example.
+- Quantitative biology follows standard numerical and algebraic evaluation rules. Allele frequency, genotype frequency, carrier frequency, penetrance, incidence, and prevalence are distinct terms and cannot be substituted for one another.
+- A concentration is not a total amount, a per-cell value is not a population sum, a steady-state level is not an accumulation rate, and a rate ($v$) is not a rate constant ($k$).
+</rule>
+
+<important>
+Before deciding whether the student’s solution is correct, carefully review all rules, examples, and guidelines provided above, and apply them to assess the solution.
+</important>
+
+Always end your response with the final judgement. Your final judgement must be in the following format:
+  Judgement: 'yes' if the student's solution is correct.
+  Judgement: 'no' if the student's solution is incorrect.
+
+**Question**:
+{question}
+
+**Reference Answer(s)**:
+{expected_answer}
+
+**Student Solution**:
+{generated_answer}

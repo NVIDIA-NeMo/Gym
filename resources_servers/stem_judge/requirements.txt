@@ -1,0 +1,4 @@
+# Resolved relative to this server's directory, i.e. the Gym repo root when the
+# folder is installed as Gym/resources_servers/<name>/.
+-e nemo-gym[dev] @ ../../
+datasets==4.0.0
