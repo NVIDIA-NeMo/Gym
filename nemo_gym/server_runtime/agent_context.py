@@ -9,8 +9,8 @@ from pathlib import PurePosixPath
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
 
-# Reserved dataset-row key, a sibling of verifier_metadata: what the agent receives, as verifier_metadata is what
-# the verifier receives.
+# single_agent_turn's row-level convenience for its one session. Other environments prepare each
+# session's AgentContext explicitly from their own task inputs.
 AGENT_CONTEXT_KEY_NAME = "agent_context"
 # The whole context stays small: the seed is kept for the whole session and compared on every retry.
 AGENT_CONTEXT_MAX_BYTES = 64 * 1024
@@ -42,7 +42,8 @@ class AgentContext(BaseModel):
 
     Small typed fields go inline in ``values``; images, documents, files and skill directories go by reference in
     ``artifacts``. A key appears in one of the two. Each agent declares the keys it accepts and refuses a seed that
-    carries any other key or misses a required one.
+    carries any other key or misses a required one. The environment constructs one context per session, including
+    when an episode has several agents; this contract does not prescribe the environment's task-input schema.
     """
 
     model_config = ConfigDict(extra="forbid")

@@ -167,8 +167,8 @@ class AgentSeedSessionRequest(BaseModel):
     agent_context: AgentContext | None = Field(
         default=None,
         description=(
-            "Task data the harness needs beyond its initial model input, from the task row's agent_context. "
-            "The agent refuses a seed whose context it does not declare. Omitted when the task has none."
+            "Task data the environment prepares for this agent session beyond its initial model input. "
+            "The agent refuses a seed whose context it does not declare. Omitted when the session has none."
         ),
     )
 
