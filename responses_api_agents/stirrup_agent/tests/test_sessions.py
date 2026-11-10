@@ -419,10 +419,19 @@ def test_a_session_requiring_mcp_tools_is_rejected(client):
     assert "Stirrup does not support required MCP tool access: gdpval.mcp" in response.json()["detail"]
 
 
-def test_a_sandbox_platform_without_a_runtime_refuses_the_seed(agent, root, monkeypatch):
+@pytest.mark.parametrize(
+    "probe, reason",
+    [
+        ("printf 'Darwin\\narm64\\nunknown\\n'", "Darwin on arm64"),
+        ("printf 'Linux\\nx86_64\\nglibc 2.12\\n'", "glibc 2.12"),
+    ],
+)
+def test_a_sandbox_platform_without_a_runtime_refuses_the_seed(agent, root, monkeypatch, probe, reason):
     # The real install probes the sandbox; this sandbox reports a platform no runtime is built for.
     monkeypatch.setattr(SandboxPythonRuntime, "is_installed", AsyncMock(return_value=False))
-    monkeypatch.setattr(sandbox_python, "_PLATFORM_PROBE", "printf 'Darwin\\narm64\\nunknown\\n'")
+    monkeypatch.setattr(sandbox_python, "_PLATFORM_PROBE", probe)
+    download = AsyncMock(side_effect=RuntimeError("Python download unavailable"))
+    monkeypatch.setattr(sandbox_python, "_python_archive", download)
     seed = AgentSeedSessionRequest(
         agent_session_id="agent-session",
         episode_id=_EPISODE,
@@ -433,7 +442,8 @@ def test_a_sandbox_platform_without_a_runtime_refuses_the_seed(agent, root, monk
 
     detail = check_agent_seed_rejected(agent.setup_webserver(), seed)
 
-    assert "No sandbox Python runtime is available for Darwin on arm64" in detail
+    assert reason in detail
+    download.assert_not_awaited()
     assert all(record.state is None for record in agent._session_records.values()), "the seed released its session"
 
 

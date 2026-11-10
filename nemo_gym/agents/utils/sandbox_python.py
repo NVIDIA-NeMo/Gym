@@ -329,6 +329,8 @@ class SandboxPythonRuntime:
         try:
             async with asyncio.timeout(timeout_s):
                 platform = await probe_sandbox_platform(sandbox)
+                # Reject an old glibc before a host download failure can hide the unsupported platform.
+                _ = platform.wheel_platform
                 python_archive = await _python_archive(platform)
                 site_packages_archive = await self._site_packages_archive(platform)
                 setup = f"{self.directory}/.setup-{uuid4().hex}"

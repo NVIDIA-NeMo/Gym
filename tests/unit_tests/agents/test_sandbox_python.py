@@ -155,8 +155,9 @@ def test_a_glibc_older_than_the_python_build_needs_is_rejected() -> None:
     "stdout, match",
     [("Darwin\narm64\nunknown\n", "Darwin on arm64"), ("Linux\nx86_64\nglibc 2.12\n", "glibc 2.12")],
 )
-async def test_install_refuses_a_platform_without_a_runtime_before_building_it(monkeypatch, stdout, match) -> None:
-    monkeypatch.setattr(sandbox_python, "_python_archive", AsyncMock(return_value=Path("python.tar.gz")))
+async def test_install_refuses_a_platform_without_a_runtime_before_downloading_it(monkeypatch, stdout, match) -> None:
+    download = AsyncMock(side_effect=RuntimeError("Python download unavailable"))
+    monkeypatch.setattr(sandbox_python, "_python_archive", download)
     build = AsyncMock()
     monkeypatch.setattr(SandboxPythonRuntime, "_build_site_packages", build)
     sandbox = _ProbedSandbox(SandboxExecResult(stdout=stdout, stderr="", return_code=0))
@@ -164,6 +165,7 @@ async def test_install_refuses_a_platform_without_a_runtime_before_building_it(m
 
     with pytest.raises(UnsupportedSandboxPlatformError, match=match):
         await runtime.install(sandbox, timeout_s=30)
+    download.assert_not_awaited()
     build.assert_not_awaited()
     assert sandbox.cwds == ["/"], "only the platform probe ran in the sandbox"
 
