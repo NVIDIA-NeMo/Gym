@@ -53,6 +53,15 @@ def test_a_missing_or_wrong_kind_of_artifact_refuses_the_seed(root: Path, path: 
     assert raised.value.status_code == 422
 
 
+def test_a_missing_root_is_reported_as_the_agents_configuration(root: Path) -> None:
+    with pytest.raises(AgentSeedRejectedError, match="agent_context root .* does not exist") as raised:
+        resolve_agent_context_artifact(
+            AgentContextArtifact(path="documents/x/manifest.json"), root / "missing", kind="file"
+        )
+
+    assert raised.value.status_code == 422
+
+
 @pytest.mark.parametrize(
     ("path", "reason"),
     [("documents/x/manifest\x00.json", "embedded null"), ("documents/" + "a" * 5000, "File name too long")],

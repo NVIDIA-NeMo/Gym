@@ -78,6 +78,17 @@ def test_an_agents_parsed_artifact_cannot_rewrite_the_stored_context() -> None:
     assert parsed.media.path == "figs/1"
 
 
+def test_an_agent_cannot_reassign_the_stored_context() -> None:
+    context = AgentContext(values={"tag": "figqa2"}, artifacts={"media": {"path": "figs/1"}})
+
+    with pytest.raises(ValidationError, match="frozen"):
+        context.values = {"tag": "other"}
+    with pytest.raises(ValidationError, match="frozen"):
+        context.artifacts = {}
+
+    assert context.fields() == {"tag": "figqa2", "media": AgentContextArtifact(path="figs/1")}
+
+
 def test_fields_put_values_and_artifacts_in_one_namespace() -> None:
     context = AgentContext(values={"tag": "figqa2"}, artifacts={"media": {"path": "test_media/figs/1"}})
 
