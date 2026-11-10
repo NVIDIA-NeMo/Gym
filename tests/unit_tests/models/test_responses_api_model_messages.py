@@ -105,9 +105,38 @@ def _client(model_cls) -> TestClient:
 
 
 class TestDefaultMessagesRoute:
+    @pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
     @pytest.mark.parametrize("stream", [False, True])
-    @pytest.mark.parametrize("output_config", [None, {"effort": None}, {"effort": "max"}])
-    def test_output_config_effort_remains_ignored(self, output_config: object, stream: bool) -> None:
+    def test_explicit_effort_reaches_the_backend(self, effort: str, stream: bool) -> None:
+        client, server = _client(_BodyOnlyModel)
+        result = client.post(
+            "/v1/messages",
+            json={
+                "model": "synthetic",
+                "messages": [],
+                "max_tokens": 8,
+                "stream": stream,
+                "output_config": {"effort": effort},
+            },
+        )
+        assert result.status_code == 200
+        assert server.last_params.model_dump(exclude_unset=True)["reasoning"] == {"effort": effort}
+
+    @pytest.mark.parametrize(
+        "output_config",
+        [
+            True,
+            [],
+            "synthetic-private",
+            {"effort": 7},
+            {"effort": "synthetic-private"},
+            {"effort": {"synthetic-private": "secret"}},
+        ],
+    )
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_invalid_effort_is_payload_free_http_400_before_backend(
+        self, output_config: object, stream: bool, caplog: pytest.LogCaptureFixture
+    ) -> None:
         client, server = _client(_BodyOnlyModel)
         result = client.post(
             "/v1/messages",
@@ -119,8 +148,45 @@ class TestDefaultMessagesRoute:
                 "output_config": output_config,
             },
         )
+        assert result.status_code == 400
+        assert result.headers["content-type"].startswith("application/json")
+        assert result.json()["detail"] in {"Invalid Anthropic output_config", "Invalid Anthropic output_config.effort"}
+        assert "synthetic-private" not in result.text
+        assert "synthetic-private" not in caplog.text
+        assert server.last_params is None
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            {},
+            {"output_config": {}},
+            {"output_config": None},
+            {
+                "output_config": {"effort": None},
+            },
+            {"output_config": {"format": {"type": "text"}}},
+        ],
+    )
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_omitted_effort_remains_omitted(self, extra: dict, stream: bool) -> None:
+        client, server = _client(_BodyOnlyModel)
+        result = client.post(
+            "/v1/messages", json={"model": "synthetic", "messages": [], "max_tokens": 8, "stream": stream, **extra}
+        )
         assert result.status_code == 200
         assert "reasoning" not in server.last_params.model_dump(exclude_unset=True)
+
+    def test_unrelated_conversion_error_is_not_recategorized(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def invalid_request(_body):
+            raise ValueError("unrelated conversion failure")
+
+        monkeypatch.setattr(
+            "nemo_gym.models.base_responses_api_model._ANTHROPIC_CONVERTER.anthropic_request_to_responses",
+            invalid_request,
+        )
+        client, _ = _client(_BodyOnlyModel)
+        with pytest.raises(ValueError, match="unrelated conversion failure"):
+            client.post("/v1/messages", json={"messages": []})
 
     def test_messages_route_registered_alongside_openai_routes(self) -> None:
         server = _BodyOnlyModel(config=_config(), server_client=MagicMock(spec=ServerClient, global_config_dict={}))

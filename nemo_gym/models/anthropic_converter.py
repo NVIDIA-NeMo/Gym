@@ -78,6 +78,10 @@ SUPPORTED_ANTHROPIC_IMAGE_MEDIA_TYPES = {"image/jpeg", "image/png", "image/gif",
 _RESPONSES_REASONING_CARRIER_PREFIX = "nemo_gym_responses_reasoning:"
 
 
+class AnthropicRequestValidationError(ValueError):
+    """An invalid client control with a payload-free message suitable for an HTTP error."""
+
+
 class AnthropicConverter:
     ############################################################################
     # Egress: NeMo Gym Responses  ->  Anthropic Messages request
@@ -337,6 +341,14 @@ class AnthropicConverter:
             params["temperature"] = anthropic_body["temperature"]
         if anthropic_body.get("top_p") is not None:
             params["top_p"] = anthropic_body["top_p"]
+
+        if (output_config := anthropic_body.get("output_config")) is not None:
+            if not isinstance(output_config, dict):
+                raise AnthropicRequestValidationError("Invalid Anthropic output_config")
+            if (effort := output_config.get("effort")) is not None:
+                if not isinstance(effort, str) or effort not in {"low", "medium", "high", "xhigh", "max"}:
+                    raise AnthropicRequestValidationError("Invalid Anthropic output_config.effort")
+                params["reasoning"] = {"effort": effort}
 
         tools = self._anthropic_tools_to_responses(anthropic_body.get("tools"))
         if tools:
