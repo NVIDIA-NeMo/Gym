@@ -9,6 +9,13 @@ config_paths:
   - resources_servers/automationbench/configs/automationbench.yaml
   - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
 
+# The sampling config_legacy_agent.yaml sends from its agent config. Run-level, so it reaches every row of a run that
+# loads this file; `++responses_create_params.temperature=...` replaces it. Rows carry none, because verifiers_agent
+# would let a row's value win over its own config.
+responses_create_params:
+  temperature: 1.0
+  top_p: 1.0
+
 automationbench:
   responses_api_agents:
     simple_agent:

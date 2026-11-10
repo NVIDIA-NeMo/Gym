@@ -20,8 +20,18 @@ Configuration (`configs/automationbench.yaml`):
 - `reward_fn`: `aa_headline` (default) or `partial_credit`. Both are reported either way.
 - `export_assertion_results`: add every assertion's verdict to the verify response as `assertion_results`.
 
+A row whose `responses_create_params` carries no tools was prepared before this server existed; `/verify` masks its
+sample as `verifier_error` and says to re-run `gym eval prepare --benchmark automationbench`.
+
 Sessions are kept in the worker's memory and are not exported to partial-rollout checkpoints: an episode interrupted
 by a crash starts over.
+
+The tool dispatch comes from verifiers, as a transitional choice for exact tool parity with the `verifiers_agent`
+recipe: `tool_env()` builds Gym's `AutomationBenchEnv` on a one-row placeholder dataset, and each call goes through
+its `update_tool_args` and `tool_map`. That keeps verifiers' argument handling and `automationbench_env`'s `api_fetch`
+overrides. The cost is the verifiers dependency: `pyproject.toml` pins verifiers at the same git revision as
+`verifiers_agent` and copies its uv constraint, override and exclude lists. Dropping verifiers would mean calling
+upstream `automation-bench`'s tools directly and carrying those `api_fetch` overrides here.
 
 ## Licensing information
 

@@ -53,6 +53,13 @@ SCORE_NAMES = (
     "objectives_passed",
     "objectives_total",
 )
+# A row without tools is one prepared before this server existed: the model could not touch the world, so its zero
+# is no grade of the model.
+NO_TOOLS_REASON = (
+    "The row's responses_create_params carries no tools, so the model could not act on the task's world. Rows "
+    "prepared before the automationbench resources server lack them: re-run `gym eval prepare --benchmark "
+    "automationbench`."
+)
 
 
 class AutomationBenchResourcesServerConfig(BaseResourcesServerConfig):
@@ -188,24 +195,28 @@ class AutomationBenchResourcesServer(SimpleResourcesServer):
             if verification.is_live:
                 state = self._episodes[session_id].state
                 task_name = state["info"]["task_name"]
-                try:
-                    scores = score(state, export_assertion_results=self.config.export_assertion_results)
-                except Exception as error:
-                    # verifiers would score the raising function 0.0; that zero is no grade of the answer.
-                    LOG.exception("Scoring AutomationBench task %s failed", body.task_id)
-                    scores = {"error": f"{type(error).__name__}: {error}"}
+                if not body.responses_create_params.tools:
+                    LOG.error("AutomationBench task %s: %s", body.task_id, NO_TOOLS_REASON)
+                    scores = {"failure_reason": NO_TOOLS_REASON}
+                else:
+                    try:
+                        scores = score(state, export_assertion_results=self.config.export_assertion_results)
+                    except Exception as error:
+                        # verifiers would score the raising function 0.0; that zero is no grade of the answer.
+                        LOG.exception("Scoring AutomationBench task %s failed", body.task_id)
+                        scores = {"failure_reason": f"AutomationBench rubric raised: {type(error).__name__}: {error}"}
                 verification.retain({"task_name": task_name, **scores})
             result = dict(verification.retained)
         task_name = result.pop("task_name")
         fields = {"task_name": task_name, "domain": task_name.split(".", 1)[0]}
-        if "error" in result:
+        if "failure_reason" in result:
             return AutomationBenchVerifyResponse(
                 **body.model_dump(),
                 **fields,
                 reward=0.0,
                 mask_sample=True,
                 failure_kind=VERIFIER_ERROR,
-                failure_reason=f"AutomationBench rubric raised: {result['error']}",
+                failure_reason=result["failure_reason"],
             )
         return AutomationBenchVerifyResponse(
             **body.model_dump(), **fields, **result, reward=result[self.config.reward_fn]

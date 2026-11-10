@@ -84,10 +84,6 @@ def prepare(
                 "vf_env_id": VF_ENV_ID,
                 # simple_agent sends these; verifiers_agent takes its tools and budget from its environment and config.
                 "responses_create_params": {"input": prompt, "tools": tools, "max_output_tokens": MAX_OUTPUT_TOKENS},
-                "agent_ref": {
-                    "type": "responses_api_agents",
-                    "name": "verifiers_agent",
-                },
                 "question": prompt[-1]["content"] if prompt else "",
                 "answer": row.get("answer", ""),
                 "example_id": row["example_id"],

@@ -58,10 +58,12 @@ def _post_seed(client: TestClient, seed: ResourcesSeedSessionRequest):
     return client.post("/seed_session", json=seed.model_dump(mode="json"))
 
 
-def _verify_body() -> dict[str, Any]:
+def _verify_body(tools: list[dict[str, Any]] = TASK["responses_create_params"]["tools"]) -> dict[str, Any]:
     return {
         "task_id": TASK["task_id"],
-        "responses_create_params": NeMoGymResponseCreateParamsNonStreaming(input=[]).model_dump(mode="json"),
+        "responses_create_params": NeMoGymResponseCreateParamsNonStreaming(input=[], tools=tools).model_dump(
+            mode="json"
+        ),
         "response": NeMoGymResponse(
             id="r",
             created_at=0.0,
@@ -197,6 +199,17 @@ def test_a_rubric_that_raises_masks_the_sample(client, monkeypatch):
 
     assert (result["mask_sample"], result["failure_kind"], result["reward"]) == (True, "verifier_error", 0.0)
     assert result["failure_reason"] == "AutomationBench rubric raised: KeyError: 'assertion'"
+
+
+def test_a_row_prepared_without_tools_is_masked_not_scored(client):
+    # Rows prepared before this server carry no tools; the model could not act, so 0 would be no grade of it.
+    _post_seed(client, _seed())
+
+    result = client.post("/verify", json=_verify_body(tools=[])).json()
+
+    assert (result["mask_sample"], result["failure_kind"], result["reward"]) == (True, "verifier_error", 0.0)
+    assert "gym eval prepare --benchmark automationbench" in result["failure_reason"]
+    assert result["task_name"] == "sales.multi_hop_lookup"
 
 
 def test_a_task_without_assertions_is_refused(client):

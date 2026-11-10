@@ -16,12 +16,25 @@ task's world in a resources server session and runs the tool loop in
 reproduce existing results; the relay will be removed after the Environment
 Server migration.
 
-Sampling: `config_legacy_agent.yaml` sends `temperature` and `top_p` from the
-agent config (1.0 each). Rows carry neither, so `config.yaml` sends what the
-run sets, for example
-`++responses_create_params.temperature=1.0 ++responses_create_params.top_p=1.0`,
-or the model server's defaults. Rows do carry the tools and the 131072-token
-output budget.
+Sampling: both recipes send `temperature` and `top_p` 1.0.
+`config_legacy_agent.yaml` sends them from its agent config; `config.yaml` sets
+them as the run's `responses_create_params`, which applies to every row of a run
+that loads it and which `++responses_create_params.temperature=...` replaces.
+Rows carry neither, because `verifiers_agent` would let a row's value win over
+its config. Rows do carry the tools and the 131072-token output budget; rows
+prepared before the resources server existed lack the tools, and `config.yaml`
+masks their samples as `verifier_error` instead of scoring them. Re-run
+`gym eval prepare --benchmark automationbench` to get them.
+
+The resources server takes its tool dispatch from verifiers, as a transitional
+choice for exact tool parity with `config_legacy_agent.yaml`: it builds Gym's
+`AutomationBenchEnv` on a one-row placeholder dataset and calls each tool
+through that environment's `update_tool_args` and `tool_map`, so the tools keep
+verifiers' argument handling and Gym's `api_fetch` overrides, and the server
+depends on verifiers at the same git pin as `verifiers_agent`, with its uv
+constraint, override and exclude lists copied. Dropping
+verifiers would mean calling upstream `automation-bench`'s tools directly and
+carrying those overrides in the server.
 
 ## Metric
 
