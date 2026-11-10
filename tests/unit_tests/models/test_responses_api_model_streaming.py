@@ -35,6 +35,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.responses_api_types import (
+    SSE_KEEPALIVE,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
@@ -1316,6 +1317,12 @@ class _SlowFailingModel(_EchoModel):
         raise RuntimeError("backend exploded late")
 
 
+class _SlowHTTPExceptionModel(_EchoModel):
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        await asyncio.sleep(_SLOW_CALL_S)
+        raise HTTPException(status_code=429, detail="rate limited")
+
+
 def _upstream_error(status: int, message: str, body: bytes) -> ClientResponseError:
     request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions?api-key=secret-value")
     error = ClientResponseError(request_info, (), status=status, message=message)
@@ -1549,6 +1556,138 @@ class TestResponsesStreamKeepalive:
             resp = client.post("/v1/responses", json=self.STREAM_BODY)
         assert resp.status_code == 429
         assert resp.content == error.response_content
+
+    @pytest.mark.parametrize(
+        ("path", "backend", "body"),
+        [
+            ("/v1/responses", "responses", STREAM_BODY),
+            ("/v1/chat/completions", "chat_completions", {"stream": True, "messages": []}),
+        ],
+    )
+    @pytest.mark.parametrize("phase", ["first_interval", "before_first_chunk", "after_keepalive"])
+    @pytest.mark.parametrize("spec_version", ["2.0", "2.4"])
+    async def test_disconnect_waits_for_backend_cleanup(
+        self, monkeypatch, path, backend, body, phase, spec_version
+    ) -> None:
+        keepalive_s = 30.0 if phase == "first_interval" else _KEEPALIVE_S
+        monkeypatch.setattr("nemo_gym.models.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", keepalive_s)
+        client, server = _keepalive_client(_EchoModel, keepalive_s=keepalive_s)
+        server.setup_cancellation_middleware(client.app)
+        started, cleanup_started = asyncio.Event(), asyncio.Event()
+        cleanup_release, cleanup_complete = asyncio.Event(), asyncio.Event()
+        backend_tasks: list[asyncio.Task] = []
+
+        async def blocked(*args, **kwargs):
+            task = asyncio.current_task()
+            assert task is not None
+            backend_tasks.append(task)
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleanup_started.set()
+                await cleanup_release.wait()
+                cleanup_complete.set()
+
+        # The model's external backend is held; invocation, streaming and disconnect handling stay real.
+        monkeypatch.setattr(_EchoModel, backend, blocked)
+        incoming: asyncio.Queue[dict] = asyncio.Queue()
+        await incoming.put({"type": "http.request", "body": json.dumps(body).encode(), "more_body": False})
+        phase_reached = asyncio.Event()
+
+        async def send(message: dict) -> None:
+            if phase == "before_first_chunk" and message["type"] == "http.response.start":
+                phase_reached.set()
+                await asyncio.Event().wait()
+            elif phase == "after_keepalive" and message["type"] == "http.response.body":
+                chunk = message.get("body", b"")
+                if chunk == SSE_KEEPALIVE or b"event: response.in_progress\n" in chunk:
+                    phase_reached.set()
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": spec_version},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": path,
+            "raw_path": path.encode(),
+            "query_string": b"",
+            "root_path": "",
+            "headers": [(b"content-type", b"application/json")],
+            "client": ("127.0.0.1", 50000),
+            "server": ("testserver", 80),
+        }
+
+        async def request() -> tuple[bool, bool, bool]:
+            await client.app(scope, incoming.get, send)
+            task = backend_tasks[0]
+            return cleanup_complete.is_set(), task.done(), task.cancelled()
+
+        call = asyncio.create_task(request())
+        try:
+            await asyncio.wait_for(started.wait(), 5)
+            if phase != "first_interval":
+                await asyncio.wait_for(phase_reached.wait(), 5)
+            await incoming.put({"type": "http.disconnect"})
+            await asyncio.wait_for(cleanup_started.wait(), 5)
+            assert not call.done(), "the request must wait for the backend's asynchronous cleanup"
+            cleanup_release.set()
+            assert await asyncio.wait_for(call, 5) == (True, True, True)
+        finally:
+            cleanup_release.set()
+            if not call.done():
+                call.cancel()
+            for task in backend_tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(call, *backend_tasks, return_exceptions=True)
+
+    @staticmethod
+    def _blocked_backend(monkeypatch) -> tuple[asyncio.Event, asyncio.Event]:
+        started, cancelled = asyncio.Event(), asyncio.Event()
+
+        async def blocked(*args, **kwargs):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        monkeypatch.setattr(_EchoModel, "_invoke_responses", blocked)
+        return started, cancelled
+
+    async def test_cancel_during_the_first_interval_cancels_the_backend(self, monkeypatch) -> None:
+        _, server = _keepalive_client(_EchoModel, keepalive_s=30.0)
+        started, cancelled = self._blocked_backend(monkeypatch)
+        dispatch = asyncio.create_task(server.responses_dispatch(MagicMock(), dict(self.STREAM_BODY)))
+        await asyncio.wait_for(started.wait(), 5)
+        dispatch.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await dispatch
+        assert cancelled.is_set()
+
+    async def test_closing_the_stream_after_keepalives_cancels_the_backend(self, monkeypatch) -> None:
+        _, server = _keepalive_client(_EchoModel)
+        started, cancelled = self._blocked_backend(monkeypatch)
+        response = await server.responses_dispatch(MagicMock(), dict(self.STREAM_BODY))
+        assert "response.created" in await anext(response.body_iterator)
+        assert started.is_set()
+        await response.body_iterator.aclose()
+        assert cancelled.is_set()
+
+    def test_http_exception_after_keepalives_ends_with_response_failed(self) -> None:
+        client, _ = _keepalive_client(_SlowHTTPExceptionModel)
+        resp = client.post("/v1/responses", json=self.STREAM_BODY)
+
+        assert resp.status_code == 200
+        events = _sse_payloads(resp.text)
+        assert [event["type"] for event in events[:2]] == ["response.created", "response.in_progress"]
+        assert [event["type"] for event in events].count("response.failed") == 1
+        failed = events[-1]
+        assert failed["type"] == "response.failed"
+        assert failed["response"]["error"] == {"code": "server_error", "message": "HTTP 429: rate limited"}
+        assert {event["response"]["id"] for event in events} == {events[0]["response"]["id"]}
 
 
 class TestUnionItemTypesThroughDispatch:
