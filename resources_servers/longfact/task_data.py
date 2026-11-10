@@ -13,6 +13,7 @@ class TaskData(BaseModel):
     # Every prepared row carries stable IDs for task provenance.
     id: str | None = Field(default=None, json_schema_extra={"consumed_by": ["provenance"]})
     task_id: str | None = Field(default=None, json_schema_extra={"consumed_by": ["provenance"]})
+    canary: str | None = Field(default=None, json_schema_extra={"consumed_by": ["provenance"]})
     benchmark_variant: Literal["longfact-safe-v1"]
     prompt: str = Field(pattern=r"\S", json_schema_extra={"consumed_by": ["prompt", "verify"]})
     subset: Literal["objects", "concepts"] | None = Field(default=None, json_schema_extra={"consumed_by": ["metrics"]})

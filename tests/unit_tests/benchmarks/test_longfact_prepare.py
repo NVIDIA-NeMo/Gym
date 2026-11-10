@@ -20,6 +20,7 @@ from benchmarks.longfact.prepare import (
 )
 from nemo_gym.config.config_types import BenchmarkDatasetConfig, DatasetConfig
 from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.data.task_data import load_task_data_schema, validate_jsonl_rows
 from nemo_gym.data.task_materialization import materialize_task
 
 
@@ -80,8 +81,12 @@ def test_published_configs_resolve_example_data_and_judge(monkeypatch, hosted_ca
         assert benchmark_dataset.prepare_script == Path("benchmarks/longfact/prepare.py")
     else:
         example = DatasetConfig.model_validate(dataset)
-        rows = [json.loads(line) for line in (root / example.jsonl_fpath).read_text().splitlines()]
+        lines = (root / example.jsonl_fpath).read_text().splitlines()
+        rows = [json.loads(line) for line in lines]
         assert example.type == "example" and len(rows) == 5
+        schema = load_task_data_schema(root / "resources_servers/longfact")
+        report = validate_jsonl_rows("longfact", schema, str(example.jsonl_fpath), lines)
+        assert report.clean, report.summary()
         assert example.license == "Creative Commons Attribution 4.0 International"
         metrics = json.loads((root / "resources_servers/longfact/data/example_metrics.json").read_text())
         assert DatasetConfig.model_validate(metrics).license == example.license
