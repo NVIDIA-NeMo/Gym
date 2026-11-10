@@ -6,6 +6,7 @@ opencode_multimodal_benchmarks:
   resources_servers:
     opencode_multimodal_benchmarks:
       judge_server: visual_judge
+      judge_required: true
 visual_judge:
   responses_api_models:
     openai_model:

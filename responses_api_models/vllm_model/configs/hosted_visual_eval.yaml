@@ -5,3 +5,5 @@ policy_model:
     vllm_model:
       entrypoint: hosted_visual_eval.py
       max_images: null
+      # Hosted providers use their own output limits; retain the configured agent cap.
+      sampling_overrides: null

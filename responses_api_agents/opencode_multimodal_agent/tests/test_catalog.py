@@ -3,6 +3,7 @@
 """Exercise complete recipes, including inherited policies and episode routing."""
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -10,6 +11,8 @@ from omegaconf import OmegaConf
 
 from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from responses_api_agents.opencode_multimodal_agent.eval import OpenCodeMultimodalEvalConfig
+from responses_api_models.vllm_model.app import VLLMModel
+from responses_api_models.vllm_model.visual_eval import VisualEvalModelConfig
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -98,6 +101,20 @@ def test_catalog_and_compatibility_route_once(monkeypatch, benchmark, sessions):
     ]["opencode_multimodal_agent"]
     assert agent.build_system_prompt == original["build_system_prompt"]
     assert agent.context_window == agent.max_output_tokens == 131072
+    policy = VisualEvalModelConfig.model_validate(
+        OmegaConf.to_container(cfg.policy_model.responses_api_models.vllm_model, resolve=True)
+        | {"name": "policy_model"}
+    )
+    outbound = VLLMModel._apply_sampling_overrides(
+        SimpleNamespace(config=policy),
+        {"max_tokens": agent.max_output_tokens, "max_completion_tokens": agent.max_output_tokens},
+    )
+    # A full-window output reservation rejects every nonempty prompt in vLLM.
+    # The shipped recipe must clear both SDK spellings without a launch override.
+    assert outbound["max_tokens"] is None and outbound["max_completion_tokens"] is None
+    assert policy.propagate_context_overflow_errors
+    assert policy.extra_body is None
+    assert policy.turn_state_idle_timeout_seconds > agent.timeout
     assert agent.opencode_config.get("tools", {}).get("webfetch", False) is False
     assert agent.opencode_config.get("tools", {}).get("websearch", False) is False
     assert agent.network_access == "model_only"
@@ -136,3 +153,39 @@ def test_catalog_and_compatibility_route_once(monkeypatch, benchmark, sessions):
         assert "datasets" not in cfg[name].responses_api_agents.opencode_multimodal_agent
     else:
         assert agent.command == original["command"] and agent.sandbox is not None
+
+
+def test_hosted_overlay_preserves_provider_output_limit(monkeypatch):
+    monkeypatch.chdir(ROOT)
+    monkeypatch.setenv("GYM_JUDGE_BASE_URL", "http://judge.invalid/v1")
+    monkeypatch.setenv("GYM_JUDGE_API_KEY", "unused")
+    cfg = GlobalConfigDictParser().parse(
+        GlobalConfigDictParserConfig(
+            initial_global_config_dict=OmegaConf.create(
+                {
+                    "config_paths": [
+                        "benchmarks/opencode_multimodal_benchmarks/opencode_eval.yaml",
+                        "responses_api_models/vllm_model/configs/vllm_model.yaml",
+                        "responses_api_models/vllm_model/configs/hosted_visual_eval.yaml",
+                    ],
+                    "opencode_multimodal_benchmarks": {
+                        "resources_servers": {"opencode_multimodal_benchmarks": {"judge_model": "test-judge"}}
+                    },
+                    "policy_model_name": "hosted-model",
+                    "policy_base_url": "http://model.invalid/v1",
+                    "policy_api_key": "none",
+                }
+            ),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+            offline=True,
+        )
+    )
+    policy = VisualEvalModelConfig.model_validate(
+        OmegaConf.to_container(cfg.policy_model.responses_api_models.vllm_model, resolve=True)
+        | {"name": "policy_model"}
+    )
+    outbound = VLLMModel._apply_sampling_overrides(SimpleNamespace(config=policy), {"max_tokens": 32768})
+    assert outbound["max_tokens"] == 32768
+    assert policy.propagate_context_overflow_errors
+    assert cfg.opencode_multimodal_benchmarks.resources_servers.opencode_multimodal_benchmarks.judge_required

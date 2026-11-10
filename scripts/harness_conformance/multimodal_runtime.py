@@ -90,11 +90,13 @@ def provision(directory: Path, *, bwrap_command: list[str] | None = None) -> Pat
     python_env = directory / "python"
     if not (python_env / "pyvenv.cfg").is_file():
         subprocess.run(["uv", "venv", "--python", sys.executable, str(python_env)], check=True)
+    # This separately pinned tool runtime needs OpenCV, which Gym's root uv policy excludes.
     subprocess.run(
         [
             "uv",
             "pip",
             "install",
+            "--no-config",
             "--python",
             str(python_env / "bin/python"),
             "Pillow==11.3.0",

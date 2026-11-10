@@ -299,8 +299,13 @@ policy_model:
       chat_template_kwargs:
         truncate_history_thinking: false
       uses_interleaved_reasoning: true
-      extra_body:
-        skip_special_tokens: false
+      # Let vLLM allocate the remaining context after accounting for prompt tokens.
+      sampling_overrides:
+        max_tokens: null
+        max_completion_tokens: null
+      extra_body: null
+      propagate_context_overflow_errors: true
+      turn_state_idle_timeout_seconds: 18000
 
 visual_opencode_environment_server:
   environment_servers:
