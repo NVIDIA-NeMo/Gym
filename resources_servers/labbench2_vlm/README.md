@@ -75,8 +75,10 @@ Each JSONL row contains:
   image or PDF for this question (e.g. `media/figs/imgs/<uuid>` or
   `test_media/figs/imgs/<uuid>`), resolved against the agent's `media_base_dir`.
 - `agent_context`: what an agent session receives, written by `prepare_data.py`:
-  `{"values": {"tag": <tag>}, "artifacts": {"media": {"path": <media_dir>}}}`. Data prepared before this
-  key existed still runs through the `legacy_agent` relay; prepare it again to run it under an agent session.
+  `{"values": {"tag": <tag>}, "artifacts": {"media": {"path": <media_dir>}}}`. The shipped configs run the
+  agent in an agent session (`single_agent_turn_legacy`), so a row without this key is refused with HTTP 422.
+  Data prepared before the key existed, including the v0.0.1 validation JSONL from `gitlab_identifier`, lacks
+  it: run `prepare_data.py` again.
 
 See `data/example.jsonl` for concrete examples.
 
