@@ -51,7 +51,7 @@ class DeepCADResourcesServerConfig(BaseResourcesServerConfig):
     operation_bonus: OperationBonusConfig = Field(default_factory=OperationBonusConfig)
     verification_metric: Literal["geometry", "mixed_iou"] = "geometry"
     mixed_iou: MixedIoUConfig | None = None
-    reference_root: str = "resources_servers/deepcad/data"
+    reference_root: str = "cad-data/references"
     sandbox_provider: str | dict[str, Any] = "sandbox"
     sandbox_image: str = "deepcad-cadquery:2.8.0"
     sandbox_python: str = "python"

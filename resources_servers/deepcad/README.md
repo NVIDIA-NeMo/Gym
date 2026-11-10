@@ -16,10 +16,12 @@ docker build -t deepcad-cadquery:2.8.0 resources_servers/deepcad
 ```
 
 `configs/deepcad.yaml` wires the verifier to Gym's single-turn agent. Set the
-model endpoint using the normal Gym model-server configuration. The five example
-rows and reference STEPs under `data/` provide a small environment fixture.
-Prepared datasets must use paths relative to `reference_root`; references outside
-that directory are rejected.
+model endpoint using the normal Gym model-server configuration. Supply your own
+prepared task JSONL and reference STEP files; this contribution bundles no data.
+Set `reference_root` to the external reference directory (the config uses
+`cad-data/references` as a placeholder) and pass your task JSONL to the rollout
+collector. Each task's `reference_step` must be relative to `reference_root`;
+references outside that directory are rejected.
 
 The execution sandbox has no network and receives only the submitted program
 and runner. It receives no reference geometry. Host scoring dependencies must

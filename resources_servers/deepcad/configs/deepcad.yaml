@@ -9,14 +9,9 @@ deepcad:
       iou_backend: brep
       alignment: rescale
       voxel_resolution: 64
-      reference_root: resources_servers/deepcad/data
+      reference_root: cad-data/references
       sandbox_provider: sandbox
       sandbox_image: deepcad-cadquery:2.8.0
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/deepcad/data/example.jsonl
-        num_repeats: 1
 
 deepcad_simple_agent:
   responses_api_agents:
