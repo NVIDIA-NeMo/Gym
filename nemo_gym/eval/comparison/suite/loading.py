@@ -39,6 +39,7 @@ from nemo_gym.eval.comparison.suite.schema import (
     SuiteRunSource,
 )
 from nemo_gym.rollouts.rollout_records import resolve_rollout_path
+from nemo_gym.utils.json_codec import loads_json
 from nemo_gym.utils.path_utils import aggregate_metrics_path_for, materialized_path_for
 
 
@@ -171,7 +172,7 @@ def _read_planned_tasks(path: Path, agent: str, *, environment_server: str | Non
             for line_number, line in enumerate(stream, 1):
                 if not line.strip():
                     continue
-                row = orjson.loads(line)
+                row = loads_json(line)
                 if not isinstance(row, dict):
                     raise ConfigError(f"'{path}' line {line_number} is not an input object.")
                 server = row.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)

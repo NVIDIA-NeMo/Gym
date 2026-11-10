@@ -1046,7 +1046,7 @@ def _normalize_chat_message(message: Any, *, structured: bool = False) -> Any:
             continue
         try:
             arguments = json.loads(raw_arguments) if isinstance(raw_arguments, str) else raw_arguments
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
             continue
         if not isinstance(arguments, dict):
             continue

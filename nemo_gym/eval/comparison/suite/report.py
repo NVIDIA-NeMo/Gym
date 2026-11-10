@@ -26,6 +26,7 @@ from nemo_gym.eval.comparison.suite.schema import (
     SuiteStatistics,
     summary_sources,
 )
+from nemo_gym.utils.json_codec import dumps_json
 
 
 def _number(value: float | None) -> str:
@@ -206,6 +207,6 @@ def write_suite_reports(result: SuiteComparisonResult, output_dir: Path, report_
         written.append(path)
     if report_format in ("json", "both"):
         path = output_dir / "suite_compare_report.json"
-        path.write_bytes(orjson.dumps(result.model_dump(mode="json"), option=orjson.OPT_INDENT_2) + b"\n")
+        path.write_bytes(dumps_json(result.model_dump(mode="json"), option=orjson.OPT_INDENT_2) + b"\n")
         written.append(path)
     return written

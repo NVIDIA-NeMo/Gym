@@ -30,6 +30,7 @@ from nemo_gym.artifacts.exporters.metrics import flatten_aggregate_metrics, heal
 from nemo_gym.artifacts.run_artifacts import RunArtifacts, accepted_stage_omission
 from nemo_gym.config.config_types import DEPRECATED_UPLOAD_ROLLOUTS_KEY, RunExportConfig, UploadRolloutsConfigMixin
 from nemo_gym.config.secret_utils import hide_secrets_in_container
+from nemo_gym.utils.json_codec import dumps_json, loads_json
 from nemo_gym.utils.path_utils import exporter_run_id_path_for
 
 
@@ -115,7 +116,7 @@ def _accepted_stage_omissions(materialized_inputs: Path) -> int:
     if not materialized_inputs.is_file():
         return 0
     with materialized_inputs.open("rb") as lines:
-        rows = (orjson.loads(line) for line in lines if line.strip())
+        rows = (loads_json(line) for line in lines if line.strip())
         return sum(isinstance(row, dict) and accepted_stage_omission(row) is not None for row in rows)
 
 
@@ -171,7 +172,7 @@ def _aggregation_failure(aggregate_metrics: Path) -> Optional[str]:
     from nemo_gym.artifacts.run_files import AGGREGATION_ERROR_KEY
 
     try:
-        entries = orjson.loads(aggregate_metrics.read_bytes())
+        entries = loads_json(aggregate_metrics.read_bytes())
     except orjson.JSONDecodeError as exc:
         return f"Aggregate metrics {aggregate_metrics} are not valid JSON ({exc}). Run `gym eval aggregate` again."
     failed = sorted(
@@ -418,7 +419,7 @@ class BaseExporter(Exporter):
             version = _artifact_version(artifacts)
             if marker.exists():
                 try:
-                    receipt = orjson.loads(marker.read_bytes())
+                    receipt = loads_json(marker.read_bytes())
                 except orjson.JSONDecodeError:
                     receipt = None
                 if (
@@ -454,7 +455,7 @@ class BaseExporter(Exporter):
                         run_id=receipt["run_id"],
                     )
                 if artifacts.aggregate_metrics_json_fpath.is_file():
-                    entries = orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes())
+                    entries = loads_json(artifacts.aggregate_metrics_json_fpath.read_bytes())
                     if isinstance(entries, list) and any(
                         isinstance(entry, dict) and "_ng_run_health_metrics" in entry for entry in entries
                     ):
@@ -488,7 +489,7 @@ class BaseExporter(Exporter):
                 )
             health_version = health_source_artifacts(artifacts, version)
             metrics = flatten_aggregate_metrics(
-                orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes()), source_artifacts=health_version
+                loads_json(artifacts.aggregate_metrics_json_fpath.read_bytes()), source_artifacts=health_version
             )
             rollouts = self._read_rollouts(artifacts) if upload else None
             with self:
@@ -526,7 +527,7 @@ class BaseExporter(Exporter):
             }
             if omitted:
                 receipt["accepted_stage_omissions"] = omitted
-            _write_marker_atomically(marker, orjson.dumps(receipt).decode())
+            _write_marker_atomically(marker, dumps_json(receipt).decode())
         except Exception as exc:
             logger.warning(f"Exporter {self.name} failed to export {artifacts.rollouts_jsonl_fpath}", exc_info=True)
             return ExportResult.failed(f"{type(exc).__name__}: {exc}")
@@ -556,7 +557,7 @@ class BaseExporter(Exporter):
         # and a live run leaves them out of its upload too. `_rollout_for_export` preserves canonical operation metadata while
         # dropping conversation and raw model-call payloads, the same trimming a live run applies.
         with artifacts.rollouts_jsonl_fpath.open("rb") as f:
-            rows = (orjson.loads(line) for line in f if line.strip())
+            rows = (loads_json(line) for line in f if line.strip())
             return [_rollout_for_export(row) for row in rows if not row.get(NG_DISPATCH_DRAINED_KEY)]
 
     def __enter__(self) -> "BaseExporter":

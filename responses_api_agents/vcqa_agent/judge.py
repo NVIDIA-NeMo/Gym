@@ -23,10 +23,10 @@ import re
 from contextlib import nullcontext
 from typing import Any, Dict, List, Optional
 
-import orjson
 from pydantic import BaseModel
 
 from nemo_gym.client import get_response_json, request
+from nemo_gym.utils.json_codec import dumps_json
 
 
 _JUDGE_SYSTEM_PROMPT = (
@@ -163,7 +163,7 @@ async def _judge_attempt(
 async def _judge_exchange(
     *, url: str, headers: Dict[str, str], body: Dict[str, Any], cookies: Optional[Dict[str, str]]
 ) -> Dict[str, Any]:
-    response = await request(method="POST", url=url, headers=headers, data=orjson.dumps(body), cookies=cookies or {})
+    response = await request(method="POST", url=url, headers=headers, data=dumps_json(body), cookies=cookies or {})
     try:
         outcome = await _read_judge_reply(response)
     except BaseException:

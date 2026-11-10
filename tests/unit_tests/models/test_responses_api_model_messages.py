@@ -34,6 +34,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.models.base_responses_api_model import BaseResponsesAPIModelConfig, SimpleResponsesAPIModel
+from nemo_gym.utils.json_codec import loads_json
 
 
 def _build_response(text: str, model: str = "downstream-model") -> NeMoGymResponse:
@@ -150,3 +151,63 @@ class TestDefaultMessagesRoute:
         assert "event: message_start" in body
         assert "event: content_block_delta" in body
         assert "event: message_stop" in body
+
+
+# Model-written arguments orjson cannot carry exactly: a wide integer, a lone surrogate, and NaN beside them.
+_EDGE_ARGUMENTS = '{"n": 1180591620717411303424, "m": -9223372036854775809, "s": "a\\ud800", "f": NaN}'
+_EDGE_INPUT = {"n": 2**70, "m": -(2**63) - 1, "s": "a\ud800", "f": None}
+
+
+class _ToolCallModel(SimpleResponsesAPIModel):
+    """A server whose model calls a tool with ``_EDGE_ARGUMENTS``."""
+
+    config: BaseResponsesAPIModelConfig
+    model_config = {"arbitrary_types_allowed": True}
+
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        response = _build_response("")
+        response.output = [
+            {
+                "type": "function_call",
+                "id": "fc_1",
+                "call_id": "call_1",
+                "name": "lookup",
+                "arguments": _EDGE_ARGUMENTS,
+                "status": "completed",
+            }
+        ]
+        return response
+
+    async def chat_completions(
+        self, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
+    ) -> NeMoGymChatCompletion:
+        raise NotImplementedError
+
+
+class TestToolUseArgumentsOrjsonRejects:
+    _REQUEST = {"model": "claude-x", "max_tokens": 8, "messages": [{"role": "user", "content": "hi"}]}
+
+    def test_non_streaming_reply_carries_the_arguments_exactly(self) -> None:
+        client, _ = _client(_ToolCallModel)
+
+        resp = client.post("/v1/messages", json=self._REQUEST)
+
+        assert resp.status_code == 200
+        tool_use = next(block for block in loads_json(resp.content)["content"] if block["type"] == "tool_use")
+        assert tool_use["input"] == _EDGE_INPUT
+        assert type(tool_use["input"]["n"]) is int
+
+    def test_streaming_reply_carries_the_arguments_exactly(self) -> None:
+        client, _ = _client(_ToolCallModel)
+
+        resp = client.post("/v1/messages", json={**self._REQUEST, "stream": True})
+
+        assert resp.status_code == 200
+        events = [loads_json(line[len("data: ") :]) for line in resp.text.splitlines() if line.startswith("data: ")]
+        partial_json = "".join(
+            event["delta"]["partial_json"]
+            for event in events
+            if event.get("type") == "content_block_delta" and event["delta"]["type"] == "input_json_delta"
+        )
+        # A strict JSON parser reads the streamed input: NaN arrives as null, not as a bare NaN token.
+        assert loads_json(partial_json) == _EDGE_INPUT

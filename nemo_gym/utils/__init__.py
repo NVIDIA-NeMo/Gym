@@ -12,8 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""General helpers shared across nemo_gym: paths, decorators, text, process information, progress bars, and import
-compatibility."""
+"""General helpers shared across nemo_gym: paths, decorators, text, JSON encoding and decoding, process information,
+progress bars, and import compatibility."""
 
 # Public API
 from typing import TYPE_CHECKING

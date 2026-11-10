@@ -190,6 +190,7 @@ from nemo_gym.trajectory.trajectory_record import (
     NG_VERIFIER_INVOCATIONS_KEY,
     failure_observations,
 )
+from nemo_gym.utils.json_codec import dumps_json, loads_json
 from nemo_gym.utils.path_utils import (
     aggregate_metrics_path_for,
     aggregation_sources_path_for,
@@ -1284,7 +1285,7 @@ class _RunRecordWriter:
             if rows is not None:
                 with self.materialized_fpath.open("wb") as file:
                     for row in rows:
-                        file.write(orjson.dumps(row) + b"\n")
+                        file.write(dumps_json(row) + b"\n")
                 # A verified run manifest with every row's attempt reserved before the first request, as collection
                 # writes its own: resume and recovery accept the shard, and the Store checks each record's identity
                 # against it. ``rows`` are the copies as dispatched (run id, rollout id and attempt index stamped).
@@ -1374,17 +1375,17 @@ class _RunRecordWriter:
                 if self._status_expected is not None and self._status_written >= self._status_expected:
                     self.flush_status()
                 return None
-            fpath, line = self.failures_fpath, orjson.dumps(omitted_rollout_record(result))
+            fpath, line = self.failures_fpath, dumps_json(omitted_rollout_record(result))
         elif result.get(NG_FAILURE_CLASS_KEY) is not None:
             # The cap this attempt ran under travels with it, as collection stamps it from the run manifest.
             fpath = self.failures_fpath
-            line = orjson.dumps(
+            line = dumps_json(
                 result
                 if NG_FAILURE_MAX_ATTEMPTS_KEY in result
                 else {**result, NG_FAILURE_MAX_ATTEMPTS_KEY: get_max_rollout_attempts()}
             )
         else:
-            fpath, line = self.rollouts_fpath, orjson.dumps(result)
+            fpath, line = self.rollouts_fpath, dumps_json(result)
         with self._locked() as lock:
             lock.seek(0)
             if lock.read() != self._writer_token:
@@ -1400,7 +1401,7 @@ class _RunRecordWriter:
             # The status follows under the same lock, so a writer superseded meanwhile cannot overwrite the newer
             # writer's counts.
             if self._status is not None and self._status.enabled:
-                status_row = _batch_status_row(orjson.loads(line), self._status_agent_refs)
+                status_row = _batch_status_row(loads_json(line), self._status_agent_refs)
                 (self._status_completed if fpath == self.rollouts_fpath else self._status_failures).append(status_row)
                 last = self._status_expected is not None and self._status_written >= self._status_expected
                 self._status.write_status(self._status_completed, self._status_failures, force=last)
@@ -2545,7 +2546,7 @@ def _agent_request_failure_row(exc: BaseException, status: Optional[int], header
     rollout_ran = status is not None and status not in _SERVER_DID_NOT_RUN_STATUSES
     body = getattr(exc, "response_content", None)
     try:
-        observations = failure_observations(orjson.loads(body)) if body else {}
+        observations = failure_observations(loads_json(body)) if body else {}
     except (TypeError, ValueError):
         observations = {}
     # A reply that ran and broke names its cause's kind, so the row is typed instead of a bare agent_run_error.
@@ -2730,7 +2731,7 @@ def _raise_for_aggregation_errors(metrics_fpath: Optional[Path]) -> None:
         return
     failed_agents = sorted(
         entry[AGENT_REF_KEY_NAME]["name"]
-        for entry in orjson.loads(metrics_fpath.read_bytes())
+        for entry in loads_json(metrics_fpath.read_bytes())
         if AGGREGATION_ERROR_KEY in entry
     )
     if failed_agents:
@@ -2752,7 +2753,7 @@ def _refresh_shard_status_aggregation(input_paths: List[str], aggregate_metrics_
         # Run status is best-effort: a shard whose status cannot be read or written is logged and skipped, never a
         # reason to fail the aggregation or hide its own error.
         try:
-            status = orjson.loads(status_fpath.read_bytes())
+            status = loads_json(status_fpath.read_bytes())
             members = status.get("members")
             if status.get("tracking") != "enabled" or not isinstance(members, dict):
                 continue
@@ -3028,7 +3029,7 @@ async def _read_jsonl(path: Path) -> List[Dict]:
     with path.open("rb") as f:
         for line in f:
             if line.strip():
-                rows.append(orjson.loads(line))
+                rows.append(loads_json(line))
             if time.monotonic() - yielded_at >= _READ_JSONL_YIELD_INTERVAL_S:
                 await asyncio.sleep(0)
                 yielded_at = time.monotonic()
@@ -3542,7 +3543,7 @@ class RolloutCollectionHelper(BaseModel):
         )
         selected = range(len(examples)) if task_ids is None else select_tasks(examples, task_ids)
         raw_rows = [
-            (idx, orjson.dumps(examples[idx], option=orjson.OPT_SORT_KEYS).decode(), examples[idx].copy())
+            (idx, dumps_json(examples[idx], option=orjson.OPT_SORT_KEYS).decode(), examples[idx].copy())
             for idx in selected
         ]
         rows = self._preprocess_raw_rows(raw_rows, config)
@@ -3822,10 +3823,10 @@ class RolloutCollectionHelper(BaseModel):
                 ),
                 rows,
                 results,
-                [[orjson.dumps(r)] for r in results],
+                [[dumps_json(r)] for r in results],
             )
         with config.materialized_jsonl_fpath.open() as f:
-            original_input_rows = list(map(orjson.loads, tqdm(f, desc="Reading materialized input rows")))
+            original_input_rows = list(map(loads_json, tqdm(f, desc="Reading materialized input rows")))
         _reject_attempt_qualified_rollout_ids(original_input_rows, config.materialized_jsonl_fpath)
 
         get_key = lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
@@ -3840,7 +3841,7 @@ class RolloutCollectionHelper(BaseModel):
                 if not stripped:
                     continue
 
-                result = orjson.loads(stripped)
+                result = loads_json(stripped)
                 successes_seen.add(get_key(result))
 
                 if retain_results_in_memory:
@@ -3866,7 +3867,7 @@ class RolloutCollectionHelper(BaseModel):
                     line = line.strip()
                     if not line:
                         continue
-                    fr = orjson.loads(line)
+                    fr = loads_json(line)
                     if TASK_INDEX_KEY_NAME not in fr or ROLLOUT_INDEX_KEY_NAME not in fr:
                         continue
                     k = (fr[TASK_INDEX_KEY_NAME], fr[ROLLOUT_INDEX_KEY_NAME])
@@ -4076,7 +4077,7 @@ executions → not run again (left to recovery)
                 # Legacy imports can skip preparation. Validate their full saved
                 # inventory before the store repairs or migrates any artifacts.
                 with config.materialized_jsonl_fpath.open("rb") as materialized_file:
-                    validate_batch([orjson.loads(line) for line in materialized_file if line.strip()])
+                    validate_batch([loads_json(line) for line in materialized_file if line.strip()])
 
         def prepare_inputs() -> tuple[list[dict], RunManifest]:
             input_rows = self._preprocess_rows_from_config(config)
@@ -4327,7 +4328,7 @@ executions → not run again (left to recovery)
                 )
                 upload_spool = output_files.enter_context(upload_spool_fpath.open("w+b"))
                 for record in store.selected_records("success").values():
-                    upload_spool.write(orjson.dumps(_rollout_for_export(record.read())) + b"\n")
+                    upload_spool.write(dumps_json(_rollout_for_export(record.read())) + b"\n")
             if run_timing is not None:
 
                 async def _timing_heartbeat() -> None:
@@ -4491,7 +4492,7 @@ executions → not run again (left to recovery)
                     rows.append(row)
                     results.append(result)
                 if upload_spool is not None:
-                    upload_spool.write(orjson.dumps(_rollout_for_export(result)) + b"\n")
+                    upload_spool.write(dumps_json(_rollout_for_export(result)) + b"\n")
 
                 dispatch_name = self._dispatch_name(row)
                 if completed.run_error is not None:
@@ -5041,7 +5042,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         # Write single file with all agents
         metrics_fpath = aggregate_metrics_path_for(output_fpath)
-        metrics_fpath.write_bytes(orjson.dumps(all_agent_metrics, option=orjson.OPT_INDENT_2))
+        metrics_fpath.write_bytes(dumps_json(all_agent_metrics, option=orjson.OPT_INDENT_2))
 
         if raise_on_error and first_error is not None:
             raise first_error
@@ -6044,7 +6045,7 @@ class RolloutAggregationConfig(RunHealthConfig, BaseNeMoGymCLIConfig):
 def loads_jsonl_line(raw, fpath, line_no: int):
     """Parse one JSONL line, raising a clean `ConfigError` (naming file + line) on malformed JSON."""
     try:
-        return orjson.loads(raw)
+        return loads_json(raw)
     except orjson.JSONDecodeError as e:
         raise ConfigError(f"Malformed JSON in '{fpath}' at line {line_no}: {e}") from e
 
@@ -6233,7 +6234,7 @@ class RolloutAggregationHelper(BaseModel):
                     "+materialized_inputs_jsonl_fpath=<path> when aggregating a batch from shards."
                 )
             with materialized_fpath.open("rb") as materialized_file:
-                materialized_rows = [orjson.loads(line) for line in materialized_file if line.strip()]
+                materialized_rows = [loads_json(line) for line in materialized_file if line.strip()]
             batch_tracker = BatchStatusTracker(Path(config.batch_manifest_fpath), materialized_rows)
             batch_agent_refs = {
                 (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]): row[AGENT_REF_KEY_NAME]
@@ -6264,7 +6265,7 @@ class RolloutAggregationHelper(BaseModel):
             try:
                 with os.fdopen(fd, "wb") as out:
                     for r in results:
-                        out.write(orjson.dumps(r) + b"\n")
+                        out.write(dumps_json(r) + b"\n")
                     out.flush()
                     os.fsync(out.fileno())
                 if prior_mode is not None:
