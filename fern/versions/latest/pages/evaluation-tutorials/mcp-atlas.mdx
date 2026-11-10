@@ -13,17 +13,27 @@ at revision `8c563b55d7c967755f474299848049834d624617`, with the upstream
 <Warning>
 This integration is pending validation. The committed catalog lacks the authenticated Slack schemas
 needed by 60 tasks. Preparation fails until those schemas are exported and committed; credentials alone
-do not repair the catalog. The default Apptainer configuration also shares the host network. It requires
-a verified access boundary between evaluated code, other rollouts and the NeMo Gym control plane before
-benchmark scoring. Separate filesystems and host ports do not establish that boundary.
+do not repair the catalog. The OpenSandbox exec transport and network policy still require deployment
+validation: evaluated code must be unable to reach other rollouts or the NeMo Gym control plane before
+benchmark scoring. Unit tests and a policy request do not establish that boundary.
 </Warning>
 
 ## Prepare the runtime and accounts
 
 Complete [installation](/main/get-started/installation) and configure a policy endpoint that supports
-function calls. Follow the [resources-server setup](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/mcp_atlas/README.md#setup)
-to build a non-root-readable SIF of the upstream image. Its tools may install packages at startup, so
-the sandbox needs outbound access to the task services, PyPI, npm and GitHub.
+function calls. The benchmark includes the shared OpenSandbox provider config and references its named
+`sandbox` block. Configure approved host-side `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY` through normal
+secret configuration, and use the OCI image `ghcr.io/scaleapi/mcp-atlas:1.2.7` or its approved deployment
+rewrite. Follow the [resources-server setup](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/mcp_atlas/README.md#setup)
+to validate image architecture, user permissions and filesystem access on the deployment.
+
+Supply an operator-reviewed YAML overlay that sets `mcp_atlas_sandbox_options.network_policy` with
+explicit `defaultAction: deny`. The server rejects fields the installed OpenSandbox SDK drops or changes,
+including unsupported port restrictions. The policy must allow the real task services and bootstrap hosts
+(PyPI, npm and GitHub), while the deployed boundary protects peer, host, provider and NeMo Gym destinations.
+Verify IP-level enforcement, IPv6 handling and policy-management protection from evaluated code; DNS-only
+filtering is insufficient. Run simultaneous A/B private-marker tests with trusted host-proxy positive
+controls under the same deployment and policy before scoring. No service allowlist is invented here.
 
 Provision the service credentials in the runtime environment using the upstream variable names listed in
 [`SERVICE_ENV_NAMES`](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/mcp_atlas/app.py).
@@ -54,8 +64,9 @@ These keys control the benchmark's runtime:
 
 | Key | Purpose |
 |---|---|
-| `mcp_atlas_sandbox_image` | Absolute path to the staged SIF. |
-| `mcp_atlas.resources_servers.mcp_atlas.sandbox_provider` | Provider configuration; its transport must be compatible with the server's endpoints. |
+| `mcp_atlas_sandbox_image` | OCI image reference for OpenSandbox. |
+| `mcp_atlas_sandbox_provider` | Named or inline provider configuration; defaults to `sandbox`. |
+| `mcp_atlas_sandbox_options` | Provider create options, including the reviewed network policy. |
 | `mcp_atlas.resources_servers.mcp_atlas.sandbox_max_concurrency` | Maximum simultaneous task sandboxes. |
 | `mcp_atlas_judge_base_url` | OpenAI-compatible judge endpoint. |
 | `mcp_atlas_judge_model_name` | Exact judge model name served by that endpoint. |
@@ -71,15 +82,18 @@ the resources, agent and model-wrapper servers, collects responses and verifies 
 
 ```bash
 gym eval run --benchmark mcp_atlas \
+  --config /absolute/path/mcp-atlas-network.yaml \
   --model-type vllm_model --model-url http://POLICY_HOST:8000/v1 --model POLICY_MODEL \
   --output results/mcp_atlas/rollouts.jsonl \
-  ++mcp_atlas_sandbox_image=/absolute/path/mcp-atlas-1.2.7-nonroot.sif \
+  ++mcp_atlas_sandbox_image=ghcr.io/scaleapi/mcp-atlas:1.2.7 \
   ++mcp_atlas_judge_api_key='${oc.env:MCP_ATLAS_JUDGE_API_KEY}'
 ```
 
 Set `MCP_ATLAS_JUDGE_API_KEY` through approved secret configuration before starting the command. Use
 `--limit 3` for a small smoke; a limited run is not the 500-task benchmark. The development-only
-`mcp_atlas_sandbox_url` connects every task to one shared environment and must not be used for scores.
+`mcp_atlas_sandbox_url` connects every task to one shared environment. This and the explicit
+Apptainer development config require `mcp_atlas_development_mode: true` (or the equivalent resources-server
+field) and must not be used for scores. The resources-server README documents the local SIF development path.
 
 Tool calls within one rollout run serially under its session lock. Verification and close wait for an
 active call, up to `tool_call_timeout_s` (60 s by default). Different rollouts can run concurrently.

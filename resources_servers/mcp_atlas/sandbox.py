@@ -2,11 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """One private MCP-Atlas agent-environment sandbox per rollout.
 
-Each sandbox is the upstream ``ghcr.io/scaleapi/mcp-atlas`` image run through ``nemo_gym.sandbox`` (Apptainer on
-Slurm). Each task has dedicated process and scratch state, but the host-loopback transport shares networking;
-evaluated code still needs an enforced boundary from other rollouts and Gym control endpoints before scoring.
-Service credentials reach the sandbox through
-``SandboxSpec.env``, which the provider writes to a private env file, never onto a command line.
+OpenSandbox reaches the image's loopback HTTP server through lifecycle exec, without exposing MCP ports.
+Apptainer development runs use host loopback and private scratch directories. Neither transport establishes
+egress isolation: scoring still requires deployment enforcement against peers and Gym control endpoints.
+Service credentials reach the sandbox through ``SandboxSpec.env``.
 """
 
 from __future__ import annotations
@@ -16,6 +15,8 @@ import contextlib
 import json as json_module
 import logging
 import os
+import posixpath
+import shlex
 import shutil
 import socket
 import stat
@@ -29,13 +30,16 @@ from typing import Any, Optional
 from aiohttp import ClientError, ClientTimeout
 
 from nemo_gym.client import request
-from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
+from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec
 from nemo_gym.server_runtime import ResourcesSessionLocks
 
 
 logger = logging.getLogger(__name__)
 
 LOG_PATH = "/tmp/mcp-atlas-sandbox.log"
+HTTP_HELPER_PATH = "/tmp/nemo-gym-mcp-atlas-http.py"
+HTTP_REQUEST_ENV = "MCP_ATLAS_HTTP_REQUEST"
+SANDBOX_PORT = 1984
 POLL_INTERVAL_S = 2.0
 LIST_TOOLS_ATTEMPTS = 5
 
@@ -71,6 +75,7 @@ class AtlasSandbox:
     base_url: str
     tool_names: dict[str, str]
     missing_tools: list[str]
+    exec_transport: bool = False
     sandbox: Optional[AsyncSandbox] = None
     server_task: Optional[asyncio.Task] = None
     port: Optional[int] = None
@@ -119,6 +124,56 @@ async def _http_json(method: str, url: str, timeout_s: float, json: Any = None) 
         return response.status, text
 
 
+def _check_exec_result(result: SandboxExecResult) -> None:
+    if result.error_type == "timeout":
+        raise asyncio.TimeoutError("sandbox exec timed out")
+    if result.error_type is not None or result.return_code != 0:
+        raise SandboxError(f"sandbox exec failed: error_type={result.error_type!r}, return_code={result.return_code}")
+
+
+async def _sandbox_http_json(
+    box: AtlasSandbox, method: str, path: str, timeout_s: float, json: Any = None
+) -> tuple[int, Any]:
+    if not box.exec_transport:
+        return await _http_json(method, f"{box.base_url}{path}", timeout_s, json)
+    if box.sandbox is None:
+        raise SandboxError("sandbox HTTP exec has no sandbox")
+    envelope = json_module.dumps(
+        {"method": method, "path": path, "timeout_s": timeout_s, "json": json}, allow_nan=False
+    )
+    try:
+        # Socket deadlines alone reset on each read. Bound the whole exec, including provider overhead,
+        # while allowing the provider's cancellation cleanup to finish before reporting the timeout.
+        async with asyncio.timeout(timeout_s) as deadline:
+            result = await box.sandbox.exec(
+                shlex.join(["/agent-environment/.venv/bin/python", HTTP_HELPER_PATH]),
+                env={HTTP_REQUEST_ENV: envelope},
+                timeout_s=timeout_s + 5,
+            )
+        if deadline.expired():
+            # A provider that consumed cancellation must not turn a late result into a successful call.
+            raise asyncio.TimeoutError("sandbox HTTP request timed out")
+    except asyncio.TimeoutError:
+        raise
+    except Exception as exc:
+        raise SandboxError(f"sandbox HTTP exec failed: {type(exc).__name__}") from exc
+    _check_exec_result(result)
+    try:
+        response = json_module.loads(result.stdout or "")
+    except ValueError as exc:
+        raise SandboxError("sandbox HTTP exec returned an invalid response envelope") from exc
+    if isinstance(response, dict) and set(response) == {"status", "body"}:
+        status = response["status"]
+        if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599:
+            return status, response["body"]
+    if isinstance(response, dict) and set(response) == {"error", "message"} and isinstance(response["message"], str):
+        if response["error"] == "timeout":
+            raise asyncio.TimeoutError("sandbox HTTP request timed out")
+        if response["error"] == "transport":
+            raise OSError(f"sandbox HTTP request failed: {response['message']}")
+    raise SandboxError("sandbox HTTP exec returned an invalid response envelope")
+
+
 async def call_sandbox_tool(
     box: AtlasSandbox, name: str, arguments: dict[str, Any], *, timeout_s: float
 ) -> tuple[int, Any]:
@@ -130,7 +185,7 @@ async def call_sandbox_tool(
         raise SandboxError("the sandbox was stopped")
     box.last_used_at = monotonic()
     payload = {"tool_name": box.tool_names.get(name, name), "tool_args": arguments, "use_cache": False}
-    return await _http_json("POST", f"{box.base_url}/call-tool", timeout_s, payload)
+    return await _sandbox_http_json(box, "POST", "/call-tool", timeout_s, payload)
 
 
 class PortAllocator:
@@ -179,13 +234,27 @@ class SandboxPool:
         ttl_s: float,
         scratch_root: Optional[str] = None,
         sandbox_metadata: Optional[Mapping[str, Any]] = None,
+        sandbox_options: Optional[Mapping[str, Any]] = None,
         sandbox_factory: Callable[[Mapping[str, Any], SandboxSpec], AsyncSandbox] = AsyncSandbox,
     ) -> None:
         self.image = image
         self.sandbox_provider = dict(sandbox_provider)
+        if len(self.sandbox_provider) != 1 or next(iter(self.sandbox_provider)) not in {"apptainer", "opensandbox"}:
+            raise ValueError("MCP-Atlas requires one resolved opensandbox or apptainer provider")
+        self._exec_transport = next(iter(self.sandbox_provider)) == "opensandbox"
         self.sandbox_env = dict(sandbox_env)
         self.sandbox_files = dict(sandbox_files)
         self.sandbox_metadata = dict(sandbox_metadata or {})
+        self.sandbox_options = dict(sandbox_options or {})
+        if self._exec_transport:
+            reserved_paths = {HTTP_HELPER_PATH, *map(str, Path(HTTP_HELPER_PATH).parents)}
+            if any(posixpath.normpath("/" + path.lstrip("/")) in reserved_paths for path in self.sandbox_files):
+                raise ValueError(f"sandbox_files must not replace the HTTP helper at {HTTP_HELPER_PATH}")
+            if HTTP_REQUEST_ENV in self.sandbox_env:
+                raise ValueError(f"sandbox_env must not set the reserved {HTTP_REQUEST_ENV}")
+            self.sandbox_files[HTTP_HELPER_PATH] = Path(__file__).with_name("sandbox_http.py").read_text()
+        elif self.sandbox_options:
+            raise ValueError("sandbox_options are supported only for OpenSandbox")
         self.startup_timeout_s = startup_timeout_s
         self.ttl_s = ttl_s
         self.scratch_root = scratch_root
@@ -206,20 +275,26 @@ class SandboxPool:
         async with self._sessions.locked(session_id):
             await self._stop_locked(session_id)
             await self._capacity.acquire()
-            box = AtlasSandbox(base_url="", tool_names={}, missing_tools=[])
+            box = AtlasSandbox(base_url="", tool_names={}, missing_tools=[], exec_transport=self._exec_transport)
             self._sandboxes[session_id] = box
             try:
-                box.port = self._ports.acquire()
-                box.base_url = f"http://127.0.0.1:{box.port}"
-                box.scratch_dir = tempfile.mkdtemp(prefix="mcp-atlas-", dir=self.scratch_root)
+                port = SANDBOX_PORT
+                options = self.sandbox_options
+                if not self._exec_transport:
+                    box.port = self._ports.acquire()
+                    port = box.port
+                    box.base_url = f"http://127.0.0.1:{port}"
+                    box.scratch_dir = tempfile.mkdtemp(prefix="mcp-atlas-", dir=self.scratch_root)
+                    options = {"binds": [f"{box.scratch_dir}:/tmp"]}
                 spec = SandboxSpec(
                     image=self.image,
                     ttl_s=self.ttl_s,
                     env={**self.sandbox_env, "ENABLED_SERVERS": ",".join(servers)},
                     files=self.sandbox_files,
-                    # A private /tmp per sandbox: uv and npm caches and the server log live there.
-                    provider_options={"binds": [f"{box.scratch_dir}:/tmp"]},
-                    ports=(box.port,),
+                    provider_options=options,
+                    ports=() if self._exec_transport else (port,),
+                    # Override the image's server entrypoint; only the explicit loopback service should start.
+                    entrypoint=["/bin/sh", "-c", "exec sleep infinity"] if self._exec_transport else None,
                     metadata=self.sandbox_metadata,
                 )
                 box.sandbox = self._factory(self.sandbox_provider, spec)
@@ -228,12 +303,18 @@ class SandboxPool:
                 # sandbox_files configs live under /root, and MCP stdio servers inherit HOME from this process.
                 command = (
                     "cd /agent-environment && export HOME=/root && exec ./entrypoint.sh .venv/bin/python -m uvicorn "
-                    f"agent_environment.main:app --host 127.0.0.1 --port {box.port} >{LOG_PATH} 2>&1 </dev/null"
+                    f"agent_environment.main:app --host 127.0.0.1 --port {port} >{LOG_PATH} 2>&1 </dev/null"
                 )
-                # The exec stays open for the server's lifetime; stopping the sandbox ends both.
-                box.server_task = asyncio.create_task(
-                    box.sandbox.exec(command, timeout_s=self.ttl_s + self.startup_timeout_s)
-                )
+                if self._exec_transport:
+                    result = await box.sandbox.exec(
+                        command + " &", timeout_s=self.startup_timeout_s, preserve_background_services=True
+                    )
+                    _check_exec_result(result)
+                else:
+                    # The development exec stays open for the server's lifetime; stopping ends both.
+                    box.server_task = asyncio.create_task(
+                        box.sandbox.exec(command, timeout_s=self.ttl_s + self.startup_timeout_s)
+                    )
                 listed = await self._wait_until_ready(box, tools)
                 box.tool_names, box.missing_tools = sandbox_tool_names(tools, listed, servers)
                 return box
@@ -254,10 +335,13 @@ class SandboxPool:
     async def _log_tail(self, box: AtlasSandbox) -> str:
         if box.sandbox is None:
             return ""
-        with contextlib.suppress(Exception):
+        try:
             result = await box.sandbox.exec(f"tail -c 4000 {LOG_PATH}", timeout_s=15)
+            _check_exec_result(result)
             return (result.stdout or "") + (result.stderr or "")
-        return ""
+        except Exception as exc:
+            logger.warning("could not read the MCP-Atlas sandbox log: %s", exc)
+            return f"log unavailable: {type(exc).__name__}"
 
     async def _wait_until_ready(self, box: AtlasSandbox, tools: list[str]) -> set[str]:
         """Wait for ``/health``, then for ``/list-tools`` to report every tool or stop changing."""
@@ -265,9 +349,15 @@ class SandboxPool:
         healthy = False
         while not healthy:
             if box.server_task is not None and box.server_task.done():
+                try:
+                    _check_exec_result(await box.server_task)
+                except (SandboxError, asyncio.TimeoutError) as exc:
+                    raise SandboxError(
+                        f"sandbox server exited during startup: {exc}: {await self._log_tail(box)}"
+                    ) from exc
                 raise SandboxError(f"sandbox server exited during startup: {await self._log_tail(box)}")
             with contextlib.suppress(ClientError, asyncio.TimeoutError, OSError):
-                status, body = await _http_json("GET", f"{box.base_url}/health", 10)
+                status, body = await _sandbox_http_json(box, "GET", "/health", 10)
                 healthy = (
                     status == 200
                     and isinstance(body, dict)
@@ -286,7 +376,7 @@ class SandboxPool:
         while attempts < LIST_TOOLS_ATTEMPTS and not ready:
             attempts += 1
             try:
-                status, body = await _http_json("POST", f"{box.base_url}/list-tools", 120)
+                status, body = await _sandbox_http_json(box, "POST", "/list-tools", 120)
             except (ClientError, asyncio.TimeoutError, OSError) as exc:
                 raise SandboxError(f"list-tools failed: {type(exc).__name__}: {exc}") from exc
             if status != 200 or not isinstance(body, list):
@@ -319,6 +409,11 @@ class SandboxPool:
                     for result in results:
                         if isinstance(result, Exception):
                             logger.warning("MCP-Atlas sandbox server stopped with an error: %s", result)
+                        elif isinstance(result, SandboxExecResult):
+                            try:
+                                _check_exec_result(result)
+                            except (SandboxError, asyncio.TimeoutError) as exc:
+                                logger.warning("MCP-Atlas sandbox server stopped with an error: %s", exc)
                 if box.scratch_dir is not None:
                     try:
                         _remove_scratch_dir(box.scratch_dir)

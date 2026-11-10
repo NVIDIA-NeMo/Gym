@@ -1,5 +1,6 @@
 config_paths:
   - resources_servers/mcp_atlas/configs/mcp_atlas.yaml
+  - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
 mcp_atlas_benchmark_simple_agent:
   _inherit_from: mcp_atlas_simple_agent

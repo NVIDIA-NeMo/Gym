@@ -820,6 +820,7 @@ class TestBuildVerifyPayload:
                 host="127.0.0.1",
                 port=0,
                 sandbox_base_url="http://127.0.0.1:1984",
+                sandbox_development_mode=True,
                 judge_model_server={"type": "responses_api_models", "name": "judge"},
             ),
             server_client=MagicMock(spec=ServerClient),

@@ -11,7 +11,9 @@ at revision `8c563b55`) with the servers of the upstream agent-environment image
   the image serves (`tool_catalog.json`). Tools of servers the image does not ship are dropped, as upstream does.
 - **Sandbox.** Every rollout gets a private agent-environment sandbox that serves only the task's servers, so
   stateful servers (filesystem, memory, git, desktop-commander) start clean. Tool calls go to its `/call-tool`
-  with caching off. A tool error reaches the model as the sandbox's error text, an empty result as `success`,
+  on sandbox-local loopback through the host's OpenSandbox exec connection, with no declared MCP port and
+  caching off. This transport alone does not establish outbound network isolation. A tool error reaches
+  the model as the sandbox's error text, an empty result as `success`,
   and a call that takes more than 60 s as `Tool call timed out after 60s`, as in the upstream harness.
 - **Limits.** 256 model turns (`max_steps`) and 100 tool calls; calls past the 100th return an error that asks
   for the final answer.
@@ -49,37 +51,56 @@ so the masks stay the same.
 ## Setup
 
 The current integration is pending validation. The committed catalog has no Slack tools, so preparation
-refuses the 60 Slack-enabled tasks until their authenticated schemas are exported and committed. Also,
-the default Apptainer configuration shares the host network: separate filesystems and ports do not stop
-an evaluated Python tool from reaching another rollout or the Gym control plane. A verified network/access
-boundary is required before this configuration can support benchmark scores. See the
+refuses the 60 Slack-enabled tasks until their authenticated schemas are exported and committed. The
+OpenSandbox transport and policy configuration still require real deployment and rollout validation.
+An evaluated Python tool must be unable to reach other rollouts or the Gym control plane. See the
 [evaluation tutorial](https://docs.nvidia.com/nemo/gym/main/tutorials/evaluation-tutorials/mcp-atlas).
 
-1. Build a SIF that a non-root user can run. The image keeps its pre-installed tools under `/root`, mode 700:
-   ```bash
-   apptainer build --sandbox mcp-atlas docker://ghcr.io/scaleapi/mcp-atlas:1.2.7
-   chmod -R a+rX mcp-atlas && chmod -R a+rwX mcp-atlas/root mcp-atlas/data mcp-atlas/agent-environment
-   apptainer build mcp-atlas-1.2.7-nonroot.sif mcp-atlas
-   ```
-2. Set `sandbox_image` to the SIF. The default provider runs it with
-   `--userns --writable-tmpfs --no-home --cleanenv`, and `--cleanenv` on every exec, so this server's own
-   environment never reaches the sandbox. Each sandbox needs about 1 to 4 GB of memory.
+1. Include the approved OpenSandbox provider config and set `sandbox_image` to the OCI reference
+   `ghcr.io/scaleapi/mcp-atlas:1.2.7` (or an approved deployment rewrite of it). The benchmark config includes
+   `nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml` and selects its named `sandbox` block.
+   Provider credentials stay in the host client. Validate image architecture, user permissions, `/root`
+   tool/config access and writable private `/tmp` on the actual deployment before using this path.
+2. Supply an operator-reviewed `sandbox_options.network_policy` with explicit `defaultAction: deny`.
+   The server rejects policy fields the installed SDK silently drops or changes, including unsupported
+   port restrictions. Configure the full policy through `mcp_atlas_sandbox_options`; no external-service
+   allowlist is invented here. Required task services and bootstrap hosts must work under the same policy.
+   A policy request is not enforcement evidence: verify IP-level filtering (DNS-only filtering is
+   insufficient), peer/host/Gym/provider/metadata protection, IPv6 handling and protected policy-management
+   access from evaluated code. Prove this with concurrent A/B private-marker tests and host-proxy positive
+   controls before benchmark scoring. No network or isolation acceptance is claimed by unit tests.
 3. Export the service credentials under the upstream names (`service_env_names`, for example `EXA_API_KEY`,
    `GITHUB_TOKEN`, `NOTION_TOKEN`). Only the credentials that are set reach the sandbox, through the provider's
    private env file. 411 of the 500 ground-truth trajectories call at least one key-gated server; five servers
    (Airtable, Google Calendar, Notion, MongoDB, Slack) also need the upstream `data_exports/` seeded into the
-   accounts.
+   accounts. Management, model and judge credentials must not be forwarded as workload credentials.
 4. The sandbox needs internet access to the services and to PyPI, npm and GitHub, because some servers install
    packages when they start. `sandbox_files` pins that resolution to the image date (2026-07-17).
 
-`sandbox_ttl_s` controls this server's in-process idle reaper. The default Apptainer provider does not enforce
-`ttl_s`, so instances are not guaranteed to expire after the server exits. Shutdown reports failed stops and
-propagates the error, retaining ownership for a later cleanup retry while the process is alive. If cleanup
-cannot finish before process exit, an operator must inspect and stop the remaining instances.
+`sandbox_ttl_s` is passed to the provider and controls the in-process idle reaper. Verify the deployment's
+TTL behavior. Shutdown reports failed stops and propagates the error, retaining ownership for a later
+cleanup retry while the process is alive. If cleanup cannot finish before process exit, an operator must
+inspect and stop the remaining instances.
+
+### Development transports
+
+The explicit `configs/mcp_atlas_apptainer_development.yaml` selects Apptainer and
+`sandbox_development_mode: true`. Build a local SIF with readable/writable image paths:
+
+```bash
+apptainer build --sandbox mcp-atlas docker://ghcr.io/scaleapi/mcp-atlas:1.2.7
+chmod -R a+rX mcp-atlas && chmod -R a+rwX mcp-atlas/root mcp-atlas/data mcp-atlas/agent-environment
+apptainer build mcp-atlas-1.2.7-nonroot.sif mcp-atlas
+```
+
+Set `sandbox_image` to that file. `--cleanenv` keeps host credentials out of the workload; the provider
+shares host networking, so separate filesystems/ports are not a scoring boundary. Apptainer does not
+enforce provider `ttl_s`; an exited host process can leave instances requiring operator cleanup.
 
 For development, `sandbox_base_url` points at one running agent-environment
 (`docker run -p 1984:1984 --env-file .env ghcr.io/scaleapi/mcp-atlas:1.2.7`). Every rollout then shares it, so
-stateful servers leak between tasks: do not use it for scores.
+stateful servers leak between tasks. This also requires `sandbox_development_mode: true`. Neither
+development transport may be used for benchmark scores.
 
 ## Differences from upstream
 

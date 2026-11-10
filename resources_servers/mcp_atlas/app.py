@@ -136,30 +136,15 @@ def _is_service_error(status: int, text: str, tool_name: str) -> bool:
 
 
 class MCPAtlasResourcesServerConfig(BaseResourcesServerConfig):
-    # Path to the agent-environment SIF; one sandbox per rollout.
+    # OCI image for OpenSandbox, or a local SIF with explicit development mode.
     sandbox_image: str = ""
     # An already running agent-environment (for example `docker run -p 1984:1984`); shared by every
     # rollout, so stateful servers leak between tasks. For development only.
     sandbox_base_url: str = ""
-    sandbox_provider: str | dict[str, Any] = Field(
-        default_factory=lambda: {
-            "apptainer": {
-                "create": {
-                    "start_timeout_s": 600,
-                    "extra_start_args": ["--userns", "--writable-tmpfs", "--no-home", "--cleanenv"],
-                    "apply_resource_limits": False,
-                },
-                # --cleanenv keeps this server's own environment (judge and cluster keys) out of the sandbox,
-                # where the model's shell and code tools could read it.
-                "exec": {
-                    "fakeroot_for_root": False,
-                    "default_timeout_s": 180,
-                    "concurrency": 64,
-                    "extra_exec_args": ["--cleanenv"],
-                },
-            }
-        }
-    )
+    sandbox_provider: str | dict[str, Any] = "sandbox"
+    sandbox_development_mode: bool = False
+    # OpenSandbox create options. The requested policy is not evidence of deployment enforcement.
+    sandbox_options: dict[str, Any] = Field(default_factory=dict)
     sandbox_env: dict[str, str] = Field(default_factory=dict)
     sandbox_files: dict[str, str] = Field(default_factory=lambda: dict(DEFAULT_SANDBOX_FILES))
     service_env_names: list[str] = Field(default_factory=lambda: list(SERVICE_ENV_NAMES))
@@ -258,18 +243,45 @@ class MCPAtlasResourcesServer(SimpleResourcesServer):
             raise ValueError("mcp_atlas keeps one sandbox per rollout in-process and requires num_workers=1")
         if bool(self.config.sandbox_image) == bool(self.config.sandbox_base_url):
             raise ValueError("set exactly one of sandbox_image or sandbox_base_url")
+        if self.config.sandbox_base_url and not self.config.sandbox_development_mode:
+            raise ValueError("sandbox_base_url requires sandbox_development_mode=true; do not use it for scores")
         self._judge_slots = asyncio.Semaphore(self.config.judge_max_concurrency)
         self._closed_sessions = ResourcesSessionFences(self.config.session_close_retry_window_seconds)
         if self.config.sandbox_image:
-            if not os.path.isfile(self.config.sandbox_image):
-                raise ValueError(f"sandbox_image is not a file: {self.config.sandbox_image}")
+            provider = resolve_provider_config(self.config.sandbox_provider, self.server_client.global_config_dict)
+            provider_name = next(iter(provider))
+            if provider_name == "apptainer":
+                if not self.config.sandbox_development_mode:
+                    raise ValueError("Apptainer requires sandbox_development_mode=true; do not use it for scores")
+                if not os.path.isfile(self.config.sandbox_image):
+                    raise ValueError(f"sandbox_image is not a file: {self.config.sandbox_image}")
+            elif provider_name == "opensandbox":
+                if os.path.isabs(self.config.sandbox_image) or self.config.sandbox_image.endswith(".sif"):
+                    raise ValueError("OpenSandbox sandbox_image must be an OCI image reference, not a local SIF")
+                policy = self.config.sandbox_options.get("network_policy")
+                if not isinstance(policy, dict) or policy.get("defaultAction") != "deny":
+                    raise ValueError(
+                        "OpenSandbox requires sandbox_options.network_policy with defaultAction=deny; "
+                        "deployment enforcement and allowed external services must be validated before scoring"
+                    )
+                from opensandbox.models.sandboxes import NetworkPolicy
+
+                encoded_policy = NetworkPolicy.model_validate(policy).model_dump(
+                    by_alias=True, mode="json", exclude_unset=True
+                )
+                if encoded_policy != policy:
+                    raise ValueError(
+                        "network_policy contains fields the installed OpenSandbox SDK drops or changes; "
+                        "use a policy the SDK preserves exactly"
+                    )
+            else:
+                raise ValueError("MCP-Atlas supports OpenSandbox, or Apptainer in explicit development mode")
             services = {name: os.environ[name] for name in self.config.service_env_names if os.environ.get(name)}
             logger.info("MCP-Atlas sandboxes get %d of %d service credentials", len(services), len(SERVICE_ENV_NAMES))
             self._pool = SandboxPool(
                 image=self.config.sandbox_image,
-                sandbox_provider=resolve_provider_config(
-                    self.config.sandbox_provider, self.server_client.global_config_dict
-                ),
+                sandbox_provider=provider,
+                sandbox_options=self.config.sandbox_options,
                 sandbox_metadata=resolve_provider_metadata(
                     self.config.sandbox_provider, self.server_client.global_config_dict
                 ),

@@ -14,6 +14,7 @@ from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_runtime import ResourcesCloseSessionRequest, ResourcesParticipant
 from nemo_gym.verification import JudgeError, judge_failsafe
 from resources_servers.mcp_atlas.app import (
+    SERVICE_ENV_NAMES,
     MCPAtlasResourcesServer,
     MCPAtlasResourcesServerConfig,
     MCPAtlasSeedSessionRequest,
@@ -38,6 +39,7 @@ META = {
 def judge_client(*outcomes: str) -> MagicMock:
     """A ServerClient whose judge answers the given outcomes in order; any other string is sent as is."""
     client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {}
     replies = []
     for outcome in outcomes:
         if outcome in ("fulfilled", "partially_fulfilled", "not_fulfilled"):
@@ -64,6 +66,7 @@ def judge_client(*outcomes: str) -> MagicMock:
 
 
 def make_server(base_url: str, client: MagicMock, **overrides) -> MCPAtlasResourcesServer:
+    overrides.setdefault("sandbox_development_mode", True)
     config = MCPAtlasResourcesServerConfig(
         host="0.0.0.0",
         port=0,
@@ -112,6 +115,91 @@ async def seed(server: MCPAtlasResourcesServer, session_id: str = "s1") -> None:
 def test_exactly_one_sandbox_source_is_required() -> None:
     with pytest.raises(ValueError, match="exactly one"):
         make_server("", judge_client())
+
+
+def test_shared_environment_requires_explicit_development_mode() -> None:
+    with pytest.raises(ValueError, match="sandbox_base_url requires sandbox_development_mode=true"):
+        make_server("http://unused", judge_client(), sandbox_development_mode=False)
+
+
+def test_apptainer_requires_explicit_development_mode(tmp_path) -> None:
+    image = tmp_path / "atlas.sif"
+    image.touch()
+    with pytest.raises(ValueError, match="Apptainer requires sandbox_development_mode=true"):
+        make_server(
+            "",
+            judge_client(),
+            sandbox_image=str(image),
+            sandbox_provider={"apptainer": {}},
+            sandbox_development_mode=False,
+        )
+
+
+@pytest.mark.parametrize("options", [{}, {"network_policy": {}}, {"network_policy": {"defaultAction": "allow"}}])
+def test_opensandbox_requires_an_explicit_default_deny_policy(options: dict) -> None:
+    with pytest.raises(ValueError, match="network_policy with defaultAction=deny"):
+        make_server(
+            "",
+            judge_client(),
+            sandbox_image="ghcr.io/scaleapi/mcp-atlas:1.2.7",
+            sandbox_provider={"opensandbox": {}},
+            sandbox_options=options,
+            sandbox_development_mode=False,
+        )
+
+
+def test_opensandbox_rejects_a_local_sif(tmp_path) -> None:
+    image = tmp_path / "atlas.sif"
+    image.touch()
+    with pytest.raises(ValueError, match="OCI image reference"):
+        make_server(
+            "",
+            judge_client(),
+            sandbox_image=str(image),
+            sandbox_provider={"opensandbox": {}},
+            sandbox_options={"network_policy": {"defaultAction": "deny", "egress": []}},
+        )
+
+
+def test_opensandbox_rejects_a_policy_whose_port_restriction_would_be_dropped() -> None:
+    with pytest.raises(ValueError, match="SDK drops or changes"):
+        make_server(
+            "",
+            judge_client(),
+            sandbox_image="ghcr.io/scaleapi/mcp-atlas:1.2.7",
+            sandbox_provider={"opensandbox": {}},
+            sandbox_options={
+                "network_policy": {
+                    "defaultAction": "deny",
+                    "egress": [{"action": "allow", "target": "service.example", "ports": [443]}],
+                }
+            },
+        )
+
+
+def test_opensandbox_resolves_provider_and_keeps_control_credentials_host_side(monkeypatch) -> None:
+    for name in SERVICE_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("EXA_API_KEY", "service-only")
+    monkeypatch.setenv("OPENSANDBOX_API_KEY", "provider-only")
+    monkeypatch.setenv("INFERENCE_API_KEY", "model-only")
+    monkeypatch.setenv("NVAUTH_TOKEN", "host-only")
+    client = judge_client()
+    block = {"opensandbox": {"connection": {"api_key": "provider-only"}}, "default_metadata": {"team": "atlas"}}
+    client.global_config_dict = {"sandbox": block}
+    options = {"network_policy": {"defaultAction": "deny", "egress": []}}
+    server = make_server(
+        "",
+        client,
+        sandbox_image="ghcr.io/scaleapi/mcp-atlas:1.2.7",
+        sandbox_options=options,
+        sandbox_env={"PYTHONUNBUFFERED": "1"},
+        sandbox_development_mode=False,
+    )
+    assert server._pool.sandbox_provider == {"opensandbox": block["opensandbox"]}
+    assert server._pool.sandbox_metadata == {"team": "atlas"}
+    assert server._pool.sandbox_env == {"EXA_API_KEY": "service-only", "PYTHONUNBUFFERED": "1"}
+    assert server._pool.sandbox_options == options
 
 
 def test_tool_output_text() -> None:
@@ -622,6 +710,7 @@ def test_provider_configuration_resolves_defaults_and_metadata(tmp_path, named: 
         name="mcp_atlas",
         sandbox_image=str(image),
         sandbox_provider="sandbox" if named else block,
+        sandbox_development_mode=True,
         judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
     )
     server = MCPAtlasResourcesServer(config=config, server_client=client)

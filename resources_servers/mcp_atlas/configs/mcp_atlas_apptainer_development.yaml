@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Explicit host-network development configuration. Do not use for benchmark scores.
+config_paths:
+- resources_servers/mcp_atlas/configs/mcp_atlas.yaml
+mcp_atlas:
+  resources_servers:
+    mcp_atlas:
+      sandbox_development_mode: true
+      sandbox_provider:
+        apptainer:
+          create:
+            start_timeout_s: 600
+            extra_start_args:
+            - --userns
+            - --writable-tmpfs
+            - --no-home
+            - --cleanenv
+            apply_resource_limits: false
+          exec:
+            fakeroot_for_root: false
+            default_timeout_s: 180
+            concurrency: 64
+            extra_exec_args:
+            - --cleanenv
+      verified: false
