@@ -375,7 +375,7 @@ async def test_malformed_and_oversized_bodies_answer_category_only(make_server, 
     server, app, fake = make_server()
     status, result = await post(app, "/verify", raw=b'{"not json')
     assert (status, result) == (422, {"error": {"category": "request_invalid"}})
-    status, result = await post(app, "/verify", raw=b"x" * (adapter.MAX_REQUEST_BYTES + 1))
+    status, result = await post(app, "/verify", raw=b"x" * (server.config.max_request_bytes + 1))
     assert (status, result) == (413, {"error": {"category": "request_limit"}})
     status, result = await post(app, "/verify", payload(entrypoint=""))
     assert status == 200 and result["category"] == "task_invalid"
@@ -774,13 +774,12 @@ async def test_pre_endpoint_privacy_survives_late_handler_registration(
 
 
 @pytest.mark.asyncio
-async def test_malformed_saved_response_and_ingress_limit(make_server, monkeypatch):
-    _, app, fake = make_server()
+async def test_malformed_saved_response_and_ingress_limit(make_server):
+    _, app, fake = make_server(max_request_bytes=64 * 1024)
     row = payload()
     row["response"] = {"private": REFERENCE_MARKER}
     assert await post(app, "/verify", row) == (422, {"error": {"category": "request_invalid"}})
-    monkeypatch.setattr(adapter, "MAX_REQUEST_BYTES", 64)
-    assert await post(app, "/verify", raw=b" " * 65) == (413, {"error": {"category": "request_limit"}})
+    assert await post(app, "/verify", raw=b" " * (64 * 1024 + 1)) == (413, {"error": {"category": "request_limit"}})
     fake.grade.assert_not_awaited()
 
 
@@ -1796,3 +1795,98 @@ async def test_uncertainty_without_execution_provenance_stays_unscored(make_serv
     _, app, _ = make_server(grade=unscorable_verdict(), score_comparator_uncertain_as_incorrect=True)
     _, result = await post(app, "/verify", payload())
     assert_unscorable(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["passed", "truncated", "source_limit"])
+async def test_long_reasoning_preserves_response_and_executable_limits(make_server, outcome):
+    server, app, fake = make_server()
+    row = payload()
+    reasoning = {
+        "id": "reasoning-1",
+        "type": "reasoning",
+        "summary": [],
+        "content": [{"type": "reasoning_text", "text": "long reasoning " * 100_000}],
+    }
+    row["response"]["output"].insert(0, reasoning)
+    # Multi-turn prompt history can contain an earlier long reasoning item too.
+    row["responses_create_params"]["input"] = [reasoning, {"role": "user", "content": "Return the code."}]
+    if outcome == "truncated":
+        row["response"]["status"] = "incomplete"
+        row["response"]["incomplete_details"] = {"reason": "max_output_tokens"}
+    if outcome == "source_limit":
+        row["response"]["output"][-1]["content"][0]["text"] = "x" * (
+            server.config.execution.max_candidate_source_bytes + 1
+        )
+    status, result = await post(app, "/verify", row)
+    assert status == 200
+    assert result["response"] == row["response"]
+    assert result["responses_create_params"] == row["responses_create_params"]
+    assert (
+        result["category"]
+        == {"passed": "passed", "truncated": "response_truncated", "source_limit": "candidate_source_limit"}[outcome]
+    )
+    assert result["reward"] == (1.0 if outcome == "passed" else 0.0)
+    if outcome == "passed":
+        assert fake.grade.await_args.args[1] == SOURCE.strip()
+        # Judge-only replay preserves the same saved response and verdict.
+        replay_status, replay = await post(app, "/verify", {**row, "response": result["response"]})
+        assert replay_status == 200 and replay["category"] == "passed"
+        assert replay["response"] == result["response"]
+        assert fake.grade.await_count == 2
+    else:
+        fake.grade.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/verify", "/seed_session"])
+async def test_configurable_ingress_limit_is_the_envelope_byte_bound(make_server, caplog, path):
+    _, app, fake = make_server()
+    row = payload()
+    row["responses_create_params"]["input"] = "private_prompt_marker" * 600_000
+    if path == "/seed_session":
+        row.pop("response")
+    assert await post(app, path, row) == (413, {"error": {"category": "request_limit"}})
+    fake.grade.assert_not_awaited()
+    _, larger_app, larger_fake = make_server(max_request_bytes=16 * 1024 * 1024)
+    status, result = await post(larger_app, path, row)
+    assert status == 200
+    if path == "/verify":
+        assert result["category"] == "passed"
+        larger_fake.grade.assert_awaited_once()
+    assert "private_prompt_marker" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_stream_limit_stops_before_reading_remaining_chunks(make_server):
+    server, _, fake = make_server(max_request_bytes=8)
+    receive = AsyncMock(
+        side_effect=[
+            {"type": "http.request", "body": b"12345", "more_body": True},
+            {"type": "http.request", "body": b"6789", "more_body": True},
+            {"type": "http.request", "body": b"unread", "more_body": False},
+        ]
+    )
+    value, error = await server._read_json(adapter.Request({"type": "http"}, receive))
+    assert value is None
+    assert error.status_code == 413
+    assert json.loads(error.body) == {"error": {"category": "request_limit"}}
+    assert receive.await_count == 2
+    fake.grade.assert_not_awaited()
+
+
+@pytest.mark.parametrize("limit", [0, -1, True, 1.5, "100"])
+def test_ingress_limit_requires_a_positive_integer(make_server, limit):
+    with pytest.raises(ValidationError):
+        make_server(max_request_bytes=limit)
+
+
+def test_unbounded_envelope_bytes_still_enforce_json_structure_and_types():
+    for value in [float("nan"), 2**64, {"x": [None] * (task_schema.MAX_JSON_NODES + 1)}]:
+        with pytest.raises(ValueError):
+            task_schema.bounded_json(value, max_bytes=None)
+    nested = None
+    for _ in range(3 * task_schema.MAX_DEPTH + 10):
+        nested = [nested]
+    with pytest.raises(ValueError, match="structure"):
+        task_schema.bounded_json(nested, max_bytes=None)
