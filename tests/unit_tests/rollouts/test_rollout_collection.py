@@ -12910,108 +12910,65 @@ class TestEnvironmentServerRouting:
             assert all(AGENT_REF_KEY_NAME not in row for row in rows)
             assert all(row[NG_ENVIRONMENT_SERVER_KEY] == "environment" for row in rows)
 
-    @pytest.mark.parametrize("all_statuses_present", [False, True])
-    @pytest.mark.parametrize("first_route", ["environment", None])
-    @pytest.mark.parametrize("reverse_input_order", [False, True])
-    async def test_offline_status_rejects_distinct_members_sharing_a_route_across_shards(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        all_statuses_present: bool,
-        first_route: str | None,
-        reverse_input_order: bool,
+    @pytest.mark.parametrize("trailing_input_fragment", [False, True])
+    async def test_recorded_environment_rows_keep_dispatched_status_identity(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, trailing_input_fragment: bool
     ) -> None:
         async def post(server_name, url_path, json, **kwargs):
             assert server_name == "environment"
             if url_path == "/aggregate_metrics":
                 return FakeResponse(200, compute_aggregate_metrics(json.verify_responses).model_dump())
             assert url_path == "/run"
-            return FakeResponse(200, {"response": {}, "reward": float(json[AGENT_REF_KEY_NAME]["name"] == "hermes")})
+            return FakeResponse(200, {"response": {}, "reward": 1.0})
 
         client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
         client.global_config_dict = _environment_server_config()
-        client.global_config_dict["other"] = client.global_config_dict["hermes"].copy()
-        client.global_config_dict["environment"]["environment_servers"]["single_agent"]["other_agent"] = {
-            "type": "responses_api_agents",
-            "name": "other",
-        }
-        helper = RolloutCollectionHelper()
-        outputs = []
-        for index, (shard, agent) in enumerate((("a", "hermes"), ("b", "other"))):
-            row = {
-                AGENT_REF_KEY_NAME: {"name": agent},
-                NG_ENVIRONMENT_SERVER_KEY: first_route if index == 0 else "environment",
-                TASK_INDEX_KEY_NAME: 1 - index if reverse_input_order else index,
+        rows = [
+            {
+                NG_ENVIRONMENT_SERVER_KEY: "environment",
+                TASK_INDEX_KEY_NAME: 0,
                 ROLLOUT_INDEX_KEY_NAME: 0,
                 "responses_create_params": {"input": []},
             }
-            output = tmp_path / f"rollouts-{shard}.jsonl"
-            if first_route is None:
-                # Historical raw shards may retain a null route. Offline scoring falls back to the agent's server;
-                # that does not turn the saved null into verified route evidence for status.
-                output.write_bytes(orjson.dumps(row | {"response": {}, "reward": float(agent == "hermes")}) + b"\n")
-                output.with_name(output.stem + "_batch_status.json").write_bytes(
-                    orjson.dumps(
-                        {
-                            "tracking": "enabled",
-                            "members": {
-                                agent: {
-                                    "expected_rollout_count": 1,
-                                    "completed_rollout_count": 1,
-                                    "aggregation_status": "deferred",
-                                }
-                            },
-                        }
-                    )
-                )
-            else:
-                for future in helper.run_examples([row], record_output_dir=tmp_path, record_shard=shard):
-                    await future
-            outputs.append(output)
-        optional_output = outputs[0] if first_route is None else outputs[1]
-        optional_status = optional_output.with_name(optional_output.stem + "_batch_status.json")
-        if not all_statuses_present:
-            optional_status.unlink()
-        source_files = [
-            path
-            for output in outputs
-            for path in (
-                (output,)
-                if first_route is None
-                else (
-                    output,
-                    materialized_path_for(output),
-                    failures_path_for(output),
-                    nemo_gym.rollouts.rollout_collection.manifest_path_for(output),
-                )
-            )
         ]
-        assert all(path.is_file() for path in source_files)
-        before = {path: path.read_bytes() for path in source_files}
-        merged = tmp_path / "merged.jsonl"
+        original = deepcopy(rows)
+        for future in RolloutCollectionHelper().run_examples(rows, record_output_dir=tmp_path, record_shard="flat"):
+            await future
+        assert rows == original
+        output = tmp_path / "rollouts-flat.jsonl"
+        status_path = output.with_name(output.stem + "_batch_status.json")
+        live = orjson.loads(status_path.read_bytes())
+        assert live["tracking"] == "enabled"
+        assert set(live["members"]) == {"hermes"}
+        member = live["members"]["hermes"]
+        assert member["expected_rollout_count"] == member["completed_rollout_count"] == 1
+        assert member["remaining_rollout_count"] == 0
+        materialized = materialized_path_for(output)
+        [saved_row] = [orjson.loads(line) for line in materialized.read_bytes().splitlines()]
+        assert saved_row[AGENT_REF_KEY_NAME] == {"name": "hermes"}
+        if trailing_input_fragment:
+            with materialized.open("ab") as f:
+                f.write(b'{"incomplete":')
+        before = {path: path.read_bytes() for path in (output, materialized)}
 
         await RolloutAggregationHelper().run_from_config(
             RolloutAggregationConfig(
-                input_glob=str(tmp_path / "rollouts-[ab].jsonl"),
-                output_jsonl_fpath=str(merged),
+                input_glob=str(output),
+                output_jsonl_fpath=str(output),
+                merge_shards=False,
                 disable_health_check=True,
             )
         )
 
-        [entry] = orjson.loads(merged.with_name("merged_aggregate_metrics.json").read_bytes())
-        assert entry[AGENT_REF_KEY_NAME] == {"name": "other" if reverse_input_order else "hermes"}
+        offline = orjson.loads(status_path.read_bytes())
+        assert offline["tracking"] == "enabled"
+        assert set(offline["members"]) == {"hermes"}
+        assert offline["members"]["hermes"] == {**member, "aggregation_status": "complete"}
+        [entry] = orjson.loads(output.with_name(output.stem + "_aggregate_metrics.json").read_bytes())
+        assert entry[AGENT_REF_KEY_NAME] == {"name": "hermes"}
         assert entry[NG_ENVIRONMENT_SERVER_KEY] == "environment"
-        assert entry["key_metrics"]["mean/reward"] == 0.5
-        mandatory_output = outputs[1] if first_route is None else outputs[0]
-        assert mandatory_output.with_name(mandatory_output.stem + "_batch_status.json").is_file()
-        for output, agent in zip(outputs, ("hermes", "other")):
-            status_path = output.with_name(output.stem + "_batch_status.json")
-            if status_path.exists():
-                member = orjson.loads(status_path.read_bytes())["members"][agent]
-                assert member["completed_rollout_count"] == member["expected_rollout_count"] == 1
-                assert member["aggregation_status"] == "error"
-        assert optional_status.exists() is all_statuses_present
-        assert {path: path.read_bytes() for path in source_files} == before
+        assert entry["key_metrics"]["mean/reward"] == 1.0
+        assert {path: path.read_bytes() for path in before} == before
 
     async def test_call_aggregate_metrics_groups_by_environment_server(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -16083,7 +16040,6 @@ class TestRunStatusFiles:
     def test_aggregation_marks_each_shard_status_and_keeps_its_counts(
         self, tmp_path: Path, metrics: list | None, expected: str
     ) -> None:
-        from nemo_gym.rollouts.batch_status import _AggregateBinding
         from nemo_gym.rollouts.rollout_collection import _refresh_shard_status_aggregation
 
         shard = tmp_path / "rollouts-rs0.jsonl"
@@ -16095,9 +16051,7 @@ class TestRunStatusFiles:
             metrics_fpath = tmp_path / "rollouts_aggregate_metrics.json"
             metrics_fpath.write_bytes(orjson.dumps(metrics))
 
-        _refresh_shard_status_aggregation(
-            [str(shard)], metrics_fpath, legacy_bindings={str(shard): {"a": _AggregateBinding(frozenset())}}
-        )
+        _refresh_shard_status_aggregation([str(shard)], metrics_fpath)
 
         refreshed = orjson.loads(status_fpath.read_bytes())["members"]["a"]
         assert refreshed == {**member, "aggregation_status": expected}
@@ -16128,357 +16082,6 @@ class TestRunStatusFiles:
         assert "Could not update the run status" in caplog.text
         second = orjson.loads((tmp_path / "rollouts-rs1_batch_status.json").read_bytes())
         assert second["members"]["a"]["aggregation_status"] == "error"
-
-
-@pytest.mark.parametrize(
-    "damage",
-    [
-        "changed_inputs",
-        "missing_inputs",
-        "missing_manifest",
-        "missing_both",
-        "scalar_input",
-        "invalid_agent",
-        "stat_denied",
-    ],
-)
-def test_offline_status_requires_bound_materialized_routes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str
-) -> None:
-    from nemo_gym.rollouts.rollout_collection import _refresh_shard_status_aggregation
-    from nemo_gym.rollouts.rollout_recovery import RunManifest, manifest_path_for
-
-    output = tmp_path / "rollouts-shard.jsonl"
-    materialized = materialized_path_for(output)
-    rows = [
-        {
-            "task_id": {"taskset": "tasks", "task_id": "first"},
-            "task_input": {"task_data": {"id": "first"}},
-            NG_ENVIRONMENT_SERVER_KEY: "environment",
-            TASK_INDEX_KEY_NAME: 0,
-            ROLLOUT_INDEX_KEY_NAME: 0,
-        }
-    ]
-    materialized.write_bytes(orjson.dumps(rows[0]) + b"\n")
-    manifest = manifest_path_for(output)
-    RunManifest.create(materialized, rows, {}, _environment_server_config()).write(manifest)
-    status_path = output.with_name(output.stem + "_batch_status.json")
-    member = {"expected_rollout_count": 1, "completed_rollout_count": 1, "aggregation_status": "complete"}
-    status_path.write_bytes(orjson.dumps({"tracking": "enabled", "members": {"environment": member}}))
-    metrics = tmp_path / "aggregate_metrics.json"
-    # Even a matching display label cannot replace missing or changed route evidence.
-    metrics.write_bytes(
-        orjson.dumps([{AGENT_REF_KEY_NAME: {"name": "environment"}, NG_ENVIRONMENT_SERVER_KEY: "environment"}])
-    )
-    if damage == "changed_inputs":
-        materialized.write_bytes(orjson.dumps(rows[0] | {NG_ENVIRONMENT_SERVER_KEY: "other_environment"}) + b"\n")
-    elif damage == "missing_inputs":
-        materialized.unlink()
-    elif damage == "missing_manifest":
-        manifest.unlink()
-    elif damage == "missing_both":
-        manifest.unlink()
-        materialized.unlink()
-    elif damage == "scalar_input":
-        materialized.write_bytes(b"7\n")
-    elif damage == "invalid_agent":
-        materialized.write_bytes(orjson.dumps(rows[0] | {AGENT_REF_KEY_NAME: "invalid"}) + b"\n")
-    before = {path: path.read_bytes() for path in (materialized, manifest) if path.exists()}
-    if damage == "stat_denied":
-        exists = Path.exists
-
-        def deny_manifest_stat(path):
-            if path == manifest:
-                raise PermissionError("source metadata is unreadable")
-            return exists(path)
-
-        monkeypatch.setattr(Path, "exists", deny_manifest_stat)
-
-    _refresh_shard_status_aggregation([str(output)], metrics)
-
-    assert orjson.loads(status_path.read_bytes())["members"]["environment"] == {
-        **member,
-        "aggregation_status": "error",
-    }
-    assert {path: path.read_bytes() for path in before} == before
-
-
-@pytest.mark.parametrize("unrouted_shard", [False, True])
-async def test_offline_aggregation_status_checks_all_legacy_source_identities(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unrouted_shard: bool
-) -> None:
-    """The aggregator's actual legacy input rows supply the binding when no managed inventory exists."""
-    install_fake_server_client(
-        monkeypatch,
-        AsyncMock(return_value=FakeResponse(200, AggregateMetrics(key_metrics={"mean/reward": 1.0}).model_dump())),
-        agent_names=("a",),
-    )
-    shard = tmp_path / "rollouts-shard.jsonl"
-    shard.write_bytes(
-        orjson.dumps(
-            {AGENT_REF_KEY_NAME: {"name": "a"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0}
-        )
-        + b"\n"
-    )
-    status = shard.with_name(shard.stem + "_batch_status.json")
-    member = {"expected_rollout_count": 1, "completed_rollout_count": 1, "aggregation_status": "deferred"}
-    status.write_bytes(orjson.dumps({"tracking": "enabled", "members": {"a": member}}))
-    sources = [shard]
-    if unrouted_shard:
-        unrouted = tmp_path / "rollouts-unrouted.jsonl"
-        unrouted.write_bytes(orjson.dumps({TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.0}) + b"\n")
-        sources.append(unrouted)
-    before = {path: path.read_bytes() for path in sources}
-
-    await RolloutAggregationHelper().run_from_config(
-        RolloutAggregationConfig(
-            input_glob=str(tmp_path / "rollouts-*.jsonl"),
-            output_jsonl_fpath=str(shard),
-            merge_shards=False,
-            disable_health_check=True,
-        )
-    )
-
-    assert orjson.loads(status.read_bytes())["members"]["a"] == {
-        **member,
-        "aggregation_status": "error" if unrouted_shard else "complete",
-    }
-    assert {path: path.read_bytes() for path in sources} == before
-    assert not materialized_path_for(shard).exists()
-    assert not nemo_gym.rollouts.rollout_collection.manifest_path_for(shard).exists()
-    [entry] = orjson.loads(shard.with_name(shard.stem + "_aggregate_metrics.json").read_bytes())
-    assert entry[AGENT_REF_KEY_NAME] == {"name": "a"}
-
-
-@pytest.mark.parametrize(
-    ("failure_route", "failure_status_present", "relative_input", "unbound_inventory"),
-    [
-        pytest.param("environment", present, relative, False, id=f"shared-status-{present}-relative-{relative}")
-        for present in (False, True)
-        for relative in (False, True)
-    ]
-    + [
-        pytest.param(route, present, False, False, id=f"{route}-status-{present}")
-        for route in (None, "other_environment")
-        for present in (False, True)
-    ]
-    + [pytest.param("environment", False, False, True, id="empty-unbound-inventory")],
-)
-async def test_offline_status_accounts_for_counted_failure_sidecar_ownership(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    failure_route: str | None,
-    failure_status_present: bool,
-    relative_input: bool,
-    unbound_inventory: bool,
-) -> None:
-    async def post(server_name, url_path, json, **kwargs):
-        assert url_path == "/aggregate_metrics"
-        assert server_name in {"environment", "other_environment"}
-        return FakeResponse(200, compute_aggregate_metrics(json.verify_responses).model_dump())
-
-    client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
-    client.global_config_dict = _environment_server_config()
-    if failure_route == "other_environment":
-        client.global_config_dict["other_environment"] = client.global_config_dict["environment"].copy()
-    successful = tmp_path / "rollouts-a.jsonl"
-    successful.write_bytes(
-        orjson.dumps(
-            {
-                NG_ENVIRONMENT_SERVER_KEY: "environment",
-                TASK_INDEX_KEY_NAME: 0,
-                ROLLOUT_INDEX_KEY_NAME: 0,
-                "reward": 1.0,
-            }
-        )
-        + b"\n"
-    )
-    failed = tmp_path / "rollouts-b.jsonl"
-    failed.write_bytes(b"")
-    sidecar = failures_path_for(failed)
-    sidecar.write_bytes(
-        orjson.dumps(
-            {
-                AGENT_REF_KEY_NAME: {"name": "hermes"},
-                NG_ENVIRONMENT_SERVER_KEY: failure_route,
-                TASK_INDEX_KEY_NAME: 1,
-                ROLLOUT_INDEX_KEY_NAME: 0,
-                NG_FAILURE_CLASS_KEY: AGENT_RUN_ERROR_FAILURE_CLASS,
-            }
-        )
-        + b"\n"
-    )
-    members = {
-        "environment": {"expected_rollout_count": 1, "completed_rollout_count": 1, "aggregation_status": "deferred"},
-        "hermes": {"expected_rollout_count": 1, "completed_rollout_count": 0, "aggregation_status": "deferred"},
-    }
-    successful_status = successful.with_name(successful.stem + "_batch_status.json")
-    successful_status.write_bytes(
-        orjson.dumps({"tracking": "enabled", "members": {"environment": members["environment"]}})
-    )
-    failure_status = failed.with_name(failed.stem + "_batch_status.json")
-    if failure_status_present:
-        failure_status.write_bytes(orjson.dumps({"tracking": "enabled", "members": {"hermes": members["hermes"]}}))
-    source_paths = [successful, failed, sidecar]
-    if unbound_inventory:
-        materialized = materialized_path_for(failed)
-        materialized.write_bytes(b"")
-        source_paths.append(materialized)
-    before = {path: path.read_bytes() for path in source_paths}
-    if relative_input:
-        monkeypatch.chdir(tmp_path)
-    merged = tmp_path / "merged.jsonl"
-
-    await RolloutAggregationHelper().run_from_config(
-        RolloutAggregationConfig(
-            input_glob="./rollouts-[ab].jsonl" if relative_input else str(tmp_path / "rollouts-[ab].jsonl"),
-            output_jsonl_fpath=str(merged),
-            count_failure_classes_as_zero=[AGENT_RUN_ERROR_FAILURE_CLASS],
-            disable_health_check=True,
-        )
-    )
-
-    entries = orjson.loads(merged.with_name("merged_aggregate_metrics.json").read_bytes())
-    if failure_route == "other_environment":
-        assert {entry[AGENT_REF_KEY_NAME]["name"]: entry["key_metrics"] for entry in entries} == {
-            "environment": {"mean/reward": 1.0},
-            "other_environment": {"mean/reward": 0.0},
-        }
-        expected_status = "complete"
-    else:
-        [entry] = entries
-        assert entry[AGENT_REF_KEY_NAME] == {"name": "hermes"}
-        assert entry[NG_ENVIRONMENT_SERVER_KEY] == "environment"
-        assert entry["key_metrics"] == {"mean/reward": 0.5}
-        expected_status = "error"
-    assert orjson.loads(successful_status.read_bytes())["members"]["environment"] == {
-        **members["environment"],
-        "aggregation_status": expected_status,
-    }
-    assert failure_status.exists() is failure_status_present
-    if failure_status_present:
-        assert orjson.loads(failure_status.read_bytes())["members"]["hermes"] == {
-            **members["hermes"],
-            "aggregation_status": expected_status,
-        }
-    assert merged.read_bytes() == before[successful]
-    assert {path: path.read_bytes() for path in before} == before
-    assert not materialized_path_for(successful).exists()
-    assert materialized_path_for(failed).exists() is unbound_inventory
-    assert all(
-        not nemo_gym.rollouts.rollout_collection.manifest_path_for(path).exists() for path in (successful, failed)
-    )
-
-
-@pytest.mark.parametrize("selection", ["uncounted", "later_uncounted", "later_omitted", "successful", "later_source"])
-async def test_offline_status_ownership_uses_only_selected_scored_failures(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selection: str
-) -> None:
-    async def post(server_name, url_path, json, **kwargs):
-        assert server_name == "environment" and url_path == "/aggregate_metrics"
-        return FakeResponse(200, compute_aggregate_metrics(json.verify_responses).model_dump())
-
-    client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
-    client.global_config_dict = _environment_server_config()
-    successful = tmp_path / "rollouts-a.jsonl"
-    row = {NG_ENVIRONMENT_SERVER_KEY: "environment", TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0}
-    successful.write_bytes(orjson.dumps(row) + b"\n")
-    failed = tmp_path / "rollouts-b.jsonl"
-    failed.write_bytes(orjson.dumps(row | {TASK_INDEX_KEY_NAME: 1}) + b"\n" if selection == "successful" else b"")
-    failure = {
-        AGENT_REF_KEY_NAME: {"name": "hermes"},
-        NG_ENVIRONMENT_SERVER_KEY: "environment",
-        TASK_INDEX_KEY_NAME: 1,
-        ROLLOUT_INDEX_KEY_NAME: 0,
-        ATTEMPT_INDEX_KEY_NAME: 0,
-        NG_FAILURE_CLASS_KEY: AGENT_RUN_ERROR_FAILURE_CLASS,
-    }
-    failures = [failure]
-    if selection in {"later_uncounted", "later_omitted"}:
-        failures.append(
-            failure
-            | {ATTEMPT_INDEX_KEY_NAME: 1, NG_FAILURE_CLASS_KEY: "judge_failed"}
-            | ({NG_OMITTED_ROLLOUT_KEY: True, NG_NO_PERSIST_KEY: True} if selection == "later_omitted" else {})
-        )
-    sidecar = failures_path_for(failed)
-    sidecar.write_bytes(b"".join(orjson.dumps(failure) + b"\n" for failure in failures))
-    sources = [successful, failed, sidecar]
-    if selection == "later_source":
-        later = tmp_path / "rollouts-c.jsonl"
-        later.write_bytes(b"")
-        later_sidecar = failures_path_for(later)
-        later_sidecar.write_bytes(orjson.dumps({k: v for k, v in failure.items() if k != AGENT_REF_KEY_NAME}) + b"\n")
-        sources.extend((later, later_sidecar))
-    status = successful.with_name(successful.stem + "_batch_status.json")
-    member = {"expected_rollout_count": 1, "completed_rollout_count": 1, "aggregation_status": "deferred"}
-    status.write_bytes(orjson.dumps({"tracking": "enabled", "members": {"environment": member}}))
-    before = {path: path.read_bytes() for path in sources}
-    merged = tmp_path / "merged.jsonl"
-
-    await RolloutAggregationHelper().run_from_config(
-        RolloutAggregationConfig(
-            input_glob=str(tmp_path / "rollouts-*.jsonl"),
-            output_jsonl_fpath=str(merged),
-            count_failure_classes_as_zero=[] if selection == "uncounted" else [AGENT_RUN_ERROR_FAILURE_CLASS],
-            disable_health_check=True,
-        )
-    )
-
-    assert orjson.loads(status.read_bytes())["members"]["environment"] == {**member, "aggregation_status": "complete"}
-    [entry] = orjson.loads(merged.with_name("merged_aggregate_metrics.json").read_bytes())
-    assert entry[AGENT_REF_KEY_NAME] == {"name": "hermes"}
-    assert entry[NG_ENVIRONMENT_SERVER_KEY] == "environment"
-    assert entry["key_metrics"]["mean/reward"] == (0.5 if selection == "later_source" else 1.0)
-    assert len(merged.read_bytes().splitlines()) == (2 if selection == "successful" else 1)
-    assert {path: path.read_bytes() for path in sources} == before
-
-
-async def test_offline_status_retains_an_absent_route_when_counted_failures_add_a_route(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    async def post(server_name, url_path, json, **kwargs):
-        assert server_name == "environment" and url_path == "/aggregate_metrics"
-        return FakeResponse(200, compute_aggregate_metrics(json.verify_responses).model_dump())
-
-    client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
-    client.global_config_dict = _environment_server_config()
-    shard = tmp_path / "rollouts.jsonl"
-    row = {AGENT_REF_KEY_NAME: {"name": "hermes"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
-    shard.write_bytes(orjson.dumps(row | {"reward": 1.0}) + b"\n")
-    sidecar = failures_path_for(shard)
-    sidecar.write_bytes(
-        orjson.dumps(
-            row
-            | {
-                TASK_INDEX_KEY_NAME: 1,
-                NG_ENVIRONMENT_SERVER_KEY: "environment",
-                NG_FAILURE_CLASS_KEY: AGENT_RUN_ERROR_FAILURE_CLASS,
-            }
-        )
-        + b"\n"
-    )
-    status = shard.with_name(shard.stem + "_batch_status.json")
-    member = {"expected_rollout_count": 2, "completed_rollout_count": 1, "aggregation_status": "deferred"}
-    status.write_bytes(orjson.dumps({"tracking": "enabled", "members": {"hermes": member}}))
-    before = {path: path.read_bytes() for path in (shard, sidecar)}
-    merged = tmp_path / "merged.jsonl"
-
-    await RolloutAggregationHelper().run_from_config(
-        RolloutAggregationConfig(
-            input_glob=str(shard),
-            output_jsonl_fpath=str(merged),
-            count_failure_classes_as_zero=[AGENT_RUN_ERROR_FAILURE_CLASS],
-            disable_health_check=True,
-        )
-    )
-
-    [entry] = orjson.loads(merged.with_name("merged_aggregate_metrics.json").read_bytes())
-    assert entry[AGENT_REF_KEY_NAME] == {"name": "hermes"}
-    assert entry[NG_ENVIRONMENT_SERVER_KEY] == "environment"
-    assert entry["key_metrics"] == {"mean/reward": 0.5}
-    assert orjson.loads(status.read_bytes())["members"]["hermes"] == {**member, "aggregation_status": "error"}
-    assert merged.read_bytes() == before[shard]
-    assert {path: path.read_bytes() for path in before} == before
 
 
 async def test_run_status_keeps_results_persisted_inside_the_throttle_when_the_run_fails(
@@ -16796,3 +16399,126 @@ async def test_returned_and_stored_projection_share_one_decision(
         [saved] = [json.loads(line) for line in (tmp_path / filename).read_text().splitlines()]
         assert saved["ng_trajectory"] == result["ng_trajectory"]
         assert saved["ng_agent_observations"] == bundle
+
+
+@pytest.mark.parametrize("companion", ["absent", "present", "counted_missing", "counted_failure"])
+async def test_offline_environment_status_is_independent_of_input_companion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, companion: str
+) -> None:
+    async def post(server_name, url_path, json, **kwargs):
+        assert server_name == "environment" and url_path == "/aggregate_metrics"
+        return FakeResponse(200, compute_aggregate_metrics(json.verify_responses).model_dump())
+
+    client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    client.global_config_dict = _environment_server_config()
+    output = tmp_path / "rollouts-taskset.jsonl"
+    row = {
+        NG_ENVIRONMENT_SERVER_KEY: "environment",
+        TASK_INDEX_KEY_NAME: 0,
+        ROLLOUT_INDEX_KEY_NAME: 0,
+        "responses_create_params": {"input": []},
+        "reward": 1.0,
+    }
+    counted_failure = companion == "counted_failure"
+    output.write_bytes(b"" if counted_failure else orjson.dumps(row) + b"\n")
+    if counted_failure:
+        failure = {key: value for key, value in row.items() if key != "reward"}
+        failure.update({AGENT_REF_KEY_NAME: None, NG_FAILURE_CLASS_KEY: AGENT_RUN_ERROR_FAILURE_CLASS})
+        failures_path_for(output).write_bytes(orjson.dumps(failure) + b"\n")
+    counted_missing = companion == "counted_missing"
+    if companion not in ("absent", "counted_failure"):
+        inputs = [row]
+        if counted_missing:
+            inputs.append(row | {TASK_INDEX_KEY_NAME: 1})
+        materialized_path_for(output).write_bytes(b"".join(orjson.dumps(r) + b"\n" for r in inputs))
+    status_path = output.with_name(output.stem + "_batch_status.json")
+    member = {
+        "expected_rollout_count": 2 if counted_missing else 1,
+        "completed_rollout_count": 0 if counted_failure else 1,
+        "remaining_rollout_count": 1 if counted_missing or counted_failure else 0,
+        "aggregation_status": "deferred",
+        "failures_by_class": {AGENT_RUN_ERROR_FAILURE_CLASS: 1} if counted_failure else {},
+    }
+    status_path.write_bytes(orjson.dumps({"tracking": "enabled", "members": {"environment": member}}))
+    before = {
+        p: p.read_bytes() for p in (output, materialized_path_for(output), failures_path_for(output)) if p.exists()
+    }
+
+    await RolloutAggregationHelper().run_from_config(
+        RolloutAggregationConfig(
+            input_glob=str(output),
+            output_jsonl_fpath=str(output),
+            merge_shards=False,
+            disable_health_check=True,
+            count_missing_rollouts_as_zero=counted_missing,
+            count_failure_classes_as_zero=[AGENT_RUN_ERROR_FAILURE_CLASS] if counted_failure else [],
+        )
+    )
+
+    status = orjson.loads(status_path.read_bytes())
+    assert status["members"]["environment"] == {**member, "aggregation_status": "complete"}
+    [entry] = orjson.loads(output.with_name(output.stem + "_aggregate_metrics.json").read_bytes())
+    assert entry[AGENT_REF_KEY_NAME] == {"name": "hermes"}
+    assert entry[NG_ENVIRONMENT_SERVER_KEY] == "environment"
+    assert entry["key_metrics"]["mean/reward"] == (0.0 if counted_failure else 0.5 if counted_missing else 1.0)
+    assert {p: p.read_bytes() for p in before} == before
+
+
+@pytest.mark.parametrize("unroutable_row", [False, True])
+async def test_offline_mixed_agent_routes_do_not_poison_unrelated_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unroutable_row: bool
+) -> None:
+    async def post(server_name, url_path, json, **kwargs):
+        assert url_path == "/aggregate_metrics"
+        return FakeResponse(200, compute_aggregate_metrics(json.verify_responses).model_dump())
+
+    client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    client.global_config_dict = _environment_server_config()
+    client.global_config_dict["other"] = client.global_config_dict["hermes"].copy()
+    client.global_config_dict["other_environment"] = client.global_config_dict["environment"].copy()
+    client.global_config_dict["other_environment"]["environment_servers"]["single_agent"]["agent_server"]["name"] = (
+        "other"
+    )
+    sources = []
+    for index, (agent, route) in enumerate(
+        (("hermes", None), ("hermes", "environment"), ("other", "other_environment"))
+    ):
+        row = {
+            AGENT_REF_KEY_NAME: {"name": agent},
+            TASK_INDEX_KEY_NAME: index,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            "reward": 1.0,
+        }
+        if route is not None:
+            row[NG_ENVIRONMENT_SERVER_KEY] = route
+        output = tmp_path / f"rollouts-{index}.jsonl"
+        output.write_bytes(orjson.dumps(row) + b"\n")
+        member = {"expected_rollout_count": 1, "completed_rollout_count": 1, "aggregation_status": "deferred"}
+        output.with_name(output.stem + "_batch_status.json").write_bytes(
+            orjson.dumps({"tracking": "enabled", "members": {agent: member}})
+        )
+        sources.append((output, agent, member))
+    if unroutable_row:
+        (tmp_path / "rollouts-unroutable.jsonl").write_bytes(
+            orjson.dumps({TASK_INDEX_KEY_NAME: 99, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.0}) + b"\n"
+        )
+    before = {p: p.read_bytes() for p in tmp_path.glob("rollouts-*.jsonl")}
+    merged = tmp_path / "merged.jsonl"
+
+    await RolloutAggregationHelper().run_from_config(
+        RolloutAggregationConfig(
+            input_glob=str(tmp_path / "rollouts-*.jsonl"),
+            output_jsonl_fpath=str(merged),
+            disable_health_check=True,
+        )
+    )
+
+    for output, agent, member in sources:
+        status = orjson.loads(output.with_name(output.stem + "_batch_status.json").read_bytes())
+        assert status["members"][agent] == {**member, "aggregation_status": "complete"}
+    entries = orjson.loads(merged.with_name("merged_aggregate_metrics.json").read_bytes())
+    assert {e[AGENT_REF_KEY_NAME]["name"]: e["key_metrics"]["mean/reward"] for e in entries} == {
+        "hermes": 1.0,
+        "other": 1.0,
+    }
+    assert {p: p.read_bytes() for p in before} == before

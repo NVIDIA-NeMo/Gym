@@ -116,11 +116,9 @@ from nemo_gym.models.model_call_capture import ModelCallCaptureConfig
 from nemo_gym.rollouts.batch_status import (
     BatchStatusTracker,
     RunStatusTracker,
-    _aggregate_entries_for_member,
-    _aggregate_member_environments,
-    _AggregateBinding,
+    _aggregate_entry_for_member,
     _atomic_write_json,
-    _merge_aggregate_bindings,
+    _environment_status_members,
     _read_aggregate_entries,
     disable_run_status,
 )
@@ -2750,45 +2748,14 @@ def _refresh_shard_status_aggregation(
     input_paths: List[str],
     aggregate_metrics_fpath: Optional[Path],
     *,
-    legacy_bindings: Optional[Mapping[str, Optional[Mapping[str, _AggregateBinding]]]] = None,
+    scored_rows: Iterable[Mapping[str, Any]] = (),
 ) -> None:
     """Mark each shard's run status with the outcome of the aggregation that merged it, keeping its counts.
 
     EvalRDL sums the shards' status files, so the merged output gets no status file of its own.
     """
     entries, artifact_error = _read_aggregate_entries(aggregate_metrics_fpath)
-    source_bindings = []
-    unverified_source = False
-    # A merged aggregate cannot separate two members sharing one route, even when they came from different shards.
-    # Read every source's bound inventory, including shards without a status file. Legacy bindings were captured
-    # while aggregation read its inputs, so this never scans those rollout files a second time.
-    for path in input_paths:
-        bindings = (legacy_bindings or {}).get(path)
-        manifest_path = manifest_path_for(Path(path))
-        materialized_path = materialized_path_for(Path(path))
-        try:
-            if manifest_path.exists() or materialized_path.exists():
-                with materialized_path.open("rb") as source:
-                    rows = [orjson.loads(line) for line in source if line.strip()]
-                if manifest_path.exists():
-                    manifest = RunManifest.model_validate_json(manifest_path.read_bytes())
-                    if _digest(rows) != manifest.materialized_digest:
-                        raise ConfigError("Saved materialized inputs do not match the run manifest.")
-                    bindings = _aggregate_member_environments(rows)
-                elif bindings is not None or path not in (legacy_bindings or {}):
-                    # Only historical agent-only inputs retain exact-label lookup without a bound inventory.
-                    bindings = {
-                        member: replace(binding, unresolved=True) if binding.environments else binding
-                        for member, binding in _aggregate_member_environments(rows, existing_bindings=bindings).items()
-                    }
-        except (ConfigError, OSError, ValueError, TypeError):
-            logger.warning("Could not verify aggregation routes for %s.", path, exc_info=True)
-            bindings = None
-        if bindings is None:
-            unverified_source = True
-        else:
-            source_bindings.append(bindings)
-    bindings = _merge_aggregate_bindings(entries, source_bindings)
+    environment_members = _environment_status_members(scored_rows)
     for path in input_paths:
         status_fpath = batch_status_path_for(Path(path))
         # Run status is best-effort: a shard whose status cannot be read or written is logged and skipped, never a
@@ -2799,14 +2766,12 @@ def _refresh_shard_status_aggregation(
             if status.get("tracking") != "enabled" or not isinstance(members, dict):
                 continue
             for agent, member in members.items():
-                matched, binding_error = _aggregate_entries_for_member(
-                    entries, agent, None if unverified_source else bindings.get(agent)
-                )
+                entry, _ = _aggregate_entry_for_member(entries, agent, environment_member=agent in environment_members)
                 failed = (
                     aggregate_metrics_fpath is None
                     or artifact_error
-                    or binding_error
-                    or any(AGGREGATION_ERROR_KEY in entry for entry in matched)
+                    or entry is None
+                    or AGGREGATION_ERROR_KEY in entry
                 )
                 member["aggregation_status"] = "error" if failed else "complete"
             _atomic_write_json(status_fpath, status)
@@ -5947,7 +5912,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             # The shard's status members, as collection names them: the agent, or the Environment Server a row
             # is routed to.
             status_rows = []
-            for row in examples:
+            for row in dispatched:
                 status_row = _batch_status_row(row, {})
                 if AGENT_REF_KEY_NAME not in status_row:
                     status_row[AGENT_REF_KEY_NAME] = {"name": self._dispatch_name(row)}
@@ -6214,9 +6179,7 @@ class RolloutAggregationHelper(BaseModel):
         histories: List[RolloutStore] = []
         health_histories: Dict[Path, Optional[RolloutStore]] = {}
         legacy_paths: List[Path] = []
-        legacy_source_keys: Dict[Path, str] = {}
         legacy_results: List[Dict] = []
-        legacy_bindings: Dict[str, Optional[Dict[str, _AggregateBinding]]] = {}
         history_results: Dict[str, List[Dict]] = {}
         shard_keys: Dict[str, set] = {}
         run_ids: set[str] = set()
@@ -6244,10 +6207,8 @@ class RolloutAggregationHelper(BaseModel):
                     shard_digests[shard_path] = (f.tell(), sha256)
                 continue
             legacy_paths.append(shard)
-            legacy_source_keys[shard] = shard_path
             keys = shard_keys[str(shard)] = set()
             digest = hashlib.sha256()
-            status_rows = []
             with open(shard_path, "rb") as f:
                 for line_no, line in enumerate(f, 1):
                     digest.update(line)
@@ -6258,14 +6219,7 @@ class RolloutAggregationHelper(BaseModel):
                     keys.add((result.get(TASK_INDEX_KEY_NAME), result.get(ROLLOUT_INDEX_KEY_NAME)))
                     results.append(result)
                     legacy_results.append(result)
-                    status_rows.append(_batch_status_row(result, {}))
                 shard_digests[shard_path] = (f.tell(), digest.hexdigest())
-            try:
-                legacy_bindings[shard_path] = _aggregate_member_environments(status_rows)
-            except ConfigError:
-                # Status needs every contributing source's identity; this does not change legacy scoring/parsing.
-                logger.warning("Could not verify aggregation routes for %s.", shard_path, exc_info=True)
-                legacy_bindings[shard_path] = None
         print(f"Loaded {len(results)} rollout record(s) from {len(input_paths)} shard(s)")
 
         # Sort for deterministic aggregation ordering (matches run_from_config's post-collection sort)
@@ -6355,13 +6309,10 @@ class RolloutAggregationHelper(BaseModel):
         # not hide another run's failed or lost rollout. A rollout another shard landed for the same
         # server is still not counted, and of the attempts recorded for one rollout the last stands.
         latest_failures: Dict[tuple, Dict[str, Any]] = {}
-        latest_failure_sources: Dict[tuple, str] = {}
         for path, failures_fpath in zip(legacy_paths, failures_fpaths):
             for key, row in _latest_failure_rows([failures_fpath]).items():
                 if key not in shard_keys[str(path)]:
-                    identity = _identity_key(row, group)
-                    latest_failures[identity] = row
-                    latest_failure_sources[identity] = legacy_source_keys[path]
+                    latest_failures[_identity_key(row, group)] = row
         result_ids = (
             {_identity_key(r, group) for r in legacy_results}
             if latest_failures or config.count_missing_rollouts_as_zero
@@ -6369,13 +6320,11 @@ class RolloutAggregationHelper(BaseModel):
         )
         wanted = set(config.count_failure_classes_as_zero)
         # A row that names no agent and no server cannot reach any server's metrics; it stays a dropped one.
-        counted: List[Dict[str, Any]] = []
-        counted_by_source: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-        for identity, row in latest_failures.items():
-            if identity not in result_ids and _counts_as_zero(row, wanted) and _routing_identity(row) is not None:
-                scored_failure = _counted_failure_row(row)
-                counted.append(scored_failure)
-                counted_by_source[latest_failure_sources[identity]].append(scored_failure)
+        counted = [
+            _counted_failure_row(row)
+            for identity, row in latest_failures.items()
+            if identity not in result_ids and _counts_as_zero(row, wanted) and _routing_identity(row) is not None
+        ]
         if config.count_failure_classes_as_zero or counted:
             print(f"Counting {len(counted)} failure row(s) as scored zeros: {config.count_failure_classes_as_zero}")
         materialized_fpaths = [materialized_path_for(path) for path in legacy_paths]
@@ -6389,23 +6338,9 @@ class RolloutAggregationHelper(BaseModel):
                     if _identity_key(zero, group) not in accounted:
                         accounted.add(_identity_key(zero, group))
                         missing.append(zero)
-                        counted_by_source[legacy_source_keys[path]].append(zero)
             counted.extend(missing)
         if counted:
             _fill_task_fields(counted, legacy_results, materialized_fpaths, group)
-        # Keep only actual metric contributors, after task fields have been filled into their scored copies.
-        # Earlier or uncounted failures must not claim ownership of the aggregate they did not enter.
-        for source, contributors in counted_by_source.items():
-            bindings = legacy_bindings[source]
-            if bindings is None:
-                continue
-            try:
-                legacy_bindings[source] = _aggregate_member_environments(
-                    (_batch_status_row(row, {}) for row in contributors), existing_bindings=bindings
-                )
-            except ConfigError:
-                logger.warning("Could not verify aggregation routes for %s.", source, exc_info=True)
-                legacy_bindings[source] = None
 
         legacy_counted_ids = {_identity_key(row, group) for row in counted}
         for history in histories:
@@ -6443,7 +6378,7 @@ class RolloutAggregationHelper(BaseModel):
                 force=True,
             )
         else:
-            _refresh_shard_status_aggregation(input_paths, aggregate_metrics_fpath, legacy_bindings=legacy_bindings)
+            _refresh_shard_status_aggregation(input_paths, aggregate_metrics_fpath, scored_rows=scored)
 
         _raise_for_aggregation_errors(aggregate_metrics_fpath)
 

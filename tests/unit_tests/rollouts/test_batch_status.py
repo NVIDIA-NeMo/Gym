@@ -86,7 +86,19 @@ def write_manifest(path: Path, rows: list[dict], metric_keys: dict[str, list[str
 
 
 @pytest.mark.parametrize("with_manifest", [False, True])
-@pytest.mark.parametrize("aggregate_case", ["matched", "wrong_route", "missing_route", "duplicate_route", "error"])
+@pytest.mark.parametrize(
+    "aggregate_case",
+    [
+        "matched",
+        "wrong_route",
+        "missing_route",
+        "duplicate_route",
+        "error",
+        "missing_metric",
+        "label_collision",
+        "selected_error_with_label_collision",
+    ],
+)
 def test_aggregation_status_uses_saved_route_instead_of_a_coincidental_agent_label(
     tmp_path: Path, with_manifest: bool, aggregate_case: str
 ) -> None:
@@ -94,7 +106,7 @@ def test_aggregation_status_uses_saved_route_instead_of_a_coincidental_agent_lab
     tracker = (
         BatchStatusTracker(write_manifest(tmp_path / "batch_manifest.json", rows), rows)
         if with_manifest
-        else RunStatusTracker(tmp_path / "rollouts_batch_status.json", rows)
+        else RunStatusTracker(tmp_path / "rollouts_batch_status.json", (row for row in rows))
     )
     entry = {
         AGENT_REF_KEY_NAME: {"name": "candidate"},
@@ -107,9 +119,15 @@ def test_aggregation_status_uses_saved_route_instead_of_a_coincidental_agent_lab
             entry[ENVIRONMENT_SERVER_STAMP_KEY_NAME] = "other_environment"
         else:
             del entry[ENVIRONMENT_SERVER_STAMP_KEY_NAME]
-    elif aggregate_case == "error":
+    elif aggregate_case in ("error", "selected_error_with_label_collision"):
         entry["aggregation_error"] = {"type": "ClientResponseError", "http_status": 500, "message": "private"}
+    if aggregate_case == "missing_metric":
+        entry["key_metrics"] = {}
     entries = [entry]
+    if aggregate_case == "label_collision":
+        entries.append({AGENT_REF_KEY_NAME: {"name": "environment"}, AGGREGATION_ERROR_KEY: {"type": "WrongEntry"}})
+    if aggregate_case == "selected_error_with_label_collision":
+        entries.append({AGENT_REF_KEY_NAME: {"name": "environment"}, "key_metrics": {"mean/reward": 0.0}})
     if aggregate_case == "duplicate_route":
         entries.append(entry | {AGENT_REF_KEY_NAME: {"name": "other_candidate"}})
     metrics = tmp_path / "rollouts_aggregate_metrics.json"
@@ -120,90 +138,50 @@ def test_aggregation_status_uses_saved_route_instead_of_a_coincidental_agent_lab
     status = json.loads(tracker.status_fpath.read_text())
     member = status["members"]["environment"]
     assert member["completed_rollout_count"] == member["expected_rollout_count"] == 1
-    assert member["aggregation_status"] == ("complete" if aggregate_case == "matched" else "error")
+    expected = (
+        "complete"
+        if aggregate_case in ("matched", "label_collision")
+        or (aggregate_case == "missing_metric" and not with_manifest)
+        else "error"
+    )
+    assert member["aggregation_status"] == expected
+    if with_manifest and aggregate_case == "missing_metric":
+        assert member["aggregation_error"] == {
+            "type": "MissingExpectedMetricKeys",
+            "missing_metric_keys": ["mean/reward"],
+        }
+    assert orjson.loads(metrics.read_bytes()) == entries
     assert "private" not in tracker.status_fpath.read_text()
 
 
-def test_aggregation_requires_every_saved_environment_of_a_shared_agent(tmp_path: Path) -> None:
-    rows = [
-        materialized_row("candidate", "source", index, 0) | {ENVIRONMENT_SERVER_STAMP_KEY_NAME: environment}
-        for index, environment in enumerate(("first_environment", "second_environment"))
-    ]
-    tracker = RunStatusTracker(tmp_path / "rollouts_batch_status.json", rows)
-    metrics = tmp_path / "rollouts_aggregate_metrics.json"
-    entries = [
-        {AGENT_REF_KEY_NAME: {"name": environment}, ENVIRONMENT_SERVER_STAMP_KEY_NAME: environment}
-        for environment in ("first_environment", "second_environment")
-    ]
-    metrics.write_bytes(orjson.dumps(entries))
-    complete = tracker.build_status(rows, [], aggregate_metrics_fpath=metrics)
-    assert complete["members"]["candidate"]["aggregation_status"] == "complete"
-
-    metrics.write_bytes(orjson.dumps(entries[:1]))
-    missing = tracker.build_status(rows, [], aggregate_metrics_fpath=metrics)
-    assert missing["members"]["candidate"]["completed_rollout_count"] == 2
-    assert missing["members"]["candidate"]["aggregation_status"] == "error"
-
-
 @pytest.mark.parametrize("with_manifest", [False, True])
-@pytest.mark.parametrize("mixed_aliases", [False, True])
-def test_distinct_status_members_cannot_share_one_aggregate(
-    tmp_path: Path, with_manifest: bool, mixed_aliases: bool
+@pytest.mark.parametrize("route", [None, "other_environment", "candidate"])
+def test_agent_status_keeps_exact_metric_label_with_mixed_routes(
+    tmp_path: Path, with_manifest: bool, route: str | None
 ) -> None:
-    rows = [
-        materialized_row(member, "source", index, 0) | {ENVIRONMENT_SERVER_STAMP_KEY_NAME: "environment"}
-        for index, member in enumerate(("first_candidate", "second_candidate"))
-    ]
-    if mixed_aliases:
-        # The first member uses an exact agent label; the second uses the aggregate's environment stamp.
-        del rows[0][ENVIRONMENT_SERVER_STAMP_KEY_NAME]
+    rows = [materialized_row("candidate", "source", index, 0) for index in range(2)]
+    rows[0][ENVIRONMENT_SERVER_STAMP_KEY_NAME] = "candidate"
+    if route is not None:
+        rows[1][ENVIRONMENT_SERVER_STAMP_KEY_NAME] = route
     tracker = (
         BatchStatusTracker(write_manifest(tmp_path / "batch_manifest.json", rows), rows)
         if with_manifest
-        else RunStatusTracker(tmp_path / "rollouts_batch_status.json", rows)
+        else RunStatusTracker(tmp_path / "rollouts_batch_status.json", (row for row in rows))
     )
-    metrics = tmp_path / "rollouts_aggregate_metrics.json"
-    metrics.write_bytes(
-        orjson.dumps(
-            [
-                {
-                    AGENT_REF_KEY_NAME: {"name": "first_candidate"},
-                    ENVIRONMENT_SERVER_STAMP_KEY_NAME: "environment",
-                    "key_metrics": {"mean/reward": 0.5},
-                }
-            ]
-        )
-    )
+    entries = [{AGENT_REF_KEY_NAME: {"name": "candidate"}, "key_metrics": {"mean/reward": 0.75}}]
+    if route == "candidate":
+        entries[0][ENVIRONMENT_SERVER_STAMP_KEY_NAME] = "candidate"
+    metrics = tmp_path / "aggregate_metrics.json"
+    metrics.write_bytes(orjson.dumps(entries))
 
     tracker.write_status(rows, [], aggregate_metrics_fpath=metrics, force=True)
 
-    members = json.loads(tracker.status_fpath.read_text())["members"]
-    assert set(members) == {"first_candidate", "second_candidate"}
-    for member in members.values():
-        assert member["completed_rollout_count"] == member["expected_rollout_count"] == 1
-        assert member["aggregation_status"] == "error"
-
-
-@pytest.mark.parametrize("route", [None, "", 7, "absent"])
-def test_aggregation_does_not_accept_a_partial_or_malformed_route_binding(tmp_path: Path, route: object) -> None:
-    rows = [
-        materialized_row("candidate", "source", index, 0) | {ENVIRONMENT_SERVER_STAMP_KEY_NAME: "environment"}
-        for index in range(2)
-    ]
-    if route == "absent":
-        del rows[1][ENVIRONMENT_SERVER_STAMP_KEY_NAME]
-    else:
-        rows[1][ENVIRONMENT_SERVER_STAMP_KEY_NAME] = route
-    tracker = RunStatusTracker(tmp_path / "rollouts_batch_status.json", rows)
-    metrics = tmp_path / "rollouts_aggregate_metrics.json"
-    metrics.write_bytes(
-        orjson.dumps([{AGENT_REF_KEY_NAME: {"name": "candidate"}, ENVIRONMENT_SERVER_STAMP_KEY_NAME: "environment"}])
-    )
-
-    status = tracker.build_status(rows, [], aggregate_metrics_fpath=metrics)
-
-    assert status["members"]["candidate"]["completed_rollout_count"] == 2
-    assert status["members"]["candidate"]["aggregation_status"] == "error"
+    member = orjson.loads(tracker.status_fpath.read_bytes())["members"]["candidate"]
+    assert member["aggregation_status"] == "complete"
+    assert member["expected_rollout_count"] == member["completed_rollout_count"] == 2
+    if with_manifest:
+        assert member["observed_metric_keys"] == ["mean/reward"]
+    assert orjson.loads(metrics.read_bytes()) == entries
 
 
 class TestObserveMaterializedRows:

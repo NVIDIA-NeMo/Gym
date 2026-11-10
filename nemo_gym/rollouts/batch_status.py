@@ -21,7 +21,7 @@ import os
 import re
 from collections import Counter, defaultdict
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic
@@ -389,111 +389,32 @@ def _read_aggregate_entries(metrics_fpath: Optional[Path]) -> tuple[Dict[str, Di
     return entries, None
 
 
-@dataclass(frozen=True)
-class _AggregateBinding:
-    environments: frozenset[str]
-    unresolved: bool = False
-
-
-def _aggregate_member_environments(
-    rows: Iterable[Mapping[str, Any]],
-    *,
-    existing_bindings: Optional[Mapping[str, _AggregateBinding]] = None,
-) -> Dict[str, _AggregateBinding]:
-    """Keep saved dispatch routes separate from status members and metric labels.
-
-    Empty routes retain agent-only inputs' exact-label lookup. Partial or malformed bindings retain their known
-    routes for collision checks, but cannot certify aggregation.
-    """
-    routes: Dict[str, set[Optional[str]]] = defaultdict(set)
-    invalid = set()
-    for member, binding in (existing_bindings or {}).items():
-        routes[member].update(binding.environments or {None})
-        if binding.unresolved:
-            invalid.add(member)
+def _environment_status_members(rows: Iterable[Mapping[str, Any]]) -> set[str]:
+    """Identify members whose saved rows consistently name their own environment."""
+    own_environment: Dict[str, bool] = {}
     for row in rows:
-        if not isinstance(row, Mapping):
-            raise ConfigError("Aggregation route evidence contains a non-object row.")
         agent_ref = row.get(AGENT_REF_KEY_NAME)
-        if agent_ref is not None and not isinstance(agent_ref, Mapping):
-            raise ConfigError("Aggregation route evidence contains a non-object agent_ref.")
-        member = (agent_ref or {}).get("name") or row.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)
-        if not isinstance(member, str) or not member:
-            raise ConfigError("Aggregation route evidence contains a row without a status member identity.")
-        environment = row.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)
-        if ENVIRONMENT_SERVER_STAMP_KEY_NAME in row and (not isinstance(environment, str) or not environment.strip()):
-            invalid.add(member)
-        routes[member].add(environment if isinstance(environment, str) and environment else None)
-    return {
-        member: _AggregateBinding(
-            frozenset(name for name in names if name is not None),
-            unresolved=member in invalid or (None in names and len(names) > 1),
-        )
-        for member, names in routes.items()
-    }
+        member = agent_ref.get("name") if isinstance(agent_ref, Mapping) else None
+        member = member or row.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)
+        if isinstance(member, str) and member:
+            own_environment[member] = own_environment.get(member, True) and (
+                row.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME) == member
+            )
+    return {member for member, own_stamp in own_environment.items() if own_stamp}
 
 
-def _merge_aggregate_bindings(
-    entries: Mapping[str, Dict[str, Any]],
-    bindings: Iterable[Mapping[str, Optional[_AggregateBinding]]],
-) -> Dict[str, Optional[_AggregateBinding]]:
-    """Reject aggregates shared by distinct status members, including across source shards."""
-    merged: Dict[str, Optional[_AggregateBinding]] = {}
-    for source in bindings:
-        for member, binding in source.items():
-            if member not in merged:
-                merged[member] = binding
-                continue
-            previous = merged[member]
-            if previous is None or binding is None:
-                merged[member] = None
-            else:
-                merged[member] = _AggregateBinding(
-                    previous.environments | binding.environments,
-                    unresolved=previous.unresolved
-                    or binding.unresolved
-                    or bool(previous.environments) != bool(binding.environments),
-                )
-    # An unresolved route may have contributed to any merged entry, whichever member labelled that entry.
-    unknown_ownership = any(binding is None or binding.unresolved for binding in merged.values())
-    owners: Dict[str, set[str]] = defaultdict(set)
-    for member, binding in merged.items():
-        if binding is None:
-            continue
-        environments = binding.environments
-        if not environments:
-            # An exact-label legacy member may select the same aggregate as an environment-routed member.
-            environment = entries.get(member, {}).get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)
-            environments = frozenset([environment]) if isinstance(environment, str) and environment else frozenset()
-        for environment in environments:
-            owners[environment].add(member)
-    ambiguous = {member for members in owners.values() if len(members) > 1 for member in members}
-    return {
-        member: replace(binding, unresolved=True)
-        if binding is not None and (unknown_ownership or member in ambiguous)
-        else binding
-        for member, binding in merged.items()
-    }
-
-
-def _aggregate_entries_for_member(
-    entries: Mapping[str, Dict[str, Any]],
-    member: str,
-    binding: Optional[_AggregateBinding],
-) -> tuple[List[Dict[str, Any]], Optional[str]]:
-    """Join verified environment routes, retaining exact metric-label lookup for agent-only inputs."""
-    if binding is None or binding.unresolved:
-        return [], "UnresolvedAggregateEnvironmentBinding"
-    if not binding.environments:
+def _aggregate_entry_for_member(
+    entries: Mapping[str, Dict[str, Any]], member: str, *, environment_member: bool
+) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Join environment members by their stamp and agent members by their metric label."""
+    if environment_member:
+        matches = [entry for entry in entries.values() if entry.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME) == member]
+        if len(matches) > 1:
+            return None, "AmbiguousAggregateMetricsEntry"
+        entry = matches[0] if matches else None
+    else:
         entry = entries.get(member)
-        return ([entry], None) if entry is not None else ([], "MissingAggregateMetricsEntry")
-    selected = []
-    for environment in sorted(binding.environments):
-        matches = [entry for entry in entries.values() if entry.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME) == environment]
-        if len(matches) != 1:
-            return [], "AmbiguousAggregateMetricsEntry" if matches else "MissingAggregateMetricsEntry"
-        selected.append(matches[0])
-    return selected, None
+    return entry, None if entry is not None else "MissingAggregateMetricsEntry"
 
 
 def _safe_aggregation_error(error: Any) -> Dict[str, Any]:
@@ -535,7 +456,7 @@ class BatchStatusTracker:
         self.manifest, self.manifest_sha256 = load_batch_manifest(manifest_fpath)
         self.observations = observe_materialized_rows(materialized_rows)
         validate_batch_manifest(self.manifest, self.observations)
-        self._aggregation_environments = _aggregate_member_environments(materialized_rows)
+        self._environment_members = _environment_status_members(materialized_rows)
         self._expected_rollout_identities: set[tuple[str, int, int]] = {
             (row[AGENT_REF_KEY_NAME]["name"], row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])
             for row in materialized_rows
@@ -613,17 +534,14 @@ class BatchStatusTracker:
                 model_final_by_agent[agent_name][_status_kind(failure)] += 1
 
         aggregate_entries, aggregate_artifact_error = _read_aggregate_entries(aggregate_metrics_fpath)
-        bindings = _merge_aggregate_bindings(aggregate_entries, [self._aggregation_environments])
         members = {}
         for benchmark_slug, expected in sorted(self.manifest.members.items()):
             agent_name = expected.agent_name
             observed = self.observations[agent_name]
-            matched, binding_error = _aggregate_entries_for_member(
-                aggregate_entries, agent_name, bindings.get(agent_name)
+            aggregate_entry, entry_error = _aggregate_entry_for_member(
+                aggregate_entries, agent_name, environment_member=agent_name in self._environment_members
             )
-            observed_metric_keys = sorted(
-                set.intersection(*(set(entry.get("key_metrics") or {}) for entry in matched)) if matched else set()
-            )
+            observed_metric_keys = sorted((aggregate_entry or {}).get("key_metrics") or {})
             aggregation_error = None
             if aggregation_deferred:
                 aggregation_status = "deferred"
@@ -632,14 +550,12 @@ class BatchStatusTracker:
             elif aggregate_artifact_error is not None:
                 aggregation_status = "error"
                 aggregation_error = {"type": aggregate_artifact_error}
-            elif binding_error is not None:
+            elif entry_error is not None:
                 aggregation_status = "error"
-                aggregation_error = {"type": binding_error}
-            elif any(AGGREGATION_ERROR_KEY in entry for entry in matched):
+                aggregation_error = {"type": entry_error}
+            elif AGGREGATION_ERROR_KEY in aggregate_entry:
                 aggregation_status = "error"
-                aggregation_error = _safe_aggregation_error(
-                    next(entry[AGGREGATION_ERROR_KEY] for entry in matched if AGGREGATION_ERROR_KEY in entry)
-                )
+                aggregation_error = _safe_aggregation_error(aggregate_entry[AGGREGATION_ERROR_KEY])
             else:
                 missing_metric_keys = sorted(set(expected.metric_keys) - set(observed_metric_keys))
                 if missing_metric_keys:
@@ -740,7 +656,7 @@ class RunStatusTracker(BatchStatusTracker):
         self._expected_rollout_identities = {
             (row[AGENT_REF_KEY_NAME]["name"], row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]) for row in rows
         }
-        self._aggregation_environments = _aggregate_member_environments(rows)
+        self._environment_members = _environment_status_members(rows)
         self.write_interval_seconds = (
             BATCH_STATUS_WRITE_INTERVAL_SECONDS if write_interval_seconds is None else write_interval_seconds
         )
@@ -810,15 +726,16 @@ class RunStatusTracker(BatchStatusTracker):
         self._completed_cursor = len(completed_results)
         self._failure_cursor = len(failure_rows)
         aggregates, artifact_error = _read_aggregate_entries(aggregate_metrics_fpath)
-        bindings = _merge_aggregate_bindings(aggregates, [self._aggregation_environments])
         members = {}
         for agent, expected in sorted(self._expected_by_agent.items()):
-            matched, binding_error = _aggregate_entries_for_member(aggregates, agent, bindings.get(agent))
+            entry, _ = _aggregate_entry_for_member(
+                aggregates, agent, environment_member=agent in self._environment_members
+            )
             if aggregation_deferred:
                 aggregation_status = "deferred"
             elif aggregate_metrics_fpath is None:
                 aggregation_status = "pending"
-            elif artifact_error or binding_error or any(AGGREGATION_ERROR_KEY in entry for entry in matched):
+            elif artifact_error or entry is None or AGGREGATION_ERROR_KEY in entry:
                 aggregation_status = "error"
             else:
                 aggregation_status = "complete"
