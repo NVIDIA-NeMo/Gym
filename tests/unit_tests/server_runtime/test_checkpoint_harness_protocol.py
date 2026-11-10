@@ -558,12 +558,16 @@ def _seed(attempt: int, sandbox_id: Optional[str] = "s1") -> dict:
 
 
 async def _restored_agent(
-    tmp_path: Path, *, rebinds: bool = True, agent_type: type[_ExportingAgent] = _BorrowingAgent
+    tmp_path: Path,
+    *,
+    rebinds: bool = True,
+    agent_type: type[_ExportingAgent] = _BorrowingAgent,
+    sandbox_id: Optional[str] = "s1",
 ) -> tuple[_ExportingAgent, httpx.AsyncClient]:
     """An agent restored from a checkpoint of ``session`` at attempt 0, as a fresh process after a crash."""
     first = _borrowing_agent(agent_type=agent_type)
     async with _http(first) as http:
-        seeded = await http.post("/v1/agent_sessions", json=_seed(0))
+        seeded = await http.post("/v1/agent_sessions", json=_seed(0, sandbox_id))
         assert seeded.status_code == 200, seeded.text
         for operation, body in (
             ("prepare", control("c1")),
@@ -639,16 +643,19 @@ async def test_an_agent_that_does_not_re_bind_accepts_only_an_identical_seed_of_
     tmp_path: Path,
 ) -> None:
     # The agent leaves the re-bind hook alone, as Simple Agent does: the default gate decides.
-    agent, http = await _restored_agent(tmp_path, agent_type=_ExportingAgent)
+    # Its session is lent no sandbox: one that is would be a restart, and no checkpoint would hold it.
+    agent, http = await _restored_agent(tmp_path, agent_type=_ExportingAgent, sandbox_id=None)
     async with http:
-        identical = await http.post("/v1/agent_sessions", json=_seed(1, "s1"))
-    other, other_http = await _restored_agent(tmp_path / "other", agent_type=_ExportingAgent)
+        identical = await http.post("/v1/agent_sessions", json=_seed(1, None))
+    other, other_http = await _restored_agent(tmp_path / "other", agent_type=_ExportingAgent, sandbox_id=None)
     async with other_http:
         different = await other_http.post("/v1/agent_sessions", json=_seed(1, "s2"))
 
     assert identical.status_code == 200, identical.text
     assert CHECKPOINT_REBINDS_TOOL_ACCESSES_HEADER not in identical.headers
-    assert agent._session_state("session").request.sandbox_access.connection.descriptor == {"sandbox_id": "s1"}
+    assert CHECKPOINT_RESTART_HEADER not in identical.headers
+    assert agent._session_state("session").request.sandbox_access is None
+    # The restored session is there, so a seed that differs from it conflicts instead of starting a session.
     assert different.status_code == 409
 
 
@@ -665,8 +672,9 @@ def _mcp_seed(attempt: int, sandbox_id: Optional[str] = "s1") -> dict:
 @pytest.mark.parametrize(
     ("agent_type", "seed", "restarts"),
     [
-        (_ExportingAgent, _mcp_seed(0), True),
-        (_ExportingAgent, _seed(0), False),
+        # Without a lent sandbox, so only the grant decides: an agent that does not re-bind restarts a lent one too.
+        (_ExportingAgent, _mcp_seed(0, sandbox_id=None), True),
+        (_ExportingAgent, _seed(0, sandbox_id=None), False),
         (_BorrowingAgent, _mcp_seed(0), False),
     ],
     ids=["mcp_grant", "no_mcp_grant", "mcp_grant_re_bound"],
@@ -754,7 +762,8 @@ async def test_an_override_of_the_restart_hook_cannot_keep_an_mcp_session_from_r
 
     async with _http(_borrowing_agent(agent_type=_AddsNoRestarts)) as http:
         granted = await http.post("/v1/agent_sessions", json=_mcp_seed(0, sandbox_id=None))
-        plain = await http.post("/v1/agent_sessions", json=_seed(0, sandbox_id=None) | {"agent_session_id": "other"})
+    async with _http(_borrowing_agent(agent_type=_AddsNoRestarts)) as http:
+        plain = await http.post("/v1/agent_sessions", json=_seed(0, sandbox_id=None))
 
     assert granted.status_code == 200, granted.text
     # The hook only adds restarts: an agent that cannot take a new MCP token restarts whatever the hook says.

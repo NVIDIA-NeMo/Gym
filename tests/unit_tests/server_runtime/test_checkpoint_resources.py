@@ -575,7 +575,7 @@ async def test_a_seed_that_claims_a_restored_session_blocks_prepare_and_is_not_a
         await fresh.post("/ng-control/v1/checkpoint/resume", json=control("c2"), headers=AUTH)
 
     # Prepare waits for the seed instead of reporting its rollout as a restart, which would discard the session.
-    assert cut_short.json()["error"]["code"] == "checkpoint_deadline_exceeded"
+    assert cut_short.json()["phase"] == "preparing" and cut_short.json()["report"]["restarts"] == []
     assert waiting["phase"] == "preparing" and waiting["report"]["restarts"] == []
     assert seeded.status_code == 200
     assert prepared.json()["phase"] == "prepared" and prepared.json()["report"]["restarts"] == []
