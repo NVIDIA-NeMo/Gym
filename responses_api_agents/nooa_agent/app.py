@@ -18,8 +18,9 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import ClassVar
 
-from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi import Body, HTTPException, Request
 
 from nemo_gym.agents import (
     AgentCloseSessionResponse,
@@ -69,6 +70,9 @@ class NOOAAgent(SimpleResponsesAPIAgent):
     """Run one NOOA activation per Environment Server-owned episode."""
 
     config: NOOAAgentConfig
+    # Sandboxed mode runs NOOA inside the task sandbox, which calls the model server from there. Embedded mode
+    # calls it from this host, which reaches the advertised node address as well.
+    calls_model_from_sandbox: ClassVar[bool] = True
 
     def classify_outcome(self, native_result: Mapping[str, object]) -> AgentOutcome:
         """Report a trusted model rejection; the environment owns grading and retry policy."""
@@ -80,14 +84,6 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         ):
             return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
         return AgentOutcome(failure_kind="unknown")
-
-    def setup_webserver(self) -> FastAPI:
-        app = super().setup_webserver()
-        app.router.routes = [route for route in app.router.routes if getattr(route, "path", None) != "/run"]
-        return app
-
-    async def run(self, body: object) -> None:
-        raise NotImplementedError("Use the single_agent_turn Environment Server")
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> NOOASessionState:
         accesses = self.effective_tool_accesses(body)

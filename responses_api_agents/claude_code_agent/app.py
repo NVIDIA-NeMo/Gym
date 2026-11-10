@@ -27,7 +27,7 @@ from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from shlex import quote
 from time import monotonic, time
-from typing import Any, Callable, Optional
+from typing import Any, Callable, ClassVar, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
@@ -171,6 +171,8 @@ class ClaudeCodeAgentVerifyResponse(BaseVerifyResponse):
 
 class ClaudeCodeAgent(SimpleResponsesAPIAgent):
     config: ClaudeCodeAgentConfig
+    # Sandbox sessions run the CLI inside the sandbox, which calls the model server from there.
+    calls_model_from_sandbox: ClassVar[bool] = True
     sem: Semaphore = None
     _local_setup_task: asyncio.Task[None] | None = PrivateAttr(default=None)
     _static_mcp_config: Optional[dict[str, Any]] = PrivateAttr(default=None)

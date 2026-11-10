@@ -197,6 +197,8 @@ Validate with actual training:
 
 Run `gym env publish my_eval` to confirm the manifest is valid and discoverable before opening the PR. Then include the following in your pull request description:
 
+CI does not start on its own for unverified commits or external contributors: a qualified NVIDIA-NeMo member must comment `/ok to test <full 40-character commit SHA>` on the PR. See [Continuous Integration](https://github.com/NVIDIA-NeMo/Gym/blob/main/CONTRIBUTING.md#continuous-integration-ci).
+
 - Description of the environment
 - Description of the verification logic
 - Description of the prompts/tasks: What is the source? Which domain does it cover?

@@ -45,11 +45,11 @@ prepare to pin the same redis build. The 3 H100 tasks run on a GPU deployment wh
 server's `gpu_sandbox_provider` names its config block (for example `sandbox_gpu`); without one they run on the
 default provider and fail to schedule. `--exclude-tasks` and `--only-tasks` select subsets.
 
-Settings live in four places (see `environment_servers/harbor/README.md`). `dataset.toml` sets
+Settings live in four places (see `fern/versions/latest/pages/agent-interactions/harbor.mdx`, "Configure the server"). `dataset.toml` sets
 `CIRCLE_NODE_TOTAL=3` for `nextjs-performance`, as the legacy benchmark's server does, so its test sharding matches
 the task's two-CPU allocation; the loader applies it and nothing else changes.
 
 Deployment settings go in the `sandbox` and `sandbox_gpu` provider blocks of the merged configuration (`env.yaml` or a `--config` overlay): Compose networking and
-the shared-memory label as documented in the harbor README, and, for `gym dataset validate` on the three images
+the shared-memory label as documented in `fern/versions/latest/pages/data/task-folders/compose-tasks.mdx`, and, for `gym dataset validate` on the three images
 that run as a non-root user, `images.rewrites` pointing them at derived images with writable `/solution` and
 `/logs` folders. Model runs use the upstream images.

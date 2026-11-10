@@ -127,6 +127,7 @@ from nemo_gym.rollouts.rollout_collection import (
     RolloutCollectionHelper,
     _CompletedRollout,
     _counted_failure_row,
+    _episode_request_body,
     _expand_input_glob,
     _failure_export_metrics,
     _failure_rows_counted_as_zero,
@@ -16255,3 +16256,20 @@ async def test_returned_and_stored_projection_share_one_decision(
         [saved] = [json.loads(line) for line in (tmp_path / filename).read_text().splitlines()]
         assert saved["ng_trajectory"] == result["ng_trajectory"]
         assert saved["ng_agent_observations"] == bundle
+
+
+def test_an_episode_request_carries_a_rows_sampling_values_beside_the_unchanged_task() -> None:
+    row = {
+        "task_id": {"taskset": "math", "task_id": "7"},
+        "task_input": {"prompt": "2+2"},
+        "_ng_task_index": 7,
+        "_ng_rollout_index": 1,
+        "_ng_model_sampling": {"temperature": 0.6, "top_p": 0.95, "max_output_tokens": 64},
+    }
+
+    body = _episode_request_body(row)
+
+    assert body["model_sampling"] == {"temperature": 0.6, "top_p": 0.95, "max_output_tokens": 64}
+    assert body["task"] == {"task_id": row["task_id"], "task_input": row["task_input"]}
+    # Gym-only evaluation sends exactly what it sent before.
+    assert "model_sampling" not in _episode_request_body({k: v for k, v in row.items() if k != "_ng_model_sampling"})
