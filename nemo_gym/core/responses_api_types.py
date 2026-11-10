@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from collections.abc import Mapping
 from typing import (
     Annotated,
     Any,
@@ -666,9 +667,9 @@ RESPONSES_TO_TRAIN = {
 #   web_search_call, file_search_call, code_interpreter_call, image_generation_call,
 #   mcp_call, computer_call, local_shell_call.
 #
-# training_variant_of() is reached only from ChatCompletionsConverter.postprocess_assistant_message_dict,
-# which passes response_output[-1].
-# That list is local to the function.
+# training_variant_of() is reached only from the chat converter's _attach_token_information, which passes
+# response_output[-1].
+# That list is built by ChatCompletionsConverter._lift_assistant_message.
 # It holds only NeMoGymResponseReasoningItem, NeMoGymResponseOutputMessage,
 # NeMoGymResponseFunctionToolCall or NeMoGymResponseCustomToolCall (the
 # function bridge's lift), all registered above.
@@ -1444,18 +1445,39 @@ class NeMoGymFunctionToolParam(FunctionToolParam):
     pass
 
 
+def _discriminate_chat_message(value: Any) -> Optional[str]:
+    """Pick the chat message member from its role, and the training variant when token metadata is present.
+
+    Without a discriminator Pydantic validates each message against every member of the union to find
+    the best match; the role already decides it. For a ``dict`` message, ``_validate_atomic_token_metadata``
+    has run first, so one token field means all the required ones are present. Any other mapping skips
+    that check and is still rejected by the training member's own required fields.
+    """
+    if not isinstance(value, Mapping):
+        return None
+    role = value.get("role")
+    if role == "assistant" and "prompt_token_ids" in value:
+        return "assistant__training"
+    return role if isinstance(role, str) else None
+
+
 NeMoGymChatCompletionMessageParam: TypeAlias = Annotated[
     Union[
-        NeMoGymChatCompletionDeveloperMessageParam,
-        NeMoGymChatCompletionSystemMessageParam,
-        NeMoGymChatCompletionUserMessageParam,
-        NeMoGymChatCompletionAssistantMessageParam,
-        NeMoGymChatCompletionToolMessageParam,
+        Annotated[NeMoGymChatCompletionDeveloperMessageParam, Tag("developer")],
+        Annotated[NeMoGymChatCompletionSystemMessageParam, Tag("system")],
+        Annotated[NeMoGymChatCompletionUserMessageParam, Tag("user")],
+        Annotated[NeMoGymChatCompletionAssistantMessageParam, Tag("assistant")],
+        Annotated[NeMoGymChatCompletionToolMessageParam, Tag("tool")],
         # Keep deprecated function messages out of this union.
         # NeMoGymChatCompletionFunctionMessageParam,
         # Training variants.
-        NeMoGymChatCompletionAssistantMessageForTrainingParam,
+        Annotated[NeMoGymChatCompletionAssistantMessageForTrainingParam, Tag("assistant__training")],
     ],
+    Discriminator(
+        _discriminate_chat_message,
+        custom_error_type="chat_message_role",
+        custom_error_message="Chat message needs a 'role' of developer, system, user, assistant or tool",
+    ),
     BeforeValidator(_validate_atomic_token_metadata),
 ]
 
@@ -1550,6 +1572,11 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
         a model server needs, and the strict message schema would reject it.
         """
         if not isinstance(value, dict) or not isinstance(value.get("messages"), list):
+            return value
+        # Copy only when some message carries the key, so a clean request is not rebuilt.
+        if not any(
+            isinstance(message, dict) and "provider_specific_fields" in message for message in value["messages"]
+        ):
             return value
         value = value.copy()
         value["messages"] = [

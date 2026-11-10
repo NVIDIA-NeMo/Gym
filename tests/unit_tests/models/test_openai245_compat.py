@@ -14,6 +14,8 @@
 # limitations under the License.
 """OpenAI 2.45 wire fields survive Gym validation, replay and boundary splitting."""
 
+from copy import deepcopy
+
 import openai
 import pytest
 from pydantic import ValidationError
@@ -186,7 +188,7 @@ def test_caller_rejection_does_not_change_conversion_state(item: dict) -> None:
     state = ChatCompletionsConverterState(
         return_token_id_information=False, assistant_item_buffered=True, content_buffer="buffered text"
     )
-    before = state.model_dump()
+    before = deepcopy(state)
     method = {
         "function_call": converter._format_function_call,
         "custom_tool_call": converter._format_custom_tool_call,
@@ -195,7 +197,7 @@ def test_caller_rejection_does_not_change_conversion_state(item: dict) -> None:
     }[item["type"]]
     with pytest.raises(NotImplementedError, match="^Responses .*caller metadata"):
         method({**item, "caller": {"type": "program", "caller_id": "p"}}, state)
-    assert state.model_dump() == before
+    assert state == before
 
 
 @pytest.mark.parametrize("caller", [None, {"type": "direct"}])
