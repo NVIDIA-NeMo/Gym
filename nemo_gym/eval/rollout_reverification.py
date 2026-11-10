@@ -24,6 +24,7 @@ import warnings
 from asyncio import Future, Semaphore
 from collections import Counter, defaultdict
 from contextlib import ExitStack, nullcontext
+from copy import deepcopy
 from dataclasses import dataclass
 from math import isfinite
 from pathlib import Path
@@ -53,6 +54,7 @@ from nemo_gym.config.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
     ENVIRONMENT_SERVER_STAMP_KEY_NAME,
+    ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
@@ -62,12 +64,16 @@ from nemo_gym.config.global_config import (
     rollout_run_labels,
 )
 from nemo_gym.core import VERIFIER_ERROR
+from nemo_gym.core.episode_types import TaskId, is_materialized_task_row
 from nemo_gym.core.failure_transport import FailureHeader, FailureReportRow
+from nemo_gym.models.model_call_capture import ModelCallCaptureConfig
+from nemo_gym.rollouts.model_calls import model_call_capture_dirs_from_config, observability_enabled_from_config
 from nemo_gym.rollouts.rollout_collection import (
     NG_RESULT_TYPE_KEY,
     _coverage_report,
     _get_max_rollout_attempts,
     _rollout_request_debug_summary,
+    enrich_run_result,
     is_omitted_rollout_row,
     is_terminal_failure,
     matches_failure_class,
@@ -75,6 +81,7 @@ from nemo_gym.rollouts.rollout_collection import (
 from nemo_gym.rollouts.rollout_records import (
     REJUDGE_OPERATION_ID_KEY,
     REJUDGED_FAILURE_ID_KEY,
+    REJUDGED_OBSERVATIONS_KEY,
     RUN_ID_KEY,
     coverage_path_for,
     journal_path_for,
@@ -286,6 +293,15 @@ class RolloutReverificationConfig(RemovedRolloutOptionsMixin, UploadRolloutsConf
 class InputRolloutPair:
     input: Dict[str, Any]  # from materialized inputs
     rollout: Dict[str, Any]  # from rollouts
+
+
+@dataclass(frozen=True)
+class _ReverificationContext:
+    row: Dict[str, Any]
+    observations: Dict[str, Any]
+    redacted: bool
+    rollout_latency_ms: Optional[float]
+    prior_verifier_ids: frozenset[str]
 
 
 @dataclass
@@ -788,6 +804,80 @@ def _build_verify_payload(pair: InputRolloutPair) -> Dict:
     return payload
 
 
+def _reverification_context(pair: InputRolloutPair, payload: Dict) -> _ReverificationContext:
+    row = pair.input | {key: payload[key] for key in (ROLLOUT_ID_KEY_NAME, ATTEMPT_INDEX_KEY_NAME) if key in payload}
+    if is_materialized_task_row(row):
+        TaskId.model_validate(row["task_id"])
+    observations = {
+        key: deepcopy(pair.rollout[key]) for key in ("ng_agent_observations", "ng_trajectory") if key in pair.rollout
+    }
+    trajectory = observations.get("ng_trajectory")
+    if isinstance(trajectory, dict):
+        model_calls = trajectory.get("model_calls", [])
+        judge_calls = _referenced_call_positions(model_calls, trajectory.get("verifier_invocations", []))
+        policy_calls = _referenced_call_positions(model_calls, trajectory.get("invocations", []))
+        trajectory["verifier_invocations"] = []
+        trajectory["model_calls"] = [
+            call for index, call in enumerate(model_calls) if index not in judge_calls - policy_calls
+        ]
+    redacted = any(
+        isinstance(envelope, dict)
+        and any(gap.get("code") == "multimodal_history_redacted" for gap in envelope.get("gaps", []))
+        for envelope in observations.values()
+    )
+    perf = pair.rollout.get("ng_perf")
+    latency = perf.get("total_latency_ms") if isinstance(perf, dict) else None
+    saved_latency = latency if type(latency) in (int, float) and isfinite(latency) and latency >= 0 else None
+    return _ReverificationContext(row, observations, redacted, saved_latency, _predecessor_verifier_ids(pair.rollout))
+
+
+def _referenced_call_positions(calls: List[Dict], invocations: List[Dict]) -> set[int]:
+    positions = set()
+    for invocation in invocations:
+        for reference in invocation.get("model_calls", []):
+            candidates = []
+            for index, call in enumerate(calls):
+                metadata = call.get("response_metadata", {})
+                if reference.get("model_call_id"):
+                    matches = (
+                        reference["model_call_id"] == call.get("model_call_id")
+                        and (reference.get("model_ref") is None or reference["model_ref"] == metadata.get("model_ref"))
+                        and (
+                            reference.get("response_id") is None
+                            or reference["response_id"] == metadata.get("response_id")
+                        )
+                    )
+                else:
+                    matches = (
+                        reference.get("model_ref") is not None
+                        and bool(reference.get("response_id"))
+                        and reference["model_ref"] == metadata.get("model_ref")
+                        and reference["response_id"] == metadata.get("response_id")
+                    )
+                if matches:
+                    candidates.append(index)
+            if len(candidates) == 1:
+                positions.add(candidates[0])
+    return positions
+
+
+def _apply_reverification_context(result: Dict, context: _ReverificationContext) -> None:
+    for key, observations in context.observations.items():
+        if key not in result:
+            result[key] = deepcopy(observations)
+    if context.redacted:
+        envelope = next(
+            (result[key] for key in ("ng_agent_observations", "ng_trajectory") if isinstance(result.get(key), dict)),
+            None,
+        )
+        if envelope is None:
+            envelope = {"source": "reverification", "records": [], "gaps": []}
+            result["ng_agent_observations"] = envelope
+        gaps = envelope.setdefault("gaps", [])
+        if not any(gap.get("code") == "multimodal_history_redacted" for gap in gaps):
+            gaps.append({"code": "multimodal_history_redacted"})
+
+
 def _rescoring_source_answer(row: Dict, run_id: str) -> dict[str, str | int]:
     """Bind a re-score to its saved answer, independently of changes to the source grade."""
     return {
@@ -862,17 +952,28 @@ def _prepare_payloads(
     retry_terminal_timeouts: bool = False,
     *,
     selected_rollouts: Optional[Iterable[Dict]] = None,
+    context_out: Optional[Dict[Tuple[str, int], _ReverificationContext]] = None,
 ) -> List[Dict]:
-    all_payloads = [
-        _build_verify_payload(pair)
-        for pair in _yield_inputs_and_rollouts_paired(
-            materialized_inputs_jsonl_fpath,
-            rollouts_jsonl_fpath,
-            limit=limit,
-            rollout_predicate=rollout_predicate,
-            **({"selected_rollouts": selected_rollouts} if selected_rollouts is not None else {}),
-        )
-    ]
+    all_payloads = []
+    for pair in _yield_inputs_and_rollouts_paired(
+        materialized_inputs_jsonl_fpath,
+        rollouts_jsonl_fpath,
+        limit=limit,
+        rollout_predicate=rollout_predicate,
+        **({"selected_rollouts": selected_rollouts} if selected_rollouts is not None else {}),
+    ):
+        payload = _build_verify_payload(pair)
+        if context_out is not None:
+            for identity in (ROLLOUT_ID_KEY_NAME, ATTEMPT_INDEX_KEY_NAME):
+                if identity in pair.rollout:
+                    payload[identity] = pair.rollout[identity]
+            key = (logical_rollout_id(payload), payload.get(ATTEMPT_INDEX_KEY_NAME, 0))
+            if key in context_out:
+                raise ConfigError(
+                    f"reverify: more than one source row names rollout attempt {key!r}; nothing was judged"
+                )
+            context_out[key] = _reverification_context(pair, payload)
+        all_payloads.append(payload)
     if resume_from_cache:
         cache = _load_cache_keys_by_status(output_fpaths, retry_terminal_timeouts=retry_terminal_timeouts)
         payloads = list(_drop_cache_from_payloads(all_payloads, cache))
@@ -936,6 +1037,17 @@ def _prepare_atif_payloads(
         }
         for item in projected
     ]
+
+
+def _predecessor_verifier_ids(predecessor: Dict[str, Any]) -> frozenset[str]:
+    """The known verifier executions retained across earlier re-judgments of this saved answer."""
+    ids: set[str] = set()
+    observations = predecessor
+    while isinstance(observations, dict):
+        trajectory = observations.get("ng_trajectory") or {}
+        ids.update(item["invocation_id"] for item in trajectory.get("verifier_invocations", []))
+        observations = observations.get(REJUDGED_OBSERVATIONS_KEY)
+    return frozenset(ids)
 
 
 def _run_verification_payloads(
@@ -1811,6 +1923,7 @@ class RolloutReverificationHelper(BaseModel):
 
         materialized_inputs_jsonl_fpath = _resolve_under_cwd_or_install(config.materialized_inputs_jsonl_fpath)
         identity_sources: Tuple[Path, ...] = ()
+        source_contexts: Dict[Tuple[str, int], _ReverificationContext] = {}
         if config.input_format == "atif":
             assert config.atif_manifest_jsonl_fpath is not None
             atif_manifest_jsonl_fpath = _resolve_under_cwd_or_install(config.atif_manifest_jsonl_fpath)
@@ -1912,6 +2025,7 @@ class RolloutReverificationHelper(BaseModel):
                 config.limit,
                 rollout_predicate=rollout_predicate,
                 retry_terminal_timeouts=config.retry_terminal_timeouts,
+                **({"context_out": source_contexts} if config.settle_into_source else {}),
                 **({"selected_rollouts": _selected_rescoring_rows(source_store)} if source_store is not None else {}),
             )
             if config.settle_into_source and settle_binding["saved_results"]:
@@ -1925,7 +2039,16 @@ class RolloutReverificationHelper(BaseModel):
                     output_fpaths,
                     config.resume_from_cache,
                     rollout_predicate=lambda row: bound_results.get(logical_rollout_id(row)) == row,
+                    context_out=source_contexts,
                 )
+
+        if config.settle_into_source:
+            for row in payloads_to_reverify:
+                key = (logical_rollout_id(row), row.get(ATTEMPT_INDEX_KEY_NAME, 0))
+                if key not in source_contexts:
+                    raise ConfigError(
+                        f"reverify: source context is missing for rollout attempt {key!r}; nothing was judged"
+                    )
 
         if config.settle_into_source:
             for row in payloads_to_reverify:
@@ -1975,6 +2098,13 @@ class RolloutReverificationHelper(BaseModel):
         failure_counts: Counter = Counter()
         completed = 0  # number of rows re-verified this run (for progress reporting)
         sources_dropped = False
+        if config.settle_into_source:
+            global_config = setup_server_client().global_config_dict
+            capture_dirs = model_call_capture_dirs_from_config(global_config)
+            observability_enabled = observability_enabled_from_config(global_config)
+            trajectory_schema_version = ModelCallCaptureConfig.model_validate(
+                global_config.get("model_call_capture") or {}
+            ).trajectory_schema_version
         try:
             for future in _run_verification_payloads(payloads_to_reverify, semaphore=semaphore):
                 row, result = await future
@@ -1995,6 +2125,26 @@ class RolloutReverificationHelper(BaseModel):
                 for key in (ATIF_PROVENANCE_KEY, _SOURCE_RUN_ID_KEY, _SOURCE_ANSWER_KEY):
                     if key in row:
                         result[key] = row[key]
+
+                if config.settle_into_source:
+                    source_context = source_contexts.get((logical_rollout_id(row), row.get(ATTEMPT_INDEX_KEY_NAME, 0)))
+                    if source_context is None:
+                        raise ConfigError("reverify: returned payload has no paired source context")
+                    result["_ng_rejudge_verifier_invocation_ids"] = [
+                        item["invocation_id"] for item in result.get("ng_verifier_invocations", [])
+                    ]
+                    _apply_reverification_context(result, source_context)
+                    # Settlement shares the source attempt's capture key. Drain writes before persisting
+                    # its fresh verifier evidence, without changing the raw capture store.
+                    await enrich_run_result(
+                        source_context.row,
+                        result,
+                        capture_dirs=capture_dirs,
+                        observability_enabled=observability_enabled,
+                        trajectory_schema_version=trajectory_schema_version,
+                        excluded_verifier_invocation_ids=source_context.prior_verifier_ids,
+                        rollout_latency_ms=source_context.rollout_latency_ms,
+                    )
 
                 no_persist = bool(result.get(NG_NO_PERSIST_KEY))
                 failure_class = result.get(NG_FAILURE_CLASS_KEY)

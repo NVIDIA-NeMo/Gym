@@ -230,6 +230,66 @@ def test_merge_capture_reports_partial_write_loss(tmp_path):
     assert [gap["code"] for gap in record["ng_model_call_capture"]["gaps"]] == ["model_call_capture_incomplete"]
 
 
+@pytest.mark.parametrize(
+    "owner,exclude_prior,excluded",
+    [
+        ("prior-verifier", True, True),
+        ("prior-verifier", False, False),
+        ("fresh-verifier", True, False),
+        (None, True, False),
+    ],
+)
+def test_reverification_capture_filter_retains_policy_and_current_failure_evidence(
+    tmp_path, owner, exclude_prior, excluded
+):
+    from nemo_gym.core.failure_records import FailureBoundary, FailureEvent, FailureReport
+    from nemo_gym.core.failure_transport import FailureHeader, FailureReportRow
+    from nemo_gym.rollouts.model_calls import merge_model_call_capture_into_record
+
+    store = CaptureStore(tmp_path)
+    event = FailureEvent(
+        boundary=FailureBoundary.MODEL,
+        failure_kind="model_request_error",
+        failure_reason="Synthetic streamed transport failure",
+        operation="model_request",
+        http_status=503,
+    )
+    report = FailureReport(events={event.event_id: event}, failure_id=event.event_id)
+    policy = _capture_exchange("responses", "policy", {}, {"id": "policy", "status": "completed"})
+    failed = _capture_exchange("responses", "failed-judge", {}, {"id": "failed", "status": "failed"})
+    failed["verifier_invocation_id"] = owner
+    failed["response_raw"] = (
+        "data: "
+        + orjson.dumps(
+            {"type": "response.failed", FailureHeader.STREAM_FIELD: report.model_dump(mode="json")}
+        ).decode()
+        + "\n\n"
+    )
+    fresh = _capture_exchange("responses", "fresh-judge", {}, {"id": "fresh", "status": "completed"})
+    fresh["verifier_invocation_id"] = "fresh-verifier"
+    for item in (policy, failed, fresh):
+        store.record("recovery", item)
+    original = store.path_for("recovery").read_bytes()
+    result = {"_ng_rollout_id": "recovery", "response": {"id": "saved-policy"}, "reward": 0.5}
+
+    merge_model_call_capture_into_record(
+        result,
+        [tmp_path],
+        include_payloads=True,
+        excluded_verifier_invocation_ids=frozenset({"prior-verifier"}) if exclude_prior else frozenset(),
+    )
+
+    assert {call["model_call_id"] for call in result["ng_model_call_capture"]["calls"]} == (
+        {"call-policy", "call-fresh-judge"} if excluded else {"call-policy", "call-failed-judge", "call-fresh-judge"}
+    )
+    assert {item["invocation_id"] for item in result["ng_model_call_capture"]["verifier_invocations"]} == (
+        {"fresh-verifier"} | ({owner} if owner is not None and not excluded else set())
+    )
+    assert (event.event_id in FailureReportRow.report(result).events) is not excluded
+    assert result["response"] == {"id": "saved-policy"} and result["reward"] == 0.5
+    assert store.path_for("recovery").read_bytes() == original
+
+
 def test_clear_model_call_captures_for_rollouts_run_scoping(tmp_path, monkeypatch):
     import nemo_gym.rollouts.model_calls as obs
     from nemo_gym.rollouts.model_calls import clear_model_call_captures_for_rollouts
