@@ -49,6 +49,10 @@ def test_adaptive_capture_selected_parameters_and_resume(
     tmp_path, monkeypatch, complete_stage, fail_last_dispatch, interrupted, fresh_resume, multiple, reasoning_effort
 ):
     monkeypatch.setattr(jobs, "installed_gym_commit", lambda: "runtime-revision")
+    # Other CI component workers can change unrelated files in the shared checkout.
+    # Keep dispatch scenarios fixed, then exercise the real identity checks on resume.
+    runtime = core.runtime_identity()
+    monkeypatch.setattr(rollout_driver, "runtime_identity", lambda: copy.deepcopy(runtime))
     create(tmp_path / "data", examples=interrupted or multiple)
     dataset = core.Dataset(tmp_path / "data", synthetic=True)
     prepared = tmp_path / "prepared.jsonl"
@@ -468,6 +472,7 @@ def test_adaptive_capture_selected_parameters_and_resume(
     before = {path: core.digest(path) for path in [*store.root.glob("*"), *verifier.receipt_dir.rglob("*.json")]}
     config.resume_from_cache = True
     # Another component's generated output must not invalidate a completed run.
+    monkeypatch.setattr(rollout_driver, "runtime_identity", core.runtime_identity)
     monkeypatch.setattr(jobs, "installed_gym_commit", lambda: "runtime-revision-dirty")
     asyncio.run(rollout_driver.run_rollout_collection(config, settings))
     assert inventory_path.read_bytes() == inventory_bytes
