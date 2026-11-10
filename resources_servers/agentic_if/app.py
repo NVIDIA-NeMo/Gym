@@ -36,6 +36,7 @@ from nemo_gym.server_runtime import (
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
     ResourcesSessionFences,
     ReverifyMode,
     SimpleResourcesServer,
@@ -205,7 +206,7 @@ def _seed_failure(error: Exception) -> HTTPException:
 
 def _closing(episode: _Episode) -> None:
     if episode.closing:
-        raise HTTPException(409, "Resources session closed during setup")
+        raise ResourcesSessionConflictError("Resources session closed during setup")
 
 
 class AgenticIFResourcesServer(SimpleResourcesServer):
@@ -269,16 +270,16 @@ class AgenticIFResourcesServer(SimpleResourcesServer):
         if self._shutting_down:
             raise HTTPException(503, "The agentic IF server is shutting down")
         if session_id in self._fences:
-            raise HTTPException(409, "Resources session is already closed")
+            raise ResourcesSessionConflictError("Resources session is already closed")
         episode = self._episodes.setdefault(session_id, _Episode())
         async with episode.lock:
             if self._episodes.get(session_id) is not episode or episode.closing:
-                raise HTTPException(409, "Resources session is already closed")
+                raise ResourcesSessionConflictError("Resources session is already closed")
             if episode.request is not None:
                 if episode.request != body:
-                    raise HTTPException(409, "resources_session_id is already bound to a different request")
+                    raise ResourcesSessionConflictError("resources_session_id is already bound to a different request")
                 if episode.response is None:
-                    raise HTTPException(409, "Resources session failed to seed and is no longer available")
+                    raise ResourcesSessionConflictError("Resources session failed to seed and is no longer available")
                 request.session[SESSION_ID_KEY] = session_id
                 return episode.response
             try:
@@ -405,14 +406,14 @@ class AgenticIFResourcesServer(SimpleResourcesServer):
         fenced_episode = self._fences.get(session_id)
         if fenced_episode is not None:
             if fenced_episode != body.episode_id:
-                raise HTTPException(409, "episode_id does not match the resources session")
+                raise ResourcesSessionConflictError("episode_id does not match the resources session")
             return ResourcesCloseSessionResponse(resources_session_id=session_id)
         episode = self._episodes.get(session_id)
         if episode is None:
             self._fences.fence(session_id, body.episode_id)
             return ResourcesCloseSessionResponse(resources_session_id=session_id)
         if episode.request is not None and episode.request.episode_id != body.episode_id:
-            raise HTTPException(409, "episode_id does not match the resources session")
+            raise ResourcesSessionConflictError("episode_id does not match the resources session")
         # Mark a seed still in progress as closing before waiting for it: it releases what it allocated itself.
         episode.closing = True
         async with episode.lock:
@@ -435,7 +436,7 @@ class AgenticIFResourcesServer(SimpleResourcesServer):
         if episode is not None:
             return await self._verify_live(session_id, episode, body)
         if session_id in self._fences:
-            raise HTTPException(409, "Resources session is closed")
+            raise ResourcesSessionConflictError("Resources session is closed")
         if body.deliverables_dir is not None:
             return await self._verify_persisted(body)
         return self._lost(body)
@@ -451,11 +452,11 @@ class AgenticIFResourcesServer(SimpleResourcesServer):
         """
         async with episode.lock:
             if episode.closing or episode.response is None or self._episodes.get(session_id) is not episode:
-                raise HTTPException(409, "Resources session is not available for verification")
+                raise ResourcesSessionConflictError("Resources session is not available for verification")
             canonical = body.model_dump(mode="json", exclude={"deliverables_dir"})
             if episode.verification_request is not None:
                 if episode.verification_request != canonical:
-                    raise HTTPException(409, "Verification request does not match the first request")
+                    raise ResourcesSessionConflictError("Verification request does not match the first request")
                 if episode.verification is not None:
                     # Replay a lost reply without verifying the task twice.
                     return episode.verification.model_copy(deep=True)
@@ -502,7 +503,7 @@ class AgenticIFResourcesServer(SimpleResourcesServer):
         if any(key not in fields or fields[key] != value for key, value in content.items()) or (
             task_id is not None and body.task_id not in (None, task_id)
         ):
-            raise HTTPException(409, "Verification task does not match the seeded task")
+            raise ResourcesSessionConflictError("Verification task does not match the seeded task")
         row = dict(content) | {
             "responses_create_params": body.responses_create_params.model_dump(mode="json", exclude_unset=True)
         }

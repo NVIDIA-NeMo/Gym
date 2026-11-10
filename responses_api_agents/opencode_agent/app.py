@@ -48,6 +48,7 @@ from nemo_gym.agents import (
     AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
@@ -796,7 +797,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 verification_failure_fields(response)
                 return response
             if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
-                raise HTTPException(409, "OpenCode activation does not match the seeded session and rollout")
+                raise AgentSessionConflictError("OpenCode activation does not match the seeded session and rollout")
             if state.task is None:
                 # Parse only for a new activation: a retry is compared with the stored request instead,
                 # so its media are never decoded again.
@@ -806,7 +807,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     self._session_response(state, state.activation_request, prompt=prompt, system=system, media=media)
                 )
             elif body != state.activation_request:
-                raise HTTPException(409, "OpenCode sandbox sessions support one activation; retry the same request")
+                raise AgentSessionConflictError(
+                    "OpenCode sandbox sessions support one activation; retry the same request"
+                )
             response = (await asyncio.shield(state.task)).model_copy(deep=True)
             verification_failure_fields(response)
             return response
@@ -827,7 +830,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
 
     async def run(self, request: Request, body: OpenCodeAgentRunRequest) -> OpenCodeAgentVerifyResponse:
         if self._agent_session_id_from_request(request) is not None:
-            raise HTTPException(409, "OpenCode sandbox sessions must use EnvironmentServer /run")
+            raise AgentSessionConflictError("OpenCode sandbox sessions must use EnvironmentServer /run")
         if self.config.resources_server is None:
             raise HTTPException(422, "Local OpenCode /run requires resources_server")
         async with self.sem:

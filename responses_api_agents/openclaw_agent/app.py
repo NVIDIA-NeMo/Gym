@@ -46,6 +46,7 @@ from nemo_gym.agents import (
     AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
@@ -1697,12 +1698,14 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         except (AssertionError, AttributeError):
             legacy_marker = False
         if legacy_marker:
-            raise HTTPException(409, "Obsolete OpenClaw session cookie; seed a new agent session")
+            raise AgentSessionConflictError("Obsolete OpenClaw session cookie; seed a new agent session")
         if session_id is not None:
             state = self._require_agent_session(session_id)
             assert isinstance(state, OpenClawSandboxSession)
             if state.request.episode_id.capture_key != request.path_params.get("rollout_id"):
-                raise HTTPException(409, "OpenClaw activation does not match the seeded session and rollout route")
+                raise AgentSessionConflictError(
+                    "OpenClaw activation does not match the seeded session and rollout route"
+                )
             prompt, system = self._sandbox_input(body)
             if state.task is None:
                 # Bind the immutable request before yielding, so identical retries
@@ -1712,7 +1715,9 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                     self._sandbox_response(state, state.activation_request, prompt=prompt, system=system)
                 )
             elif body != state.activation_request:
-                raise HTTPException(409, "OpenClaw sandbox sessions support one activation; retry the same request")
+                raise AgentSessionConflictError(
+                    "OpenClaw sandbox sessions support one activation; retry the same request"
+                )
             # Session close owns cancellation, not an individual HTTP waiter.
             return (await asyncio.shield(state.task)).model_copy(deep=True)
         path_params = getattr(request, "path_params", None)
@@ -1805,10 +1810,10 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
 
     async def run(self, request: Request, body: OpenClawAgentRunRequest) -> OpenClawAgentVerifyResponse:
         if self._agent_session_id_from_request(request) is not None:
-            raise HTTPException(409, "OpenClaw sandbox sessions must use EnvironmentServer /run")
+            raise AgentSessionConflictError("OpenClaw sandbox sessions must use EnvironmentServer /run")
         try:
             if isinstance(request.session, Mapping) and _SANDBOX_SESSION_KEY in request.session:
-                raise HTTPException(409, "OpenClaw sandbox sessions must use EnvironmentServer /run")
+                raise AgentSessionConflictError("OpenClaw sandbox sessions must use EnvironmentServer /run")
         except (AssertionError, AttributeError):
             pass
         if self.config.resources_server is None:

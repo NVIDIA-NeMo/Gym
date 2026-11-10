@@ -39,6 +39,7 @@ from nemo_gym.agents import (
     AgentCloseSessionResponse,
     AgentOutcome,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
@@ -957,16 +958,16 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
                 raise TypeError("Expected Kilo sandbox session")
             rollout_id = request.path_params.get("rollout_id")
             if rollout_id != state.request.episode_id.capture_key:
-                raise HTTPException(409, "Kilo agent session requires its attempt-qualified rollout route")
+                raise AgentSessionConflictError("Kilo agent session requires its attempt-qualified rollout route")
             if state.session.closing:
-                raise HTTPException(409, "Kilo session is closing")
+                raise AgentSessionConflictError("Kilo session is closing")
             if state.task is None:
                 state.activation_request = body.model_copy(deep=True)
                 state.task = asyncio.create_task(
                     self._sandbox_response(state, state.activation_request, rollout_id=rollout_id)
                 )
             elif body != state.activation_request:
-                raise HTTPException(409, "Kilo sandbox sessions support one activation; retry the same request")
+                raise AgentSessionConflictError("Kilo sandbox sessions support one activation; retry the same request")
             return (await asyncio.shield(state.task)).model_copy(deep=True)
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
@@ -1066,7 +1067,7 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
 
     async def run(self, request: Request, body: KiloCodeAgentRunRequest) -> KiloCodeAgentVerifyResponse:
         if self._agent_session_id_from_request(request) is not None:
-            raise HTTPException(409, "Kilo sessions require EnvironmentServer /run")
+            raise AgentSessionConflictError("Kilo sessions require EnvironmentServer /run")
         if self.config.resources_server is None:
             raise HTTPException(
                 422, "Kilo /run requires resources_server; use EnvironmentServer /run for sandbox sessions"

@@ -374,8 +374,8 @@ class AgentSessionConflictError(HTTPException, ValueError):
     """Refuse an agent session request that conflicts with what this agent recorded for the session.
 
     Examples: an ``agent_session_id`` already bound to another seed request, a close that names another episode,
-    or a seed for a closed session. FastAPI answers it with HTTP 409, which an environment server treats as
-    terminal. It is also a ``ValueError`` for direct callers.
+    a seed for a closed session, or an activation on another rollout route than the seed's. FastAPI answers it with
+    HTTP 409, which an environment server treats as terminal. It is also a ``ValueError`` for direct callers.
     """
 
     def __init__(self, detail: str) -> None:

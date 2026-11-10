@@ -741,9 +741,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
             directory = (task.task_id, repeat)
             owner = self._claimed_directories.get(directory)
             if owner is not None:
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"Session {owner} already holds task {task.task_id} repeat {repeat}; "
+                raise ResourcesSessionConflictError(
+                    f"Session {owner} already holds task {task.task_id} repeat {repeat}; "
                     "a second live session would overwrite its deliverables",
                 )
             self._claimed_directories[directory] = session_id
@@ -851,7 +850,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
     async def finish(self, request: Request, body: FinishRequest) -> str:
         session = self._get_session(request)
         if session.sandbox is None:
-            raise HTTPException(status_code=409, detail="The task sandbox is no longer available")
+            raise ResourcesSessionConflictError("The task sandbox is no longer available")
         missing = await missing_files(session.sandbox, body.paths)
         if missing:
             raise HTTPException(

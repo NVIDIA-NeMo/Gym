@@ -31,6 +31,7 @@ from nemo_gym.agents import (
     AgentCloseSessionResponse,
     AgentOutcome,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
@@ -460,12 +461,12 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         agent_session_id = self._agent_session_id_from_request(request)
         if agent_session_id is None:
-            raise HTTPException(409, "Stirrup runs only in agent sessions; use an environment server")
+            raise AgentSessionConflictError("Stirrup runs only in agent sessions; use an environment server")
         path_params = getattr(request, "path_params", None)
         rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
         state = self._require_agent_session(agent_session_id)
         if state.request.episode_id.capture_key != rollout_id:
-            raise HTTPException(409, "Agent-session episode_id does not match the rollout route")
+            raise AgentSessionConflictError("Agent-session episode_id does not match the rollout route")
         if state.task is None:
             # No await until the task and its request binding are installed.
             state.activation_request = body.model_copy(deep=True)
@@ -476,7 +477,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
 
             state.task = asyncio.create_task(activate())
         elif body != state.activation_request:
-            raise HTTPException(409, "Stirrup sandbox sessions support one activation; retry the same request")
+            raise AgentSessionConflictError("Stirrup sandbox sessions support one activation; retry the same request")
         # Session close owns cancellation; a disconnected waiter must not cancel the activation.
         return (await asyncio.shield(state.task)).model_copy(deep=True)
 

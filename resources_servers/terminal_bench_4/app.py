@@ -39,6 +39,7 @@ from nemo_gym.server_runtime import (
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
     ReverifyMode,
     SimpleResourcesServer,
     lost_session_verification,
@@ -391,7 +392,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         else:
             session = self._sessions[session_id]
         if session.request != body:
-            raise HTTPException(409, "Rollout identity is already bound to another request")
+            raise ResourcesSessionConflictError("Rollout identity is already bound to another request")
         if session.execution is not None:
             # Retried seed requests share provisioning, including before the first cookie response.
             await asyncio.shield(session.execution)
@@ -399,7 +400,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         if session.verified_response is not None:
             return SeedSessionResponse(session_id=session.session_id, verified_response=session.verified_response)
         if session.seed_response is None:
-            raise HTTPException(409, "Episode has no recorded seed response")
+            raise ResourcesSessionConflictError("Episode has no recorded seed response")
         return session.seed_response
 
     async def _prepare_session(self, session: Session) -> None:
@@ -468,7 +469,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         self._expire_fences()
         async with self._resources_lock(key):
             if key in self._fenced_resources:
-                raise HTTPException(409, "Resources session is already closed")
+                raise ResourcesSessionConflictError("Resources session is already closed")
             session_id = self._resources_sessions.get(key)
             if session_id is None:
                 rollout_id = body.episode_id.capture_key
@@ -493,16 +494,19 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             else:
                 session = self._sessions[session_id]
                 if session.resources_request != body:
-                    raise HTTPException(409, "resources_session_id is already bound to a different request")
+                    raise ResourcesSessionConflictError("resources_session_id is already bound to a different request")
         # Retried seeds share provisioning; close fences it, then waits for it before releasing.
         await asyncio.shield(session.execution)
         if session.resources_error is not None:
-            raise HTTPException(*session.resources_error)
+            status, detail = session.resources_error
+            if status == 409:
+                raise ResourcesSessionConflictError(detail)
+            raise HTTPException(status, detail)
         if key in self._fenced_resources:
-            raise HTTPException(409, "Resources session is already closed")
+            raise ResourcesSessionConflictError("Resources session is already closed")
         self._check_expiry(session)
         if session.verify_body is not None:
-            raise HTTPException(409, "Resources session is no longer available for seeding")
+            raise ResourcesSessionConflictError("Resources session is no longer available for seeding")
         request.session[_RESOURCES_SESSION_KEY] = key
         return session.resources_response
 
@@ -753,16 +757,16 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             if lookup.exists():
                 identity = lookup.read_text()
                 if not re.fullmatch(r"[a-f0-9]{64}", identity):
-                    raise HTTPException(409, "Invalid recorded episode identity")
+                    raise ResourcesSessionConflictError("Invalid recorded episode identity")
                 state = json.loads(self._state_path(identity).read_text())
                 if state["owner"] != self._owner(request):
                     raise HTTPException(404, "Unknown session")
                 if state["phase"] != "closed":
-                    raise HTTPException(
-                        409, "Resources process restarted; episode cannot resume; provider TTL applies"
+                    raise ResourcesSessionConflictError(
+                        "Resources process restarted; episode cannot resume; provider TTL applies"
                     )
                 if state.get("record_version", 0) != 3:
-                    raise HTTPException(409, "Unsupported recorded episode version")
+                    raise ResourcesSessionConflictError("Unsupported recorded episode version")
                 session = self._new_session(
                     state["identity"],
                     state["owner"],
@@ -795,11 +799,11 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             await asyncio.shield(session.execution)
         self._check_expiry(session)
         if session.verify_body is not None and session.verify_body != body:
-            raise HTTPException(409, "Session is already bound to another verification request")
+            raise ResourcesSessionConflictError("Session is already bound to another verification request")
         if session.verified_response is not None:
             return session.verified_response
         if session.seed_response is None:
-            raise HTTPException(409, "Episode has no recorded seed response")
+            raise ResourcesSessionConflictError("Episode has no recorded seed response")
         if session.finalization is None:
             if session.expiry_task is not None:
                 session.expiry_task.cancel()
@@ -834,15 +838,15 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         if self._expired(session):
             return _lost_session(body, "Seeded session deadline expired", SESSION_EXPIRED)
         if session.resources_verify_body is not None and session.resources_verify_body != body:
-            raise HTTPException(409, "Session is already bound to another verification request")
+            raise ResourcesSessionConflictError("Session is already bound to another verification request")
         if session.verified_response is not None:
             return session.verified_response
         if session.resources_response is None:
-            raise HTTPException(409, "Resources session has no task sandbox to verify")
+            raise ResourcesSessionConflictError("Resources session has no task sandbox to verify")
         if session.finalization is None:
             seeded = TaskIdentity.model_validate(session.request.model_dump())
             if TaskIdentity.model_validate(body.model_dump()) != seeded:
-                raise HTTPException(409, "Verification task does not match the seeded task")
+                raise ResourcesSessionConflictError("Verification task does not match the seeded task")
             if session.expiry_task is not None:
                 session.expiry_task.cancel()
             session.agent_deadline = None
@@ -883,7 +887,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             session.resources_request.episode_id if session is not None else None
         )
         if expected is not None and expected != body.episode_id:
-            raise HTTPException(409, "episode_id does not match the resources session")
+            raise ResourcesSessionConflictError("episode_id does not match the resources session")
         # Fence before waiting: a timed-out close must not leave a late allocation running.
         self._fenced_resources[key] = body.episode_id
         async with self._resources_lock(key):
