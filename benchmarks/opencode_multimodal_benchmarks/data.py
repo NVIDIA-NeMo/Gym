@@ -51,8 +51,6 @@ def question(row: dict, benchmark: str, answer_format: bool) -> str:
     text = row["question"].strip()
     options = options_from_row(row)
     text = f"Question: {text}\n"
-    if row.get("hint", "").strip():
-        text = f"Hint: {row['hint'].strip()}\n" + text
     if options:
         text += "Options:\n" + "".join(f"{key}. {value}\n" for key, value in options.items())
         text += "Please select the correct answer from the options above."

@@ -86,6 +86,8 @@ class OpenCodeMultimodalEvalAgent(OpenCodeMultimodalAgent):
             raise ValueError("Agent and model gateway turn budgets must match")
         if not gateway.get("turn_budget"):
             raise ValueError("The model gateway must explicitly enable the eval turn budget")
+        if gateway.get("turn_state_idle_timeout_seconds", 3600) <= self.config.timeout:
+            raise ValueError("Gateway turn-state idle timeout must exceed the agent episode timeout")
 
     def _web_tool_environment(self) -> dict[str, str]:
         websearch = self.config.opencode_config.get("tools", {}).get("websearch", False)
@@ -264,14 +266,14 @@ class OpenCodeMultimodalEvalAgent(OpenCodeMultimodalAgent):
         if self.config.build_system_prompt is not None:
             build["prompt"] = self.config.build_system_prompt
             config["plugin"] = ["file:///testbed/.eval-system-prompt.mjs"]
-        if self.config.capture_message_ids:
+        if self.config.capture_message_ids or self.config.turn_budget is not None:
             config.setdefault("plugin", []).append("file:///testbed/.eval-correlation.mjs")
         config["provider"]["nemo"]["options"].update({"timeout": False, "chunkTimeout": 600000})
         return config
 
     def _write_opencode_config(self, work_dir: Path, rollout_id: str | None = None) -> None:
         super()._write_opencode_config(work_dir, rollout_id)
-        if self.config.capture_message_ids:
+        if self.config.capture_message_ids or self.config.turn_budget is not None:
             shutil.copyfile(Path(__file__).with_name("eval-correlation.mjs"), work_dir / ".eval-correlation.mjs")
         if self.config.build_system_prompt is None:
             return

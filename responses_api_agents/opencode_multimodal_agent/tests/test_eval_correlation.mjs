@@ -14,3 +14,18 @@ assert.deepEqual(correlationHeaders([{ info: { ...reply, sessionID: "other" } }]
 assert.deepEqual(correlationHeaders([{ info: { ...reply, error: { message: "failed" } } }], input), {});
 assert.deepEqual(correlationHeaders([], input), {});
 assert.deepEqual(correlationHeaders(undefined, input), {});
+
+// Budget identity remains available even when assistant evidence is ambiguous or unavailable.
+const { default: createPlugin } = await import("../eval-correlation.mjs");
+for (const lookup of [
+  async () => ({ data: [] }),
+  async () => { throw new Error("lookup failed"); },
+]) {
+  const plugin = await createPlugin({ client: { session: { messages: lookup } } });
+  for (const sessionID of ["root", "child"]) {
+    const output = { headers: {} };
+    await plugin["chat.headers"]({ ...input, sessionID }, output);
+    assert.equal(output.headers["x-opencode-session-id"], sessionID);
+    assert.equal(output.headers["x-opencode-assistant-message-id"], undefined);
+  }
+}

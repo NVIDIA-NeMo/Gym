@@ -467,3 +467,36 @@ def test_enforced_budget_requires_matching_gateway(monkeypatch, tmp_path, entryp
             runner._validate_turn_budget_gateway()
     else:
         runner._validate_turn_budget_gateway()
+
+
+@pytest.mark.parametrize("capture_message_ids", [False, True])
+def test_enforced_budget_stages_session_headers_without_optional_capture(monkeypatch, tmp_path, capture_message_ids):
+    runner = evaluation(monkeypatch, tmp_path)
+    runner.config = OpenCodeMultimodalEvalConfig.model_validate(
+        runner.config.model_dump() | {"max_turns": 65, "turn_budget": {}, "capture_message_ids": capture_message_ids}
+    )
+    runner._write_opencode_config(tmp_path, "episode")
+    runtime = json.loads((tmp_path / "opencode.json").read_text())
+    assert runtime["plugin"].count("file:///testbed/.eval-correlation.mjs") == 1
+    assert (tmp_path / ".eval-correlation.mjs").is_file()
+
+
+@pytest.mark.parametrize("idle_timeout", [1, 1800])
+def test_turn_state_expiry_cannot_reset_a_live_episode(monkeypatch, tmp_path, idle_timeout):
+    runner = evaluation(monkeypatch, tmp_path)
+    runner.config = OpenCodeMultimodalEvalConfig.model_validate(
+        runner.config.model_dump() | {"max_turns": 65, "turn_budget": {}, "timeout": 1800}
+    )
+    runner.server_client.global_config_dict = {
+        "policy_model": {
+            "responses_api_models": {
+                "vllm_model": {
+                    "entrypoint": "visual_eval.py",
+                    "turn_budget": runner.config.turn_budget.model_dump(),
+                    "turn_state_idle_timeout_seconds": idle_timeout,
+                }
+            }
+        }
+    }
+    with pytest.raises(ValueError, match="idle timeout must exceed"):
+        runner._validate_turn_budget_gateway()

@@ -16,8 +16,9 @@ from responses_api_models.vllm_model.hosted_visual_eval import HostedVisualEvalM
 from responses_api_models.vllm_model.visual_eval import VisualEvalModel, VisualEvalModelConfig
 
 
-def request():
-    return Request({"type": "http", "state": {}, "method": "POST", "path": "/v1/chat/completions", "headers": []})
+def request(session_id="root"):
+    headers = [(b"x-opencode-session-id", session_id.encode())] if session_id else []
+    return Request({"type": "http", "state": {}, "method": "POST", "path": "/v1/chat/completions", "headers": headers})
 
 
 def body():
@@ -148,10 +149,10 @@ async def test_failed_calls_then_success_count_as_one_turn(monkeypatch, model_cl
         for _ in range(12):
             with pytest.raises(type(error_factory())):
                 await model.chat_completions(request(), body())
-            assert model._turn_states["episode"].turns == 0
+            assert model._turn_states[("episode", "root")].turns == 0
         await model.chat_completions(request(), body())
     assert attempts == 13
-    assert model._turn_states["episode"].turns == 1
+    assert model._turn_states[("episode", "root")].turns == 1
 
 
 @pytest.mark.asyncio
@@ -173,7 +174,7 @@ async def test_failed_boundary_attempts_preserve_notice_and_grace_allowance(monk
     with rollout_context("episode"):
         for turn in range(1, 66):
             if turn in (54, 55, 56, 57, 58, 65):
-                state = model._turn_states["episode"]
+                state = model._turn_states[("episode", "root")]
                 before = (state.turns, state.grace_tool_calls)
                 fail_next = True
                 with pytest.raises(HTTPException):
@@ -185,8 +186,8 @@ async def test_failed_boundary_attempts_preserve_notice_and_grace_allowance(monk
         with pytest.raises(HTTPException) as error:
             await model.chat_completions(request(), body())
     assert error.value.status_code == 422
-    assert model._turn_states["episode"].turns == 65
-    assert model._turn_states["episode"].grace_tool_calls == 2
+    assert model._turn_states[("episode", "root")].turns == 65
+    assert model._turn_states[("episode", "root")].grace_tool_calls == 2
     assert [len(r.choices[0].message.tool_calls or []) for r in successful[55:]] == [1, 1] + [0] * 8
     assert successful[-1].choices[0].finish_reason == "stop"
 
@@ -207,14 +208,14 @@ async def test_cancelled_call_does_not_spend_a_turn_or_hold_the_lock(monkeypatch
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-        assert model._turn_states["episode"].turns == 0
+        assert model._turn_states[("episode", "root")].turns == 0
 
         async def success(self, req, params):
             return completion(0)
 
         monkeypatch.setattr(VLLMModel, "chat_completions", success)
         await asyncio.wait_for(model.chat_completions(request(), body()), 1)
-    assert model._turn_states["episode"].turns == 1
+    assert model._turn_states[("episode", "root")].turns == 1
 
 
 @pytest.mark.asyncio
@@ -229,7 +230,7 @@ async def test_invalid_completion_does_not_spend_a_turn(monkeypatch, choice_coun
     monkeypatch.setattr(VLLMModel, "chat_completions", upstream)
     with rollout_context("episode"), pytest.raises(ValueError, match="exactly one returned completion"):
         await model.chat_completions(request(), body())
-    assert model._turn_states["episode"].turns == 0
+    assert model._turn_states[("episode", "root")].turns == 0
 
 
 @pytest.mark.asyncio
@@ -255,7 +256,7 @@ async def test_concurrent_failures_do_not_exhaust_successful_turn_budget(monkeyp
     assert statuses.count(422) == 6
     assert sum(isinstance(r, NeMoGymChatCompletion) for r in results) == 2
     assert attempts == 14
-    assert model._turn_states["episode"].turns == 2
+    assert model._turn_states[("episode", "root")].turns == 2
 
 
 @pytest.mark.asyncio
@@ -325,3 +326,154 @@ async def test_multiple_completions_are_rejected_before_engine(monkeypatch):
         await model.chat_completions(request(), body().model_copy(update={"n": 2}))
     assert error.value.status_code == 400
     upstream.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_class", [VisualEvalModel, HostedVisualEvalModel])
+async def test_child_sessions_have_independent_turn_and_grace_budgets(monkeypatch, model_class):
+    model = gateway(monkeypatch, EvalTurnBudget(regular_turns=1, grace_turns=2, grace_tool_turns=1), model_class)
+    seen = []
+
+    async def upstream(self, req, params):
+        seen.append((req.headers["x-opencode-session-id"], params.tool_choice))
+        return completion()
+
+    monkeypatch.setattr(VLLMModel, "chat_completions", upstream)
+    with rollout_context("episode"):
+        await model.chat_completions(request("root"), body())
+        await model.chat_completions(request("child"), body())
+        child_grace = await model.chat_completions(request("child"), body())
+        await model.chat_completions(request("child"), body())
+        with pytest.raises(HTTPException) as error:
+            await model.chat_completions(request("child"), body())
+        assert error.value.status_code == 422
+        assert model._turn_states[("episode", "root")].turns == 1
+        assert model._turn_states[("episode", "root")].grace_tool_calls == 0
+        root_grace = await model.chat_completions(request("root"), body())
+    assert seen == [("root", "auto"), ("child", "auto"), ("child", "auto"), ("child", "none"), ("root", "auto")]
+    assert len(child_grace.choices[0].message.tool_calls) == len(root_grace.choices[0].message.tool_calls) == 1
+    # A reused OpenCode session ID in another rollout cannot share counters.
+    with rollout_context("another-episode"):
+        await model.chat_completions(request("child"), body())
+    assert model._turn_states[("another-episode", "child")].turns == 1
+
+
+@pytest.mark.asyncio
+async def test_missing_session_identity_fails_before_upstream(monkeypatch):
+    model = gateway(monkeypatch, EvalTurnBudget())
+    with rollout_context("episode"), pytest.raises(HTTPException) as error:
+        await model.chat_completions(request(None), body())
+    assert error.value.status_code == 400
+    assert not model._turn_states
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_class", [VisualEvalModel, HostedVisualEvalModel])
+async def test_idle_state_expires_without_another_request(monkeypatch, model_class):
+    model = gateway(monkeypatch, EvalTurnBudget(), model_class)
+    model.config.turn_state_idle_timeout_seconds = 0.01
+
+    async def upstream(self, req, params):
+        return completion(0)
+
+    monkeypatch.setattr(VLLMModel, "chat_completions", upstream)
+    with rollout_context("episode"):
+        await model.chat_completions(request(), body())
+    assert model._turn_states[("episode", "root")].turns == 1
+    await asyncio.sleep(0.03)
+    assert not model._turn_states
+
+
+@pytest.mark.asyncio
+async def test_active_and_queued_requests_cannot_expire_or_split_counters(monkeypatch):
+    model = gateway(monkeypatch, EvalTurnBudget(regular_turns=1, grace_turns=1, grace_tool_turns=0))
+    model.config.turn_state_idle_timeout_seconds = 0.01
+    entered = asyncio.Event()
+    finish = asyncio.Event()
+    calls = 0
+
+    async def upstream(self, req, params):
+        nonlocal calls
+        calls += 1
+        entered.set()
+        await finish.wait()
+        return completion(0)
+
+    monkeypatch.setattr(VLLMModel, "chat_completions", upstream)
+    with rollout_context("episode"):
+        first = asyncio.create_task(model.chat_completions(request(), body()))
+        await asyncio.wait_for(entered.wait(), 1)
+        second = asyncio.create_task(model.chat_completions(request(), body()))
+        cancelled = asyncio.create_task(model.chat_completions(request(), body()))
+        await asyncio.sleep(0.03)
+        state = model._turn_states[("episode", "root")]
+        assert state.users == 3 and state.expiry is None
+        cancelled.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled
+        assert state.users == 2 and state.expiry is None
+        finish.set()
+        await asyncio.gather(first, second)
+        assert state.users == 0 and state.turns == 2 and calls == 2
+        with pytest.raises(HTTPException) as error:
+            await model.chat_completions(request(), body())
+        assert error.value.status_code == 422
+    await asyncio.sleep(0.03)
+    assert not model._turn_states
+
+
+@pytest.mark.asyncio
+async def test_capacity_rejects_new_sessions_without_resetting_existing_budget(monkeypatch):
+    model = gateway(monkeypatch, EvalTurnBudget(regular_turns=1, grace_turns=1, grace_tool_turns=0))
+    model.config.turn_state_max_sessions = 1
+    model.config.turn_state_idle_timeout_seconds = 0.01
+    calls = 0
+
+    async def upstream(self, req, params):
+        nonlocal calls
+        calls += 1
+        return completion(0)
+
+    monkeypatch.setattr(VLLMModel, "chat_completions", upstream)
+    with rollout_context("episode"):
+        await model.chat_completions(request(), body())
+        await model.chat_completions(request(), body())
+        with pytest.raises(HTTPException) as error:
+            await model.chat_completions(request("child"), body())
+        assert error.value.status_code == 503
+        with pytest.raises(HTTPException) as error:
+            await model.chat_completions(request(), body())
+        assert error.value.status_code == 422
+        assert calls == 2
+        await asyncio.sleep(0.03)
+        await model.chat_completions(request("child"), body())
+    assert calls == 3
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancels_expiry_callbacks_and_preserves_parent_lifespan(monkeypatch):
+    from contextlib import asynccontextmanager
+
+    from fastapi import FastAPI
+
+    events = []
+
+    @asynccontextmanager
+    async def lifespan(app):
+        events.append("start")
+        yield {"parent": True}
+        events.append("stop")
+
+    model = gateway(monkeypatch, EvalTurnBudget())
+    monkeypatch.setattr(VLLMModel, "setup_webserver", lambda self: FastAPI(lifespan=lifespan))
+    app = model.setup_webserver()
+    key = ("episode", "root")
+    async with app.router.lifespan_context(app) as lifespan_state:
+        assert lifespan_state == {"parent": True}
+        state = model._acquire_turn_state(key)
+        model._release_turn_state(key, state)
+        handle = state.expiry
+        assert not handle.cancelled()
+    assert handle.cancelled()
+    assert not model._turn_states
+    assert events == ["start", "stop"]

@@ -18,6 +18,8 @@ export function correlationHeaders(messages, input) {
 
 export default async ({ client }) => ({
   "chat.headers": async (input, output) => {
+    // Budget accounting needs session identity even when assistant linkage fails.
+    output.headers["x-opencode-session-id"] = input.sessionID;
     try {
       const result = await client.session.messages({ path: { id: input.sessionID } });
       const headers = correlationHeaders(result.data, input);
