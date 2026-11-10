@@ -44,12 +44,13 @@ from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.client.http_client import (
     MAX_NUM_TRIES,
     ClientResponse,
+    ConnectionRetryWindow,
     get_response_json,
     is_global_aiohttp_client_request_debug_enabled,
     raise_for_status,
     request,
 )
-from nemo_gym.core.episode_context import current_rollout_id
+from nemo_gym.core.episode_context import current_rollout_id, note_verifier_model_request
 from nemo_gym.core.failure_kinds import MODEL_REQUEST_ERROR
 from nemo_gym.core.failure_records import FailureBoundary, ModelFailureDetails, SdkErrorDetails
 from nemo_gym.core.failure_transport import FailureHeader, observe_failure, observe_model_operation
@@ -280,6 +281,16 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         ),
     )
 
+    connection_retry_timeout_s: Optional[float] = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Wall-clock seconds one call may spend retrying connection errors, counted from the first one, "
+            "before that error is raised. Any answer from the server closes the window. "
+            "None retries connection errors without a time limit."
+        ),
+    )
+
     max_http_attempts: int = Field(default=MAX_NUM_TRIES, ge=1)
 
     max_rate_limit_wait_seconds: float = Field(
@@ -375,6 +386,8 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     async def _request(self, **request_kwargs: Dict) -> ClientResponse:
         if self._permanent_trip is not None:
             self._raise_permanent_error()
+        # A judge request inside a verify execution is a model request: that grading is not model-free.
+        note_verifier_model_request(self.base_url)
         request_headers = request_kwargs.pop("headers", {})
         connection_retries = self.max_connection_retries
         if connection_retries is None and request_kwargs.get("_resend_after_disconnect") is False:
@@ -394,6 +407,8 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                 total=self.request_timeout_seconds,
                 connect=self.connect_timeout_seconds,
             )
+        if self.connection_retry_timeout_s is not None:
+            request_kwargs["_connection_retry_window"] = ConnectionRetryWindow(self.connection_retry_timeout_s)
         return await self._request_with_retry(**request_kwargs)
 
     async def _request_with_retry(self, **request_kwargs: Dict) -> ClientResponse:

@@ -129,11 +129,11 @@ class CheckpointableLedger(Protocol):
 
     def import_rows(self, rollout_id: str, rows: list[dict]) -> None: ...
 
-    async def retire(self, rollout_ids: Sequence[str]) -> dict: ...
+    async def retire(self, capture_keys: Sequence[str]) -> dict: ...
 
     def mark_started(self, rollout_id: str) -> None: ...
 
-    async def delete_unstarted(self, rollout_ids: Sequence[str]) -> dict: ...
+    async def delete_unstarted(self, capture_keys: Sequence[str]) -> dict: ...
 
 
 class EpisodeCut(BaseModel):
@@ -225,7 +225,7 @@ class LocalRestoredCuts:
     def supersede(self, ticket: "_Ticket", record: GenerationCutRecord) -> None:
         # The checkpoint exports the newer cut and retains only its staged rows,
         # so a retry of the call must continue from it rather than from the restored one.
-        # The ticket claims it, so delivering the call's response frees it and an interruption keeps it.
+        # The ticket claims it, so delivering the call's response releases it and an interruption keeps it.
         if ticket.capture_key in self.records:
             self.records[ticket.capture_key] = record
             ticket.claimed_cut, ticket.claimed_cut_used = record, True
@@ -451,7 +451,7 @@ class PolicyGate:
             if ticket.cut_regenerate_reason is not None:
                 return admission
             digest = conversation_digest(list(context.request_items or []))
-            record = self.restored_cuts.take(ticket, context.rollout_id, digest)
+            record = self.restored_cuts.take(ticket, context.capture_key, digest)
             if record is None:
                 return admission
             return admission.model_copy(update={"generation_cut": record.continuation})

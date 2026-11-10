@@ -1636,8 +1636,10 @@ class TestRunVerificationPayloads:
         mock_client.global_config_dict = {}
         posted_to: list[tuple[str, str]] = []
 
-        async def capture_post(server_name, url_path, json):  # noqa: ARG001
+        async def capture_post(server_name, url_path, json, **options):  # noqa: ARG001
             posted_to.append((server_name, json[AGENT_REF_KEY_NAME]["name"]))
+            # A /verify that may have been delivered is never resent: the verifier may already have graded it.
+            assert options == {"_resend_after_disconnect": False}
             return MagicMock()
 
         mock_client.post = capture_post
@@ -1653,7 +1655,7 @@ class TestRunVerificationPayloads:
         mock_client.global_config_dict = {}
         posted_rows: list[dict] = []
 
-        async def capture_post(server_name, url_path, json):  # noqa: ARG001
+        async def capture_post(server_name, url_path, json, **options):  # noqa: ARG001
             posted_rows.append(json)
             return MagicMock()
 
@@ -2002,7 +2004,7 @@ class TestCallAggregateMetrics:
 
         posted: list[tuple[str, list]] = []
 
-        async def capture_post(server_name, url_path, json):  # noqa: ARG001
+        async def capture_post(server_name, url_path, json, **options):  # noqa: ARG001
             posted.append((server_name, json.verify_responses))
             return MagicMock()
 
@@ -2078,6 +2080,46 @@ class TestCallAggregateMetrics:
         assert returned_path == tmp_path / "my_run_rollouts_aggregate_metrics.json"
         assert returned_path.exists()
 
+    @pytest.mark.parametrize(
+        ("usage", "context_marker"),
+        [
+            (None, None),  # Legacy context-window rejection.
+            ({"input_tokens": 10, "output_tokens": 32768}, None),  # Truncated generation.
+            ({"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}, "true"),
+            ({"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}, None),  # Output-budget rejection.
+            ({"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}, "false"),
+        ],
+    )
+    async def test_preserves_incomplete_details_even_without_usage(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, usage: dict | None, context_marker: str | None
+    ) -> None:
+        """Keep limit diagnostics without forwarding unrelated metadata or mutating the saved response."""
+        client = self._patch(monkeypatch, {"agent_a": "rs_a"})
+        metadata = {"unrelated": "not needed for aggregation"}
+        if context_marker is not None:
+            metadata["nemo_gym_context_window_exceeded"] = context_marker
+        response = {
+            "output": [{"type": "message", "content": "large partial answer"}],
+            "usage": usage,
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "metadata": metadata.copy(),
+        }
+        original = json.dumps(response, sort_keys=True)
+        results = [{"response": response, "games": [], TASK_INDEX_KEY_NAME: 0}]
+        rows = [{AGENT_REF_KEY_NAME: {"name": "agent_a"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}]
+
+        await _call_aggregate_metrics(results, rows, tmp_path / "out.jsonl")
+
+        sent = client.post.call_args.kwargs["json"].verify_responses[0]
+        expected = {"incomplete_details": {"reason": "max_output_tokens"}}
+        if usage is not None:
+            expected["usage"] = usage
+        if context_marker is not None:
+            expected["metadata"] = {"nemo_gym_context_window_exceeded": context_marker}
+        assert sent["response"] == expected
+        assert "output" not in sent["response"]
+        assert json.dumps(response, sort_keys=True) == original
+
     async def test_returns_none_when_no_results(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """No results → no aggregate file written and None returned."""
         self._patch(monkeypatch, {"agent_a": "rs_a"})
@@ -2089,7 +2131,7 @@ class TestCallAggregateMetrics:
         """A row whose AGENT_REF has no name contributes nothing (it can't be routed to an RS)."""
         posted: list[str] = []
 
-        async def capture_post(server_name, url_path, json):  # noqa: ARG001
+        async def capture_post(server_name, url_path, json, **options):  # noqa: ARG001
             posted.append(server_name)
             return MagicMock()
 
@@ -2414,7 +2456,7 @@ class TestRolloutReverificationRunFromConfig:
         mock_client.get = capture_reverify_mode
         posted_rows: list[dict] = []
 
-        async def capture_verify(server_name: str, url_path: str, json: dict) -> object:
+        async def capture_verify(server_name: str, url_path: str, json: dict, **options: object) -> object:
             assert server_name == "fixture-rs"
             assert url_path == "/verify"
             posted_rows.append(json)
@@ -2716,7 +2758,7 @@ class TestRolloutReverificationRunFromConfig:
         mock_client.global_config_dict = {}
         verify_calls: list[tuple[str, dict]] = []
 
-        async def capturing_post(server_name, url_path, json):  # noqa: ARG001
+        async def capturing_post(server_name, url_path, json, **options):  # noqa: ARG001
             verify_calls.append((server_name, json))
             return MagicMock(headers={})
 
@@ -3124,7 +3166,7 @@ class TestResumeOfOutputCachedWithoutIdentityStamps:
         monkeypatch.setattr("nemo_gym.eval.rollout_reverification._run_verification_payloads", fake_run)
         client = MagicMock(global_config_dict={})
 
-        async def capture_post(server_name, url_path, json):  # noqa: ARG001
+        async def capture_post(server_name, url_path, json, **options):  # noqa: ARG001
             posted.append(sorted(r[TASK_INDEX_KEY_NAME] for r in json.verify_responses))
             return MagicMock()
 
@@ -3827,7 +3869,7 @@ class TestVerifyAggregationRoutingConsistency:
 
         posted: list[str] = []
 
-        async def capture_post(server_name, url_path, json):  # noqa: ARG001
+        async def capture_post(server_name, url_path, json, **options):  # noqa: ARG001
             posted.append(server_name)
             return MagicMock()
 

@@ -23,7 +23,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from threading import Lock
 from time import monotonic, time, time_ns
-from typing import Any, Awaitable, ClassVar, Dict, List, Literal, Optional, Union, get_args
+from typing import Any, Awaitable, Callable, ClassVar, Dict, List, Literal, Optional, Union, get_args
 
 from aiohttp.client_exceptions import ClientConnectionError, ClientResponseError
 from fastapi import FastAPI, HTTPException, Request
@@ -31,6 +31,7 @@ from fastapi.responses import JSONResponse
 from openai.types.completion_usage import CompletionTokensDetails, CompletionUsage, PromptTokensDetails
 from openai.types.shared import ReasoningEffort
 from pydantic import Field, PositiveFloat, PrivateAttr, TypeAdapter, ValidationError, model_validator
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from nemo_gym.client import MAX_NUM_TRIES, SESSION_ID_KEY, NeMoGymAsyncOpenAI
 from nemo_gym.client.http_client import _redacted_url
@@ -52,9 +53,10 @@ from nemo_gym.models import (
     PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
     BaseResponsesAPIModelConfig,
     Body,
+    ChatCompletionsConverter,
     ExternalCaptureHandler,
     SimpleResponsesAPIModel,
-    VLLMConverter,
+    VLLMConverter,  # noqa: F401  # re-exported for importers of this module
     VLLMConverterResponsesToChatCompletionsState,  # noqa: F401
     context_overflow_error_fields,
     is_propagated_refusal,
@@ -66,6 +68,7 @@ from nemo_gym.models import (
     validate_framework_context_options,
 )
 from nemo_gym.models.base_responses_api_model import _request_messages, _validate_responses_params
+from nemo_gym.models.model_call_capture import note_finish_reason
 from nemo_gym.models.token_capture import (
     CAPTURE_REFUSAL_HEADER,
     CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
@@ -143,6 +146,16 @@ _CONTEXT_WINDOW_MARKERS = (
 # at least 1", "max_completion_tokens=N cannot be greater than max_model_len"). Lowering the
 # parameter fixes these; shortening the prompt does not.
 _MAX_TOKENS_PARAMETER_MARKERS = ("max_tokens", "max_completion_tokens")
+# How a 400 body says a request parameter carries a value the serving deployment does not support: "Unexpected
+# reasoning effort high. Supported types are xhigh (default), medium, and low." and OpenAI's "Unsupported value:
+# 'reasoning_effort' does not support 'high' with this model." A body whose error code is "unsupported_value" says the
+# same. Such a request is a setup the deployment cannot serve, not the model's outcome.
+_UNSUPPORTED_VALUE_PATTERNS = (
+    re.compile(r"Unexpected [^.\n]{1,80}\. Supported (?:types|values) (?:are|is)\b"),
+    re.compile(r"Unsupported value: '[^']{1,80}' does not support\b"),
+)
+# The error category recorded for such a refusal; the acceptance gate types it as ``invalid_request_parameter``.
+INVALID_REQUEST_PARAMETER_CATEGORY = "invalid_request_parameter"
 
 
 def _names_context_window(message: str) -> bool:
@@ -172,11 +185,61 @@ def _is_context_length_error(error: ClientResponseError) -> bool:
     return _names_context_window(message) or any(marker in message for marker in _MAX_TOKENS_PARAMETER_MARKERS)
 
 
+def _is_unsupported_parameter_value(error: ClientResponseError) -> bool:
+    """Whether a 400 says a request parameter carries a value the deployment does not support.
+
+    A length refusal (``_is_context_length_error``) is never one: the output-budget and context-window detectors decide
+    those first. Only the phrases in ``_UNSUPPORTED_VALUE_PATTERNS`` and an error code ``unsupported_value`` count, so a
+    generic invalid request, or a parameter the deployment does not support at all, keeps its ordinary handling.
+    """
+    if error.status != 400 or _is_context_length_error(error):
+        return False
+    message = error.response_content.decode(errors="replace")
+    if any(pattern.search(message) for pattern in _UNSUPPORTED_VALUE_PATTERNS):
+        return True
+    try:
+        payload = json.loads(message)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    inner = payload.get("error")
+    return "unsupported_value" in (payload.get("code"), inner.get("code") if isinstance(inner, dict) else None)
+
+
 # How an engine names its context window: "maximum context length is 32768", "max_model_len=32768", and vLLM 0.27's
 # "max_model_len=max_total_tokens=32768".
 _CONTEXT_WINDOW_SIZE = re.compile(
     r"(?:maximum context length|maximum model length|max_model_len|max_total_tokens)\D{0,5}(\d+)"
 )
+# How an engine states the prompt's length in a length refusal: vLLM's "(N in the messages, M in the completion)",
+# vLLM 0.29's "your prompt contains N input tokens", "your request has N input tokens", and the prompt-only checks'
+# "Input length (N)" and "decoder prompt (length N)".
+_PROMPT_TOKEN_COUNT = re.compile(
+    r"(\d+) (?:tokens )?in the messages"
+    r"|(?:prompt contains|request has) (\d+) input tokens"
+    r"|Input length \((\d+)\)"
+    r"|decoder prompt \(length (\d+)\)"
+)
+# Tokens a refitted request leaves unused in the window, against small differences between the prompt count the
+# server obtains and the one the engine checks.
+_REFIT_MARGIN_TOKENS = 16
+
+# The output budget keys the engine reads, in precedence order: chat takes ``max_completion_tokens`` before
+# ``max_tokens``, and /v1/completions has only ``max_tokens``.
+_CHAT_BUDGET_KEYS = ("max_completion_tokens", "max_tokens")
+_COMPLETIONS_BUDGET_KEYS = ("max_tokens",)
+
+
+def _effective_budget_key(outbound: Dict[str, Any], keys: tuple[str, ...]) -> str | None:
+    """The key of the output budget the engine applies to ``outbound``, or None when it carries none."""
+    return next((key for key in keys if outbound.get(key) is not None), None)
+
+
+def _stated_prompt_tokens(message: str) -> int | None:
+    """The prompt length a length refusal states, or None when it states none."""
+    match = _PROMPT_TOKEN_COUNT.search(message)
+    return None if match is None else int(next(group for group in match.groups() if group is not None))
 
 
 def _length_refusal_category(
@@ -188,8 +251,8 @@ def _length_refusal_category(
     The budget is the one the engine received: on chat, ``max_completion_tokens`` before ``max_tokens``. A message that
     names no window does not prove the budget wrong, so that refusal stays an overflow.
     """
-    keys = ("max_tokens",) if completions_api else ("max_completion_tokens", "max_tokens")
-    budget = next((outbound[key] for key in keys if outbound.get(key) is not None), None)
+    key = _effective_budget_key(outbound, _COMPLETIONS_BUDGET_KEYS if completions_api else _CHAT_BUDGET_KEYS)
+    budget = None if key is None else outbound[key]
     message, _, _ = context_overflow_error_fields(error)
     window = _CONTEXT_WINDOW_SIZE.search(message)
     if type(budget) is int and window is not None and budget > int(window.group(1)):
@@ -368,6 +431,43 @@ def _set_reasoning(message_dict: dict[str, Any], reasoning: str, mode: Reasoning
         message_dict["reasoning"] = reasoning
 
 
+class _ContextErrorMiddleware:
+    """Return an engine refusal the client must see, such as a context overflow, instead of Gym's generic 500.
+
+    The engine's message and param are preserved verbatim inside OpenAI's error envelope.
+    The code says whether compacting the prompt is the remedy.
+    Every other error, and any error after the reply has started, propagates.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        started = False
+
+        async def send_tracking_start(message: Message) -> None:
+            nonlocal started
+            started = started or message["type"] == "http.response.start"
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_tracking_start)
+        except ClientResponseError as error:
+            if started or not is_propagated_refusal(error):
+                raise
+            message, code, param = context_overflow_error_fields(error)
+            response = JSONResponse(
+                content={"error": {"message": message, "type": "invalid_request_error", "param": param, "code": code}},
+                status_code=error.status,
+                headers=FailureHeader.encode(failure_report_for(error)),
+            )
+            await response(scope, receive, send)
+
+
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
     base_url: Union[str, List[str]]
     # Where each backend takes generation cuts, aligned with `base_url`,
@@ -380,6 +480,20 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # Request inline prompt and generation token IDs from compatible vLLM endpoints.
     request_prompt_and_generation_token_ids: bool = False
     propagate_context_overflow_errors: bool = False
+    refit_output_budget_to_window: bool = Field(
+        default=True,
+        description=(
+            "When the engine refuses a call for length because the requested output budget (`max_completion_tokens` "
+            "or `max_tokens`, whichever the call used) alone exceeds the context window the refusal names, send the "
+            "call once more with that budget lowered to the window minus the prompt minus a small margin. The prompt "
+            "length is the one the refusal states, or else the engine's `/tokenize` count. The model call's capture "
+            "records `requested_max_tokens` and `applied_max_tokens` and an `output_budget_refit` event with the "
+            "window, which the gate's facts count. A budget within the window is never changed: "
+            "when the prompt and that budget together overflow, the call keeps the `context_length_exceeded` refusal "
+            "(or empty completion), so a harness that compacts its history still gets the cue. A prompt that leaves "
+            "no output token keeps the refusal too. Turn it off to keep every length refusal."
+        ),
+    )
 
     max_http_attempts: int = Field(default=MAX_NUM_TRIES, ge=1)
     max_num_tries: Optional[Literal[1]] = Field(
@@ -508,6 +622,9 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # Total time limit for each HTTP attempt to the engine, not for the whole call; None means no limit.
     # A timed-out attempt is retried like any other transport error, so the call's attempt count is unchanged.
     request_timeout_seconds: Optional[PositiveFloat] = None
+    # Wall-clock cap on connection-error retries per model call, on every client including
+    # rebuilt endpoint clients. None waits without limit so a training run can ride out an engine restart.
+    endpoint_connection_retry_timeout_s: Optional[float] = Field(default=None, gt=0)
 
     # Expose the Gym session (one per rollout) as the backend's conversation id.
     # ``conversation_params`` is a TensorRT-LLM extension outside the OpenAI Chat Completions
@@ -679,7 +796,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         ):
             refuse = getattr(context.lineage_store, "refuse_call", None)
             if refuse is not None:
-                await refuse(context.rollout_id, context.model_call_id)
+                await refuse(context.capture_key, context.model_call_id)
                 context.refused = True
         if source_history or self.config.propagate_context_overflow_errors:
             code = _mark_propagated_overflow(error)
@@ -688,30 +805,84 @@ class VLLMModel(SimpleResponsesAPIModel):
             return True
         return False
 
-    def setup_exception_middleware(self, app) -> None:
-        @app.middleware("http")
-        async def context_error_middleware(request: Request, call_next):
-            try:
-                return await call_next(request)
-            except ClientResponseError as error:
-                if is_propagated_refusal(error):
-                    # The engine's message and param are preserved verbatim inside OpenAI's error
-                    # envelope; the code says whether compacting the prompt is the remedy.
-                    message, code, param = context_overflow_error_fields(error)
-                    return JSONResponse(
-                        content={
-                            "error": {
-                                "message": message,
-                                "type": "invalid_request_error",
-                                "param": param,
-                                "code": code,
-                            }
-                        },
-                        status_code=error.status,
-                        headers=FailureHeader.encode(failure_report_for(error)),
-                    )
-                raise
+    async def _refit_output_budget(
+        self,
+        execution: Dict[str, Any],
+        client: NeMoGymAsyncOpenAI,
+        error: ClientResponseError,
+        outbound: Dict[str, Any],
+        budget_keys: tuple[str, ...],
+        tokenize_body: Callable[[], Dict[str, Any]],
+    ) -> bool:
+        """Lower ``outbound``'s output budget, in place, to what the window the refusal names leaves after the prompt.
 
+        Returns whether the budget was lowered, in which case the caller sends ``outbound`` once more. Only a budget
+        that by itself exceeds the window is lowered, the refusal ``_length_refusal_category`` calls
+        ``invalid_output_token_parameter``. Nothing changes when the setting is off, when ``error`` is not a length
+        refusal naming the window, when the call has no budget, when the budget fits the window (prompt and budget
+        together overflowing stays a ``context_length_exceeded`` refusal, the cue for a harness to compact), or when
+        the window minus the prompt minus the margin leaves no output token. Calls admitted by an external capture worker are left alone: the worker has
+        settled the refused call, so a second send under the same call id is not this server's to make.
+        """
+        if not self.config.refit_output_budget_to_window or not _is_context_length_error(error):
+            return False
+        context = current_capture_context()
+        if context is not None and context.external_staging:
+            return False
+        key = _effective_budget_key(outbound, budget_keys)
+        budget = None if key is None else outbound[key]
+        message, _, _ = context_overflow_error_fields(error)
+        window = _CONTEXT_WINDOW_SIZE.search(message)
+        if type(budget) is not int or window is None or budget <= int(window.group(1)):
+            return False
+        prompt_tokens = _stated_prompt_tokens(message)
+        if prompt_tokens is None:
+            prompt_tokens = await self._count_prompt_tokens(client, tokenize_body())
+            if prompt_tokens is None:
+                return False
+        applied = int(window.group(1)) - prompt_tokens - _REFIT_MARGIN_TOKENS
+        if applied < 1:
+            return False
+        outbound[key] = applied
+        execution.update(
+            requested_max_tokens=budget,
+            applied_max_tokens=applied,
+            output_budget_refit={
+                "requested_max_tokens": budget,
+                "window": int(window.group(1)),
+                "applied_max_tokens": applied,
+            },
+        )
+        LOG.info(
+            "engine window %s holds a %s-token prompt; refitting %s from %s to %s (rollout %s)",
+            window.group(1),
+            prompt_tokens,
+            key,
+            budget,
+            applied,
+            current_rollout_id() or "none",
+        )
+        return True
+
+    @staticmethod
+    async def _count_prompt_tokens(client: NeMoGymAsyncOpenAI, tokenize_body: Dict[str, Any]) -> int | None:
+        """The engine's ``/tokenize`` count for a prompt, or None when the engine does not give one."""
+        try:
+            result = await client.create_tokenize(**tokenize_body)
+        except (ClientResponseError, ClientConnectionError, asyncio.TimeoutError) as error:
+            LOG.warning("could not count the prompt to refit an output budget: %r", error)
+            return None
+        if not isinstance(result, dict):
+            return None
+        count = result.get("count")
+        if type(count) is int:
+            return count
+        tokens = result.get("tokens")
+        return len(tokens) if isinstance(tokens, list) else None
+
+    def setup_exception_middleware(self, app) -> None:
+        # Registered before Gym's exception middleware, so it runs inside it and sees the error first.
+        app.add_middleware(_ContextErrorMiddleware)
         super().setup_exception_middleware(app)
 
     def setup_webserver(self) -> FastAPI:
@@ -736,7 +907,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             raise HTTPException(status_code=422, detail="measurement requires explicit non-streaming history")
         client = self._resolve_client(request)
         context = CaptureContext(
-            rollout_id=rollout_id,
+            capture_key=rollout_id,
             model_call_id="measurement",
             token_sink=None,
             lineage_store=self._capture_lineage,
@@ -765,12 +936,12 @@ class VLLMModel(SimpleResponsesAPIModel):
             raise HTTPException(status_code=502, detail="worker did not acknowledge exact context measurement")
         return {"prompt_token_count": count}
 
-    def get_converter(self) -> "VLLMConverter":
+    def get_converter(self) -> "ChatCompletionsConverter":
         """Return the converter used for Responses API <-> Chat Completions mapping.
 
         Override in subclasses (e.g. GenRMModel) to use a specialized converter.
         """
-        return VLLMConverter(
+        return ChatCompletionsConverter(
             return_token_id_information=self.config.return_token_id_information,
             uses_reasoning_parser=self.config.uses_reasoning_parser,
             custom_tool_strategy=self.config.custom_tool_strategy,
@@ -809,6 +980,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 max_rate_limit_wait_seconds=0,
                 max_http_attempts=self.config.max_http_attempts,
                 max_num_tries=self.config.max_num_tries,
+                connection_retry_timeout_s=self.config.endpoint_connection_retry_timeout_s,
             )
             for base_url in self.config.base_url
         ]
@@ -929,6 +1101,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         )
 
         execution = getattr(request.state, "nemo_gym_model_execution", {})
+        note_finish_reason(request, chat_completion_response.choices[0].finish_reason)
         if isinstance(execution, dict) and execution.get("local_response_reason") == "context_length_exceeded":
             response.metadata = {**(response.metadata or {}), "nemo_gym_context_window_exceeded": "true"}
         return response
@@ -1166,7 +1339,18 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         if self.config.uses_reasoning_parser and not self.config.preserve_reasoning_in_assistant_content:
             for message_dict in body_dict["messages"]:
-                if message_dict.get("role") != "assistant" or "content" not in message_dict:
+                if message_dict.get("role") != "assistant":
+                    continue
+
+                # External harnesses can supply reasoning separately from content.
+                # Normalize that history too: newer vLLM ignores reasoning_content.
+                reasoning = message_dict.get("reasoning_content") or message_dict.get("reasoning")
+                if reasoning and self.config.uses_interleaved_reasoning:
+                    message_dict.pop("reasoning_content", None)
+                    message_dict.pop("reasoning", None)
+                    _set_reasoning(message_dict, reasoning, self.config.reasoning_field)
+
+                if "content" not in message_dict:
                     continue
 
                 content = message_dict["content"]
@@ -1488,9 +1672,25 @@ class VLLMModel(SimpleResponsesAPIModel):
             else {}
         )
         try:
-            chat_completion_dict = await self._call_endpoint(
-                client, client.create_chat_completion(**transport_options, **body_dict)
-            )
+            try:
+                chat_completion_dict = await self._call_endpoint(
+                    client, client.create_chat_completion(**transport_options, **body_dict)
+                )
+            except ClientResponseError as refusal:
+                if not await self._refit_output_budget(
+                    execution,
+                    client,
+                    refusal,
+                    body_dict,
+                    _CHAT_BUDGET_KEYS,
+                    # A count before generation, so the shared field selection applies even in a subclass that
+                    # refuses to retokenize a prompt after generation.
+                    lambda: VLLMModel._get_tokenize_chat_body(body_dict),
+                ):
+                    raise
+                chat_completion_dict = await self._call_endpoint(
+                    client, client.create_chat_completion(**transport_options, **body_dict)
+                )
         except ClientResponseError as e:
             execution.update(response_source="upstream", upstream_status_code=e.status)
             if transport_io_enabled:
@@ -1541,6 +1741,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                 execution.update(response_source="local", local_response_reason=category)
                 return res
             else:
+                if _is_unsupported_parameter_value(e):
+                    execution["error_category"] = INVALID_REQUEST_PARAMETER_CATEGORY
                 _log_unhandled_engine_error(request, e.status, result_content_str, "chat completion")
                 raise e
         except Exception as e:
@@ -1884,7 +2086,19 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         execution = start_model_execution(request, upstream_attempted=True)
         try:
-            completion_dict = await self._call_endpoint(client, client.create_completion(**completion_body))
+            try:
+                completion_dict = await self._call_endpoint(client, client.create_completion(**completion_body))
+            except ClientResponseError as refusal:
+                if not await self._refit_output_budget(
+                    execution,
+                    client,
+                    refusal,
+                    completion_body,
+                    _COMPLETIONS_BUDGET_KEYS,
+                    lambda: self._completion_tokenize_body(prompt, completion_body),
+                ):
+                    raise
+                completion_dict = await self._call_endpoint(client, client.create_completion(**completion_body))
         except ClientResponseError as e:
             execution.update(response_source="upstream", upstream_status_code=e.status)
             result_content_str = e.response_content.decode(errors="replace")
@@ -1907,6 +2121,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                 res.choices[0].finish_reason = "length"
                 execution.update(response_source="local", local_response_reason=category)
                 return res
+            if _is_unsupported_parameter_value(e):
+                execution["error_category"] = INVALID_REQUEST_PARAMETER_CATEGORY
             _log_unhandled_engine_error(request, e.status, result_content_str, "completion")
             raise
 
@@ -1914,16 +2130,19 @@ class VLLMModel(SimpleResponsesAPIModel):
         if self.config.return_token_id_information:
             choice_dict = completion_dict["choices"][0]
             if choice_dict.get("prompt_token_ids") is None:
-                tokenize_body = dict(
-                    model=self.config.model,
-                    prompt=prompt,
+                tokenize_response = await client.create_tokenize(
+                    **self._completion_tokenize_body(prompt, completion_body)
                 )
-                if "add_special_tokens" in completion_body:
-                    tokenize_body["add_special_tokens"] = completion_body["add_special_tokens"]
-                tokenize_response = await client.create_tokenize(**tokenize_body)
                 choice_dict["prompt_token_ids"] = tokenize_response["tokens"]
 
         return self._completion_dict_to_chat_completion(completion_dict)
+
+    def _completion_tokenize_body(self, prompt: str, completion_body: Dict[str, Any]) -> Dict[str, Any]:
+        """The ``/tokenize`` body that counts ``prompt`` as /v1/completions renders it."""
+        tokenize_body = dict(model=self.config.model, prompt=prompt)
+        if "add_special_tokens" in completion_body:
+            tokenize_body["add_special_tokens"] = completion_body["add_special_tokens"]
+        return tokenize_body
 
     def _render_messages_to_prompt(self, messages: List[Dict[str, Any]]) -> str:
         """Convert a chat-style messages list into a flat prompt string.
@@ -1966,7 +2185,7 @@ class VLLMModel(SimpleResponsesAPIModel):
           - ``str``: returned as-is.
           - list of text blocks (``[{"type": "text", "text": ...}, ...]``):
             concatenated with no separator. This is the shape produced by
-            VLLMConverter when the caller passes a string ``input`` to
+            ChatCompletionsConverter when the caller passes a string ``input`` to
             /v1/responses.
 
         Anything else (image / audio blocks, None content) is rejected — the
@@ -2103,7 +2322,7 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         vLLM /v1/completions returns ``choices[i].text``; we lift it into a
         single assistant chat message. Reasoning content (``<think>...</think>``
-        in the raw text) is left inline — VLLMConverter._extract_reasoning_from_content
+        in the raw text) is left inline — ChatCompletionsConverter._extract_reasoning_from_content
         will pull it out downstream when the result is converted back to a
         Response.
         """
@@ -2246,6 +2465,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 max_http_attempts=self.config.max_http_attempts,
                 max_num_tries=self.config.max_num_tries,
                 request_timeout_seconds=self.config.request_timeout_seconds,
+                connection_retry_timeout_s=self.config.endpoint_connection_retry_timeout_s,
             )
         ]
         # Every session re-resolves onto the new host.

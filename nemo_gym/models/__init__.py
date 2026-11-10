@@ -37,10 +37,11 @@ if TYPE_CHECKING:
         is_propagated_refusal,
     )
     from nemo_gym.models.chat_completions_converter import (
-        ResponsesConverter,
+        ChatCompletionsConverter,
         VLLMConverter,
         VLLMConverterResponsesToChatCompletionsState,
         chat_completion_usage_to_response_usage,
+        message_content_to_text,
         split_responses_input_output_items,
     )
     from nemo_gym.models.chat_streaming import synthesize_chat_completion_sse
@@ -71,11 +72,11 @@ _PUBLIC_API = {
     "BaseResponsesAPIModelConfig": "base_responses_api_model",
     "Body": "base_responses_api_model",
     "CaptureStore": "model_call_capture",
+    "ChatCompletionsConverter": "chat_completions_converter",
     "ExternalCaptureHandler": "token_capture.external_capture",
     "ModelCallCaptureConfig": "model_call_capture",
     "PROPAGATED_REFUSAL_CODE_ATTRIBUTE": "base_responses_api_model",
     "PolicyModelParticipant": "_checkpoint",
-    "ResponsesConverter": "chat_completions_converter",
     "SimpleResponsesAPIModel": "base_responses_api_model",
     "VLLMConverter": "chat_completions_converter",
     "VLLMConverterResponsesToChatCompletionsState": "chat_completions_converter",
@@ -88,6 +89,7 @@ _PUBLIC_API = {
     "is_propagated_refusal": "base_responses_api_model",
     "is_responses_lifecycle_chunk": "responses_streaming",
     "make_external_capture_handler": "token_capture.external_capture",
+    "message_content_to_text": "chat_completions_converter",
     "note_generation_backend": "_checkpoint",
     "note_generation_request": "_checkpoint",
     "restore_namespace_tool_calls": "responses_streaming",
