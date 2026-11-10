@@ -302,7 +302,8 @@ def build_gym_row(
 
 
 def _agent_context(document_manifest_relpath: str) -> dict:
-    return {"artifacts": {"document_manifest": {"path": document_manifest_relpath}}}
+    """The row's ``agent_context``, keyed by participant role: the ``agent`` session's document manifest."""
+    return {"agent": {"artifacts": {"document_manifest": {"path": document_manifest_relpath}}}}
 
 
 def restore_original_prompt(row: dict) -> dict:

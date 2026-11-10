@@ -48,6 +48,7 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NgFailureEvent,
 )
+from nemo_gym.server_runtime import AgentContext, SingleAgentTurnTaskInput
 from nemo_gym.verification import JudgeError, is_judge_failure
 from resources_servers.gdp_pdf.app import (
     GdpPdfConfig,
@@ -282,6 +283,10 @@ class TestBuildGymRow:
         # the content-block layout the agent rewrites at rollout time.
         assert meta["prompt"] == PROMPT
         assert len(meta["criteria"]) == 1
+        # single_agent_turn seeds its `agent` role's session with the same manifest.
+        assert SingleAgentTurnTaskInput.model_validate(row).agent_seed_context == AgentContext(
+            artifacts={"document_manifest": {"path": "documents/t1/manifest.json"}}
+        )
 
 
 # ---------------------------------------------------------------------------

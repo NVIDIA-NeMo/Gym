@@ -85,7 +85,7 @@ as a `multimodal_history_redacted` gap on the trajectory.
 ## Agent sessions
 
 Under an agent session (`single_agent_turn` or `single_agent_turn_legacy`), the agent reads the manifest
-from the row's `agent_context` (`artifacts.document_manifest`, written by `benchmarks/gdp_pdf/prepare.py`)
+from the row's `agent_context.agent` (`artifacts.document_manifest`, written by `benchmarks/gdp_pdf/prepare.py`)
 and resolves it under `documents_base_dir` when the session is seeded. A row without `agent_context`, a
 missing, unreadable or malformed manifest, a manifest whose page images leave its directory, or a manifest
 rendered at a DPI other than `dpi` is refused with HTTP 422, so a session never answers without its document.

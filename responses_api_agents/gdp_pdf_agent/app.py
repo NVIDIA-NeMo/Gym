@@ -38,9 +38,10 @@ failure is scored as a zero attempt, matching AA's treatment of failed submissio
 raise, so the row still gets verified (and scores 0, since an empty answer earns no rubric credit)
 rather than being dropped from the run entirely.
 
-An agent session gets the manifest from the task's ``agent_context`` (``artifacts.document_manifest``) and runs
-the same delivery and backoff in the episode of its one activation; the agent loop stays Simple Agent's. The delivery record goes into the response's
-``document_delivery`` metadata, and the Environment Server verifies the answer.
+An agent session gets the manifest from its ``agent_context`` (``artifacts.document_manifest``, the ``agent`` role's
+context in the task row) and runs the same delivery and backoff in the episode of its one activation; the agent loop
+stays Simple Agent's. The delivery record goes into the response's ``document_delivery`` metadata, and the Environment
+Server verifies the answer.
 """
 
 import base64

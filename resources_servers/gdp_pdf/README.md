@@ -64,8 +64,9 @@ Rows are lightweight — no base64 in the JSONL:
       "implicitness": "Explicit", "subjectiveness": "Objective", "failure_mode": "Binary"}]}}
 ```
 
-Each row also carries `"agent_context": {"artifacts": {"document_manifest": {"path": <document_manifest>}}}`,
-the manifest an agent session receives (see `responses_api_agents/gdp_pdf_agent/README.md`). The shipped
+Each row also carries
+`"agent_context": {"agent": {"artifacts": {"document_manifest": {"path": <document_manifest>}}}}`, the manifest
+the `agent` role's session receives (see `responses_api_agents/gdp_pdf_agent/README.md`). The shipped
 configs run the agent in an agent session (`single_agent_turn_legacy`), so a row without this key is refused
 with HTTP 422. Data prepared before the key existed lacks it: run `gym eval prepare --benchmark gdp_pdf` again.
 
