@@ -25,7 +25,7 @@ from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
 from nemo_gym.server_runtime.episode_tokens import EPISODE_TOKEN_HEADER, EpisodeTokens, episode_token_secret
 from nemo_gym.server_runtime.episode_tools import ToolResult, ToolSpec, TypedToolset, episode_tool
 from nemo_gym.server_runtime.request_handling.request_context import install_request_context_isolation
-from nemo_gym.server_runtime.tool_access import DirectHTTPToolAccess
+from nemo_gym.server_runtime.tool_access import TOOL_ERROR_HEADER, DirectHTTPToolAccess
 
 
 BASE_URL = "http://127.0.0.1:1234"
@@ -79,6 +79,11 @@ class _Counter:
     async def fail(self, arguments: _Nothing) -> None:
         """Raise, as a broken tool does."""
         raise RuntimeError("broken")
+
+    @episode_tool
+    async def overdraw(self, arguments: _Amount) -> ToolResult:
+        """Refuse to take more than the total, with an error result the agent handles."""
+        return ToolResult(output={"detail": f"the total is {self.total}"}, is_error=True)
 
     @episode_tool
     async def rollout(self, arguments: _Nothing) -> str | None:
@@ -273,6 +278,31 @@ def test_a_call_the_tool_cannot_run_answers_with_an_error_the_agent_sees(
     assert detail in replies[0].json()["detail"]
     assert [(call.name, call.arguments, call.is_error) for call in recorded] == [(path.strip("/"), body, True)]
     assert detail in recorded[0].output["detail"]
+
+
+@pytest.mark.parametrize(
+    "path, body, status, flagged",
+    [
+        pytest.param("/add", {"amount": 2}, 200, False, id="result"),
+        pytest.param("/overdraw", {"amount": 2}, 200, True, id="error-result"),
+        pytest.param("/add", {"amount": "two"}, 422, True, id="failed-call"),
+    ],
+)
+def test_a_reply_says_whether_the_call_was_an_error(path: str, body: Any, status: int, flagged: bool) -> None:
+    """Direct HTTP has no field for an error result, which MCP calls ``isError``, so the reply has a header."""
+    replies: list[httpx.Response] = []
+    recorded: list[Any] = []
+
+    async def agent(server: _Server, counter: _Counter, served: ServedTools) -> None:
+        replies.append(await http.post(path, json=body, headers=_headers(served)))
+        recorded.extend(served.calls)
+
+    server, http = _server(agent)
+    asyncio.run(server.run_request(_request()))
+
+    assert replies[0].status_code == status
+    assert (replies[0].headers.get(TOOL_ERROR_HEADER) == "true") is flagged
+    assert [call.is_error for call in recorded] == [flagged]
 
 
 @pytest.mark.parametrize("path", ["/run", "/aggregate_metrics", "/ng-rollout/3-0/run", "/add/../run", "/a/b"])
