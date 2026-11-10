@@ -18,9 +18,9 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi import HTTPException
 
-from nemo_gym.base_resources_server import BaseResourcesServerConfig
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseOutputMessage, NeMoGymResponseOutputText
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseOutputMessage, NeMoGymResponseOutputText
+from nemo_gym.server_runtime import BaseResourcesServerConfig
 from resources_servers.connect_four.app import (
     MODEL,
     OPPONENT,

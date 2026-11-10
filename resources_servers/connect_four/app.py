@@ -27,7 +27,7 @@ from typing import Optional
 
 from fastapi import HTTPException
 
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core import NeMoGymResponse
 from resources_servers.gymnasium import GymnasiumServer, extract_text
 
 
