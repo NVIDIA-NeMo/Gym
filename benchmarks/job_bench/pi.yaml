@@ -1,30 +1,32 @@
+# Job-Bench with Pi. The resources server lends each task's sandbox through sandbox_access; Pi installs
+# its pinned CLI there and works in /workspace. single_agent_turn_legacy seeds both, closes Pi before
+# grading, then closes the resources session, which stops the sandbox.
 config_paths:
 - resources_servers/job_bench/configs/job_bench.yaml
 - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
+# The agent calls the model server from inside a remote sandbox, so the servers advertise this host's address
+# instead of loopback. Pass +default_host=<address the sandbox reaches> when the hostname does not resolve.
+use_absolute_ip: true
+
 job_bench_pi_agent:
   responses_api_agents:
-    harness_agent:
+    pi_agent:
       entrypoint: app.py
-      resources_server:
-        type: resources_servers
-        name: job_bench_resources_server
+      resources_server: null
       model_server:
         type: responses_api_models
         name: policy_model
-      agent: pi
-      agent_kwargs:
-        model: ${policy_model_name}
-        workspace_root: /tmp/pi-agent
-        thinking: high
-        timeout: 7200
-        pi_version: 0.80.2
-        context_window: 262144
-        max_output_tokens: 65536
-        models_config: {}
-        system_prompt: Complete the task using its specified input paths. Save every requested deliverable in /workspace/output.
-      sandbox_provider: sandbox
-      rollout_timeout: 7800
+      model: ${policy_model_name}
+      thinking: high
+      timeout: 7200
+      # harness_agent set no per-command limit; keep long document conversions within the agent's budget.
+      sandbox_bash_timeout_seconds: 7200
+      pi_version: 0.80.2
+      context_window: 262144
+      max_output_tokens: 65536
+      system_prompt: Complete the task using its specified input paths. Save every requested deliverable in /workspace/output.
+      # Keep it at least max_concurrent_episodes: an episode beyond it waits with its sandbox started.
       concurrency: 32
       datasets:
         - name: job_bench
@@ -35,8 +37,22 @@ job_bench_pi_agent:
 
 job_bench_pi_environment_server:
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
       entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: job_bench_resources_server
       agent_server:
         type: responses_api_agents
         name: job_bench_pi_agent
+      # Job-Bench serves no tools: the agent uses its own tools in the task sandbox.
+      resources_tool_transports: []
+      # Bounds the task sandboxes that run at once, as the agent's concurrency did behind legacy_agent.
+      max_concurrent_episodes: 32
+      queue_timeout_seconds: 86400
+      # Covers the slowest scored path, so a slow grade is not a timeout that reruns the 2-hour episode: sandbox
+      # start (ready_timeout_s 1200), agent CLI setup (up to 1200, outside the agent's timeout), the agent's 7200 s,
+      # output collection, and one round of rubric judging (300 s x 3 tries each, max_judge_workers at a time).
+      # Verify starts well before the session's ttl_s (10800) ends; the task sandbox is stopped after collection
+      # and the judge runs on this host.
+      default_episode_timeout_seconds: 11400
