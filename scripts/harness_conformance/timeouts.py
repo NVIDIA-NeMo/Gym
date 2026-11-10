@@ -60,7 +60,7 @@ def _one(values: object) -> dict | None:
     return values[0] if isinstance(values, list) and len(values) == 1 and isinstance(values[0], dict) else None
 
 
-def _model_report(values: object, *, exhausted: bool) -> FailureReport | None:
+def _expected_model_failure_report(values: object, *, exhausted: bool) -> FailureReport | None:
     """Keep all observed calls, with only the last failed call selecting a terminal cause."""
     if not isinstance(values, list) or not values:
         return None
@@ -103,7 +103,7 @@ def inspect_model_timeouts(witness: dict | None, record: dict | None, *, exhaust
     """Require real timeouts and retain their events through successful or failed delivery."""
     witness = witness or {}
     attempts = witness.get("timeout_attempts", [])
-    model = _model_report(witness.get("model_server_failure_reports"), exhausted=exhausted)
+    model = _expected_model_failure_report(witness.get("model_server_failure_reports"), exhausted=exhausted)
     caller = _report(_one(witness.get("caller_failure_reports")))
     response = _one(witness.get("agent_responses")) or {}
     response_report = _report(response.get("failure_report"))
