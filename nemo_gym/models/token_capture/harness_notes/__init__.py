@@ -11,6 +11,12 @@ The request then ends with a user turn, and an exact-token worker keeps the pare
 output and renders the tool results and the note after them. The next request, which no longer carries the note,
 still extends those tokens, because the worker keeps them from the parent.
 
+This keeps calls chained where the parent's exact tokens carry over: external staging, or prefix supply on the model
+server. With ``parent_resolution: source_history``, the replayed history leaves the note out while the forwarded
+messages end with it, so each call past the step limit starts a new chain, as it did before. In-process capture
+without prefix supply still fails closed: the trajectory build finds ``parent_digest_mismatch`` and does not link
+the call to its parent.
+
 Each harness keeps its notes in a module of its own (``opencode.py``), as :class:`HarnessNote` records with the
 releases checked to send that exact text. To support another harness, add its module and its ``NOTES`` to
 ``HARNESS_NOTES``; the shared tests then cover its notes, and the harness's own tests check its default release.

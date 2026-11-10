@@ -351,8 +351,11 @@ def tool_call_turn_fingerprint(items: list[dict], *, read_placeholders: frozense
     ``read_placeholders`` names the tool-call IDs whose call, if it has the shape of
     OpenCode's unavailable-tool placeholder, counts as the call the model was served
     (``_served_tool_name``). Only a lookup of a harness's echoed history sets it
-    (``echoed_tool_call_turn_fingerprints``). Keys of served output never set it, so
-    stored keys keep their meaning across this change.
+    (``echoed_tool_call_turn_fingerprints``). Keys of served output never set it.
+
+    Stored keys lowercase the served names too. A key that an older Gym stored, before names
+    were lowercased, still matches when the turn's served names had no capital letters; a turn
+    served with a capitalized name then resolves only through the strict fingerprint.
     """
     hasher = hashlib.sha256(b"nemo-gym-tool-call-turn")
     seen_ids: set[str] = set()
