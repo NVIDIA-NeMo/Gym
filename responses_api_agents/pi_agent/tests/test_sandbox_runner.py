@@ -5,6 +5,7 @@
 import asyncio
 import json
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -77,8 +78,12 @@ def test_capture_stdin_and_environment(tmp_path, monkeypatch):
 def test_task_descendants_survive_until_owner_teardown(tmp_path, ending):
     try:
         # A completed tool leaves its detached service, which no longer descends from the CLI at the stop.
-        tool = "setsid sleep 60 </dev/null >/dev/null 2>&1 & echo $! > child.pid"
-        script = f"bash -c '{tool}'; touch ready; " + ("sleep 60" if ending != "natural" else "true")
+        # The detached child publishes its own PID only after setsid has left the harness group.
+        tool = (
+            "setsid bash -c 'echo $$ > child.pid; exec sleep 60' </dev/null >/dev/null 2>&1 & "
+            "while [ ! -s child.pid ]; do sleep 0.01; done"
+        )
+        script = f"bash -c {shlex.quote(tool)}; touch ready; " + ("sleep 60" if ending != "natural" else "true")
         process = launch(tmp_path, script, timeout=3)
         if ending == "cancel":
             for _ in range(200):
