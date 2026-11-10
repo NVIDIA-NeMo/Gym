@@ -22571,3 +22571,11 @@ record unknown dataset licensing where an applicable license has not been establ
 Full applicable notices for confirmed sources are retained in the component
 `third-party-notices.md` files. BabyVision is outside this integration; an attribution to a
 VLMEvalKit source file with that name records helper-code provenance only.
+
+## OfficeQA reference scorer
+
+`resources_servers/officeqa/verifiers/officeqa_pro.py` adapts Databricks'
+[`reward.py`](https://github.com/databricks/officeqa/blob/7b9a3c154ef9fb40215bb67934afc43e6799de16/reward.py),
+revision `7b9a3c154ef9fb40215bb67934afc43e6799de16`, under Apache-2.0.
+The scorer header retains the Databricks copyright, applicable upstream notice,
+and modification record. The scoring behavior is unchanged.

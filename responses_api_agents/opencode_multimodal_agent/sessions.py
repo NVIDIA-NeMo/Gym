@@ -22,7 +22,12 @@ from nemo_gym.agents import (
     SandboxNetworkAccess,
     SandboxPythonRuntime,
 )
-from nemo_gym.core import NeMoGymFunctionCallOutput, NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseOutputItem
+from nemo_gym.core import (
+    MediaFile,
+    NeMoGymFunctionCallOutput,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseOutputItem,
+)
 from nemo_gym.sandbox import SandboxProvider, SandboxSpec
 from nemo_gym.server_runtime import MCPToolAccess
 from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle
@@ -179,7 +184,7 @@ class MultimodalSessionMixin:
                 "Use sandbox_provider or a borrowed sandbox for sessions; sandbox selects the local Bubblewrap path"
             )
 
-    def _session_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
+    def _session_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str, list[MediaFile]]:
         self._network_access_for_request(body)
         self._tools_for_request(body)
         if body.temperature is None or body.top_p is None:
@@ -223,7 +228,8 @@ class MultimodalSessionMixin:
             raise HTTPException(422, "Initial image count is outside the configured limits")
         # Preserve the adapter's user-message prefix and input-system-message semantics.
         prompt = "\n\n".join(text for text in [self.config.system_prompt, *systems, *texts] if text)
-        return prompt, body.instructions or ""
+        # The launch hook stages images and constructs the OpenCode file arguments.
+        return prompt, body.instructions or "", []
 
     async def _prepare_session_launch(
         self, state: OpenCodeSandboxSession, body: NeMoGymResponseCreateParamsNonStreaming, payload: dict[str, Any]
