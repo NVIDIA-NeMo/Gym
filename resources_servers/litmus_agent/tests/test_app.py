@@ -847,7 +847,7 @@ class TestResourcesSessions:
         request = _FakeRequest("rs-1")
         await server.seed_session(ResourcesSeedSessionRequest.model_validate(_seed("rs-1")), request=request)
         await _run_code(server, "rs-1", "print(3)")
-        original_verify = LitmusAgentResourcesServer.verify
+        original_verify = LitmusAgentResourcesServer._score
         calls = 0
 
         async def fail_once_then_score(server, body):
@@ -857,7 +857,7 @@ class TestResourcesSessions:
                 raise ValueError("scoring unavailable")
             return await original_verify(server, body)
 
-        monkeypatch.setattr(LitmusAgentResourcesServer, "verify", fail_once_then_score)
+        monkeypatch.setattr(LitmusAgentResourcesServer, "_score", fail_once_then_score)
         body = LitmusAgentVerifyRequest.model_validate(VERIFY_BODY)
         with pytest.raises(ValueError, match="scoring unavailable"):
             await server._verify_and_cleanup(request, body)
@@ -1418,3 +1418,21 @@ class TestResourcesSessions:
         assert server._sessions == {} and server._session_locks == {}
         with pytest.raises(ResourcesSessionLostError):
             await tool_call
+
+
+def test_base_verify_route_masks_judge_failure_and_releases_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    from nemo_gym.verification import JudgeError
+
+    async def fail_score(self, body):
+        raise JudgeError("judge unavailable")
+
+    monkeypatch.setattr(LitmusAgentResourcesServer, "_score", fail_score)
+    server = _make_server()
+    with TestClient(server.setup_webserver()) as client:
+        assert client.post("/seed_session", json=_seed("rs-1")).status_code == 200
+        response = client.post("/verify", json=VERIFY_BODY)
+        assert response.status_code == 200
+        assert response.json()["mask_sample"] is True
+        assert response.json()["failure_kind"] == "judge_failed"
+        assert server._session_episodes == {}
+        assert server.session_is_verified("rs-1")

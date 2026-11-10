@@ -93,7 +93,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
-from pydantic import ConfigDict, Field, PrivateAttr, TypeAdapter
+from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
@@ -107,10 +107,7 @@ from nemo_gym.server_runtime import (
     ResourcesSessionLostError,
     SimpleResourcesServer,
     lost_session_verification,
-    observe_verifier,
 )
-from nemo_gym.telemetry.endpoints import traced_verify_endpoint
-from nemo_gym.verification import judge_failsafe
 
 
 logger = logging.getLogger(__name__)
@@ -610,23 +607,6 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
-        # Swap the base ``/verify`` route for a session-aware wrapper so a
-        # finished rollout releases both its identity and any sandbox, including verifier-only configurations.
-        app.router.routes = [r for r in app.router.routes if getattr(r, "path", None) != "/verify"]
-        config = getattr(self.server_client, "global_config_dict", {})
-        # Keep the base route's grading observations, tracing, and JudgeError handling around cleanup too.
-        app.post("/verify")(
-            traced_verify_endpoint(
-                observe_verifier(
-                    judge_failsafe(self._verify_and_cleanup),
-                    enabled=TypeAdapter(bool).validate_python(config.get("observability_enabled", False)),
-                    verifier_name=self.config.name,
-                    uninstrumented_models=self.grading_may_use_uninstrumented_model,
-                ),
-                static_attributes={"nemo.gym.server.name": self.config.name},
-            )
-        )
-
         if not self.config.sandbox_provider:
             return app
 
@@ -810,6 +790,15 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
 
     # -- verification -------------------------------------------------------
 
+    async def verify(self, body: LitmusAgentVerifyRequest, request: Request = None) -> LitmusAgentVerifyResponse:
+        """Score through the base route, retaining direct ``verify(body)`` calls for request-only grading.
+
+        FastAPI supplies the request for HTTP calls, which also release the session through the shared lifecycle.
+        """
+        if request is None:
+            return await self._score(body)
+        return await self._verify_and_cleanup(request, body)
+
     async def _verify_and_cleanup(
         self,
         request: Request,
@@ -818,7 +807,7 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
         """Score, then release the rollout's identity and any lazily created sandbox.
 
         End of a rollout is the natural point to drop the session's sandbox so
-        it does not leak; scoring is delegated unchanged to ``verify``.
+        it does not leak; scoring is delegated unchanged to ``_score``.
         """
         session_id = request.session[SESSION_ID_KEY]
         async with self.verifying(session_id, allow_missing=True) as verification:
@@ -830,9 +819,9 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
                 )
             # The retry request carries the answer and grading data; no sandbox state is required.
             verification.retain(None)
-            return await self.verify(body)
+            return await self._score(body)
 
-    async def verify(self, body: LitmusAgentVerifyRequest) -> LitmusAgentVerifyResponse:
+    async def _score(self, body: LitmusAgentVerifyRequest) -> LitmusAgentVerifyResponse:
         answer_type = resolve_answer_type(body.answer_type)
 
         text = _extract_last_assistant_text(body)
