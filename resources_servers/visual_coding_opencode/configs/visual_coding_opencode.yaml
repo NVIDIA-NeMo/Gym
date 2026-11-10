@@ -71,6 +71,9 @@ visual_coding_opencode_agent:
       context_window: 131072
       max_output_tokens: 32768
       session_close_timeout_seconds: 90
+      # The model looks at the crops and plots it makes through OpenCode's read tool, and OpenCode passes those images
+      # on only when image input is declared. The prompt image declares it anyway; this keeps it for any row.
+      image_input: true
       # The resources server lends the sandbox and sets its network, so the agent keeps network_access inherit and
       # needs no sandbox_provider of its own. The lent sandbox cannot download OpenCode, so the image carries the
       # binary, pinned by its SHA-256.
