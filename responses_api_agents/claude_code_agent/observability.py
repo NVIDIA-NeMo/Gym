@@ -314,6 +314,9 @@ def _read_events(config_dir: Path, gaps: list[ObservationGap]) -> list[tuple[int
         return []
 
     events: list[tuple[int, str, dict[str, Any]]] = []
+    # Identical copies of one persisted record are replay, not new activity. Records that
+    # share a UUID but differ remain separate; UUID-less records keep their file positions.
+    seen: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for path in paths:
         try:
             lines = path.open(encoding="utf-8", errors="replace")
@@ -334,6 +337,11 @@ def _read_events(config_dir: Path, gaps: list[ObservationGap]) -> list[tuple[int
                     continue
                 if not isinstance(event.get("sessionId"), str):
                     continue
+                event_uuid = event.get("uuid")
+                if isinstance(event_uuid, str) and event_uuid:
+                    if event in seen[event_uuid]:
+                        continue
+                    seen[event_uuid].append(event)
                 events.append((len(events), f"{path.relative_to(transcript_dir)}:{line_number}", event))
     return events
 
@@ -610,7 +618,10 @@ def extract_claude_code_observations(
                             ordinal,
                             _record_key(event, record_id, tool_result_indexes[0], "tool_result"),
                         )
-                        if child_id in parents and parents[child_id][:2] != parent[:2]:
+                        # A different result record is a competing link even for the same native ID.
+                        if child_id in parents and (
+                            parents[child_id][:2] != parent[:2] or parents[child_id][4] != parent[4]
+                        ):
                             parents.pop(child_id)
                             ambiguous_parents.add(child_id)
                             gaps.append(_gap("conflicting_subagent_parent", invocation_id=child_id))

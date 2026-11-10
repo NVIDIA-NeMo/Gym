@@ -1025,3 +1025,80 @@ async def test_default_v1_keeps_reused_id_attempts_with_explicit_gaps(tmp_path: 
     assert {"tool_native_identity_unrepresentable", "tool_output_ambiguous"} <= {
         gap["code"] for gap in trajectory["gaps"]
     }
+
+
+@pytest.mark.parametrize("schema", ["1.0", "2.0"])
+async def test_copied_transcript_keeps_one_attempt_with_its_output(tmp_path: Path, schema: str) -> None:
+    result = _tool_result("root", "2026-07-22T10:00:02Z", "toolu")
+    result["sourceToolAssistantUUID"] = "response-event"
+    result["message"]["content"][0]["content"] = "ok"
+    events = [_assistant("root", "2026-07-22T10:00:01Z", "response", _bash("toolu")), result]
+    path = tmp_path / "config" / "projects" / "work" / "root.jsonl"
+    _write(path, *events)
+    single = extract_claude_code_observations(tmp_path / "config", model_ref=MODEL_REF, root_status="completed")
+    _write(path.with_name("copy.jsonl"), *events)
+    copied = extract_claude_code_observations(tmp_path / "config", model_ref=MODEL_REF, root_status="completed")
+    assert copied.model_dump() == single.model_dump()
+    trajectory = await _enriched_trajectory(tmp_path, copied, schema)
+    [tool] = trajectory["tool_calls"]
+    assert tool["output"] == "ok"
+    assert tool["tool_call_id"] == "toolu"
+    [invocation] = trajectory["invocations"]
+    assert [item["type"] for item in invocation["conversation"]] == ["function_call", "function_call_output"]
+    if schema == "2.0":
+        assert tool["timings"][0]["duration_ms"] == 1000
+    else:
+        assert tool["duration_ms"] == 1000
+
+
+def _spawn_result(timestamp: str, record: str, assistant: str) -> dict:
+    result = _tool_result("root", timestamp, "spawn", child_id="child")
+    result.update(uuid=record, sourceToolAssistantUUID=assistant)
+    return result
+
+
+def _child_tool() -> dict:
+    return _assistant("root", "2026-07-22T10:00:02Z", "child-response", _bash("child-tool"), agent="child")
+
+
+def test_competing_result_records_leave_the_subagent_parent_unset(tmp_path: Path) -> None:
+    root = tmp_path / "projects" / "work" / "root.jsonl"
+    _write(
+        root,
+        _assistant("root", "2026-07-22T10:00:01Z", "a1", {**_bash("spawn"), "name": "Agent"}),
+        _spawn_result("2026-07-22T10:00:03Z", "r1", "a1-event"),
+        _assistant("root", "2026-07-22T10:00:04Z", "a2", {**_bash("spawn"), "name": "Agent"}),
+        _spawn_result("2026-07-22T10:00:05Z", "r2", "a2-event"),
+    )
+    _write(root.parent / "root" / "subagents" / "agent-child.jsonl", _child_tool())
+    bundle = extract_claude_code_observations(tmp_path, model_ref=MODEL_REF)
+    tools = _records(bundle, ToolCallObservation)
+    spawns = [tool for tool in tools if tool.native_tool_call_id == "spawn"]
+    [child_tool] = [tool for tool in tools if tool.invocation_id == "child"]
+    assert len({tool.span_id for tool in spawns}) == 2
+    assert [tool.status for tool in spawns] == ["completed", "completed"]
+    assert child_tool.parent_span_id is None
+    invocations = {invocation.invocation_id: invocation for invocation in _records(bundle, AgentInvocation)}
+    assert invocations["child"].parent_invocation_id is None
+    assert invocations["child"].spawned_by_tool_call_id is None
+    assert "conflicting_subagent_parent" in {gap.code for gap in bundle.gaps if gap.invocation_id == "child"}
+
+
+def test_one_result_record_links_the_subagent_even_when_replayed(tmp_path: Path) -> None:
+    root = tmp_path / "projects" / "work" / "root.jsonl"
+    events = [
+        _assistant("root", "2026-07-22T10:00:01Z", "a1", {**_bash("spawn"), "name": "Agent"}),
+        _spawn_result("2026-07-22T10:00:03Z", "r1", "a1-event"),
+    ]
+    _write(root, *events)
+    _write(root.with_name("copy.jsonl"), *events)
+    _write(root.parent / "root" / "subagents" / "agent-child.jsonl", _child_tool())
+    bundle = extract_claude_code_observations(tmp_path, model_ref=MODEL_REF)
+    tools = _records(bundle, ToolCallObservation)
+    [spawn] = [tool for tool in tools if tool.native_tool_call_id == "spawn"]
+    [child_tool] = [tool for tool in tools if tool.invocation_id == "child"]
+    assert child_tool.parent_span_id == spawn.span_id
+    invocations = {invocation.invocation_id: invocation for invocation in _records(bundle, AgentInvocation)}
+    assert invocations["child"].parent_invocation_id == "root"
+    assert invocations["child"].spawned_by_tool_call_id == "spawn"
+    assert "conflicting_subagent_parent" not in {gap.code for gap in bundle.gaps}
