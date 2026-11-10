@@ -33,8 +33,10 @@ from resources_servers.bird_sql.app import (
     extract_sql_from_response,
 )
 from resources_servers.bird_sql.eval_utils import (
+    SparkUnavailableError,
     execute_and_compare,
     execute_and_compare_spark,
+    execute_spark,
     execute_spark_async,
     execute_sqlite,
     execute_sqlite_async,
@@ -945,7 +947,7 @@ class TestExecuteSparkAsyncTimeout:
 
 
 @pytest.mark.asyncio
-async def test_verify_spark_dialect_routes_to_spark(tmp_path, monkeypatch):
+async def test_verify_spark_dialect_routes_to_spark(tmp_path, monkeypatch, tiny_db):
     sessions = {"TestDB": object()}
     monkeypatch.setattr("resources_servers.bird_sql.app.ensure_bird_sql", lambda _path: tmp_path)
     monkeypatch.setattr("resources_servers.bird_sql.setup_bird_spark.ensure_bird_spark", lambda *_a: sessions)
@@ -970,6 +972,52 @@ async def test_verify_spark_dialect_routes_to_spark(tmp_path, monkeypatch):
     assert seen["session"] is sessions["TestDB"]
     assert seen["db_path"] == tmp_path / "TestDB" / "TestDB.sqlite"  # gold runs on SQLite
     assert seen["gold_sql"] == "SELECT x FROM t"  # untouched, never transpiled
+
+
+class TestSparkOutage:
+    @staticmethod
+    def _session(*, alive: bool):
+        """A session on which the model's query fails; a trivial ``SELECT 1`` works only if ``alive``."""
+        session = MagicMock()
+
+        def sql(query):
+            if query == "SELECT 1" and alive:
+                return MagicMock(collect=lambda: [(1,)])
+            raise RuntimeError("Py4JNetworkError: Answer from Java side is empty")
+
+        session.sql.side_effect = sql
+        return session
+
+    def test_failing_query_on_a_live_session_is_a_wrong_answer_not_an_outage(self):
+        pytest.importorskip("sqlglot")
+        assert execute_spark(self._session(alive=True), "SELECT nope FROM t", "job") is None
+
+    def test_failing_query_on_a_dead_session_raises_instead_of_returning_none(self):
+        pytest.importorskip("sqlglot")
+        with pytest.raises(SparkUnavailableError):
+            execute_spark(self._session(alive=False), "SELECT x FROM t", "job")
+
+    @pytest.mark.asyncio
+    async def test_verify_reports_an_outage_as_a_masked_verifier_failure_not_a_scored_zero(
+        self, tmp_path, monkeypatch, tiny_db
+    ):
+        monkeypatch.setattr("resources_servers.bird_sql.app.ensure_bird_sql", lambda _path: tmp_path)
+        monkeypatch.setattr(
+            "resources_servers.bird_sql.setup_bird_spark.ensure_bird_spark", lambda *_a: {"TestDB": object()}
+        )
+
+        async def down(**_kw):
+            raise SparkUnavailableError("jvm gone")
+
+        monkeypatch.setattr("resources_servers.bird_sql.app.execute_and_compare_spark", down)
+        config = BirdSqlResourcesServerConfig(
+            host="127.0.0.1", port=20099, entrypoint="", bird_sql_dir=str(tmp_path), dialect="spark"
+        )
+        server = BirdSqlResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+        resp = await server.verify(_make_verify_request("```sql\nSELECT x FROM t\n```", gt_sql="SELECT x FROM t"))
+
+        _assert_verifier_failure(resp, FailureCode.SPARK_UNAVAILABLE, "SELECT x FROM t")
 
 
 @requires_spark

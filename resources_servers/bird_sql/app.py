@@ -46,7 +46,7 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
     observe_programmatic_grading,
 )
-from resources_servers.bird_sql.eval_utils import execute_and_compare, execute_and_compare_spark
+from resources_servers.bird_sql.eval_utils import SparkUnavailableError, execute_and_compare, execute_and_compare_spark
 from resources_servers.bird_sql.setup_bird_sql import ensure_bird_sql, ensure_bird_train
 
 
@@ -65,6 +65,7 @@ class FailureCode(str, Enum):
     GOLD_EXECUTION_ERROR = "gold_execution_error"
     GOLD_EXECUTION_TIMEOUT = "gold_execution_timeout"
     DATABASE_MISSING = "database_missing"
+    SPARK_UNAVAILABLE = "spark_unavailable"
     UNKNOWN_ERROR = "unknown_error"
 
 
@@ -288,6 +289,9 @@ class BirdSqlResourcesServer(SimpleResourcesServer):
                     semaphore=self._semaphore,
                     timeout_s=self.config.sql_execution_timeout_s,
                 )
+        except SparkUnavailableError as e:
+            logger.error("BIRD verify on id=%s db_id=%s: %s", body.id, body.db_id, e)
+            return _verifier_failure(FailureCode.SPARK_UNAVAILABLE, "BIRD Spark session is unavailable", cause=e)
         except Exception as e:
             logger.exception("BIRD verify execution error on id=%s db_id=%s: %s", body.id, body.db_id, e)
             return _verifier_failure(FailureCode.UNKNOWN_ERROR, f"BIRD verifier crashed: {type(e).__name__}", cause=e)

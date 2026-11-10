@@ -129,11 +129,27 @@ def normalize_rows(rows: list[tuple[Any, ...]]) -> ResultSet:
     return [tuple(norm(v) for v in row) for row in rows]
 
 
+class SparkUnavailableError(RuntimeError):
+    """The Spark session cannot run any query (for example its JVM exited), as opposed to one query failing.
+
+    The model's answer was never measured, so this is a verifier failure and must not be scored as a wrong answer.
+    """
+
+
+def _spark_is_alive(session: Any) -> bool:
+    try:
+        session.sql("SELECT 1").collect()
+        return True
+    except Exception:
+        return False
+
+
 def execute_spark(session: Any, sql: str, job_group: str) -> Optional[ResultSet]:
     """Execute a single read-only query on a Spark session and return all rows.
 
-    Returns ``None`` if execution raises or ``sql`` is not exactly one query (``SELECT``/``WITH``/set operation):
-    the Spark warehouse is shared by every rollout, so DDL/DML from a model must never run.
+    Returns ``None`` if the query itself fails or ``sql`` is not exactly one query (``SELECT``/``WITH``/set
+    operation): the Spark warehouse is shared by every rollout, so DDL/DML from a model must never run. Raises
+    ``SparkUnavailableError`` if the query failed and a trivial ``SELECT 1`` fails too, i.e. Spark itself is down.
     """
     import sqlglot
     from sqlglot import exp
@@ -144,7 +160,9 @@ def execute_spark(session: Any, sql: str, job_group: str) -> Optional[ResultSet]
             return None
         session.sparkContext.setJobGroup(job_group, sql[:200], interruptOnCancel=True)
         return normalize_rows([tuple(row) for row in session.sql(sql.strip().rstrip(";")).collect()])
-    except Exception:
+    except Exception as e:
+        if not _spark_is_alive(session):
+            raise SparkUnavailableError("The Spark session cannot run queries (did its JVM exit?)") from e
         return None
 
 
