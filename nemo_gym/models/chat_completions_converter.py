@@ -525,6 +525,8 @@ class ChatCompletionsConverter(BaseModel):
                     raise NotImplementedError(
                         "Responses tool caller eligibility has no Chat Completions representation."
                     )
+                if tool_dict.get("output_schema") is not None:
+                    raise NotImplementedError("Responses tool output schema has no Chat Completions representation.")
                 if tool_type not in {"function", "custom"}:
                     raise NotImplementedError(
                         f"Responses tool type {tool_type!r} has no implemented Chat Completions conversion."
@@ -576,7 +578,7 @@ class ChatCompletionsConverter(BaseModel):
         *,
         drop_unrepresentable_request_fields: bool = False,
     ) -> None:
-        if m.get("caller") is not None:
+        if (m.get("caller") or {}).get("type", "direct") != "direct":
             raise NotImplementedError("Responses function caller metadata has no Chat Completions representation.")
         state.flush_assistant()
 
@@ -822,7 +824,7 @@ class ChatCompletionsConverter(BaseModel):
         m: dict,
         state: ChatCompletionsConverterState,
     ) -> None:
-        if m.get("caller") is not None:
+        if (m.get("caller") or {}).get("type", "direct") != "direct":
             raise NotImplementedError("Responses function caller metadata has no Chat Completions representation.")
         state.assistant_item_buffered = True
         assert "call_id" in m
@@ -854,7 +856,7 @@ class ChatCompletionsConverter(BaseModel):
         ``{"input": "<raw text>"}``, a different object from the one the model
         generated.
         """
-        if m.get("caller") is not None:
+        if (m.get("caller") or {}).get("type", "direct") != "direct":
             raise NotImplementedError("Responses custom tool caller metadata has no Chat Completions representation.")
         state.assistant_item_buffered = True
         assert "call_id" in m

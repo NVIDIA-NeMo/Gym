@@ -1982,11 +1982,22 @@ class HarborEnvironmentServer(
             # name a uid resolved to, or the integer uid when it names no user (OpenSandbox's native `uid=` exec
             # path, where the string the task wrote would be looked up as an account name and fail).
             session.agent_user = sandbox.default_user
-            image_user = await self._image_user_name(sandbox, task, names)
+            # The task healthcheck uses main's container user, independently of the later agent.
+            image_user = None
+            if compose is not None and task.config.environment.healthcheck is not None:
+                image_user = compose.document["services"]["main"].get("user")
+            if image_user in (None, ""):
+                image_user = await self._image_user_name(sandbox, task, names)
+            elif isinstance(image_user, str) and image_user.isdecimal():
+                image_user = int(image_user)
             # The working directory and /logs exist before the entrypoint starts, as Harbor's bind mounts do. For a
             # Compose group the adapter already created the /logs paths main bound, before its command; this mkdir
             # is idempotent there and still makes the whole tree.
             session.workdir = await self._prepare_workdir(sandbox, task, task.workdir)
+            # The task's skills are in place before its entrypoint, healthcheck and agent, as a Dockerfile `COPY`
+            # would leave them. A Compose group's main was already started by the adapter (command and image
+            # healthcheck included), so there they reach the agent only.
+            await self._upload_task_skills(sandbox, task, session.workdir)
             # A Compose group's main was started by the adapter, its entrypoint run and its image healthcheck waited.
             managed = compose is not None
             launch = session.entrypoint = await self._start_entrypoint(
@@ -1997,7 +2008,7 @@ class HarborEnvironmentServer(
             await self._wait_healthy(
                 sandbox, task, launch, user=image_user, workdir=session.workdir, compose_managed=managed
             )
-            await self._write_task_context(sandbox, task)
+            await self._write_task_context(sandbox, task, session.workdir)
             if launch is not None:
                 # The last look before the hand-over: an entrypoint that died during the seed's remaining steps
                 # (a setup script failing after its first lines) is a seed failure, not a rollout on an empty task.

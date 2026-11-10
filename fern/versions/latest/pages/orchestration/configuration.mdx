@@ -164,7 +164,7 @@ When `policy_model` names a `vllm` or `vllm_pd` service, each benchmark's `run` 
 - `policy_model_name`: the service's `served_model_name`, or its `model`
 - `policy_api_key`: a dummy value (vLLM does not require authentication)
 
-If a benchmark's `run` already sets any of these keys, validation fails: remove one or the other. `policy_model` must name an existing service.
+If a benchmark's `run` already sets one of these keys to a different value, validation fails: remove one or the other. A key set to the value `policy_model` gives is accepted, so these keys no longer conflict once submit has filled them in. `policy_model` must name an existing service.
 
 ## benchmarks
 

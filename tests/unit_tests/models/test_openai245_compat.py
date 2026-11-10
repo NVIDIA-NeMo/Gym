@@ -164,7 +164,7 @@ def test_program_items_retain_required_sdk_fields(item: dict, missing: str) -> N
 @pytest.mark.parametrize(
     "item", CALLER_ITEMS, ids=["function-call", "function-result", "custom-call", "custom-result"]
 )
-@pytest.mark.parametrize("caller", [{"type": "direct"}, {"type": "program", "caller_id": "synthetic-private"}])
+@pytest.mark.parametrize("caller", [{"type": "program", "caller_id": "synthetic-private"}])
 @pytest.mark.parametrize("drop", [False, True])
 def test_chat_conversion_rejects_caller_linkage_even_when_reporting_fields_may_drop(
     item: dict, caller: dict, drop: bool
@@ -198,17 +198,20 @@ def test_caller_rejection_does_not_change_conversion_state(item: dict) -> None:
     assert state.model_dump() == before
 
 
-def test_absent_and_null_callers_keep_chat_conversion_compatible() -> None:
+@pytest.mark.parametrize("caller", [None, {"type": "direct"}])
+def test_absent_null_and_direct_callers_keep_chat_conversion_compatible(caller: dict | None) -> None:
     converter = ChatCompletionsConverter(return_token_id_information=False, custom_tool_strategy="function_bridge")
     omitted = NeMoGymResponseCreateParamsNonStreaming(input=CALLER_ITEMS)
-    explicit_null = NeMoGymResponseCreateParamsNonStreaming(input=[{**item, "caller": None} for item in CALLER_ITEMS])
+    explicit_null = NeMoGymResponseCreateParamsNonStreaming(
+        input=[{**item, "caller": caller} for item in CALLER_ITEMS]
+    )
     assert converter.responses_to_chat_completion_create_params(omitted).model_dump() == (
         converter.responses_to_chat_completion_create_params(explicit_null).model_dump()
     )
 
 
 @pytest.mark.parametrize("caller", [{"type": "direct"}, {"type": "program", "caller_id": "program_call_synthetic"}])
-def test_function_call_and_result_preserve_native_caller_through_replay(caller: dict) -> None:
+def test_function_call_and_result_preserve_caller_through_replay(caller: dict) -> None:
     items = [{**item, "caller": caller} for item in CALLER_ITEMS]
     serialized = _response(items).model_dump(mode="json", exclude_unset=True)["output"]
     assert serialized == items
@@ -226,7 +229,7 @@ def test_program_caller_without_required_id_is_rejected(item: dict) -> None:
 
 
 @pytest.mark.parametrize("mode", ["implicit", "explicit"])
-def test_native_prompt_cache_options_survive_both_request_schemas_and_conversion(mode: str) -> None:
+def test_prompt_cache_options_survive_both_request_schemas_and_conversion(mode: str) -> None:
     options = {"mode": mode, "ttl": "30m"}
     chat = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(
         {"messages": [{"role": "user", "content": "synthetic input"}], "tools": [], "prompt_cache_options": options}
@@ -264,7 +267,7 @@ def _anthropic_request(request: NeMoGymResponseCreateParamsNonStreaming) -> dict
 
 
 @pytest.mark.parametrize("item", CALLER_ITEMS)
-@pytest.mark.parametrize("caller", [{"type": "direct"}, {"type": "program", "caller_id": "sensitive-caller"}])
+@pytest.mark.parametrize("caller", [{"type": "program", "caller_id": "sensitive-caller"}])
 def test_anthropic_provider_request_rejects_caller_linkage(item: dict, caller: dict) -> None:
     request = NeMoGymResponseCreateParamsNonStreaming(input=[{**item, "caller": caller}])
     before = request.model_dump()
@@ -275,7 +278,7 @@ def test_anthropic_provider_request_rejects_caller_linkage(item: dict, caller: d
 
 
 @pytest.mark.parametrize("item", [FUNCTION_CALL, CUSTOM_CALL])
-@pytest.mark.parametrize("caller", [{"type": "direct"}, {"type": "program", "caller_id": "sensitive-caller"}])
+@pytest.mark.parametrize("caller", [{"type": "program", "caller_id": "sensitive-caller"}])
 def test_anthropic_client_response_rejects_caller_linkage(item: dict, caller: dict) -> None:
     response = _response([{**item, "caller": caller}])
     before = response.model_dump()
@@ -285,14 +288,15 @@ def test_anthropic_client_response_rejects_caller_linkage(item: dict, caller: di
     assert response.model_dump() == before
 
 
-def test_anthropic_absent_and_null_function_callers_remain_compatible() -> None:
+@pytest.mark.parametrize("caller", [None, {"type": "direct"}])
+def test_anthropic_absent_null_and_direct_function_callers_remain_compatible(caller: dict | None) -> None:
     items = [FUNCTION_CALL, FUNCTION_OUTPUT]
     omitted = NeMoGymResponseCreateParamsNonStreaming(input=items)
-    null = NeMoGymResponseCreateParamsNonStreaming(input=[{**item, "caller": None} for item in items])
+    null = NeMoGymResponseCreateParamsNonStreaming(input=[{**item, "caller": caller} for item in items])
     assert _anthropic_request(omitted) == _anthropic_request(null)
     converter = AnthropicConverter()
     assert converter.responses_to_anthropic_response(_response([FUNCTION_CALL]), model="synthetic") == (
-        converter.responses_to_anthropic_response(_response([{**FUNCTION_CALL, "caller": None}]), model="synthetic")
+        converter.responses_to_anthropic_response(_response([{**FUNCTION_CALL, "caller": caller}]), model="synthetic")
     )
 
 
@@ -371,7 +375,7 @@ def test_anthropic_null_custom_response_caller_keeps_existing_unsupported_bounda
 
 
 @pytest.mark.parametrize("schema", [{}, {"type": "object", "properties": {"sensitive-field": {"type": "string"}}}])
-def test_anthropic_rejects_function_output_schema_without_dropping_native_schema(schema: dict) -> None:
+def test_anthropic_rejects_function_output_schema_without_dropping_schema(schema: dict) -> None:
     tool = {"type": "function", "name": "synthetic", "parameters": {}, "strict": False, "output_schema": schema}
     request = NeMoGymResponseCreateParamsNonStreaming(input="synthetic", tools=[tool])
     before = request.model_dump(mode="json", exclude_unset=True)
@@ -391,3 +395,26 @@ def test_anthropic_function_output_schema_absent_and_null_remain_compatible() ->
     omitted = NeMoGymResponseCreateParamsNonStreaming(input="synthetic", tools=[tool])
     null = NeMoGymResponseCreateParamsNonStreaming(input="synthetic", tools=[tool | {"output_schema": None}])
     assert _anthropic_request(omitted) == _anthropic_request(null)
+
+
+@pytest.mark.parametrize("schema", [{}, {"type": "object", "properties": {"sensitive-field": {"type": "string"}}}])
+@pytest.mark.parametrize("drop", [False, True])
+def test_chat_rejects_function_output_schema_without_echoing_payload(schema: dict, drop: bool) -> None:
+    tool = {"type": "function", "name": "synthetic", "parameters": {}, "strict": False, "output_schema": schema}
+    request = NeMoGymResponseCreateParamsNonStreaming(input="synthetic", tools=[tool])
+    before = request.model_dump(mode="json", exclude_unset=True)
+    converter = ChatCompletionsConverter(return_token_id_information=False)
+    with pytest.raises(NotImplementedError, match="^Responses tool output schema") as error:
+        converter.responses_to_chat_completion_create_params(request, drop_unrepresentable_request_fields=drop)
+    assert "sensitive-field" not in str(error.value)
+    assert request.model_dump(mode="json", exclude_unset=True) == before
+
+
+def test_chat_function_output_schema_absent_and_null_remain_compatible() -> None:
+    tool = {"type": "function", "name": "synthetic", "parameters": {}, "strict": False}
+    converter = ChatCompletionsConverter(return_token_id_information=False)
+    omitted = NeMoGymResponseCreateParamsNonStreaming(input="synthetic", tools=[tool])
+    null = NeMoGymResponseCreateParamsNonStreaming(input="synthetic", tools=[tool | {"output_schema": None}])
+    assert converter.responses_to_chat_completion_create_params(omitted).model_dump() == (
+        converter.responses_to_chat_completion_create_params(null).model_dump()
+    )

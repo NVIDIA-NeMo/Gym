@@ -1257,7 +1257,6 @@ def test_strict_export_does_not_use_a_request_alias_as_the_response_model() -> N
 @pytest.mark.parametrize(
     ("model_call_index", "finish_reason", "message"),
     [
-        (0, "stop", "contradicts the captured tool calls"),
         (0, "end_turn", "contradicts the captured tool calls"),
         (0, "stop_sequence", "contradicts the captured tool calls"),
         (1, "tool_calls", "contradicts the captured text-only output"),
@@ -1273,6 +1272,36 @@ def test_strict_export_rejects_finish_reasons_that_contradict_the_exported_step(
     rollout["ng_trajectory"]["model_calls"][model_call_index]["response_metadata"]["finish_reason"] = finish_reason
 
     with pytest.raises(AtifExportError, match=message):
+        gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
+
+
+def test_strict_export_rejects_a_chat_stop_reason_on_a_tool_call_step() -> None:
+    rollout = _canonical_rollout()
+    metadata = rollout["ng_trajectory"]["model_calls"][0]["response_metadata"]
+    metadata["dialect"] = "chat"
+    metadata["finish_reason"] = "stop"
+
+    with pytest.raises(AtifExportError, match="Chat finish reason"):
+        gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
+
+
+def test_strict_export_accepts_the_stop_reason_of_a_forced_tool_call_on_a_responses_call() -> None:
+    # The model adapter notes the chat finish reason on a completed Responses call, and a named or forced tool
+    # call finishes with "stop" there.
+    rollout = _canonical_rollout()
+    rollout["ng_trajectory"]["model_calls"][0]["response_metadata"]["finish_reason"] = "stop"
+
+    trajectory = gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
+
+    assert [call.function_name for call in trajectory.steps[2].tool_calls] == ["search", "read"]
+    assert trajectory.steps[2].extra["nemo_gym"]["model_call"]["response_metadata"]["finish_reason"] == "stop"
+
+
+def test_strict_export_still_rejects_a_truncated_responses_tool_call() -> None:
+    rollout = _canonical_rollout()
+    rollout["ng_trajectory"]["model_calls"][0]["response_metadata"]["finish_reason"] = "length"
+
+    with pytest.raises(AtifExportError, match="indicates an incomplete model response"):
         gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
 
 
@@ -2111,3 +2140,72 @@ def test_transcript_to_atif_needs_identity_and_at_least_one_message() -> None:
         transcript_to_atif([], [], session_id=" ", agent_name="a", agent_version="1")
     with pytest.raises(AtifExportError, match="contains no messages"):
         _transcript([], [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timing_source", ["executor", "artifact", "harness", None])
+async def test_default_enrichment_preserves_strict_v1_exportability(timing_source):
+    from nemo_gym.rollouts.rollout_collection import enrich_run_result
+
+    original = _canonical_rollout()
+    for tool in original["ng_trajectory"]["tool_calls"]:
+        tool["timing_source"] = timing_source
+    expected = gym_rollout_to_atif(original, session_id="legacy", agent_version="test")
+    row = {
+        "trajectory_identity": {
+            "task_id": original["ng_trajectory"]["task_id"],
+            "rollout_id": original["ng_trajectory"]["rollout_id"],
+        }
+    }
+    result = copy.deepcopy(original)
+    for _ in range(2):
+        await enrich_run_result(row, result, capture_dirs=[], observability_enabled=False)
+        actual = gym_rollout_to_atif(result, session_id="legacy", agent_version="test")
+        assert actual == expected
+        assert result["ng_trajectory"]["gaps"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timing_source", ["artifact", None])
+async def test_explicit_v2_preserves_legacy_boundary_diagnostic(timing_source):
+    from nemo_gym.rollouts.rollout_collection import enrich_run_result
+
+    result = _canonical_rollout()
+    for tool in result["ng_trajectory"]["tool_calls"]:
+        tool["timing_source"] = timing_source
+    original_tools = copy.deepcopy(result["ng_trajectory"]["tool_calls"])
+    row = {
+        "trajectory_identity": {
+            "task_id": result["ng_trajectory"]["task_id"],
+            "rollout_id": result["ng_trajectory"]["rollout_id"],
+        }
+    }
+    await enrich_run_result(row, result, capture_dirs=[], observability_enabled=False, trajectory_schema_version="2.0")
+    trajectory = result["ng_trajectory"]
+    gaps = [gap for gap in trajectory["gaps"] if gap["code"] == "tool_legacy_boundary_unavailable"]
+    assert len(gaps) == len(original_tools)
+    for tool, original in zip(trajectory["tool_calls"], original_tools):
+        assert tool["timings"] == []
+        [gap] = [gap for gap in gaps if gap["span_id"] == tool["span_id"]]
+        assert json.loads(gap["detail"]) == {
+            key: original[key] for key in ("started_at", "completed_at", "duration_ms", "timing_source")
+        }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "report", [{"_ng_failure_events_omitted": True}, {"_ng_failure_events": {"invalid": {"boundary": "invalid"}}}]
+)
+async def test_omitted_failure_report_preserves_v1_export(report):
+    from nemo_gym.rollouts.rollout_collection import enrich_run_result
+
+    original = _canonical_rollout()
+    expected = gym_rollout_to_atif(original, session_id="legacy", agent_version="test")
+    row = {"trajectory_identity": {key: original["ng_trajectory"][key] for key in ("task_id", "rollout_id")}}
+    result = {**copy.deepcopy(original), **report}
+    await enrich_run_result(row, result, capture_dirs=[], observability_enabled=False, trajectory_schema_version="2.0")
+    assert "failure_report_unavailable" in {gap["code"] for gap in result["ng_trajectory"]["gaps"]}
+    for _ in range(2):
+        await enrich_run_result(row, result, capture_dirs=[], observability_enabled=False)
+        assert result["ng_trajectory"]["gaps"] == []
+        assert gym_rollout_to_atif(result, session_id="legacy", agent_version="test") == expected

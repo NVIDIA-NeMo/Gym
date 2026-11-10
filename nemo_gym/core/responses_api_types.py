@@ -522,11 +522,11 @@ class NeMoGymResponseCodeInterpreterToolCall(ResponseCodeInterpreterToolCall):
 
 
 class NeMoGymResponseProgram(Program):
-    """A native server-executed program with its opaque fingerprint preserved."""
+    """An OpenAI `program` item, kept with its opaque fingerprint for replay."""
 
 
 class NeMoGymResponseProgramOutput(ProgramOutput):
-    """The native result of a server-executed program."""
+    """The result of an OpenAI `program` item."""
 
 
 class NeMoGymLocalShellCall(LocalShellCall):
@@ -1171,7 +1171,7 @@ class NeMoGymResponseUsage(ResponseUsage):
             return total
         return cls(
             input_tokens=0,
-            input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
+            input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0, cache_write_tokens=0),
             output_tokens=0,
             output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
             total_tokens=0,

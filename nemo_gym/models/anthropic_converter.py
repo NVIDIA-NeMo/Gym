@@ -76,10 +76,6 @@ SUPPORTED_ANTHROPIC_IMAGE_MEDIA_TYPES = {"image/jpeg", "image/png", "image/gif",
 _RESPONSES_REASONING_CARRIER_PREFIX = "nemo_gym_responses_reasoning:"
 
 
-class AnthropicRequestValidationError(ValueError):
-    """An invalid client control with a payload-free message suitable for an HTTP error."""
-
-
 class AnthropicConverter:
     ############################################################################
     # Egress: NeMo Gym Responses  ->  Anthropic Messages request
@@ -126,7 +122,7 @@ class AnthropicConverter:
                     [self._function_call_to_tool_use(item)],
                 )
             elif item_type == "function_call_output":
-                if item.get("caller") is not None:
+                if (item.get("caller") or {}).get("type", "direct") != "direct":
                     raise NotImplementedError("Responses tool caller metadata has no Anthropic representation.")
                 self._append_content(
                     anthropic_body["messages"],
@@ -324,16 +320,6 @@ class AnthropicConverter:
             params["temperature"] = anthropic_body["temperature"]
         if anthropic_body.get("top_p") is not None:
             params["top_p"] = anthropic_body["top_p"]
-
-        if "output_config" in anthropic_body:
-            output_config = anthropic_body["output_config"]
-            if not isinstance(output_config, dict):
-                raise AnthropicRequestValidationError("Invalid Anthropic output_config")
-            if "effort" in output_config:
-                effort = output_config["effort"]
-                if not isinstance(effort, str) or effort not in {"low", "medium", "high", "xhigh", "max"}:
-                    raise AnthropicRequestValidationError("Invalid Anthropic output_config.effort")
-                params["reasoning"] = {"effort": effort}
 
         tools = self._anthropic_tools_to_responses(anthropic_body.get("tools"))
         if tools:
@@ -788,7 +774,7 @@ class AnthropicConverter:
         return blocks
 
     def _function_call_to_tool_use(self, item: Dict[str, Any]) -> Dict[str, Any]:
-        if item.get("caller") is not None:
+        if (item.get("caller") or {}).get("type", "direct") != "direct":
             raise NotImplementedError("Responses tool caller metadata has no Anthropic representation.")
         return {
             "type": "tool_use",

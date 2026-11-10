@@ -2342,7 +2342,7 @@ def test_cache_write_usage_preserves_known_and_unknown(counts: list[int | None])
         usage.input_tokens_details.cache_write_tokens = count
         usages.append(usage)
     before = [usage.model_dump() for usage in usages]
-    expected = sum(counts) if counts and all(count is not None for count in counts) else None
+    expected = sum(counts) if all(count is not None for count in counts) else None
     summed = NeMoGymResponseUsage.sum_from_list(usages)
     assert summed.input_tokens_details.cache_write_tokens == expected
     assert summed.input_tokens == sum(usage.input_tokens for usage in usages)
@@ -2436,3 +2436,21 @@ def test_sum_from_list_of_no_usages_is_a_known_zero() -> None:
 
     assert (total.input_tokens, total.output_tokens, total.total_tokens) == (0, 0, 0)
     assert (total.input_tokens_details.cached_tokens, total.output_tokens_details.reasoning_tokens) == (0, 0)
+
+
+def test_empty_usage_seed_preserves_later_cache_write_counts() -> None:
+    seed = NeMoGymResponseUsage.sum_from_list([])
+    usage = _usage(cached_tokens=2, reasoning_tokens=3)
+    usage.input_tokens_details.cache_write_tokens = 7
+    before = usage.model_dump()
+
+    total = accumulate_response_usage(seed, usage)
+
+    assert total.input_tokens_details.cache_write_tokens == 7
+    assert (total.input_tokens, total.output_tokens, total.total_tokens) == (
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.total_tokens,
+    )
+    assert seed.input_tokens_details.cache_write_tokens == 0
+    assert usage.model_dump() == before

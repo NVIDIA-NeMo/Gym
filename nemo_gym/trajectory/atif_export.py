@@ -797,7 +797,10 @@ def _apply_turns(trajectory: TrajectoryRecord, groups: list[_AgentGroup]) -> set
                     path,
                     f"Messages stop reason {finish_reason!r} does not prove a completed response",
                 )
-        if group.step.tool_calls and normalized_finish_reason in {"stop", "end_turn", "stop_sequence"}:
+        # A named or forced tool call finishes with "stop" on the chat backend, and a Responses call carries that
+        # backend reason; truncation still reports its own reason and is rejected above.
+        contradicting_reasons = {"end_turn", "stop_sequence"} | ({"stop"} if dialect != "responses" else set())
+        if group.step.tool_calls and normalized_finish_reason in contradicting_reasons:
             raise _path_error(path, f"finish reason {finish_reason!r} contradicts the captured tool calls")
         if not group.step.tool_calls and normalized_finish_reason in {"tool_calls", "tool_use", "function_call"}:
             raise _path_error(path, f"finish reason {finish_reason!r} contradicts the captured text-only output")
