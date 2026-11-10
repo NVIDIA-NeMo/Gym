@@ -36,6 +36,8 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from nemo_gym.client import MAX_NUM_TRIES, SESSION_ID_KEY, NeMoGymAsyncOpenAI
 from nemo_gym.client.http_client import _redacted_url
 from nemo_gym.core import (
+    MODEL_SAMPLING_HEADER,
+    MODEL_SAMPLING_NULL,
     REQUIRED_TOKEN_METADATA_FIELDS,
     TOKEN_METADATA_FIELDS,
     FailureHeader,
@@ -46,9 +48,11 @@ from nemo_gym.core import (
     NeMoGymChoice,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    current_model_sampling_segment,
     current_rollout_id,
     current_session_key,
     failure_report_for,
+    model_call_sampling_config,
 )
 from nemo_gym.models import (
     PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
@@ -157,6 +161,9 @@ _UNSUPPORTED_VALUE_PATTERNS = (
 )
 # The error category recorded for such a refusal; the acceptance gate types it as ``invalid_request_parameter``.
 INVALID_REQUEST_PARAMETER_CATEGORY = "invalid_request_parameter"
+# Request fields that choose what the engine reports about the tokens it samples, not how it samples them. A trained
+# agent's Model Server may pin these: NeMo RL's score centering pins logprobs and top_logprobs on its policy's server.
+_REPORTING_ONLY_SAMPLING_OVERRIDES = frozenset({"logprobs", "top_logprobs"})
 
 
 def _names_context_window(message: str) -> bool:
@@ -677,9 +684,11 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     @model_validator(mode="after")
     def _validate_chat_conversion_options(self) -> "VLLMModelConfig":
         if self.is_responses_native:
+            # stream_keepalive_s is also refused by setup_webserver, but only after a local engine has started.
             for option in (
                 "forward_unvalidated_reasoning_effort",
                 "inline_tool_output_images",
+                "stream_keepalive_s",
             ):
                 if getattr(self, option):
                     raise ValueError(
@@ -689,6 +698,11 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
             raise ValueError(
                 "forward_unvalidated_reasoning_effort requires use_completions_api=false: /v1/completions has no "
                 "reasoning_effort, so the effort would be dropped"
+            )
+        if self.inline_tool_output_images and self.use_completions_api:
+            raise ValueError(
+                "inline_tool_output_images requires use_completions_api=false: /v1/completions takes text-only "
+                "messages, so every inlined image would be refused"
             )
         return self
 
@@ -985,8 +999,19 @@ class VLLMModel(SimpleResponsesAPIModel):
             body = _set_aside_unlisted_reasoning_effort(request, body)
         return await super().responses_dispatch(request, body)
 
+    def _sampling_pins(self) -> List[str]:
+        """The ``sampling_overrides`` fields that change how the engine samples."""
+        return sorted(set(self.config.sampling_overrides or {}) - _REPORTING_ONLY_SAMPLING_OVERRIDES)
+
     def _post_init(self) -> None:
         if self.config.sampling_overrides:
+            sampling_config = model_call_sampling_config(getattr(self.server_client, "global_config_dict", None))
+            pins = self._sampling_pins()
+            if pins and sampling_config is not None and self.config.name in sampling_config.required_model_servers:
+                raise ValueError(
+                    f"Model Server {self.config.name!r} serves an agent that the training framework trains, so it "
+                    f"cannot set sampling_overrides {pins}: that agent samples with the framework's values."
+                )
             LOG.info(
                 "`%s` pins sampling on every request to the engine: %s",
                 self.config.name,
@@ -1144,6 +1169,16 @@ class VLLMModel(SimpleResponsesAPIModel):
         sampling is pinned.
         """
         if self.config.sampling_overrides:
+            pins = self._sampling_pins()
+            if pins and current_model_sampling_segment() not in (None, MODEL_SAMPLING_NULL):
+                # 409, not 500: the conflict is configuration, so retrying the rollout cannot help.
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Model Server {self.config.name!r} sets sampling_overrides {pins}, but this call carries a "
+                    "training framework's values for an agent it trains, which must sample with them. Remove them "
+                    "from this Model Server's sampling_overrides, and give an untrained agent that needs a pin a "
+                    "Model Server of its own.",
+                )
             body_dict.update(self.config.sampling_overrides)
         return body_dict
 
@@ -1694,11 +1729,15 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         execution["upstream_attempted"] = True
         context = current_capture_context()
-        transport_options = (
+        transport_options: dict[str, Any] = (
             {"_resend_after_disconnect": False}
             if context is not None and context.parent_resolution_mode == "source_history"
             else {}
         )
+        if current_model_sampling_segment() == MODEL_SAMPLING_NULL:
+            # A training framework's generation server holds every call to its training sampling, except the calls
+            # of agents it does not train, which keep their own.
+            transport_options["_headers"] = {MODEL_SAMPLING_HEADER: MODEL_SAMPLING_NULL}
         try:
             try:
                 chat_completion_dict = await self._call_endpoint(
