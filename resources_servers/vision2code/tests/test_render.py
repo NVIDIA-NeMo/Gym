@@ -70,6 +70,9 @@ def fake_sandbox(monkeypatch):
                 if self.mode == "provider_failure_137":
                     return SandboxExecResult("", "lost init", 137, "sandbox")
                 return SandboxExecResult("rendered", "", 0)
+            assert kwargs["cwd"] == "/"
+            if self.mode == "inspection_failure":
+                return SandboxExecResult("", "inspection unavailable", 1)
             info = {
                 "exists": self.mode != "missing_output",
                 "regular": self.mode != "symlink",
@@ -137,6 +140,7 @@ async def attempt(tmp_path, **kwargs):
         ("invalid_checksum", "invalid_output"),
         ("create_failure", "infrastructure_failure"),
         ("isolation_failure", "infrastructure_failure"),
+        ("inspection_failure", "infrastructure_failure"),
         ("mount_failure", "infrastructure_failure"),
         ("runtime_failure", "infrastructure_failure"),
         ("download_failure", "infrastructure_failure"),
@@ -246,10 +250,22 @@ def test_code_normalization_preserves_invalid_or_unclosed_programs(text):
     assert module.normalize_code(text) == text + "\n"
 
 
+@pytest.mark.parametrize("fenced", [False, True])
 @pytest.mark.parametrize("literal", ["```py```", "<think>visible</think>", "</think>", "<think>"])
-def test_code_normalization_preserves_python_strings(literal: str) -> None:
+def test_code_normalization_preserves_python_strings(literal: str, fenced: bool) -> None:
     code = f"label = {literal!r}\nprint(label)"
-    assert module.normalize_code(code) == code + "\n"
+    text = f"```python\n{code}\n```" if fenced else code
+    assert module.normalize_code(text) == code + "\n"
+
+
+@pytest.mark.parametrize("final", ["print(1)", "this is not python !", "label = '</think>'", ""])
+def test_code_normalization_ignores_reasoning_fences_and_preserves_final(final: str) -> None:
+    text = (
+        "<think>A draft:\n```python\nprint(0)\n```\n</think>\n"
+        f"```python\nprint(2)\n```\nFinal:\n```python\n{final}\n```\n"
+        "```python\nunfinished draft"
+    )
+    assert module.normalize_code(text) == final.strip() + "\n"
 
 
 @pytest.mark.parametrize("kind", ["symlink", "bytes", "pixels", "corrupt"])

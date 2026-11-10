@@ -53,14 +53,46 @@ def normalize_code(text: str) -> str:
         pass
     else:
         return text.strip() + "\n"
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
-    # Some endpoints omit the opening tag when returning reasoning inline.
-    if "</think>" in text:
-        text = text.rpartition("</think>")[2]
-    text = text.replace("<think>", "")
-    code = text
-    for block in re.finditer(r"```(?:python|py)?\s*(.*?)```", text, flags=re.DOTALL | re.IGNORECASE):
-        code = block.group(1)
+    # Consume fences as whole tokens so thinking-tag literals inside Python are
+    # never interpreted as response wrappers. Multiline fences close on their
+    # own line, allowing inline backticks in the submitted program as well.
+    pattern = (
+        r"```(?:python|py)?[ \t]*(?:\r?\n(?P<block>.*?)^[ \t]*```[ \t]*|(?P<inline>[^\r\n]*?)```)"
+        r"|(?P<unfinished>```.*\Z)|(?P<tag></?think>)"
+    )
+    tokens = list(re.finditer(pattern, text, flags=re.DOTALL | re.MULTILINE | re.IGNORECASE))
+    last_close = max(
+        (i for i, token in enumerate(tokens) if (token.group("tag") or "").lower() == "</think>"), default=-1
+    )
+    thinking = False
+    parts = []
+    code = None
+    position = 0
+    for i, token in enumerate(tokens):
+        if not thinking:
+            parts.append(text[position : token.start()])
+        tag = (token.group("tag") or "").lower()
+        if tag == "<think>":
+            # An unmatched opening tag is stripped without discarding the code.
+            thinking = i < last_close
+        elif tag == "</think>":
+            if not thinking:
+                # Some endpoints omit the opening tag when returning reasoning.
+                parts = []
+                code = None
+            thinking = False
+        elif not thinking:
+            body = token.group("block")
+            if body is None:
+                body = token.group("inline")
+            if body is not None:
+                code = body  # Keep the final complete program even when invalid.
+            parts.append(token.group())
+        position = token.end()
+    if not thinking:
+        parts.append(text[position:])
+    if code is None:
+        code = "".join(parts)
     return code.strip() + "\n"
 
 
@@ -231,14 +263,14 @@ async def render(
         # Check in a separate trusted process after the script namespace exits.
         # /workspace is the provider's unique mount: download_file also refuses symlinks.
         check = (
-            "import os,stat,json; p='/workspace/output.png'; "
+            "import os,stat,json; os.chmod('/workspace',0o700); p='/workspace/output.png'; "
             "s=os.lstat(p) if os.path.lexists(p) else None; "
             "print(json.dumps({'exists':s is not None,'regular':s is not None and stat.S_ISREG(s.st_mode),"
             "'readable':s is not None and os.access(p,os.R_OK),"
             "'bytes':s.st_size if s else 0}))"
         )
         checked = await sandbox.exec(
-            ISOLATED + UNSHARE + "/usr/local/bin/python -I -c " + shlex.quote(check), timeout_s=15
+            ISOLATED + UNSHARE + "/usr/local/bin/python -I -c " + shlex.quote(check), cwd="/", timeout_s=15
         )
         if checked.error_type or checked.return_code:
             raise InfrastructureError(f"Output inspection failed: {checked.stderr}")

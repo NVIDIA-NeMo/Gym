@@ -3,10 +3,11 @@
 """Opt-in real execution tests. No host execution fallback is permitted."""
 
 import hashlib
+import json
 import os
 import shutil
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from PIL import Image
@@ -14,6 +15,7 @@ from PIL import Image
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from resources_servers.vision2code.app import Vision2CodeConfig, Vision2CodeServer, Vision2CodeVerifyRequest
+from resources_servers.vision2code.generic_rubric import GENERIC_RUBRIC
 from resources_servers.vision2code.render import render
 
 
@@ -39,6 +41,7 @@ VALID = "from PIL import Image\nImage.new('RGB',(TARGET_WIDTH,TARGET_HEIGHT),'wh
         ("import sys; sys.stderr.write('[ERROR] deliberate failure\\n'); raise SystemExit(1)", "code_error"),
         ("import os; os.write(2, b'[ERROR] direct fd write\\n'); raise SystemExit(1)", "code_error"),
         (VALID + "\nimport os; os.chmod(OUTPUT_PATH, 0)", "invalid_output"),
+        (VALID + "\nimport os; os.chmod('/workspace', 0)", "ok"),
         (VALID + "\nlabel = '```py``` <think>literal</think>'", "ok"),
         ("while True: pass", "timeout"),
         ("pass", "missing_output"),
@@ -72,9 +75,10 @@ async def test_real_execution(tmp_path, code, status):
         ("raise SystemExit(1)", "code_error"),
         ("import sys; sys.stderr.write('[ERROR] deliberate failure\\n'); raise SystemExit(1)", "code_error"),
         (VALID + "\nimport os; os.chmod(OUTPUT_PATH, 0)", "invalid_output"),
+        (VALID + "\nimport os; os.chmod('/workspace', 0)", "ok"),
     ],
 )
-async def test_real_program_failures_are_unmasked_zeros(tmp_path: Path, code: str, status: str) -> None:
+async def test_real_program_outcomes_are_not_masked(tmp_path: Path, monkeypatch, code: str, status: str) -> None:
     reference = tmp_path / "reference.png"
     Image.new("RGB", (80, 60), "white").save(reference)
     server = Vision2CodeServer(
@@ -119,12 +123,48 @@ async def test_real_program_failures_are_unmasked_zeros(tmp_path: Path, code: st
             "sha256": hashlib.sha256(reference.read_bytes()).hexdigest(),
         },
     )
+    judgment = body.response.model_copy(deep=True)
+    judgment.output[0].content[0].text = json.dumps(
+        {"category_scores": {category["id"]: 4 for category in GENERIC_RUBRIC["categories"]}, "rationales": {}}
+    )
+    judge = AsyncMock(return_value=judgment)
+    monkeypatch.setattr("resources_servers.vision2code.app.request_judgment", judge)
     result = await server.verify(body)
-    assert result.reward == 0 and not result.mask_sample
+    assert not result.mask_sample
+    if status != "ok":
+        assert result.reward == 0
+        judge.assert_not_awaited()
+    else:
+        judge.assert_awaited_once()
     assert result.render.status == status
     assert len(result.render_attempts) == 1
     assert result.render.diagnostics["stopped"]
     assert not server._pending_cleanup
+
+
+@pytest.mark.parametrize("literal", ["<think>", "</think>", "<think>visible</think>"])
+async def test_real_fenced_literals_match_raw_pixels(tmp_path: Path, literal: str) -> None:
+    code = (
+        "from PIL import Image, ImageDraw\n"
+        "im = Image.new('RGB', (TARGET_WIDTH, TARGET_HEIGHT), 'white')\n"
+        f"ImageDraw.Draw(im).text((0, 0), {literal!r}, fill='black')\n"
+        "im.save(OUTPUT_PATH)"
+    )
+    for name, submitted in [("raw", code), ("fenced", f"```python\n{code}\n```")]:
+        result = await render(
+            code=submitted,
+            width=160,
+            height=60,
+            image=IMAGE,
+            provider=PROVIDER,
+            artifact_dir=tmp_path / name,
+            timeout=10,
+        )
+        assert result.status == "ok", result.model_dump()
+        assert result.diagnostics["stopped"]
+    with Image.open(tmp_path / "raw/output.png") as raw, Image.open(tmp_path / "fenced/output.png") as fenced:
+        assert raw.size == fenced.size
+        assert raw.tobytes() == fenced.tobytes()
 
 
 async def test_real_matplotlib_dependencies_and_dimensions(tmp_path):
