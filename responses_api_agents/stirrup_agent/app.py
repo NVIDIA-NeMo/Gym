@@ -42,6 +42,7 @@ from nemo_gym.agents import (
 )
 from nemo_gym.config import ModelServerRef, get_global_config_dict
 from nemo_gym.core import (
+    AGENT_INVALID_OUTPUT,
     MODEL_REQUEST_ERROR,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -57,7 +58,7 @@ from nemo_gym.sandbox import (
     create_provider,
     resolve_provider_config,
 )
-from nemo_gym.server_runtime import BaseRunRequest, DirectHTTPToolAccess, MCPToolAccess
+from nemo_gym.server_runtime import DirectHTTPToolAccess, MCPToolAccess
 from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
@@ -365,6 +366,9 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
         status = native_result.get("model_error_status")
         if native_result.get("model_error") and type(status) is int and 400 <= status <= 599:
             return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
+        if native_result.get("invalid_output"):
+            # Output of the policy model the harness cannot use: graded as the model's result, never retried.
+            return AgentOutcome(failure_kind=AGENT_INVALID_OUTPUT)
         return super().classify_outcome(native_result)
 
     async def _run_sandbox_episode(
@@ -476,9 +480,6 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             raise AgentSessionConflictError("Stirrup sandbox sessions support one activation; retry the same request")
         # Session close owns cancellation; a disconnected waiter must not cancel the activation.
         return (await asyncio.shield(state.task)).model_copy(deep=True)
-
-    async def run(self, request: Request, body: BaseRunRequest = Body()):
-        raise AgentSessionConflictError("Stirrup runs only in agent sessions; use an environment server")
 
 
 if __name__ == "__main__":

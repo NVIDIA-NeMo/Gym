@@ -977,30 +977,24 @@ class PiAgent(SimpleResponsesAPIAgent):
         models = {
             "providers": {"nemo": self._build_models_config(state.request.episode_id.capture_key)["providers"]["nemo"]}
         }
-        await state.upload_json("home/.pi/agent/models.json", models)
-        await state.upload_json("home/.pi/agent/settings.json", self._build_settings_config())
+        # Staged inside the session's execute, so that close cancels the uploads before it releases the sandbox.
+        files: dict[str, str | Path] = {
+            "home/.pi/agent/models.json": json.dumps(models),
+            "home/.pi/agent/settings.json": json.dumps(self._build_settings_config()),
+        }
         output_limit_extension = "output-limit.mjs"
-        await state.session.sandbox.upload(
-            Path(__file__).with_name(output_limit_extension), f"{state.session.session_dir}/{output_limit_extension}"
-        )
+        files[output_limit_extension] = Path(__file__).with_name(output_limit_extension)
         runtime_guards_extension = "runtime-guards.mjs"
         if self.config.enable_tools:
-            await state.session.sandbox.upload(
-                Path(__file__).with_name(runtime_guards_extension),
-                f"{state.session.session_dir}/{runtime_guards_extension}",
-            )
-        await state.session.sandbox.upload(
-            Path(__file__).with_name("outcome.mjs"), f"{state.session.session_dir}/outcome.mjs"
-        )
+            files[runtime_guards_extension] = Path(__file__).with_name(runtime_guards_extension)
+        files["outcome.mjs"] = Path(__file__).with_name("outcome.mjs")
         mcp_servers, unusable_grant_gaps = self._session_mcp_servers(state.request)
         mcp_extension = []
         mcp_env = {}
         if mcp_servers:
-            await state.session.sandbox.upload(
-                Path(__file__).with_name("gym_mcp.mjs"), f"{state.session.session_dir}/gym_mcp.mjs"
-            )
+            files["gym_mcp.mjs"] = Path(__file__).with_name("gym_mcp.mjs")
             # The headers carry this episode's tool session token.
-            await state.upload_json("mcp-servers.json", mcp_servers)
+            files["mcp-servers.json"] = json.dumps(mcp_servers)
             mcp_extension = ["--extension", f"{state.session.session_dir}/gym_mcp.mjs"]
             mcp_env["NEMO_GYM_PI_MCP_CONFIG"] = f"{state.session.session_dir}/mcp-servers.json"
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
@@ -1053,6 +1047,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                         prompt=prompt,
                         timeout=timeout,
                         close_timeout=self.config.session_close_timeout_seconds,
+                        files=files,
                     )
                 except TimeoutError:
                     # The supervisor stops Pi at the deadline, and execute returns. If the provider's exec limit

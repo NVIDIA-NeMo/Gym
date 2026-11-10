@@ -50,7 +50,12 @@ from nemo_gym.agents.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutco
 from nemo_gym.agents.utils.ordered_operations import ActivationConflictError, OrderedOperationLedger
 from nemo_gym.agents.utils.sandbox_session import ExpiryUnsupportedError, SandboxSession
 from nemo_gym.client.server_client import apply_rollout_prefix, rollout_path_prefix
-from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT, ModelServerRef
+from nemo_gym.config.config_types import (
+    ROLLOUT_PATH_PREFIX,
+    TOKEN_CAPTURE_PATH_SEGMENT,
+    ModelServerRef,
+    ResourcesServerRef,
+)
 from nemo_gym.config.global_config import (
     OBSERVABILITY_ENABLED_KEY_NAME,
     TOKEN_CAPTURE_BLOCK,
@@ -311,6 +316,9 @@ class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):
     )
     skip_verification: bool = False
     skip_verification_reward: float = 0.0
+    # Resources servers, such as a search server, whose MCP tools each episode grants this agent besides its own
+    # Resources server's. A single_agent_turn Environment Server seeds them; one may also set its own list.
+    tool_servers: list[ResourcesServerRef] = Field(default_factory=list)
     # Whether this agent's rollouts participate in training token capture.
     # Native agents already receive token ids inline and normally leave this disabled.
     # Opaque external harnesses enable it because their returned output has no token ids.
@@ -1290,9 +1298,22 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         pass
 
-    @abstractmethod
     async def run(self, body: BaseRunRequest = Body()) -> BaseVerifyResponse:
-        pass
+        """Run a whole episode in the agent, including the resources server's ``seed_session`` and ``verify``.
+
+        Deprecated: rollout collection reaches an agent's own ``/run`` only through the ``legacy_agent`` environment
+        server. Agents implement agent sessions (``/v1/agent_sessions``) and need not override ``run()``, so that an
+        environment server drives the episode. To customize how an episode runs, implement an environment server on
+        ``BaseEnvironmentServer`` instead of overriding ``run()``.
+
+        The default answers 422, not a 5xx: environment servers and rollout recovery retry every 5xx, and a missing
+        ``/run`` does not go away on retry.
+        """
+        raise HTTPException(
+            422,
+            f"{type(self).__name__} does not implement /run; "
+            "drive it through agent sessions from an environment server",
+        )
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         """Default: same RewardProfiler aggregation as resources server. Override to proxy."""

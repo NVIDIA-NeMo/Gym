@@ -56,7 +56,10 @@ def test_permission_profile_loads_with_cli_override(override: bool, monkeypatch:
         "*git *@*:*",
     ):
         assert permissions.bash[command] == "deny"
-    assert settings.opencode_config.tools.webfetch is False
+    assert [permissions[tool] for tool in ("webfetch", "websearch", "skill")] == ["deny"] * 3
+    # OpenCode applies the last matching rule, so the denials must follow "*"; a `tools` map would be placed before it.
+    assert list(permissions).index("*") < list(permissions).index("webfetch")
+    assert "tools" not in settings.opencode_config
     assert "opencode_version" not in settings
 
 
