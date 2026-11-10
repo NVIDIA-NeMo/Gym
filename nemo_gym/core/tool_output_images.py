@@ -3,7 +3,8 @@
 """Images that a tool returns next to its JSON reply.
 
 A Resources Server tool route can list images under ``tool_output_images`` in its JSON reply. Each entry is a
-``ToolOutputImage``: a base64 ``data:`` URL and an optional label, which the model gets as text before the image.
+``ToolOutputImage``: a base64 ``data:`` URL of a PNG, JPEG, GIF or WebP image, checked as ``MediaFile`` checks prompt
+images, and an optional label, which the model gets as text before the image.
 ``simple_agent`` sends the rest of the reply as the tool output and each image in a user message after the turn's
 tool outputs. The MCP endpoint returns the images as image content after the tool result's text. An agent that
 does not read the key, such as ``simple_agent_with_compaction``, passes the whole reply to the model as text,
@@ -12,7 +13,9 @@ base64 data included.
 
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, TypeAdapter, field_validator
+
+from nemo_gym.core.media import MediaFile
 
 
 TOOL_OUTPUT_IMAGES_KEY = "tool_output_images"
@@ -23,8 +26,16 @@ class ToolOutputImage(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    image_url: str = Field(pattern=r"^data:image/(png|jpeg|gif|webp);base64,")
+    image_url: str
     label: Optional[str] = None
+
+    @field_validator("image_url")
+    @classmethod
+    def _decode_image(cls, image_url: str) -> str:
+        # The rule for prompt images: valid base64 holding a PNG, JPEG, GIF or WebP. The URL is written again from
+        # the content, so a JPEG labeled image/png is sent as image/jpeg, and image/jpg becomes image/jpeg.
+        # MediaFile raises UnsupportedContentError, a ValueError, which pydantic reports as a ValidationError.
+        return MediaFile.from_data_uri(image_url).to_data_uri()
 
     @property
     def media_type(self) -> str:

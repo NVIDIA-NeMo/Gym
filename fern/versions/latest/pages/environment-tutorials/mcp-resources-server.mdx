@@ -214,7 +214,7 @@ Who reads the key, and what the model gets:
 | `simple_agent` (HTTP tools) | The rest of the reply as the tool output, then each image in a user message after the turn's tool outputs. |
 | An agent that does not read the key, such as `simple_agent_with_compaction` | The whole reply as text, base64 data included. |
 
-A reply without the key, or with `null`, has no images. A malformed list is an error of the tool. An agent that puts the images inside its tool output, such as Codex, needs `inline_tool_output_images: true` on `vllm_model`; with the default setting, `vllm_model` refuses such a request.
+A reply without the key, or with `null`, has no images. A malformed list is an error of the tool. Each image is checked as prompt images are (`MediaFile`): the base64 must be valid and hold a PNG, JPEG, GIF or WebP image. The `data:` URL then names the type the content has, so a JPEG labeled `image/png` reaches the model as `image/jpeg`. An agent that puts the images inside its tool output, such as Codex, needs `inline_tool_output_images: true` on `vllm_model`; with the default setting, `vllm_model` refuses such a request.
 
 ---
 

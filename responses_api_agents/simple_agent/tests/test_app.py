@@ -3631,7 +3631,7 @@ async def test_an_unreadable_selected_failure_gets_no_resend_and_no_session_repl
 def test_tool_output_images_reach_the_model_in_user_messages_after_the_turn_s_tool_outputs() -> None:
     """A tool reply's images leave its function_call_output and follow all of the turn's outputs, as user messages."""
     server, server_client = _make_agent(False)
-    image_url = "data:image/png;base64,iVBORw0KGgo="
+    image_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
 
     def model_reply(response_id: str, output: list[dict]) -> MagicMock:
         return _mock_response(

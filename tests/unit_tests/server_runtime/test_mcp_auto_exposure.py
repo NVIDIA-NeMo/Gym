@@ -464,7 +464,10 @@ def test_tool_output_images_become_image_content_after_the_text():
         {
             "ok": True,
             "tool_output_images": [
-                {"image_url": "data:image/png;base64,iVBORw0KGgo=", "label": "Image 2"},
+                {
+                    "image_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+                    "label": "Image 2",
+                },
                 {"image_url": "data:image/jpeg;base64,/9j/4AAQ"},
             ],
         }
@@ -475,13 +478,24 @@ def test_tool_output_images_become_image_content_after_the_text():
     assert [content.model_dump(exclude_none=True) for content in result.content] == [
         {"type": "text", "text": '{"ok":true}'},
         {"type": "text", "text": "Image 2"},
-        {"type": "image", "data": "iVBORw0KGgo=", "mimeType": "image/png"},
+        {
+            "type": "image",
+            "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+            "mimeType": "image/png",
+        },
         {"type": "image", "data": "/9j/4AAQ", "mimeType": "image/jpeg"},
     ]
 
 
 def test_tool_output_images_keep_the_structured_content_that_an_output_schema_requires():
-    payload = {"ok": True, "tool_output_images": [{"image_url": "data:image/png;base64,iVBORw0KGgo="}]}
+    payload = {
+        "ok": True,
+        "tool_output_images": [
+            {
+                "image_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+            }
+        ],
+    }
 
     result = _to_result(payload, output_schema={"type": "object"})
 
