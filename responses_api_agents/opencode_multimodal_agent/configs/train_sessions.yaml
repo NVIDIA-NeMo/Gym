@@ -12,6 +12,7 @@ string_match:
       entrypoint: app.py
       host: 127.0.0.1
       strip_trailing_eos: true
+      domain: knowledge
 token_id_capture:
   enabled: true
 opencode_multimodal_agent:

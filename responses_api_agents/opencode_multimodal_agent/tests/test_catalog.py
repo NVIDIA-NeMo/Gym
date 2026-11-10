@@ -81,7 +81,6 @@ def test_training_defaults_are_session_only(monkeypatch):
         [
             "responses_api_agents/opencode_multimodal_agent/configs/opencode_multimodal_agent.yaml",
             "responses_api_models/vllm_model/configs/vllm_model.yaml",
-            "resources_servers/string_match/configs/string_match.yaml",
         ],
         {
             "opencode_multimodal_agent": {
