@@ -138,20 +138,19 @@ class WebVoyagerJudgeResourcesServer(SimpleResourcesServer):
             self.config.judge_model_server.name,
             len(screenshots),
         )
-        try:
+
+        async def judge_with_deadline():
             # Retries share one deadline and exactly the same evidence. They
             # must not rerun the policy, change the prompt, or multiply the
             # outer agent's judge timeout.
             async with asyncio.timeout(self.config.judge_call_timeout_secs):
                 for attempt in range(self.config.judge_parse_max_retries + 1):
-                    judge_response = await reraise_judge_errors(
-                        call_judge(
-                            self.server_client,
-                            server_name=self.config.judge_model_server.name,
-                            url_path="/v1/responses",
-                            json=params,
-                            response_model=NeMoGymResponse,
-                        )
+                    judge_response = await call_judge(
+                        self.server_client,
+                        server_name=self.config.judge_model_server.name,
+                        url_path="/v1/responses",
+                        json=params,
+                        response_model=NeMoGymResponse,
                     )
                     judge_text = _extract_output_text(judge_response)
                     judge_attempts.append(judge_text)
@@ -165,6 +164,10 @@ class WebVoyagerJudgeResourcesServer(SimpleResourcesServer):
                     )
                     if parsed_verdict is not None:
                         break
+            return judge_text, parsed_verdict
+
+        try:
+            judge_text, parsed_verdict = await reraise_judge_errors(judge_with_deadline())
         except Exception:
             LOG.exception(
                 "event=webvoyager_judge_model_failed task=%s model_server=%s elapsed_seconds=%.3f",

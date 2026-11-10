@@ -13,6 +13,7 @@ from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.eval.rollout_reverification import InputRolloutPair, _build_verify_payload
 from nemo_gym.server_runtime import ReverifyMode
+from nemo_gym.verification import is_judge_failure
 from nemo_gym.web import WebBenchmark, WebTask, compact_webvoyager_judge_evidence
 from resources_servers.webvoyager_judge.app import (
     WebVoyagerJudgeResourcesServer,
@@ -358,8 +359,9 @@ async def test_judge_parse_retries_share_one_overall_deadline():
         return _FakeHttpResponse(_model_response("unclear"))
 
     server.server_client.post = AsyncMock(side_effect=slow_judge)
-    with pytest.raises(TimeoutError):
+    with pytest.raises(Exception) as caught:
         await server._judge_evidence(_request())
+    assert is_judge_failure(caught.value)
     assert server.server_client.post.await_count == 2
 
 
@@ -384,3 +386,52 @@ async def test_judge_logs_lifecycle_without_screenshot_payload(caplog):
     assert "origins=none" in messages
     assert "data:image/png;base64,image-0" not in messages
     assert "The screenshot proves completion" not in messages
+
+
+@pytest.mark.asyncio
+async def test_verify_route_deadline_retains_evidence_for_reverification():
+    import httpx
+
+    server = _server()
+    server.config.judge_call_timeout_secs = 0.02
+
+    async def stalled(*args, **kwargs):
+        await asyncio.sleep(10)
+
+    server.server_client.post = AsyncMock(side_effect=stalled)
+    request = _standard_request()
+    request.response.webvoyager_judge_evidence = compact_webvoyager_judge_evidence(
+        response=request.response.model_dump(mode="json"),
+        final_answer=request.final_answer,
+        screenshots=request.screenshots,
+        page_urls=request.page_urls,
+    )
+    transport = httpx.ASGITransport(app=server.setup_webserver(), raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        result = await client.post("/verify", json=request.model_dump(mode="json"))
+        assert result.status_code == 200, result.text
+        failure = result.json()
+        assert failure["_ng_failure_class"] == "judge_failed"
+        assert failure["response"] == request.response.model_dump(mode="json")
+        payload = _build_verify_payload(InputRolloutPair(input=request.model_dump(mode="json"), rollout=failure))
+        server.server_client.post = AsyncMock(return_value=_FakeHttpResponse(_model_response('{"verdict":"SUCCESS"}')))
+        recovered = await client.post("/verify", json=payload)
+        assert recovered.status_code == 200, recovered.text
+        assert recovered.json()["reward"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_judge_caller_cancellation_propagates():
+    server = _server()
+    entered = asyncio.Event()
+
+    async def stalled(*args, **kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    server.server_client.post = AsyncMock(side_effect=stalled)
+    task = asyncio.create_task(server._judge_evidence(_request()))
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
