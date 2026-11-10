@@ -95,7 +95,7 @@ from nemo_gym.agents import (
     AgentSeedSessionResponse,
     AgentSessionCapabilitiesResponse,
     OutcomeAction,
-    agent_outcome_policy,
+    agent_response_action,
 )
 from nemo_gym.client import get_response_json, raise_boundary_failure, raise_for_status
 from nemo_gym.config import (
@@ -1353,17 +1353,22 @@ class HarborEnvironmentServer(
         """A failed response whose harness classified the cause is routed by the deployment's policy before any
         grading: a transport or unknown cause is retried ungraded, as on ``single_agent_turn``, instead of
         handing test.sh a half-finished sandbox and recording a real 0. In a multi-step task this ends the
-        episode at the turn that failed; a verify cause is graded as before."""
-        action = agent_outcome_policy(agent_response, config=self.config.agent_outcome_policy)
+        episode at the turn that failed; a verify cause is graded as before.
+
+        As on ``single_agent_turn`` (``agent_response_action``), a ``failure_report`` that selects a failure not
+        matching the response's outcome fails the episode, and the selected failure is the episode failure's cause,
+        so the failure row keeps its kind."""
+        action, cause = agent_response_action(agent_response, config=self.config.agent_outcome_policy)
         if action != OutcomeAction.VERIFY:
             raise self._failure(
                 stage="agent",
                 failure_reason=agent_response.error.message if agent_response.error else "Agent reported failure",
                 terminal=action == OutcomeAction.FAIL,
+                failure_kind=cause.failure_kind if cause else None,
                 partial_response=agent_response,
                 agent_observations=handle.observations,
                 trajectory=handle.trajectory,
-            )
+            ) from cause
 
     async def _require_turn_continuation(self) -> None:
         """Refuse a ``turn_sessions: continue`` run before any sandbox when the harness cannot continue a session.

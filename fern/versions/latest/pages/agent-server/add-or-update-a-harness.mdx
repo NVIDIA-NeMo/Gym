@@ -692,40 +692,92 @@ Local compatibility paths can have a different evidence contract. For example, [
 
 A reward of `1` or an HTTP `200` response alone does not prove that an episode was healthy.
 
-#### Report a cause; let the environment decide
+#### Report evidence; let the ladder and the environment decide
 
-`SimpleResponsesAPIAgent` provides `classify_outcome(native_result) -> AgentOutcome`
-and `report_outcome(response, native_result)`. The default classifier returns
-`unknown`; override it using native evidence when available. Call `report_outcome`
-before returning a failed response; inheritance alone does not attach metadata.
-Keep text parsing in the classifier and document the tested runtime version.
-Pi, Codex, OpenCode and Hermes override it in their agent-session paths.
+Every harness reports the same event the same way: a context limit, a deadline, a rejected model request or a run
+without a usable result does not depend on which harness ran. The shared outcome ladder in
+`nemo_gym/agents/agent_outcome.py` decides the response's status and failure kind from what the adapter observed, and
+the Environment Server then decides whether to grade, retry or fail the episode.
+
+An adapter keeps two things of its own:
+
+- **A parser** that reads the harness's native evidence (its event log, result file, exit code and the supervisor's
+  receipt) into a `RunEvidence`.
+- **`classify_outcome(native_result) -> AgentOutcome`** for the error the run ended on. Use a structured status where
+  the runtime gives one, and match text only against a pinned, tested runtime version. The default classifier
+  returns `unknown`. For a model request that failed with an HTTP status, return
+  `model_http_error_outcome(status, error_body=...)` and pass the endpoint's error body when the harness exposes it.
+  Gym's model servers answer a context overflow they propagate with a 400 whose body carries the OpenAI code
+  `context_length_exceeded`, and the helper reports that as `model_context_limit`, so the run is graded as
+  `incomplete` even before the first reply.
+
+Then it returns `self.finish_response(response, evidence, session=session)` with HTTP 200. `finish_response` sets the
+status, writes `ng_agent_outcome` on a failed response only, names the deciding row in `ng_agent_stop_reason`, and
+marks a rollout stop with `ng_rollout_stop` (pass the run's `SandboxSession`). A 5xx from the activation is left for an
+adapter that crashed or a lifecycle step that failed: launch, the supervisor, a termination receipt that does not
+confirm cleanup, artifacts that cannot be read, or a provider exec error. Raise those as typed failures (for example
+`sandbox_failure(...)` routed by `agent_route_failure(..., stage="agent")`), never as a bare 502 or 503.
+
+`RunEvidence` fields:
+
+| Field | Meaning |
+| --- | --- |
+| `has_result` | The harness exited cleanly and left its answer or its work. A nonzero exit or a missing result is not a result. |
+| `timed_out` | The run's deadline ended it, from the supervisor's receipt or a structured deadline. Never from message text: a "timed out" message is at most `model_transport_error` evidence. |
+| `model_replied` | Whether any reply of the policy model was observed; `None` when the adapter cannot tell. |
+| `stopped` | A rollout stop, or the session's close, ended the run before it finished. `finish_response` sets it for a timed-out run whose session a stop expired. |
+| `context_limit` | The harness or the endpoint explicitly reported that the context window was exceeded. HTTP 400 or 413 alone is not this evidence. |
+| `model_limit` | `output` (the model's output limit) or `turns` (the harness's configured turn or step limit). |
+| `refusal` | The model refused the task. |
+| `error` | `classify_outcome()` of the error the run ended on. An error the harness recovered from is not one. |
+| `infra_fault` | A recorded server or provider fault in the run's window (a model call that failed with a 5xx, a transport error or a queue timeout, or a sandbox provider failure). |
+
+The ladder (`decide_outcome`); the first matching row wins:
+
+| # | Evidence | Response | Default action | Harbor equivalent |
+| --- | --- | --- | --- | --- |
+| 1 | `stopped` | `incomplete`; `ng_rollout_stop` only for a rollout stop | Verify | — |
+| 2 | `context_limit` (or an `error` classified `model_context_limit`) | `incomplete` | Verify | `ContextLengthExceededError`: graded |
+| 3 | `timed_out` and `infra_fault` | `failed`, the fault's kind | Retry | — |
+| 4 | `timed_out` | `incomplete` | Verify | `AgentTimeoutError`: graded |
+| 5 | `error` | `failed`, the classified outcome; a 4xx other than 408/425/429 with `model_replied` false → `model_request_rejected` | By the policy table below | — |
+| 6 | `model_limit` | `incomplete` | Verify | `OutputLengthExceededError` |
+| 7 | `refusal` | `completed`, graded as the model's answer | Verify | `AgentSafetyRefusalError`: graded |
+| 8 | `has_result` | `completed` | Verify | — |
+| 9 | Otherwise: no usable result | `failed`, `agent_run_error` | Retry | `NonZeroAgentExitCodeError`: graded (available as a policy override) |
+
+Row 4 grades a deadline whatever the agent kept, as Harbor and Gym's rollout recovery do. Until every model call
+carries `x-session-id`, so that capture can supply `infra_fault` for every harness, an adapter whose harness retries
+failed model calls without reporting them sets `retry_deadline_before_reply`: a deadline before any model reply then
+stays `failed` with `unknown` and is retried, as before.
 
 `AgentOutcome.failure_kind` accepts names registered in `nemo_gym/core/failure_kinds.py`
 or `unknown`; unregistered names are rejected. The shared names describe causes,
-not retry or grading policy.
+not retry or grading policy. `status_code` is the upstream model request's status, not the agent endpoint's HTTP
+status.
 
-Use `model_context_limit` only when a provider or harness explicitly reports that the
-model's context window was exceeded. HTTP 400 or 413 alone does not establish that
-cause. Report a context-limit stop as `status="incomplete"` with this reason: the
-partial work proceeds to verification without an automatic episode retry.
+Adapters that have not moved to `finish_response` yet call `report_outcome(response, native_result)` before returning
+a failed response; it writes the same `ng_agent_outcome` metadata. Report a context-limit stop as
+`status="incomplete"`: the partial work proceeds to verification without an automatic episode retry.
 
-The helper writes JSON to `response.metadata.ng_agent_outcome`; `status_code` is the
-upstream model request's status, not the agent endpoint's HTTP status. The
-`single_agent_turn` and `harbor` Environment Servers apply this default policy to classified
+The `single_agent_turn` and `harbor` Environment Servers apply this default policy to classified
 failed responses after closing the agent:
 
 | Reported cause | Verify | Eligible for episode retry |
 | --- | --- | --- |
-| `agent_invalid_output`, `agent_limit`, or model request rejection 400/413/422 | Yes | No |
-| Model request errors 408/425/429/5xx, `model_transport_error`, or `unknown` | No | Yes |
-| Other failures, including 401/403/404 or malformed metadata | No | No |
+| `agent_invalid_output`, `agent_limit`, `model_context_limit`, or model request errors 400/413/422 | Yes | No |
+| Model request errors 408/425/429/5xx, `model_transport_error`, `agent_run_error`, or `unknown` | No | Yes |
+| `model_request_rejected`, other failures including model request errors 401/403/404, or malformed metadata | No | No |
+
+When a failed response also carries a `failure_report`, both Environment Servers check that the failure it selects
+matches `ng_agent_outcome`; a mismatch fails the episode, and a match becomes the episode failure's cause and kind.
 
 Excluded attempts retain their partial response and observations in the existing
 failure flow. Retry eligibility does not force a retry; the collector's retry budget
 still applies. Responses without this metadata keep the existing grading behavior,
 and completed or incomplete responses remain gradable. These decisions do not change
-native harness retries or model-adapter retries.
+native harness retries or model-adapter retries. A harness's own model retries may retry only 408, 425, 429, 5xx and
+transport errors, with a bounded total wait; never another 4xx.
 
 For Pi, Codex, OpenCode and Hermes agent sessions, this changes some provider failures
 that previously surfaced as retryable agent HTTP 500/502 errors: reported 401/403/404
@@ -735,7 +787,8 @@ remain retryable.
 
 Configure `agent_outcome_policy` inside the `single_agent_turn` or `harbor` Environment Server's
 config to choose `verify`, `retry`, or `fail` (ungraded and nonretryable) for classified
-failed responses. These overrides do not apply to completed or incomplete responses.
+failed responses. For Harbor's own behavior, which grades a run without a usable result, set
+`by_failure_kind: {agent_run_error: verify}`. These overrides do not apply to completed or incomplete responses.
 HTTP status rules take precedence over failure-kind rules; unmatched failures use `default_action`
 (default: `fail`). Supplied entries override matching defaults; omitted entries retain
 their defaults. Failure names must be registered or `unknown`, and

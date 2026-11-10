@@ -946,7 +946,7 @@ def test_only_the_failure_that_ended_the_run_is_checked(transcript, ended_by_end
 @pytest.mark.parametrize("ending", ["retries-spent", "killed-while-retrying"])
 @pytest.mark.parametrize("case", list(CODEX_0154_ENDPOINT_FAILURES))
 def test_codex_0154_endpoint_outage_is_retried_not_graded(setup, case, ending) -> None:
-    from environment_servers.single_agent_turn.app import OutcomeAction, agent_outcome_policy
+    from nemo_gym.agents import OutcomeAction, agent_outcome_policy
     from nemo_gym.core import NeMoGymResponse
 
     agent, sandbox = setup
@@ -988,7 +988,7 @@ CODEX_NATIVE_ENDPOINT_FAILURES = {
 @pytest.mark.parametrize("ending", ["reported", "killed-after-reporting"])
 @pytest.mark.parametrize("case", list(CODEX_NATIVE_ENDPOINT_FAILURES))
 def test_native_endpoint_failures_are_retried_not_graded(setup, case, ending) -> None:
-    from environment_servers.single_agent_turn.app import OutcomeAction, agent_outcome_policy
+    from nemo_gym.agents import OutcomeAction, agent_outcome_policy
     from nemo_gym.core import NeMoGymResponse
 
     agent, sandbox = setup
@@ -1019,7 +1019,7 @@ def test_native_endpoint_failures_are_retried_not_graded(setup, case, ending) ->
 )
 def test_reported_provider_failure_keeps_its_classified_outcome(setup, message, action) -> None:
     """Codex exited 1 on turn.failed: the outcome policy decides it, not verify_after_agent_error."""
-    from environment_servers.single_agent_turn.app import OutcomeAction, agent_outcome_policy
+    from nemo_gym.agents import OutcomeAction, agent_outcome_policy
     from nemo_gym.core import NeMoGymResponse
 
     agent, sandbox = setup
