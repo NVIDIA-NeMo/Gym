@@ -22,7 +22,8 @@ import pytest
 import yaml
 
 from nemo_gym.client import ServerClient
-from nemo_gym.core.failure_kinds import PROVIDER_UNAVAILABLE, VERIFIER_ERROR
+from nemo_gym.core.failure_kinds import PROVIDER_OOM_KILLED, PROVIDER_UNAVAILABLE, VERIFIER_ERROR
+from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.sandbox import SandboxCreateError, SandboxExecResult
 from resources_servers.cvdp.app import (
     CVDPResourcesServer,
@@ -928,10 +929,10 @@ class TestRunServiceProvider:
     @pytest.mark.parametrize("during_setup", [False, True])
     async def test_confirmed_guest_oom_is_a_model_failure_only_during_test(self, tmp_path, during_setup):
         fake = _FakeProvider(SandboxExecResult(stdout="", stderr="", return_code=0))
-        error = RuntimeError(
-            'Get command status failed: HTTP 410: {"code":"SANDBOX::ENDED",'
-            '"message":"Sandbox dead-beef has ended (OOMKilled): '
-            'container sandbox exited with code 137 (OOMKilled)"}'
+        error = NgFailureEvent(
+            boundary="sandbox",
+            failure_kind=PROVIDER_OOM_KILLED,
+            failure_reason="Sandbox was OOM-killed; lifecycle status confirms the user container exited with code 137",
         )
         fake.exec = AsyncMock(
             side_effect=[error] if during_setup else [SandboxExecResult(stdout="", stderr="", return_code=0), error]
@@ -947,10 +948,17 @@ class TestRunServiceProvider:
         assert len(fake.closed) == 1
 
     @pytest.mark.asyncio
-    async def test_unconfirmed_oom_during_execution_remains_infrastructure_failure(self, tmp_path):
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "node out of memory",
+            "Sandbox dead-beef has ended (OOMKilled): container sandbox exited with code 137 (OOMKilled)",
+        ],
+    )
+    async def test_unconfirmed_oom_during_execution_remains_infrastructure_failure(self, tmp_path, message):
         fake = _FakeProvider(SandboxExecResult(stdout="", stderr="", return_code=0))
         fake.exec = AsyncMock(
-            side_effect=[SandboxExecResult(stdout="", stderr="", return_code=0), RuntimeError("node out of memory")]
+            side_effect=[SandboxExecResult(stdout="", stderr="", return_code=0), RuntimeError(message)]
         )
         with pytest.raises(CVDPInfrastructureError, match="sandbox operation failed"):
             await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)

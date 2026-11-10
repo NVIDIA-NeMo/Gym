@@ -20,7 +20,6 @@ import hashlib
 import json
 import os
 import posixpath
-import re
 import shlex
 import tarfile
 import tempfile
@@ -29,7 +28,8 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import yaml
 
-from nemo_gym.core.failure_kinds import PROVIDER_UNAVAILABLE, VERIFIER_ERROR
+from nemo_gym.core.failure_kinds import PROVIDER_OOM_KILLED, PROVIDER_UNAVAILABLE, VERIFIER_ERROR
+from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxCreateError,
@@ -552,11 +552,8 @@ class TestbenchRunner:
                     )
                 except Exception as exc:
                     message = str(exc)
-                    # The control plane reports a guest OOM after the test kills its sandbox.
-                    if (
-                        re.search(r"Sandbox [\w-]+ has ended \(OOMKilled\)", message)
-                        and "container sandbox exited with code 137 (OOMKilled)" in message
-                    ):
+                    # The provider confirms a guest OOM from structured lifecycle evidence.
+                    if isinstance(exc, NgFailureEvent) and exc.failure_kind == PROVIDER_OOM_KILLED:
                         return 137, f"test execution exceeded sandbox memory for service '{service}': {message}"
                     raise
                 if result.error_type == "timeout":
