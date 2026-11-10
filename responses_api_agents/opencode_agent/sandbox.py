@@ -23,6 +23,7 @@ from nemo_gym.agents import (
     AgentSessionState,
     SandboxCommand,
     SandboxSession,
+    prefer_oom_kill_setup,
     shell_assignments,
 )
 from nemo_gym.config import ModelServerRef
@@ -382,6 +383,9 @@ class OpenCodeSandboxSession(AgentSessionState):
         if payload.get("path_prefix"):
             # Preinstalled runtime tools come first; the task's own PATH still follows.
             params["setup"] += f"PATH={quote(':'.join(payload['path_prefix']))}:$PATH\n"
+        if payload.get("raise_oom_score_adj"):
+            # OpenCode and its tools inherit the score; execd and the supervisor keep the sandbox's own.
+            params["setup"] += prefer_oom_kill_setup()
         await upload_text(self.session.sandbox, path=f"{directory}/params.sh", text=shell_assignments(params))
         return SandboxCommand(
             argv=["bash", f"{self.persistent_directory}/{HARNESS_RUNNER_FILE}", f"{directory}/params.sh"]

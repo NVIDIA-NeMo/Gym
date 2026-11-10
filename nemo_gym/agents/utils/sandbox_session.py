@@ -89,6 +89,29 @@ def shell_assignments(values: Mapping[str, str | Sequence[str] | Mapping[str, st
     return "".join(f"{line}\n" for line in lines)
 
 
+def prefer_oom_kill_setup(path: str = "/proc/self/oom_score_adj") -> str:
+    """Harness runner ``setup`` making the CLI and its children the memory-cgroup OOM killer's preferred victims.
+
+    Raises oom_score_adj to 1000, or to 0 when the sandbox starts it below zero (a Guaranteed pod's -997),
+    so the sandbox never becomes the node's first victim in a global OOM. Raising needs no privilege; a
+    failure leaves the score unchanged. The CLI inherits the runner's score, while the supervisor and the
+    sandbox's exec daemon keep their own. The runner's stderr, the supervisor's log, records what happened.
+    """
+    return f"""oom_score_adj={quote(path)}
+if read -r before 2>/dev/null <"$oom_score_adj" && [[ $before =~ ^-?[0-9]+$ ]]; then
+    after=1000
+    ((before < 0)) && after=0
+    if echo "$after" 2>/dev/null >"$oom_score_adj"; then
+        echo "oom_score_adj: $before -> $after" >&2
+    else
+        echo "oom_score_adj: unchanged" >&2
+    fi
+else
+    echo "oom_score_adj: unchanged" >&2
+fi
+"""
+
+
 class ExpiryUnsupportedError(Exception):
     """``expire`` cannot stop this running harness: its sandbox's uploads can wait for capacity the harness holds."""
 
