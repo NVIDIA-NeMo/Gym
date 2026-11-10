@@ -24,7 +24,7 @@ from typing import Any
 
 import httpx
 
-from nemo_gym.web.evaluation_collision import extract_helper_calls, snapshot_target_key
+from nemo_gym.web import extract_helper_calls, snapshot_target_key
 
 from .classic_evaluation import (
     _append_judge_log,

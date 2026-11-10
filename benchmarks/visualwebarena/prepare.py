@@ -17,7 +17,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from nemo_gym import CACHE_DIR
-from nemo_gym.web.datasets import adapt_visualwebarena_records, load_json_records, write_jsonl
+from nemo_gym.web import adapt_visualwebarena_records, load_json_records, write_jsonl
 
 
 BENCHMARK_DIR = Path(__file__).resolve().parent
