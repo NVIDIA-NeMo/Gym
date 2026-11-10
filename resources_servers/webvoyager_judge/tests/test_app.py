@@ -9,12 +9,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.base_resources_server import ReverifyMode
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.rollout_reverification import InputRolloutPair, _build_verify_payload
-from nemo_gym.server_utils import ServerClient
-from nemo_gym.web.judge_evidence import compact_webvoyager_judge_evidence
-from nemo_gym.web.models import WebBenchmark, WebTask
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
+from nemo_gym.eval.rollout_reverification import InputRolloutPair, _build_verify_payload
+from nemo_gym.server_runtime import ReverifyMode
+from nemo_gym.web import WebBenchmark, WebTask, compact_webvoyager_judge_evidence
 from resources_servers.webvoyager_judge.app import (
     WebVoyagerJudgeResourcesServer,
     parse_gemini_verdict,

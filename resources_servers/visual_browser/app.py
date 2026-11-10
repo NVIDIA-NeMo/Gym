@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from nemo_gym.web.resources_server import WebResourcesServer
+from nemo_gym.web import WebResourcesServer
 from resources_servers.visual_browser.config import VisualBrowserResourcesServerConfig
 from resources_servers.visual_browser.session_manager import VisualBrowserSessionManager
 

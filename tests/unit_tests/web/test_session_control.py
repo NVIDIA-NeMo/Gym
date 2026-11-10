@@ -9,7 +9,7 @@ import pytest
 from nemo_gym.web.api_models import WebSeedSessionRequest, WebSessionIdentity
 from nemo_gym.web.session import CapacityUnavailableError, SessionConflictError
 from nemo_gym.web.session_control import SessionIdentityError, WebSessionControl
-from tests.unit_tests.test_web_session_manager import (
+from tests.unit_tests.web.test_session_manager import (
     DelayedBrowserSessionProvider,
     FakeBackend,
     FakeBrowserSessionProvider,

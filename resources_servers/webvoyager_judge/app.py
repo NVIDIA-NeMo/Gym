@@ -12,10 +12,10 @@ import re
 import time
 from urllib.parse import urlparse
 
-from nemo_gym.base_resources_server import SimpleResourcesServer
-from nemo_gym.judge import call_judge, reraise_judge_errors
-from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse
-from nemo_gym.web.models import WebVerifierResult
+from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse
+from nemo_gym.server_runtime import SimpleResourcesServer
+from nemo_gym.verification import call_judge, reraise_judge_errors
+from nemo_gym.web import WebVerifierResult
 from resources_servers.webvoyager_judge.config import WebVoyagerJudgeConfig
 from resources_servers.webvoyager_judge.models import (
     WebVoyagerJudgeRequest,

@@ -14,7 +14,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime.base_resources_server import (
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
     BaseVerifyRequest,

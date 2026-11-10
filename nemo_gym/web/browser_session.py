@@ -23,7 +23,10 @@ from importlib.metadata import entry_points
 from typing import Any, Callable, Protocol, runtime_checkable
 
 
-ENTRY_POINT_GROUP = "nemo_gym.browser_session_providers"
+# interactive_browser owns the CDP-only nemo_gym.browser_session_providers
+# contract. Visual runtimes require transport/ownership/TTL semantics and must
+# not discover that registry's incompatible handles under the same group.
+ENTRY_POINT_GROUP = "nemo_gym.web_browser_session_providers"
 
 
 class BrowserSessionError(RuntimeError):

@@ -9,8 +9,8 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient
+from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.web.api_models import (
     WebEvaluateResponse,
     WebSeedSessionResponse,
@@ -226,7 +226,7 @@ def test_http_contract_routes_lifecycle_and_session_cookie() -> None:
 
 
 def test_http_caller_identity_survives_lost_cookie_and_rejects_unauthorized_close(tmp_path) -> None:
-    from tests.unit_tests.test_web_session_manager import _manager
+    from tests.unit_tests.web.test_session_manager import _manager
 
     manager, backends = _manager(tmp_path)
     identity = {"_ng_session_id": "a" * 32, "_ng_session_close_token": "secret-capability-" * 3}
@@ -251,7 +251,7 @@ def test_http_caller_identity_survives_lost_cookie_and_rejects_unauthorized_clos
 
 
 def test_http_close_failure_retains_handle_and_reports_retryable_cleanup(tmp_path) -> None:
-    from tests.unit_tests.test_web_session_manager import FakeBrowserSessionProvider, _manager
+    from tests.unit_tests.web.test_session_manager import FakeBrowserSessionProvider, _manager
 
     provider = FakeBrowserSessionProvider()
     manager, _ = _manager(tmp_path, browser_session_provider=provider)

@@ -6,9 +6,9 @@ from typing import ClassVar, Literal
 
 from pydantic import Field
 
-from nemo_gym.base_resources_server import BaseResourcesServerConfig, ReverifyMode
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_runtime import BaseResourcesServerConfig, ReverifyMode
 
 
 class WebVoyagerJudgeConfig(BaseResourcesServerConfig):

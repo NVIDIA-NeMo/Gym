@@ -18,7 +18,7 @@ from typing import Any
 
 import yaml
 
-from nemo_gym.web.datasets import adapt_webvoyager_record, load_json_records, write_jsonl
+from nemo_gym.web import adapt_webvoyager_record, load_json_records, write_jsonl
 
 
 BENCHMARK_DIR = Path(__file__).resolve().parent

@@ -20,9 +20,8 @@ from dataclasses import dataclass, field
 from io import BytesIO
 from typing import Any, Iterable
 
-from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse
-from nemo_gym.web.actions import MAX_SCROLL_AMOUNT, ActionParseError
-from nemo_gym.web.models import WebAction, WebObservation
+from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse
+from nemo_gym.web import MAX_SCROLL_AMOUNT, ActionParseError, WebAction, WebObservation
 
 
 COLLAPSED_SCREENSHOT_TEXT = "This screenshot has been collapsed."

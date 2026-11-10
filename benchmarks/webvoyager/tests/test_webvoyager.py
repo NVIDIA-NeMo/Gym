@@ -15,7 +15,7 @@ from omegaconf import DictConfig, OmegaConf
 from benchmarks.webvoyager import prepare as webvoyager_prepare
 from benchmarks.webvoyager.prepare import REPO_ROOT, write_env
 from benchmarks.webvoyager.prepare import main as prepare_main
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 
 
 class _DownloadResponse:

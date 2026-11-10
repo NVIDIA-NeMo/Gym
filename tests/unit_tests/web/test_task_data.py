@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.task_data import load_task_data_schema, validate_jsonl_rows
+from nemo_gym.data.task_data import load_task_data_schema, validate_jsonl_rows
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 @pytest.mark.parametrize(

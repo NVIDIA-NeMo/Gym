@@ -8,20 +8,20 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.web.browser_session import BrowserSessionHandle
-from nemo_gym.web.composed_backend import ComposedWebBackend
-from nemo_gym.web.computer_use import nano_omni_tools
-from nemo_gym.web.models import (
+from nemo_gym.web import (
     BROWSER_TARGET_CLOSED_STATUS,
     CAPTCHA_BUDGET_EXHAUSTED_STATUS,
+    BrowserSessionHandle,
+    ComposedWebBackend,
+    EvaluatorConfigurationError,
+    VisualBrowserEvaluationContext,
     WebAction,
     WebActionLimits,
     WebBenchmark,
     WebObservation,
     WebTask,
+    nano_omni_tools,
 )
-from nemo_gym.web.session import EvaluatorConfigurationError
-from nemo_gym.web.visual_browser import VisualBrowserEvaluationContext
 from resources_servers.visual_browser import backend
 from resources_servers.visual_browser.backend import (
     BrowserTargetClosedDuringCaptcha,

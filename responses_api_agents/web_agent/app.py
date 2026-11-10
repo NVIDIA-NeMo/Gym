@@ -19,44 +19,42 @@ from aiohttp import ClientResponseError
 from fastapi import Body, Request, Response
 from pydantic import ConfigDict, Field, PrivateAttr
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.failure_kinds import (
+from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.client.openai_client import _error_body_is_permanent_quota
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
     SESSION_LOST,
-    SESSION_RELEASE_FAILED,
-    TRANSPORT_TIMEOUT,
-    is_namespaced,
-    is_registered,
-)
-from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
-    _error_body_is_permanent_quota,
     accumulate_response_usage,
+    is_namespaced,
+    is_registered,
 )
-from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
-from nemo_gym.server_utils import get_response_json, raise_for_status
-from nemo_gym.web.actions import ActionParseError, parse_nano_omni_tool_calls
-from nemo_gym.web.api_models import (
-    WebCloseResponse,
-    WebEvaluateResponse,
-    WebSeedSessionResponse,
-    WebStepResponse,
-)
-from nemo_gym.web.computer_use import NANO_OMNI_SYSTEM_PROMPT, nano_omni_tools
-from nemo_gym.web.judge_evidence import compact_webvoyager_judge_evidence
-from nemo_gym.web.models import (
+from nemo_gym.core.failure_kinds import SESSION_RELEASE_FAILED, TRANSPORT_TIMEOUT
+from nemo_gym.rollouts import NG_TERMINAL_KEY
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.web import (
     BROWSER_TARGET_CLOSED_STATUS,
     CAPTCHA_BUDGET_EXHAUSTED_STATUS,
+    NANO_OMNI_SYSTEM_PROMPT,
+    ActionParseError,
     WebActionLimits,
     WebActionProfile,
     WebArtifactRef,
     WebBenchmark,
+    WebCloseResponse,
+    WebEvaluateResponse,
     WebObservation,
+    WebSeedSessionResponse,
+    WebStepResponse,
     WebTask,
     WebVerifierResult,
+    compact_webvoyager_judge_evidence,
+    nano_omni_tools,
+    parse_nano_omni_tool_calls,
 )
 from responses_api_agents.web_agent.qwen_computer_use import (
     QwenPolicyState,

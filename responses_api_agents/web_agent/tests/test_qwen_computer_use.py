@@ -7,7 +7,7 @@ import io
 import pytest
 from PIL import Image
 
-from nemo_gym.web.models import WebImage, WebObservation
+from nemo_gym.web import WebImage, WebObservation
 from responses_api_agents.web_agent.qwen_computer_use import (
     COLLAPSED_SCREENSHOT_TEXT,
     QwenPolicyState,

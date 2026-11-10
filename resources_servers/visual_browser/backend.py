@@ -9,21 +9,19 @@ import os
 from typing import Any
 from urllib.parse import urlparse
 
-from nemo_gym.web.artifacts import WebArtifactStore
-from nemo_gym.web.browser_session import BrowserSessionHandle
-from nemo_gym.web.models import (
+from nemo_gym.web import (
     BROWSER_TARGET_CLOSED_STATUS,
     CAPTCHA_BUDGET_EXHAUSTED_STATUS,
+    RESET_WAIT_UNTIL,
+    BrowserSessionHandle,
+    VisualBrowserDriver,
     WebAction,
+    WebArtifactStore,
     WebBenchmark,
     WebTask,
-)
-from nemo_gym.web.visual_browser import (
-    RESET_WAIT_UNTIL,
-    VisualBrowserDriver,
-    _url_origin,
     is_retryable_navigation_transport_error,
 )
+from nemo_gym.web.visual_browser import _url_origin
 from resources_servers.visual_browser.captcha import (
     BROWSER_PROXY_CONFIG_ATTR,
     CAPTCHA_INTERCEPT_SCRIPT,
@@ -277,8 +275,7 @@ def visual_browser_backend_factory(
     instance, which calls back into this factory with a local lease.
     """
 
-    from nemo_gym.web.browser_instance import TRANSPORT, RemoteWebBackend
-    from nemo_gym.web.composed_backend import ComposedWebBackend
+    from nemo_gym.web import TRANSPORT, ComposedWebBackend, RemoteWebBackend
 
     if browser_lease.transport == TRANSPORT:
         return RemoteWebBackend(

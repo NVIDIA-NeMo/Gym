@@ -8,9 +8,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from nemo_gym.base_resources_server import BaseVerifyRequest, BaseVerifyResponse
-from nemo_gym.web.judge_evidence import expand_webvoyager_judge_screenshots
-from nemo_gym.web.models import WebBenchmark, WebTask, WebVerifierResult
+from nemo_gym.server_runtime import BaseVerifyRequest, BaseVerifyResponse
+from nemo_gym.web import WebBenchmark, WebTask, WebVerifierResult, expand_webvoyager_judge_screenshots
 
 
 MAX_WEBVOYAGER_JUDGE_EVIDENCE_ITEMS = 200

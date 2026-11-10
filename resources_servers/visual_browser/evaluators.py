@@ -6,9 +6,14 @@ from __future__ import annotations
 
 import logging
 
-from nemo_gym.web.models import WebBenchmark, WebObservation, WebTask, WebVerifierResult
-from nemo_gym.web.session import EvaluatorConfigurationError
-from nemo_gym.web.visual_browser import VisualBrowserEvaluationContext
+from nemo_gym.web import (
+    EvaluatorConfigurationError,
+    VisualBrowserEvaluationContext,
+    WebBenchmark,
+    WebObservation,
+    WebTask,
+    WebVerifierResult,
+)
 
 
 LOG = logging.getLogger("nemo_gym.resources_servers.visual_browser")

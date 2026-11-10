@@ -9,8 +9,7 @@ from typing import Literal
 
 from pydantic import Field
 
-from nemo_gym.web.models import WebBenchmark
-from nemo_gym.web.visual_browser import VisualBrowserDriverConfig
+from nemo_gym.web import VisualBrowserDriverConfig, WebBenchmark
 
 
 class VisualBrowserResourcesServerConfig(VisualBrowserDriverConfig):

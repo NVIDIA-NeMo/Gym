@@ -7,9 +7,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from nemo_gym.openai_utils import NeMoGymEasyInputMessage
-from nemo_gym.web.models import WebObservation, WebObservationProfile, WebTask
-from nemo_gym.web.task_images import resolve_task_image_url
+from nemo_gym.core import NeMoGymEasyInputMessage
+from nemo_gym.web import WebObservation, WebObservationProfile, WebTask, resolve_task_image_url
 
 
 VISUAL_OBSERVATION_TEXT_MODES = frozenset({"full_axtree", "som_only", "none"})

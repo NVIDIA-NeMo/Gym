@@ -3,14 +3,7 @@
 
 import pytest
 
-from nemo_gym.web.models import (
-    WebBenchmark,
-    WebImage,
-    WebObservation,
-    WebObservationProfile,
-    WebTab,
-    WebTask,
-)
+from nemo_gym.web import WebBenchmark, WebImage, WebObservation, WebObservationProfile, WebTab, WebTask
 from responses_api_agents.web_agent.render import (
     TASK_INPUT_IMAGE_REDACTION_NOTICE,
     compact_som_text,

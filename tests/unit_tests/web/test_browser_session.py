@@ -125,3 +125,28 @@ def test_provider_factory_rejects_unknown_name_non_string_name_and_bad_implement
         create_browser_session_provider({"missing": {}})
     with pytest.raises(TypeError, match="does not implement"):
         create_browser_session_provider({"invalid": {}})
+
+
+def test_visual_provider_discovery_does_not_load_interactive_browser_plugins(monkeypatch) -> None:
+    class CDPEntryPoint:
+        name = "cdp_only"
+
+        def load(self):
+            raise AssertionError("a CDP-only plugin must not be loaded by the visual runtime")
+
+    queried_groups = []
+
+    def discover(*, group):
+        queried_groups.append(group)
+        return [CDPEntryPoint()] if group == "nemo_gym.browser_session_providers" else []
+
+    monkeypatch.setattr(browser_session, "entry_points", discover)
+    monkeypatch.setattr(browser_session, "_PROVIDER_REGISTRY", {"local_process": LocalProcessBrowserSessionProvider})
+
+    assert create_browser_session_provider({"local_process": {}}).name == "local_process"
+    assert queried_groups == []
+    assert list_browser_session_providers() == ["local_process"]
+    with pytest.raises(ValueError, match="unknown browser session provider"):
+        create_browser_session_provider({"cdp_only": {}})
+    assert queried_groups
+    assert set(queried_groups) == {"nemo_gym.web_browser_session_providers"}

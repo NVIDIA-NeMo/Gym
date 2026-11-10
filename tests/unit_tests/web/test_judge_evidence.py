@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core.responses_api_types import NeMoGymResponse
 from nemo_gym.web.judge_evidence import (
     compact_webvoyager_judge_evidence,
     expand_webvoyager_judge_screenshots,

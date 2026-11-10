@@ -13,9 +13,9 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import PrivateAttr
 
-from nemo_gym.base_resources_server import SimpleResourcesServer
-from nemo_gym.failure_kinds import SESSION_LOST, SESSION_RELEASE_FAILED, VERIFIER_ERROR
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.client.server_client import SESSION_ID_KEY
+from nemo_gym.core.failure_kinds import SESSION_LOST, SESSION_RELEASE_FAILED, VERIFIER_ERROR
+from nemo_gym.server_runtime.base_resources_server import SimpleResourcesServer
 from nemo_gym.web.api_models import (
     WebCloseResponse,
     WebEvaluateRequest,

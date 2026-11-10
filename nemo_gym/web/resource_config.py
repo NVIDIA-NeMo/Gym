@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 from pydantic import Field, model_validator
 
-from nemo_gym.base_resources_server import BaseResourcesServerConfig
+from nemo_gym.server_runtime.base_resources_server import BaseResourcesServerConfig
 from nemo_gym.web.models import WebBenchmark
 
 
