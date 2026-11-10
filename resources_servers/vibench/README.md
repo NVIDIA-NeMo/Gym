@@ -13,12 +13,12 @@ on its own Harbor harness, is not integrated.
 
 Two configs run this server:
 
-- `configs/vibench_sessions.yaml` runs the episode through the `single_agent_turn_legacy` Environment
+- `configs/vibench.yaml`, the default, runs the episode through the `single_agent_turn_legacy` Environment
   Server and the agent-session protocol. This server owns the build sandbox and lends it; the agent
   only borrows it. The rest of this README describes this path unless it says otherwise.
-- `configs/vibench.yaml`, the default, keeps the legacy relay path through `vibench_agent`; see
-  [Legacy relay path](#legacy-relay-path). It stays the default until both paths are graded on the
-  same tasks, since their scores are not directly comparable.
+- `configs/vibench_legacy_agent.yaml` is deprecated. It keeps the legacy relay path through `vibench_agent`;
+  see [Legacy relay path](#legacy-relay-path). The two paths are configured differently, so their scores are not
+  directly comparable.
 
 | Stage | Owner |
 | --- | --- |
@@ -39,7 +39,8 @@ a resent `verify` can harvest again (close stops it). Sessions are process-local
 runs with one worker.
 
 The sandbox provider has to support reattaching (`serialize()`/`connect()`), since the agent
-borrows the sandbox from another process. OpenSandbox and Docker both do.
+borrows the sandbox from another process. OpenSandbox, Docker, Apptainer and E2B do; enroot and the
+local provider do not.
 
 One row is one `(app, artifact)` pair. Reward is the mean normalized score
 (`score / full_points`) across that artifact's test plans, with the per-plan values exposed
@@ -57,9 +58,9 @@ longer ships; without it seeding fails in seconds and reports a fully failed see
 which reads like a bad app rather than a missing binary. The build sandbox can run on any
 provider that supports reattaching.
 
-Since ViBench 2.0 the 1.0 materials live under `v1/` and the shared runner under `_harness/`.
-`v2.0.7` is the tag this environment was checked against; a checkout from before ViBench 2.0
-(`prds/` at the root) also works.
+This environment covers ViBench 1.0. Since ViBench 2.0 the 1.0 materials live under `v1/` and
+the shared runner under `_harness/`. `v2.0.7` is the tag this environment was checked against; a
+checkout from before ViBench 2.0 (`prds/` at the root) also works.
 
 ```bash
 git clone --branch v2.0.7 https://github.com/ViBench/vibench-public.git ~/vibench
@@ -131,7 +132,7 @@ With OpenSandbox, start Gym on a host the sandboxes can route to:
 
 ```bash
 gym env start \
-    --config resources_servers/vibench/configs/vibench_sessions.yaml \
+    --config resources_servers/vibench/configs/vibench.yaml \
     --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
     --model-type openai_model \
     ++use_absolute_ip=true \
@@ -143,11 +144,13 @@ config. It sets both settings, so only the model server listens on the host's ad
 the default bridge can route to — and with it the run's token-capture path. Single-tenant hosts
 only, or firewall the port; see the comment at the top of that file. The stock config's 180s
 exec timeout would also kill the build, which OpenCode runs as one long exec. Do not use
-`network: host`: that puts model-written code on the host network namespace.
+`network: host`: that puts model-written code on the host network namespace. Do not use
+`responses_api_agents/vibench_agent/configs/docker.yaml` either: it belongs to the legacy relay
+config, and with it the sandbox gets a loopback model URL that OpenCode cannot reach.
 
 ```bash
 gym env start \
-    --config resources_servers/vibench/configs/vibench_sessions.yaml \
+    --config resources_servers/vibench/configs/vibench.yaml \
     --config resources_servers/vibench/configs/docker.yaml \
     --model-type openai_model
 ```
@@ -163,17 +166,16 @@ gym eval run --no-serve \
     --num-repeats 1
 ```
 
-The recipe keeps the legacy relay path's `vibench_agent` settings where it can: OpenCode 1.17.11,
-a 5,400-second build, no subagents. Two differ. The output budget is 32,768 tokens per model call
+The recipe keeps the legacy relay path's `vibench_agent` settings where it can: OpenCode 1.17.11
+and a 5,400-second build. Three differ. The output budget is 32,768 tokens per model call
 and the context window 229,376, so a call fits a 262,144-token served context; the legacy
 recipe asks for the whole window on every call, which an OpenAI-compatible server such as vLLM
 refuses, and OpenCode then ends the build with no model call at all. OpenCode also runs with
 `opencode_agent`'s command deny-list (`configs/permissions/default.yaml`), which also denies Git
 network commands, Git history mining and `curl`/`wget` to GitHub; the legacy recipe denies only
-process killing and `rm -rf /`. The recipe loads that deny-list but not `opencode_agent.yaml`:
-OpenCode 1.17.11 places the keys of a `tools` map, such as the one that file sets, before the
-permission map's `"*"` rule, and the last matching rule wins, so with that map none of the denials
-apply. Web, subagent and skill tools are turned off through `permission` instead.
+process killing and `rm -rf /`. And the recipe has no web, skill or subagent tools: the deny-list
+turns off `webfetch`, `websearch` and `skill`, and the recipe turns off `task` through `permission`
+as well. The legacy recipe allows all four.
 
 Start with `--limit 1`. A single rollout builds an app and then runs a full compose stack
 per test plan; wall-clock is tens of minutes and the box needs headroom for
@@ -182,9 +184,9 @@ per test plan; wall-clock is tens of minutes and the box needs headroom for
 ## Legacy relay path
 
 `responses_api_agents/vibench_agent` still runs ViBench behind the `legacy_agent` relay, from
-`configs/vibench.yaml`, the default config. That agent starts its own build sandbox from the same image, runs
-OpenCode in it with the legacy recipe above, and writes the app as a tarball into `artifact_dir`, a
-directory it shares with this server; `seed_session` hands it only the PRD text and asset
+`configs/vibench_legacy_agent.yaml`, which is deprecated. That agent starts its own build sandbox
+from the same image, runs OpenCode in it with the legacy recipe above, and writes the app as a
+tarball into `artifact_dir`, a directory it shares with this server; `seed_session` hands it only the PRD text and asset
 directories, and `verify` unpacks the tarball and grades it the same way. The shared directory puts
 the agent and this server on one host. With Docker, use the agent's own `configs/docker.yaml`; with
 OpenSandbox, set `sandbox_model_base_url` on the agent. See
@@ -192,14 +194,14 @@ OpenSandbox, set `sandbox_model_base_url` on the agent. See
 
 ```bash
 gym env start \
-    --config resources_servers/vibench/configs/vibench.yaml \
+    --config resources_servers/vibench/configs/vibench_legacy_agent.yaml \
     --config responses_api_agents/vibench_agent/configs/docker.yaml \
     --model-type openai_model
 ```
 
 The two paths differ in output budget and command deny-list, so their scores are not directly
-comparable. Making the sessions path the default, and removing `vibench_agent`, waits until both
-have been graded on the same tasks.
+comparable. `vibench_agent` will be removed after the Environment Server migration; until then
+this config keeps it runnable.
 
 ## Validation
 
@@ -218,6 +220,9 @@ example tasks graded, 16/16 test plans, no build or seeding failures:
 Mean 0.785. The spread matters more than the mean: `wedding` well below the rest shows the
 scale is not saturated. `data/example_rollouts.jsonl` holds this run, with its task paths
 updated to the `v1/` layout.
+
+The default session path (`configs/vibench.yaml`) has been run through seed, build and harvest
+on OpenSandbox, but not yet graded end to end, so these numbers are not a baseline for it.
 
 The reward tracks model capability. An earlier run with a weaker policy model scored 0.0 on
 `notes` with 0/19 steps, its app unreachable because the build produced no output, while the

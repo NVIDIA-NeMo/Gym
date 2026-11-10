@@ -1525,6 +1525,23 @@ def test_invalid_output_budget_rejected_before_connecting(setup, output_budget):
     sandbox.launch.assert_not_awaited()
 
 
+@pytest.mark.parametrize("project_config", [False, True])
+def test_task_repository_project_config_follows_the_session_setting(setup, project_config):
+    agent, sandbox = setup
+    agent.config.session_project_config = project_config
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == 200, result.text
+        payload = sandbox.params()
+        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+    # OpenCode reads the repository's AGENTS.md/CLAUDE.md and opencode.json only without this flag.
+    assert payload["env"].get("OPENCODE_DISABLE_PROJECT_CONFIG") == (None if project_config else "true")
+    # The rest of the isolation stays, and Gym's inline config is still passed.
+    assert payload["env"]["OPENCODE_DISABLE_AUTOUPDATE"] == "true"
+    assert "OPENCODE_CONFIG_CONTENT" in payload["env"]
+
+
 @pytest.mark.parametrize("kind", ["error", "timeout", "length"])
 def test_partial_output_survives_model_failure_and_timeout(setup, kind, tmp_path):
     agent, sandbox = setup
