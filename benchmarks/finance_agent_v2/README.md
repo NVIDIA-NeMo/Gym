@@ -106,6 +106,14 @@ gym eval run --no-serve --agent finance_agent_v2_benchmark_agent \
   --output results/finance_agent_v2_27q.jsonl --concurrency 4
 ```
 
+`--benchmark finance_agent_v2` uses the `single_agent_turn_legacy` Environment Server by default.
+The agent and the resources server export no checkpoint state (`restart_only`), so after a crash the episode still
+starts over from its input. Compared with earlier relay-based runs, a failed model call, seed or judge now becomes
+a classified failure instead of reward 0. These failures are excluded from scores by default, so fewer rollouts may
+be scored and aggregate results can differ. See
+[Running behind an Environment Server](../../responses_api_agents/finance_agent/README.md#running-behind-an-environment-server)
+for retry behavior and how to count failures as zero.
+
 `reward` is **Partial Credit**: the severity-weighted share of rubric criteria
 passed, forced to 0.0 if any criterion marked `must_pass` failed. `rubric_all_pass`
 is the stricter every-criterion-passed flag, and `judge_error` marks rows the judge

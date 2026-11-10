@@ -283,11 +283,17 @@ gym eval prepare --benchmark finance_agent_v2
 
 # End-to-end (prepare + start servers + collect rollouts) on the benchmark set
 gym eval run --benchmark finance_agent_v2 \
-  -c responses_api_models/openai_model/configs/openai_model.yaml
+  --model-type openai_model
 ```
 
 Add `--limit 3 --concurrency 3` for a smoke run. `gym eval run` writes the scored
 rollouts plus `<output>_aggregate_metrics.json`.
+
+The standard `--resources-server finance_agent_v2` and `--benchmark finance_agent_v2` configs run through the
+`single_agent_turn_legacy` Environment Server. The agent gets the tools through a direct HTTP grant, and the
+Environment Server closes the resources session after `/verify`. Infrastructure failures are classified separately
+and excluded from scores by default, which can change aggregate results compared with earlier relay-based runs. See
+[Running behind an Environment Server](../../responses_api_agents/finance_agent/README.md#running-behind-an-environment-server).
 
 Each prepared sample carries the upstream prompts and tool JSON schemas, read at
 prepare time from `benchmarks/finance_agent_v2/upstream_spec.json` — a generated
