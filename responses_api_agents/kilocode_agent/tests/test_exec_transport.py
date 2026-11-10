@@ -113,8 +113,7 @@ async def test_exec_only_supervision_reaps_harness_group(tmp_path, ending, detac
             with pytest.raises(asyncio.CancelledError):
                 await task
         elif ending == "close":
-            # Allow /proc scans and receipt polling to finish on shared CI hosts.
-            await state.close(timeout=10)
+            await state.close(timeout=3)
             await asyncio.gather(task, return_exceptions=True)
         else:
             artifacts = await task
