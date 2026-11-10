@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import base64
 import functools
+import hashlib
 import json
 import os
 import re
@@ -10,12 +12,15 @@ import shlex
 import shutil
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import threading
+import zlib
 from contextlib import asynccontextmanager, contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from time import monotonic
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -26,6 +31,7 @@ from omegaconf import OmegaConf
 from pydantic import ValidationError
 
 from nemo_gym.agents import (
+    AGENT_TIMEOUT_METADATA_KEY,
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
     AgentCloseSessionRequest,
@@ -36,8 +42,15 @@ from nemo_gym.agents import (
     raises_agent_failure,
 )
 from nemo_gym.client import ServerClient
-from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent, TaskId
+from nemo_gym.core import (
+    EpisodeId,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
+    TaskId,
+    split_text_and_media,
+)
 from nemo_gym.data.tasks.harbor import load_task, materialize_task
+from nemo_gym.sandbox import MEDIA_DIRECTORY, SandboxTransferError, SandboxUnavailableError
 from responses_api_agents.pi_agent.app import PiAgent, PiAgentConfig, PiAgentRunRequest, _parse_recorded_events
 
 
@@ -144,10 +157,20 @@ class Sandbox:
             return await self.launch(command, **kwargs)
         if "ln -s stop " in command:
             await self.signal()
+        # stage_media renames its partial uploads into place, and removes them when staging fails.
+        if command.startswith("rm -f -- "):
+            for path in shlex.split(command)[3:]:
+                self.files.pop(path, None)
+        for source, destination in re.findall(r"mv -f -- (\S+) (\S+)", command):
+            self.files[shlex.split(destination)[0]] = self.files.pop(shlex.split(source)[0])
         return SimpleNamespace(return_code=0, error_type=None, stdout="", stderr="")
 
     async def upload(self, source, destination):
-        self.files[destination] = Path(source).read_text()
+        data = Path(source).read_bytes()
+        try:
+            self.files[destination] = data.decode()
+        except UnicodeDecodeError:
+            self.files[destination] = data
 
     async def download(self, source, destination):
         Path(destination).write_text(self.files[source])
@@ -227,6 +250,229 @@ def mcp_grant(name, *, required=True):
 
 def seed_with_tools(*accesses):
     return AgentSeedSessionRequest.model_validate({**seed().model_dump(mode="json"), "tool_accesses": list(accesses)})
+
+
+def png(gray: int) -> bytes:
+    """A valid one-pixel grayscale PNG, which Pi recognizes as an image by its signature and IHDR chunk."""
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+    header = struct.pack(">IIBBBBB", 1, 1, 8, 0, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(bytes([0, gray])))
+        + chunk(b"IEND", b"")
+    )
+
+
+def image_part(data: bytes) -> dict:
+    return {
+        "type": "input_image",
+        "image_url": "data:image/png;base64," + base64.b64encode(data).decode(),
+        "detail": "auto",
+    }
+
+
+def activate_over_http(sandbox, client, items) -> dict:
+    """Seed a session, activate it with `items`, close it, and return the staged activation."""
+    created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+    assert created.status_code == 200, created.text
+    result = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": items})
+    assert result.status_code == 200, result.text
+    closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+    assert closed.status_code == 200, closed.text
+    return staged(sandbox)
+
+
+def staged_attachments(sandbox, payload) -> list[bytes]:
+    return [sandbox.files[arg[1:]] for arg in payload["command"] if arg.startswith("@")]
+
+
+def test_session_attaches_prompt_images_and_declares_image_input(setup):
+    agent, sandbox = setup
+    with TestClient(agent.setup_webserver()) as client:
+        payload = activate_over_http(
+            sandbox,
+            client,
+            [{"role": "user", "content": [{"type": "input_text", "text": "What is shown?"}, image_part(png(0))]}],
+        )
+    assert payload["prompt"] == "What is shown?"
+    assert [arg for arg in payload["command"] if arg.startswith("@")][0].endswith(".png")
+    assert staged_attachments(sandbox, payload) == [png(0)]
+    models = json.loads(sandbox.files[f"{sandbox.directory}/home/.pi/agent/models.json"])
+    assert models["providers"]["nemo"]["models"][0]["input"] == ["text", "image"]
+    # Pi would otherwise resize large images before sending them to the model.
+    settings = json.loads(sandbox.files[f"{sandbox.directory}/home/.pi/agent/settings.json"])
+    assert settings["images"] == {"autoResize": False}
+
+
+def test_session_stages_prompt_images_at_content_named_paths(setup):
+    agent, sandbox = setup
+    with TestClient(agent.setup_webserver()) as client:
+        payload = activate_over_http(sandbox, client, [{"role": "user", "content": [image_part(png(0))]}])
+    digest = hashlib.sha256(png(0)).hexdigest()
+    assert [arg for arg in payload["command"] if arg.startswith("@")] == [f"@{MEDIA_DIRECTORY}/{digest}.png"]
+    assert sandbox.files[f"{MEDIA_DIRECTORY}/{digest}.png"] == png(0)
+
+
+async def start_image_activation(agent, metadata=None):
+    """Seed a session and start an activation whose user prompt holds one image."""
+    request = Request({"type": "http", "headers": [], "session": {}, "path_params": {"rollout_id": "pi-smoke-a2"}})
+    seeded = await agent.seed_agent_session(request, seed())
+    body = NeMoGymResponseCreateParamsNonStreaming.model_validate(
+        {"input": [{"role": "user", "content": [image_part(png(0))]}], "metadata": metadata}
+    )
+    return request, seeded.agent_session_id, asyncio.create_task(agent.responses(request, body))
+
+
+async def test_close_during_media_staging_stops_it_before_releasing_the_sandbox(setup):
+    agent, sandbox = setup
+    staging = asyncio.Event()
+    order = []
+    upload = sandbox.upload
+
+    async def blocked_media_upload(source, destination):
+        if destination.startswith(f"{MEDIA_DIRECTORY}/"):
+            staging.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                order.append("staging stopped")
+                raise
+        await upload(source, destination)
+
+    sandbox.disconnect.side_effect = lambda: order.append("sandbox released")
+    with patch.object(sandbox, "upload", side_effect=blocked_media_upload):
+        request, session_id, task = await start_image_activation(agent)
+        await asyncio.wait_for(staging.wait(), 2)
+        await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert order == ["staging stopped", "sandbox released"]
+    sandbox.launch.assert_not_called()
+    assert not [path for path in sandbox.files if path.startswith(f"{MEDIA_DIRECTORY}/")]
+
+
+@pytest.mark.parametrize(
+    ("rename", "error"),
+    [
+        ({"return_code": None, "error_type": "timeout"}, SandboxUnavailableError),
+        ({"return_code": 1, "error_type": None}, SandboxTransferError),
+    ],
+    ids=["provider-timeout", "failed-in-sandbox"],
+)
+async def test_media_staging_failure_reports_the_sandbox_error_and_removes_partial_uploads(setup, rename, error):
+    agent, sandbox = setup
+    execute = sandbox.execute
+
+    async def failing_rename(command, **kwargs):
+        if "mv -f -- " in command:
+            return SimpleNamespace(stdout="", stderr="rename failed", **rename)
+        return await execute(command, **kwargs)
+
+    sandbox.exec.side_effect = failing_rename
+    request, session_id, task = await start_image_activation(agent)
+    with pytest.raises(error) as failure:
+        await asyncio.wait_for(task, 10)
+    # A provider timeout while staging is a sandbox failure, not the activation's deadline.
+    assert not isinstance(failure.value, TimeoutError)
+    sandbox.launch.assert_not_called()
+    assert not [path for path in sandbox.files if path.startswith(f"{MEDIA_DIRECTORY}/")]
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+
+
+async def test_media_staging_spends_the_activation_deadline(setup):
+    agent, sandbox = setup
+    upload = sandbox.upload
+
+    async def slow_media_upload(source, destination):
+        if destination.startswith(f"{MEDIA_DIRECTORY}/"):
+            await asyncio.sleep(5)
+        await upload(source, destination)
+
+    with patch.object(sandbox, "upload", side_effect=slow_media_upload):
+        request, session_id, task = await start_image_activation(agent, metadata={AGENT_TIMEOUT_METADATA_KEY: "0.2"})
+        started = monotonic()
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(task, 10)
+        assert monotonic() - started < 2
+    sandbox.launch.assert_not_called()
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+
+
+def test_retried_activation_does_not_decode_its_images_again(setup):
+    agent, sandbox = setup
+    body = {"input": [{"role": "user", "content": [image_part(png(0))]}]}
+    with (
+        patch("responses_api_agents.pi_agent.app.split_text_and_media", side_effect=split_text_and_media) as decode,
+        TestClient(agent.setup_webserver()) as client,
+    ):
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        first = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json=body)
+        retry = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json=body)
+        assert first.status_code == retry.status_code == 200
+        assert first.json() == retry.json()
+        assert decode.call_count == 1
+        assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
+    sandbox.launch.assert_awaited_once()
+
+
+def test_session_attaches_user_images_in_order_after_a_system_message(setup):
+    agent, sandbox = setup
+    items = [
+        {"role": "system", "content": "Be brief."},
+        {"role": "user", "content": [image_part(png(0)), image_part(png(255))]},
+    ]
+    with TestClient(agent.setup_webserver()) as client:
+        payload = activate_over_http(sandbox, client, items)
+    assert payload["prompt"] == ""
+    assert "Be brief." in payload["command"]
+    assert staged_attachments(sandbox, payload) == [png(0), png(255)]
+
+
+@pytest.mark.parametrize(("image_input", "declared"), [(False, ["text"]), (True, ["text", "image"])])
+def test_text_prompt_declares_image_input_only_when_configured(setup, image_input, declared):
+    agent, sandbox = setup
+    agent.config.image_input = image_input
+    with TestClient(agent.setup_webserver()) as client:
+        payload = activate_over_http(sandbox, client, "task")
+    assert staged_attachments(sandbox, payload) == []
+    models = json.loads(sandbox.files[f"{sandbox.directory}/home/.pi/agent/models.json"])
+    # Without image input, Pi replaces images its tools return with a note, so a text-only deployment keeps working.
+    assert models["providers"]["nemo"]["models"][0]["input"] == declared
+
+
+@pytest.mark.parametrize(
+    ("items", "detail"),
+    [
+        (
+            [{"role": "user", "content": [{**image_part(png(0)), "image_url": "https://example.com/a.png"}]}],
+            "Pi: Media must be a base64 data URI; URLs and file IDs are not fetched",
+        ),
+        (
+            [{"role": "user", "content": [{**image_part(png(0)), "image_url": "data:image/bmp;base64,Qk0="}]}],
+            "Pi: Unsupported media type 'image/bmp'",
+        ),
+        (
+            [{"role": "system", "content": [image_part(png(0))]}, {"role": "user", "content": "task"}],
+            "Pi accepts media only in the user prompt",
+        ),
+    ],
+    ids=["image-url", "unsupported-media-type", "system-image"],
+)
+def test_session_rejects_images_it_cannot_attach(setup, items, detail):
+    agent, sandbox = setup
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": items})
+        assert result.status_code == 422, result.text
+        assert result.json()["detail"].startswith(detail), result.text
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        assert closed.status_code == 200, closed.text
+    assert not sandbox.launch.called
 
 
 def test_http_session_flow_runs_pi_in_borrowed_sandbox(setup):
@@ -2821,7 +3067,8 @@ def test_task_timeout_metadata_reaches_sandbox_supervisor(
         )
         assert response.status_code == 200, response.text
         command = shlex.split(sandbox.launch.await_args.args[0])
-        assert float(command[command.index("--timeout") + 1]) == expected
+        # Staging spends the budget first, so Pi runs for what remains of it.
+        assert expected - 1 < float(command[command.index("--timeout") + 1]) <= expected
         assert agent.config.timeout == 1800
         assert response.json()["metadata"]["agent_timeout_sec"] == str(float(expected))
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
