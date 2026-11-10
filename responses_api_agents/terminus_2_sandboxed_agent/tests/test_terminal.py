@@ -127,6 +127,16 @@ async def test_shell_exit_during_send_is_distinguished_from_transport_failure():
         await session(SimpleNamespace(exec=execute, session_id="test")).send_keys("echo after\n")
 
 
+async def eventually(read, done, *, timeout: float = 30):
+    """Poll ``read`` until ``done`` accepts its value or ``timeout`` passes; return whether it did."""
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not done(await read()):
+        if asyncio.get_running_loop().time() > deadline:
+            return False
+        await asyncio.sleep(0.1)
+    return True
+
+
 @pytest.mark.skipif(sys.platform != "linux" or shutil.which("tmux") is None, reason="requires Linux tmux")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("exit_trigger", ["failure", "interrupt"])
@@ -159,6 +169,13 @@ async def test_exited_shell_recovery_discards_pending_input_and_reports_lost_sta
     terminal = TerminusTmuxSession(
         "test", environment, tmp_path / "pane.log", None, None, extra_env={"TERMINUS_CONFIGURED": "preserved"}
     )
+
+    def pane_format(field):
+        async def read():
+            return (await environment.exec(f"tmux display-message -p -t test '{field}'")).stdout.strip()
+
+        return read
+
     try:
         await terminal.start()
         await asyncio.sleep(0.3)
@@ -175,15 +192,13 @@ async def test_exited_shell_recovery_discards_pending_input_and_reports_lost_sta
             f"mkdir {tmp_path}/sub; cd {tmp_path}/sub; unset PROMPT_COMMAND; set -e; {failing_command}\n",
             min_timeout_sec=0.2,
         )
+        if exit_trigger == "interrupt":
+            # Ctrl-C sent before sleep starts reaches bash instead, which survives it, so wait for sleep to run.
+            assert await eventually(pane_format("#{pane_current_command}"), lambda command: command == "sleep")
         await environment.exec("tmux paste-buffer -d -b queued -t test")
         if exit_trigger == "interrupt":
             await terminal.send_keys("C-c", min_timeout_sec=0.3)
-        for _ in range(100):
-            state = await environment.exec("tmux display-message -p -t test '#{pane_dead}'")
-            if state.stdout.strip() == "1":
-                break
-            await asyncio.sleep(0.1)
-        assert state.stdout.strip() == "1"
+        assert await eventually(pane_format("#{pane_dead}"), lambda dead: dead == "1")
         assert await terminal.is_session_alive()
         with pytest.raises(ShellExitedError):
             await terminal.send_keys(f"touch {forbidden}\n")
