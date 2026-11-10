@@ -175,8 +175,6 @@ async def render(
             return result
         if executed.error_type:
             raise InfrastructureError(f"Sandbox error: {executed.error_type}")
-        if executed.return_code == 137:
-            raise InfrastructureError("Renderer was killed (possible allocation OOM)")
         if executed.return_code:
             result.status = "code_error"
             return result

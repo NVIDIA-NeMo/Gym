@@ -28,6 +28,7 @@ VALID = "from PIL import Image\nImage.new('RGB',(TARGET_WIDTH,TARGET_HEIGHT),'wh
         (VALID, "ok"),
         (f"```python\n{VALID}\n```", "ok"),
         ("this is not python !", "code_error"),
+        ("raise SystemExit(137)", "code_error"),
         ("while True: pass", "timeout"),
         ("pass", "missing_output"),
         ("open(OUTPUT_PATH,'w').write('not png')", "invalid_output"),

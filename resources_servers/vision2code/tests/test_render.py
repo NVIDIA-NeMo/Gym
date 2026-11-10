@@ -64,6 +64,10 @@ def fake_sandbox(monkeypatch):
                     return SandboxExecResult("", "SyntaxError", 1)
                 if self.mode == "runtime_failure":
                     return SandboxExecResult("", "lost init", 125, "sandbox")
+                if self.mode == "exit_137":
+                    return SandboxExecResult("", "", 137)
+                if self.mode == "provider_failure_137":
+                    return SandboxExecResult("", "lost init", 137, "sandbox")
                 return SandboxExecResult("rendered", "", 0)
             info = {
                 "exists": self.mode != "missing_output",
@@ -119,6 +123,8 @@ async def attempt(tmp_path, **kwargs):
     [
         ("ok", "ok"),
         ("code_error", "code_error"),
+        ("exit_137", "code_error"),
+        ("provider_failure_137", "infrastructure_failure"),
         ("timeout", "timeout"),
         ("missing_output", "missing_output"),
         ("symlink", "invalid_output"),
@@ -160,6 +166,10 @@ async def test_lifecycle(fake_sandbox, tmp_path, mode, status):
         assert not (tmp_path / "output.png").exists()
     if mode == "invalid_checksum":
         assert "bad header checksum" in result.diagnostics["validation_error"]
+    if mode == "exit_137":
+        assert result.diagnostics["execution"]["return_code"] == 137
+        assert result.diagnostics["execution"]["error_type"] is None
+        assert not instances[0].downloaded
 
 
 @pytest.mark.asyncio
