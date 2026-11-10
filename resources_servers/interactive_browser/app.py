@@ -26,12 +26,15 @@ when the same `session_id` is re-seeded, or when an Environment Server closes th
 session through `/close_session`. An Environment Server assigns the session id and
 registers that close before seeding, so a rollout abandoned before `verify` still
 has its browser released. An Agent's `/run` does not close, so there a rollout
-abandoned without `verify` or a re-seed keeps its browser until the process exits
-(local) or the provider reclaims it (remote).
+abandoned without `verify` or a re-seed keeps its browser until the server shuts
+down, when its lifespan closes every browser the process still holds. Only a process
+killed without shutting down leaves its remote browsers for the provider to reclaim.
 """
 
+import asyncio
 import logging
 import re
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any, Dict, Optional, Tuple, Union
 
@@ -77,6 +80,11 @@ _SCORING_KEYS = ("final_url", "url_contains", "dom_contains", "answer_equals")
 # Where the browser comes from when the config says nothing: a local Chromium,
 # which needs no account, no network and no quota.
 _DEFAULT_BACKEND: Dict[str, Any] = {"local_playwright": {"headless": True}}
+
+# How long shutdown waits for one browser to close. Browsers close concurrently, so this
+# also bounds the whole shutdown; one that has not closed by then is logged and left to
+# its provider.
+_SHUTDOWN_CLOSE_TIMEOUT_S = 30.0
 
 
 class InteractiveBrowserConfig(BaseResourcesServerConfig):
@@ -173,7 +181,40 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
         app.post("/browser_type")(self.browser_type)
         app.post("/browser_observe")(self.browser_observe)
         app.post("/browser_finish")(self.browser_finish)
+
+        parent_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def lifespan(app: FastAPI):
+            try:
+                async with parent_lifespan(app) as state:
+                    yield state
+            finally:
+                await self.shutdown()
+
+        app.router.lifespan_context = lifespan
         return app
+
+    async def shutdown(self) -> None:
+        """Close every browser this process still holds, local and remote.
+
+        Each close is bounded and runs concurrently with the others; a failure or timeout
+        is logged and does not stop the rest.
+        """
+        self._episode_identity.clear()
+        self._fences.clear()
+        await asyncio.gather(
+            *(self._release_at_shutdown(session_id) for session_id in list(self._session_id_to_state))
+        )
+
+    async def _release_at_shutdown(self, session_id: str) -> None:
+        try:
+            async with asyncio.timeout(_SHUTDOWN_CLOSE_TIMEOUT_S):
+                await self._release(session_id)
+        except TimeoutError:
+            logger.warning(
+                "browser for session %s did not close within %ss at shutdown", session_id, _SHUTDOWN_CLOSE_TIMEOUT_S
+            )
 
     # ----- lifecycle ----------------------------------------------------- #
     async def seed_session(
