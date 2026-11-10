@@ -30,7 +30,9 @@ Python dependencies are declared and locked, so there is nothing to `pip install
   `uv run --project benchmarks/birdbench` (see [Preparing data](#preparing-data)).
 - **The server** runs in `resources_servers/bird_sql`'s locked environment, which `gym` builds on first start. It
   includes `pyspark` and `sqlglot` for the Spark dialect (`pyspark` runs the model's SQL, `sqlglot` checks that it is a
-  single `SELECT`/`WITH`); the SQLite dialect never imports them.
+  single `SELECT`/`WITH`), and `psycopg` and `psycopg_pool` for the PostgreSQL dialect; the SQLite dialect never
+  imports them. The preparation project also has `psycopg`: `prepare --dialect postgres` renders the column types the
+  loader will create, without connecting.
 
 What is left is outside Python:
 
@@ -50,9 +52,7 @@ On macOS: `brew install openjdk@17`, then `export JAVA_HOME="$(brew --prefix ope
 
 Spark runs in local mode inside the server process; no cluster is needed.
 
-**PostgreSQL dialect** needs a PostgreSQL server, plus `psycopg` and `pandas` in both the server's venv and the one
-you run `gym` from (`prepare` renders the column types the loader will create, without connecting), and
-`psycopg_pool` in the server's venv. `BIRD_PG_DSN` is
+**PostgreSQL dialect** needs a PostgreSQL server. `BIRD_PG_DSN` is
 the grader's DSN: a read-only role that the loader creates. `BIRD_PG_ADMIN_DSN` (optional) is a role that can create
 schemas and roles; when it is set, the server loads any missing `db_id` on startup (dev takes about 20 s).
 
@@ -60,7 +60,6 @@ schemas and roles; when it is set, the server loads any missing `db_id` on start
 docker run -d --name bird-pg -p 127.0.0.1:5432:5432 -e POSTGRES_USER=bird -e POSTGRES_PASSWORD=<admin password> postgres:16
 export BIRD_PG_ADMIN_DSN=postgresql://bird:<admin password>@127.0.0.1:5432/bird
 export BIRD_PG_DSN=postgresql://bird_reader:<reader password>@127.0.0.1:5432/bird
-uv pip install --python resources_servers/bird_sql/.venv/bin/python "psycopg[binary]>=3.2" "psycopg_pool>=3.2" pandas
 ```
 
 ## Dialects and splits

@@ -63,8 +63,8 @@ The grader connects with `postgres_dsn`, a read-only role. When `postgres_admin_
 startup loads any missing `db_id` from the SQLite files (Spark's column typing; text columns
 use the `"C"` collation so ordering matches SQLite) and creates that role from
 `postgres_dsn`'s user and password. Without it, startup only checks that the data is
-loaded. Requires `psycopg`, `psycopg_pool` and `pandas` (see `benchmarks/birdbench/README.md`);
-the default SQLite dialect needs none of them.
+loaded. `psycopg` and `psycopg_pool` are dependencies of this server (`pyproject.toml`); the default SQLite
+dialect never imports them.
 
 ## Example usage
 
