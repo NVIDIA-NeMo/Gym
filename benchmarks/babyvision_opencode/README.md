@@ -21,13 +21,17 @@ benchmark without the instruction.
 
 ## Prepare data
 
-`prepare.py` reads BabyVision in VLMEvalKit's TSV format (`BabyVision.tsv`) and checks it is one
-of the two known copies by md5.
+`prepare.py` downloads BabyVision from [`UnipatAI/BabyVision`](https://huggingface.co/datasets/UnipatAI/BabyVision)
+on Hugging Face at a pinned revision and checks the file's SHA-256. The resources server's README (section
+"BabyVision data") names the file and how each task becomes a row.
 
 ```bash
-export LMUData=/path/to/LMUData   # the directory holding BabyVision.tsv; or BABYVISION_TSV=/path/to/BabyVision.tsv
 gym eval prepare --benchmark babyvision_opencode
 ```
+
+On a host without internet access, download
+[the pinned parquet file](https://huggingface.co/datasets/UnipatAI/BabyVision/resolve/849cbeea2b1d00ad334e9e1e2b49a1960c9ff3f3/data/train-00000-of-00001.parquet)
+elsewhere and set `BABYVISION_PARQUET` to it.
 
 ## Run
 

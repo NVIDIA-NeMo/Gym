@@ -1,7 +1,8 @@
 # BabyVision (388 rows) under OpenCode with a Python shell, the bare question as the user message
 # (no visual-reasoning instruction): OpenCode's own system prompt is all the instruction the model
 # gets, for models trained on that prompt.
-# Otherwise identical to benchmarks/babyvision_opencode. Data: $LMUData/BabyVision.tsv (or $BABYVISION_TSV).
+# Otherwise identical to benchmarks/babyvision_opencode, data included (UnipatAI/BabyVision at a
+# pinned revision, or $BABYVISION_PARQUET).
 config_paths:
   - resources_servers/visual_coding_opencode/configs/visual_coding_opencode.yaml
 
@@ -13,4 +14,6 @@ visual_coding_opencode_agent:
         type: benchmark
         jsonl_fpath: benchmarks/babyvision_opencode_question_only/data/babyvision_opencode_question_only_benchmark.jsonl
         prepare_script: benchmarks/babyvision_opencode_question_only/prepare.py
+        # prepare.py saves every image as a PNG with Pillow, which a dev install of Gym lacks.
+        prepare_dependencies: [pillow]
         num_repeats: 1

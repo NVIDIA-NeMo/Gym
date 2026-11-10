@@ -8,8 +8,10 @@ otherwise identical.
 
 ## Prepare data
 
+`prepare.py` downloads the same pinned `UnipatAI/BabyVision` file as
+[`babyvision_opencode`](../babyvision_opencode/README.md#prepare-data) (or reads `BABYVISION_PARQUET`).
+
 ```bash
-export LMUData=/path/to/LMUData   # the directory holding BabyVision.tsv; or BABYVISION_TSV=/path/to/BabyVision.tsv
 gym eval prepare --benchmark babyvision_opencode_question_only
 ```
 

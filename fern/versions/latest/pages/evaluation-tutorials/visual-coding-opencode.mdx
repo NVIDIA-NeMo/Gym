@@ -30,7 +30,7 @@ The two benchmarks have the same puzzles and answers:
 Complete [Installation](/get-started/installation). Then check the following:
 
 - **A vision-language policy.** The policy endpoint must accept image input, because the puzzle image is attached to the first user message and OpenCode's `read` tool returns the model's crops and plots as images.
-- **The BabyVision TSV.** `prepare.py` reads BabyVision in VLMEvalKit's TSV format (`BabyVision.tsv`) and checks its md5 against the two known copies.
+- **Access to Hugging Face, or a local copy of the data.** `prepare.py` downloads BabyVision from [`UnipatAI/BabyVision`](https://huggingface.co/datasets/UnipatAI/BabyVision) (MIT license) at a pinned revision and checks the file's SHA-256.
 - **An OpenAI API key for the judge**, in `OPENAI_API_KEY`. The judge defaults to `gpt-4o-mini` on the OpenAI API.
 - **The sandbox image.** Build it from `resources_servers/visual_coding_opencode/sandbox_image/Dockerfile` and set `VISUAL_CODING_OPENCODE_SANDBOX_IMAGE` to it. It holds the Python image toolkit, OpenCode 1.17.11 under `/opt/opencode/bin` and OpenCode's plugin dependencies, each pinned by its SHA-256 in the config, because the sandbox cannot download them.
 - **A sandbox provider.** The config uses [OpenSandbox](/main/infrastructure/sandbox/opensandbox): set `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY`.
@@ -44,12 +44,13 @@ The model's shell commands run in the task's sandbox, not on the agent host. The
 
 ## Prepare the Data
 
-Point `LMUData` at the directory that holds `BabyVision.tsv` (or set `BABYVISION_TSV` to the file itself), then prepare the benchmark:
+Prepare the benchmark. `prepare.py` downloads the 388 BabyVision tasks from Hugging Face:
 
 ```bash
-export LMUData=/data/LMUData
 gym eval prepare --benchmark babyvision_opencode
 ```
+
+On a host without internet access, download [the pinned parquet file](https://huggingface.co/datasets/UnipatAI/BabyVision/resolve/849cbeea2b1d00ad334e9e1e2b49a1960c9ff3f3/data/train-00000-of-00001.parquet) elsewhere and set `BABYVISION_PARQUET` to it first.
 
 Use `--benchmark babyvision_opencode_question_only` for the question-only variant.
 

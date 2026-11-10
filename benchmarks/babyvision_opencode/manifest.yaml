@@ -23,6 +23,8 @@ datasets:
   type: benchmark
   jsonl_fpath: benchmarks/babyvision_opencode/data/babyvision_opencode_benchmark.jsonl
   prepare_script: benchmarks/babyvision_opencode/prepare.py
+  prepare_dependencies:
+  - pillow
   num_repeats: 1
 model_server: policy_model
 canonical_split: benchmark

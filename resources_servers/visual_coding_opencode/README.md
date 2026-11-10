@@ -78,23 +78,22 @@ baseline. `exclude` leaves it out there too.
 ## BabyVision data
 
 ```bash
-LMUData=/path/to/LMUData python benchmarks/babyvision_opencode/prepare.py
+gym eval prepare --benchmark babyvision_opencode
 ```
 
-`prepare.py` reads BabyVision in VLMEvalKit's TSV format (`BabyVision.tsv`; set `LMUData` to its
-directory, or `BABYVISION_TSV` to the file). Two copies are accepted:
+`prepare.py` downloads BabyVision from the [`UnipatAI/BabyVision`](https://huggingface.co/datasets/UnipatAI/BabyVision)
+dataset (MIT license) at revision `849cbeea2b1d00ad334e9e1e2b49a1960c9ff3f3`: one parquet file,
+[`data/train-00000-of-00001.parquet`](https://huggingface.co/datasets/UnipatAI/BabyVision/resolve/849cbeea2b1d00ad334e9e1e2b49a1960c9ff3f3/data/train-00000-of-00001.parquet),
+with all 388 tasks. It checks the file's SHA-256 (`7f6ce0d1…`). On a host without internet access, download that
+file elsewhere and set `BABYVISION_PARQUET` to it.
 
-- md5 `b3a93182…`
-- md5 `4216333e…`
-
-They have identical questions and answers. In the `b3a93182…` copy, 175 of the 388 images are
-JPEG re-encodes of the `4216333e…` copy's PNGs.
+For a multiple-choice task, the question lists the options as `(A)`, `(B)`, … after `Choices:`, and the answer is
+the option's letter. Every image becomes an RGB PNG data URL. The release stores PNGs, JPEGs and WebPs; decoding
+them and saving them as PNG keeps every pixel.
 
 ## Example data
 
 `data/example.jsonl` has five rows. The first three (`example_0` to `example_2`) are small synthetic puzzles. The
 last two are BabyVision tasks 4624 (Spatial Perception, Count 3D blocks) and 487 (Visual Pattern Recognition, Logic
-Patterns), taken from the [`UnipatAI/BabyVision`](https://huggingface.co/datasets/UnipatAI/BabyVision) dataset
-(MIT license) at revision `849cbeea2b1d00ad334e9e1e2b49a1960c9ff3f3` and written in `prepare.py`'s format. For a
-multiple-choice task, the question lists the options as `(A)`, `(B)`, … and the answer is the option's letter, as in
-VLMEvalKit. `data/example_rollouts.jsonl` holds one OpenCode rollout of each row.
+Patterns), taken from the same `UnipatAI/BabyVision` revision and written in `prepare.py`'s format.
+`data/example_rollouts.jsonl` holds one OpenCode rollout of each row.
