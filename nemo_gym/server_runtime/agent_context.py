@@ -46,7 +46,8 @@ class AgentContext(BaseModel):
     when an episode has several agents; this contract does not prescribe the environment's task-input schema.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    # Frozen like AgentContextArtifact: the seed that holds it is stored for the session and compared on retries.
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     values: dict[str, JsonValue] = Field(default_factory=dict)
     artifacts: dict[str, AgentContextArtifact] = Field(default_factory=dict)
