@@ -577,6 +577,7 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     opencode_provider_id: str = "nemo_gym"
     opencode_model_id: str = "dummy_model"
     sandbox_upload_roots: List[str] = Field(default_factory=list)
+    sandbox_row_option_keys: List[str] = Field(default_factory=list)
 
     # Environment variables exported in front of `opencode run` inside the sandbox.
     #
@@ -779,6 +780,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         if self.config.debug:
             print("Creating new sandbox since one wasn't provided", file=sys.stderr)
 
+        row_options = provider_options or {}
+        if disallowed := sorted(set(row_options) - set(self.config.sandbox_row_option_keys)):
+            raise ValueError(f"sandbox_provider_options {disallowed} are not listed in sandbox_row_option_keys")
+        if "network_policy" in row_options and self.config.network_access != "inherit":
+            raise ValueError("sandbox_provider_options.network_policy cannot be set when network_access is restricted")
+
         resources = SandboxResources.from_mapping(self.config.sandbox_config.get("resources", {}))
         # TODO @bxyu-nvidia: Refactor this after swapping to PTY as this should be set on the SWE Bench resources server side
         env = cpu_cap_env(resources.cpu) if self.config.sandbox_config.get("derive_cpu_env", True) else {}
@@ -799,8 +806,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             },
             resources=resources,
             entrypoint=self.config.sandbox_config.get("entrypoint"),
-            provider_options=deepcopy(self.config.sandbox_config.get("provider_options", {}))
-            | deepcopy(provider_options or {}),
+            provider_options=deepcopy(self.config.sandbox_config.get("provider_options", {})) | deepcopy(row_options),
         )
 
         if self.config.network_access != "inherit":
@@ -814,7 +820,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             policy = restricted_network_policy(resolved_sandbox_provider.name, urls)
             configured = sandbox_spec.provider_options.get("network_policy") or {}
             if configured:
-                if configured.get("defaultAction") != "deny":
+                if configured.get("defaultAction", "deny") != "deny":
                     raise ValueError("network_access with a network_policy needs defaultAction: deny")
                 policy["egress"] = list(configured.get("egress") or []) + policy["egress"]
             sandbox_spec.provider_options["network_policy"] = policy
@@ -978,6 +984,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         forwards attached images instead of replacing them with "this model does not support image input"
         (``unsupportedParts`` in OpenCode's provider/transform.ts reads ``capabilities.input.image``, which
         provider.ts derives from the model's ``modalities.input``)."""
+        for provider_id, provider in self.config.opencode_config.get("provider", {}).items():
+            if provider_id != self.config.opencode_provider_id:
+                raise ValueError(f"opencode_config.provider.{provider_id} is not opencode_provider_id")
+            for model_id in (provider or {}).get("models", {}) or {}:
+                if model_id != self.config.opencode_model_id:
+                    raise ValueError(f"opencode_config model {model_id} is not opencode_model_id")
         base_url = (
             self.base_url_for_run(
                 base_url=sandbox_server_url(
