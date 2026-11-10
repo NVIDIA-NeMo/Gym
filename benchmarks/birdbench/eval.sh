@@ -4,7 +4,7 @@
 #
 # Evaluate ONE policy model on BIRD dev (or, with --split train, BIRD train) via the standard, existing birdbench pipeline
 # (`gym eval prepare`/`gym eval run --benchmark birdbench`, as documented in this directory's own
-# README) -- no custom collection code (for training data with logprobs see collect.py). Verification
+# README) -- no custom collection code. Verification
 # runs through resources_servers/bird_sql/eval_utils.py exactly as it always has, so this
 # benefits from the GIL-contention-safe concurrency and `conn.close()` fixes made there
 # automatically, with zero changes needed here.

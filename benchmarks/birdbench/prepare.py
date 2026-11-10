@@ -22,7 +22,7 @@ runs on SQLite and compares against the model's Spark SQL result.
 Each (dialect, split) pair writes its own file, ``data/birdbench_<dialect>_<split>.jsonl`` (dev: one row per task, 1534 rows; the
 dataset is never repeated -- see ``num_repeats`` in config.yaml).
 
-``split="train"`` prepares BIRD's train split instead (for training data, not evaluation): the "uberset" of BIRD's
+``split="train"`` prepares BIRD's train split instead (it is not the evaluation set): the "uberset" of BIRD's
 ``train.json`` with every row ReViSQL re-verified (``bird-verified-train.json``) swapped for its verified version, run
 against ``train_databases``. It has no ``difficulty`` labels.
 The train databases are downloaded on first use (~9 GB, shared cache with the ``bird_sql`` server dir), or point
