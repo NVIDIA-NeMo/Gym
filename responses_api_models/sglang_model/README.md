@@ -37,9 +37,12 @@ See `configs/sglang_model_for_training.yaml`.
 - `trust_remote_code`: forwarded to the local tokenizer loader; defaults to
   `false`.
 
-The leaf package pins `transformers==5.12.1`, matching NeMo RL's SGLang worker
-environment. The example config leaves `context_length` mandatory (`???`) so a
-mismatched server limit cannot be selected silently.
+The component lock pins `transformers==5.17.0` under Gym's shared dependency
+policy. Use the tokenizer and chat template selected for training: the adapter
+sends their exact integer token IDs to SGLang's `/generate` endpoint. The
+serving environment can use its own Transformers version. The example config
+leaves `context_length` mandatory (`???`) so a mismatched server limit cannot
+be selected silently.
 
 ## CPU-only tests
 
