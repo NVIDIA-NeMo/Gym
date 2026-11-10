@@ -50,7 +50,7 @@ When one `gym eval run` collects rollouts for several agents with aggregation en
 | `failed_rollouts` | Rollouts settled by a failure no resume retries, or by an intentional omission |
 | `completed_at` | UTC time the file was written, in ISO 8601 |
 | `aggregation_status` | `complete`, or `error` when `/aggregate_metrics` failed; the entry then carries the error |
-| `aggregate` | The entry `<output>_aggregate_metrics.json` gives the agent |
+| `aggregate` | The entry `<output>_aggregate_metrics.json` gives the agent, apart from `_ng_run_health_metrics`, a run-level health summary added to the first run-wide entry after the run |
 
 When an agent is complete:
 
