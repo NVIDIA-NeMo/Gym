@@ -5,16 +5,13 @@
 """Prepare hash-bound AgentVista rows without any tool/model calls."""
 
 import os
-import sys
 from pathlib import Path
 
 
 def prepare(output_fpath: str | Path | None = None, **kwargs: object) -> Path:
-    root = Path(os.environ["AGENTVISTA_ROOT"]).resolve(strict=True)
-    sys.path.insert(0, str(root))
     import json
 
-    from agentvista_harness.data import dataset_rows, inventory
+    from responses_api_agents.agentvista_agent.runtime.data import dataset_rows, inventory
 
     tasks = inventory(
         os.environ["AGENTVISTA_DATASET"],

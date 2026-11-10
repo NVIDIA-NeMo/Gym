@@ -6,7 +6,7 @@
 # 8969ea961206540749eedd6dcfe1f86b42418651cb2b1482bf7d401c45e17da9
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Gym run endpoint: own one native AgentVista lifecycle and direct OpenCode process."""
+"""Gym run endpoint for isolated original-harness and OpenCode AgentVista episodes."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ import signal
 import sys
 import time
 from pathlib import Path
+from typing import Literal
 from uuid import uuid4
 
 from fastapi import HTTPException
@@ -51,6 +52,9 @@ class AgentVistaConfig(BaseResponsesAPIAgentConfig):
     model_name: str
     output_root: str
     worker_python: str | None = None
+    harness: Literal["opencode", "default"] = "opencode"
+    default_max_turns: int = Field(default=16, ge=1)
+    default_max_images: int = Field(default=16, ge=1)
     command: str = "opencode"
     opencode_version: str = "1.17.11"
     concurrency: int = Field(default=1, ge=1)
@@ -93,8 +97,8 @@ class AgentVistaAgent(SimpleResponsesAPIAgent):
         super().model_post_init(context)
         self._semaphore = asyncio.Semaphore(self.config.concurrency)
         source = Path(self.config.source_root).resolve(strict=True)
-        if not (source / "agentvista_harness/worker.py").is_file():
-            raise ValueError(f"Missing AgentVista OpenCode implementation at {source}")
+        if not (source / "infer.py").is_file():
+            raise ValueError(f"Missing upstream AgentVista source at {source}")
         # The AgentVista checkout stays outside Gym's temporary checkout/venv.
         sys.path.insert(0, str(source))
 
@@ -107,7 +111,7 @@ class AgentVistaAgent(SimpleResponsesAPIAgent):
         if not rollout_id:
             raise HTTPException(400, "AgentVista Bench requires _ng_rollout_id; enable Gym observability")
         identity = hashlib.sha256(rollout_id.encode()).hexdigest()
-        from agentvista_harness import HARNESS_VERSION
+        from responses_api_agents.agentvista_agent.runtime import HARNESS_VERSION
 
         requested_version = body.verifier_metadata.get("harness_version")
         if requested_version and requested_version != HARNESS_VERSION:
@@ -169,14 +173,35 @@ class AgentVistaAgent(SimpleResponsesAPIAgent):
             config_path = output / "worker.json"
             config_path.write_text(json.dumps(config, indent=2))
             env = dict(os.environ)
-            env["PYTHONPATH"] = str(Path(self.config.source_root).resolve())
+            gym_root = str(Path(__file__).resolve().parents[2])
+            env["PYTHONPATH"] = gym_root + os.pathsep + str(Path(self.config.source_root).resolve())
+            env["AGENTVISTA_ROOT"] = str(Path(self.config.source_root).resolve())
+            env["PYTHONDONTWRITEBYTECODE"] = "1"
+            for key, folder in {
+                "HOME": "home",
+                "XDG_CACHE_HOME": "cache",
+                "XDG_CONFIG_HOME": "config",
+                "XDG_DATA_HOME": "data",
+                "XDG_STATE_HOME": "state",
+                "HF_HOME": "huggingface",
+                "MPLCONFIGDIR": "matplotlib",
+                "IPYTHONDIR": "ipython",
+                "JUPYTER_DATA_DIR": "jupyter-data",
+                "JUPYTER_RUNTIME_DIR": "jupyter-runtime",
+                "TMPDIR": "tmp",
+            }.items():
+                directory = output / "storage" / folder
+                directory.mkdir(parents=True, exist_ok=True)
+                env[key] = str(directory)
             process = None
             with (output / "worker.log").open("w") as log:
                 try:
                     process = await asyncio.create_subprocess_exec(
                         self.config.worker_python or sys.executable,
                         "-m",
-                        "agentvista_harness.worker",
+                        "responses_api_agents.agentvista_agent.runtime.default_worker"
+                        if self.config.harness == "default"
+                        else "responses_api_agents.agentvista_agent.runtime.worker",
                         str(config_path),
                         env=env,
                         stdout=log,
@@ -199,14 +224,14 @@ class AgentVistaAgent(SimpleResponsesAPIAgent):
             return self._response(body, json.loads(result_path.read_text()))
 
     def _response(self, body: AgentVistaRunRequest, result: dict) -> AgentVistaVerifyResponse:
-        from agentvista_harness.transcript import response_items
+        from responses_api_agents.agentvista_agent.runtime.transcript import response_items
 
         masked = result.get("mask_sample", True)
         reward = 0.0 if masked else result["verify"]["reward"]
         # Earlier episodes may have a projected trajectory plus native events.
         # Always expose the original OpenCode events, without browser-use fields.
         native = result.get("native_trajectory", result.get("trajectory", []))
-        items = response_items(native)
+        items = result.get("response_items") or response_items(native)
         if not items:
             items = [
                 {
@@ -249,6 +274,7 @@ class AgentVistaAgent(SimpleResponsesAPIAgent):
                 **body.model_dump(),
                 "response": response,
                 "reward": reward,
+                "harness": self.config.harness,
                 "mask_sample": masked,
                 "failure_kind": result.get("failure_kind"),
                 "failure_reason": result.get("error") or result.get("execution_error"),

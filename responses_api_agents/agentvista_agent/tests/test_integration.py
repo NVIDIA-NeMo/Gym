@@ -131,7 +131,7 @@ def test_training_terminal_is_witnessed_and_absence_masks(agent, tmp_path):
     object.__setattr__(
         training,
         "config",
-        SimpleNamespace(training_capture_root=str(tmp_path), model_name="fixture"),
+        SimpleNamespace(training_capture_root=str(tmp_path), model_name="fixture", harness="opencode"),
     )
     journal = tmp_path / (hashlib.sha256(b"repeat-0").hexdigest() + ".jsonl")
     journal.write_text(

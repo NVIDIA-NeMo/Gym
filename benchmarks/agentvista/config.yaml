@@ -15,7 +15,10 @@ agentvista_agent:
       model_name: ${policy_model_name}
       output_root: ${agentvista_output_root}
       worker_python: ${oc.env:AGENTVISTA_WORKER_PYTHON}
-      command: ${oc.env:AGENTVISTA_OPENCODE}
+      harness: ${oc.select:agentvista_harness,opencode}
+      default_max_turns: ${oc.select:agentvista_default_max_turns,16}
+      default_max_images: ${oc.select:agentvista_default_max_images,16}
+      command: ${oc.env:AGENTVISTA_OPENCODE,opencode}
       opencode_version: 1.17.11
       concurrency: ${oc.select:agentvista_concurrency,1}
       max_steps: ${oc.select:agentvista_max_steps,150}

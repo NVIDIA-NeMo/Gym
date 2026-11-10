@@ -1,0 +1,33 @@
+{
+  "repository": "https://github.com/hkust-nlp/AgentVista.git",
+  "revision": "a3385d51d0c3dd0c8501350a08d52065e3e94ab4",
+  "note": "Original source is fetched as a runtime dependency, not relicensed or vendored into Gym. All custom integration code is in this PR.",
+  "files": {
+    "configs/__init__.py": "31b557cbc6c6bb4c8a7a1ce076067f99f5a5606bc875bd5d6362f2ef99dfb8f1",
+    "configs/prompt_loader.py": "b5f7d707b47a5970792b6e005b31943d0bdac67ecf649f1000dd18e8adee079c",
+    "configs/tool_configs.yaml": "aecb1f3516b6f12279179dbb4ffad0ae6093bf1be82d03460bc82d43238ab800",
+    "engine/__init__.py": "9dcf8a73dd34eac720ac6131d5ad0b08e3dcf4a9f08e810915a99018a2ed2840",
+    "engine/api/__init__.py": "0931a7cc110c96110bc5371d1317a28ec11915751e3c0c10076f28796b41814a",
+    "engine/api/api_caller.py": "e5c0a488a1517e7e3c387d269a00a1ff07fbb16f1593b376014bc5ebc21982a3",
+    "engine/api/api_model_caller.py": "b5b7245fdfefeed81ea3cbf4dde8ec15ad13007e29298d95edc62de50998de24",
+    "engine/api/api_processors.py": "d15709773034c65d21c8024f8e5d03373935df23c230afc1be36ba671e3d040d",
+    "engine/api/api_tool_handler.py": "aaea0093a620919e8aaea14b832ba62ceb0712cb3684a9fb7df5499d150f3b70",
+    "infer.py": "28bf7ebf8b8e6a491814f5d96d394193530b3cfa958efc7a04fce73355a5c3e0",
+    "prompts/inference_prompts.yaml": "be4ff247a67a91f44147d8cfa15221a8972b2ec4680a2edc286c1252686751fc",
+    "search/__init__.py": "dfd5f312c73e6fd7d8e5d06d2c1447e1df015b3ab7d21f2be741509fbe820c06",
+    "search/tree.py": "0d1f1aa4b53f257c9756aca82248a5ede644b55519d7e0bb81729d0eb5917b70",
+    "tools/__init__.py": "d0ddf029136dcbbd3afd4b1ea4a05efcb86fe80fdc7c3486cbe417ac5639cfd2",
+    "tools/base.py": "635407c0627826c72edf8d748136d23893f3f4c4b22831bec4cafe8ceae12203",
+    "tools/code_interpreter.py": "a9a76c4a6cdf00d852ec72d4453b401ea6b061ed85211eee5478e4e55bd8fe9a",
+    "tools/image_search.py": "993c8aa3a6b1fe579d3afd88d6dd71a5a310fe7871404909e6a62ab009b02af9",
+    "tools/tool_registry.py": "9075a620c21644505eede4f0d24816b9f0ccfbda9d60c9b200e539b630ae1ea1",
+    "tools/visit.py": "b6040f52fd521003fa15d9b0809c1f22797d0f6a57c2c16deaf73edf3d44689a",
+    "tools/web_search.py": "7acae0e5ef732f1d4abccc8d571a654555cf681086ad7bf702cf15edccb5e85a",
+    "utils/__init__.py": "ed0dc1c725c44e4b77b66e6dae1b8b4f22fc3e810238ad1088afb42945404764",
+    "utils/context_utils.py": "84a03a27299bfa138b0b345e5bc915a24800c9c4933d3b61efdccfbd511e91fe",
+    "utils/function_call_parser.py": "c315b7d3c2bd4d77065037ca3bf3c0c0f4e998a7eeaf771c7ce154525fa0c789",
+    "utils/general_qa_tool.py": "1aea9f28fd4a53e40f3b48f0058b5ff8260c31518f90476c924005c724faea79",
+    "utils/result_utils.py": "2991aa23b22565999ee46de19b0222084d786c653dbe5fd38e98399615f999a6",
+    "utils/tool_schema_builder.py": "36ce98479e73b9d09cc6c1953cbe3275dbeab5798ad85d0bc0ff28152362e534"
+  }
+}

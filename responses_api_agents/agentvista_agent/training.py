@@ -11,6 +11,7 @@
 import hashlib
 import json
 from pathlib import Path
+from typing import Literal
 
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
@@ -18,6 +19,7 @@ from responses_api_agents.agentvista_agent.app import AgentVistaAgent, AgentVist
 
 
 class AgentVistaTrainingConfig(AgentVistaConfig):
+    harness: Literal["opencode"] = "opencode"
     training_capture_root: str
 
 
@@ -48,7 +50,7 @@ class AgentVistaTrainingAgent(AgentVistaAgent):
         return await super()._episode(body, output, fingerprint, rollout_id)
 
     def _response(self, body, result):
-        from agentvista_harness.training import read_calls, terminal_response_id
+        from responses_api_agents.agentvista_agent.runtime.training import read_calls, terminal_response_id
 
         response = super()._response(body, result)
         rollout_id = maybe_rollout_id_from_run_body(body)
