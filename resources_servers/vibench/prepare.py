@@ -19,9 +19,13 @@ that artifact's test plans, so the app is built once and graded N times -- emitt
 per test plan instead would rebuild the same app for every plan.
 
     python resources_servers/vibench/prepare.py \
-        --vibench-root ~/projects/vibench/repo \
+        --vibench-root ~/vibench \
         --output resources_servers/vibench/data/example.jsonl \
-        --limit 5
+        --apps notes quiz barber wedding market_place
+
+``--vibench-root`` is the vibench-public checkout. Since ViBench 2.0 the 1.0 apps live under
+``v1/prds/`` and ``_harness/`` stays at the root; a checkout from before that move has
+``prds/`` at the root. Row paths are relative to the checkout root either way.
 
 P0 covers ``mvp`` artifacts only. ``--artifacts`` accepts feature artifacts and resolves
 their PRD chain and test plans, but the environment cannot stage a starting codebase into
@@ -63,10 +67,25 @@ sys.stdout.write(tpl.render(
 """
 
 
+# Where the ViBench 1.0 apps live, relative to the checkout root: under v1/ since ViBench 2.0,
+# at the root before it.
+PRDS_DIRS = (Path("v1") / "prds", Path("prds"))
+
+
+def prds_dir(root: Path) -> Optional[Path]:
+    """The checkout's ViBench 1.0 app directory, or None if it has none."""
+    return next((root / d for d in PRDS_DIRS if (root / d).is_dir()), None)
+
+
 def vibench_python(root: Path) -> str:
-    """ViBench's own interpreter, which has jinja2; fall back to this one."""
-    candidate = root / ".venv" / "bin" / "python"
-    return str(candidate) if candidate.exists() else sys.executable
+    """ViBench's own interpreter, which has jinja2; fall back to this one.
+
+    The 1.0 project (and so its venv) lives in v1/ since ViBench 2.0, at the root before it.
+    """
+    for candidate in (root / "v1" / ".venv" / "bin" / "python", root / ".venv" / "bin" / "python"):
+        if candidate.exists():
+            return str(candidate)
+    return sys.executable
 
 
 def render_task_prompt(root: Path, prd_text: str, max_iterations: int, artifact: str) -> Optional[str]:
@@ -130,15 +149,16 @@ def discover_artifacts(app_dir: Path) -> List[str]:
 
 def build_row(
     root: Path,
+    prds: Path,
     app: str,
     artifact: str,
     system_prompt: Optional[str],
     max_iterations: int,
 ) -> Optional[Dict]:
-    app_dir = root / "prds" / app
+    app_dir = prds / app
 
-    prds = prd_chain(app_dir, artifact)
-    if not all(p.exists() for p in prds):
+    prd_files = prd_chain(app_dir, artifact)
+    if not all(p.exists() for p in prd_files):
         return None
 
     test_dir = artifact_test_dir(app_dir, artifact)
@@ -155,7 +175,7 @@ def build_row(
     test_assets = app_dir / "test_assets"
     test_assets_dir = str(test_assets.relative_to(root)) if test_assets.is_dir() else None
 
-    prd_text = "\n\n".join(pth.read_text() for pth in prds)
+    prd_text = "\n\n".join(pth.read_text() for pth in prd_files)
     prompt = render_task_prompt(root, prd_text, max_iterations, artifact)
     if prompt is None:
         return None
@@ -167,7 +187,7 @@ def build_row(
     return {
         "app": app,
         "artifact": artifact,
-        "prd_files": [str(p.relative_to(root)) for p in prds],
+        "prd_files": [str(p.relative_to(root)) for p in prd_files],
         "test_plans": [str(p.relative_to(root)) for p in test_plans],
         "asset_dirs": asset_dirs,
         "test_assets_dir": test_assets_dir,
@@ -177,9 +197,9 @@ def build_row(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--vibench-root", required=True, help="Path to a ViBench checkout")
+    parser.add_argument("--vibench-root", required=True, help="Path to a vibench-public checkout")
     parser.add_argument("--output", required=True, help="Destination .jsonl")
-    parser.add_argument("--apps", nargs="*", default=None, help="App names (default: every app in prds/)")
+    parser.add_argument("--apps", nargs="*", default=None, help="App names (default: every ViBench 1.0 app)")
     parser.add_argument("--artifacts", nargs="*", default=["mvp"], help="Artifacts per app (default: mvp)")
     parser.add_argument("--system-prompt", default=None)
     parser.add_argument("--max-iterations", type=int, default=300, help="Value passed to ViBench's prompt")
@@ -187,19 +207,19 @@ def main() -> None:
     args = parser.parse_args()
 
     root = Path(args.vibench_root).expanduser().resolve()
-    prds_dir = root / "prds"
-    if not prds_dir.is_dir():
-        raise SystemExit(f"No prds/ directory under {root}")
+    prds = prds_dir(root)
+    if prds is None:
+        raise SystemExit(f"No v1/prds/ or prds/ directory under {root}")
 
-    apps = args.apps or sorted(d.name for d in prds_dir.iterdir() if d.is_dir())
+    apps = args.apps or sorted(d.name for d in prds.iterdir() if d.is_dir())
 
     rows: List[Dict] = []
     for app in apps:
-        available = discover_artifacts(prds_dir / app)
+        available = discover_artifacts(prds / app)
         for artifact in args.artifacts:
             if artifact.split("-on_")[0] not in available:
                 continue
-            row = build_row(root, app, artifact, args.system_prompt, args.max_iterations)
+            row = build_row(root, prds, app, artifact, args.system_prompt, args.max_iterations)
             if row is not None:
                 rows.append(row)
 

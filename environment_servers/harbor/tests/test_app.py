@@ -13,6 +13,7 @@ import subprocess
 import tarfile
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -24,6 +25,7 @@ from yarl import URL
 
 import environment_servers.harbor.overlay as overlay
 import nemo_gym.sandbox.providers.base as sandbox_base
+import nemo_gym.server_runtime.base_environment_server as base_environment_server
 from environment_servers.harbor.app import (
     HarborEnvironmentServer,
     HarborEnvironmentServerConfig,
@@ -1457,10 +1459,32 @@ class TestAgentStage:
         assert dumped["ng_agent_observations"]["source"] == "harness"
 
     async def test_episode_deadline_stops_the_sandbox(self, tmp_path, monkeypatch):
-        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, default_episode_timeout_seconds=0.1)
-        server.server_client.slow_path = "/ng-rollout/r1/v1/responses"
+        # The episode's own deadline expires while the harness turn is running. A short deadline also covered the
+        # task snapshot and the seed, and on a slow runner fired before the turn was reached, so the turn expires
+        # the real deadline itself instead.
+        bound = 3600.0
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, default_episode_timeout_seconds=bound)
+        deadlines = []
 
-        response = await run_episode(server, task)
+        def recording_timeout(delay):
+            timeout = asyncio.timeout(delay)
+            if delay == bound:
+                deadlines.append(timeout)
+            return timeout
+
+        monkeypatch.setattr(
+            base_environment_server, "asyncio", SimpleNamespace(**{**vars(asyncio), "timeout": recording_timeout})
+        )
+
+        def expire_the_episode_deadline():
+            (deadline,) = deadlines
+            deadline.reschedule(asyncio.get_running_loop().time())
+
+        server.server_client.turn_hooks = [expire_the_episode_deadline]
+        server.server_client.slow_path = "/ng-rollout/r1/v1/responses"
+        server.server_client.slow_seconds = bound
+
+        response = await asyncio.wait_for(run_episode(server, task), 10)
 
         assert response.failure is not None and "timed out" in response.failure.failure_reason
         assert not response.failure.terminal

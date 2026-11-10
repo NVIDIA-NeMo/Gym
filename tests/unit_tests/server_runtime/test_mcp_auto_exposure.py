@@ -29,7 +29,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager
 from types import SimpleNamespace
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any, Optional, get_type_hints
 from unittest.mock import MagicMock
 
 import pytest
@@ -38,7 +38,7 @@ from fastapi.responses import PlainTextResponse
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from omegaconf import DictConfig
-from pydantic import BaseModel
+from pydantic import BaseModel, BeforeValidator
 from starlette.routing import Mount
 
 
@@ -59,11 +59,14 @@ from nemo_gym.server_runtime.base_resources_server import (  # noqa: E402
 from nemo_gym.server_runtime.base_server import SimpleServer  # noqa: E402
 from nemo_gym.server_runtime.mcp_auto_exposure import (  # noqa: E402
     TOKEN_HEADER,
+    _to_result,
     bind_route,
     install_auto_exposure,
     maybe_auto_expose,
 )
 from nemo_gym.server_runtime.request_handling.disconnect import ClientDisconnectCancellationMiddleware  # noqa: E402
+from nemo_gym.server_runtime.request_handling.exception_handling import ExceptionHandlingMiddleware  # noqa: E402
+from nemo_gym.server_runtime.request_handling.session_id import SessionIDMiddleware  # noqa: E402
 
 
 RPC_HEADERS = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
@@ -71,6 +74,16 @@ RPC_HEADERS = {"Content-Type": "application/json", "Accept": "application/json, 
 
 class EchoBody(BaseModel):
     value: str
+
+
+class CustomRequest(Request):
+    pass
+
+
+def _reject_empty_echo(value: dict) -> dict:
+    if not value.get("value"):
+        raise ValueError("value must not be empty")
+    return value
 
 
 class OtherBody(BaseModel):
@@ -446,6 +459,54 @@ def test_non_json_2xx_response_passes_through_as_text():
         assert r["content"][0]["text"] == "plain hello"
 
 
+def test_tool_output_images_become_image_content_after_the_text():
+    result = _to_result(
+        {
+            "ok": True,
+            "tool_output_images": [
+                {
+                    "image_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+                    "label": "Image 2",
+                },
+                {"image_url": "data:image/jpeg;base64,/9j/4AAQ"},
+            ],
+        }
+    )
+
+    # OpenCode replaces the content with structured content when it is present, which would drop the images.
+    assert result.structuredContent is None
+    assert [content.model_dump(exclude_none=True) for content in result.content] == [
+        {"type": "text", "text": '{"ok":true}'},
+        {"type": "text", "text": "Image 2"},
+        {
+            "type": "image",
+            "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+            "mimeType": "image/png",
+        },
+        {"type": "image", "data": "/9j/4AAQ", "mimeType": "image/jpeg"},
+    ]
+
+
+def test_tool_output_images_keep_the_structured_content_that_an_output_schema_requires():
+    payload = {
+        "ok": True,
+        "tool_output_images": [
+            {
+                "image_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+            }
+        ],
+    }
+
+    result = _to_result(payload, output_schema={"type": "object"})
+
+    assert result.structuredContent == {"ok": True}
+    assert [content.type for content in result.content] == ["text", "image"]
+
+
+def test_a_result_without_images_keeps_its_structured_content():
+    assert _to_result({"ok": True}).structuredContent == {"ok": True}
+
+
 def test_sequential_calls_keep_sessions_isolated_and_ordered():
     server = _server()
     app = server.setup_webserver()
@@ -650,8 +711,9 @@ def test_accepts_the_exception_and_cancellation_middleware():
     app = server.setup_webserver()
     server.setup_exception_middleware(app)
     server.setup_cancellation_middleware(app)
-    installed = [m.kwargs.get("dispatch", m.cls) for m in app.user_middleware]
-    assert any(getattr(m, "__name__", "") == "exception_handling_middleware" for m in installed)
+    installed = [m.cls for m in app.user_middleware]
+    assert ExceptionHandlingMiddleware in installed
+    assert SessionIDMiddleware in installed
     assert ClientDisconnectCancellationMiddleware in installed
     install_auto_exposure(server, app)
 
@@ -661,12 +723,6 @@ def test_middleware_marked_as_skipped_on_direct_dispatch_is_accepted_wherever_it
     # Moving it to another module keeps it accepted.
     server = _server()
     app = server.setup_webserver()
-
-    async def relocated(request, call_next):
-        return await call_next(request)
-
-    relocated.skipped_on_direct_mcp_dispatch = True
-    app.middleware("http")(relocated)
 
     class RelocatedMiddleware:
         skipped_on_direct_mcp_dispatch = True
@@ -906,6 +962,77 @@ def test_silently_wrong_shapes_are_classified_not_degraded():
 # ==================================================================================================
 # The detector's annotation resolution (regression: factory-set __signature__ must win)
 # ==================================================================================================
+
+
+@pytest.mark.parametrize("deferred", [False, True])
+def test_annotated_tool_body_is_refused_without_discarding_validation(deferred: bool) -> None:
+    server = _server(Shapes)
+    app = server.setup_webserver()
+    called = []
+
+    async def validated(body: Annotated[EchoBody, BeforeValidator(_reject_empty_echo)]):
+        called.append(body.value)
+        return {"value": body.value}
+
+    if not deferred:
+        validated.__annotations__ = get_type_hints(validated, include_extras=True)
+    app.post("/validated")(validated)
+    with TestClient(app) as client:
+        assert client.post("/validated", json={"value": ""}).status_code == 422
+        assert called == []
+        assert client.post("/validated", json={"value": "ok"}).json() == {"value": "ok"}
+
+    # Direct dispatch cannot run parameter-level validators, so it must refuse this tool at startup.
+    with pytest.raises(ValueError, match="validated.*cannot be dispatched directly"):
+        maybe_auto_expose(server, app)
+
+
+@pytest.mark.parametrize("deferred", [False, True])
+@pytest.mark.parametrize(
+    "annotation",
+    ["Request", "Annotated[Request, 'caller']", "CustomRequest", "Annotated[CustomRequest, 'caller']"],
+)
+def test_mcp_tool_injects_request_like_http(annotation: str, deferred: bool) -> None:
+    server = _server(Shapes)
+    app = server.setup_webserver()
+
+    async def read_request(body: EchoBody, request: Request):
+        return {"session": request.session[SESSION_ID_KEY], "value": body.value, "raw": await request.json()}
+
+    read_request.__annotations__["request"] = annotation
+    if not deferred:
+        read_request.__annotations__ = get_type_hints(read_request, include_extras=True)
+    app.post("/read_request")(read_request)
+    maybe_auto_expose(server, app)
+    with TestClient(app) as client:
+        token = _seed(client)
+        _handshake(client)
+        arguments = {"value": "ok"}
+        plain = client.post("/read_request", json=arguments)
+        assert plain.status_code == 200, plain.text
+        assert plain.json()["session"]
+        assert plain.json()["value"] == "ok"
+        assert plain.json()["raw"] == arguments
+        assert _payload(_call(client, "read_request", arguments, token)) == plain.json()
+
+
+@pytest.mark.parametrize("deferred", [False, True])
+def test_annotated_tool_response_is_refused_without_discarding_filtering(deferred: bool) -> None:
+    server = _server(Shapes)
+    app = server.setup_webserver()
+
+    async def annotated_response(body: EchoBody) -> Annotated[PublicView, "public"]:
+        return {"shown": body.value, "secret": "hidden"}  # pragma: allowlist secret
+
+    if not deferred:
+        annotated_response.__annotations__ = get_type_hints(annotated_response, include_extras=True)
+    app.post("/annotated_response")(annotated_response)
+    with TestClient(app) as client:
+        assert client.post("/annotated_response", json={"value": "ok"}).json() == {"shown": "ok"}
+
+    # Treat return metadata like body metadata: do not bypass FastAPI's validation/serialization rules.
+    with pytest.raises(ValueError, match="Annotated response models"):
+        maybe_auto_expose(server, app)
 
 
 def test_bind_route_honors_factory_signature_over_annotations():

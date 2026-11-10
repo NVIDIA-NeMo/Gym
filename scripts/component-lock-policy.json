@@ -82,6 +82,11 @@
       "protobuf==6.33.6"
     ]
   },
+  "responses_api_agents/agentic_mme_agent": {
+    "override-dependencies": [
+      "opencv-python-headless>=4.10"
+    ]
+  },
   "responses_api_agents/harbor_agent": {
     "override-dependencies": [
       "pathspec"
@@ -121,7 +126,9 @@
       "alibabacloud-ecs20140526",
       "alibabacloud-tea-openapi",
       "alibabacloud-tea-util",
-      "volcengine-python-sdk"
+      "volcengine-python-sdk",
+      "paddleocr",
+      "paddlepaddle"
     ],
     "override-dependencies": [
       "grpcio-status==1.71.2",
