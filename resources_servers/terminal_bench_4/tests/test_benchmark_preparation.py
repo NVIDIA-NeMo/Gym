@@ -91,7 +91,7 @@ def test_explicit_names_and_invalid_selections(tmp_path, monkeypatch):
 )
 def test_benchmark_limits_resolve_defaults_and_client_overrides(overrides, steps, timeout):
     root = Path(preparation.__file__).resolve().parents[2]
-    config = OmegaConf.merge(OmegaConf.load(root / "benchmarks/terminal_bench_4/miniswe_run.yaml"), overrides)
+    config = OmegaConf.merge(OmegaConf.load(root / "benchmarks/terminal_bench_4/miniswe_legacy_agent.yaml"), overrides)
     agent = config.terminal_bench_4_miniswe.responses_api_agents.miniswe_sandboxed_agent
     harness = agent.harness
     assert harness.step_limit == steps
@@ -109,7 +109,7 @@ def test_benchmark_limits_resolve_defaults_and_client_overrides(overrides, steps
     ],
 )
 def test_agent_artifacts_follow_run_directory_unless_overridden(overrides, expected):
-    config = OmegaConf.merge(OmegaConf.load(preparation.BENCHMARK_DIR / "miniswe_run.yaml"), overrides)
+    config = OmegaConf.merge(OmegaConf.load(preparation.BENCHMARK_DIR / "miniswe_legacy_agent.yaml"), overrides)
     assert config.terminal_bench_4_miniswe.responses_api_agents.miniswe_sandboxed_agent.artifacts_dir == expected
 
 

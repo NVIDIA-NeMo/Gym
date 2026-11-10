@@ -2,7 +2,7 @@
 
 > [!WARNING]
 > **The legacy `/run` path is deprecated.** With `resources_server` set, as in the benchmark presets
-> (for example [`benchmarks/terminal_bench_4/miniswe_run.yaml`](../../benchmarks/terminal_bench_4/miniswe_run.yaml)),
+> (for example [`benchmarks/terminal_bench_4/miniswe_legacy_agent.yaml`](../../benchmarks/terminal_bench_4/miniswe_legacy_agent.yaml)),
 > this agent runs each episode through its own `/run` behind a `legacy_agent` environment server.
 > That path will be removed after the environment-server migration, and the agent logs a deprecation
 > warning when it starts with a `resources_server`. Do not build new benchmarks, agents or configs on it.
@@ -15,7 +15,7 @@
 
 Run pinned mini-SWE 2.4.6 directly in a resource-owned Linux sandbox, using its
 native CLI, `DefaultAgent`, `LocalEnvironment`, and `litellm_response` model.
-The legacy `/run` path uses [the TB4 `/run` profile](../../benchmarks/terminal_bench_4/miniswe_run.yaml) with
+The legacy `/run` path uses [the TB4 `/run` profile](../../benchmarks/terminal_bench_4/miniswe_legacy_agent.yaml) with
 [TB4 resources](../../resources_servers/terminal_bench_4/README.md).
 
 `harness.py` supplies execution and trajectory conversion; it imports no benchmark

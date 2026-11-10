@@ -9,7 +9,7 @@
   adapter, and task-local MCP CLI. It runs the task folders of
   [`environments/harbor/terminal_bench_4`](../../environments/harbor/terminal_bench_4/README.md)
   through the Harbor environment server (`harbor_target` in `miniswe.yaml`).
-- `terminal_bench_4/miniswe_run` (deprecated): the same harness over the legacy
+- `terminal_bench_4/miniswe_legacy_agent` (deprecated): the same harness over the legacy
   `/run` relay of the TB4 resources server. It stays for comparison until that
   server is retired. The sections from "Failure scoring" to "Infra validation"
   describe this path.
@@ -138,8 +138,8 @@ and `++tb4_agent_max_timeout_sec` apply to mini-SWE only.
 ### The `/run` profile
 
 ```sh
-gym eval prepare --benchmark terminal_bench_4/miniswe_run
-gym eval run --benchmark terminal_bench_4/miniswe_run \
+gym eval prepare --benchmark terminal_bench_4/miniswe_legacy_agent
+gym eval run --benchmark terminal_bench_4/miniswe_legacy_agent \
   --model-type vllm_model --model-url http://MODEL_HOST:8000/v1 \
   --model MODEL_NAME --output results/tb4/rollouts.jsonl --concurrency 8 \
   ++use_absolute_ip=true ++tb4_split_sandbox_endpoints=true
@@ -152,7 +152,7 @@ request and returns the result; it does not manage task environments.
 Select tasks during preparation:
 
 ```sh
-gym eval prepare --benchmark terminal_bench_4/miniswe_run \
+gym eval prepare --benchmark terminal_bench_4/miniswe_legacy_agent \
   '++prepare_script_args.task_names=[formal-crypto,interleaved-vigenere,ks-solver-cpp]'
 ```
 

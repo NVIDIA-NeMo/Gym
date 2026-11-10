@@ -112,7 +112,7 @@ async def main(args):
     config.tb4_max_steps = args.steps
     agent_name = "terminal_bench_4_" + args.harness
     # The legacy /run preset: this runner exercises the TB4 resources server's own sessions.
-    profile = OmegaConf.load(root / f"{args.harness}_run.yaml")
+    profile = OmegaConf.load(root / f"{args.harness}_legacy_agent.yaml")
     del profile["config_paths"]
     config = OmegaConf.merge(config, profile)
     ports = {name: free_port() for name in ["terminal_bench_4", agent_name, "policy_model"]}
