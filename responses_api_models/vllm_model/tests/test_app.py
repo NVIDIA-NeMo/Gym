@@ -17,6 +17,7 @@ import hashlib
 import json
 import logging
 import os
+import socket
 import time
 from contextlib import nullcontext
 from copy import deepcopy
@@ -24,7 +25,7 @@ from types import SimpleNamespace
 from typing import Any, Union
 from unittest.mock import AsyncMock, MagicMock
 
-from aiohttp import ClientResponseError, RequestInfo
+from aiohttp import ClientConnectorError, ClientResponseError, ClientSession, RequestInfo
 from fastapi import HTTPException, Response
 from fastapi.testclient import TestClient
 from multidict import CIMultiDict, CIMultiDictProxy
@@ -72,10 +73,12 @@ from nemo_gym.core import (
     rollout_context,
 )
 from nemo_gym.models import (
+    PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
     ChatCompletionsConverter,
     PolicyModelParticipant,
     VLLMWorkerCaptureHandler,
     generation_cut_requester,
+    start_model_execution,
 )
 from nemo_gym.models.token_capture import (
     CaptureContext,
@@ -106,6 +109,7 @@ from responses_api_models.vllm_model.app import (
     VLLMModel,
     VLLMModelConfig,
     _append_transport_io,
+    _ContextErrorMiddleware,
     _redacted_error_repr,
     _transport_images,
     _transport_log_context,
@@ -1657,6 +1661,31 @@ class TestApp:
             picked = {server._resolve_client(self._request_for_session(f"fresh-{i}")) for i in range(32)}
 
         assert len(picked) == 1
+
+    def test_endpoint_selection_keys_on_the_session_key(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch)
+        server._clients = [MagicMock(spec=NeMoGymAsyncOpenAI) for _ in range(4)]
+        monkeypatch.setattr("responses_api_models.vllm_model.app.current_session_key", lambda: "the-session")
+
+        picked = {server._resolve_client(self._request_for_session(f"fresh-{i}")) for i in range(32)}
+
+        assert picked == {server._clients[self._hashed_client_idx("the-session", 4)]}
+        assert list(server._session_id_to_client) == ["the-session"]
+
+    def test_the_header_and_the_endpoint_selection_name_the_same_session(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch)
+        server._clients = [MagicMock(spec=NeMoGymAsyncOpenAI) for _ in range(4)]
+        upstream = NeMoGymAsyncOpenAI(
+            api_key="abc", base_url="https://example.test/v1", session_key_headers=["X-Session-Id"]
+        )
+
+        for capture_key in ("task-7-0", "task-7-0-a2"):
+            with rollout_context(capture_key):
+                header = upstream._session_headers()["X-Session-Id"]
+                server._resolve_client(self._request_for_session("a-cookie-session"))
+
+            assert header == capture_key
+            assert capture_key in server._session_id_to_client
 
     def test_rollouts_spread_across_endpoints(self, monkeypatch: MonkeyPatch) -> None:
         server = self._setup_server(monkeypatch)
@@ -4914,6 +4943,33 @@ class TestReasoningFieldConfig:
             ("reasoning_content", {"reasoning_content"}),
         ],
     )
+    @mark.parametrize("content", [None, "visible answer", [{"type": "text", "text": "visible answer"}]])
+    def test_explicit_harness_reasoning_reaches_selected_backend_fields(
+        self, reasoning_field: str, expected_keys: set[str], content: Any
+    ) -> None:
+        model = _make_reasoning_history_model(preserve_content=False, reasoning_field=reasoning_field)
+        body = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(
+            {
+                "model": "caller-model",
+                "messages": [{"role": "assistant", "content": content, "reasoning_content": "prior reasoning"}],
+            }
+        )
+        assistant = model._preprocess_chat_completion_create_params(MagicMock(), body.model_dump(exclude_unset=True))[
+            "messages"
+        ][0]
+
+        assert assistant["content"] == content
+        assert {key for key in ("reasoning", "reasoning_content") if key in assistant} == expected_keys
+        assert all(assistant[key] == "prior reasoning" for key in expected_keys)
+
+    @mark.parametrize(
+        "reasoning_field,expected_keys",
+        [
+            ("both", {"reasoning", "reasoning_content"}),
+            ("reasoning", {"reasoning"}),
+            ("reasoning_content", {"reasoning_content"}),
+        ],
+    )
     @mark.parametrize(
         "content",
         ["<think>reason</think>act", [{"type": "text", "text": "<think>reason</think>act"}]],
@@ -7127,6 +7183,37 @@ class TestEndpointFile:
         server = self._make_server(tmp_path, endpoint_file=None, base_url=static_urls)
         assert [client.max_connection_retries for client in server._clients] == [None, None]
 
+    def test_connection_retry_timeout_reaches_every_client(self, tmp_path) -> None:
+        static_urls = ["http://engine-0:8712/v1", "http://engine-1:8712/v1"]
+        server = self._make_server(tmp_path, endpoint_file=None, base_url=static_urls)
+        assert [client.connection_retry_timeout_s for client in server._clients] == [None, None]
+
+        server = self._make_server(
+            tmp_path, endpoint_file=None, base_url=static_urls, endpoint_connection_retry_timeout_s=30.0
+        )
+        assert [client.connection_retry_timeout_s for client in server._clients] == [30.0, 30.0]
+
+        (tmp_path / "endpoint.txt").write_text("http://new-host:8712/v1\n")
+        server = self._make_server(tmp_path, endpoint_connection_retry_timeout_s=30.0)
+        server._maybe_rebind_endpoint()
+        assert [client.connection_retry_timeout_s for client in server._clients] == [30.0]
+
+    async def test_a_dead_engine_fails_the_call_within_the_retry_timeout(
+        self, tmp_path, monkeypatch: MonkeyPatch
+    ) -> None:
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            refused_url = f"http://127.0.0.1:{sock.getsockname()[1]}/v1"
+        server = self._make_server(
+            tmp_path, endpoint_file=None, base_url=refused_url, endpoint_connection_retry_timeout_s=1.0
+        )
+        async with ClientSession() as session:
+            monkeypatch.setattr(nemo_gym.client.http_client, "get_global_aiohttp_client", lambda: session)
+            started = time.monotonic()
+            with raises(ClientConnectorError):
+                await server._clients[0].create_chat_completion(model="dummy_model", messages=[])
+            assert time.monotonic() - started < 1.8
+
     def test_unpublished_endpoint_grace_lifecycle(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
         endpoint_file = tmp_path / "endpoint.txt"
         server = self._make_server(tmp_path)  # grace defaults to 300s
@@ -8877,6 +8964,233 @@ async def test_refit_output_budget_to_window_off_keeps_the_refusal(
     assert request.state.nemo_gym_model_execution["error_category"] == "invalid_output_token_parameter"
 
 
+# A budget that fits the window while the prompt and the budget together overflow it: kept as a refusal unless
+# ``refit_output_budget_to_prompt`` opts in to the same single resend.
+_REFIT_FITTING_BUDGET = 8000
+_REFIT_LONG_PROMPT_TOKENS = 4000
+_REFIT_LONG_PROMPT_APPLIED = _REFIT_WINDOW - _REFIT_LONG_PROMPT_TOKENS - 16
+_REFIT_OVERFLOW_TOGETHER = (
+    "This model's maximum context length is 8192 tokens. However, you requested 12000 tokens "
+    "(4000 in the messages, 8000 in the completion). Please reduce the length of the messages or completion."
+)
+_REFIT_OVERFLOW_TOGETHER_V029 = (
+    "This model's maximum context length is 8192 tokens. However, you requested 8000 output tokens and your "
+    "prompt contains 4000 input tokens, for a total of 12000 tokens. Please reduce the length of the input prompt "
+    "or the number of requested output tokens."
+)
+
+
+def test_refit_output_budget_to_prompt_is_off_by_default(monkeypatch: MonkeyPatch) -> None:
+    assert TestApp()._setup_server(monkeypatch).config.refit_output_budget_to_prompt is False
+
+
+@mark.parametrize("use_completions_api", [False, True], ids=["chat-completions", "completions"])
+@mark.parametrize("window_refit", [True, False], ids=["window-refit-on", "window-refit-off"])
+@mark.parametrize("propagate", [False, True], ids=["finish-reason-length", "propagate-error"])
+@mark.parametrize("message", [_REFIT_OVERFLOW_TOGETHER, _REFIT_OVERFLOW_TOGETHER_V029], ids=["vllm-0.10", "vllm-0.29"])
+async def test_a_prompt_and_budget_that_overflow_together_are_refitted_once_when_opted_in(
+    monkeypatch: MonkeyPatch, use_completions_api: bool, window_refit: bool, propagate: bool, message: str
+) -> None:
+    model = _refit_model(monkeypatch, use_completions_api)
+    model.config.refit_output_budget_to_prompt = True
+    model.config.refit_output_budget_to_window = window_refit
+    model.config.propagate_context_overflow_errors = propagate
+    client = _refit_engine(_engine_bad_request_error(message), _refit_served(use_completions_api, "length"))
+    model._clients = [client]
+    request = _refit_request()
+
+    result = await model.chat_completions(request, _refit_body({"max_tokens": _REFIT_FITTING_BUDGET}))
+
+    assert result.choices[0].finish_reason == "length"
+    assert result.choices[0].message.content == "answer"
+    first, second = _generation_calls(client, use_completions_api)
+    assert first["max_tokens"] == _REFIT_FITTING_BUDGET
+    assert second["max_tokens"] == _REFIT_LONG_PROMPT_APPLIED
+    assert {key: value for key, value in second.items() if key != "max_tokens"} == {
+        key: value for key, value in first.items() if key != "max_tokens"
+    }
+    client.create_tokenize.assert_not_awaited()
+    execution = request.state.nemo_gym_model_execution
+    assert execution["requested_max_tokens"] == _REFIT_FITTING_BUDGET
+    assert execution["applied_max_tokens"] == _REFIT_LONG_PROMPT_APPLIED
+    assert execution["output_budget_refit"] == {
+        "requested_max_tokens": _REFIT_FITTING_BUDGET,
+        "window": _REFIT_WINDOW,
+        "applied_max_tokens": _REFIT_LONG_PROMPT_APPLIED,
+    }
+    assert execution["response_source"] == "upstream"
+    assert "error_category" not in execution
+
+
+@mark.parametrize("use_completions_api", [False, True], ids=["chat-completions", "completions"])
+async def test_the_chat_budget_key_that_was_sent_is_the_one_refitted_when_opted_in(
+    monkeypatch: MonkeyPatch, use_completions_api: bool
+) -> None:
+    model = _refit_model(monkeypatch, use_completions_api)
+    model.config.refit_output_budget_to_prompt = True
+    client = _refit_engine(_engine_bad_request_error(_REFIT_OVERFLOW_TOGETHER), _refit_served(use_completions_api))
+    model._clients = [client]
+
+    await model.chat_completions(_refit_request(), _refit_body({"max_completion_tokens": _REFIT_FITTING_BUDGET}))
+
+    first, second = _generation_calls(client, use_completions_api)
+    sent_key = "max_tokens" if use_completions_api else "max_completion_tokens"
+    assert (first[sent_key], second[sent_key]) == (_REFIT_FITTING_BUDGET, _REFIT_LONG_PROMPT_APPLIED)
+
+
+@mark.parametrize("use_completions_api", [False, True], ids=["chat-completions", "completions"])
+async def test_a_prompt_that_overflows_with_the_budget_keeps_the_refusal_when_the_setting_is_off(
+    monkeypatch: MonkeyPatch, use_completions_api: bool
+) -> None:
+    model = _refit_model(monkeypatch, use_completions_api)
+    client = _refit_engine(_engine_bad_request_error(_REFIT_OVERFLOW_TOGETHER), _refit_served(use_completions_api))
+    model._clients = [client]
+    request = _refit_request()
+
+    assert (await model.chat_completions(request, _refit_body({"max_tokens": _REFIT_FITTING_BUDGET}))).choices[
+        0
+    ].finish_reason == "length"
+
+    assert len(_generation_calls(client, use_completions_api)) == 1
+    client.create_tokenize.assert_not_awaited()
+    execution = request.state.nemo_gym_model_execution
+    assert execution["error_category"] == "context_length_exceeded"
+    assert "applied_max_tokens" not in execution
+    assert "output_budget_refit" not in execution
+
+
+@mark.parametrize("use_completions_api", [False, True], ids=["chat-completions", "completions"])
+@mark.parametrize(
+    "message",
+    [
+        # The prompt alone is over the window, or leaves no output token.
+        "This model's maximum context length is 8192 tokens. However, you requested 11048 tokens "
+        "(9000 in the messages, 2048 in the completion). Please reduce the length of the messages or completion.",
+        "This model's maximum context length is 8192 tokens. However, you requested 2048 output tokens and your "
+        "prompt contains 9000 input tokens, for a total of 11048 tokens.",
+        "Input length (9000) exceeds model's maximum context length (8192).",
+        "This model's maximum context length is 8192 tokens. However, you requested 10240 tokens "
+        "(8180 in the messages, 2048 in the completion). Please reduce the length of the messages or completion.",
+    ],
+    ids=["messages", "input-tokens", "input-length", "prompt-within-margin"],
+)
+async def test_a_prompt_that_alone_overflows_the_window_is_still_a_context_length_failure_when_opted_in(
+    monkeypatch: MonkeyPatch, use_completions_api: bool, message: str
+) -> None:
+    model = _refit_model(monkeypatch, use_completions_api)
+    model.config.refit_output_budget_to_prompt = True
+    client = _refit_engine(_engine_bad_request_error(message), _refit_served(use_completions_api))
+    model._clients = [client]
+    request = _refit_request()
+
+    assert (await model.chat_completions(request, _refit_body({"max_tokens": 2048}))).choices[
+        0
+    ].finish_reason == "length"
+
+    assert len(_generation_calls(client, use_completions_api)) == 1
+    execution = request.state.nemo_gym_model_execution
+    assert execution["error_category"] == "context_length_exceeded"
+    assert execution["local_response_reason"] == "context_length_exceeded"
+    assert "applied_max_tokens" not in execution
+    assert "output_budget_refit" not in execution
+
+
+@mark.parametrize("use_completions_api", [False, True], ids=["chat-completions", "completions"])
+async def test_a_prompt_that_alone_overflows_the_window_propagates_when_opted_in(
+    monkeypatch: MonkeyPatch, use_completions_api: bool
+) -> None:
+    model = _refit_model(monkeypatch, use_completions_api)
+    model.config.refit_output_budget_to_prompt = True
+    model.config.propagate_context_overflow_errors = True
+    message = (
+        "This model's maximum context length is 8192 tokens. However, you requested 11048 tokens "
+        "(9000 in the messages, 2048 in the completion). Please reduce the length of the messages or completion."
+    )
+    client = _refit_engine(_engine_bad_request_error(message), _refit_served(use_completions_api))
+    model._clients = [client]
+
+    with raises(ClientResponseError):
+        await model.chat_completions(_refit_request(), _refit_body({"max_tokens": 2048}))
+
+    assert len(_generation_calls(client, use_completions_api)) == 1
+
+
+@mark.parametrize("use_completions_api", [False, True], ids=["chat-completions", "completions"])
+async def test_a_prompt_refit_counts_the_prompt_with_tokenize_when_the_refusal_does_not(
+    monkeypatch: MonkeyPatch, use_completions_api: bool
+) -> None:
+    model = _refit_model(monkeypatch, use_completions_api)
+    model.config.refit_output_budget_to_prompt = True
+    message = "This model's maximum context length is 8192 tokens. Please reduce the length of the messages."
+    client = _refit_engine(_engine_bad_request_error(message), _refit_served(use_completions_api))
+    model._clients = [client]
+    request = _refit_request()
+
+    await model.chat_completions(request, _refit_body({"max_tokens": 8100}))
+
+    first, second = _generation_calls(client, use_completions_api)
+    assert (first["max_tokens"], second["max_tokens"]) == (8100, _REFIT_APPLIED)
+    client.create_tokenize.assert_awaited_once()
+    assert request.state.nemo_gym_model_execution["output_budget_refit"]["applied_max_tokens"] == _REFIT_APPLIED
+
+
+@mark.parametrize("use_completions_api", [False, True], ids=["chat-completions", "completions"])
+async def test_a_prompt_refit_never_raises_the_budget(monkeypatch: MonkeyPatch, use_completions_api: bool) -> None:
+    model = _refit_model(monkeypatch, use_completions_api)
+    model.config.refit_output_budget_to_prompt = True
+    # The count leaves more room than the call asked for, so the refusal is not about the budget and stays.
+    message = "This model's maximum context length is 8192 tokens. Please reduce the length of the messages."
+    client = _refit_engine(_engine_bad_request_error(message), _refit_served(use_completions_api))
+    model._clients = [client]
+    request = _refit_request()
+
+    assert (await model.chat_completions(request, _refit_body({"max_tokens": 2048}))).choices[
+        0
+    ].finish_reason == "length"
+
+    assert len(_generation_calls(client, use_completions_api)) == 1
+    assert request.state.nemo_gym_model_execution["error_category"] == "context_length_exceeded"
+
+
+@mark.parametrize("use_completions_api", [False, True], ids=["chat-completions", "completions"])
+async def test_a_budget_over_the_window_is_left_to_the_window_setting_when_only_the_prompt_setting_is_on(
+    monkeypatch: MonkeyPatch, use_completions_api: bool
+) -> None:
+    model = _refit_model(monkeypatch, use_completions_api)
+    model.config.refit_output_budget_to_prompt = True
+    model.config.refit_output_budget_to_window = False
+    client = _refit_engine(_engine_bad_request_error(_REFIT_STATED_PROMPT), _refit_served(use_completions_api))
+    model._clients = [client]
+    request = _refit_request()
+
+    await model.chat_completions(request, _refit_body({"max_tokens": 131072}))
+
+    assert len(_generation_calls(client, use_completions_api)) == 1
+    assert request.state.nemo_gym_model_execution["error_category"] == "invalid_output_token_parameter"
+
+
+@mark.parametrize("use_completions_api", [False, True], ids=["chat-completions", "completions"])
+async def test_a_prompt_refit_is_not_repeated_when_the_refitted_call_is_refused_again(
+    monkeypatch: MonkeyPatch, use_completions_api: bool
+) -> None:
+    model = _refit_model(monkeypatch, use_completions_api)
+    model.config.refit_output_budget_to_prompt = True
+    client = _refit_engine(
+        _engine_bad_request_error(_REFIT_OVERFLOW_TOGETHER),
+        _engine_bad_request_error(_REFIT_OVERFLOW_TOGETHER),
+        _refit_served(use_completions_api),
+    )
+    model._clients = [client]
+    request = _refit_request()
+
+    assert (await model.chat_completions(request, _refit_body({"max_tokens": _REFIT_FITTING_BUDGET}))).choices[
+        0
+    ].finish_reason == "length"
+
+    assert len(_generation_calls(client, use_completions_api)) == 2
+    assert request.state.nemo_gym_model_execution["error_category"] == "context_length_exceeded"
+
+
 def test_the_trajectory_carries_the_refitted_budget() -> None:
     from nemo_gym.rollouts.trajectory_builder import _build_trajectory_record
 
@@ -9068,3 +9382,41 @@ async def test_a_400_for_an_unsupported_parameter_value_records_invalid_request_
     execution = request.state.nemo_gym_model_execution
     assert execution["upstream_status_code"] == 400
     assert execution.get("error_category") == category
+
+
+@mark.parametrize("finish_reason", ["stop", "tool_calls", "length"])
+async def test_responses_notes_the_chat_finish_reason_for_model_call_capture(
+    monkeypatch: MonkeyPatch, finish_reason: str
+) -> None:
+    model = _refit_model(monkeypatch, False)
+    completion = PARAMETERIZE_DATA[0][2].model_copy(deep=True)
+    completion.choices[0].finish_reason = finish_reason
+    monkeypatch.setattr(VLLMModel, "chat_completions", AsyncMock(return_value=completion))
+    request = _refit_request()
+    start_model_execution(request, upstream_attempted=True)
+
+    await model.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="hi"))
+
+    assert request.state.nemo_gym_model_execution["finish_reason"] == finish_reason
+
+
+async def test_a_context_refusal_after_the_reply_started_propagates() -> None:
+    # The status is already sent, so the error envelope cannot replace it.
+    error = ClientResponseError(MagicMock(real_url="http://vllm.test/v1/chat/completions"), (), status=400)
+    error.response_content = b'{"error":{"message":"maximum context length","code":400}}'
+    setattr(error, PROPAGATED_REFUSAL_CODE_ATTRIBUTE, "context_length_exceeded")
+
+    async def streams_then_refuses(scope, receive, send) -> None:
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        raise error
+
+    sent = []
+
+    async def send(message) -> None:
+        sent.append(message)
+
+    with raises(ClientResponseError) as raised:
+        await _ContextErrorMiddleware(streams_then_refuses)({"type": "http"}, AsyncMock(), send)
+
+    assert raised.value is error
+    assert [message["status"] for message in sent] == [200]
