@@ -31,6 +31,10 @@ def resolve_agent_context_artifact(
     """
     try:
         base = root.resolve(strict=True)
+    except (FileNotFoundError, NotADirectoryError):
+        # The agent's configuration, not the task, is wrong; say so instead of blaming the artifact.
+        raise AgentSeedRejectedError(f"the agent's agent_context root {root} does not exist") from None
+    try:
         path = (base / artifact.path).resolve(strict=True)
         inside = path.is_relative_to(base)
         is_kind = inside and (path.is_file() if kind == "file" else path.is_dir())
