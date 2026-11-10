@@ -100,6 +100,32 @@ def test_seed_lends_a_sandbox_and_close_stops_it(root, stopped) -> None:
     assert len(stopped) == 1
 
 
+def test_a_failed_stop_leaves_the_session_open_and_a_retried_close_stops_it(root, monkeypatch) -> None:
+    stops: list[AsyncSandbox] = []
+    real_stop = AsyncSandbox.stop
+
+    async def stop(self: AsyncSandbox) -> None:
+        stops.append(self)
+        if len(stops) == 1:
+            raise RuntimeError("provider unavailable")
+        await real_stop(self)
+
+    monkeypatch.setattr(AsyncSandbox, "stop", stop)
+    server = _server(root)
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+    assert client.post("/seed_session", json=_seed().model_dump(mode="json")).status_code == 200
+    close = ResourcesCloseSessionRequest(resources_session_id="session", episode_id=_seed().episode_id)
+
+    assert client.post("/close_session", json=close.model_dump(mode="json")).status_code >= 500
+    # The stop raised before the fence, so the session keeps its sandbox and is not fenced: a close can retry.
+    assert "session" not in server._fences
+    assert server._lent_sandboxes.get("session") is not None and "session" in server._sessions
+
+    assert client.post("/close_session", json=close.model_dump(mode="json")).status_code == 200
+    assert len(stops) == 2 and stops[0] is stops[1]
+    assert server._lent_sandboxes.get("session") is None and "session" in server._fences
+
+
 def test_lent_sandbox_follows_the_session_contract(root, stopped) -> None:
     server = _server(root)
     check_resources_session_contract(

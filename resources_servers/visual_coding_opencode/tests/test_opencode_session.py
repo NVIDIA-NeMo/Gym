@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Visual-coding rows (BabyVision's format) under the OpenCode settings of the visual_coding_opencode config."""
+"""The example rows in an opencode_agent sandbox session, with the OpenCode settings of this environment's config."""
 
 import base64
 import json
@@ -17,9 +17,9 @@ from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgent
 from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import Sandbox, close_body, seed
 
 
-ROOT = Path(__file__).resolve().parents[3]
-SESSION_CONFIG = ROOT / "resources_servers" / "visual_coding_opencode" / "configs" / "visual_coding_opencode.yaml"
-EXAMPLE_ROWS = ROOT / "resources_servers" / "visual_coding_opencode" / "data" / "example.jsonl"
+SERVER = Path(__file__).resolve().parents[1]
+SESSION_CONFIG = SERVER / "configs" / "visual_coding_opencode.yaml"
+EXAMPLE_ROWS = SERVER / "data" / "example.jsonl"
 # The settings OpenCode runs with inside the sandbox. The provider, image and model name come from the run.
 SESSION_KEYS = (
     "opencode_version",
@@ -79,18 +79,6 @@ def setup():
         yield agent, sandbox
 
 
-def test_the_session_config_declares_image_input_for_the_model_s_crops():
-    # OpenCode's read tool returns the crops and plots as images only when the model entry declares image input.
-    assert session_agent_config()["image_input"] is True
-
-
-def test_the_session_config_runs_without_a_step_limit_or_compaction():
-    """Token capture refuses agent.build.steps, and compaction's summary calls cannot join the scored call."""
-    opencode_config = session_agent_config()["opencode_config"]
-    assert "agent" not in opencode_config
-    assert opencode_config["compaction"] == {"auto": False}
-
-
 @pytest.mark.parametrize("row", example_rows(), ids=lambda row: row["source_id"])
 def test_a_visual_coding_row_runs_in_a_session_with_its_image_attached(setup, row):
     agent, sandbox = setup
@@ -119,3 +107,24 @@ def test_a_visual_coding_row_runs_in_a_session_with_its_image_attached(setup, ro
     assert opencode["permission"]["external_directory"] == "allow"
     assert opencode["permission"]["doom_loop"] == "allow"
     assert opencode["tools"]["task"] is False
+
+
+def test_image_input_declares_images_for_a_row_without_a_prompt_image(setup):
+    # The example rows all carry a prompt image, which declares image input on its own. A text-only row shows that
+    # image_input: true declares it too, so read can return the model's crops and plots.
+    agent, sandbox = setup
+    params = example_rows()[0]["responses_create_params"]
+    [message] = params["input"]
+    message["content"] = [part for part in message["content"] if part["type"] != "input_image"]
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json=params)
+        assert result.status_code == 200, result.text
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        assert closed.status_code == 200, closed.text
+
+    payload = sandbox.params()
+    assert "--file" not in payload["command"]
+    opencode = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
+    assert opencode["provider"]["nemo_gym"]["models"]["dummy_model"]["modalities"]["input"] == ["text", "image"]
