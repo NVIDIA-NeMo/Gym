@@ -86,6 +86,7 @@ gym eval run \
   --agent harbor_agent_general --model openai/MODEL_ID \
   --split benchmark \
   --output /absolute/path/to/new-run/rollouts.jsonl --num-repeats 3 \
+  ++skip_venv_if_present=true \
   ++policy_base_url=https://api.openai.com/v1 \
   ++skill_trigger_settings.release=/absolute/path/to/release \
   ++skill_trigger_settings.manifest_sha256=MANIFEST_SHA256 \
@@ -94,6 +95,8 @@ gym eval run \
 ```
 
 Change the profile in the overlay’s `config_paths` for another harness. Codex guidance additionally requires `skill_trigger_settings.model_catalog_path` and its SHA-256: use a catalog captured from the same Codex version and baseline model. The extension changes only the selected model's `include_skills_usage_instructions` value. A native model may already enable it; inspect the effective baseline before interpreting this as a treatment contrast.
+
+The `skip_venv_if_present` setting retains the explicitly prepared Harbor 0.25.0 component environment; without it, Gym reinstalls the component lock, which currently selects Harbor 0.24.0 and cannot import these adapters. Verify the component environment version before running.
 
 Gym and Harbor own scheduling, failure collection, and cleanup. This contribution does not change their worker-retry policy. Preserve the resolved configuration, runtime versions, task manifests, trajectories, and failure records. Do not infer complete coverage from process exit alone.
 
