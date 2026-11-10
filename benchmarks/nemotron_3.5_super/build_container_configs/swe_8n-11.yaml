@@ -27,7 +27,7 @@ run:
   env:
     _copy: shared_run_warmup_env_vars
     EXPERIMENT_NAME: swe_8n-11/super_3.5_GA-BF16-p2d2
-    SBATCH_TIMELIMIT: "02:00:00"
+    SBATCH_TIMELIMIT: "01:00:00"
   args: |
     --config responses_api_models/vllm_model/configs/vllm_model.yaml \
     --config resources_servers/swe_rebench/configs/swe_rebench_opencode.yaml \
