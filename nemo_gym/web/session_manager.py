@@ -336,6 +336,7 @@ class WebSessionManager:
         cleanup_failed_session = False
         try:
             async with state.lock:
+                self._require_unfenced(state)
                 state.status = "resetting"
                 started = time.monotonic()
                 LOG.info(
@@ -389,6 +390,7 @@ class WebSessionManager:
     async def observe(self, session_id: str) -> WebObservation:
         state = await self._get_session(session_id)
         async with state.lock:
+            self._require_unfenced(state)
             observation = await self._run_backend(state.operation_runner, state.backend.observe)
             state.observation = observation
             state.last_access_at = time.time()
@@ -397,6 +399,7 @@ class WebSessionManager:
     async def step(self, session_id: str, body: WebStepRequest) -> WebStepResponse:
         state = await self._get_session(session_id)
         async with state.lock:
+            self._require_unfenced(state)
             cached = state.operations.get(body.operation_id)
             if cached is not None:
                 state.operations.move_to_end(body.operation_id)
@@ -442,6 +445,14 @@ class WebSessionManager:
                     time.monotonic() - started,
                 )
                 return response
+            except asyncio.CancelledError:
+                # Cancelling the waiter does not stop its backend thread. The
+                # action may already have mutated the site; never execute it
+                # again or score an uncertain state. close_session drains the
+                # same thread before releasing the unhealthy lease.
+                state.fenced = True
+                state.status = "error"
+                raise
             except Exception:
                 state.status = "error"
                 LOG.exception(
@@ -456,6 +467,7 @@ class WebSessionManager:
     async def evaluate(self, session_id: str, final_answer: str | None = None) -> WebEvaluateResponse:
         state = await self._get_session(session_id)
         async with state.lock:
+            self._require_unfenced(state)
             if state.verifier_result is not None:
                 state.last_access_at = time.time()
                 return WebEvaluateResponse(result=state.verifier_result)
@@ -493,6 +505,11 @@ class WebSessionManager:
                     time.monotonic() - started,
                 )
                 raise
+
+    @staticmethod
+    def _require_unfenced(state: WebSessionState) -> None:
+        if state.fenced:
+            raise SessionConflictError(f"session {state.session_id!r} is fenced after a cancelled step; close it")
 
     async def close_session(self, session_id: str) -> bool:
         created = False

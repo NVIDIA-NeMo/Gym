@@ -56,6 +56,7 @@ class WebSessionState:
     last_access_at: float
     operation_runner: WebOperationRunner
     status: str = "ready"
+    fenced: bool = False
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     operations: OrderedDict[str, WebStepResponse] = field(default_factory=OrderedDict)
     verifier_result: WebVerifierResult | None = None

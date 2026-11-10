@@ -355,6 +355,7 @@ class VisualBrowserDriver:
         self._last_action = action.raw_model_output or action.name
         self._last_error = ""
         execution_ok = True
+        ui_action_attempted = False
         started = time.monotonic()
         lifecycle_failure_step = self._step
         calls = action.arguments.get("calls", [])
@@ -389,6 +390,7 @@ class VisualBrowserDriver:
             calls = validated_action.arguments["calls"]
             for call in calls:
                 call_started = time.monotonic()
+                ui_action_attempted |= call["name"] != "terminate"
                 self._execute_call(call["name"], call.get("arguments") or {})
                 if call["name"] != "terminate":
                     self._sync_active_page()
@@ -415,9 +417,9 @@ class VisualBrowserDriver:
                 action.name,
             )
         self._step += 1
-        if action.terminal:
-            # The reference trajectory does not add a duplicate screenshot for
-            # terminate; return the most recent observation unchanged.
+        if action.terminal and not ui_action_attempted:
+            # Only terminate alone reuses evidence. A mixed batch must capture
+            # the page after its preceding UI actions, even when it terminates.
             if self._observation is None:
                 raise RuntimeError("terminal action has no prior observation")
         else:

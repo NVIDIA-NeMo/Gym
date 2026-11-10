@@ -959,12 +959,11 @@ class WebAgent(SimpleResponsesAPIAgent):
                     time.monotonic() - environment_started,
                 )
                 runtime_status = step_data.info.get("runtime_status")
-                # Explicit terminate returns the previous observation unchanged;
-                # unlike a non-terminal action, it does not capture a new
-                # screenshot. Keep valid observations from actions that cause
-                # the environment to terminate, but do not duplicate evidence
-                # for an explicit terminate or append a closed-target result.
-                explicit_computer_terminate = action.terminal
+                # Only terminate alone reuses the previous observation. Mixed
+                # batches carry fresh evidence from their preceding UI calls.
+                explicit_computer_terminate = action.terminal and not any(
+                    call["name"] != "terminate" for call in action.arguments.get("calls", [])
+                )
                 if runtime_status != BROWSER_TARGET_CLOSED_STATUS and not explicit_computer_terminate:
                     self._remember_evidence(observation, screenshot_history, url_history)
                 elif explicit_computer_terminate:

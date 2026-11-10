@@ -1,10 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import os
 import socket
 import threading
+import time
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
@@ -200,3 +203,93 @@ async def test_pool_lends_each_slot_once_and_restarts_unhealthy_slots(monkeypatc
     fourth = await provider.acquire(BrowserSessionSpec(metadata={"rollout_session_id": "d"}))
     assert {third.metadata["slot"], fourth.metadata["slot"]} == {0, 1}
     await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_pool_start_rolls_back_all_slots_and_can_retry(monkeypatch, tmp_path) -> None:
+    provider = LocalBrowserInstancePoolProvider(size=2, port_base=42000, log_dir=str(tmp_path))
+    live = set()
+    monkeypatch.setattr("shutil.which", lambda tool: f"/usr/bin/{tool}")
+
+    def launch(slot):
+        if slot.index == 1:
+            time.sleep(0.05)
+        live.add(slot.index)
+        if slot.index == 0:
+            raise RuntimeError("partial launch")
+
+    monkeypatch.setattr(provider, "_launch", launch)
+    monkeypatch.setattr(provider, "_stop", lambda slot: live.discard(slot.index))
+    with pytest.raises(RuntimeError, match="partial launch"):
+        await provider.start()
+    assert live == set()
+    monkeypatch.setattr(provider, "_launch", lambda slot: live.add(slot.index))
+    await provider.start()
+    try:
+        handles = [await asyncio.wait_for(provider.acquire(BrowserSessionSpec()), 1) for _ in range(2)]
+        assert {handle.metadata["slot"] for handle in handles} == {0, 1}
+    finally:
+        await provider.close()
+    assert not live
+
+
+def test_launch_rolls_back_xvfb_and_tempdir_if_server_fails(monkeypatch, tmp_path) -> None:
+    provider = LocalBrowserInstancePoolProvider(size=1, port_base=42000, log_dir=str(tmp_path))
+    process = Mock()
+    process.poll.return_value = None
+    process.pid = 987654
+    calls = []
+
+    def popen(*args, **kwargs):
+        calls.append(args)
+        if len(calls) == 2:
+            raise OSError("server spawn failed")
+        return process
+
+    monkeypatch.setattr("subprocess.Popen", popen)
+    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: Mock(returncode=0))
+    killed = []
+    monkeypatch.setattr("os.killpg", lambda pid, sig: killed.append(pid))
+    slot = provider._slots[0]
+    with pytest.raises(OSError, match="server spawn failed"):
+        provider._launch(slot)
+    assert killed == [process.pid]
+    process.wait.assert_called_once()
+    assert slot.xvfb is None and slot.server is None and slot.tmpdir is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repeat_cancel", [False, True])
+async def test_cancelled_start_waits_for_launch_threads_before_rollback(monkeypatch, tmp_path, repeat_cancel) -> None:
+    provider = LocalBrowserInstancePoolProvider(size=1, port_base=42000, log_dir=str(tmp_path))
+    started, finish = threading.Event(), threading.Event()
+    live = set()
+    monkeypatch.setattr("shutil.which", lambda tool: f"/usr/bin/{tool}")
+
+    def launch(slot):
+        started.set()
+        assert finish.wait(5)
+        live.add(slot.index)
+
+    monkeypatch.setattr(provider, "_launch", launch)
+    monkeypatch.setattr(provider, "_stop", lambda slot: live.discard(slot.index))
+    caller = asyncio.create_task(provider.start())
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        caller.cancel()
+        await asyncio.sleep(0)
+        if repeat_cancel:
+            caller.cancel()
+    finally:
+        finish.set()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    await provider.close()
+    assert not live
+    monkeypatch.setattr(provider, "_launch", lambda slot: live.add(slot.index))
+    await provider.start()
+    try:
+        await asyncio.wait_for(provider.acquire(BrowserSessionSpec()), 1)
+    finally:
+        await provider.close()
+    assert not live

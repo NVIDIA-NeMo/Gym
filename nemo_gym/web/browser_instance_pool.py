@@ -79,19 +79,48 @@ class LocalBrowserInstancePoolProvider:
         self._request_timeout = request_timeout_seconds
         self._idle: asyncio.Queue[_Slot] | None = None
         self._leased: dict[int, _Slot] = {}
+        self._lifecycle_lock = asyncio.Lock()
+        self._startup_cleanup: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
-        if self._idle is not None:
-            return
-        for tool in ("Xvfb", "xdpyinfo"):
-            if shutil.which(tool) is None:
-                raise BrowserSessionError(f"{tool} is required for local browser instances")
-        self._log_dir.mkdir(parents=True, exist_ok=True)
-        self._idle = asyncio.Queue()
-        await asyncio.gather(*(asyncio.to_thread(self._launch, slot) for slot in self._slots))
-        for slot in self._slots:
-            self._idle.put_nowait(slot)
-        LOG.info("event=browser_instance_pool_ready size=%d", len(self._slots))
+        async with self._lifecycle_lock:
+            if self._startup_cleanup is not None:
+                await asyncio.shield(self._startup_cleanup)
+                self._startup_cleanup = None
+            if self._idle is not None:
+                return
+            for tool in ("Xvfb", "xdpyinfo"):
+                if shutil.which(tool) is None:
+                    raise BrowserSessionError(f"{tool} is required for local browser instances")
+            self._log_dir.mkdir(parents=True, exist_ok=True)
+            launches = asyncio.gather(
+                *(asyncio.to_thread(self._launch, slot) for slot in self._slots), return_exceptions=True
+            )
+            try:
+                results = await asyncio.shield(launches)
+                for result in results:
+                    if isinstance(result, BaseException):
+                        raise result
+            except BaseException:
+                # Threads may still be launching after an RPC is cancelled.
+                # Own rollback independently, and make retry/close wait for it.
+                self._startup_cleanup = asyncio.create_task(self._rollback_start(launches))
+                await asyncio.shield(self._startup_cleanup)
+                raise
+            self._idle = asyncio.Queue()
+            for slot in self._slots:
+                self._idle.put_nowait(slot)
+            LOG.info("event=browser_instance_pool_ready size=%d", len(self._slots))
+
+    async def _rollback_start(self, launches: asyncio.Future) -> None:
+        await launches
+        results = await asyncio.gather(
+            *(asyncio.to_thread(self._stop, slot) for slot in self._slots), return_exceptions=True
+        )
+        self._idle = None
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
 
     async def acquire(self, spec: BrowserSessionSpec) -> BrowserSessionHandle:
         if self._idle is None:
@@ -140,62 +169,80 @@ class LocalBrowserInstancePoolProvider:
         self._idle.put_nowait(slot)
 
     async def close(self) -> None:
-        await asyncio.gather(*(asyncio.to_thread(self._stop, slot) for slot in self._slots))
-        self._idle = None
+        async with self._lifecycle_lock:
+            if self._startup_cleanup is not None:
+                await asyncio.shield(self._startup_cleanup)
+                self._startup_cleanup = None
+            results = await asyncio.gather(
+                *(asyncio.to_thread(self._stop, slot) for slot in self._slots), return_exceptions=True
+            )
+            self._idle = None
+            self._leased.clear()
+            for result in results:
+                if isinstance(result, BaseException):
+                    raise result
 
     def _launch(self, slot: _Slot) -> None:
+        try:
+            self._launch_slot(slot)
+        except BaseException:
+            self._stop(slot)
+            raise
+
+    def _launch_slot(self, slot: _Slot) -> None:
         slot.token = secrets.token_hex(16)
         slot.tmpdir = Path(tempfile.mkdtemp(prefix=f"browser-instance-{slot.index}-"))
-        log = (self._log_dir / f"slot-{slot.index:03d}.log").open("ab")
-        slot.xvfb = subprocess.Popen(
-            ["Xvfb", slot.display, "-screen", "0", self._screen, "-ac", "-nolisten", "tcp"],
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-        env = dict(os.environ)
-        env.update(
-            {
-                "DISPLAY": slot.display,
-                "XDG_SESSION_TYPE": "x11",
-                "TMPDIR": str(slot.tmpdir),
-                TOKEN_ENV: slot.token,
-            }
-        )
-        env.pop("WAYLAND_DISPLAY", None)
-        # Xvfb runs with -ac, but python-xlib (PyAutoGUI) still opens an
-        # Xauthority file; give each display its own empty one.
-        xauthority = slot.tmpdir / "Xauthority"
-        xauthority.touch(mode=0o600)
-        env["XAUTHORITY"] = str(xauthority)
-        deadline = time.monotonic() + self._startup_timeout
-        while subprocess.run(["xdpyinfo", "-display", slot.display], env=env, capture_output=True).returncode:
-            if slot.xvfb.poll() is not None or time.monotonic() > deadline:
-                raise BrowserSessionError(f"Xvfb {slot.display} did not start (slot {slot.index})")
-            time.sleep(0.2)
-        slot.server = subprocess.Popen(
-            [
-                self._python,
-                "-m",
-                "nemo_gym.web.browser_instance",
-                "--host",
-                self._host,
-                "--port",
-                str(slot.port),
-                "--parent-pid",
-                str(os.getpid()),
-            ],
-            env=env,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-        log.close()
-        while not self._idle_and_healthy(slot):
-            if slot.server.poll() is not None or time.monotonic() > deadline:
-                raise BrowserSessionError(f"browser instance on port {slot.port} did not start (slot {slot.index})")
-            time.sleep(0.2)
-        LOG.info("event=browser_instance_started slot=%d display=%s port=%d", slot.index, slot.display, slot.port)
+        with (self._log_dir / f"slot-{slot.index:03d}.log").open("ab") as log:
+            slot.xvfb = subprocess.Popen(
+                ["Xvfb", slot.display, "-screen", "0", self._screen, "-ac", "-nolisten", "tcp"],
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+            env = dict(os.environ)
+            env.update(
+                {
+                    "DISPLAY": slot.display,
+                    "XDG_SESSION_TYPE": "x11",
+                    "TMPDIR": str(slot.tmpdir),
+                    TOKEN_ENV: slot.token,
+                }
+            )
+            env.pop("WAYLAND_DISPLAY", None)
+            # Xvfb runs with -ac, but python-xlib (PyAutoGUI) still opens an
+            # Xauthority file; give each display its own empty one.
+            xauthority = slot.tmpdir / "Xauthority"
+            xauthority.touch(mode=0o600)
+            env["XAUTHORITY"] = str(xauthority)
+            deadline = time.monotonic() + self._startup_timeout
+            while subprocess.run(["xdpyinfo", "-display", slot.display], env=env, capture_output=True).returncode:
+                if slot.xvfb.poll() is not None or time.monotonic() > deadline:
+                    raise BrowserSessionError(f"Xvfb {slot.display} did not start (slot {slot.index})")
+                time.sleep(0.2)
+            slot.server = subprocess.Popen(
+                [
+                    self._python,
+                    "-m",
+                    "nemo_gym.web.browser_instance",
+                    "--host",
+                    self._host,
+                    "--port",
+                    str(slot.port),
+                    "--parent-pid",
+                    str(os.getpid()),
+                ],
+                env=env,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+            while not self._idle_and_healthy(slot):
+                if slot.server.poll() is not None or time.monotonic() > deadline:
+                    raise BrowserSessionError(
+                        f"browser instance on port {slot.port} did not start (slot {slot.index})"
+                    )
+                time.sleep(0.2)
+            LOG.info("event=browser_instance_started slot=%d display=%s port=%d", slot.index, slot.display, slot.port)
 
     def _idle_and_healthy(self, slot: _Slot) -> bool:
         if slot.server is None or slot.server.poll() is not None or slot.xvfb is None or slot.xvfb.poll() is not None:

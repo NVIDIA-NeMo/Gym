@@ -214,20 +214,21 @@ async def test_nano_omni_parse_retry_injects_feedback_and_retry_temperature(capl
 
 
 @pytest.mark.asyncio
-async def test_native_nonterminal_action_that_terminates_retains_final_observation() -> None:
+@pytest.mark.parametrize("mixed_terminal", [False, True])
+async def test_native_nonterminal_action_that_terminates_retains_final_observation(mixed_terminal: bool) -> None:
     agent = _agent(judge=True)
     final_observation = _observation("https://example.test/final")
     final_observation["screenshot"]["data_url"] = "data:image/png;base64,final"
+    model_response = _native_model_response("computer", '{"actions":[{"action":"left_click","coordinate":[0.2,0.3]}]}')
+    if mixed_terminal:
+        model_response["output"].extend(
+            _native_model_response("terminate", '{"status":"success","answer":"done"}')["output"]
+        )
     calls = _wire(
         agent,
         {
             "/seed_session": [_seed("Allrecipes--0")],
-            "/v1/responses": [
-                _native_model_response(
-                    "computer",
-                    '{"actions":[{"action":"left_click","coordinate":[0.2,0.3]}]}',
-                )
-            ],
+            "/v1/responses": [model_response],
             "/step": [
                 {
                     "operation_id": "step-0",

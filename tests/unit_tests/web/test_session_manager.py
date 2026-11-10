@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import threading
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -222,6 +223,47 @@ class FailingCloseRunner(DirectWebOperationRunner):
     async def close(self) -> None:
         self.close_calls += 1
         raise RuntimeError("runner close failed")
+
+
+@pytest.mark.asyncio
+async def test_cancelled_mutation_fences_session_until_close(tmp_path) -> None:
+    started = threading.Event()
+    finish = threading.Event()
+    pool = FakeSitePool()
+    manager, backends = _manager(tmp_path, site_pool=pool)
+    manager._shared_operation_runner = None  # Exercise the real thread-backed runner.
+    await manager.seed_session("cancelled-step", WebSeedSessionRequest(task=_task()))
+    backend = backends[0]
+    original_step = backend.step
+
+    def mutation(action):
+        result = original_step(action)
+        started.set()
+        assert finish.wait(5)
+        return result
+
+    backend.step = mutation
+    request = _step("same-operation")
+    caller = asyncio.create_task(manager.step("cancelled-step", request))
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        caller.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+        for operation in (
+            lambda: manager.step("cancelled-step", request),
+            lambda: manager.observe("cancelled-step"),
+            lambda: manager.evaluate("cancelled-step"),
+            lambda: manager.reset_session("cancelled-step", WebResetRequest(task=_task())),
+        ):
+            with pytest.raises(SessionConflictError, match="fenced"):
+                await operation()
+        assert backend.step_calls == 1
+    finally:
+        finish.set()
+        await manager.close_session("cancelled-step")
+    assert backend.close_calls == 1
+    assert pool.released[0][1] is False
 
 
 def _config(tmp_path, **updates: Any) -> WebResourcesServerConfig:

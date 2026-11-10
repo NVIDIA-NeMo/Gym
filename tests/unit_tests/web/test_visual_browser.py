@@ -410,6 +410,12 @@ def test_step_success_terminal_and_failures(monkeypatch: pytest.MonkeyPatch, tmp
     assert result.terminated and result.observation is prior
     assert result.info == {"runtime_status": "done"}
 
+    mixed = terminal.model_copy(deep=True)
+    mixed.arguments["calls"].insert(0, {"id": "3", "name": "navigate", "arguments": {"url": "https://final.example"}})
+    result = driver.step(mixed)
+    assert result.execution_ok and result.terminated
+    assert result.observation.url == "https://final.example"
+
     driver._observation = None
     with pytest.raises(RuntimeError, match="no prior observation"):
         driver.step(terminal)
