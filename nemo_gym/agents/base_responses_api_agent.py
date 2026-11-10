@@ -29,6 +29,7 @@ from typing import Any, Awaitable, Callable, ClassVar, Optional
 from urllib.parse import urlsplit
 from warnings import warn
 
+from aiohttp import ClientResponseError
 from fastapi import Body, FastAPI, HTTPException, Request, Response
 from pydantic import (
     BaseModel,
@@ -45,13 +46,19 @@ from nemo_gym.agents.agent_activation_types import (
     AgentContinuationCapabilities,
     AgentContinuationRequirements,
 )
-from nemo_gym.agents.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
+from nemo_gym.agents.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome, policy_timeout_failure
 from nemo_gym.agents.utils.ordered_operations import ActivationConflictError, OrderedOperationLedger
 from nemo_gym.agents.utils.sandbox_session import ExpiryUnsupportedError, SandboxSession
 from nemo_gym.client.server_client import apply_rollout_prefix, rollout_path_prefix
-from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT, ModelServerRef
+from nemo_gym.config.config_types import (
+    ROLLOUT_PATH_PREFIX,
+    TOKEN_CAPTURE_PATH_SEGMENT,
+    ModelServerRef,
+    ResourcesServerRef,
+)
 from nemo_gym.config.global_config import (
     OBSERVABILITY_ENABLED_KEY_NAME,
+    ROLLOUT_CORRELATION_KEY_NAME,
     TOKEN_CAPTURE_BLOCK,
     get_first_server_config_dict,
 )
@@ -310,6 +317,9 @@ class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):
     )
     skip_verification: bool = False
     skip_verification_reward: float = 0.0
+    # Resources servers, such as a search server, whose MCP tools each episode grants this agent besides its own
+    # Resources server's. A single_agent_turn Environment Server seeds them; one may also set its own list.
+    tool_servers: list[ResourcesServerRef] = Field(default_factory=list)
     # Whether this agent's rollouts participate in training token capture.
     # Native agents already receive token ids inline and normally leave this disabled.
     # Opaque external harnesses enable it because their returned output has no token ids.
@@ -388,6 +398,9 @@ def _agent_boundary(
 ):
     """``endpoint`` with its failures raised as one agent route failure caused by them.
 
+    A model reply that confirms a policy response timeout makes ``agent.responses`` raise the typed
+    ``model_policy_response_timeout`` failure instead.
+
     The reply body and status stay those of the original error. ``HTTPException``, cancellation and any error
     ``app`` has a handler for (such as a checkpoint ``ControlError``, answered 409) pass through to that
     handler. A failure an agent boundary already reported (``/run`` calling this server's ``/v1/responses``)
@@ -406,6 +419,11 @@ def _agent_boundary(
                 app, error
             ):
                 raise
+            if operation == "agent.responses" and isinstance(error, ClientResponseError):
+                # The model call this route makes is the policy's: a confirmed response timeout keeps its kind.
+                timeout = policy_timeout_failure(error)
+                if timeout is not None:
+                    raise timeout from error
             raise agent_route_failure(error, operation=operation, stage=stage) from error
 
     return bounded
@@ -1159,6 +1177,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
         Evaluation uses ``/ng-rollout/<id>/...`` for every agent.
         Training capture uses ``/ng-rollout/<id>/training-token-capture/...``.
+        ``rollout_correlation`` adds the prefix without any capture, e.g. so a model server can route by rollout.
         Training capture requires ``token_id_capture.enabled``.
         It also requires the static agent flag or run-level ``all_agents``.
         Partial-rollout checkpointing also needs it for this agent.
@@ -1166,6 +1185,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         """
         return (
             self._model_call_capture_enabled()
+            or self._rollout_correlation_enabled()
             or self._token_id_capture_enabled()
             # Checkpointing keys a legacy /run by its rollout, so its self-dispatch must carry the rollout.
             or self._checkpoint_participant is not None
@@ -1178,6 +1198,13 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         if not isinstance(global_config, Mapping):
             return False
         return bool(global_config.get(OBSERVABILITY_ENABLED_KEY_NAME, False))
+
+    def _rollout_correlation_enabled(self) -> bool:
+        """Whether the run asked for rollout prefixes without capture."""
+        global_config = getattr(self.server_client, "global_config_dict", None)
+        if not isinstance(global_config, Mapping):
+            return False
+        return bool(global_config.get(ROLLOUT_CORRELATION_KEY_NAME, False))
 
     def _token_id_capture_enabled(self) -> bool:
         """Whether this agent explicitly opted into training-token capture."""
@@ -1281,9 +1308,22 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         pass
 
-    @abstractmethod
     async def run(self, body: BaseRunRequest = Body()) -> BaseVerifyResponse:
-        pass
+        """Run a whole episode in the agent, including the resources server's ``seed_session`` and ``verify``.
+
+        Deprecated: rollout collection reaches an agent's own ``/run`` only through the ``legacy_agent`` environment
+        server. Agents implement agent sessions (``/v1/agent_sessions``) and need not override ``run()``, so that an
+        environment server drives the episode. To customize how an episode runs, implement an environment server on
+        ``BaseEnvironmentServer`` instead of overriding ``run()``.
+
+        The default answers 422, not a 5xx: environment servers and rollout recovery retry every 5xx, and a missing
+        ``/run`` does not go away on retry.
+        """
+        raise HTTPException(
+            422,
+            f"{type(self).__name__} does not implement /run; "
+            "drive it through agent sessions from an environment server",
+        )
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         """Default: same RewardProfiler aggregation as resources server. Override to proxy."""
