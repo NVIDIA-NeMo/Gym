@@ -12,7 +12,7 @@ from nemo_gym.agents.context_management.history import SemanticHistory
 from nemo_gym.agents.context_management.materialization import materialize_history_view
 from nemo_gym.agents.context_management.policies import RecencyHistoryPolicy
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.models.chat_completions_converter import ChatCompletionsConverter
+from nemo_gym.models import ChatCompletionsConverter
 
 
 def _history(calls: int, *, images_per_observation: int, feedback: bool) -> SemanticHistory:
