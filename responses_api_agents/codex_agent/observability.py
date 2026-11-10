@@ -234,7 +234,9 @@ def parse_codex_observations(
             visited.add(ancestor)
             ancestor = parents[ancestor][0]
         if ancestor != root:
+            invocation.parent_invocation_id = None
             result.gaps.append(ObservationGap(code="subagent_hierarchy_unavailable", invocation_id=names[identity]))
+            continue
         if parent not in parents:
             continue
         conversation = parents[parent][1].conversation or []
