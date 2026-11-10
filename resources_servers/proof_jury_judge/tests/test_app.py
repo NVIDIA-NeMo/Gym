@@ -81,7 +81,8 @@ def make_server(replies):
     """A server whose judge `name` answers its round-r call with `replies[name][r]` (text or a response)."""
     calls = []
 
-    async def post(server_name, url_path, json):
+    async def post(server_name, url_path, json, *, _max_num_tries):
+        assert _max_num_tries == 1  # The judge helper owns the retry budget.
         prompt = json.input[0].content
         calls.append((server_name, prompt))
         round_idx = sum(name == server_name for name, _ in calls) - 1
