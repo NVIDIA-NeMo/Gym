@@ -60,7 +60,7 @@ deepcad_opencode:
       domain: coding
       verified: false
       description: Final model.py verification for multi-turn OpenCode CAD episodes
-      reference_root: resources_servers/deepcad/data
+      reference_root: cad-data/references
       sandbox_provider: sandbox
       sandbox_image: deepcad-cadquery:2.8.0
       sandbox_python: python
