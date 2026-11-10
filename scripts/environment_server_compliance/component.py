@@ -6,6 +6,7 @@
 import importlib
 import inspect
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -53,7 +54,9 @@ def server_classes(component: Path, kind: Kind) -> tuple[str, list[type]]:
     """The component's entry point file, and the concrete server classes of `kind` that it defines."""
     base = _base_class(kind)
     entrypoint = _entrypoint(component)
-    module = importlib.import_module(".".join((*component.parts, Path(entrypoint).stem)))
+    # Gym runs the entry point as a script, so modules beside it import by name.
+    sys.path.insert(0, str((component / entrypoint).resolve().parent))
+    module = importlib.import_module(".".join((*component.parts, *Path(entrypoint).with_suffix("").parts)))
     classes = [
         value
         for value in vars(module).values()
