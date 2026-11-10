@@ -55,6 +55,10 @@ collector ──/run──▶ remote_agent (Gym) ──POST /v1/responses──�
    echoes your cookies back on every subsequent call of the same rollout.
 4. Reporting `usage` (or omitting it entirely — allowed, but your token metrics are empty).
 
+Under an Environment Server, the [agent sessions API](#run-through-an-environment-server) divides Gym's part: the
+Environment Server seeds, verifies and records failures, and `remote_agent` runs the loop. Your service sees the same
+requests either way.
+
 ## The contract, exactly
 
 **Every request you receive** is the task's `responses_create_params` with the conversation
@@ -250,8 +254,54 @@ never a crashed run.
 | `resources_server` | required | The environment that seeds, serves tools for, and verifies each rollout. Swap benchmarks by changing this ref — your service doesn't change. |
 | `concurrency` | `32` | Maximum rollouts in flight against your service, enforced server-side. |
 | `remote_responses_timeout_secs` | `1800` | Wallclock bound on ONE call to your service (a rollout makes one call per loop step). |
-| `run_timeout_secs` | `2100` | Bound on a whole rollout (seed + every loop step + verify), started after the concurrency slot is acquired — queue wait doesn't count. |
+| `run_timeout_secs` | `2100` | Bound on a whole rollout (seed + every loop step + verify), started after the concurrency slot is acquired — queue wait doesn't count. Under an Environment Server, it bounds only the activation (every loop step). |
 | `max_steps` | unset | Maximum loop steps per rollout. Unset leaves `run_timeout_secs` as the only bound. |
+
+## Run through an Environment Server
+
+`remote_agent` also serves the agent sessions API, so a `single_agent_turn` Environment Server can run its episodes.
+Each episode is one agent session with one activation: the Environment Server seeds the resources server, seeds an
+agent session that grants `remote_agent` direct HTTP access to the resources server's tools, calls `/v1/responses`
+once to run the loop, closes the agent session, then verifies and closes the resources session.
+
+Most environments in Gym already declare a `single_agent_turn_legacy` Environment Server. Compose `remote_agent` onto
+one with `--agent-type`, and that server runs the episodes:
+
+```bash
+gym env start --resources-server <your_env> --agent-type remote_agent \
+    ++remote_agent.responses_api_agents.remote_agent.agent_base_url=http://your-agent-host:9000
+```
+
+An environment of your own declares the server next to the agent, bound to the same resources server:
+
+```yaml
+my_env_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: my_env
+      agent_server:
+        type: responses_api_agents
+        name: remote_agent
+      resources_tool_transports:
+      - direct_http
+```
+
+What changes on this path:
+
+1. The resources server must serve resources sessions: a typed `seed_session` keyed by `resources_session_id` and
+   `/close_session`. The in-repo counter in the quickstart above does not, so it keeps the `/run` path.
+2. The tool calls your service asks for go through the session's direct HTTP grant. Without
+   `resources_tool_transports: [direct_http]` the session has no grant, and a tool ask fails the episode.
+3. `run_timeout_secs` bounds only the activation: the agent/tool loop. The Environment Server bounds the whole
+   episode with its own `default_episode_timeout_seconds`. `concurrency` bounds activations in flight.
+4. Failures reach the Environment Server as HTTP errors instead of `remote_agent_error` rows. An invalid Responses
+   object, or a tool ask in a session with no grant, answers `422`, which the Environment Server records as a terminal
+   failure. Any other failure answers `500`, which it records as retryable.
+5. Your service's cookies still last one rollout: they round-trip within the activation and are never stored in the
+   session.
 
 ## Failure handling and resume
 
