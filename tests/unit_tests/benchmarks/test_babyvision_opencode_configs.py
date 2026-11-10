@@ -15,13 +15,13 @@ from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDi
 ROOT = Path(__file__).resolve().parents[3]
 
 
-def resolve(config_path: str) -> tuple[GlobalConfigDictParser, dict]:
+def resolve(config_path: str, **overrides: object) -> tuple[GlobalConfigDictParser, dict]:
     parser = GlobalConfigDictParser()
     config = parser.parse(
         GlobalConfigDictParserConfig(
             initial_global_config_dict=OmegaConf.merge(
                 GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
-                {"config_paths": [str(ROOT / config_path)]},
+                {"config_paths": [str(ROOT / config_path)], **overrides},
             ),
             skip_load_from_cli=True,
             skip_load_from_dotenv=True,
@@ -65,3 +65,36 @@ def test_benchmark_config_routes_the_rows_through_an_agent_session(benchmark):
     manifest = yaml.safe_load((ROOT / "benchmarks" / benchmark / "manifest.yaml").read_text())
     assert manifest["agent_server"] == "opencode_agent"
     assert [OmegaConf.to_container(dataset) for dataset in agent["datasets"]] == manifest["datasets"]
+
+
+def test_only_the_policy_model_takes_a_launcher_s_host_address():
+    """The lent sandbox may reach every port of the policy model's host, so no other server listens there.
+
+    NeMo RL sets default_host to the node's address. A server's own host wins over it, so the judge (it spends the
+    judge's key for any caller), the agent (a request without a session runs OpenCode on the host) and the resources
+    and Environment Servers stay on loopback.
+    """
+    parser, config = resolve("benchmarks/babyvision_opencode/config.yaml", default_host="10.1.2.3")
+    hosts = {
+        instance.name: instance.get_inner_run_server_config_dict()["host"]
+        for instance in parser.filter_for_server_instance_configs(config)
+    }
+    assert hosts == {
+        "policy_model": "10.1.2.3",
+        "visual_coding_opencode": "127.0.0.1",
+        "visual_coding_opencode_judge_model": "127.0.0.1",
+        "visual_coding_opencode_agent": "127.0.0.1",
+        "visual_coding_opencode_environment_server": "127.0.0.1",
+    }
+
+
+def test_episodes_are_admitted_at_the_agent_s_rate_and_end_before_the_sandbox_expires():
+    _, config = resolve("benchmarks/babyvision_opencode/config.yaml")
+    pairing = config["visual_coding_opencode_environment_server"]["environment_servers"]["single_agent_turn_legacy"]
+    agent = config["visual_coding_opencode_agent"]["responses_api_agents"]["opencode_agent"]
+    sandbox = config["visual_coding_opencode"]["resources_servers"]["visual_coding_opencode"]["sandbox_config"]
+    # Each seed starts a sandbox, so admitting more episodes than OpenCode runs would leave sandboxes idle.
+    assert pairing["max_concurrent_episodes"] == agent["concurrency"]
+    # The episode covers the sandbox start and OpenCode's run, and ends before the sandbox's TTL.
+    deadline = pairing["default_episode_timeout_seconds"]
+    assert sandbox["ready_timeout_s"] + agent["timeout"] < deadline < sandbox["ttl_s"]

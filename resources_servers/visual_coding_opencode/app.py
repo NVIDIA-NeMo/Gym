@@ -5,8 +5,10 @@
 Grading:
 - the response text is every assistant text part joined, and the judge sees its last
   `judge_max_text_chars` characters;
-- `extracted` is string_match's final_answer extraction (last "answer:", else last \\boxed{});
+- `extracted` is the last \\boxed{} of that text, the answer the prompt asks for;
 - correct iff the verdict is "equivalent"; "different" and "unsure" score 0;
+- a run that stopped before its final answer (status incomplete: a timeout, an output cap or a context limit) scores
+  0 without a judge call, even if its text holds an earlier \\boxed{} guess;
 - a judge failure (a failed call, or a reply without a valid verdict) is not scored: the base class's
   judge_failsafe returns the row masked (judge_failed).
 string_match's grade of `extracted` is kept as a diagnostic, not the reward.
@@ -21,10 +23,10 @@ import json
 import re
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, ClassVar, Literal, Optional
+from typing import Annotated, Any, ClassVar, Literal, Optional
 
 from fastapi import FastAPI, Request
-from pydantic import ConfigDict, Field, PrivateAttr
+from pydantic import BeforeValidator, ConfigDict, Field, PrivateAttr
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import ModelServerRef
@@ -39,6 +41,7 @@ from nemo_gym.server_runtime import (
     LentSandboxes,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
+    ResourcesSeedRejectedError,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
     ResourcesSessionConflictError,
@@ -46,8 +49,10 @@ from nemo_gym.server_runtime import (
     ResourcesSessionLocks,
     ReverifyMode,
     SimpleResourcesServer,
+    observe_llm_judge_grading,
+    reject_partial_typed_seed,
 )
-from nemo_gym.verification import JudgeError, VerifierFixture, call_judge
+from nemo_gym.verification import JudgeError, VerifierFixture, call_judge, record_parsed_judge_verdict
 from resources_servers.string_match.app import (
     _extract_answer,
     _extract_last_assistant_text,
@@ -90,18 +95,30 @@ Is the model's answer the same as the reference, differing only in formatting?""
 
 
 def parse_verdict(content: str) -> dict[str, Any]:
-    """The verdict and reason from the first JSON object in the reply.
+    """The verdict and reason from the JSON objects in the reply that have a verdict.
 
-    A reply without a JSON object or without a valid verdict is a judge failure, not an "unsure" verdict: it raises
-    JudgeError, so the row is masked instead of scored 0. "unsure" counts only when the judge says it.
+    A reply with no such object, with objects that name different verdicts, or with an invalid verdict is a judge
+    failure, not an "unsure" verdict: it raises JudgeError, so the row is masked instead of scored 0. "unsure" counts
+    only when the judge says it.
     """
-    match = re.search(r"\{.*\}", content or "", re.S)
-    try:
-        data = json.loads(match.group(0)) if match else None
-    except json.JSONDecodeError:
-        data = None
-    if not isinstance(data, dict):
-        raise JudgeError(f"judge reply has no JSON object: {(content or '')[:200]!r}")
+    text = content or ""
+    decoder = json.JSONDecoder()
+    verdicts: list[dict[str, Any]] = []
+    end = 0
+    for brace in re.finditer(r"\{", text):
+        if brace.start() < end:
+            continue
+        try:
+            data, end = decoder.raw_decode(text, brace.start())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict) and "verdict" in data:
+            verdicts.append(data)
+    # A brace ahead of the verdict (a quoted \boxed{7}) is skipped. Verdict objects that disagree, as when a reasoning
+    # judge quotes one from the model's text, stay a judge failure.
+    if len({str(data["verdict"]).lower().strip() for data in verdicts}) != 1:
+        raise JudgeError(f"judge reply has no single JSON verdict: {text[:200]!r}")
+    data = verdicts[-1]
     verdict = str(data.get("verdict", "")).lower().strip()
     if verdict not in ("equivalent", "different", "unsure"):
         raise JudgeError(f"judge reply has no valid verdict: {(content or '')[:200]!r}")
@@ -124,8 +141,8 @@ class VisualCodingOpenCodeConfig(BaseResourcesServerConfig):
     # model_only: the lent sandbox reaches only sandbox_model_server's host. inherit keeps the provider's network.
     sandbox_network_access: Literal["inherit", "model_only"] = "inherit"
     sandbox_model_server: Optional[ModelServerRef] = None
+    # The judge's model server picks the judge model (openai_model's openai_model), so this server names none.
     judge_model_server: ModelServerRef
-    judge_model: str
     judge_temperature: float = 0.0
     judge_top_p: float = 1.0
     judge_max_tokens: int = 1024
@@ -193,11 +210,23 @@ class VisualCodingOpenCodeServer(SimpleResourcesServer):
         return app
 
     async def seed_session(
-        self, request: Request, body: ResourcesSeedSessionRequest | BaseSeedSessionRequest
+        self,
+        request: Request,
+        body: ResourcesSeedSessionRequest
+        | Annotated[BaseSeedSessionRequest, BeforeValidator(reject_partial_typed_seed)],
     ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
-        """Lend the episode a sandbox when the server lends one; otherwise keep no state."""
-        if not isinstance(body, ResourcesSeedSessionRequest) or self._lent_sandboxes is None:
+        """Lend the episode a sandbox when the server lends one; otherwise keep no state.
+
+        A malformed typed seed is refused (422) instead of being taken as a cookie seed. While the server lends
+        sandboxes, a cookie seed is refused too: an agent's own /run seeds that way and then runs OpenCode on its own
+        host, outside any lent sandbox, and without the prompt image.
+        """
+        if self._lent_sandboxes is None:
             return await super().seed_session(body)
+        if not isinstance(body, ResourcesSeedSessionRequest):
+            raise ResourcesSeedRejectedError(
+                "This server lends a sandbox only to an Environment Server's episode seed"
+            )
         session_id = body.resources_session_id
         async with self._locks.locked(session_id):
             self._fences.raise_if_fenced(session_id)
@@ -242,7 +271,6 @@ class VisualCodingOpenCodeServer(SimpleResourcesServer):
             text=text[-self.config.judge_max_text_chars :],
         )
         params = {
-            "model": self.config.judge_model,
             "messages": [{"role": "system", "content": JUDGE_SYSTEM}, {"role": "user", "content": prompt}],
             "temperature": self.config.judge_temperature,
             "top_p": self.config.judge_top_p,
@@ -256,31 +284,42 @@ class VisualCodingOpenCodeServer(SimpleResourcesServer):
                 json=params,
                 response_model=NeMoGymChatCompletion,
             )
+        if not completion.choices:
+            raise JudgeError("judge reply has no choices")
         return parse_verdict(completion.choices[0].message.content or "")
 
     async def verify(self, body: VisualCodingOpenCodeVerifyRequest) -> VisualCodingOpenCodeVerifyResponse:
         """Score the final answer with the judge.
 
         A judge failure (a failed call, or a reply without a valid verdict) is not caught here. The base class's
-        judge_failsafe returns the row masked (mask_sample, failure_kind judge_failed), so RL does not train on it
-        as a wrong answer.
+        judge_failsafe returns the row masked (mask_sample, failure_kind judge_failed), so RL leaves it out of the
+        loss. Under NeMo RL's default ``grpo.masked_reward_policy: include``, its 0.0 still counts in its group's
+        baseline; ``exclude`` leaves it out there too.
         """
         result = VisualCodingOpenCodeVerifyResponse(**body.model_dump(), reward=0.0)
         text = _extract_last_assistant_text(body)
-        if not text:
-            # A timed-out or failed run leaves no answer: wrong, with no judge call.
-            result.failure_reason = "no_response"
+        if not text or body.response.status == "incomplete":
+            # A run that leaves no text, or stops before its final answer (a timeout, an output cap or a context
+            # limit), is wrong even if its text holds an earlier \boxed{} guess. A failed response never gets here:
+            # the Environment Server's outcome policy owns it.
+            result.failure_reason = "no_response" if not text else "incomplete_run"
             return result
-        result.extracted_answer = _extract_answer(text, "final_answer")
+        result.extracted_answer = _extract_answer(text, "boxed")
         if result.extracted_answer is not None:
             result.string_match_reward = _grade_string_match(body.expected_answer, result.extracted_answer)
-        judged = await self.judge(body.question, body.expected_answer, result.extracted_answer, text)
-        result.judge_verdict = judged["verdict"]
-        result.judge_reason = judged["reason"]
-        result.reward = float(judged["verdict"] == "equivalent")
-        if not result.reward:
-            result.failure_reason = "incorrect_answer"
-        return result
+
+        async def grade() -> VisualCodingOpenCodeVerifyResponse:
+            judged = await self.judge(body.question, body.expected_answer, result.extracted_answer, text)
+            # judge() raises on a reply without a valid verdict, so reaching here means the verdict parsed.
+            record_parsed_judge_verdict()
+            result.judge_verdict = judged["verdict"]
+            result.judge_reason = judged["reason"]
+            result.reward = float(judged["verdict"] == "equivalent")
+            if not result.reward:
+                result.failure_reason = "incorrect_answer"
+            return result
+
+        return await observe_llm_judge_grading(grade)
 
 
 VERIFIER_FIXTURE = VerifierFixture(
