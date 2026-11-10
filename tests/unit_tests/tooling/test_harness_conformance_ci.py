@@ -167,7 +167,7 @@ def test_custom_check_is_separate_from_required_ci_and_probe_permissions():
     root = Path(__file__).resolve().parents[3]
     main = yaml.safe_load((root / ".github/workflows/cicd-main.yml").read_text())["jobs"]
     workflow = yaml.safe_load((root / ".github/workflows/harness-conformance.yml").read_text())
-    assert main["harness_conformance"]["needs"] == ["pre-flight"]
+    assert main["harness_conformance"]["needs"] == ["pre-flight", "classify_changes"]
     assert main["harness_conformance"]["name"] == "Harness conformance (non-blocking)"
     assert "harness_conformance" not in main["Nemo_CICD_Test"]["needs"]
     assert "harness_conformance" not in main["notify-failure"]["needs"]
