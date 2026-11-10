@@ -8,8 +8,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServerConfig
-from nemo_gym.config import GlobalConfigDictParser
-from nemo_gym.config.global_config import GlobalConfigDictParserConfig
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 
 
 BENCHMARKS = Path(__file__).parents[3] / "benchmarks/agentic_mme"
