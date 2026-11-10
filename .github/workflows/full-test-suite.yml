@@ -149,8 +149,10 @@ jobs:
       # Runs after failed tests too: a failing assertion still downloaded its dependencies. A failed
       # venv install leaves the cache incomplete, so this shard's venvs (the union of its workers')
       # are set up once more into the same cache: a transient failure completes it, and a persistent
-      # one fails here before anything is published. The revision annotation lets the offline-image
-      # job reject a tag left by an earlier commit.
+      # one fails here before anything is published. Assets that tests fetch at runtime (Chromium,
+      # datasets) are captured only when a test reaches the download, so a test that already fails
+      # before it at this commit may also miss that asset offline. The revision annotation lets the
+      # offline-image job reject a tag left by an earlier commit.
       - name: Publish dependency cache layer
         if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
         env:
@@ -210,9 +212,9 @@ jobs:
         env:
           AWS_REGION: us-east-1
 
-      # A shard that failed before publishing leaves an earlier commit's cache under its tag. That
-      # shard's own failure is reported and classified for retry, so this job publishes nothing
-      # instead of failing too; re-running the failed shard re-runs this dependent job as well.
+      # A shard that failed before publishing leaves an earlier commit's cache under its tag, or no
+      # tag at all. That shard's own failure is reported and classified for retry, so this job
+      # publishes nothing instead of failing too; re-running the failed shard re-runs this job.
       - name: Check this commit's shard caches
         id: shards
         shell: bash
@@ -225,7 +227,10 @@ jobs:
           tar -xzf "$RUNNER_TEMP/crane.tar.gz" -C "$RUNNER_TEMP" crane
           stale=()
           for shard in $(seq 0 $((NUM_SHARDS - 1))); do
-            "$RUNNER_TEMP/crane" manifest "$REPOSITORY:main-cache-$shard" > "$RUNNER_TEMP/main-cache-$shard.json"
+            if ! "$RUNNER_TEMP/crane" manifest "$REPOSITORY:main-cache-$shard" > "$RUNNER_TEMP/main-cache-$shard.json"; then
+              stale+=("$shard")
+              continue
+            fi
             revision="$(python3 -c 'import json, sys; print(json.load(sys.stdin).get("annotations", {}).get(sys.argv[1], ""))' \
               org.opencontainers.image.revision < "$RUNNER_TEMP/main-cache-$shard.json")"
             [[ "$revision" == "$GITHUB_SHA" ]] || stale+=("$shard")
@@ -233,7 +238,7 @@ jobs:
           if ((${#stale[@]} == 0)); then
             echo "current=true" | tee -a "$GITHUB_OUTPUT"
           elif [[ "$SERVER_SUITE_RESULT" == "success" ]]; then
-            echo "::error::Shards ${stale[*]} passed but their main-cache tags hold another commit's cache."
+            echo "::error::Shards ${stale[*]} passed but their main-cache tags are missing or hold another commit's cache."
             exit 1
           else
             echo "::warning::Shards ${stale[*]} did not publish this commit's cache; gym:main-offline keeps its previous image."
