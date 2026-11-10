@@ -2993,7 +2993,7 @@ class TestFailureRouting:
         ]
         rows = [{**row, NG_ENVIRONMENT_SERVER_KEY: "gdpval_environment_server"} for row in rows]
         outcomes: List[Tuple[str, str]] = []
-        monkeypatch.setattr(rollout_collection_module, "is_span_group_enabled", lambda group: True)
+        monkeypatch.setattr(rollout_collection_module, "is_metrics_exporter_active", lambda: True)
         monkeypatch.setattr(
             rollout_collection_module,
             "record_rollout_completed",
