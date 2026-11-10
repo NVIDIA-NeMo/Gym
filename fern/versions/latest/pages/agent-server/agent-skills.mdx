@@ -9,7 +9,7 @@ Skills are reusable units of operational knowledge an agent can load at runtime,
 NeMo Gym treats skills as an **environment-level variable you can sweep**, the same way it treats prompts. You point a run at a directory of skills, the agent loads them with its own native mechanism, and each rollout result is tagged so you can compare variants. NeMo Gym does not interpret or activate skills — it sets up the skill environment and measures the outcome.
 
 <Note>
-Run-level skills do not apply to Harbor task folders yet: rollout collection refuses `+skills.path` for their rows. [#5640](https://github.com/NVIDIA-NeMo/Gym/issues/5640) tracks support. A task folder can still bring its own skills, as described below.
+Task folders don't yet support run-level skills: rollout collection refuses `+skills.path` for their rows. A task folder can bring its own skills, as described below.
 </Note>
 
 ## Skills are a run-level knob, not a dataset field
