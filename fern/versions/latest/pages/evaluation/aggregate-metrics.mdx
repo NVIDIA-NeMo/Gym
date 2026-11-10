@@ -36,7 +36,35 @@ or the original producer name saved in `_ng_failure_legacy_class`, when present.
 kind `gdpval:reference_missing` still matches an existing `reference_missing` selection. Selecting both names counts
 the task once. Collection and offline aggregation use the same rule; see [evaluation resume](/main/evaluation/resume).
 
-When one `gym eval run` collects rollouts for several agents, an agent whose every expected rollout is scored is aggregated at once, without waiting for the other agents, and its entry is also written to `<output>_agent_complete/<agent>.json` (characters other than letters, digits, `.`, `_` and `-` in the agent name are percent-encoded). The file carries the agent's `expected_rollouts`, `completed_rollouts` (scored) and `failed_rollouts`, `completed_at`, `aggregation_status` and the same `aggregate` entry the run-wide file later holds. The file waits until every rollout is settled: a result masked by infrastructure or a failure that a resume will retry keeps the agent pending until that rerun, while a failure no resume retries settles its rollout and is scored as the end of the run scores it (`count_failure_classes_as_zero` decides whether it counts as a zero). An agent whose results include one with no reward gets no file, and rollouts routed to an environment server together with rows naming the agent behind it count as one agent. An agent fronted by several environment servers is labeled by the environment server in its completion file, while the run-wide file falls back to the agent name when only one of those servers ends with scored rollouts. `<output>_aggregate_metrics.json` itself is written once, after every agent is done, and once it exists it is authoritative: a later `gym eval aggregate` repair rewrites it but not the completion files, so a completion file that recorded an aggregation error can be stale, and the run-wide entry wins.
+## Per-agent completion files
+
+When one `gym eval run` collects rollouts for several agents with aggregation enabled, each agent is aggregated as soon as every one of its expected rollouts is settled, without waiting for the other agents, and its entry is written to `<output>_agent_complete/<agent>.json`. Characters other than letters, digits, `.`, `_` and `-` in the agent name are percent-encoded in the filename. A run with a single agent or `disable_aggregation` writes no completion files.
+
+| Field | Value |
+| --- | --- |
+| `schema_version` | `"1"` |
+| `agent_ref` | `{"name": <label>}`, the label the run-wide entry uses |
+| `_ng_environment_server` | The environment server the agent's rollouts ran through |
+| `expected_rollouts` | The agent's materialized rollouts |
+| `completed_rollouts` | Rollouts with a scored success |
+| `failed_rollouts` | Rollouts settled by a failure no resume retries, or by an intentional omission |
+| `completed_at` | UTC time the file was written, in ISO 8601 |
+| `aggregation_status` | `complete`, or `error` when `/aggregate_metrics` failed; the entry then carries the error |
+| `aggregate` | The entry `<output>_aggregate_metrics.json` gives the agent |
+
+When an agent is complete:
+
+- A rollout is settled when its outcome is final: a scored success, or a failure no resume retries (a terminal class or an exhausted attempt budget). A result masked by infrastructure, or a failure a resume will retry, keeps the agent pending until a resumed run reruns that rollout.
+- Failures enter the entry as they do at the end of the run: `count_failure_classes_as_zero` decides whether they count as zeros.
+- An agent with a persisted result that carries no reward gets no file.
+- Rollouts routed to an environment server and rows naming the agent behind it count as one agent. An agent fronted by several environment servers is labeled by the environment server in its file, while the run-wide file falls back to the agent name when only one of those servers ends with scored rollouts.
+
+What changes the files:
+
+- A fresh run deletes `<output>_agent_complete/`.
+- A resumed run rewrites the file of an agent an earlier job finished before it dispatches, so that file's `completed_at` is the resuming job's time.
+- `<output>_aggregate_metrics.json` is still written once, after every agent is done. Once it exists it is authoritative: a later `gym eval aggregate` repair rewrites it but not the completion files, so a completion file that recorded an aggregation error can be stale, and the run-wide entry wins.
+- If a job is killed before the run-wide file is written, the completion files are what it leaves. `gym eval aggregate` with `+merge_shards=false` can compute metrics from the saved rollouts afterwards; it needs the environment servers running again, scores unfinished agents from the rollouts they have, and is a manual step.
 
 ## Output Format
 
