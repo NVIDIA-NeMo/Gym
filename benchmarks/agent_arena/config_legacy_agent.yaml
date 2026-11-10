@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Deprecated: the legacy_agent relay will be removed after the Environment Server migration. Use
+# agent_arena (config.yaml) instead, which runs the same agent, rows and scoring through single_agent_turn_legacy.
+#
+# AgentArena as a benchmark: the agentic_turn_simulation environment over the Arena validation
+# split, 4 repeats. The simulator and judge are the environment's judge model server: pass
+# ++judge_base_url (one URL or a list of replicas), ++judge_api_key and ++judge_model_name.
+config_paths:
+  - resources_servers/agentic_turn_simulation/configs/agentic_turn_simulation_legacy_agent.yaml
+
+agent_arena_benchmark_agent:
+  _inherit_from: agentic_turn_simulation_agent
+  responses_api_agents:
+    agentic_turn_simulation_agent:
+      datasets:
+      - name: agent_arena
+        type: benchmark
+        jsonl_fpath: benchmarks/agent_arena/data/agent_arena_benchmark.jsonl
+        prepare_script: benchmarks/agent_arena/prepare.py
+        # Rows carry the harness's system prompt and history already.
+        prompt_config: null
+        num_repeats: 4
+        license: NVIDIA Internal Use Only, Do Not Distribute
+
+agent_arena_benchmark_environment_server:
+  _inherit_from: agentic_turn_simulation_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: agent_arena_benchmark_agent
