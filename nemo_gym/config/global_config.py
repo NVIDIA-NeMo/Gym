@@ -151,6 +151,9 @@ MODEL_CALL_CAPTURE_DIR_KEY_NAME = "model_call_capture_dir"
 # Run-wide training-token capture settings.
 # See ``nemo_gym/models/token_capture/config.py``.
 TOKEN_CAPTURE_BLOCK = "token_id_capture"
+# Set by a training framework whose rows carry model-call sampling values.
+# See ``nemo_gym/core/model_call_sampling.py``.
+MODEL_CALL_SAMPLING_BLOCK = "model_call_sampling"
 COMPONENT_NAME_KEY_NAME = "component_name"
 SKIP_VERIFICATION_KEY_NAME = "skip_verification"
 SKIP_VERIFICATION_REWARD_KEY_NAME = "skip_verification_reward"
@@ -201,6 +204,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     ROLLOUT_CORRELATION_KEY_NAME,
     MODEL_CALL_CAPTURE_DIR_KEY_NAME,
     TOKEN_CAPTURE_BLOCK,
+    MODEL_CALL_SAMPLING_BLOCK,
     COMPONENT_NAME_KEY_NAME,
     SKIP_VERIFICATION_KEY_NAME,
     SKIP_VERIFICATION_REWARD_KEY_NAME,
@@ -333,6 +337,8 @@ ATTEMPT_INDEX_KEY_NAME = "_ng_attempt_index"
 # Otherwise two dispatches would share one capture key.
 # The suffix "-a<N>" is reserved for attempt-qualified ids, so a dataset row's id must not end with it.
 ROLLOUT_ID_KEY_NAME = "_ng_rollout_id"
+# Sampling values a training framework sets for one rollout's trained agent; see nemo_gym/core/model_call_sampling.py.
+MODEL_SAMPLING_KEY_NAME = "_ng_model_sampling"
 RESPONSES_CREATE_PARAMS_KEY_NAME = "responses_create_params"
 RESPONSE_KEY_NAME = "response"
 AGENT_REF_KEY_NAME = "agent_ref"
