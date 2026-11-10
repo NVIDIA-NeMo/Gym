@@ -148,6 +148,20 @@ def _timestamp(event: dict) -> datetime | None:
     return observed_at if observed_at.tzinfo is not None else None
 
 
+def _persisted_item_ids(lines: list[str]) -> set[str]:
+    """Every call and item ID any persisted record uses, including records later in the stream."""
+    reserved = set()
+    for line in lines:
+        try:
+            event = json.loads(line)
+            payload = event["payload"] if event["type"] == "response_item" else {}
+        except (ValueError, TypeError, KeyError):
+            continue
+        if isinstance(payload, dict):
+            reserved.update(payload[key] for key in ("id", "call_id") if isinstance(payload.get(key), str))
+    return reserved
+
+
 def _transcript_tools(
     attempts: list[dict], invocation_id: str, agent_instance: str | None, clock_domain: str | None
 ) -> tuple[list[ToolCallObservation], list[ObservationGap]]:
@@ -237,7 +251,8 @@ def parse_codex_observations(
     """Parse a transcript, using the caller's final outcome and gaps when supplied.
 
     Schema 2.0 keeps one attempt per persisted call record. A request keeps its native call ID
-    unless an earlier record used it; a reuse gets an ID qualified by its record position. Unlike
+    unless an earlier record used it; a reuse, or a result that no call can own, gets an ID derived
+    from its record position that no persisted record or earlier allocation uses. Unlike
     OpenCode, Codex has no exact model-call join, so captured turns keep unproven native IDs that
     block the v1 projection from restoring qualified ones; qualifying only reuse keeps v1 native.
     A result closes the only open call with its native ID. A result for concurrent calls sharing
@@ -258,10 +273,22 @@ def parse_codex_observations(
     attempts = []
     open_calls = defaultdict(lambda: {"calls": [], "results": 0})
     used_call_ids = set()
+    lines = _jsonl_lines(transcript or "")
+    reserved_ids = _persisted_item_ids(lines) if qualified else set()
+
+    def record_id(native: str, index: int) -> str:
+        """A replay-stable ID that no persisted record or earlier allocation uses."""
+        candidate, suffix = f"{native}:record-{index}", 0
+        while candidate in reserved_ids:
+            suffix += 1
+            candidate = f"{native}:record-{index}.{suffix}"
+        reserved_ids.add(candidate)
+        return candidate
+
     # A record that could not be read may have been a tool call, unless it is a native event (token usage, a patch
     # outcome): then the tool history read is not complete, and its timing is unknown.
     tool_history_complete = True
-    for index, line in enumerate(_jsonl_lines(transcript or "")):
+    for index, line in enumerate(lines):
         native_event = False
         try:
             event = json.loads(line)
@@ -313,8 +340,8 @@ def parse_codex_observations(
             observed_at = _timestamp(event)
             group = open_calls[native]
             if kind in _RESULT_RECORDS and len(group["calls"]) > 1:
-                # A record-qualified result ID attaches to no attempt in the group.
-                conversation[-1] = parsed.model_copy(update={"call_id": f"{native}:record-{index}"})
+                # A fresh result ID attaches to no attempt, in the group or elsewhere.
+                conversation[-1] = parsed.model_copy(update={"call_id": record_id(native, index)})
                 group["results"] += 1
                 for attempt in group["calls"]:
                     attempt["status"], attempt["error_type"] = "unknown", None
@@ -330,9 +357,9 @@ def parse_codex_observations(
                 # A hosted search has no call_id; its item ID is its conversation identity, which the
                 # shared v1 projection cannot rename, so it stays native.
                 call_id = native
-                if kind != "web_search_call":
-                    call_id = native if native not in used_call_ids else f"{native}:record-{index}"
-                    used_call_ids.update({native, call_id})
+                if kind != "web_search_call" and native in used_call_ids:
+                    call_id = record_id(native, index)
+                used_call_ids.add(native)
                 attempt = {
                     "key": f"record:{index}",
                     "native": native,
