@@ -423,21 +423,23 @@ def runtime_identity() -> dict:
             "openai",
         ]
     }
-
-    def tracked_sources(base: Path):
-        # Skip hidden directories: .venv and checkouts other servers fetch at test time (e.g. ether0's
-        # .ether0) are not part of this code and appear mid-run while shard workers share a checkout.
-        return (p for p in base.rglob("*.py") if not any(part.startswith(".") for part in p.relative_to(base).parts))
-
-    sources = {str(p.relative_to(ROOT)): digest(p) for p in tracked_sources(ROOT)}
+    sources = {str(p.relative_to(ROOT)): digest(p) for p in ROOT.rglob("*.py")}
+    sources["policy/judge_output.schema.json"] = digest(ROOT / "policy/judge_output.schema.json")
     component_root = ROOT.parents[2]
     for boundary in ["benchmarks", "resources_servers", "responses_api_models", "responses_api_agents", "nemo_gym"]:
-        for p in tracked_sources(component_root / boundary):
-            sources["gym/" + str(p.relative_to(component_root))] = digest(p)
+        for p in (component_root / boundary).rglob("*.py"):
+            # Other components prepare hidden checkouts and caches during concurrent runs.
+            if not any(part.startswith(".") for part in p.relative_to(component_root).parts):
+                sources["gym/" + str(p.relative_to(component_root))] = digest(p)
+    # Workspace outputs can toggle Git's checkout-wide dirty flag between calls.
+    # Source hashes above, not that flag, detect edits to the code used by a run.
+    gym_commit = installed_gym_commit()
+    if gym_commit is not None:
+        gym_commit = gym_commit.removesuffix("-dirty")
     return {
         "python": sys.version,
         "dependencies": versions,
         "sources": sources,
-        "gym_commit": installed_gym_commit(),
+        "gym_commit": gym_commit,
         "source_gym_commit": read(ROOT / "source_manifest.json")["gym_commit"],
     }

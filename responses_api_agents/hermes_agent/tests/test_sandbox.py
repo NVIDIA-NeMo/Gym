@@ -365,7 +365,7 @@ async def test_close_failure_keeps_session_for_retry(
 
 @pytest.mark.parametrize("receipt", [None, {"cleanup_confirmed": False, "error": "cleanup failed"}])
 @pytest.mark.parametrize("launch_started,cleanup", [(False, None), (True, None), (True, {"cleanup_confirmed": True})])
-async def test_owned_close_falls_back_to_stop_without_receipt(agent, state, receipt, launch_started, cleanup):
+async def test_owned_close_falls_back_to_stop_when_exec_unavailable(agent, state, receipt, launch_started, cleanup):
     state.session.owns_sandbox = True
     state.session.launch_started = launch_started
     state.session.cleanup = cleanup
@@ -388,7 +388,8 @@ async def test_owned_close_falls_back_to_stop_without_receipt(agent, state, rece
         state.session.sandbox.exec.assert_awaited_once()
         assert download_json.await_count >= 1
     else:
-        state.session.sandbox.exec.assert_not_awaited()
+        state.session.sandbox.exec.assert_awaited_once()
+        assert "mv /tmp/nemo-gym-hermes-sessions/session" in state.session.sandbox.exec.await_args.args[0]
         download_json.assert_not_awaited()
 
 
