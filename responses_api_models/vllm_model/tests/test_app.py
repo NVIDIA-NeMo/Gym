@@ -4400,7 +4400,9 @@ class TestChatCompletionsConverter:
         assert expected_messages == actual_messages
 
     @staticmethod
-    def _chat_client_capturing_upstream(**config_overrides: Any) -> tuple[TestClient, dict[str, Any]]:
+    def _chat_client_capturing_upstream(
+        *, response_payload: dict[str, Any] | None = None, **config_overrides: Any
+    ) -> tuple[TestClient, dict[str, Any]]:
         """Chat-path vllm_model behind a TestClient; returns the kwargs sent upstream."""
         config = VLLMModelConfig(
             host="0.0.0.0",
@@ -4421,6 +4423,8 @@ class TestChatCompletionsConverter:
         async def mock_create_chat_completion(**kwargs):
             captured_kwargs.clear()
             captured_kwargs.update(kwargs)
+            if response_payload is not None:
+                return deepcopy(response_payload)
             return NeMoGymChatCompletion(
                 id="chtcmpl",
                 object="chat.completion",
@@ -4439,6 +4443,50 @@ class TestChatCompletionsConverter:
         mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
         server._clients = [mock_client]
         return TestClient(app), captured_kwargs
+
+    @mark.parametrize("responses_api", [False, True], ids=["chat", "responses"])
+    @mark.parametrize("stop_reason", [None, "repetition_detected"], ids=["native-finish-only", "stock-stop"])
+    def test_default_chat_path_preserves_repetition_termination(
+        self, responses_api: bool, stop_reason: str | None
+    ) -> None:
+        choice = {
+            "index": 0,
+            "finish_reason": "repetition",
+            "message": {"role": "assistant", "content": "Retained answer."},
+        }
+        if stop_reason is not None:
+            choice["stop_reason"] = stop_reason
+        payload = {
+            "id": "chatcmpl-repetition",
+            "object": "chat.completion",
+            "created": FIXED_TIME,
+            "model": "dummy_model",
+            "choices": [choice],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+        }
+        client, upstream = self._chat_client_capturing_upstream(response_payload=payload)
+        body = {"input": "Question"} if responses_api else {"messages": [{"role": "user", "content": "Question"}]}
+
+        response = client.post("/v1/responses" if responses_api else "/v1/chat/completions", json=body)
+
+        assert response.status_code == 200, response.text
+        assert "messages" in upstream
+        assert "prompt" not in upstream
+        if responses_api:
+            saved = NeMoGymResponse.model_validate_json(response.content)
+            assert saved.status == "completed"
+            assert saved.incomplete_details is None
+            assert saved.output_text == "Retained answer."
+            assert saved.native_finish_reason == "repetition"
+            assert getattr(saved, "native_stop_reason", None) == stop_reason
+            assert (saved.usage.input_tokens, saved.usage.output_tokens, saved.usage.total_tokens) == (3, 2, 5)
+        else:
+            saved = NeMoGymChatCompletion.model_validate_json(response.content)
+            assert saved.choices[0].finish_reason == "stop"
+            assert saved.choices[0].native_finish_reason == "repetition"
+            assert getattr(saved.choices[0], "stop_reason", None) == stop_reason
+            assert saved.choices[0].message.content == "Retained answer."
+            assert (saved.usage.prompt_tokens, saved.usage.completion_tokens, saved.usage.total_tokens) == (3, 2, 5)
 
     @mark.parametrize("stream", [False, True])
     @mark.parametrize("aws_region_name", [None, "us-east-1", 123, {"ignored": ["value"]}])

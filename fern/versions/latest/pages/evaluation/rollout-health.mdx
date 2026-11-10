@@ -207,6 +207,9 @@ reason is represented by the SDK-compatible `stop` value while retaining `native
 streaming, capture and conversion. This does not enable a repetition detector or change its settings. The provider's
 completion status and agent-visible output stay unchanged.
 
+Consumers that require a complete judge verdict must also check these native repetition signals. The SDK-compatible
+`stop` category alone does not establish that a repetition-stopped answer or verdict is finished.
+
 ## How Health Checks Interpret Existing Observation Gaps
 
 During rollout collection, Gym's observability layer writes an `ObservationGap` to `ng_trajectory.gaps` when it cannot collect,
