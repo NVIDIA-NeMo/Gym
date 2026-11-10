@@ -78,6 +78,7 @@ from nemo_gym.core import (
 from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
 from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess
 from nemo_gym.server_runtime import (
+    TOOL_CALL_ID_HEADER,
     TOOL_ERROR_HEADER,
     AgentContext,
     AgentContextArtifact,
@@ -418,7 +419,7 @@ class TestApp:
             url="http://resources:8000/get_weather",
             json={"city": "San Francisco"},
             cookies={"session_id": "seeded-resource-cookie"},
-            headers={"X-Scoped-Access": "token"},
+            headers={"X-Scoped-Access": "token", TOOL_CALL_ID_HEADER: "call-1"},
             _internal=True,
         )
         assert [item.kwargs["server_name"] for item in server_client.post.await_args_list] == ["model", "model"]
