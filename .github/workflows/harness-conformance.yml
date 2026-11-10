@@ -16,6 +16,10 @@ on:
         type: string
         default: ""
 
+env:
+  # Check publication targets the event head; evidence identifies the checked-out tree.
+  TESTED_SHA: ${{ inputs.checkout-ref || github.sha }}
+
 permissions:
   contents: read
 
@@ -190,7 +194,7 @@ jobs:
         run: |
           .venv/bin/python -m scripts.harness_conformance.ci_table \
             --repo "$GITHUB_REPOSITORY" --run-id "$GITHUB_RUN_ID" \
-            --run-attempt "$GITHUB_RUN_ATTEMPT" --commit "$GITHUB_SHA" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" --commit "$TESTED_SHA" \
             --output "$RUNNER_TEMP/harness-conformance-docs/table.mdx"
       - name: Upload rendered documentation table
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
