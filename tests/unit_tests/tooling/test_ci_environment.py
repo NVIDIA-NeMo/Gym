@@ -31,6 +31,7 @@ SERVER_TESTS = REPO_ROOT / "scripts" / "ci" / "server_tests.sh"
 SETUP_DEV = REPO_ROOT / "scripts" / "ci" / "setup_dev.sh"
 TEST_TEMPLATE_ACTION = REPO_ROOT / ".github" / "actions" / "test-template" / "action.yml"
 UNIT_TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "unit-tests.yml"
+INSTALL_TEST_DEPENDENCIES = REPO_ROOT / "scripts" / "ci" / "install_test_dependencies.sh"
 QWEN_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
 BEHAVIOR_CHANGING_ENV = {
@@ -105,6 +106,71 @@ def test_ci_environment_sanitizer_rejects_unknown_stage() -> None:
 
     assert result.returncode == 2
     assert "unknown Gym CI stage: unknown" in result.stderr
+
+
+@pytest.mark.parametrize("download_failures,install_status", [(0, 0), (1, 0), (4, 0), (0, 17)])
+def test_ci_dependency_installer_retries_downloads_without_interrupting_dpkg(
+    tmp_path: Path, download_failures: int, install_status: int
+) -> None:
+    tools = tmp_path / "bin"
+    tools.mkdir()
+    scripts = {
+        "sudo": 'exec "$@"\n',
+        "timeout": 'shift\nexport DOWNLOAD_TIMER=1\nexec "$@"\n',
+        "apt-get": """
+case "$1" in
+    update) echo update >> "$TEST_STATE/calls"; exit 0 ;;
+    install)
+        test "$DEBIAN_FRONTEND" = noninteractive || exit 90
+        case " $* " in
+            *" --download-only "*)
+                attempt=0
+                if [ -f "$TEST_STATE/downloads" ]; then read -r attempt < "$TEST_STATE/downloads"; fi
+                attempt=$((attempt + 1))
+                echo "$attempt" > "$TEST_STATE/downloads"
+                echo download >> "$TEST_STATE/calls"
+                test "$attempt" -gt "$FAIL_DOWNLOADS" || exit 124
+                touch "$TEST_STATE/cached"
+                exit 0 ;;
+        esac
+        # Model a deadline interrupting dpkg during unpacking.
+        if [ "${DOWNLOAD_TIMER-}" = 1 ]; then touch "$TEST_STATE/interrupted"; exit 91; fi
+        case " $* " in *" --no-download "*) ;; *) exit 92 ;; esac
+        test -f "$TEST_STATE/cached" || exit 93
+        echo install >> "$TEST_STATE/calls"
+        exit "$INSTALL_STATUS" ;;
+    *) exit 94 ;;
+esac
+""",
+    }
+    for name, script in scripts.items():
+        tool = tools / name
+        tool.write_text("#!/bin/bash\n" + script)
+        tool.chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", str(INSTALL_TEST_DEPENDENCIES)],
+        env=os.environ
+        | {
+            "PATH": f"{tools}:{os.environ['PATH']}",
+            "RUNNER_TEMP": str(tmp_path),
+            "GITHUB_ENV": str(tmp_path / "github-env"),
+            "TEST_STATE": str(tmp_path),
+            "FAIL_DOWNLOADS": str(download_failures),
+            "INSTALL_STATUS": str(install_status),
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    exhausted = download_failures >= 4
+    assert result.returncode == (1 if exhausted else install_status), result.stderr
+    assert not (tmp_path / "interrupted").exists()
+    expected = ["update", "download"] * min(download_failures + 1, 4)
+    if not exhausted:
+        expected.append("install")
+    assert (tmp_path / "calls").read_text().splitlines() == expected
 
 
 @pytest.mark.parametrize("venv_dir", ["relative-driver-venv", "/"])

@@ -21,10 +21,15 @@ packages=(
 )
 for attempt in 1 2 3 4; do
     if timeout 5m sudo bash -c \
-        'apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@"' \
+        'apt-get update &&
+         DEBIAN_FRONTEND=noninteractive apt-get install -y --download-only --no-install-recommends "$@"' \
         bash "${packages[@]}"; then
+        # A timed-out download can resume from the cache. Killing dpkg during unpacking
+        # leaves it interrupted and makes every later apt-get attempt fail instead.
+        # Workflow deadlines bound installation without a shorter retry timer.
+        sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-download --no-install-recommends "${packages[@]}"
         exit 0
     fi
-    echo "apt-get attempt $attempt/4 failed or timed out after 5m; retrying"
+    echo "apt-get download attempt $attempt/4 failed or timed out after 5m; retrying"
 done
 exit 1
