@@ -16,7 +16,6 @@
 
 import json
 import logging
-import re
 from importlib import import_module
 from os import getenv
 from typing import Any, Literal, Optional, Union, Unpack
@@ -38,8 +37,6 @@ from nemo_gym.client.http_client import (
 )
 from nemo_gym.config.config_types import (
     ROLLOUT_PATH_PREFIX,
-    TOKEN_CAPTURE_PATH_SEGMENT,
-    TRACE_CONTEXT_PATH_SEGMENT,
     BaseServerConfig,
     HeadServerUnreachableError,
 )
@@ -49,6 +46,7 @@ from nemo_gym.config.global_config import (
     get_first_server_config_dict,
     get_global_config_dict,
 )
+from nemo_gym.core.correlation import TRACEPARENT_PATTERN, CorrelationContext, encode
 from nemo_gym.core.episode_context import (
     VERIFIER_INVOCATION_HEADER,
     current_rollout_id,
@@ -341,10 +339,6 @@ class ServerClient(BaseModel):
 SESSION_ID_KEY = "session_id"
 
 
-# A W3C ``traceparent``, version 00, the only form the propagator writes.
-_TRACEPARENT_PATTERN = r"00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}"
-
-
 def get_server_url(server_name: str) -> str:
     global_config_dict = get_global_config_dict()
 
@@ -360,8 +354,7 @@ def rollout_path_prefix(rollout_id: Optional[str], *, token_capture: bool = Fals
     """Return the leading model-server path prefix for a rollout, if available."""
     if not rollout_id:
         return ""
-    capture_segment = f"/{TOKEN_CAPTURE_PATH_SEGMENT}" if token_capture else ""
-    return f"/{ROLLOUT_PATH_PREFIX}/{rollout_id}{capture_segment}"
+    return encode(CorrelationContext(capture_key=rollout_id, token_capture=token_capture))
 
 
 def trace_context_path_segment() -> str:
@@ -376,9 +369,9 @@ def trace_context_path_segment() -> str:
     carrier: dict[str, str] = {}
     inject_trace_context(carrier)
     traceparent = carrier.get("traceparent", "")
-    if not re.fullmatch(_TRACEPARENT_PATTERN, traceparent):
+    if not TRACEPARENT_PATTERN.fullmatch(traceparent):
         return ""
-    return f"/{TRACE_CONTEXT_PATH_SEGMENT}/{traceparent}"
+    return encode(CorrelationContext(trace_parent=traceparent))
 
 
 def apply_rollout_prefix(

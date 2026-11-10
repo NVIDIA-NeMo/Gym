@@ -247,6 +247,10 @@ class TestRolloutSessionMiddleware:
     async def test_well_formed_rollout_id_is_published(self) -> None:
         assert await self._rollout_id_for("/ng-rollout/task0-r1-a0/v1/responses") == "task0-r1-a0"
 
+    async def test_rollout_id_is_published_when_an_agent_instance_follows_it(self) -> None:
+        path = "/ng-rollout/task0-r1-a0/ng-agent-instance/judge/v1/responses"
+        assert await self._rollout_id_for(path) == "task0-r1-a0"
+
     async def test_rollout_id_outside_the_contract_charset_is_ignored(self) -> None:
         """The id becomes an upstream header value, so anything off-contract is dropped, not sent."""
         assert await self._rollout_id_for("/ng-rollout/bad\r\nx-injected: 1/v1/responses") is None

@@ -14,39 +14,31 @@
 # limitations under the License.
 """Middleware that reads trace context carried in a request's URL path."""
 
-import re
+import dataclasses
+import logging
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from nemo_gym.client.server_client import (
-    _TRACEPARENT_PATTERN,
-)
-from nemo_gym.config.config_types import (
-    ROLLOUT_PATH_PREFIX,
-    TOKEN_CAPTURE_PATH_SEGMENT,
-    TRACE_CONTEXT_PATH_SEGMENT,
-)
+from nemo_gym.config.config_types import TRACE_CONTEXT_PATH_SEGMENT
+from nemo_gym.core.correlation import CorrelationPathError, encode, parse_path, remember, resolve
 from nemo_gym.server_runtime.request_handling.rollout_context import scope_with_routed_path
 
 
-_ROLLOUT_PREFIX_PATTERN = rf"/{re.escape(ROLLOUT_PATH_PREFIX)}/[^/]+(?:/{re.escape(TOKEN_CAPTURE_PATH_SEGMENT)})?"
-
-
-_ROLLOUT_PREFIX_RE = re.compile(rf"^{_ROLLOUT_PREFIX_PATTERN}(?=/|$)")
-
-
-_TRACE_CONTEXT_PATH_RE = re.compile(
-    rf"^(?P<head>(?:{_ROLLOUT_PREFIX_PATTERN})?)"
-    rf"/{re.escape(TRACE_CONTEXT_PATH_SEGMENT)}/(?P<traceparent>{_TRACEPARENT_PATTERN})(?P<rest>/.*)$"
-)
+logger = logging.getLogger(__name__)
 
 
 class TraceContextPathMiddleware:
-    """Strip ``/ng-trace/<traceparent>`` from the path and supply it as the inbound ``traceparent``.
+    """Resolve the request's correlation prefix once, and turn ``/ng-trace/<traceparent>`` into the header.
 
-    The segment comes from ``apply_rollout_prefix``: a model URL an agent hands to a client that
+    This is the outermost layer that reads the path on every Gym server (only request-context isolation is
+    outside it), so it resolves the path through ``nemo_gym.core.correlation.resolve``, which shares the
+    result with inner middleware through ``scope["state"]``. A malformed prefix (segments out of order, an
+    invalid agent instance name or traceparent) is answered with 404, as an unroutable path was before.
+
+    The trace segment comes from ``apply_rollout_prefix``: a model URL an agent hands to a client that
     sends no ``traceparent`` header, such as a harness inside a sandbox. A header the client did
     send wins. The segment is stripped whether or not traces are on, so such a URL always routes.
     """
@@ -55,18 +47,34 @@ class TraceContextPathMiddleware:
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        path = scope.get("path", "") if scope["type"] == "http" else ""
-        # Substring test first: this runs on every request of every server, almost none of which carry the segment.
-        match = _TRACE_CONTEXT_PATH_RE.match(path) if f"/{TRACE_CONTEXT_PATH_SEGMENT}/" in path else None
-        if match is None:
+        if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+        try:
+            resolved = resolve(scope)
+        except CorrelationPathError as error:
+            # 404, not 400: the agent outcome policy grades a 400 as the model's request error.
+            logger.warning(f"Refusing a malformed correlation prefix: {error}")
+            await JSONResponse({"detail": str(error)}, status_code=404)(scope, receive, send)
+            return
+        if resolved is None or resolved[0].trace_parent is None:
+            await self.app(scope, receive, send)
+            return
+        context, rest = resolved
+        traceparent = context.trace_parent
         headers = list(scope.get("headers") or [])
         if not any(name.lower() == b"traceparent" for name, _ in headers):
-            headers.append((b"traceparent", match.group("traceparent").encode("ascii")))
-        scope = scope_with_routed_path(scope, match.group("head") + match.group("rest"))
+            headers.append((b"traceparent", traceparent.encode("ascii")))
+        # The parsed prefix is canonical, so the trace segment sits right before ``rest``: cut it out.
+        segment = f"/{TRACE_CONTEXT_PATH_SEGMENT}/{traceparent}"
+        path = scope["path"]
+        scope = scope_with_routed_path(scope, path[: len(path) - len(rest) - len(segment)] + rest)
         scope["headers"] = headers
-        segment = f"/{TRACE_CONTEXT_PATH_SEGMENT}/{match.group('traceparent')}"
+        # Inner middleware reads the rewritten path; a trace-only path has no prefix left.
+        remember(
+            scope,
+            (dataclasses.replace(context, trace_parent=None), rest) if context.capture_key is not None else None,
+        )
 
         async def send_with_segment_on_redirect(message: Message) -> None:
             # The client only ever had the URL, so a redirect it follows must carry the segment again.
@@ -82,8 +90,9 @@ def _restore_trace_segment_on_redirect(
 ) -> Message:
     """Put ``/ng-trace/<traceparent>`` back into root-relative and same-origin redirect targets.
 
-    Inserted after a rollout or token-capture prefix (which the capture middleware has already restored)
-    or at the root; cross-origin targets and targets that already carry a segment are left alone.
+    Inserted after the correlation prefix (capture key, agent instance name, training segment), which the
+    capture middleware has already restored, or at the root. Cross-origin targets, targets that already
+    carry a segment and targets with a malformed prefix are left alone.
     """
     status = int(message.get("status") or 0)
     if not 300 <= status < 400:
@@ -99,8 +108,12 @@ def _restore_trace_segment_on_redirect(
             continue
         if f"/{TRACE_CONTEXT_PATH_SEGMENT}/" in parts.path:
             continue
-        prefix = _ROLLOUT_PREFIX_RE.match(parts.path)
-        head = prefix.group(0) if prefix else ""
+        try:
+            prefix = parse_path(parts.path, allow_empty_rest=True)
+        except CorrelationPathError:
+            # Left as is, so the follow-up request is refused with its own reason.
+            continue
+        head = encode(prefix[0]) if prefix is not None else ""
         path = f"{head}{segment}{parts.path[len(head) :]}"
         headers[index] = (key, urlunsplit(parts._replace(path=path)).encode("latin-1"))
         changed = True
