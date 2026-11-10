@@ -147,12 +147,21 @@ def _restore_native_tool_ids(
                 yield item, "call_id", role
                 if item.get("id") is not None and item.get("id") == item.get("call_id"):
                     yield item, "id", role
+            elif kind == "tool_use":
+                yield item, "id", "request"
+            elif kind == "tool_result":
+                yield item, "tool_use_id", "output"
             elif item.get("role") == "tool":
                 yield item, "tool_call_id", "output"
             elif item.get("role") == "assistant" and isinstance(item.get("tool_calls"), list):
                 for call in item["tool_calls"]:
                     if isinstance(call, dict):
                         yield call, "id", "request"
+            elif kind in {None, "message"} and isinstance(item.get("content"), list):
+                # Anthropic Messages carry tool_use / tool_result blocks inside message content.
+                for block in item["content"]:
+                    if isinstance(block, dict) and block.get("type") in {"tool_use", "tool_result"}:
+                        yield from references(block)
 
     def content(payload, *, response):
         if isinstance(payload, str):
@@ -166,6 +175,8 @@ def _restore_native_tool_ids(
             return payload.get("input", payload.get("messages"))
         if isinstance(payload.get("output"), list):
             return payload["output"]
+        if payload.get("type") == "message" and isinstance(payload.get("content"), list):
+            return payload["content"]
         choices = payload.get("choices")
         if isinstance(choices, list) and len(choices) == 1 and isinstance(choices[0], dict):
             return choices[0].get("message")
@@ -205,9 +216,9 @@ def _restore_native_tool_ids(
 
     def items(value, owner, *, native_aliases=()):
         typed = list(references(value))
-        aliases = {
-            id(record) for record, field, _ in typed if field == "id" and record.get("id") == record.get("call_id")
-        }
+        # An item's own ``id`` is a tool reference (an alias of its ``call_id`` or a Messages
+        # ``tool_use`` ID), so it is rewritten with the other references rather than kept fixed.
+        aliases = {id(record) for record, field, _ in typed if field == "id"}
         for item in value if isinstance(value, list) else [value]:
             if isinstance(item, dict) and isinstance(item.get("id"), str) and id(item) not in aliases:
                 immutable[owner].add(item["id"])
