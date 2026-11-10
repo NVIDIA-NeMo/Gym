@@ -213,14 +213,12 @@ def _token_information_from_mapping(value: Dict[str, Any]) -> Optional[TokenIDLo
 def _token_metadata_fields(token_information: TokenIDLogProbMixin) -> Dict[str, Any]:
     """The set token metadata fields, as ``model_dump(exclude_none=True)`` would give them, without copying.
 
-    The values are the validated lists themselves. Every caller hands them to a model that validates
-    (and so copies) them before the result leaves the converter.
+    The values are the validated lists themselves. On the request side the final
+    ``NeMoGymChatCompletionCreateParamsNonStreaming`` validation copies them; on the reply side the
+    training variant's validation does. Neither result shares lists with the converter's input.
     """
-    return {
-        name: getattr(token_information, name)
-        for name in TokenIDLogProbMixin.model_fields
-        if getattr(token_information, name) is not None
-    }
+    fields = {name: getattr(token_information, name, None) for name in TokenIDLogProbMixin.model_fields}
+    return {name: value for name, value in fields.items() if value is not None}
 
 
 def _attach_token_information(
@@ -239,16 +237,18 @@ def _input_item_token_information(item: Any) -> Optional[TokenIDLogProbMixin]:
     """The token metadata a Responses input item carries, without dumping the item.
 
     A training variant was validated with its metadata, so it is returned as is. An item type without
-    a training variant can still carry the fields as extras, which are validated here as a dump of
-    the item would have been.
+    a training variant can still carry the fields as extras; ``model_dump(exclude_none=True)`` would
+    drop null extras, so they are dropped here too before validation. A raw dict placed in ``input``
+    after the request was validated is dumped as is, null values included, so it is validated whole.
     """
     if isinstance(item, TokenIDLogProbMixin):
         return item
     if isinstance(item, BaseModel):
-        item = item.model_extra or {}
-    if not isinstance(item, dict):
-        return None
-    return _token_information_from_mapping({key: value for key, value in item.items() if value is not None})
+        extras = item.model_extra or {}
+        return _token_information_from_mapping({key: value for key, value in extras.items() if value is not None})
+    if isinstance(item, dict):
+        return _token_information_from_mapping(item)
+    return None
 
 
 def _chat_logprobs_to_responses(logprobs: Any) -> Optional[List[Dict[str, Any]]]:
@@ -1172,7 +1172,12 @@ class ChatCompletionsConverter(BaseModel):
         custom_tool_names: Collection[str] = (),
         structured_output: bool = False,
     ) -> List[NeMoGymResponseOutputItem]:
-        """Lift assistant content without interpreting tags inside a structured final answer."""
+        """Lift assistant content without interpreting tags inside a structured final answer.
+
+        ``postprocess_chat_response`` calls this for a reply without token metadata only. A reply that
+        carries token metadata was already validated, so it goes to ``_lift_assistant_message`` and
+        ``_attach_token_information`` directly; an override of this method does not see it.
+        """
         response_output = self._lift_assistant_message(
             message_dict,
             logprobs=logprobs,

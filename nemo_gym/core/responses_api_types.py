@@ -647,9 +647,9 @@ RESPONSES_TO_TRAIN = {
 #   web_search_call, file_search_call, code_interpreter_call, image_generation_call,
 #   mcp_call, computer_call, local_shell_call.
 #
-# training_variant_of() is reached only from ChatCompletionsConverter.postprocess_assistant_message_dict,
-# which passes response_output[-1].
-# That list is local to the function.
+# training_variant_of() is reached only from the chat converter's _attach_token_information, which passes
+# response_output[-1].
+# That list is built by ChatCompletionsConverter._lift_assistant_message.
 # It holds only NeMoGymResponseReasoningItem, NeMoGymResponseOutputMessage,
 # NeMoGymResponseFunctionToolCall or NeMoGymResponseCustomToolCall (the
 # function bridge's lift), all registered above.
@@ -1426,8 +1426,9 @@ def _discriminate_chat_message(value: Any) -> Optional[str]:
     """Pick the chat message member from its role, and the training variant when token metadata is present.
 
     Without a discriminator Pydantic validates each message against every member of the union to find
-    the best match; the role already decides it. ``_validate_atomic_token_metadata`` has run first, so
-    one token field means all the required ones are present.
+    the best match; the role already decides it. For a ``dict`` message, ``_validate_atomic_token_metadata``
+    has run first, so one token field means all the required ones are present. Any other mapping skips
+    that check and is still rejected by the training member's own required fields.
     """
     if not isinstance(value, Mapping):
         return None
@@ -1449,7 +1450,11 @@ NeMoGymChatCompletionMessageParam: TypeAlias = Annotated[
         # Training variants.
         Annotated[NeMoGymChatCompletionAssistantMessageForTrainingParam, Tag("assistant__training")],
     ],
-    Discriminator(_discriminate_chat_message),
+    Discriminator(
+        _discriminate_chat_message,
+        custom_error_type="chat_message_role",
+        custom_error_message="Chat message needs a 'role' of developer, system, user, assistant or tool",
+    ),
     BeforeValidator(_validate_atomic_token_metadata),
 ]
 

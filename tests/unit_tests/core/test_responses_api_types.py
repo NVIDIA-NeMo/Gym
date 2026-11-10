@@ -1924,8 +1924,9 @@ def test_no_dead_entries_in_any_type_list(set_name: str, tags: frozenset) -> Non
 def _classes_the_converter_can_emit() -> List[str]:
     """Return classes that can enter the converter's response output list.
 
-    ``training_variant_of`` has one production caller, which passes it ``response_output[-1].__class__``.
-    The AST identifies classes appended to that local list.
+    ``training_variant_of`` has one production caller, ``_attach_token_information``, which passes it
+    ``response_output[-1].__class__``. That list is built by ``_lift_assistant_message``; the AST identifies
+    the classes appended to it there.
     """
     import ast
     import inspect
@@ -1936,8 +1937,7 @@ def _classes_the_converter_can_emit() -> List[str]:
     func = next(
         node
         for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name == "postprocess_assistant_message_dict"
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "_lift_assistant_message"
     )
 
     # Map each local variable to the class used to construct it.
@@ -1975,17 +1975,20 @@ def test_every_item_the_converter_can_emit_has_a_training_variant() -> None:
     A type needs a variant when the converter can attach sampled token IDs to it.
     """
     emitted = _classes_the_converter_can_emit()
+    # An empty set means the AST walk found no appends, for example because the lift moved to another
+    # function; the invariant would then pass without checking anything.
+    assert emitted, "found no response_output appends in ChatCompletionsConverter._lift_assistant_message"
     unresolved = [name for name in emitted if name.startswith("<unresolved")]
     assert not unresolved, (
         f"this test's AST analysis could not resolve {unresolved} in "
-        f"postprocess_assistant_message_dict, so it cannot prove the invariant. Extend "
+        f"_lift_assistant_message, so it cannot prove the invariant. Extend "
         f"_classes_the_converter_can_emit rather than deleting the assertion."
     )
 
     registered = {cls.__name__ for cls in RESPONSES_TO_TRAIN}
     missing = sorted(set(emitted) - registered)
     assert not missing, (
-        f"ChatCompletionsConverter.postprocess_assistant_message_dict can emit {missing}, and "
+        f"ChatCompletionsConverter._lift_assistant_message can emit {missing}, and "
         f"chat_completions_converter.py hands response_output[-1] to training_variant_of(), so a "
         f"rollout carrying token IDs would fail there.\n"
         f"Fix: declare `class <Name>ForTraining(<Name>, TokenIDLogProbMixin)`, add it to "

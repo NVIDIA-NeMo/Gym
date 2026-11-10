@@ -106,6 +106,13 @@ def build_request(turns: int, *, token_metadata: bool) -> Dict[str, Any]:
         if turn % 8 == 3:
             output = [{"type": "input_text", "text": "line\n" * 40}]
         items.append({"type": "function_call_output", "call_id": call_id, "output": output})
+        if turn % 8 == 5:
+            patch_id = f"patch_{turn}"
+            items.append(
+                {"type": "custom_tool_call", "call_id": patch_id, "name": "apply_patch", "input": "*** Begin Patch"}
+                | tokens
+            )
+            items.append({"type": "custom_tool_call_output", "call_id": patch_id, "output": "applied"})
         items.append(
             {
                 "type": "message",
@@ -190,8 +197,11 @@ _GENERATED_ID = re.compile(r"\b(resp|msg|rs)_[0-9a-f]{32}\b")
 
 
 def normalize(value: Any) -> Any:
-    """JSON-ready value with converter-minted UUIDs replaced, for differential comparison."""
-    text = json.dumps(value, sort_keys=True, default=str)
+    """JSON-ready value with converter-minted UUIDs replaced, for differential comparison.
+
+    Key order is kept, so two dumps compare equal only when the outputs match field for field and in order.
+    """
+    text = json.dumps(value, default=str)
     return json.loads(_GENERATED_ID.sub(r"\1_<generated>", text))
 
 
@@ -208,16 +218,13 @@ def _measure(fn: Callable[[], Any], *, iterations: int) -> Dict[str, float]:
     tracemalloc.start()
     fn()
     _, peak = tracemalloc.get_traced_memory()
-    snapshot = tracemalloc.take_snapshot()
     tracemalloc.stop()
-    blocks = sum(stat.count for stat in snapshot.statistics("filename"))
-    wall.sort()
     return {
         "cpu_ms_mean": 1000 * statistics.fmean(cpu),
-        "wall_ms_p50": 1000 * wall[len(wall) // 2],
-        "wall_ms_p99": 1000 * wall[min(len(wall) - 1, int(len(wall) * 0.99))],
+        "cpu_ms_min": 1000 * min(cpu),
+        "wall_ms_p50": 1000 * statistics.median(wall),
+        "wall_ms_max": 1000 * max(wall),
         "peak_alloc_kib": peak / 1024,
-        "live_blocks_after": blocks,
     }
 
 
@@ -284,8 +291,8 @@ def main() -> None:
             for phase in ("request_conversion", "response_conversion", "proxy_hop"):
                 m = result[phase]
                 print(
-                    f"{result['case']:<24} {phase:<20} cpu {m['cpu_ms_mean']:9.3f} ms  "
-                    f"p50 {m['wall_ms_p50']:9.3f} ms  p99 {m['wall_ms_p99']:9.3f} ms  "
+                    f"{result['case']:<24} {phase:<20} cpu mean {m['cpu_ms_mean']:9.3f} ms  "
+                    f"min {m['cpu_ms_min']:9.3f} ms  wall p50 {m['wall_ms_p50']:9.3f} ms  max {m['wall_ms_max']:9.3f} ms  "
                     f"peak {m['peak_alloc_kib']:10.1f} KiB"
                 )
 
@@ -294,7 +301,7 @@ def main() -> None:
             json.dump(results, f, indent=2)
     if args.dump_outputs:
         with open(args.dump_outputs, "w") as f:
-            json.dump(dump, f, sort_keys=True)
+            json.dump(dump, f)
 
 
 if __name__ == "__main__":
