@@ -106,6 +106,26 @@ With the Apptainer provider, anyswe always adds `--no-home` to
 sandbox, hiding toolchains that images keep there, such as R2E-Gym's
 `/root/.local/share/uv` interpreters.
 
+## Git history
+
+Some task images (for example R2E-Gym, SWE-Gym and SWE-rebench) contain the full
+upstream clone checked out at the base commit, so the fix commit is still
+reachable through other branches, tags or remotes (`git log --all`). Set
+`sanitize_git_history: true` to keep only the history reachable from `HEAD` in
+the agent's sandbox: every other ref, reflog and remote is deleted and the
+unreachable objects are pruned. If pruning takes longer than
+`sanitize_git_history_timeout_s` (default 300), the history is replaced by a
+single commit of the current tree. The option is off by default. Grading runs in
+a fresh sandbox and is unaffected.
+The fallback preserves existing tracked files even when ignore rules match them,
+so subsequent agent edits remain visible to patch capture.
+
+Sanitization requires a standalone repository with its own Git directory and
+object store. Linked worktrees, repositories with sibling worktrees, external or
+symlinked Git directories, and alternate object stores are rejected before
+cleanup. Git access failures, unsuccessful fallback initialization, or objects
+retained after pruning stop setup as a sandbox error; the agent does not run.
+
 ## Reward
 
 SWE-bench and SWE-bench Multilingual use the official `make_test_spec` and
