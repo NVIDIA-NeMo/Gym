@@ -243,6 +243,8 @@ export NEMO_GYM_USER="\${NEMO_GYM_USER:-\$SLURM_JOB_USER}"
 
 source "$VLLM_CONFIG"
 
+# With --input / ++input_jsonl_fpath, prepare validates the file and skips
+# dataset preparation; eval run then uses that file without collating a split.
 gym eval prepare $eval_arguments +use_cached_prepared_benchmarks=true
 
 experiment_name=$EXPERIMENT_NAME/slurm_job_id_\$SLURM_JOB_ID/date_\$(date +%Y%m%d_%H%M%S)

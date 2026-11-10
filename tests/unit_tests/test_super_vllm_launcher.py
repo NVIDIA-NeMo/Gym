@@ -225,6 +225,16 @@ getent() { printf '10.0.0.1 node0\n'; }
     def settings(self, args, key):
         return [arg for arg in args if arg.lstrip("+").startswith(key + "=")]
 
+    def test_explicit_input_reaches_both_gym_stages(self) -> None:
+        for override in (
+            ("++input_jsonl_fpath=/shared/mixed tasks.jsonl",),
+            ("--input", "/shared/mixed tasks.jsonl"),
+        ):
+            for stage in ("prepare", "run"):
+                with self.subTest(override=override, stage=stage):
+                    args = self.eval_arguments(*override, stage=stage)
+                    self.assertEqual(args[4 : 4 + len(override)], list(override))
+
     def test_mooncake_metrics_endpoint_uses_only_master_node(self) -> None:
         for mode in ("independent", "coupled"):
             for enabled in ("0", "1"):

@@ -142,6 +142,12 @@ class TestStorageFlag:
 
 
 class TestEvalRunFlags:
+    @pytest.mark.parametrize("stage", ["prepare", "run"])
+    @pytest.mark.parametrize("flag", ["--input", "-i"])
+    def test_input_flag_supported_by_both_launcher_stages(self, monkeypatch: MonkeyPatch, stage, flag) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["eval", stage, flag, "/data/mixed.jsonl"])
+        assert overrides == ["+input_jsonl_fpath=/data/mixed.jsonl"]
+
     @pytest.mark.parametrize(
         "flag_argv, expected_override",
         [

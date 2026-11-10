@@ -1330,7 +1330,12 @@ COMMANDS = {
     "eval prepare": Command(
         target="nemo_gym.cli.eval:prepare_benchmark",
         summary="Prepare benchmark data and dump it to disk.",
-        flags=(CONFIG, BENCHMARK, SEARCH_DIR),
+        flags=(
+            CONFIG,
+            BENCHMARK,
+            SEARCH_DIR,
+            _value_flag("input", "input_jsonl_fpath", "Use an existing JSONL and skip preparation.", aliases=("-i",)),
+        ),
     ),
     "eval plan": Command(
         target="nemo_gym.cli.eval:plan_benchmark",
