@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Multimodal inputs over the shared OpenCode sandbox/session lifecycle."""
 
-import asyncio
 import copy
 import json
 import shlex
@@ -32,7 +31,7 @@ from nemo_gym.sandbox import SandboxProvider, SandboxSpec
 from nemo_gym.server_runtime import MCPToolAccess
 from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ToolCallObservation
 from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession
-from responses_api_agents.opencode_multimodal_agent.media import stage_inputs
+from responses_api_agents.opencode_multimodal_agent.media import prepare_image
 
 
 _NETWORK_RUNTIME = SandboxPythonRuntime(
@@ -195,7 +194,6 @@ class MultimodalSessionMixin:
         sanitized = type(body).model_validate(
             body.model_dump()
             | {
-                "input": [{"role": "user", "content": "Validate multimodal request controls"}],
                 "temperature": None,
                 "top_p": None,
                 "max_output_tokens": None,
@@ -207,29 +205,21 @@ class MultimodalSessionMixin:
                 or None,
             }
         )
-        super()._session_input(sanitized)
-        if isinstance(body.input, str):
-            raise HTTPException(422, "Multimodal tasks require image inputs")
-        texts, systems, images = [], [], 0
-        for item in body.model_dump()["input"]:
-            role = item.get("role")
-            if role not in {"user", "system", "developer"}:
-                raise HTTPException(422, "Multimodal sessions accept initial prompts, not replayed trajectories")
-            content = item["content"]
-            parts = [{"type": "input_text", "text": content}] if isinstance(content, str) else content
-            for part in parts:
-                if part["type"] == "input_text":
-                    (texts if role == "user" else systems).append(part["text"])
-                elif part["type"] == "input_image" and role == "user":
-                    images += 1
-                else:
-                    raise HTTPException(422, "Only user images and text prompts are supported")
-        if images == 0 or (self.config.max_images is not None and images > self.config.max_images):
+        prompt, system, media = super()._session_input(sanitized)
+        if not media or (self.config.max_images is not None and len(media) > self.config.max_images):
             raise HTTPException(422, "Initial image count is outside the configured limits")
-        # Preserve the adapter's user-message prefix and input-system-message semantics.
-        prompt = "\n\n".join(text for text in [self.config.system_prompt, *systems, *texts] if text)
-        # The launch hook stages images and constructs the OpenCode file arguments.
-        return prompt, body.instructions or "", []
+        try:
+            media = [
+                prepare_image(
+                    image,
+                    max_source_pixels=self.config.max_source_pixels,
+                    preserve_format=self.config.preserve_image_format,
+                )
+                for image in media
+            ]
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from error
+        return prompt, system, media
 
     async def _prepare_session_launch(
         self, state: OpenCodeSandboxSession, body: NeMoGymResponseCreateParamsNonStreaming, payload: dict[str, Any]
@@ -253,23 +243,12 @@ class MultimodalSessionMixin:
         await self._check_session_network(state)
         with TemporaryDirectory(prefix="gym-visual-session-") as temporary:
             directory = Path(temporary)
-            try:
-                _, _, images = await asyncio.to_thread(
-                    stage_inputs,
-                    body,
-                    directory,
-                    max_source_pixels=self.config.max_source_pixels,
-                    max_images=self.config.max_images,
-                    preserve_format=self.config.preserve_image_format,
-                )
-            except ValueError as error:
-                raise HTTPException(422, str(error)) from error
-            state.expected_images = len(images)
-            image_paths = []
-            for index, image in enumerate(images):
-                path = f"{state.session.session_dir}/{self._input_image_name(image, index)}"
-                await state.session.sandbox.upload(image, path)
-                image_paths.append(path)
+            # The parent decoded media once and stages it inside execute, under close/deadline control.
+            state.expected_images = sum(
+                part.get("type") == "input_image"
+                for item in body.model_dump()["input"]
+                for part in (item["content"] if not isinstance(item["content"], str) else [])
+            )
             native_config = copy.deepcopy(self.config.opencode_config)
             self._deep_merge(
                 native_config, {"agent": {"build": {"temperature": body.temperature, "top_p": body.top_p}}}
@@ -315,9 +294,7 @@ class MultimodalSessionMixin:
             payload["env"]["OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS"] = str(
                 self.config.command_exec_timeout * 1000
             )
-            payload["command"].extend(
-                ["--model", runner._effective_model(), "--agent", "build", "--file", *image_paths, "--"]
-            )
+            payload["command"].extend(["--model", runner._effective_model(), "--agent", "build"])
             if not self._uses_provider_isolation(state):
                 network_runner = f"{state.session.session_dir}/network_runner.py"
                 payload["command"] = [
@@ -335,8 +312,6 @@ class MultimodalSessionMixin:
                     "--",
                     *payload["command"],
                 ]
-            # Keep adapter-owned files out of a borrowed task repository.
-            payload["prompt"] = "Image files: " + ", ".join(image_paths) + "\n\n" + payload["prompt"]
 
     def _session_output(
         self, export: dict[str, Any], observations: AgentObservationBundle

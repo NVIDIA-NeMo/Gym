@@ -262,7 +262,7 @@ def test_session_stages_images_preserves_outputs_and_replays_once(visual_setup):
         assert response["opencode_evidence"]["turns_used"] == 1
         payload = sandbox.params()
         assert payload["env"]["OPENCODE_ENABLE_EXA"] == "0"
-        assert "Inspect carefully.\n\nCount red objects" in payload["prompt"]
+        assert payload["prompt"] == "Count red objects"
         config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
         assert config["agent"]["build"]["temperature"] == 0.6
         assert config["agent"]["build"]["top_p"] == 0.95
@@ -270,8 +270,12 @@ def test_session_stages_images_preserves_outputs_and_replays_once(visual_setup):
         assert "/ng-rollout/opencode-smoke-a2/" in provider["options"]["baseURL"]
         assert provider["models"]["vision-model"]["limit"]["output"] == 2048
         assert any(path.endswith(".visual-final-answer.mjs") for path in sandbox.files)
-        image_path = next(path for path in sandbox.files if path.endswith("input-0.png"))
-        assert image_path.startswith(sandbox.directory + "/")
+        from nemo_gym.core import MediaFile
+        from nemo_gym.sandbox import media_path
+
+        image_path = media_path(MediaFile.from_data_uri(image_url()))
+        assert sandbox.files[image_path] == MediaFile.from_data_uri(image_url()).data
+        assert image_path in payload["command"]
         assert not any(path.startswith("/app/") for path in sandbox.files)
         closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
         assert closed.status_code == 200 and closed.json()["agent_observations"] is not None
@@ -582,3 +586,35 @@ def test_tool_images_follow_call_identity_without_crossing_invocations(visual_se
     ]
     assert parent.conversation[0].output == "parent result"
     assert child.conversation[0].output == "child result"
+
+
+def test_session_decodes_once_and_preserves_image_bytes(visual_setup):
+    from unittest.mock import patch
+
+    from nemo_gym.core import MediaFile, NeMoGymResponseCreateParamsNonStreaming
+
+    agent, _ = visual_setup
+    agent = agent.model_copy(update={"config": agent.config.model_copy(update={"preserve_image_format": True})})
+    body = request_body()
+    # The shared decoder trusts the bytes rather than a mislabeled MIME header.
+    body["input"][0]["content"][1]["image_url"] = image_url().replace("image/png", "image/jpeg")
+    with patch.object(MediaFile, "from_data_uri", wraps=MediaFile.from_data_uri) as decode:
+        prompt, _, media = agent._session_input(NeMoGymResponseCreateParamsNonStreaming.model_validate(body))
+    assert decode.call_count == 1
+    assert prompt == "Count red objects"
+    assert media == [MediaFile.from_data_uri(image_url())]
+
+
+@pytest.mark.parametrize("source", ["https://example.com/image.png", "file:///tmp/image.png"])
+def test_session_rejects_non_inline_images(visual_setup, source):
+    from fastapi import HTTPException
+
+    from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+
+    agent, sandbox = visual_setup
+    body = request_body()
+    body["input"][0]["content"][1]["image_url"] = source
+    with pytest.raises(HTTPException) as error:
+        agent._session_input(NeMoGymResponseCreateParamsNonStreaming.model_validate(body))
+    assert error.value.status_code == 422
+    sandbox.launch.assert_not_awaited()

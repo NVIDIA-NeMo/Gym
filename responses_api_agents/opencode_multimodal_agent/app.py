@@ -145,7 +145,7 @@ class OpenCodeMultimodalAgentConfig(OpenCodeAgentConfig):
         if self.extra_args:
             raise ValueError("Multimodal episodes manage file arguments; extra_args must be empty")
         if any("prompt" in agent for agent in self.opencode_config.get("agent", {}).values()):
-            raise ValueError("Keep the runtime default prompt; use system_prompt for a user-message prefix")
+            raise ValueError("Keep the runtime default prompt; use system_prompt for additional instructions")
         return self
 
 

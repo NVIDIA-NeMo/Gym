@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Image staging and native OpenCode artifact validation."""
 
-import base64
 import io
 import json
 import re
@@ -13,6 +12,7 @@ from pathlib import Path
 from PIL import Image
 
 from nemo_gym.core import (
+    MediaFile,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputItem,
@@ -22,6 +22,18 @@ from nemo_gym.core import (
 from nemo_gym.trajectory import AgentInvocation
 from nemo_gym.utils import final_assistant_text
 from responses_api_agents.opencode_agent.artifacts import parse_opencode_observations, parse_opencode_session
+
+
+def prepare_image(image: MediaFile, *, max_source_pixels: int, preserve_format: bool) -> MediaFile:
+    """Apply benchmark pixel limits and optional RGB conversion to decoded media."""
+    with Image.open(io.BytesIO(image.data)) as source:
+        if source.width * source.height > max_source_pixels:
+            raise ValueError("Visual input exceeds max_source_pixels")
+        if preserve_format:
+            return image
+        output = io.BytesIO()
+        source.convert("RGB").save(output, format="PNG")
+        return MediaFile(media_type="image/png", data=output.getvalue())
 
 
 def stage_inputs(
@@ -57,10 +69,7 @@ def stage_inputs(
             if not isinstance(source, str):
                 raise ValueError("Images require image_url, not file_id")
             if source.startswith("data:"):
-                header, payload = source.split(",", 1)
-                if not header.startswith("data:image/") or not header.endswith(";base64"):
-                    raise ValueError("Expected a base64 image data URL")
-                image_source = io.BytesIO(base64.b64decode(payload, validate=True))
+                image_source = io.BytesIO(MediaFile.from_data_uri(source).data)
             else:
                 if "://" in source and not source.startswith("file://"):
                     raise ValueError("Stage remote image URLs locally before rollout")
