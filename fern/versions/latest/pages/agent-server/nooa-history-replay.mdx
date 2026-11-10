@@ -4,8 +4,6 @@ description: "Understand exact Gym replay, portable history, and the measured co
 position: 8
 ---
 
-# NOOA history replay and training metadata
-
 Gym's NOOA adapter stores ordered assistant parts alongside the complete Responses
 output items. An unchanged turn can therefore survive a NOOA snapshot or SQLite
 round trip and replay the same text blocks, reasoning, tool calls, token IDs,
