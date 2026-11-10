@@ -349,6 +349,8 @@ class TestResponsesToAnthropicResponse:
 
         assert out == conv.responses_to_anthropic_response(resp, model="m")
         assert not any(field in json.dumps(out) for field in tokens)
+        # The mapping ignores token fields either way; the item dumps skip them so the lists are not copied.
+        assert not any(field in item for item in conv._iter_output_dicts(training_resp) for field in tokens)
 
     def test_reasoning_becomes_thinking_block(self) -> None:
         conv, resp = self._response_from_anthropic(
