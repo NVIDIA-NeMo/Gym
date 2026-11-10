@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
+import threading
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -18,6 +19,16 @@ from resources_servers.gdp_pdf import sandbox_app as module
 from resources_servers.gdp_pdf.tests.test_app import _verify_request, config  # noqa: F401
 
 
+# LentSandboxes looks up the sandbox class and the global config in its own module.
+LENDING = "nemo_gym.server_runtime.sandbox_lending"
+
+
+def _use_provider(monkeypatch, provider):
+    global_config = {"sandbox": provider}
+    monkeypatch.setattr(module, "get_global_config_dict", lambda: global_config)
+    monkeypatch.setattr(f"{LENDING}.get_global_config_dict", lambda: global_config)
+
+
 @pytest.fixture
 def setup(config, tmp_path, monkeypatch):  # noqa: F811
     component = tmp_path / "resources_servers/gdp_pdf"
@@ -32,16 +43,8 @@ def setup(config, tmp_path, monkeypatch):  # noqa: F811
     )
     sandbox = AsyncMock()
     sandbox.serialize.return_value = {"sandbox_id": "test"}
-
-    async def start(spec, callback):
-        assert spec.files == {}  # No hidden rubric or reference answer is uploaded.
-        await callback(sandbox)
-
-    sandbox.start_with_setup.side_effect = start
-    monkeypatch.setattr(module, "AsyncSandbox", lambda _: sandbox)
-    monkeypatch.setattr(
-        module, "get_global_config_dict", lambda: {"sandbox": {"docker": {"create": {"network": "isolated"}}}}
-    )
+    monkeypatch.setattr(f"{LENDING}.AsyncSandbox", lambda _: sandbox)
+    _use_provider(monkeypatch, {"docker": {"create": {"network": "isolated"}}})
     monkeypatch.setattr(module.subprocess, "run", MagicMock(return_value=MagicMock(stdout="true\n")))
     body = ResourcesSeedSessionRequest(
         resources_session_id="session",
@@ -55,10 +58,17 @@ def setup(config, tmp_path, monkeypatch):  # noqa: F811
 def test_session_contract_and_pdf_delivery(setup):
     server, sandbox, body, pdf = setup
     check_resources_session_contract(
-        server.setup_webserver(), body, keeps_state=True, holds_state=lambda sid: sid in server._sessions
+        server.setup_webserver(),
+        body,
+        keeps_state=True,
+        holds_state=lambda sid: server._sandboxes.get(sid) is not None,
     )
-    assert all(call.args == (pdf, module.DOCUMENT_PATH) for call in sandbox.upload.await_args_list)
-    sandbox.upload.assert_awaited()
+    specs = [call.args[0] for call in sandbox.start.await_args_list]
+    assert specs
+    for spec in specs:
+        assert (spec.image, spec.workdir) == ("tools", module.WORKDIR)
+        # Only the source document is delivered: no rubric or reference answer.
+        assert spec.files == {module.DOCUMENT_PATH: pdf.read_bytes()}
 
 
 @pytest.mark.parametrize(
@@ -103,7 +113,7 @@ async def test_invalid_pdf_never_allocates(setup, source):
     body.task_data["verifier_metadata"]["source_pdf"] = source
     with pytest.raises(ResourcesSeedRejectedError):
         await server.seed_session(Request({"type": "http", "session": {}}), body)
-    sandbox.start_with_setup.assert_not_awaited()
+    sandbox.start.assert_not_awaited()
 
 
 @pytest.mark.parametrize(
@@ -119,13 +129,13 @@ async def test_invalid_pdf_never_allocates(setup, source):
 )
 async def test_unsafe_sandbox_requires_recorded_opt_out(setup, monkeypatch, provider, internal, options):
     server, sandbox, body, _ = setup
-    monkeypatch.setattr(module, "get_global_config_dict", lambda: {"sandbox": provider})
+    _use_provider(monkeypatch, provider)
     module.subprocess.run.return_value.stdout = internal
     server.config.sandbox_config.provider_options = options
     request = Request({"type": "http", "session": {}})
     with pytest.raises(ResourcesSeedRejectedError):
         await server.seed_session(request, body)
-    sandbox.start_with_setup.assert_not_awaited()
+    sandbox.start.assert_not_awaited()
     server.config.allow_unisolated_sandbox = True
     await server.seed_session(request, body)
     server._judge_criterion = AsyncMock(return_value=module.CriterionEvaluation(criterion="cap", passed=True))
@@ -138,80 +148,50 @@ async def test_network_inspection_failure_never_allocates(setup):
     module.subprocess.run.side_effect = module.subprocess.TimeoutExpired("docker", 10)
     with pytest.raises(ResourcesSeedRejectedError, match="Could not verify"):
         await server.seed_session(Request({"type": "http", "session": {}}), body)
-    sandbox.start_with_setup.assert_not_awaited()
+    sandbox.start.assert_not_awaited()
 
 
-@pytest.mark.parametrize("failure", [RuntimeError, asyncio.CancelledError])
-async def test_failed_start_is_cleaned_before_reseed(setup, failure):
-    server, sandbox, body, _ = setup
-    request = Request({"type": "http", "session": {}})
-    start = sandbox.start_with_setup.side_effect
-    sandbox.start_with_setup.side_effect = failure("start failed")
-    sandbox.stop.side_effect = RuntimeError("stop failed")
-    with pytest.raises(failure):
-        await server.seed_session(request, body)
-    sandbox.stop.assert_awaited_once()
-    assert server._sessions["session"].access is None
-    sandbox.start_with_setup.side_effect = start
-    with pytest.raises(RuntimeError, match="stop failed"):
-        await server.seed_session(request, body)
-    sandbox.start_with_setup.assert_awaited_once()
-    sandbox.stop.side_effect = None
-    await server.seed_session(request, body)
-    assert sandbox.stop.await_count == 3
-    assert sandbox.start_with_setup.await_count == 2
-    assert server._sessions["session"].access is not None
-
-
-@pytest.mark.parametrize("hang", [False, True])
-async def test_shutdown_continues_after_stop_failure_or_timeout(setup, hang):
-    server, sandbox, body, _ = setup
-    server.config.sandbox_stop_timeout_seconds = 0.01
-    app = server.setup_webserver()
-    lifespan = app.router.lifespan_context(app)
-    await lifespan.__aenter__()
-    await server.seed_session(Request({"type": "http", "session": {}}), body)
-    other = AsyncMock()
-    server._sessions["other"] = module._Session(body, other)
-
-    async def fail():
-        if hang:
-            await asyncio.Event().wait()
-        raise RuntimeError("stop failed")
-
-    sandbox.stop.side_effect = fail
-    shutdown = asyncio.create_task(lifespan.__aexit__(None, None, None))
-    try:
-        done, _ = await asyncio.wait({shutdown}, timeout=1)
-        assert shutdown in done
-        await shutdown
-        other.stop.assert_awaited_once()
-        assert list(server._sessions) == ["session"]
-    finally:
-        shutdown.cancel()
-        await asyncio.gather(shutdown, return_exceptions=True)
-        sandbox.stop.side_effect = None
-        await server._stop("session")
-
-
-async def test_failed_upload_and_close_retain_retryable_cleanup(setup):
+async def test_failed_start_and_close_retain_retryable_cleanup(setup):
     server, sandbox, body, pdf = setup
     server.config.documents_base_dir = str(pdf.parent)  # Absolute roots work too.
     request = Request({"type": "http", "session": {}})
-    sandbox.upload.side_effect = RuntimeError("upload failed")
-    with pytest.raises(RuntimeError, match="upload failed"):
+    sandbox.start.side_effect = RuntimeError("start failed")
+    with pytest.raises(RuntimeError, match="start failed"):
         await server.seed_session(request, body)
     sandbox.stop.assert_awaited_once()
-    assert not server._sessions
-    sandbox.upload.side_effect = None
+    assert not server._seeds
+    sandbox.start.side_effect = None
     await server.seed_session(request, body)
     close = ResourcesCloseSessionRequest(resources_session_id="session", episode_id=body.episode_id)
     sandbox.stop.side_effect = [RuntimeError("stop failed"), None]
     with pytest.raises(RuntimeError, match="stop failed"):
         await server.close_resources_session(close)
-    assert "session" in server._sessions
+    assert "session" in server._seeds
     await server.close_resources_session(close)
-    assert not server._sessions
+    assert not server._seeds
+    assert server._sandboxes.get("session") is None
+
+
+@pytest.mark.parametrize("release", ["close", "retire", "shutdown"])
+async def test_sandbox_of_a_failed_seed_is_stopped_later(setup, release):
+    server, sandbox, body, _ = setup
+    app = server.setup_webserver()
+    lifespan = app.router.lifespan_context(app)
+    await lifespan.__aenter__()
+    sandbox.start.side_effect = RuntimeError("start failed")
+    sandbox.stop.side_effect = [RuntimeError("stop failed"), None]
+    with pytest.raises(RuntimeError, match="start failed"):
+        await server.seed_session(Request({"type": "http", "session": {}}), body)
+    assert not server._seeds
+    if release == "close":
+        await server.close_resources_session(
+            ResourcesCloseSessionRequest(resources_session_id="session", episode_id=body.episode_id)
+        )
+    elif release == "retire":
+        await server.retire_session_state("session")
+    assert sandbox.stop.await_count == (1 if release == "shutdown" else 2)
+    await lifespan.__aexit__(None, None, None)
+    assert sandbox.stop.await_count == 2
 
 
 async def test_shutdown_waits_for_session_operation(setup):
@@ -222,11 +202,66 @@ async def test_shutdown_waits_for_session_operation(setup):
     await server.seed_session(Request({"type": "http", "session": {}}), body)
     async with server._locks.locked(body.resources_session_id):
         shutdown = asyncio.create_task(lifespan.__aexit__(None, None, None))
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.05)
         sandbox.stop.assert_not_awaited()
     await asyncio.wait_for(shutdown, timeout=1)
     sandbox.stop.assert_awaited_once()
-    assert not server._sessions
+    assert server._sandboxes.get(body.resources_session_id) is None
+
+
+async def test_cancelled_seed_stops_its_sandbox_and_holds_nothing(setup):
+    server, sandbox, body, _ = setup
+    started = asyncio.Event()
+
+    async def start(spec):
+        started.set()
+        await asyncio.Event().wait()
+
+    sandbox.start.side_effect = start
+    seeding = asyncio.create_task(server.seed_session(Request({"type": "http", "session": {}}), body))
+    await started.wait()
+    seeding.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await seeding
+    sandbox.stop.assert_awaited_once()
+    assert not server._seeds
+
+
+@pytest.mark.parametrize("blocked", ["network inspection", "sandbox start"])
+async def test_shutdown_waits_for_a_first_seed_in_progress(setup, blocked):
+    server, sandbox, body, _ = setup
+    app = server.setup_webserver()
+    lifespan = app.router.lifespan_context(app)
+    await lifespan.__aenter__()
+    entered, proceed = threading.Event(), threading.Event()
+
+    def inspect(*args, **kwargs):
+        entered.set()
+        proceed.wait(5)
+        return MagicMock(stdout="true\n")
+
+    async def start(spec):
+        entered.set()
+        await asyncio.to_thread(proceed.wait, 5)
+
+    if blocked == "network inspection":
+        module.subprocess.run.side_effect = inspect
+    else:
+        sandbox.start.side_effect = start
+    seeding = asyncio.create_task(server.seed_session(Request({"type": "http", "session": {}}), body))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        shutdown = asyncio.create_task(lifespan.__aexit__(None, None, None))
+        await asyncio.sleep(0.05)
+        assert not shutdown.done()
+        sandbox.stop.assert_not_awaited()
+    finally:
+        proceed.set()
+    await asyncio.wait_for(asyncio.gather(seeding, shutdown), timeout=5)
+    # The sandbox that finished starting during shutdown is stopped, not left running.
+    sandbox.start.assert_awaited_once()
+    sandbox.stop.assert_awaited_once()
+    assert server._sandboxes.get(body.resources_session_id) is None
 
 
 async def test_retirement_releases_sandbox_and_retries_failed_stop(setup):
@@ -236,10 +271,10 @@ async def test_retirement_releases_sandbox_and_retries_failed_stop(setup):
     sandbox.stop.side_effect = [RuntimeError("stop failed"), None]
     with pytest.raises(RuntimeError, match="stop failed"):
         await server.retire_session_state(body.resources_session_id)
-    assert body.resources_session_id in server._sessions
+    assert body.resources_session_id in server._seeds
     with pytest.raises(ResourcesSessionConflictError):
         await server.seed_session(request, body)
     await server.retire_session_state(body.resources_session_id)
     await server.retire_session_state(body.resources_session_id)
-    assert not server._sessions
+    assert not server._seeds
     assert sandbox.stop.await_count == 2

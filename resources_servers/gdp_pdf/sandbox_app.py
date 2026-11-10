@@ -6,7 +6,6 @@ import asyncio
 import logging
 import subprocess
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -16,14 +15,9 @@ from nemo_gym import PARENT_DIR
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
 from nemo_gym.core import EpisodeId
-from nemo_gym.sandbox import (
-    AsyncSandbox,
-    DirectSandboxConnection,
-    SandboxAccess,
-    SandboxConfig,
-    resolve_provider_config,
-)
+from nemo_gym.sandbox import SandboxConfig, resolve_provider_config
 from nemo_gym.server_runtime import (
+    LentSandboxes,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
     ResourcesSeedRejectedError,
@@ -53,15 +47,7 @@ class GdpPdfSandboxConfig(GdpPdfConfig):
     sandbox_image: str
     sandbox_config: SandboxConfig = Field(default_factory=lambda: SandboxConfig(ttl_s=14400))
     documents_base_dir: str = "resources_servers/gdp_pdf/data"
-    sandbox_stop_timeout_seconds: float = Field(default=60, gt=0)
     allow_unisolated_sandbox: bool = False
-
-
-@dataclass
-class _Session:
-    seed: ResourcesSeedSessionRequest
-    sandbox: AsyncSandbox
-    access: SandboxAccess | None = None
 
 
 class GdpPdfSandboxResourcesServer(GdpPdfResourcesServer):
@@ -73,7 +59,11 @@ class GdpPdfSandboxResourcesServer(GdpPdfResourcesServer):
             raise ValueError("GDP.pdf sandbox sessions require num_workers=1")
         if self.config.sandbox_config.ttl_s is None:
             raise ValueError("GDP.pdf sandboxes require ttl_s for abandoned episodes")
-        self._sessions: dict[str, _Session] = {}
+        # The seed of each session that holds a lent sandbox or is starting one.
+        self._seeds: dict[str, ResourcesSeedSessionRequest] = {}
+        self._sandboxes = LentSandboxes(
+            self.config.sandbox_provider, self.config.sandbox_config, image=self.config.sandbox_image, workdir=WORKDIR
+        )
         self._locks = ResourcesSessionLocks()
         self._fences: ResourcesSessionFences[EpisodeId] = ResourcesSessionFences(
             self.config.session_close_retry_window_seconds
@@ -89,12 +79,11 @@ class GdpPdfSandboxResourcesServer(GdpPdfResourcesServer):
                 async with parent(app) as state:
                     yield state
             finally:
-                for session_id in list(self._sessions):
-                    try:
-                        async with self._locks.locked(session_id):
-                            await self._stop(session_id)
-                    except Exception:
-                        LOG.exception("Could not stop GDP.pdf sandbox %s", session_id)
+                # A seed, close or retirement still running finishes first, so no sandbox is stopped twice at once.
+                for session_id in list(self._seeds):
+                    async with self._locks.locked(session_id):
+                        pass
+                await self._sandboxes.release_all()
 
         app.router.lifespan_context = lifespan
         return app
@@ -154,70 +143,47 @@ class GdpPdfSandboxResourcesServer(GdpPdfResourcesServer):
         session_id = body.resources_session_id
         async with self._locks.locked(session_id):
             self._fences.raise_if_fenced(session_id)
-            session = self._sessions.get(session_id)
-            if session is not None and session.seed != body:
+            seed = self._seeds.get(session_id)
+            if seed is not None and seed != body:
                 raise ResourcesSessionConflictError("Session is already bound to another episode or task")
-            if session is None or session.access is None:
-                # A failed start whose cleanup failed remains owned until a retry can release it.
-                await self._stop(session_id)
-                pdf = self._source_pdf(body)
-                global_config = get_global_config_dict()
-                provider = resolve_provider_config(self.config.sandbox_provider, global_config)
-                await self._check_isolation(provider)
-                sandbox = AsyncSandbox(provider)
-                session = _Session(body.model_copy(deep=True), sandbox)
-                self._sessions[session_id] = session
-                spec = self.config.sandbox_config.spec(
-                    self.config.sandbox_provider,
-                    image=self.config.sandbox_image,
-                    workdir=WORKDIR,
-                    named_configs=global_config,
-                    metadata={"nemo_gym_task": body.task_id.task_id[:63]},
-                )
-
-                async def setup(sandbox: AsyncSandbox) -> None:
-                    # Only the source document enters the sandbox: no rubric, reference answer or host mounts.
-                    await sandbox.upload(pdf, DOCUMENT_PATH)
-
+            if seed is not None:
+                access = await self._sandboxes.lend(session_id, body.task_id)
+            else:
+                # Recorded before the first await, so that shutdown waits for a seed that is still starting its sandbox.
+                self._seeds[session_id] = body.model_copy(deep=True)
                 try:
-                    await sandbox.start_with_setup(spec, setup)
-                    session.access = SandboxAccess(
-                        connection=DirectSandboxConnection(
-                            provider_config_ref=self.config.sandbox_provider, descriptor=await sandbox.serialize()
-                        ),
-                        workdir=WORKDIR,
+                    pdf = self._source_pdf(body)
+                    await self._check_isolation(
+                        resolve_provider_config(self.config.sandbox_provider, get_global_config_dict())
                     )
+                    # Only the source document enters the sandbox: no rubric, reference answer or host mounts.
+                    files = {DOCUMENT_PATH: await asyncio.to_thread(pdf.read_bytes)}
+                    access = await self._sandboxes.lend(session_id, body.task_id, files=files)
                 except BaseException:
-                    try:
-                        await self._stop(session_id)
-                    except Exception:
-                        LOG.exception("Could not stop partially initialized GDP.pdf sandbox %s", session_id)
+                    del self._seeds[session_id]
                     raise
             request.session[SESSION_ID_KEY] = session_id
-            return ResourcesSeedSessionResponse(resources_session_id=session_id, sandbox_access=session.access)
+            return ResourcesSeedSessionResponse(resources_session_id=session_id, sandbox_access=access)
 
-    async def _stop(self, session_id: str) -> None:
-        session = self._sessions.get(session_id)
-        if session is not None:
-            async with asyncio.timeout(self.config.sandbox_stop_timeout_seconds):
-                await session.sandbox.stop()
-            self._sessions.pop(session_id)
+    async def _release(self, session_id: str) -> None:
+        await self._sandboxes.release(session_id)
+        self._seeds.pop(session_id, None)
 
     async def retire_session_state(self, session_id: str) -> None:
         async with self._locks.locked(session_id):
-            session = self._sessions.get(session_id)
-            if session is not None:
-                self._fences.fence(session_id, session.seed.episode_id)
-            await self._stop(session_id)
+            seed = self._seeds.get(session_id)
+            if seed is not None:
+                self._fences.fence(session_id, seed.episode_id)
+            await self._release(session_id)
 
     async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
         session_id = body.resources_session_id
         async with self._locks.locked(session_id):
-            session = self._sessions.get(session_id)
-            owner = session.seed.episode_id if session else self._fences.get(session_id)
+            seed = self._seeds.get(session_id)
+            owner = seed.episode_id if seed else self._fences.get(session_id)
             if owner is not None and owner != body.episode_id:
                 raise ResourcesSessionConflictError("episode_id does not match the resources session")
-            await self._stop(session_id)
+            await self._release(session_id)
             self._fences.fence(session_id, body.episode_id)
         return ResourcesCloseSessionResponse(resources_session_id=session_id)
 
