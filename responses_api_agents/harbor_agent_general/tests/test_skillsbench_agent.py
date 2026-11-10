@@ -257,24 +257,28 @@ async def test_terminal_model_feedback_reports_completion_and_updated_directory(
     environment = _make_environment(tmp_path)
     await environment.start(force_build=False)
     try:
-        # Extract the per-action cwd marker from the dispatched command, as a
-        # real shell does, rather than coupling the test to its random UUID.
-        async def exec_command(command, **kwargs):
-            import re
 
-            marker = re.search(r"__OPENHANDS_CWD_[0-9a-f]+__", command)[0]
+        async def exec_command(command, **kwargs):
             assert kwargs["cwd"] == "/"
-            assert "cd -- /tmp" in command
-            return SimpleNamespace(return_code=0, stdout=f"done\n{marker}/workspace\n", stderr="")
+            process = await asyncio.create_subprocess_exec(
+                "bash",
+                "-c",
+                command,
+                cwd=kwargs["cwd"],
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await process.communicate()
+            return SimpleNamespace(return_code=process.returncode, stdout=stdout.decode(), stderr=stderr.decode())
 
         environment.exec = exec_command
         executor = OpenSandboxTerminalExecutor(environment, asyncio.get_running_loop(), "/tmp", _RunControl())
-        observation = await asyncio.to_thread(executor, TerminalAction(command="cd /workspace; echo done"))
+        observation = await asyncio.to_thread(executor, TerminalAction(command=f"cd '{tmp_path}'; echo done"))
         content = "\n".join(part.text for part in observation.to_llm_content)
         assert "[Command finished with exit code 0]" in content
-        assert "[Current working directory: /workspace]" in content
+        assert f"[Current working directory: {tmp_path}]" in content
         assert "__OPENHANDS_CWD_" not in content
-        assert executor.cwd == "/workspace"
+        assert executor.cwd == str(tmp_path)
         assert not observation.is_error
     finally:
         await environment.stop(delete=True)
@@ -438,7 +442,8 @@ async def test_frozen_terminal_tool_describes_stateless_shell_and_keeps_executor
         observation = await asyncio.to_thread(tool.executor, TerminalAction(command="echo regression"))
         assert observation.exit_code == 0
         environment.exec.assert_awaited_once()
-        assert "echo regression" in environment.exec.call_args.args[0]
+        assert observation.command == "echo regression"
+        assert "regression" in observation.text
     finally:
         _EXECUTORS.pop("test")
 
@@ -675,6 +680,62 @@ def test_the_llm_request_timeout_and_retries_reach_openhands(tmp_path, monkeypat
         agent._run_openhands("task", None, None, "id", "/root", _RunControl())
     # OpenHands' own default is a 300 s request timeout, shorter than a slow but healthy policy needs.
     assert (received["timeout"], received["num_retries"]) == expected
+
+
+@pytest.mark.asyncio
+async def test_terminal_process_cleanup_does_not_match_command_transport(tmp_path):
+    import shlex
+    import uuid
+
+    from harbor.environments.base import ExecResult
+
+    class ShellEnvironment:
+        stop = AsyncMock()
+
+        async def exec(self, command, *, cwd=None, timeout_sec=None):
+            process = await asyncio.create_subprocess_exec(
+                "bash",
+                "-c",
+                command,
+                cwd=cwd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout_sec)
+            return ExecResult(return_code=process.returncode, stdout=stdout.decode(), stderr=stderr.decode())
+
+    # A unique process name confines pkill to this test's service and any shell
+    # that incorrectly exposes the action text in its command-line arguments.
+    name = f"skillsbench-service-{uuid.uuid4().hex}"
+    service = await asyncio.create_subprocess_exec(
+        "bash",
+        "-c",
+        'exec -a "$1" sleep 120',
+        "bash",
+        name,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    environment = ShellEnvironment()
+    executor = OpenSandboxTerminalExecutor(environment, asyncio.get_running_loop(), str(tmp_path), _RunControl())
+    try:
+        assert service.returncode is None
+        result = await asyncio.to_thread(
+            executor, TerminalAction(command=f"pkill -f {shlex.quote(name)}; echo cleanup-finished", timeout=5)
+        )
+        await asyncio.wait_for(service.wait(), timeout=5)
+        assert service.returncode != 0
+        assert result.exit_code == result.metadata.exit_code == 0
+        assert "cleanup-finished" in result.text
+        assert executor.cwd == str(tmp_path)
+        assert executor.control.sandbox_failure is None
+        environment.stop.assert_not_awaited()
+    finally:
+        if service.returncode is None:
+            service.kill()
+            await service.wait()
 
 
 @pytest.mark.asyncio
