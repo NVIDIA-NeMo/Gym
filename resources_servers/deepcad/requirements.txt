@@ -1,0 +1,11 @@
+-e nemo-gym[dev,sandbox] @ ../..
+# CadQuery/OCP: Apache-2.0/LGPL-2.1 with exception; analytic solid construction and booleans.
+cadquery==2.8.0
+# NumPy/SciPy: BSD-3-Clause; normalized grids and voxel filling.
+numpy>=2.2
+scipy>=1.15
+# Trimesh: MIT; independently normalized mesh voxelization at pitch 1/64.
+trimesh==5.1.1
+# Pillow: HPND; dimension annotations and embedded input views.
+pillow>=11
+rtree==1.4.1
