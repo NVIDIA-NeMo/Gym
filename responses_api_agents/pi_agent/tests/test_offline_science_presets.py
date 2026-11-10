@@ -91,7 +91,8 @@ def test_preset_runs_pi_agent_sessions_through_single_agent_turn_legacy(
     # The pinned Pi in the image, with no output cap on its requests.
     assert agent_config.pi_version == "0.85.1"
     assert agent_config.output_token_policy == "remaining_context"
-    # Only the servers a sandbox must reach take the host address; the judge and the head server stay on loopback.
+    # Only the server types a sandbox must reach take the host address, and the head server stays on loopback. The
+    # judge stays there too, except in hle_search: Tavily is a Resources server, so every Resources server leaves.
     assert list(config.absolute_ip_server_types) == absolute_ip_server_types
     assert config.head_server.host == "127.0.0.1"
     env = get_first_server_config_dict(config, environment)
