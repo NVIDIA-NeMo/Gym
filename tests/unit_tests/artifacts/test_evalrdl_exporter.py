@@ -19,12 +19,15 @@ import subprocess
 import sys
 import textwrap
 from pathlib import Path
+from types import ModuleType
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 from omegaconf import OmegaConf
 from pytest import MonkeyPatch
 
+import nemo_gym.artifacts.exporters._evalrdl_worker as _evalrdl_worker
 import nemo_gym.artifacts.exporters.isolated as isolated
 from nemo_gym.artifacts.exporters import load_run_exporter_class
 from nemo_gym.artifacts.exporters.base import ExportState
@@ -106,9 +109,6 @@ class Client:
 
 
 def upload_plan(path, label=None):
-    if os.environ.get("FAKE_EVALRDL_PLAN") == "split":
-        return [{"label": name, "dir": str(Path(path) / name), "files": [], "unreadable": [], "bytes": 0}
-                for name in ("run_a", "run_b")]
     return [{"label": label or Path(path).name, "dir": str(path), "files": [], "unreadable": [], "bytes": 0}]
 """
 
@@ -481,17 +481,23 @@ class TestUpload:
 
         assert (result.state, result.exit_code) == (state, exit_code)
 
-    def test_a_directory_the_sdk_would_split_is_refused_before_anything_is_sent(
-        self, tmp_path: Path, fake_sdk: dict[str, Any], monkeypatch: MonkeyPatch
+    @pytest.mark.parametrize("planned", [["/run/a", "/run/b"], ["/run/a"]], ids=["split", "nested"])
+    def test_a_directory_the_sdk_would_not_upload_whole_is_refused_before_anything_is_sent(
+        self, monkeypatch: MonkeyPatch, planned: list[str]
     ) -> None:
-        monkeypatch.setenv("FAKE_EVALRDL_PLAN", "split")
-        artifacts = _make_run(tmp_path)
+        api = ModuleType("evalrdl.sdk.api")
+        api.RdlError = api.IntakeRefused = Exception
+        api.Client = Mock()
+        api.upload_plan = lambda path, label=None: [{"dir": d} for d in planned]
+        monkeypatch.setitem(sys.modules, "evalrdl", ModuleType("evalrdl"))
+        monkeypatch.setitem(sys.modules, "evalrdl.sdk", ModuleType("evalrdl.sdk"))
+        monkeypatch.setitem(sys.modules, "evalrdl.sdk.api", api)
 
-        result = _exporter(artifacts, tmp_path).export(artifacts)
+        result = _evalrdl_worker.run({"run_dir": "/run"})
 
-        assert (result.state, result.exit_code) == (ExportState.FAILED, 1)
-        assert "into 2 uploads" in result.error
-        assert not fake_sdk["log"].exists()
+        assert (result["state"], result["exit_code"]) == ("failed", 1)
+        assert result["detail"]["upload_dirs"] == planned
+        api.Client.assert_not_called()
 
     def test_a_committed_upload_reports_the_run_it_created(self, tmp_path: Path, fake_sdk: dict[str, Any]) -> None:
         artifacts = _make_run(tmp_path)
