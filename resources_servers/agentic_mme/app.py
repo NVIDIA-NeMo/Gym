@@ -20,12 +20,12 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path, PurePosixPath
-from typing import Any, ClassVar, Literal, Optional
+from typing import Annotated, Any, ClassVar, Literal, Optional
 
 import cv2
 from fastapi import FastAPI, HTTPException, Request
 from PIL import Image
-from pydantic import ConfigDict, Field, PrivateAttr, TypeAdapter, ValidationError
+from pydantic import BeforeValidator, ConfigDict, Field, PrivateAttr, TypeAdapter, ValidationError
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.agents import HARNESS_STEP_LIMIT_METADATA_KEY
@@ -52,9 +52,11 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
     lost_session_verification,
+    observe_llm_judge_grading,
+    reject_partial_typed_seed,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
-from nemo_gym.verification import JudgeError, VerifierFixture, call_judge
+from nemo_gym.verification import JudgeError, VerifierFixture, call_judge, record_parsed_judge_verdict
 from resources_servers.agentic_mme.image_tools import IMAGE_TOOLS, ImageArgs, ImageWorkspace
 from resources_servers.agentic_mme.task_data import GoldenAnswer, ImageFile
 from resources_servers.agentic_mme.verifier_fixture import create_server
@@ -146,13 +148,29 @@ Is the model's final answer correct?"""
 
 
 def parse_verdict(content: str) -> dict[str, Any]:
-    """Read the judge's JSON verdict. A reply without one is a judge failure, not a wrong answer."""
-    match = re.search(r"\{.*\}", content or "", re.S)
-    try:
-        data = json.loads(match.group(0)) if match else None
-    except json.JSONDecodeError:
-        data = None
-    verdict = str(data.get("verdict", "")).lower().strip() if isinstance(data, dict) else ""
+    """Read the judge's JSON verdict. A reply without one is a judge failure, not a wrong answer.
+
+    Every JSON object in the reply that has a verdict counts, so a brace ahead of it (a quoted \\boxed{7}) is skipped.
+    Objects that name different verdicts, as when a reasoning judge quotes one from the model's text, stay a judge
+    failure.
+    """
+    text = content or ""
+    decoder = json.JSONDecoder()
+    verdicts: list[dict[str, Any]] = []
+    end = 0
+    for brace in re.finditer(r"\{", text):
+        if brace.start() < end:
+            continue
+        try:
+            data, end = decoder.raw_decode(text, brace.start())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict) and "verdict" in data:
+            verdicts.append(data)
+    if len({str(data["verdict"]).lower().strip() for data in verdicts}) != 1:
+        raise JudgeError(f"The judge reply has no single verdict: {text[:200]!r}")
+    data = verdicts[-1]
+    verdict = str(data.get("verdict", "")).lower().strip()
     if verdict not in ("equivalent", "different", "unsure"):
         raise JudgeError(f"The judge reply has no verdict: {(content or '')[:200]!r}")
     return {"verdict": verdict, "reason": str(data.get("reason", ""))[:200]}
@@ -202,8 +220,8 @@ class AgenticMMEConfig(BaseResourcesServerConfig):
     # checkout, not to the working directory of this server's process.
     image_root: Optional[str] = None
     # When set, an LLM judge decides correctness and string match is kept only as a diagnostic.
+    # The judge's model server picks the judge model (openai_model's openai_model), so this server names none.
     judge_model_server: Optional[ModelServerRef] = None
-    judge_model: str = ""
     judge_temperature: float = 0.0
     judge_max_tokens: int = 1024
     judge_max_concurrency: int = Field(default=32, ge=1)
@@ -307,13 +325,23 @@ class AgenticMMEServer(SimpleResourcesServer):
         return app
 
     async def seed_session(
-        self, request: Request, body: ResourcesSeedSessionRequest | BaseSeedSessionRequest
+        self,
+        request: Request,
+        body: ResourcesSeedSessionRequest
+        | Annotated[BaseSeedSessionRequest, BeforeValidator(reject_partial_typed_seed)],
     ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
-        """Load the task images into the episode's workspace, lend it a sandbox with or without them, or both."""
-        if not isinstance(body, ResourcesSeedSessionRequest) or (
-            self.config.sandbox_provider is None and not self.config.serve_image_tools
-        ):
+        """Load the task images into the episode's workspace, lend it a sandbox with or without them, or both.
+
+        A malformed typed seed is refused (422) instead of being taken as a cookie seed. A server that keeps
+        per-episode state (a lent sandbox or the image tools' workspace) refuses a cookie seed too: it would get
+        neither, and an agent's own /run, which seeds that way, would run its harness on its own host.
+        """
+        if self.config.sandbox_provider is None and not self.config.serve_image_tools:
             return await super().seed_session(body)
+        if not isinstance(body, ResourcesSeedSessionRequest):
+            raise ResourcesSeedRejectedError(
+                "This server lends a sandbox or serves image tools only to an Environment Server's episode seed"
+            )
         session_id = body.resources_session_id
         async with self._locks.locked(session_id):
             self._fences.raise_if_fenced(session_id)
@@ -443,7 +471,6 @@ class AgenticMMEServer(SimpleResourcesServer):
             text=text[-self.config.judge_max_text_chars :],
         )
         params = {
-            "model": self.config.judge_model,
             "messages": [{"role": "system", "content": JUDGE_SYSTEM}, {"role": "user", "content": prompt}],
             "temperature": self.config.judge_temperature,
             "max_tokens": self.config.judge_max_tokens,
@@ -456,6 +483,8 @@ class AgenticMMEServer(SimpleResourcesServer):
                 json=params,
                 response_model=NeMoGymChatCompletion,
             )
+        if not completion.choices:
+            raise JudgeError("The judge reply has no choices")
         return parse_verdict(completion.choices[0].message.content or "")
 
     async def verify(self, request: Request, body: AgenticMMEVerifyRequest) -> AgenticMMEVerifyResponse:
@@ -503,18 +532,28 @@ class AgenticMMEServer(SimpleResourcesServer):
         if self.config.judge_model_server is not None and result.extracted_answer:
             # A failed judge call raises JudgeError; the judge_failsafe wrapper around /verify turns it
             # into a masked judge_failed row in the failures sidecar, regraded later, not a wrong answer.
-            judged = await self.judge(
-                question_text(body.responses_create_params),
-                str(golden.value),
-                result.extracted_answer,
-                final_text,
-                tolerance=judge_tolerance(body.verifier_metadata, golden),
-            )
-            result.judge_verdict = judged["verdict"]
-            result.judge_reason = judged["reason"]
-            result.reward = float(judged["verdict"] == "equivalent")
+            return await observe_llm_judge_grading(lambda: self._grade_with_judge(body, golden, result, final_text))
         if not result.reward:
             result.failure_reason = "incorrect_answer" if result.extracted_answer else "missing_answer"
+        return result
+
+    async def _grade_with_judge(
+        self, body: AgenticMMEVerifyRequest, golden: GoldenAnswer, result: AgenticMMEVerifyResponse, final_text: str
+    ) -> AgenticMMEVerifyResponse:
+        judged = await self.judge(
+            question_text(body.responses_create_params),
+            str(golden.value),
+            result.extracted_answer,
+            final_text,
+            tolerance=judge_tolerance(body.verifier_metadata, golden),
+        )
+        # judge() raises on a reply without a valid verdict, so reaching here means the verdict parsed.
+        record_parsed_judge_verdict()
+        result.judge_verdict = judged["verdict"]
+        result.judge_reason = judged["reason"]
+        result.reward = float(judged["verdict"] == "equivalent")
+        if not result.reward:
+            result.failure_reason = "incorrect_answer"
         return result
 
 

@@ -128,6 +128,11 @@ agentic_mme_environment_server:
       # the judge fit inside it, and it ends well before the sandbox's ttl_s (7200 s). The default (21600 s) would
       # outlive the sandbox, and a verify after the sandbox expires is masked as a lost session.
       default_episode_timeout_seconds: 5400
+      # Admit episodes at the agent's rate (its concurrency, 32). Each seed lends a sandbox, so an episode admitted
+      # beyond it would wait for OpenCode with its sandbox started and its deadline running. Admission comes before
+      # the deadline starts.
+      max_concurrent_episodes: 32
+      queue_timeout_seconds: 86400
       # resources_server comes from resources_servers/agentic_mme/configs/agentic_mme.yaml.
       agent_server:
         type: responses_api_agents

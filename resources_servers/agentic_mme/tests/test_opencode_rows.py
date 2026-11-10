@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from benchmarks.agentic_mme.prepare import (
     EXAMPLE_FPATH,
@@ -14,6 +15,7 @@ from benchmarks.agentic_mme.prepare import (
     EXAMPLE_OPENCODE_SERVER_TOOLS_FPATH,
     EXAMPLE_SERVER_TOOLS_FPATH,
     OPENCODE_SYSTEM_PROMPT,
+    convert,
     opencode_row,
     opencode_server_tools_row,
     server_tools_row,
@@ -156,3 +158,19 @@ def test_committed_opencode_server_tools_examples_match_the_example_rows() -> No
     assert rows == [
         opencode_server_tools_row(row, oc["image_files"]) for row, oc in zip(examples, opencode, strict=True)
     ]
+
+
+def test_a_converted_row_carries_its_task_id_at_the_top_level(tmp_path: Path) -> None:
+    """`gym eval plan` reads the task id from the row's top level; the verifier keeps its copy in verifier_metadata."""
+    Image.new("RGB", (2, 2), "red").save(tmp_path / "0.png")
+    task = {
+        "task_id": "task-7",
+        "input": {"image": "0.png", "prompt": "What colour is it?"},
+        "meta": {"level": 1, "domain": "art"},
+        "golden_answer": {"value": "red"},
+        "process_evaluation": {"checkpoints": []},
+    }
+
+    row = convert(task, tmp_path)
+
+    assert row["task_id"] == row["verifier_metadata"]["task_id"] == "task-7"

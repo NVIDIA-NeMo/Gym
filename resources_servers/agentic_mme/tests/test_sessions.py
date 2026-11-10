@@ -241,6 +241,38 @@ def test_seed_refuses_bad_image_files_without_a_retry(root, image_root, stopped,
     assert stopped == []
 
 
+# A malformed typed seed: it names a resources session but has no episode, task or task_data.
+_ID_ONLY_SEED = {"resources_session_id": "s"}
+# A cookie seed, as an agent's own /run posts: a dataset row.
+_COOKIE_SEED = {"verifier_metadata": {"golden_answer": {"value": "red"}}}
+
+
+@pytest.mark.parametrize("server_tools", [False, True])
+@pytest.mark.parametrize("body", [_ID_ONLY_SEED, _COOKIE_SEED])
+def test_a_server_with_episode_state_takes_only_a_typed_episode_seed(
+    root, image_root, stopped, server_tools, body
+) -> None:
+    extra = {"serve_image_tools": True} if server_tools else {}
+    server = _server(image_root, **extra)
+    client = TestClient(server.setup_webserver())
+
+    refused = client.post("/seed_session", json=body)
+
+    assert refused.status_code == 422, refused.text
+    assert server._sessions == {} and stopped == []
+
+
+def test_a_stateless_server_refuses_a_malformed_typed_seed_and_accepts_a_cookie_seed() -> None:
+    server = AgenticMMEServer(
+        config=AgenticMMEConfig(host="0.0.0.0", port=8080, entrypoint="", name="agentic_mme"),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    client = TestClient(server.setup_webserver())
+
+    assert client.post("/seed_session", json=_ID_ONLY_SEED).status_code == 422
+    assert client.post("/seed_session", json=_COOKIE_SEED).status_code == 200
+
+
 def test_without_a_sandbox_provider_the_server_stays_stateless(image_root) -> None:
     server = AgenticMMEServer(
         config=AgenticMMEConfig(host="0.0.0.0", port=8080, entrypoint="", name="agentic_mme"),

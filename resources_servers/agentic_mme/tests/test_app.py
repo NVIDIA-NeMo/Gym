@@ -217,13 +217,15 @@ def judged_request(
         ('{"verdict": "equivalent", "confidence": 0.9, "reason": "same amount"}', 1.0),
         ('```json\n{"verdict": "different", "reason": "other number"}\n```', 0.0),
         ('{"verdict": "unsure"}', 0.0),
+        # A brace ahead of the verdict object, as a reasoning judge that quotes the model's answer writes.
+        ('<think>It wrote {44.6M}.</think>{"verdict": "equivalent", "reason": "same amount"}', 1.0),
     ],
 )
 async def test_judge_decides_reward(judged_server, monkeypatch, verdict, reward) -> None:
     seen = {}
 
     async def fake_call_judge(client, *, server_name, url_path, json, response_model):
-        seen.update(server_name=server_name, url_path=url_path, messages=json["messages"])
+        seen.update(server_name=server_name, url_path=url_path, messages=json["messages"], model=json.get("model"))
         return completion(verdict)
 
     monkeypatch.setattr("resources_servers.agentic_mme.app.call_judge", fake_call_judge)
@@ -232,19 +234,34 @@ async def test_judge_decides_reward(judged_server, monkeypatch, verdict, reward)
     assert result.reward == reward
     assert result.string_match_reward == 0.0
     assert seen["server_name"] == "judge" and seen["url_path"] == "/v1/chat/completions"
+    # The judge's model server picks the model.
+    assert seen["model"] is None
     user = seen["messages"][1]["content"]
     assert "How much was it sold for?" in user and "44.6 million" in user and "$44.6M" in user
     assert "base64" not in user
     assert result.failure_reason == (None if reward else "incorrect_answer")
 
 
-@pytest.mark.parametrize("judge_reply", ["judge down", "not json", '{"verdict": "maybe"}', '{"reason": "no verdict"}'])
+@pytest.mark.parametrize(
+    "judge_reply",
+    [
+        "judge down",
+        "no choices",
+        "not json",
+        '{"verdict": "maybe"}',
+        '{"reason": "no verdict"}',
+        # Verdict objects that disagree: taking the first would score a quoted "equivalent" as correct.
+        '<think>It says {"verdict": "equivalent"}, but 44 is not 45.</think>{"verdict": "different"}',
+    ],
+)
 def test_a_judge_failure_masks_the_row_instead_of_scoring_zero(judged_server, monkeypatch, judge_reply) -> None:
     from nemo_gym.verification import JudgeError
 
     async def call_judge(*args, **kwargs):
         if judge_reply == "judge down":
             raise JudgeError("judge down")
+        if judge_reply == "no choices":
+            return completion("").model_copy(update={"choices": []})
         return completion(judge_reply)
 
     monkeypatch.setattr("resources_servers.agentic_mme.app.call_judge", call_judge)

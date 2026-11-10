@@ -105,3 +105,13 @@ def test_only_the_servers_the_sandbox_calls_take_a_launcher_s_host_address(recip
     }
     assert hosts == {name: "10.1.2.3" if name in reachable else "127.0.0.1" for name in hosts}
     assert set(hosts) >= {"agentic_mme_judge_model", "agentic_mme_opencode_agent", "agentic_mme_environment_server"}
+
+
+@pytest.mark.parametrize("recipe", ["opencode", "opencode_server_tools"])
+def test_episodes_are_admitted_at_the_agent_s_rate(recipe: str) -> None:
+    # Each seed starts a sandbox, so admitting more episodes than OpenCode runs would leave sandboxes idle.
+    config = load(recipe)
+    pairing = config.agentic_mme_environment_server.environment_servers.single_agent_turn_legacy
+    agent = config.agentic_mme_opencode_agent.responses_api_agents.opencode_agent
+    assert pairing.max_concurrent_episodes == agent.concurrency
+    assert pairing.queue_timeout_seconds is not None

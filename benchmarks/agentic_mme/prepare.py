@@ -213,6 +213,8 @@ def convert(task: dict, root: Path) -> dict:
         "responses_create_params": {
             "input": [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": content}]
         },
+        # The stable id that `gym eval plan` and task selection read from the row's top level.
+        "task_id": task["task_id"],
         "verifier_metadata": {
             "task_id": task["task_id"],
             "level": task["meta"].get("level"),
