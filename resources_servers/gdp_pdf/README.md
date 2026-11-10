@@ -246,6 +246,7 @@ Upstream dataset: MIT. Evaluation only — see the warning above.
 ## GDP.pdf with OpenCode
 
 OpenCode receives the raw PDF at `/workspace/document.pdf` and the question.
+The PDF path is included in the user message; OpenCode's system prompt is unchanged.
 It can inspect text/images and run Python; the existing grader scores only the
 final answer. Rubrics and reference answers stay outside the sandbox.
 

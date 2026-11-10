@@ -40,9 +40,6 @@ gdp_pdf_opencode:
       image_input: true
       max_output_tokens: 16384
       timeout: 7200
-      system_prompt: The source PDF is /workspace/document.pdf. Use the available
-        tools to inspect its text and images and solve the user's task using only
-        this document as evidence. Put your complete answer in the final chat response.
       opencode_config:
         permission:
           task: deny
