@@ -2494,3 +2494,69 @@ async def test_a_resume_after_the_credentials_are_fixed_retries_the_rejected_rol
     runner_config.resume_from_cache = True
     await RolloutCollectionHelper().run_from_config(runner_config)
     assert RolloutStore.read(Path(runner_config.output_jsonl_fpath)).coverage()["complete"]
+
+
+def test_run_outcomes_forwards_the_connection_bounds_and_is_unbounded_without_them(monkeypatch):
+    seen = []
+
+    def fake(self, examples, **kwargs):
+        seen.append(kwargs)
+        return iter(())
+
+    monkeypatch.setattr(RolloutCollectionHelper, "_run_examples_with_metadata", fake)
+    row = failing_row()
+
+    RolloutCollectionHelper().run_outcomes([row])
+    RolloutCollectionHelper().run_outcomes([row], max_num_tries=2, connect_grace_s=60.0)
+
+    assert (seen[0]["_max_num_tries"], seen[0]["_connect_grace_s"]) == (None, None)
+    assert (seen[1]["_max_num_tries"], seen[1]["_connect_grace_s"]) == (2, 60.0)
+
+
+def _refused_connection():
+    from aiohttp import ClientConnectorError
+    from aiohttp.client_reqrep import ConnectionKey
+
+    return ClientConnectorError(ConnectionKey("127.0.0.1", 1, False, True, None, None, None), OSError(111, "refused"))
+
+
+async def test_a_refused_connection_is_resent_within_the_grace_and_then_reported_as_not_sent(monkeypatch):
+    calls = []
+
+    async def post(*, _on_transport_failure=None, **kwargs):
+        calls.append(kwargs)
+        error = _refused_connection()
+        _on_transport_failure(error, False)
+        raise error
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+
+    _, outcome = await next(
+        RolloutCollectionHelper().run_outcomes([failing_row()], max_num_tries=2, connect_grace_s=0.3)
+    )
+
+    assert len(calls) > 1
+    assert (outcome.source, outcome.delivery) == ("collector", "not_sent")
+    assert outcome.exception_type == "ClientConnectorError"
+
+
+async def test_a_connection_that_dropped_is_reported_as_possibly_delivered_and_not_resent_by_the_grace(monkeypatch):
+    from aiohttp import ServerDisconnectedError
+
+    calls = []
+
+    async def post(*, _on_transport_failure=None, **kwargs):
+        calls.append(kwargs)
+        error = ServerDisconnectedError()
+        _on_transport_failure(error, False)
+        raise error
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+
+    _, outcome = await next(
+        RolloutCollectionHelper().run_outcomes([failing_row()], max_num_tries=2, connect_grace_s=0.3)
+    )
+
+    assert len(calls) == 1
+    assert (outcome.source, outcome.delivery) == ("collector", "possibly_delivered")
+    assert outcome.exception_type == "ServerDisconnectedError"

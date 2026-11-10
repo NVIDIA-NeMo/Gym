@@ -71,7 +71,8 @@ async def test_real_runner_preserves_model_history_and_tool_observations(
         observability_enabled=observability_enabled,
     )
     Path(harness.context.workdir, "large.txt").write_text(full_output)
-    response, termination, extra = await harness.execute(30)
+    # Allow runner startup headroom on loaded CI hosts; the command timeout under test stays at 1 s.
+    response, termination, extra = await harness.execute(120)
     assert termination.reason == "completed", termination
     assert extra["harness_version"] == "2.4.6"
     assert len(response.output) == 8
