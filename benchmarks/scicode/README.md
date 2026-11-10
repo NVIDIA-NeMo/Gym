@@ -59,16 +59,8 @@ to write the next function directly.
 
 ## Dependencies
 
-The resources server executes generated SciCode solutions in its own venv, so its
-`pyproject.toml` declares the scientific dependencies (`scipy>=1.14.1`, `numpy`, `matplotlib`,
-`h5py`, `sympy`, `networkx`; `uv.lock` has the exact versions). Python 3.13 needs scipy 1.14 or
-newer, and scipy 1.14 removed `scipy.integrate.simps`, which the benchmark's own dependency header
-imports for problems 2 and 28 (`from scipy.integrate import simps`) and a few solutions call.
-`config.yaml` therefore sets `provide_removed_scipy_aliases: true` on the resources server: when
-`scipy.integrate` has no `simps`, every grading program first restores it as a forward to `simpson`
-(the call scipy 1.13 made; results are bit-identical on odd and even sample counts). Nothing changes
-on a scipy that still has `simps`. Other removed scipy names (for example `scipy.special.sph_harm`)
-are not restored.
+SciCode executes generated solutions in a separate Python 3.11 environment with
+pinned scientific dependencies; see [Grading environment](#grading-environment).
 
 Problems 13 and 62 each have one sub-step the benchmark prefills with reference code instead of
 generating it (13.6 builds `class Maxwell`, 62.1 builds `class Block` and `class EnlargedBlock`);
@@ -147,3 +139,22 @@ model-generated, so treat the rollout file accordingly.
 
 Code: Apache 2.0
 Data (`SciCode1/SciCode`, `test_data.h5`): Apache 2.0
+
+## Grading environment
+
+For local grading without explicit `grading_interpreters`, the resources server
+prepares an isolated Python 3.11 environment using `uv` and
+`resources_servers/scicode/grading-requirements.lock`, including resolved transitive
+dependencies. SciPy 1.10.1 provides
+`scipy.integrate.simps`, which the problem dependencies require. Gym keeps its
+own Python interpreter and does not install the grading packages into it.
+
+Sandbox grading uses the interpreters and test data in the configured image and
+does not prepare this local environment.
+
+The first start requires Python/package download access and a writable
+`grading_venv_path` (default `resources_servers/scicode/.grading_venv`). Set this
+path to persistent writable storage when running from a read-only checkout.
+Subsequent starts reuse a matching environment offline. A lock or Python-version
+change recreates it and synchronizes packages with `uv pip sync`. See the
+[resources-server README](../../resources_servers/scicode/README.md) for lock regeneration.
