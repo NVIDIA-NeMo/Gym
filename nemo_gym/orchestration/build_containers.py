@@ -691,6 +691,7 @@ class MooncakeBuilder(BaseBuilder):
             git submodule update --init --recursive --depth=1
 
             # Both distributions own the same mooncake package and CLI entry points.
+            rm -f /opt/mooncake-build.env
             uv pip uninstall --system mooncake-transfer-engine-cuda13 mooncake-transfer-engine
             uv pip install --system . \
                 --config-settings=cmake.build-type=Release \
@@ -706,6 +707,12 @@ class MooncakeBuilder(BaseBuilder):
                 --config-settings=cmake.define.WITH_STORE_RUST=OFF \
                 --config-settings=cmake.define.WITH_STORE_RS=OFF \
                 --config-settings=cmake.define.WITH_P2P_STORE=OFF
+
+            # Publish provenance only after installation succeeds. Quote values so
+            # the manifest can also be sourced safely as shell assignments.
+            printf 'MOONCAKE_REPO=%q\nMOONCAKE_BRANCH=%q\nMOONCAKE_HEAD_SHA=%q\nBASE_IMAGE=%q\n' \
+                "$MOONCAKE_REPO" "$MOONCAKE_BRANCH" "$MOONCAKE_HEAD_SHA" "$BASE_IMAGE" \
+                > /opt/mooncake-build.env
 
             cd /
             rm -rf "${BUILD_DIR}"

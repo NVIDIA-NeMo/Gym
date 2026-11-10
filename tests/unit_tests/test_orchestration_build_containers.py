@@ -831,6 +831,10 @@ def test_mooncake_build_and_cleanup(
     mooncake_builder.config.extra_apt_packages = extra_apt_packages
     mooncake_builder._head_sha = "a" * 40
     argv = shlex.split(mooncake_builder.get_srun_command_str())
+    manifest = tmp_path / "mooncake-build.env"
+    manifest.write_text("STALE_BUILD=1\n")
+    assert "/opt/mooncake-build.env" in argv[2]
+    argv[2] = argv[2].replace("/opt/mooncake-build.env", shlex.quote(str(manifest)))
     subprocess.run(["bash", "-n", "-c", argv[2]], check=True)
     cuda_home = tmp_path / "cuda toolkit"
     cuda_bin = cuda_home / "bin"
@@ -926,11 +930,33 @@ elif tool == "uv" and args == ["cache", "clean"]:
     if install_failure:
         assert result.returncode == 42, result.stderr
         assert ["cache", "clean"] not in uv_args
+        assert not manifest.exists()
     else:
         assert result.returncode == 23, result.stderr
         assert calls[-1]["args"] == ["cache", "clean"]
         assert calls[-1]["cwd"] == "/"
         assert not calls[-1]["build_exists"]
+        manifest_values = subprocess.run(
+            [
+                "bash",
+                "-c",
+                'source "$1"; printf "%s\\0" "$MOONCAKE_REPO" "$MOONCAKE_BRANCH" "$MOONCAKE_HEAD_SHA" "$BASE_IMAGE"',
+                "manifest-check",
+                str(manifest),
+            ],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert manifest_values.stdout.split("\0") == [
+            mooncake_builder.config.repo,
+            mooncake_builder.config.branch,
+            mooncake_builder._head_sha,
+            str(container_config.input_container_fpath),
+            "",
+        ]
+        assert not (tmp_path / "INJECTED").exists()
 
 
 @pytest.mark.parametrize(
