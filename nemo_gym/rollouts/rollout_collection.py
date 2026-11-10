@@ -1297,6 +1297,10 @@ _SHARD_LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 _RESERVED_SHARD_ENDINGS = ("_failures", "_materialized_inputs", "_attempts")
 
 
+RecordSink = Callable[[Literal["rollout", "failure", "omitted"], Dict[str, Any]], None]
+"""Receives each record a recorded shard writes, as ``(kind, record)``; see ``run_examples(record_sink=...)``."""
+
+
 class _RunRecordWriter:
     """Writes finished rollouts into a run folder the way ``ng_collect_rollouts`` lays it out, one shard at a time.
 
@@ -1313,7 +1317,9 @@ class _RunRecordWriter:
     and worker); Gym owns the file names. A result goes to the rollouts file, a failed one to the failures sidecar as
     the typed failure row collection writes, with its attempt cap, and an interrupted or never-started try to the
     sidecar as an omitted-rollout row only when ``record_omitted_rollouts`` is set. Opening a shard replaces what an
-    earlier run wrote under the same label, so a replayed step does not duplicate rows.
+    earlier run wrote under the same label, so a replayed step does not duplicate rows. ``sink``, when given, receives
+    each record after it is appended, as ``(kind, record)``: ``kind`` is ``"rollout"``, ``"failure"`` or ``"omitted"``,
+    and ``record`` is the line just written, read back.
     """
 
     def __init__(
@@ -1326,6 +1332,7 @@ class _RunRecordWriter:
         run_id: Optional[str] = None,
         status_rows: Optional[List[Dict[str, Any]]] = None,
         global_config: Any = None,
+        sink: Optional[RecordSink] = None,
     ) -> None:
         if not _SHARD_LABEL.fullmatch(shard):
             raise ValueError(f"shard label {shard!r} must be letters, digits, '_', '.' or '-', starting alnum")
@@ -1338,6 +1345,7 @@ class _RunRecordWriter:
         self.manifest_fpath = manifest_path_for(self.rollouts_fpath)
         self.status_fpath = batch_status_path_for(self.rollouts_fpath)
         self.record_omitted_rollouts = record_omitted_rollouts
+        self.sink = sink
         # The run this shard's typed failure records belong to, named by the shard's run manifest. The rows and
         # records stay untagged, as in an eval run written before run manifests, which the Store imports as well.
         self.run_id = run_id or uuid4().hex
@@ -1461,17 +1469,17 @@ class _RunRecordWriter:
                 if self._status_expected is not None and self._status_written >= self._status_expected:
                     self.flush_status()
                 return None
-            fpath, line = self.failures_fpath, orjson.dumps(omitted_rollout_record(result))
+            kind, fpath, line = "omitted", self.failures_fpath, orjson.dumps(omitted_rollout_record(result))
         elif result.get(NG_FAILURE_CLASS_KEY) is not None:
             # The cap this attempt ran under travels with it, as collection stamps it from the run manifest.
-            fpath = self.failures_fpath
+            kind, fpath = "failure", self.failures_fpath
             line = orjson.dumps(
                 result
                 if NG_FAILURE_MAX_ATTEMPTS_KEY in result
                 else {**result, NG_FAILURE_MAX_ATTEMPTS_KEY: get_max_rollout_attempts()}
             )
         else:
-            fpath, line = self.rollouts_fpath, orjson.dumps(result)
+            kind, fpath, line = "rollout", self.rollouts_fpath, orjson.dumps(result)
         with self._locked() as lock:
             lock.seek(0)
             if lock.read() != self._writer_token:
@@ -1491,6 +1499,9 @@ class _RunRecordWriter:
                 (self._status_completed if fpath == self.rollouts_fpath else self._status_failures).append(status_row)
                 last = self._status_expected is not None and self._status_written >= self._status_expected
                 self._status.write_status(self._status_completed, self._status_failures, force=last)
+        if self.sink is not None:
+            # Read back from the line, so the sink receives exactly what the shard holds.
+            self.sink(kind, orjson.loads(line))
         return fpath
 
     def flush_status(self) -> None:
@@ -5840,6 +5851,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         record_shard: Optional[str] = None,
         record_omitted_rollouts: bool = False,
         scope_rollout_ids: bool = True,
+        record_sink: Optional[RecordSink] = None,
     ) -> _RowResultIterator:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
@@ -5939,9 +5951,19 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         ``gym eval run`` with
         ``+input_jsonl_fpath=<dir>/rollouts-<shard>_materialized_inputs.jsonl +output_jsonl_fpath=<dir>/rollouts-<shard>.jsonl
         +resume_from_cache=true`` resumes a shard and runs only what it still lacks.
+
+        ``record_sink`` receives each record the shard writer appends, right after it is written, as ``(kind,
+        record)``: ``kind`` is ``"rollout"`` for the rollouts file, ``"failure"`` for a typed failure row (with the
+        model calls and agent observations captured before the failure, which the returned ``RolloutFailureRecord``
+        leaves out) and ``"omitted"`` for an omitted-rollout row; ``record`` is the line as written, read back. A caller
+        that keeps its own copy of the records (a database, a table store) gets the same lines as the shard. It runs
+        on the event loop before the row's result is returned, so it should hand slow work off; an exception it raises
+        is raised from that row's awaitable, after the record is already in the shard. It needs ``record_output_dir``.
         """
         if record_output_dir is not None and not record_shard:
             raise ValueError("record_output_dir needs a record_shard label naming this call's shard")
+        if record_sink is not None and record_output_dir is None:
+            raise ValueError("record_sink receives the records a shard writes, so it needs record_output_dir")
         enrich_results = enrich_results or record_output_dir is not None
         if delete_model_call_capture and not include_model_call_payloads:
             raise ValueError("delete_model_call_capture would drop the bodies include_model_call_payloads=False keeps")
@@ -6087,6 +6109,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 run_id=run_id,
                 status_rows=status_rows,
                 global_config=global_config,
+                sink=record_sink,
             )
         return _RowResultIterator(completions, enrich=enrich, on_close=writer.flush_status if writer else None)
 

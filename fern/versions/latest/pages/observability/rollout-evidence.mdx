@@ -70,6 +70,11 @@ evidence with two opt-in options:
   `gym eval run +input_jsonl_fpath=runs/policy/rollouts-<shard>_materialized_inputs.jsonl
   +output_jsonl_fpath=runs/policy/rollouts-<shard>.jsonl +resume_from_cache=true`, with the same servers, runs only
   what the shard still lacks.
+- `record_sink` receives each record the shard writer appends, as `(kind, record)`, for a caller that keeps its own
+  copy of the records, such as a database or a table store. `kind` is `"rollout"`, `"failure"` or `"omitted"`, and
+  `record` is the line as written. A failure row holds the model calls and agent observations captured before the
+  failure, which the returned `RolloutFailureRecord` leaves out. The sink runs on the event loop before the row's
+  result is returned, so it should hand slow work off. It needs `record_output_dir`.
 
 ```python
 from nemo_gym.rollouts import RolloutCollectionHelper
