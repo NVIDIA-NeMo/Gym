@@ -147,6 +147,7 @@ jobs:
           AWS_REGION: us-east-1
 
       # Runs after failed tests too: a failing assertion still downloaded its dependencies.
+      # The revision annotation lets the offline-image job reject a tag left by an earlier commit.
       - name: Publish dependency cache layer
         if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
         env:
@@ -158,8 +159,10 @@ jobs:
           tar -xzf "$RUNNER_TEMP/crane.tar.gz" -C "$RUNNER_TEMP" crane
           tar -C "$RUNNER_TEMP/gym-offline-cache" --numeric-owner --owner=65532 --group=65532 \
             -czf "$RUNNER_TEMP/cache.tar.gz" opt/nemo-gym/cache
-          "$RUNNER_TEMP/crane" append --new_layer "$RUNNER_TEMP/cache.tar.gz" \
+          "$RUNNER_TEMP/crane" append --oci-empty-base --new_layer "$RUNNER_TEMP/cache.tar.gz" \
             --new_tag "$REPOSITORY:main-cache-$SHARD"
+          "$RUNNER_TEMP/crane" mutate "$REPOSITORY:main-cache-$SHARD" \
+            --annotation "org.opencontainers.image.revision=$GITHUB_SHA" --tag "$REPOSITORY:main-cache-$SHARD"
 
       - name: Upload server worker logs
         if: always()
@@ -184,8 +187,8 @@ jobs:
           echo "One or more server-suite shards failed (result: ${{ needs.server-suite.result }})."
           exit 1
 
-  # Merges every shard's dependency cache into one layer on top of gym:main as gym:main-offline,
-  # an image that runs the server suite without network access.
+  # Merges every shard's dependency cache into one layer on top of the gym image built from the
+  # same commit, as gym:main-offline: an image that runs the server suite without network access.
   offline-image:
     name: Publish offline server image
     runs-on: nemo-ci-aws-cpu-4-16
@@ -198,9 +201,10 @@ jobs:
         env:
           AWS_REGION: us-east-1
 
+      # A shard that failed before publishing leaves an earlier commit's cache under its tag.
       # Shards download shared wheels (torch, CUDA libraries) into separate uv archives. Each
       # shard's links replace the previous shard's, and pruning drops the archives left unlinked.
-      - name: Merge shard caches onto gym:main
+      - name: Merge this commit's shard caches
         shell: bash
         env:
           REPOSITORY: ${{ steps.ecr.outputs.registry }}/gym
@@ -210,17 +214,44 @@ jobs:
           tar -xzf "$RUNNER_TEMP/crane.tar.gz" -C "$RUNNER_TEMP" crane
           curl -LsSf "$UV_INSTALL_URL" | env UV_UNMANAGED_INSTALL="$RUNNER_TEMP/uv" sh
           crane="$RUNNER_TEMP/crane"
+          for shard in $(seq 0 $((NUM_SHARDS - 1))); do
+            "$crane" manifest "$REPOSITORY:main-cache-$shard" > "$RUNNER_TEMP/main-cache-$shard.json"
+            revision="$(python3 -c 'import json, sys; print(json.load(sys.stdin).get("annotations", {}).get(sys.argv[1], ""))' \
+              org.opencontainers.image.revision < "$RUNNER_TEMP/main-cache-$shard.json")"
+            if [[ "$revision" != "$GITHUB_SHA" ]]; then
+              echo "::error::main-cache-$shard holds the cache of '$revision', not of $GITHUB_SHA."
+              exit 1
+            fi
+          done
           merged="$RUNNER_TEMP/merged"
           mkdir -p "$merged"
           for shard in $(seq 0 $((NUM_SHARDS - 1))); do
-            digest="$("$crane" manifest "$REPOSITORY:main-cache-$shard" |
-              python3 -c 'import json, sys; print(json.load(sys.stdin)["layers"][0]["digest"])')"
+            digest="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["layers"][0]["digest"])' \
+              < "$RUNNER_TEMP/main-cache-$shard.json")"
             "$crane" blob "$REPOSITORY@$digest" | tar -xzf - -C "$merged"
             "$RUNNER_TEMP/uv/uv" cache prune --cache-dir "$merged/opt/nemo-gym/cache/uv"
           done
           tar -C "$merged" --numeric-owner --owner=65532 --group=65532 \
             -czf "$RUNNER_TEMP/cache.tar.gz" opt/nemo-gym/cache
-          "$crane" append --base "$REPOSITORY:main" --new_layer "$RUNNER_TEMP/cache.tar.gz" \
+
+      # cicd-main's schedule builds gym:<commit> on the same cron, once its unit tests pass. Layering
+      # onto that image keeps its source and locks in step with the caches; another commit's image
+      # could miss dependencies its own locks need, so publication waits for the next run instead.
+      - name: Publish onto this commit's gym image
+        shell: bash
+        env:
+          REPOSITORY: ${{ steps.ecr.outputs.registry }}/gym
+        run: |
+          base="$REPOSITORY:$GITHUB_SHA"
+          for attempt in $(seq 45); do
+            "$RUNNER_TEMP/crane" digest "$base" && break
+            if ((attempt == 45)); then
+              echo "::warning::gym:$GITHUB_SHA was not built; gym:main-offline keeps its previous image."
+              exit 0
+            fi
+            sleep 60
+          done
+          "$RUNNER_TEMP/crane" append --base "$base" --new_layer "$RUNNER_TEMP/cache.tar.gz" \
             --new_tag "$REPOSITORY:main-offline" --set-base-image-annotations
 
   test-wheel-install:
