@@ -15521,6 +15521,44 @@ class TestRunRecordWriter:
             writer.failures_fpath
         )
 
+    def test_the_sink_gets_nothing_the_shard_does_not_keep(self, tmp_path: Path) -> None:
+        from nemo_gym.rollouts.rollout_collection import _RunRecordWriter
+
+        received: list[str] = []
+        writer = _RunRecordWriter(tmp_path, "step_1", sink=lambda kind, record: received.append(kind))
+        writer.write({TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, NG_NO_PERSIST_KEY: True})
+        superseded = writer
+        _RunRecordWriter(tmp_path, "step_1")
+        with pytest.raises(RuntimeError, match="replaced by another writer"):
+            superseded.write({TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0})
+
+        assert received == []
+
+    def test_a_sink_that_raises_leaves_the_record_and_later_records_in_place(self, tmp_path: Path) -> None:
+        from nemo_gym.rollouts.rollout_collection import _RunRecordWriter
+
+        received: list[dict] = []
+
+        def sink(kind: str, record: dict) -> None:
+            if record[TASK_INDEX_KEY_NAME] == 0:
+                raise OSError("table store unavailable")
+            received.append(record)
+
+        rows = [
+            {TASK_INDEX_KEY_NAME: index, ROLLOUT_INDEX_KEY_NAME: 0, AGENT_REF_KEY_NAME: {"name": "a"}}
+            for index in range(2)
+        ]
+        writer = _RunRecordWriter(tmp_path, "step_1", sink=sink, status_rows=rows)
+        with pytest.raises(OSError, match="table store unavailable"):
+            writer.write({**rows[0], "reward": 1.0})
+        writer.write({**rows[1], "reward": 0.0})
+        writer.flush_status()
+
+        assert [row[TASK_INDEX_KEY_NAME] for row in self._lines(writer.rollouts_fpath)] == [0, 1]
+        assert [record[TASK_INDEX_KEY_NAME] for record in received] == [1]
+        status = json.loads(writer.status_fpath.read_text())
+        assert status["members"]["a"]["completed_rollout_count"] == 2
+
     async def test_the_sink_gets_a_failure_row_with_the_model_calls_made_before_it_failed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

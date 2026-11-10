@@ -1492,16 +1492,17 @@ class _RunRecordWriter:
                 raise RuntimeError(f"{self.rollouts_fpath} was replaced by another writer for the same shard")
             with fpath.open("ab") as f:
                 f.write(line + b"\n")
+            # Read back from the line, so the status and the sink see exactly what the shard holds.
+            written = orjson.loads(line) if self.sink is not None or self._status is not None else None
             # The status follows under the same lock, so a writer superseded meanwhile cannot overwrite the newer
             # writer's counts.
             if self._status is not None and self._status.enabled:
-                status_row = _batch_status_row(orjson.loads(line), self._status_agent_refs)
+                status_row = _batch_status_row(written, self._status_agent_refs)
                 (self._status_completed if fpath == self.rollouts_fpath else self._status_failures).append(status_row)
                 last = self._status_expected is not None and self._status_written >= self._status_expected
                 self._status.write_status(self._status_completed, self._status_failures, force=last)
         if self.sink is not None:
-            # Read back from the line, so the sink receives exactly what the shard holds.
-            self.sink(kind, orjson.loads(line))
+            self.sink(kind, written)
         return fpath
 
     def flush_status(self) -> None:
