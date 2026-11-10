@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, Mock
 
 import pytest
 
-from nemo_gym.web.models import WebTask
+from nemo_gym.web import WebTask
 from resources_servers.webarena_browser.site_auth import (
     _verify_shopping_login,
     configured_site_urls,

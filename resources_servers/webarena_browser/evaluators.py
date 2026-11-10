@@ -10,10 +10,16 @@ import os
 from collections.abc import Mapping
 from typing import Protocol
 
-from nemo_gym.web.evaluation_collision import build_collision_plan, has_collision_mitigation
-from nemo_gym.web.models import WebBenchmark, WebObservation, WebTask, WebVerifierResult
-from nemo_gym.web.session import EvaluatorConfigurationError
-from nemo_gym.web.visual_browser import VisualBrowserEvaluationContext
+from nemo_gym.web import (
+    EvaluatorConfigurationError,
+    VisualBrowserEvaluationContext,
+    WebBenchmark,
+    WebObservation,
+    WebTask,
+    WebVerifierResult,
+    build_collision_plan,
+    has_collision_mitigation,
+)
 from resources_servers.webarena_browser.config import WebArenaBrowserResourcesServerConfig
 from resources_servers.webarena_browser.site_auth import configured_site_urls, resolve_site_templates
 

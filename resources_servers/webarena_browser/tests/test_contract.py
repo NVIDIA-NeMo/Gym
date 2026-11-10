@@ -10,10 +10,14 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.web.browser_session import BrowserSessionHandle
-from nemo_gym.web.models import WebObservation, WebTask
-from nemo_gym.web.session import EvaluatorConfigurationError
-from nemo_gym.web.visual_browser import VisualBrowserDriver, VisualBrowserEvaluationContext
+from nemo_gym.web import (
+    BrowserSessionHandle,
+    EvaluatorConfigurationError,
+    VisualBrowserDriver,
+    VisualBrowserEvaluationContext,
+    WebObservation,
+    WebTask,
+)
 from resources_servers.webarena_browser.app import WebArenaBrowserResourcesServer
 from resources_servers.webarena_browser.backend import (
     LOCAL_SETUP_RETRY_DELAYS_S,

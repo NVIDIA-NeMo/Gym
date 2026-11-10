@@ -38,7 +38,13 @@ if TYPE_CHECKING:
     from nemo_gym.web.chromium import ensure_chromium
     from nemo_gym.web.composed_backend import ComposedWebBackend, WebBrowserDriver, WebTaskEvaluator
     from nemo_gym.web.computer_use import NANO_OMNI_SYSTEM_PROMPT, nano_omni_tools
-    from nemo_gym.web.datasets import adapt_webvoyager_record, load_json_records, write_jsonl
+    from nemo_gym.web.datasets import adapt_webarena_records, adapt_webvoyager_record, load_json_records, write_jsonl
+    from nemo_gym.web.evaluation_collision import (
+        build_collision_plan,
+        extract_helper_calls,
+        has_collision_mitigation,
+        snapshot_target_key,
+    )
     from nemo_gym.web.judge_evidence import compact_webvoyager_judge_evidence, expand_webvoyager_judge_screenshots
     from nemo_gym.web.models import (
         BROWSER_TARGET_CLOSED_STATUS,
@@ -76,6 +82,7 @@ if TYPE_CHECKING:
     from nemo_gym.web.site_pool import LocalSiteLockPool, SiteLease, SitePool, UnmanagedSitePool
     from nemo_gym.web.task_images import resolve_task_image_url
     from nemo_gym.web.visual_browser import (
+        NAVIGATION_WAIT_UNTIL,
         RESET_WAIT_UNTIL,
         VisualBrowserDriver,
         VisualBrowserDriverConfig,
@@ -102,6 +109,7 @@ _PUBLIC_API = {
     "LocalSiteLockPool": "site_pool",
     "MAX_SCROLL_AMOUNT": "actions",
     "NANO_OMNI_SYSTEM_PROMPT": "computer_use",
+    "NAVIGATION_WAIT_UNTIL": "visual_browser",
     "RESET_WAIT_UNTIL": "visual_browser",
     "RemoteWebBackend": "browser_instance",
     "RenewableBrowserSessionProvider": "browser_session",
@@ -146,11 +154,15 @@ _PUBLIC_API = {
     "WebVerifierResult": "models",
     "WebVerifyRequest": "api_models",
     "WebVerifyResponse": "api_models",
+    "adapt_webarena_records": "datasets",
     "adapt_webvoyager_record": "datasets",
+    "build_collision_plan": "evaluation_collision",
     "compact_webvoyager_judge_evidence": "judge_evidence",
     "create_browser_session_provider": "browser_session",
     "ensure_chromium": "chromium",
     "expand_webvoyager_judge_screenshots": "judge_evidence",
+    "extract_helper_calls": "evaluation_collision",
+    "has_collision_mitigation": "evaluation_collision",
     "is_retryable_navigation_transport_error": "visual_browser",
     "list_browser_session_providers": "browser_session",
     "load_json_records": "datasets",
@@ -158,6 +170,7 @@ _PUBLIC_API = {
     "parse_nano_omni_tool_calls": "actions",
     "register_browser_session_provider": "browser_session",
     "resolve_task_image_url": "task_images",
+    "snapshot_target_key": "evaluation_collision",
     "write_jsonl": "datasets",
 }
 __getattr__, __dir__ = lazy_exports(__name__, _PUBLIC_API)

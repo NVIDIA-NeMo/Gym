@@ -12,7 +12,7 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
-from nemo_gym.web.datasets import adapt_webarena_records, load_json_records, write_jsonl
+from nemo_gym.web import adapt_webarena_records, load_json_records, write_jsonl
 
 
 BENCHMARK_DIR = Path(__file__).resolve().parent

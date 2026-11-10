@@ -11,7 +11,7 @@ import pytest
 from omegaconf import DictConfig, OmegaConf
 
 from benchmarks.webarena import prepare as webarena_prepare
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 
 
 def _write_source(path, count: int) -> str:

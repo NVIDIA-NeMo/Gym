@@ -11,7 +11,7 @@ from collections.abc import Callable
 from typing import Any
 from urllib.parse import urlparse
 
-from nemo_gym.web.models import WebTask
+from nemo_gym.web import WebTask
 
 
 LOG = logging.getLogger("nemo_gym.resources_servers.webarena_browser")

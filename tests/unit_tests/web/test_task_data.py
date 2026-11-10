@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.task_data import load_task_data_schema, validate_jsonl_rows
+from nemo_gym.data.task_data import load_task_data_schema, validate_jsonl_rows
 from resources_servers.visual_browser.task_data import TaskData as VisualTaskData
 from resources_servers.webarena_browser.task_data import TaskData as WebArenaTaskData
 

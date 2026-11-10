@@ -6,9 +6,7 @@ from __future__ import annotations
 
 from functools import partial
 
-from nemo_gym.web.chromium import ensure_chromium
-from nemo_gym.web.models import WebActionProfile, WebBenchmark, WebRuntimeProfile, WebTask
-from nemo_gym.web.session_manager import WebSessionManager
+from nemo_gym.web import WebActionProfile, WebBenchmark, WebRuntimeProfile, WebSessionManager, WebTask, ensure_chromium
 from resources_servers.webarena_browser.backend import webarena_backend_factory
 from resources_servers.webarena_browser.config import WebArenaBrowserResourcesServerConfig
 

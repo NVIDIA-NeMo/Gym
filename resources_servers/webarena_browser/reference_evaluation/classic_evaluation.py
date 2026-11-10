@@ -21,7 +21,7 @@ from typing import Any
 
 import httpx
 
-from nemo_gym.web.evaluation_collision import extract_helper_calls, snapshot_target_key
+from nemo_gym.web import extract_helper_calls, snapshot_target_key
 
 from .navigation import goto, resolve_after_navigation_sync
 from .site_config import DEFAULT_CREDENTIALS
