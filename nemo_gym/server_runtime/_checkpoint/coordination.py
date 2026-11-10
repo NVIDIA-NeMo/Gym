@@ -103,6 +103,9 @@ class Participant:
     kind: ParticipantKind
     # What the server can capture; a ``restart_only`` server's rollouts start over after a crash.
     mode: CheckpointMode
+    # Whether the server's checkpoints keep state outside Gym, such as sandbox snapshots, that only ``release``
+    # deletes: a controller that never releases leaves it behind.
+    keeps_external_state: bool = False
 
 
 @dataclass(frozen=True)
@@ -178,7 +181,15 @@ async def discover(client: ServerClient, *, auth_token: str) -> Participants:
                 raise ValueError(f"unknown participant kind {kind!r}")
             if mode not in get_args(CheckpointMode):
                 raise ValueError(f"participant reports no checkpoint mode (got {mode!r})")
-            members.append(Participant(server_name=name, kind=kind, mode=mode))
+            members.append(
+                Participant(
+                    server_name=name,
+                    kind=kind,
+                    mode=mode,
+                    # A server from before the field existed keeps nothing outside Gym.
+                    keeps_external_state=bool(status.get("keeps_external_state", False)),
+                )
+            )
         except TimeoutError:
             failures[name] = f"no status reply within {_DISCOVER_TIMEOUT_SECONDS:g} seconds"
         except Exception as error:
@@ -265,15 +276,18 @@ async def forget(
 async def release(
     participants: Participants, checkpoint_id: str, kept: Iterable[str], *, deadline_ts: float
 ) -> dict[str, str]:
-    """Tell every participant which checkpoints the controller may still restore, so each frees external state,
+    """Tell every participant which checkpoints the controller may still restore, so each deletes external state,
     such as sandbox snapshots, that only other checkpoints referred to.
 
-    Call it after publishing a checkpoint and pruning old ones, with ``checkpoint_id`` naming the checkpoint just
-    published and ``kept`` every checkpoint the controller could restore, that one included.
+    Call it after publishing a checkpoint and pruning old ones, with ``kept`` every checkpoint the controller
+    could restore, the one just published included.
     The list must be complete: a checkpoint it leaves out can no longer be restored.
     Pass an empty list only once the run is complete for good.
+    ``checkpoint_id`` names the latest checkpoint the controller resumed, published or aborted: the one just
+    published after a publication, and whichever came last for the release that ends the run.
     Refused while a checkpoint is open: resume first.
-    A participant refuses as stale a release for a checkpoint older than the latest one it resumed.
+    A participant refuses a release as stale once it committed or restored a checkpoint after the one named,
+    or, having restored one, when it never resumed the one named.
 
     Best effort: every participant is asked, and the failures are returned by server name instead of raised.
     What a failed release left behind is still recorded, and the next release deletes it.

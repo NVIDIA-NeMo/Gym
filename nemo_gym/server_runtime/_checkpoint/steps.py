@@ -79,12 +79,12 @@ CHECKPOINT_CLOSE_FOLLOWS_HEADER = "x-ng-checkpoint-close-follows"
 # An agent that hands a restored session fresh tool grants when its replacement attempt seeds it again,
 # such as a new MCP session token, says so on its seed reply.
 # An episode whose agent holds such grants can then continue after a restore instead of starting over.
-CHECKPOINT_REBINDS_TOOLS_HEADER = "x-ng-checkpoint-rebinds-tools"
+CHECKPOINT_REBINDS_TOOL_ACCESSES_HEADER = "x-ng-checkpoint-rebinds-tool-accesses"
 
 
-def seed_rebinds_tools(headers: Optional[Mapping[str, str]]) -> bool:
+def seed_rebinds_tool_accesses(headers: Optional[Mapping[str, str]]) -> bool:
     """Whether an agent seed reply says the agent takes fresh tool grants when a restored session is seeded again."""
-    return (headers or {}).get(CHECKPOINT_REBINDS_TOOLS_HEADER) == "1"
+    return (headers or {}).get(CHECKPOINT_REBINDS_TOOL_ACCESSES_HEADER) == "1"
 
 
 def seed_restarts(headers: Optional[Mapping[str, str]]) -> bool:

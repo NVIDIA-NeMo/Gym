@@ -75,7 +75,7 @@ from nemo_gym.server_runtime import (
     dependency_failure,
     handled_episode_failure,
     is_handled_episode_failure,
-    seed_rebinds_tools,
+    seed_rebinds_tool_accesses,
     seed_restarts,
     seed_verify_step_type,
 )
@@ -629,7 +629,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             # the MCP check covers an agent whose own check misses that case.
             if seed_restarts(agent_create_http_response.headers) or (
                 "mcp" in self.config.resources_tool_transports
-                and not seed_rebinds_tools(agent_create_http_response.headers)
+                and not seed_rebinds_tool_accesses(agent_create_http_response.headers)
             ):
                 await self.checkpoint_restart(request)
         except Exception as error:

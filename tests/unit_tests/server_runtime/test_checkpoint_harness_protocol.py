@@ -31,13 +31,19 @@ from nemo_gym.server_runtime._checkpoint.control import (
     PrepareReport,
     PrepareRequest,
     ReleaseRequest,
+    RestoreRequest,
 )
-from nemo_gym.server_runtime._checkpoint.errors import InvalidPhaseError, StaleAttemptError, StaleCheckpointError
+from nemo_gym.server_runtime._checkpoint.errors import (
+    ControlError,
+    InvalidPhaseError,
+    StaleAttemptError,
+    StaleCheckpointError,
+)
 from nemo_gym.server_runtime._checkpoint.settings import CheckpointSettings, checkpoint_settings
 from nemo_gym.server_runtime._checkpoint.steps import (
-    CHECKPOINT_REBINDS_TOOLS_HEADER,
+    CHECKPOINT_REBINDS_TOOL_ACCESSES_HEADER,
     CHECKPOINT_RESTART_HEADER,
-    seed_rebinds_tools,
+    seed_rebinds_tool_accesses,
 )
 from nemo_gym.server_runtime.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from tests.unit_tests.server_runtime.test_checkpoint_participant_workers import (  # noqa: F401 (fixtures)
@@ -72,7 +78,7 @@ class Hooks:
     async def retire_agent_session(self, session_key: str) -> None:
         pass
 
-    async def release_external_state(self, kept: frozenset[str]) -> None:
+    async def delete_external_state(self, kept: frozenset[str]) -> None:
         self.released.append(kept)
 
 
@@ -143,16 +149,53 @@ async def test_a_release_delayed_past_a_later_checkpoint_is_refused_as_stale(tmp
         await controller.resume(CheckpointRequest(**control(checkpoint_id)))
 
     # c1's release, sent before c2 existed and delivered after c2 resumed, would delete what only c2 keeps.
-    with pytest.raises(StaleCheckpointError, match="a later checkpoint has resumed"):
+    with pytest.raises(StaleCheckpointError, match="committed or restored a later checkpoint"):
         await controller.release(ReleaseRequest(**control("c1", kept=["c1"])))
+    # One this process never resumed dates from before it started, so it is older than the checkpoint it holds.
+    with pytest.raises(StaleCheckpointError, match="committed or restored a later checkpoint"):
+        await controller.release(ReleaseRequest(**control("c0", kept=["c0"])))
     current = await controller.release(ReleaseRequest(**control("c2", kept=["c2"])))
     again = await controller.release(ReleaseRequest(**control("c2", kept=["c2"])))
     end_of_run = await controller.release(ReleaseRequest(**control("c2", kept=[])))
-    # A checkpoint this process never took part in, such as one from before a restore, is not known to be stale.
-    unknown = await controller.release(ReleaseRequest(**control("c0", kept=["c0", "c2"])))
 
-    assert current == again == end_of_run == unknown == {"released": True}
-    assert participant.released == [frozenset({"c2"}), frozenset({"c2"}), frozenset(), frozenset({"c0", "c2"})]
+    assert current == again == end_of_run == {"released": True}
+    assert participant.released == [frozenset({"c2"}), frozenset({"c2"}), frozenset()]
+
+
+async def test_an_aborted_checkpoint_does_not_make_the_release_of_the_one_before_it_stale(tmp_path: Path) -> None:
+    participant = _Releasing()
+    controller = ParticipantControlPlane(participant, instance_name="res", lease_grace_seconds=60)
+    await controller.prepare(CheckpointRequest(**control("c1")))
+    await controller.commit(CommitRequest(**control("c1", checkpoint_dir=str(tmp_path))))
+    await controller.resume(CheckpointRequest(**control("c1")))
+    # c2 is prepared and aborted, and c3 never reaches this participant: neither kept anything.
+    await controller.prepare(CheckpointRequest(**control("c2")))
+    await controller.resume(CheckpointRequest(**control("c2")))
+    await controller.resume(CheckpointRequest(**control("c3")))
+
+    # The release that ends the run is admitted whether it names the last published checkpoint or the last resumed.
+    for checkpoint_id in ("c1", "c2", "c3"):
+        assert await controller.release(ReleaseRequest(**control(checkpoint_id, kept=[]))) == {"released": True}
+    assert participant.released == [frozenset()] * 3
+
+
+async def test_a_release_from_before_a_restore_is_refused_as_stale(tmp_path: Path) -> None:
+    first = ParticipantControlPlane(_Releasing(), instance_name="res", lease_grace_seconds=60)
+    for checkpoint_id in ("c1", "c2"):
+        await first.prepare(CheckpointRequest(**control(checkpoint_id)))
+        await first.commit(CommitRequest(**control(checkpoint_id, checkpoint_dir=str(tmp_path / checkpoint_id))))
+        await first.resume(CheckpointRequest(**control(checkpoint_id)))
+    # The process restarts and restores c2: it no longer remembers resuming c1.
+    participant = _Releasing()
+    controller = ParticipantControlPlane(participant, instance_name="res", lease_grace_seconds=60)
+    before_restore = await controller.release(ReleaseRequest(**control("c1", kept=["c1", "c2"])))
+    await controller.restore(RestoreRequest(**control("c2", checkpoint_dir=str(tmp_path / "c2"), episode_ids=[])))
+    await controller.resume(CheckpointRequest(**control("c2")))
+
+    with pytest.raises(StaleCheckpointError, match="committed or restored a later checkpoint"):
+        await controller.release(ReleaseRequest(**control("c1", kept=["c1"])))
+    assert before_restore == await controller.release(ReleaseRequest(**control("c2", kept=["c2"])))
+    assert participant.released == [frozenset({"c1", "c2"}), frozenset({"c2"})]
 
 
 def test_a_release_request_names_valid_checkpoint_ids() -> None:
@@ -185,7 +228,7 @@ async def test_release_reaches_every_worker(socket_dir: str) -> None:  # noqa: F
 
     def releasing_worker() -> tuple[AgentSessionParticipant, Any]:
         participant, app = agent_worker()
-        participant.hooks.release_external_state = lambda kept: _record(released, kept)
+        participant.hooks.delete_external_state = lambda kept: _record(released, kept)
         return participant, app
 
     async with coordinated(socket_dir, releasing_worker) as deployment:
@@ -196,6 +239,51 @@ async def test_release_reaches_every_worker(socket_dir: str) -> None:  # noqa: F
 
 async def _record(released: list[frozenset[str]], kept: frozenset[str]) -> None:
     released.append(kept)
+
+
+async def test_release_fails_unless_every_expected_worker_answered(socket_dir: str) -> None:  # noqa: F811
+    released: list[frozenset[str]] = []
+
+    def releasing_worker() -> tuple[AgentSessionParticipant, Any]:
+        participant, app = agent_worker()
+        participant.hooks.delete_external_state = lambda kept: _record(released, kept)
+        return participant, app
+
+    async with coordinated(socket_dir, releasing_worker, workers=1, expected=2) as deployment:
+        # A worker that has not joined may hold state the release would delete: the controller releases again.
+        with pytest.raises(ControlError, match="1 of 2 agent workers answered release"):
+            await deployment.controller.release(ReleaseRequest(**control("c3", kept=["c3"])))
+        await deployment.join()
+        await deployment.controller.release(ReleaseRequest(**control("c3", kept=["c3"])))
+
+    # The worker that was there ran the hook both times, and the late one once.
+    assert released == [frozenset({"c3"})] * 3
+
+
+def test_an_agent_participant_refuses_an_export_hook_that_cannot_take_the_checkpoint_id() -> None:
+    class _HooksWithoutTheId(Hooks):
+        async def export_agent_sessions(self, session_keys: list[str]) -> dict[str, dict[str, JsonValue]]:
+            return {}
+
+    # Code that builds the participant around its own hooks learns it here, not at the first commit.
+    with pytest.raises(ValueError, match="_HooksWithoutTheId.export_agent_sessions must accept .*checkpoint_id"):
+        AgentSessionParticipant(_HooksWithoutTheId())
+
+
+async def test_status_reports_whether_an_agent_s_checkpoints_keep_state_outside_gym() -> None:
+    class _KeepsSnapshots(_ExportingAgent):
+        async def delete_external_state(self, kept: frozenset[str]) -> None:
+            pass
+
+    async def reported(agent_type: type[_ExportingAgent]) -> bool:
+        async with _http(_borrowing_agent(agent_type=agent_type)) as http:
+            return (await http.get("/ng-control/v1/checkpoint/status")).json()["keeps_external_state"]
+
+    # Only an agent that overrides the hook keeps such state: a controller that never releases can tell.
+    assert await reported(_KeepsSnapshots) is True
+    assert await reported(_ExportingAgent) is False
+    # A participant built around its own hooks keeps such state when they include the hook.
+    assert AgentSessionParticipant(Hooks()).keeps_external_state
 
 
 # -- the park signal ------------------------------------------------------------------------------------------
@@ -512,7 +600,7 @@ async def test_the_replacement_attempt_s_seed_re_binds_a_restored_session_to_its
         conflicting = await http.post("/v1/agent_sessions", json=_seed(1, "s3"))
 
     assert reseeded.status_code == 200, reseeded.text
-    assert reseeded.headers.get(CHECKPOINT_REBINDS_TOOLS_HEADER) == "1"
+    assert reseeded.headers.get(CHECKPOINT_REBINDS_TOOL_ACCESSES_HEADER) == "1"
     assert CHECKPOINT_RESTART_HEADER not in reseeded.headers
     [(before, after)] = agent.rebound
     assert before.connection.descriptor == {"sandbox_id": "s1"} and after.connection.descriptor == {"sandbox_id": "s2"}
@@ -559,7 +647,7 @@ async def test_an_agent_that_does_not_re_bind_accepts_only_an_identical_seed_of_
         different = await other_http.post("/v1/agent_sessions", json=_seed(1, "s2"))
 
     assert identical.status_code == 200, identical.text
-    assert CHECKPOINT_REBINDS_TOOLS_HEADER not in identical.headers
+    assert CHECKPOINT_REBINDS_TOOL_ACCESSES_HEADER not in identical.headers
     assert agent._session_state("session").request.sandbox_access.connection.descriptor == {"sandbox_id": "s1"}
     assert different.status_code == 409
 
@@ -639,9 +727,39 @@ async def test_a_session_the_agent_cannot_capture_is_a_restart_and_is_not_export
         await http.post("/ng-control/v1/checkpoint/resume", json=control("c1"))
 
     assert owned.headers.get(CHECKPOINT_RESTART_HEADER) == "1"
-    assert seed_rebinds_tools(owned.headers)
+    assert seed_rebinds_tool_accesses(owned.headers)
     assert prepared.json()["report"]["restarts"] == ["r"]
     assert exported == []
+
+
+async def test_a_session_lent_a_sandbox_is_a_restart_unless_the_agent_re_binds_restored_sessions() -> None:
+    # The replacement attempt would seed it with another sandbox, which the default re-bind hook refuses.
+    async with _http(_borrowing_agent(agent_type=_ExportingAgent)) as http:
+        lent = await http.post("/v1/agent_sessions", json=_seed(0))
+        prepared = await http.post("/ng-control/v1/checkpoint/prepare", json=control("c1"))
+        await http.post("/ng-control/v1/checkpoint/resume", json=control("c1"))
+    async with _http(_borrowing_agent()) as http:
+        rebound = await http.post("/v1/agent_sessions", json=_seed(0))
+
+    assert lent.status_code == 200, lent.text
+    assert lent.headers.get(CHECKPOINT_RESTART_HEADER) == "1"
+    assert prepared.json()["report"]["restarts"] == ["r"]
+    assert rebound.status_code == 200 and CHECKPOINT_RESTART_HEADER not in rebound.headers
+
+
+async def test_an_override_of_the_restart_hook_cannot_keep_an_mcp_session_from_restarting() -> None:
+    class _AddsNoRestarts(_ExportingAgent):
+        def _seed_restarts(self, body: AgentSeedSessionRequest) -> bool:
+            return False
+
+    async with _http(_borrowing_agent(agent_type=_AddsNoRestarts)) as http:
+        granted = await http.post("/v1/agent_sessions", json=_mcp_seed(0, sandbox_id=None))
+        plain = await http.post("/v1/agent_sessions", json=_seed(0, sandbox_id=None) | {"agent_session_id": "other"})
+
+    assert granted.status_code == 200, granted.text
+    # The hook only adds restarts: an agent that cannot take a new MCP token restarts whatever the hook says.
+    assert granted.headers.get(CHECKPOINT_RESTART_HEADER) == "1"
+    assert plain.status_code == 200 and CHECKPOINT_RESTART_HEADER not in plain.headers
 
 
 def test_an_agent_reports_its_checkpoint_mode_in_effect() -> None:

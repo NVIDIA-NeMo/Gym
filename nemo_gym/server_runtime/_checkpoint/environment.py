@@ -40,10 +40,18 @@ class EpisodeRecord(CheckpointRecord):
     task_digest: str
     # ``None`` for an episode that had not recorded a boundary yet: it starts over from its input.
     boundary: JsonPayload
-    # Seconds of the episode's time budget spent at the cut, not counting time parked for checkpoints.
+    # Seconds of the episode's time budget spent when the checkpoint exported it, not counting time parked for
+    # checkpoints.
     # Sampled when the checkpoint exports the episode, so a step in flight, such as an agent activation, counts in full.
     # The replacement attempt is charged it when it begins, and has only the rest.
     elapsed_s: float = 0.0
+
+    def to_json_record(self) -> dict[str, Any]:
+        record = super().to_json_record()
+        # Left out when nothing was spent, so a Gym from before the field existed still restores the record.
+        if not self.elapsed_s:
+            del record["elapsed_s"]
+        return record
 
 
 def task_digest(task: Any) -> str:
@@ -165,7 +173,7 @@ class EnvironmentParticipant(CheckpointParticipant):
         # Only episodes within the commit's scope: another participant may report one of these as a restart.
         scope = None if episode_ids is None else {episode_id.capture_key for episode_id in episode_ids}
         # Every exported episode is parked or inside a replay step, whose deadline is suspended while admission is
-        # closed, so its elapsed time is the time at the cut.
+        # closed, so its elapsed time is the time when the checkpoint exported it.
         live = [
             EpisodeRecord(
                 episode_id=EpisodeId.from_capture_key(key),

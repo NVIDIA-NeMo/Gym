@@ -64,7 +64,7 @@ from nemo_gym.core.responses_api_types import (
 from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.metrics.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.sandbox.access import SandboxAccess
-from nemo_gym.server_runtime._checkpoint.control import CheckpointMode, require_checkpoint_id_keyword
+from nemo_gym.server_runtime._checkpoint.control import CheckpointMode
 from nemo_gym.server_runtime._checkpoint.participant_workers import install_server_participant
 from nemo_gym.server_runtime._checkpoint.resources import (
     MCPTokenClaims,
@@ -951,12 +951,14 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
                 raise ValueError(
                     f"{type(self).__name__} declares checkpoint_mode='exported' but does not implement {missing}"
                 )
-            require_checkpoint_id_keyword(self, "export_session_states")
         participant = ResourcesParticipant(
             self,
             mode,
             verify_step_type=self.checkpoint_verify,
             session_release_pending=self.session_release_pending,
+        )
+        participant.keeps_external_state = (
+            mode == "exported" and type(self).delete_external_state is not SimpleResourcesServer.delete_external_state
         )
         self._checkpoint = participant
         install_server_participant(
@@ -1061,7 +1063,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
             await self.release_session_state(session_id)
             self._forget_session(session_id)
 
-    async def release_external_state(self, kept: frozenset[str]) -> None:
+    async def delete_external_state(self, kept: frozenset[str]) -> None:
         """Delete what exports of checkpoints outside ``kept`` kept outside Gym, such as sandbox snapshots.
 
         Called after the controller published a checkpoint and pruned old ones, only in the ``exported`` mode;

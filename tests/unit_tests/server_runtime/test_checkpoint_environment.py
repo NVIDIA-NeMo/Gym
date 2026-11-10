@@ -3,11 +3,13 @@
 import asyncio
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.server_runtime._checkpoint.control import (
+    CheckpointRecord,
     CheckpointRequest,
     CommitRequest,
     ParticipantControlPlane,
@@ -651,7 +653,7 @@ async def test_an_expired_retire_cannot_be_exported_by_a_later_checkpoint(tmp_pa
 async def test_the_budget_an_episode_spent_is_sampled_at_export_and_charged_to_its_replacement(
     tmp_path: Path,
 ) -> None:
-    """Sampled when the commit exports the episode, so a step in flight at the cut counts in full;
+    """Sampled when the commit exports the episode, so a step in flight then counts in full;
     time parked for the checkpoint does not."""
     source = EnvironmentParticipant(mode="exported")
     source_controller = controller_for(source)
@@ -696,3 +698,19 @@ async def test_the_budget_an_episode_spent_is_sampled_at_export_and_charged_to_i
     assert remaining < 30 - at_prepare.elapsed_s + 0.01
     # A record written before the field existed loads as nothing spent.
     assert EpisodeRecord(episode_id=episode_id, task_digest="d", boundary=None).elapsed_s == 0.0
+
+
+def test_a_record_with_nothing_spent_is_written_without_the_field_so_an_earlier_gym_restores_it() -> None:
+    class RecordBeforeTheField(CheckpointRecord):
+        task_digest: str
+        boundary: Any
+
+    episode_id = EpisodeId(rollout_id="r")
+    unspent = EpisodeRecord(episode_id=episode_id, task_digest="d", boundary=None).to_json_record()
+    spent = EpisodeRecord(episode_id=episode_id, task_digest="d", boundary=None, elapsed_s=1.5).to_json_record()
+
+    assert "elapsed_s" not in unspent
+    # Records forbid unknown fields, so this is what a Gym from before the field accepts.
+    assert RecordBeforeTheField.model_validate(unspent).episode_id == episode_id
+    assert EpisodeRecord.model_validate(unspent).elapsed_s == 0.0
+    assert spent["elapsed_s"] == 1.5 and EpisodeRecord.model_validate(spent).elapsed_s == 1.5

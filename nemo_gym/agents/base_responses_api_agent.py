@@ -88,11 +88,14 @@ from nemo_gym.server_runtime._checkpoint.agent import (
     RestartOnlyTrackingMiddleware,
     RestoredAgentSession,
 )
-from nemo_gym.server_runtime._checkpoint.control import CheckpointMode, require_checkpoint_id_keyword
+from nemo_gym.server_runtime._checkpoint.control import CheckpointMode
 from nemo_gym.server_runtime._checkpoint.errors import StaleAttemptError
 from nemo_gym.server_runtime._checkpoint.participant_workers import install_server_participant
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
-from nemo_gym.server_runtime._checkpoint.steps import CHECKPOINT_REBINDS_TOOLS_HEADER, CHECKPOINT_RESTART_HEADER
+from nemo_gym.server_runtime._checkpoint.steps import (
+    CHECKPOINT_REBINDS_TOOL_ACCESSES_HEADER,
+    CHECKPOINT_RESTART_HEADER,
+)
 from nemo_gym.server_runtime.base_resources_server import (
     AggregateMetrics,
     AggregateMetricsRequest,
@@ -748,7 +751,6 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             participant = self._restart_only
             app.add_middleware(RestartOnlyTrackingMiddleware, participant=self._restart_only)
         else:
-            require_checkpoint_id_keyword(self, "export_agent_sessions")
             if self.rebinds_tool_accesses and not self._rebinds_restored_sessions():
                 # Its seed replies would let MCP episodes continue after a restore, and the re-seed would refuse them.
                 raise ValueError(
@@ -756,6 +758,9 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                     "_rebind_restored_agent_session_state, so a restored session could not take new tool grants"
                 )
             self._checkpoint_participant = AgentSessionParticipant(self)
+            self._checkpoint_participant.keeps_external_state = (
+                type(self).delete_external_state is not SimpleResponsesAPIAgent.delete_external_state
+            )
             participant = self._checkpoint_participant
         install_server_participant(
             app,
@@ -793,7 +798,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                     await self._close_agent_session_state(record.state)
             record.state = None
 
-    async def release_external_state(self, kept: frozenset[str]) -> None:
+    async def delete_external_state(self, kept: frozenset[str]) -> None:
         """Delete what exports of checkpoints outside ``kept`` kept outside Gym, such as snapshots of sandboxes the
         agent owns. The default keeps nothing outside Gym.
 
@@ -814,10 +819,23 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         An exported agent whose session state lives where no checkpoint reaches it, such as a sandbox it owns
         without a snapshot, says so here. The seed reply then carries the restart header,
         and the session is never exported nor waited for.
-        The default restarts a session granted MCP tools unless the agent declares ``rebinds_tool_accesses``:
-        its MCP session token names the seeding attempt, and the Resources Server refuses it once a restore
-        replaces that attempt. Deciding it here, before the session exists, keeps every checkpoint from exporting it.
+        It only adds restarts: whatever it returns, ``_seed_must_restart`` restarts a session the agent could
+        not continue after a restore. The default adds none.
         """
+        return False
+
+    def _seed_must_restart(self, body: AgentSeedSessionRequest) -> bool:
+        """Whether the session ``body`` seeds could not continue after a restore, whatever ``_seed_restarts`` says.
+
+        - A session granted MCP tools, unless the agent declares ``rebinds_tool_accesses``: its MCP session token
+          names the seeding attempt, and the Resources Server refuses it once a restore replaces that attempt.
+        - A session lent a sandbox, unless the agent re-binds restored sessions: the replacement attempt seeds it
+          with another sandbox, and the default ``_rebind_restored_agent_session_state`` refuses that seed.
+
+        Deciding it at the seed, before the session exists, keeps every checkpoint from exporting it.
+        """
+        if body.sandbox_access is not None and not self._rebinds_restored_sessions():
+            return True
         return not self.rebinds_tool_accesses and any(access.kind == "mcp" for access in body.tool_accesses)
 
     async def _rebind_restored_agent_session_state(
@@ -943,7 +961,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             _log_seed_refusal(body.agent_session_id, error)
             raise error
         restarts = self._restart_only is not None or (
-            self._checkpoint_participant is not None and self._seed_restarts(body)
+            self._checkpoint_participant is not None and (self._seed_restarts(body) or self._seed_must_restart(body))
         )
         if restarts and response is not None:
             # This agent cannot capture the session, so the episode that seeds it starts over after a crash.
@@ -1011,7 +1029,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                 record.state.request = body.model_copy(deep=True)
                 record.restored = False
             if participant is not None and self.rebinds_tool_accesses and response is not None:
-                response.headers[CHECKPOINT_REBINDS_TOOLS_HEADER] = "1"
+                response.headers[CHECKPOINT_REBINDS_TOOL_ACCESSES_HEADER] = "1"
             request.session[AGENT_SESSION_COOKIE_KEY] = body.agent_session_id
             return AgentSeedSessionResponse(
                 agent_session_id=body.agent_session_id,

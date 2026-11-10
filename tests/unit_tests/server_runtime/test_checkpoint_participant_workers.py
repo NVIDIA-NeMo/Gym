@@ -695,7 +695,7 @@ class LabelledSessionStates(SessionStates):
         self.exported_for.append(checkpoint_id)
         return await super().export_session_states(session_ids, checkpoint_id=checkpoint_id)
 
-    async def release_external_state(self, kept: frozenset[str]) -> None:
+    async def delete_external_state(self, kept: frozenset[str]) -> None:
         self.released.append(kept)
 
 

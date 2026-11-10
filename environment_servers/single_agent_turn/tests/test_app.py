@@ -1178,7 +1178,9 @@ async def test_an_episode_that_grants_mcp_access_restarts_unless_its_agent_borro
         seed["sandbox_access"] = _sandbox_access("lent")
     client.responses[0] = _Response(seed)
     if rebinds:
-        client.responses[1] = _Response({"agent_session_id": "agent-session"}, {"x-ng-checkpoint-rebinds-tools": "1"})
+        client.responses[1] = _Response(
+            {"agent_session_id": "agent-session"}, {"x-ng-checkpoint-rebinds-tool-accesses": "1"}
+        )
     restarts: list[list[str]] = []
 
     async def record_restart(request: object) -> None:

@@ -60,6 +60,7 @@ from nemo_gym.server_runtime._checkpoint.control import (
     JsonPayload,
     PrepareReport,
     next_attempt,
+    require_checkpoint_id_keyword,
 )
 from nemo_gym.server_runtime._checkpoint.errors import (
     AdmissionClosedError,
@@ -134,7 +135,7 @@ class AgentSessionHooks(Protocol):
     A restore runs in a fresh process after a crash and rebuilds every session or raises;
     the crashed process's sandboxes are still running and can be stopped there.
     Retire stops a discarded attempt's sandbox.
-    Export receives the ID of the checkpoint being written; ``release_external_state``, which is optional,
+    Export receives the ID of the checkpoint being written; ``delete_external_state``, which is optional,
     receives every checkpoint the controller may still restore and deletes what the export of any other
     checkpoint kept outside Gym, such as snapshots.
     """
@@ -149,7 +150,7 @@ class AgentSessionHooks(Protocol):
 
     async def retire_agent_session(self, session_key: str) -> None: ...
 
-    async def release_external_state(self, kept: frozenset[str]) -> None:
+    async def delete_external_state(self, kept: frozenset[str]) -> None:
         """Delete what exports of checkpoints outside ``kept`` kept outside Gym. Optional."""
 
 
@@ -271,7 +272,10 @@ class AgentSessionParticipant(CheckpointParticipant):
 
     def __init__(self, hooks: AgentSessionHooks) -> None:
         super().__init__()
+        require_checkpoint_id_keyword(hooks, "export_agent_sessions")
         self.hooks = hooks
+        # The hook is optional. A server whose base class defines a default that keeps nothing sets this itself.
+        self.keeps_external_state = getattr(hooks, "delete_external_state", None) is not None
         self.accepting = True
         self._sessions: dict[str, _Session] = {}
         self.legacy_episodes = EpisodeSteps(self.notify)
@@ -284,7 +288,7 @@ class AgentSessionParticipant(CheckpointParticipant):
         # commit leaves its episode out; after a crash the rollout starts over from its input. No seed starts while
         # admission is closed, so these are all the seeds of the checkpoint, and its restarts do not change before
         # the commit.
-        self._seed_restarts: dict[str, set[EpisodeId]] = {}
+        self._first_seed_restarts: dict[str, set[EpisodeId]] = {}
         # The same seeds and the sessions, by rollout, so a retire touches only its own rollout's.
         # An entry leaves with the last seed or session of its rollout.
         self._rollout_seeds: dict[str, Counter[EpisodeId]] = {}
@@ -394,14 +398,14 @@ class AgentSessionParticipant(CheckpointParticipant):
         """Whether ``session``'s episode starts over after a crash, so no checkpoint waits for or exports it."""
         return (
             session.key in self._restart_sessions
-            or session.key in self._seed_restarts
+            or session.key in self._first_seed_restarts
             or session.episode_id.capture_key in self.carried_restarts
             or session.key in self.legacy_episodes.restarts()
         )
 
     def _restart_keys(self) -> set[str]:
         """The session keys that restart: legacy restarts, restart sessions, and the open checkpoint's seeds."""
-        return set(self.legacy_episodes.restarts()) | self._restart_sessions | set(self._seed_restarts)
+        return set(self.legacy_episodes.restarts()) | self._restart_sessions | set(self._first_seed_restarts)
 
     def require_open(self, session: _Session) -> None:
         """Refuse to continue an activation of a session that was retired or closed."""
@@ -686,7 +690,7 @@ class AgentSessionParticipant(CheckpointParticipant):
             session.park_event.set()
         # Only a rollout's first seed: a seed of a session that exists, such as one re-binding a restored session to
         # its rebuilt sandbox, still blocks prepare, so the restored progress stays in the checkpoint.
-        self._seed_restarts = {
+        self._first_seed_restarts = {
             key: set(seeds)
             for key, seeds in self._seeding.items()
             if key not in self._sessions and not any(seed.rollout_id in self._rollout_sessions for seed in seeds)
@@ -694,7 +698,7 @@ class AgentSessionParticipant(CheckpointParticipant):
 
     async def open_admission(self) -> None:
         # After resume a session that one of these seeds registered is checkpointed like any other.
-        self._seed_restarts = {}
+        self._first_seed_restarts = {}
         self.accepting = True
         self._open.set()
         self.legacy_episodes.open()
@@ -705,7 +709,7 @@ class AgentSessionParticipant(CheckpointParticipant):
             session.resume.set()
 
     async def release(self, kept: frozenset[str]) -> None:
-        release = getattr(self.hooks, "release_external_state", None)
+        release = getattr(self.hooks, "delete_external_state", None)
         if release is not None:  # optional: an agent whose checkpoints keep nothing outside Gym
             await release(kept)
 
@@ -732,7 +736,7 @@ class AgentSessionParticipant(CheckpointParticipant):
                     episode_id.capture_key
                     for key, seeds in self._seeding.items()
                     for episode_id in seeds
-                    if episode_id not in self._seed_restarts.get(key, ())
+                    if episode_id not in self._first_seed_restarts.get(key, ())
                 }
             )
             - self.carried_restarts
@@ -744,7 +748,7 @@ class AgentSessionParticipant(CheckpointParticipant):
             counts={"sessions": len(self._sessions), "at_boundary": at_boundary},
             restarts=sorted(
                 {self._sessions[key].episode_id.capture_key for key in restart_keys if key in self._sessions}
-                | {episode_id.capture_key for seeds in self._seed_restarts.values() for episode_id in seeds}
+                | {episode_id.capture_key for seeds in self._first_seed_restarts.values() for episode_id in seeds}
                 | set(self._restart_calls.keys())
             ),
         )
@@ -755,7 +759,7 @@ class AgentSessionParticipant(CheckpointParticipant):
             return self.readiness().ready
         # A prepare asks after every change, so stop at the first blocker instead of listing and sorting them all.
         if self.legacy_episodes.blocker_count() or any(
-            not set(seeds) <= self._seed_restarts.get(key, set()) for key, seeds in self._seeding.items()
+            not set(seeds) <= self._first_seed_restarts.get(key, set()) for key, seeds in self._seeding.items()
         ):
             return False
         restart_keys: Optional[set[str]] = None

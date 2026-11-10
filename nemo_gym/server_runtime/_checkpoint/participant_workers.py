@@ -159,9 +159,11 @@ class CoordinatedServerParticipant(CoordinatedParticipant[PrepareReport]):
 
     def __init__(self, participant: CheckpointParticipant, *, expected_workers: int) -> None:
         super().__init__(expected_workers=expected_workers)
-        # The coordinator stands in for the workers' participants, so it shares their kind, mode and records.
+        # The coordinator stands in for the workers' participants, so it shares their kind, mode, records, and whether
+        # they keep state outside Gym.
         self.kind = participant.kind
         self.mode = participant.mode
+        self.keeps_external_state = participant.keeps_external_state
         self.record_model = participant.record_model
         self.worker_label = participant.kind
         self.claim_key = participant.claim_key
@@ -333,9 +335,15 @@ class CoordinatedServerParticipant(CoordinatedParticipant[PrepareReport]):
         await self.broadcast("delete_restored", {"episode_id": episode_id.model_dump(mode="json")}, timeout=None)
 
     async def release(self, kept: frozenset[str]) -> None:
-        """Release on every worker: each holds the hooks of the sessions it serves, and any of them may hold the
-        external state a release frees. Bounded by the release request's deadline."""
-        await self.broadcast("release", {"kept": sorted(kept)}, timeout=None)
+        """Delete on every worker: each holds the hooks of the sessions it serves, and any of them may hold the
+        external state a release deletes. Fails unless every expected worker answered, so the controller
+        releases again. Bounded by the release request's deadline."""
+        replies = await self.broadcast("release", {"kept": sorted(kept)}, timeout=None)
+        if len(replies) < self.expected_workers:
+            raise ControlError(
+                f"{len(replies)} of {self.expected_workers} {self.worker_label} workers answered release; "
+                "release again once every worker has joined"
+            )
 
     def handle_now(self, worker_index: int, kind: str, body: dict[str, Any]) -> Optional[dict[str, Any]]:
         if kind != "claim":
