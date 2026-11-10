@@ -347,3 +347,12 @@ def test_terminal_cause_must_select_last_model_call():
     witness, record = case(True)
     witness["agent_responses"][0]["failure_report"]["events"]["agent"]["cause_id"] = "model-0"
     assert "timeout.terminal_outcome" in failures(witness, record, exhausted=True)
+
+
+@pytest.mark.parametrize("exhausted", [False, True])
+def test_multiple_provider_calls_in_one_model_reply_fail(exhausted):
+    witness, record = case(exhausted, 3)
+    first, second, last = [FailureReport.model_validate(value) for value in witness["model_server_failure_reports"]]
+    combined = FailureReport(events=first.events | second.events, failure_id=second.failure_id)
+    witness["model_server_failure_reports"] = [combined.model_dump(mode="json"), last.model_dump(mode="json")]
+    assert "timeout.model_events" in failures(witness, record, exhausted=exhausted)

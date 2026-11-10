@@ -65,7 +65,9 @@ def _model_report(values: object, *, exhausted: bool) -> FailureReport | None:
     if not isinstance(values, list) or not values:
         return None
     reports = [_report(value) for value in values]
-    if any(report is None for report in reports):
+    if any(
+        report is None or sum(event.boundary == "model" for event in report.events.values()) != 1 for report in reports
+    ):
         return None
     merged = reports[-1] if exhausted else FailureReport()
     for report in reports:
@@ -154,6 +156,7 @@ def inspect_model_timeouts(witness: dict | None, record: dict | None, *, exhaust
         model is not None
         and not model.omitted
         and wanted_timeouts > 0
+        and len(witness["model_server_failure_reports"]) == wanted_timeouts
         and len(model_events) == wanted_timeouts
         and len({event.operation_id for event in model_events}) == wanted_timeouts
         and len({event.attempt_id for event in model_events}) == wanted_timeouts
