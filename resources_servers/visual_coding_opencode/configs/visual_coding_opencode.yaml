@@ -20,6 +20,7 @@ config_paths:
 # other server sets host 127.0.0.1, which a launcher's default_host (NeMo RL sets one) cannot change: the judge (it
 # spends the judge's API key for any caller), the agent (a request without a session runs OpenCode on this host), and
 # the resources and Environment Servers (they start sandboxes and episodes). All their callers run on this host.
+# Under NeMo RL, Gym's head server takes the node address, so the sandbox can reach it (see the README).
 use_absolute_ip: true
 absolute_ip_server_types: [responses_api_models]
 

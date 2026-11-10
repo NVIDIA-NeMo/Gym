@@ -23,7 +23,7 @@ This tutorial runs the BabyVision benchmark (388 visual-reasoning puzzles) on it
 The two benchmarks have the same puzzles and answers:
 
 - `babyvision_opencode` puts a visual-reasoning instruction before each question (look first, use code when the answer needs precision).
-- `babyvision_opencode_question_only` sends only the question, for models trained on OpenCode's own system prompt.
+- `babyvision_opencode_question_only` sends the image and the bare question, without the instruction, for models trained on OpenCode's own system prompt.
 
 ## Prerequisites
 
@@ -34,7 +34,7 @@ Complete [Installation](/get-started/installation). Then check the following:
 - **An OpenAI API key for the judge**, in `OPENAI_API_KEY`. The judge defaults to `gpt-4o-mini` on the OpenAI API.
 - **The sandbox image.** Build it from `resources_servers/visual_coding_opencode/sandbox_image/Dockerfile` and set `VISUAL_CODING_OPENCODE_SANDBOX_IMAGE` to it. It holds the Python image toolkit, OpenCode 1.17.11 under `/opt/opencode/bin` and OpenCode's plugin dependencies, each pinned by its SHA-256 in the config, because the sandbox cannot download them.
 - **A sandbox provider.** The config uses [OpenSandbox](/main/infrastructure/sandbox/opensandbox): set `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY`.
-- **A host address the sandbox can reach.** OpenCode in the sandbox calls the policy model server by address. The config sets `use_absolute_ip`, and only the policy model server advertises this host's address. Every other Gym server, the judge included, sets the address `127.0.0.1`, so the sandbox cannot reach it.
+- **A host address the sandbox can reach.** OpenCode in the sandbox calls the policy model server by address. The config sets `use_absolute_ip`, and only the policy model server advertises this host's address. Every other Gym server, the judge included, sets the address `127.0.0.1`, so the sandbox cannot reach it. Under NeMo RL, the head server is the exception: see [Train on the Environment](#train-on-the-environment).
 
 <Note>
 
@@ -75,7 +75,7 @@ gym eval run \
     ++policy_model_name="${POLICY_MODEL}"
 ```
 
-The metric is `mean/reward`: judged accuracy over the 388 puzzles. Each task stops after 1800 seconds. A run that stops before its final answer, by timeout, output cap or context limit, scores `0`. The config sets no step limit and turns off automatic compaction, so token capture can join every model call.
+The metric is `mean/reward`: judged accuracy over the 388 puzzles. Each task stops after 1800 seconds. A run that stops before its final answer, by timeout, output cap or context limit, scores `0`. The config turns off automatic compaction, so token capture can join every model call. It sets no step limit.
 
 To use another judge, point it at any OpenAI-compatible endpoint with `++visual_coding_opencode_judge_base_url=...` and `++visual_coding_opencode_judge_model_name=...`.
 
@@ -87,7 +87,7 @@ vLLM can send every message's `content` to the chat template as a list of parts.
 
 ## Read the Results
 
-Each rollout carries the judge's verdict and reason, the extracted answer, and `string_match_reward` as a diagnostic next to `reward`. The judge sees the question text, the gold answer, the extracted answer and the end of the model's text, but not the image. A response without a final answer scores `0`. A judge failure (a failed call, or a reply without a valid verdict) is not a score: the row comes back masked (`failure_kind: judge_failed`).
+Each rollout carries the judge's verdict and reason and the extracted answer next to `reward`. The judge sees the question text, the gold answer, the extracted answer and the end of the model's text, but not the image. A response without a final answer scores `0`, and so does a run that does not complete, without a judge call. A judge failure (a failed call, or a reply without a valid verdict) is not a score: the row comes back masked (`failure_kind: judge_failed`).
 
 See [Aggregate Metrics](/evaluation/aggregate-metrics) for the summary files a run writes.
 
@@ -123,6 +123,14 @@ Without `sandbox_provider`, the resources server lends no sandbox; the agent the
 ## Train on the Environment
 
 Gym's token capture records each model call of the session with its token IDs and log-probabilities, so the same config serves RL training. See [Training on External Agent Harnesses](/tutorials/training-tutorials/external-agent-harnesses).
+
+The crops and plots that OpenCode's `read` returns are images added between model calls. On NeMo RL's single controller, the vLLM worker stages them, so training sees them. Gym's local capture records them only with #5837. Saved rollouts keep the prompt image, but not the images that `read` returns: their tool outputs keep only text.
+
+<Note>
+
+Under NeMo RL, the sandbox can reach Gym's head server. NeMo RL sets the head server's host to the node address, which is the policy host whose every port `model_only` opens. The head server's `/global_config_dict_yaml` returns the merged config, including any key passed literally. Other environments' servers in an RL blend that do not set `127.0.0.1` get the node address too. Allowing only the model server's port needs a change in Gym's core.
+
+</Note>
 
 ## Reference
 
