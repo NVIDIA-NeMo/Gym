@@ -2,11 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import base64
+import hashlib
 import json
 import shlex
 import sqlite3
 import subprocess
+import threading
 from pathlib import Path
+from time import monotonic
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -29,6 +33,7 @@ from nemo_gym.client import ServerClient
 from nemo_gym.core import (
     PROVIDER_OOM_KILLED,
     EpisodeId,
+    MediaFile,
     NeMoGymResponseCreateParamsNonStreaming,
     NgFailureEvent,
     SandboxFailureDetails,
@@ -38,6 +43,7 @@ from nemo_gym.data.tasks.harbor import load_task, materialize_task
 from nemo_gym.sandbox import SandboxHandle
 from nemo_gym.trajectory import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
 from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgentConfig, _sandbox_prepare_command
+from responses_api_agents.opencode_agent.runtime import UNRESTRICTED_IMAGE_ATTACHMENT
 
 
 def sandbox_oom(reason: str, *, sandbox_id: str = "task-5") -> NgFailureEvent:
@@ -166,10 +172,21 @@ class Sandbox:
             return SimpleNamespace(return_code=0, stdout="opencode.db\n", stderr="", error_type=None)
         if "stop.request" in command:
             await self.request_stop()
+        if command.startswith("{ [ ! -d /tmp/nemo-gym-media/"):
+            # stage_media renames its partial uploads onto their content-named paths in one command.
+            words = shlex.split(command)
+            for index, word in enumerate(words):
+                if words[index : index + 3] == ["mv", "-f", "--"]:
+                    source, destination = words[index + 3 : index + 5]
+                    self.files[destination] = self.files.pop(source)
         return self.exec.return_value
 
     async def upload(self, source, destination):
-        self.files[destination] = Path(source).read_text()
+        data = Path(source).read_bytes()
+        try:
+            self.files[destination] = data.decode()
+        except UnicodeDecodeError:
+            self.files[destination] = data
 
     async def download(self, source, destination):
         if source.endswith("/opencode.db") and source not in self.files:
@@ -352,6 +369,217 @@ def capture_observations(sandbox, tmp_path):
 
     sandbox.download = download
     return database
+
+
+PNG = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00"
+PNG_URI = "data:image/png;base64," + base64.b64encode(PNG).decode()
+JPEG = b"\xff\xd8\xff\xe0\x00\xfe"
+JPEG_URI = "data:image/jpeg;base64," + base64.b64encode(JPEG).decode()
+
+
+def count_media_decodes(monkeypatch):
+    """Count base64 data-URI decodes, which should happen once per image in each request."""
+    decodes = []
+    decode = MediaFile.from_data_uri.__func__
+
+    def counting(cls, uri):
+        decodes.append(uri)
+        return decode(cls, uri)
+
+    monkeypatch.setattr(MediaFile, "from_data_uri", classmethod(counting))
+    return decodes
+
+
+def test_session_attaches_prompt_images_and_declares_image_input(setup, monkeypatch):
+    agent, sandbox = setup
+    decodes = count_media_decodes(monkeypatch)
+    prompt = [
+        {"type": "input_text", "text": "What is shown?"},
+        {"type": "input_image", "image_url": PNG_URI, "detail": "auto"},
+        {"type": "input_image", "image_url": JPEG_URI, "detail": "auto"},
+    ]
+    body = {"input": [{"role": "user", "content": prompt}]}
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json=body)
+        assert result.status_code == 200, result.text
+        # A retry replays the activation without decoding its images again.
+        retried = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json=body)
+        assert retried.status_code == 200, retried.text
+        assert decodes == [PNG_URI, JPEG_URI]
+        payload = sandbox.params()
+        assert payload["prompt"] == "What is shown?"
+        command = payload["command"]
+        paths = [command[index + 1] for index, arg in enumerate(command) if arg == "--file"]
+        # The path reaches the model's prompt, so it depends only on the image.
+        assert paths == [
+            f"/tmp/nemo-gym-media/{hashlib.sha256(PNG).hexdigest()}.png",
+            f"/tmp/nemo-gym-media/{hashlib.sha256(JPEG).hexdigest()}.jpg",
+        ]
+        assert [sandbox.files[path] for path in paths] == [PNG, JPEG]
+        assert not [path for path in sandbox.files if path.endswith(".partial")]
+        config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
+        model = config["provider"]["nemo_gym"]["models"]["dummy_model"]
+        assert model["modalities"] == {"input": ["text", "image"], "output": ["text"]}
+        assert config["attachment"] == UNRESTRICTED_IMAGE_ATTACHMENT
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        assert closed.status_code == 200, closed.text
+
+
+@pytest.mark.parametrize("image_input", [False, True])
+def test_text_prompt_declares_image_input_only_when_configured(setup, image_input):
+    agent, sandbox = setup
+    agent.config.image_input = image_input
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == 200, result.text
+        config = json.loads(sandbox.params()["env"]["OPENCODE_CONFIG_CONTENT"])
+        # Without the declaration OpenCode replaces tool images with an error text, which a text-only model accepts.
+        assert ("modalities" in config["provider"]["nemo_gym"]["models"]["dummy_model"]) is image_input
+        # Image limits are lifted only with the declaration, so the model gets each image's own bytes.
+        assert config.get("attachment") == (UNRESTRICTED_IMAGE_ATTACHMENT if image_input else None)
+        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+
+
+def test_session_attachment_config_restores_image_limits(setup):
+    agent, sandbox = setup
+    agent.config.image_input = True
+    agent.config.opencode_config = {"attachment": {"image": {"max_width": 4096}}}
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == 200, result.text
+        config = json.loads(sandbox.params()["env"]["OPENCODE_CONFIG_CONTENT"])
+        # The session's setting replaces the lifted limits; OpenCode applies its defaults to the rest.
+        assert config["attachment"] == {"image": {"max_width": 4096}}
+        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+
+
+def test_session_close_stops_media_staging_before_releasing_the_sandbox(setup):
+    agent, sandbox = setup
+    events = []
+    started = threading.Event()
+    upload = sandbox.upload
+
+    async def stall_media(source, destination):
+        if "/nemo-gym-media/" not in destination:
+            return await upload(source, destination)
+        started.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            events.append("upload cancelled")
+            raise
+
+    async def released(*args, **kwargs):
+        events.append("sandbox released")
+
+    sandbox.upload = stall_media
+    sandbox.stop.side_effect = released
+    sandbox.disconnect.side_effect = released
+    prompt = [
+        {"type": "input_text", "text": "What is shown?"},
+        {"type": "input_image", "image_url": PNG_URI, "detail": "auto"},
+    ]
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        activation = threading.Thread(
+            target=client.post,
+            args=("/ng-rollout/opencode-smoke-a2/v1/responses",),
+            kwargs={"json": {"input": [{"role": "user", "content": prompt}]}},
+        )
+        activation.start()
+        assert started.wait(10)
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        assert closed.status_code == 200, closed.text
+        activation.join(10)
+        assert not activation.is_alive()
+    # Staging belongs to the activation, so close stops it before giving the sandbox back.
+    assert events[:2] == ["upload cancelled", "sandbox released"], events
+    assert not sandbox.launch.called
+
+
+def test_first_activation_budget_bounds_media_staging(setup):
+    agent, sandbox = setup
+    upload = sandbox.upload
+    stalled = SimpleNamespace(cancelled=False)
+
+    async def stall_media(source, destination):
+        if "/nemo-gym-media/" not in destination:
+            return await upload(source, destination)
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            stalled.cancelled = True
+            raise
+
+    sandbox.upload = stall_media
+    prompt = [
+        {"type": "input_text", "text": "What is shown?"},
+        {"type": "input_image", "image_url": PNG_URI, "detail": "auto"},
+    ]
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        started = monotonic()
+        result = client.post(
+            "/ng-rollout/opencode-smoke-a2/v1/responses",
+            json={"input": [{"role": "user", "content": prompt}], "metadata": {"agent_timeout_sec": "0.5"}},
+        )
+        # The budget, not the stalled upload, ends the activation, and its slot is free for the next one.
+        assert monotonic() - started < 10
+        assert result.status_code == 500, result.text
+        assert stalled.cancelled
+        assert agent.sem._value == agent.config.concurrency
+        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+    assert not sandbox.launch.called
+
+
+@pytest.mark.parametrize(
+    "items",
+    [
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "What is shown?"},
+                    {"type": "input_image", "image_url": "https://example.com/a.png", "detail": "auto"},
+                ],
+            }
+        ],
+        [
+            {"role": "system", "content": [{"type": "input_image", "image_url": PNG_URI, "detail": "auto"}]},
+            {"role": "user", "content": "task"},
+        ],
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": " "},
+                    {"type": "input_image", "image_url": PNG_URI, "detail": "auto"},
+                ],
+            }
+        ],
+    ],
+    ids=["url", "system-media", "image-without-text"],
+)
+def test_session_rejects_images_it_cannot_attach(setup, items):
+    agent, sandbox = setup
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": items})
+        assert result.status_code == 422, result.text
+        # A plain string: request validation would return a list of errors before the agent runs.
+        assert result.json()["detail"].startswith("OpenCode sandbox execution"), result.text
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        assert closed.status_code == 200, closed.text
+    assert not sandbox.launch.called
 
 
 @pytest.mark.parametrize("output_budget", [4096, 32000])
@@ -2000,7 +2228,8 @@ def test_task_timeout_metadata_reaches_sandbox_supervisor(
         )
         assert response.status_code == 200, response.text
         command = shlex.split(sandbox.launch.await_args.kwargs["command"])
-        assert float(command[command.index("--timeout") + 1]) == expected
+        # Staging spends the budget, and OpenCode runs for what remains.
+        assert expected - 1 < float(command[command.index("--timeout") + 1]) <= expected
         assert agent.config.timeout == 1800
         assert response.json()["metadata"]["agent_timeout_sec"] == str(float(expected))
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
