@@ -1,0 +1,14 @@
+# AutomationBench resources server: holds each task's simulated SaaS world, serves the api toolset and scores the
+# final world. benchmarks/automationbench/config.yaml pairs it with simple_agent; see its README.
+automationbench_resources_server:
+  resources_servers:
+    automationbench:
+      entrypoint: app.py
+      domain: other
+      verified: false
+      description: AutomationBench enterprise workflows scored by guardrail-gated objective completion.
+      value: Evaluate enterprise workflow automation capabilities
+      # aa_headline (any broken guardrail zeroes the task) or upstream's ungated partial_credit; both are reported.
+      reward_fn: aa_headline
+      # Adds every assertion's verdict to the verify response.
+      export_assertion_results: false
