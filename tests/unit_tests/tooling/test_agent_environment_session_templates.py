@@ -46,6 +46,7 @@ migration = load_migration()
         "osworld_agent",
         "harbor_oracle_agent",
         "terminus_2_sandboxed_agent",
+        "mini_swe_agent",
         "miniswe_sandboxed_agent",
     ],
 )
