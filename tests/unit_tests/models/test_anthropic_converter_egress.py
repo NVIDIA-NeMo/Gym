@@ -188,6 +188,51 @@ class TestAnthropicConverter:
         assert response.usage.total_tokens == 30
         assert response.usage.input_tokens_details.cached_tokens == 3
 
+    def test_anthropic_to_responses_items_keep_every_field_set_for_replay(self) -> None:
+        response = AnthropicConverter().anthropic_to_responses(
+            {
+                "content": [
+                    {"type": "thinking", "thinking": "plan", "signature": "sig"},
+                    {"type": "text", "text": "answer"},
+                    {"type": "tool_use", "id": "toolu_1", "name": "f", "input": {}},
+                ],
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 1, "output_tokens": 2},
+            },
+            request_body=NeMoGymResponseCreateParamsNonStreaming(input="hi"),
+            model="m",
+        )
+
+        for item in response.output:
+            assert item.model_fields_set == set(type(item).model_fields)
+        # An exclude_unset dump, as request replay makes, still carries defaults and nulls of nested parts.
+        reasoning, message, call = response.model_dump(exclude_unset=True)["output"]
+        assert reasoning["summary"] == [{"text": "plan", "type": "summary_text"}]
+        assert message["content"][0]["logprobs"] is None
+        assert "namespace" in call and call["namespace"] is None
+
+    def test_responses_to_anthropic_drops_token_metadata_and_leaves_the_request_unchanged(self) -> None:
+        tokens = {"prompt_token_ids": [1, 2], "generation_token_ids": [3], "generation_log_probs": [-0.5]}
+        body = NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {"role": "user", "content": "q"},
+                {"type": "function_call", "call_id": "c1", "name": "f", "arguments": "{}", **tokens},
+                {"type": "function_call_output", "call_id": "c1", "output": "r"},
+            ]
+        )
+        before = body.model_dump()
+
+        anthropic_body = AnthropicConverter().responses_to_anthropic(
+            body, model="m", max_tokens=8, thinking=None, thinking_budget_tokens=None, extra_body={}
+        )
+
+        assert anthropic_body["messages"][1] == {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "id": "c1", "name": "f", "input": {}}],
+        }
+        assert not any(field in json.dumps(anthropic_body) for field in tokens)
+        assert body.model_dump() == before
+
     def test_anthropic_to_responses_preserves_unknown_usage_details(self) -> None:
         response = AnthropicConverter().anthropic_to_responses(
             anthropic_response={
