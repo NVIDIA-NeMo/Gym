@@ -55,6 +55,127 @@ class TerminusXMLParser(TerminusXMLPlainParser):
         return result
 
 
+# A non-reading foreground job lets a paste fill the kernel input queue, and
+# tmux then holds even Ctrl-C behind the rest of the paste. This script drains
+# the cancelled input so the native interrupt reaches the terminal driver. It
+# does not signal the process directly: queued shell text could then run when
+# the foreground job exits. Raw applications (-isig) receive Ctrl-C as a byte.
+#
+# One reader runs for the whole call, so input is consumed while Ctrl-C is sent
+# too. Quiet means the reader made no progress for several polls and the queue
+# has nothing to read (`read -t 0` polls the descriptor), so neither process
+# start-up nor a slow paste can be mistaken for quiet. A starved tmux can
+# still hold input that the kernel has not seen, so after Ctrl-C the script
+# waits until every foreground process that SIGINT would kill has exited or
+# has SIGINT pending, and fails if input stops arriving first. Both waits share
+# one bound on polls without progress.
+#
+# The deadline keeps the script inside the exec timeout. A provider that kills
+# only its client on timeout (docker) leaves the script running until the
+# deadline, and the EXIT trap then stops the reader. The reader stays in the
+# script's process group, so a provider that kills the group kills it too.
+# A reader left behind would consume the agent's later keystrokes.
+_INTERRUPT_DEADLINE_S = 90
+_INTERRUPT_EXEC_TIMEOUT_S = 120
+_INTERRUPT_SCRIPT = r"""
+target=$1 deadline=$2
+fail() { echo "$1" >&2; exit 1; }
+info=$(tmux display-message -p -t "$target" '#{pane_pid} #{pane_tty}') || exit
+shell_pid=${info%% *}
+tty=${info#* }
+settings=$(stty -F "$tty" -a) || exit
+for setting in $settings; do
+  case "$setting" in -isig|"-isig;") exec tmux send-keys -t "$target" C-c ;; esac
+done
+
+exec 3<"$tty" || exit
+sink=$(mktemp) || exit
+reader=
+trap 'exit 1' HUP INT TERM
+trap '[ -n "$reader" ] && kill "$reader" 2>/dev/null; rm -f "$sink"' EXIT
+cat <&3 >"$sink" 2>/dev/null &
+reader=$!
+
+size=0 idle=0 sent=
+patience=100
+poll() {
+  sleep 0.1 || exit
+  if [ "$SECONDS" -ge "$deadline" ]; then
+    [ -n "$sent" ] || fail "Pending terminal input was still arriving after $deadline seconds"
+    fail "Ctrl-C did not reach the foreground job within $deadline seconds"
+  fi
+  # The reader also stops when the interrupted shell exits and hangs up the
+  # terminal; after Ctrl-C, only a still-running target makes that a failure.
+  kill -0 "$reader" 2>/dev/null || [ -n "$sent" ] || fail "The terminal input reader stopped"
+  local new
+  new=$(wc -c <"$sink") || exit
+  new=$((new))
+  if [ "$new" -ne "$size" ]; then
+    size=$new idle=0
+  else
+    idle=$((idle + 1))
+  fi
+}
+
+while :; do
+  poll
+  if [ "$idle" -ge 5 ]; then
+    read -t 0 -u 3 || break
+    [ "$idle" -lt "$patience" ] || fail "Pending terminal input stopped draining"
+  fi
+done
+
+# Record the foreground processes that SIGINT would kill: default disposition,
+# neither blocked, ignored nor caught. Without /proc there is nothing to check.
+sigint_bit() {
+  local key value mask=0
+  while read -r key value; do
+    case " $2 " in *" $key "*) mask=$((mask | 16#$value)) ;; esac
+  done 2>/dev/null <"/proc/$1/status" || return 2
+  [ $((mask & 2)) -ne 0 ]
+}
+foreground=
+read -r stat 2>/dev/null <"/proc/$shell_pid/stat" && set -- ${stat##*) } && foreground=$6
+targets=()
+for file in /proc/[0-9]*/stat; do
+  [ -n "$foreground" ] || break
+  read -r stat 2>/dev/null <"$file" || continue
+  set -- ${stat##*) }
+  [ "$3" = "$foreground" ] && [ "$1" != Z ] || continue
+  pid=${file#/proc/}
+  pid=${pid%/stat}
+  sigint_bit "$pid" 'SigBlk: SigIgn: SigCgt:'
+  [ $? -eq 1 ] && targets+=("$pid:${20}")
+done
+
+tmux send-keys -t "$target" C-c || exit
+sent=1
+interrupted() {
+  local stat
+  read -r stat 2>/dev/null <"/proc/$1/stat" || return 0
+  set -- "$1" "$2" ${stat##*) }
+  [ "$3" != Z ] && [ "${22}" = "$2" ] || return 0
+  sigint_bit "$1" 'SigPnd: ShdPnd:'
+}
+idle=0
+while [ "${#targets[@]}" -gt 0 ]; do
+  # Check the reader before the targets: a reader that the exiting shell hung
+  # up stops only after Ctrl-C has ended the job.
+  reader_alive=
+  kill -0 "$reader" 2>/dev/null && reader_alive=1
+  pending=()
+  for item in "${targets[@]}"; do
+    interrupted "${item%%:*}" "${item#*:}" || pending+=("$item")
+  done
+  targets=("${pending[@]}")
+  [ "${#targets[@]}" -gt 0 ] || break
+  [ -n "$reader_alive" ] || fail "The terminal input reader stopped before Ctrl-C took effect"
+  [ "$idle" -lt "$patience" ] || fail "Ctrl-C did not reach the foreground job (process ${targets[0]%%:*})"
+  poll
+done
+"""
+
+
 class ShellExitedError(RuntimeError):
     """The interactive shell exited before its command batch finished."""
 
@@ -131,38 +252,22 @@ class TerminusTmuxSession(TmuxSession):
                 if batch:
                     await super()._send_keys_to_session(batch, action)
                     batch.clear()
-                await self._drain_pending_input()
-                await super()._send_keys_to_session([key], action)
+                await self._interrupt()
             else:
                 batch.append(key)
         if batch:
             await super()._send_keys_to_session(batch, action)
 
-    async def _drain_pending_input(self) -> None:
-        # A non-reading foreground job can fill the kernel input queue. tmux
-        # then queues even Ctrl-C behind the pending paste. Drain the cancelled
-        # input first so the native interrupt reaches the terminal driver. Do
-        # not signal the process directly: that can execute queued shell text
-        # when the foreground job exits. Raw applications own Ctrl-C themselves.
-        # Require an idle pass: a large paste can outlast one fixed read window.
-        target = shlex.quote(self._session_name)
-        script = f"""set -o pipefail
-tty=$(tmux display-message -p -t {target} '#{{pane_tty}}') || exit $?
-settings=$(stty -F "$tty" -a) || exit $?
-for setting in $settings; do
-  case "$setting" in -isig|"-isig;") exit 0 ;; esac
-done
-for attempt in {{1..25}}; do
-  bytes=$(timeout 0.2 cat "$tty" | wc -c)
-  status=$?
-  case "$status" in 0|124) ;; *) exit "$status" ;; esac
-  [ "$bytes" -eq 0 ] && exit 0
-done
-echo 'Pending terminal input did not become quiet within 5 seconds' >&2
-exit 1"""
-        result = await self.environment.exec(f"bash -c {shlex.quote(script)}", user=self._user)
+    async def _interrupt(self) -> None:
+        """Send Ctrl-C after discarding pending input, and confirm that it reached the foreground job."""
+        result = await self.environment.exec(
+            f"bash -c {shlex.quote(_INTERRUPT_SCRIPT)} interrupt {shlex.quote(self._session_name)} "
+            f"{_INTERRUPT_DEADLINE_S}",
+            timeout_sec=_INTERRUPT_EXEC_TIMEOUT_S,
+            user=self._user,
+        )
         if result.return_code != 0:
-            raise RuntimeError(f"Could not clear pending terminal input before Ctrl-C: {result.stderr}")
+            raise RuntimeError(f"Could not interrupt the terminal: {result.stderr}")
 
     async def _find_new_content(self, current_buffer: str) -> str | None:
         if self._previous_buffer is not None and current_buffer == self._previous_buffer:
