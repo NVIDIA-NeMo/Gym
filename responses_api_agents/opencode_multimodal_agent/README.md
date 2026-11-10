@@ -35,6 +35,13 @@ main's lifecycle: seed resources, create/activate/close the agent, verify, and
 close resources. It sends a final-answer copy to the verifier and preserves the
 complete original response for training.
 
+The Environment Server also reuses main's `SingleAgentTurnLegacyEnvironmentServer`
+HTTP bridge. NeMo-RL can send its existing flat rows and receive flat rewards and
+responses; the bridge runs the same session lifecycle internally. Native episode
+requests keep their native response envelope. No separate execution runner or
+NeMo-RL reader patch is needed.
+
+
 Training enables token capture, an eight-turn final-answer policy and a 2048-token
 final-answer reserve by default. `backend_final_answer_reserve` requires a backend
 that implements that extension; disable it explicitly for hosted backends that do
@@ -84,8 +91,12 @@ bind control servers to loopback and advertise a sandbox-reachable model address
 Additional ingress aliases and deployment routing still need validation.
 
 The policy is fixed at sandbox creation. Use separate agent/environment instances
-and `task_source` routing for different network modes, tool permissions or
-verifiers. Request metadata cannot change an existing sandbox's policy. Native
+for different network modes, tool permissions or verifiers. Flat training rows
+select a profile by its agent name in `task_source` (or an explicit `agent_ref`).
+Native materialized rows select an Environment Server through `task_id.taskset`
+and `environment_server_routes`; that server binds the agent profile. Both allow
+samples with different policies in one dataset. Request metadata cannot change
+an existing sandbox's policy. Native
 web tools need `inherit`; `model_and_tools` permits granted MCP hosts, not arbitrary
 public web search. Tool permissions use main's shared default command policy and
 can be overridden through `opencode_config.permission`.

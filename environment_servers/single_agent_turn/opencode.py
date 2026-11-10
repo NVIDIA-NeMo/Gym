@@ -8,10 +8,11 @@ from omegaconf import OmegaConf
 
 from environment_servers.single_agent_turn.app import (
     SessionHandles,
-    SingleAgentTurnEnvironmentServer,
+    SingleAgentTurnEnvironmentServerConfig,
     SingleAgentTurnRequest,
     SingleAgentTurnResult,
 )
+from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
 from nemo_gym.config import get_first_server_config_dict
 from nemo_gym.core import NeMoGymResponse
 from nemo_gym.trajectory import AgentObservationBundle, TrajectoryRecord
@@ -23,8 +24,10 @@ from responses_api_agents.opencode_multimodal_agent.rewards import (
 )
 
 
-class OpenCodeEnvironmentServer(SingleAgentTurnEnvironmentServer):
-    """Keep lifecycle and verification in main, adding answer-dependent tool rewards."""
+class OpenCodeEnvironmentServer(SingleAgentTurnLegacyEnvironmentServer):
+    """Use main's session lifecycle and flat/native HTTP bridge with tool rewards."""
+
+    config: SingleAgentTurnEnvironmentServerConfig
 
     def _agent_options(self) -> dict[str, Any]:
         config = get_first_server_config_dict(self.server_client.global_config_dict, self.config.agent_server.name)

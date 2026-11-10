@@ -60,3 +60,48 @@ async def test_failed_response_selected_for_verification_is_zero_without_judging
     assert result.reward == 0.0
     assert result.response.output == response.output
     assert client.calls == []
+
+
+@pytest.mark.parametrize("wire_format", ["flat", "native"])
+def test_http_bridge_preserves_reward_and_training_tokens(wire_format):
+    from fastapi.testclient import TestClient
+
+    base, client = _environment_server(token_capture=True)
+    config = OpenCodeToolRewardConfig()
+    call = {"type": "function_call", "call_id": "bash-1", "name": "bash", "arguments": '{"command":"ls"}'}
+    tools = score_opencode_tools({"bash-1": ("bash", "completed", 0)}, [call], [], 0.0, config)
+    response = _agent_response().model_dump(mode="json")
+    response["opencode_evidence"] = {"turns_used": 2, "finished_naturally": True, "tool_reward": tools.model_dump()}
+    client.responses[2] = _Response(response)
+    payload = json.loads(client.responses[4].body)
+    payload["reward"] = 1.0
+    client.responses[4] = _Response(payload)
+    server = OpenCodeEnvironmentServer(config=base.config, server_client=client)
+    request = _request()
+    if wire_format == "flat":
+        task_input = request.task.task_input.model_dump(mode="json")
+        body = {
+            "responses_create_params": task_input["responses_create_params"],
+            **task_input["task_data"],
+            "task_source": "agent",
+            "_ng_rollout_id": "rollout-a2",
+        }
+    else:
+        body = request.model_dump(mode="json")
+    with TestClient(server.setup_webserver()) as http:
+        reply = http.post("/run", json=body)
+    assert reply.status_code == 200, reply.text
+    raw = reply.json()
+    result = raw if wire_format == "flat" else raw["result"]
+    assert ("episode_id" in raw) is (wire_format == "native")
+    assert result["reward"] == pytest.approx(1.1)
+    assert result["response"]["output"][0]["generation_token_ids"] == [3, 4]
+    assert result["opencode_tool_reward"]["auxiliary_reward"] == pytest.approx(0.1)
+    assert [path for _, path, _ in client.calls] == [
+        "/seed_session",
+        "/v1/agent_sessions",
+        "/ng-rollout/rollout-a2/training-token-capture/v1/responses",
+        "/v1/agent_sessions/close",
+        "/verify",
+        "/close_session",
+    ]
