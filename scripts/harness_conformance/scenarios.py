@@ -11,6 +11,7 @@ from nemo_gym.rollouts.harness_capabilities import PriorityTier
 
 SUITE = "harness-probes/v2"
 ALL_EVIDENCE = tuple(f"TE-{i}" for i in range(1, 10))
+MODEL_TIMEOUT_ATTEMPTS = 3
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,7 @@ class Scenario:
     health_expectations: dict[str, Verdict] = field(default_factory=dict)
     tier: PriorityTier = "P0"
     compaction: bool | None = None
+    model_timeout: bool = False
 
     def task(self) -> dict:
         """Only the task reaches the harness; expectations stay in the runner."""
@@ -90,6 +92,29 @@ SCENARIOS = (
         judge_verifier=True,
     ),
     Scenario("verifier_failure", "A completed trajectory receives a known zero reward.", expected_reward=0.0),
+    Scenario(
+        "model_timeout_recovered",
+        "A real model-client response timeout recovers, preserving the failure with the successful answer.",
+        tool_steps=0,
+        tier="P1",
+        model_timeout=True,
+    ),
+    Scenario(
+        "model_timeout_exhausted",
+        "Real model-client response timeouts exhaust its attempts and reach the caller with all failures.",
+        evidence=("TE-1", "TE-2", "TE-4", "TE-7", "TE-8"),
+        tool_steps=0,
+        terminal_error=True,
+        expected_reward=0.0,
+        steps=False,
+        tier="P1",
+        model_timeout=True,
+        health_expectations={
+            "rollout_ended_on_failed_model_call": "unhealthy",
+            # No response completed, so aggregate token reconciliation has no evidence.
+            "rollout_token_count_mismatch": "unobserved",
+        },
+    ),
     Scenario(
         "context_compaction",
         "Automatic compaction during shell actions; retain the helper without creating a policy turn.",

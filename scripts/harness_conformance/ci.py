@@ -36,6 +36,7 @@ def select_harnesses(paths: list[str]) -> list[str]:
             (
                 "nemo_gym/",
                 "responses_api_agents/shared/",
+                "responses_api_models/vllm_model/",
                 "environment_servers/legacy_agent/",
                 "environment_servers/single_agent_turn/",
                 "environment_servers/single_agent_turn_legacy/",

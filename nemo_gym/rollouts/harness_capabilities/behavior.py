@@ -255,7 +255,7 @@ def inspect_behavior(
                 _terminal_error_reported(attempts, agent_responses, http_errors[-1]) if terminal_error else True
             ),
             available=available,
-            applies=terminal_error,
+            applies=terminal_error and bool(http_errors),
         )
     )
     results.run(

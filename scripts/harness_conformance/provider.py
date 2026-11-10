@@ -72,6 +72,9 @@ class Probe:
     verifications: list[dict] = field(default_factory=list)
     agent_responses: list[dict] = field(default_factory=list)
     judge_calls: list[dict] = field(default_factory=list)
+    timeout_attempts: list[dict] = field(default_factory=list)
+    model_server_failure_reports: list[dict] = field(default_factory=list)
+    caller_failure_reports: list[dict] = field(default_factory=list)
     seeded: int = 0
     closed: int = 0
     finished: bool = False
@@ -95,6 +98,12 @@ class Probe:
             "finished": self.finished,
             "finish_call": self.finish_call,
         }
+        if self.scenario.model_timeout:
+            witness.update(
+                timeout_attempts=self.timeout_attempts,
+                model_server_failure_reports=self.model_server_failure_reports,
+                caller_failure_reports=self.caller_failure_reports,
+            )
         if self.scenario.compaction is not None:
             witness["compaction"] = {
                 "summary": self.compaction_summary,
@@ -224,6 +233,16 @@ class Probe:
     async def model(self, request: Request) -> JSONResponse | StreamingResponse:
         body = await request.json()
         self._observe_tool_results(body)
+        if self.scenario.model_timeout:
+            timed_out = self.scenario.terminal_error or not self.timeout_attempts
+            self.timeout_attempts.append(
+                {"request": body, "timed_out": timed_out, "status_code": None, "response": None}
+            )
+            self.save()
+            if timed_out:
+                # Expire the real client's response-header deadline after consuming its upload.
+                await asyncio.sleep(2)
+                return JSONResponse({"error": "response arrived after the client deadline"})
         index = len(self.attempts)
         status = 200
         if index < len(self.scenario.http_errors):
@@ -376,6 +395,8 @@ class Probe:
         self.attempts.append(
             {"attempt_id": f"attempt-{index}", "request": body, "response": payload, "status_code": status}
         )
+        if self.scenario.model_timeout:
+            self.timeout_attempts[-1].update(response=payload, status_code=status)
         self.save()
         if status != 200 or not body.get("stream"):
             return JSONResponse(payload, status_code=status, headers={"Retry-After": "0"})

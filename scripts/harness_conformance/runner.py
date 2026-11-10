@@ -34,6 +34,7 @@ from nemo_gym.rollouts.harness_capabilities import (
 
 from .episode import HARNESSES
 from .scenarios import SCENARIOS, SUITE, Scenario, suite_manifest
+from .timeouts import inspect_model_timeouts
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -133,8 +134,11 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
 
     scope = EvidenceScope(tools=scenario.tool_steps > 0, steps=scenario.steps, verifier=not scenario.terminal_error)
     artifact = inspect_record(record, scope=scope)
-    checks = artifact["checks"] + inspect_behavior(
-        witness,
+    behavior_witness = witness
+    if scenario.model_timeout and witness is not None:
+        behavior_witness = {**witness, "attempts": witness.get("timeout_attempts", [])}
+    behavior_checks = inspect_behavior(
+        behavior_witness,
         record,
         http_errors=scenario.http_errors,
         terminal_error=scenario.terminal_error,
@@ -143,6 +147,17 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
         judge_verifier=scenario.judge_verifier,
         fingerprint=_fingerprint,
     )
+    if scenario.model_timeout:
+        # The real ModelServer converts wire formats and captures logical calls,
+        # whereas the provider witnesses lower-level attempts. Exact exchange
+        # equality at these different boundaries is not meaningful.
+        behavior_checks = [
+            check
+            for check in behavior_checks
+            if check["id"] not in {"model.saved_exchanges", "model.response_metadata", "model.token_counts"}
+        ]
+        behavior_checks += inspect_model_timeouts(witness, record, exhausted=scenario.terminal_error)
+    checks = artifact["checks"] + behavior_checks
     health_inputs = [path for path in [rollouts_path, failures_path] if path.is_file()]
     checks += inspect_health(
         health_inputs,
@@ -177,7 +192,7 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
         "behavioral_status": "pass" if behavior_passed else "fail",
         "execution": execution,
         "delivery": delivery,
-        "model_attempts": len((witness or {}).get("attempts", [])),
+        "model_attempts": len((behavior_witness or {}).get("attempts", [])),
         "evidence": evidence,
         "artifact_report": report,
         "health_report": str(health_report.relative_to(directory)) if health_inputs else None,

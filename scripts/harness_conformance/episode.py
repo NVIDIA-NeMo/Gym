@@ -26,7 +26,7 @@ from nemo_gym.rollouts.harness_capabilities import digest_file
 
 from .provider import OpenClawProbe, Probe
 from .registry import HARNESSES
-from .scenarios import SCENARIOS
+from .scenarios import MODEL_TIMEOUT_ATTEMPTS, SCENARIOS
 
 
 class _Server(uvicorn.Server):
@@ -217,6 +217,8 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
         names = ["policy_model", "probe_resources", "probe_agent", "probe_environment"]
         if scenario.judge_verifier:
             names.append("judge_model")
+        if scenario.model_timeout:
+            names.append("timeout_provider")
         sockets = {name: stack.enter_context(socket.socket()) for name in names}
         for sock in sockets.values():
             sock.bind(("127.0.0.1", 0))
@@ -227,6 +229,25 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
             timeout,
             use_agent_sessions=use_agent_sessions,
         )
+        if scenario.model_timeout:
+            # Existing scenarios retain their direct scripted ModelServer endpoint.
+            config["policy_model"]["responses_api_models"] = {
+                "vllm_model": {
+                    "name": "policy_model",
+                    "host": "127.0.0.1",
+                    "port": sockets["policy_model"].getsockname()[1],
+                    "entrypoint": "app.py",
+                    "num_workers": 1,
+                    "base_url": f"http://127.0.0.1:{sockets['timeout_provider'].getsockname()[1]}/v1",
+                    "api_key": "conformance",
+                    "model": "conformance-model",
+                    "return_token_id_information": False,
+                    "uses_reasoning_parser": True,
+                    "uses_interleaved_reasoning": True,
+                    "request_timeout_seconds": 0.25,
+                    "max_http_attempts": MODEL_TIMEOUT_ATTEMPTS,
+                }
+            }
         if scenario.compaction is not None:
             agent_config = config["probe_agent"]["responses_api_agents"][f"{harness}_agent"]
             if harness in ("opencode", "pi"):
@@ -260,7 +281,13 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
                     probe.agent_responses.append(
                         response.model_dump(
                             mode="json",
-                            include={"status": True, "error": True, "metadata": {AGENT_OUTCOME_METADATA_KEY}},
+                            include={
+                                "status": True,
+                                "error": True,
+                                "output": True,
+                                "failure_report": True,
+                                "metadata": {AGENT_OUTCOME_METADATA_KEY},
+                            },
                         )
                     )
                     probe.save()
@@ -280,6 +307,30 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
         from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper
 
         client = setup_server_client()
+        if scenario.model_timeout:
+            from typing import Unpack
+
+            from aiohttp import ClientResponse
+            from aiohttp.client import _RequestOptions
+
+            from nemo_gym.client import ServerClient
+            from nemo_gym.core.failure_records import FailureReport
+            from nemo_gym.core.failure_transport import FailureHeader
+
+            class ObservedClient(ServerClient):
+                async def post(
+                    self, server_name: str, url_path: str, **kwargs: Unpack[_RequestOptions]
+                ) -> ClientResponse:
+                    response = await super().post(server_name, url_path, **kwargs)
+                    if server_name == "probe_agent" and url_path.endswith("/responses"):
+                        report = FailureHeader.decode(response.headers) or FailureReport()
+                        probe.caller_failure_reports.append(report.model_dump(mode="json"))
+                        probe.save()
+                    return response
+
+            client = ObservedClient(
+                head_server_config=client.head_server_config, global_config_dict=client.global_config_dict
+            )
         agent = agent_cls(
             config=config_cls.model_validate(config["probe_agent"]["responses_api_agents"][f"{harness}_agent"]),
             server_client=client,
@@ -304,6 +355,35 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
                 "probe_agent": agent.setup_webserver(),
                 "probe_environment": environment.setup_webserver(),
             }
+            if scenario.model_timeout:
+                from fastapi import FastAPI
+
+                from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
+
+                from .timeouts import FailureReportWitness
+
+                model = VLLMModel(
+                    config=VLLMModelConfig.model_validate(
+                        config["policy_model"]["responses_api_models"]["vllm_model"]
+                    ),
+                    server_client=client,
+                )
+                model_app = model.setup_webserver()
+                # Production startup installs this after setup_webserver(); the
+                # embedded timeout servers need the same failure-report scope.
+                model.setup_exception_middleware(model_app)
+                agent.setup_exception_middleware(apps["probe_agent"])
+
+                def record_model_report(report: FailureReport) -> None:
+                    probe.model_server_failure_reports.append(report.model_dump(mode="json"))
+                    probe.save()
+
+                apps["policy_model"] = FailureReportWitness(model_app, record_model_report)
+                # Capture belongs to the real ModelServer, not its stub provider.
+                provider_app = FastAPI()
+                provider_app.post("/v1/chat/completions", response_model=None)(probe.model)
+                provider_app.post("/v1/responses", response_model=None)(probe.model)
+                apps["timeout_provider"] = provider_app
             if scenario.judge_verifier:
                 apps["judge_model"] = probe.judge_app()
             for name, app in apps.items():
@@ -335,20 +415,29 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
                     }
                 ]
             inputs.write_text(json.dumps(task) + "\n")
-            async with asyncio.timeout(timeout + 10):
-                await RolloutCollectionHelper().run_from_config(
-                    RolloutCollectionConfig(
-                        agent_name="probe_agent",
-                        input_jsonl_fpath=str(inputs),
-                        output_jsonl_fpath=str(directory / "rollouts.jsonl"),
-                        num_samples_in_parallel=1,
-                        num_repeats=1,
-                        resume_from_cache=False,
-                        disable_aggregation=True,
-                        disable_health_check=True,
-                        route_failures_to_sidecar=True,
+            from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
+
+            try:
+                async with asyncio.timeout(timeout + 10):
+                    await RolloutCollectionHelper().run_from_config(
+                        RolloutCollectionConfig(
+                            agent_name="probe_agent",
+                            input_jsonl_fpath=str(inputs),
+                            output_jsonl_fpath=str(directory / "rollouts.jsonl"),
+                            num_samples_in_parallel=1,
+                            num_repeats=1,
+                            resume_from_cache=False,
+                            disable_aggregation=True,
+                            disable_health_check=True,
+                            route_failures_to_sidecar=True,
+                        )
                     )
-                )
+            except IncompleteEvaluationError:
+                if not (scenario.model_timeout and scenario.terminal_error):
+                    raise
+                # A deliberately exhausted episode has no scored row. Inspect
+                # its actual sidecar evidence instead of calling this a runner crash.
+
         finally:
             for server in servers:
                 server.should_exit = True

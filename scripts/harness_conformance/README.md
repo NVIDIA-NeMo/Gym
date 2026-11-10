@@ -4,7 +4,7 @@
 
 Gym CI runs a harness probe matrix on approved PR mirrors and merge-queue
 revisions and on main pushes. Changes to a registered adapter select that harness.
-Shared Gym code, conformance tooling and tests, the `legacy_agent`,
+Shared Gym code, the `vllm_model` server, conformance tooling and tests, the `legacy_agent`,
 `single_agent_turn`, and `single_agent_turn_legacy` environments, dependency files,
 and CI configuration select all registered harnesses. Unrelated servers, CLI/task
 ingestion, other tests, benchmarks, and documentation are skipped. Unknown paths
@@ -96,6 +96,26 @@ Omitting `--harness` selects all registered harnesses.
 
 No model service or model credentials are needed. Each scenario starts fresh
 local model, resources, agent, and compatibility environment servers on dynamically assigned loopback ports.
+
+The P1 `model_timeout_recovered` and `model_timeout_exhausted` scenarios put the
+real Gym `vllm_model` server and its model client between the harness and a local
+scripted provider. The provider consumes the request, then delays response headers
+beyond the client's deadline. Recovery must retain its timeout event alongside
+the successful answer; exhaustion must retain all three failed attempts without
+starting another harness retry budget. Both cases check unchanged event IDs and
+facts at the model-server reply, the EnvironmentServer's received agent reply,
+and Collection's canonical saved failure map. Missing persistence is a P1 failure,
+including when events survive only in a nested partial response.
+
+These scenarios use the existing model client's three-attempt transport bound.
+They do not certify shared configurable retry settings or sandbox retry handling.
+They run for every selected harness; missing adapter support remains visible as
+failed or unavailable evidence. Byte-for-byte scripted exchange comparisons are
+inapplicable across the real server's format conversion and logical-call capture;
+the timeout checks replace those three comparisons while retaining the other
+artifact, behavioral and health checks. All other scenarios keep their existing
+execution path.
+
 The runner prefers the agent session interface whenever the adapter implements
 session setup and close, including inherited implementations. It uses
 `single_agent_turn_legacy` to translate the probe's flat rows into Resources seed,
