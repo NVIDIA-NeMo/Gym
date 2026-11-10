@@ -8,7 +8,6 @@ import json
 import shlex
 import sqlite3
 import subprocess
-import sys
 import threading
 from pathlib import Path
 from time import monotonic
@@ -41,10 +40,8 @@ from nemo_gym.core import (
     TaskId,
 )
 from nemo_gym.data.tasks.harbor import load_task, materialize_task
-from nemo_gym.models import token_capture
 from nemo_gym.sandbox import SandboxHandle
 from nemo_gym.trajectory import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
-from responses_api_agents.opencode_agent import app as opencode_app
 from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgentConfig, _sandbox_prepare_command
 from responses_api_agents.opencode_agent.runtime import UNRESTRICTED_IMAGE_ATTACHMENT
 
@@ -1212,32 +1209,9 @@ def test_token_capture_routes_every_opencode_model_call_to_the_rollout(setup):
     )
 
 
-def test_with_token_capture_a_seed_refuses_build_steps(setup, monkeypatch):
+def test_with_token_capture_a_seed_accepts_build_steps(setup):
     agent, sandbox = setup
-    # Without Gym #5833's capture fix installed.
-    monkeypatch.setattr(opencode_app, "_capture_joins_opencode_step_limit", lambda: False)
-    agent.server_client.global_config_dict = OmegaConf.create(
-        {
-            "policy": {"responses_api_models": {"openai_model": {"host": "model.example", "port": 9000}}},
-            "token_id_capture": {"enabled": True, "all_agents": True},
-        }
-    )
-    agent.config.opencode_config = {"compaction": {"auto": False}, "agent": {"build": {"steps": 8}}}
-    with TestClient(agent.setup_webserver()) as client:
-        refused = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
-        assert refused.status_code == 422
-        # OpenCode's last-step prompt is an assistant message, which capture cannot join to the earlier calls.
-        assert "agent.build.steps cannot be used with token capture" in refused.json()["detail"]
-        sandbox.exec.assert_not_awaited()
-        # compaction.auto keeps capture whole, so it stays allowed.
-        agent.config.opencode_config = {"compaction": {"auto": False}}
-        client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
-
-
-def test_with_token_capture_a_seed_accepts_build_steps_when_the_capture_fix_is_installed(setup, monkeypatch):
-    agent, sandbox = setup
-    # Gym #5833 installs the capture fix for OpenCode's step-limit note. TODO: drop this test with the check.
-    monkeypatch.setattr(opencode_app, "_capture_joins_opencode_step_limit", lambda: True)
+    # Capture recognizes OpenCode's step-limit note (harness_notes), so the step limit and capture go together.
     agent.server_client.global_config_dict = OmegaConf.create(
         {
             "policy": {"responses_api_models": {"openai_model": {"host": "model.example", "port": 9000}}},
@@ -1247,36 +1221,6 @@ def test_with_token_capture_a_seed_accepts_build_steps_when_the_capture_fix_is_i
     agent.config.opencode_config = {"compaction": {"auto": False}, "agent": {"build": {"steps": 8}}}
     with TestClient(agent.setup_webserver()) as client:
         client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
-
-
-_HARNESS_NOTES_MODULE = "nemo_gym.models.token_capture.harness_notes"
-
-
-def test_capture_fix_detection_is_off_without_the_harness_notes_module(monkeypatch):
-    monkeypatch.setitem(sys.modules, _HARNESS_NOTES_MODULE, None)  # import raises ImportError
-    assert not opencode_app._capture_joins_opencode_step_limit()
-
-
-@pytest.mark.parametrize("layout", ["module", "package"])
-@pytest.mark.parametrize(("harnesses", "expected"), [(["opencode"], True), (["pi"], False), ([], False)])
-def test_capture_fix_detection_finds_an_opencode_note_in_either_layout(
-    monkeypatch, tmp_path, layout, harnesses, expected
-):
-    # #5833 first added harness_notes.py and then moved it into a harness_notes/ package; both must be found.
-    source = "from types import SimpleNamespace\n" + (
-        f"HARNESS_NOTES = tuple(SimpleNamespace(harness=name) for name in {harnesses!r})\n"
-    )
-    if layout == "module":
-        (tmp_path / "harness_notes.py").write_text(source)
-    else:
-        (tmp_path / "harness_notes").mkdir()
-        (tmp_path / "harness_notes" / "__init__.py").write_text(source)
-    monkeypatch.setattr(token_capture, "__path__", [str(tmp_path), *token_capture.__path__])
-    monkeypatch.delitem(sys.modules, _HARNESS_NOTES_MODULE, raising=False)
-    try:
-        assert opencode_app._capture_joins_opencode_step_limit() is expected
-    finally:
-        sys.modules.pop(_HARNESS_NOTES_MODULE, None)
 
 
 def test_http_close_retry_survives_other_session_closes(setup, monkeypatch):
