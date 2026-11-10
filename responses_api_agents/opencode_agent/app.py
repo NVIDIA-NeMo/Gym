@@ -100,7 +100,6 @@ from nemo_gym.trajectory import (
     AgentObservationBundle,
     ObservationGap,
     SandboxObservation,
-    ToolCallObservation,
     TrajectoryRecord,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
@@ -761,17 +760,25 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 if timed_out
                 else parse_opencode_session(db_path, gym_reasoning=self.config.model_server is not None)
             )
-            observations = AgentObservationBundle(source="opencode")
+            observations = AgentObservationBundle(schema_version="2.0", source="opencode")
             if collect_observations:
                 try:
                     observations = _parse_opencode_session(
-                        db_path, invocation_id, trajectory, model_ref=self.config.model_server
+                        db_path,
+                        invocation_id,
+                        trajectory,
+                        model_ref=self.config.model_server,
+                        # This fresh local database is written by one OpenCode launch.
+                        clock_domain=f"opencode-wall:{uuid4().hex}",
+                        agent_instance=f"opencode-agent:{uuid4().hex}",
+                        observation_schema_version="2.0",
                     )
                 except Exception:
                     LOG.exception("failed to read OpenCode session artifact")
                     if trajectory is not None:
                         trajectory.gaps.append(ObservationGap(code="turns_unavailable"))
                     observations = AgentObservationBundle(
+                        schema_version="2.0",
                         source="opencode",
                         records=[AgentInvocation(invocation_id=invocation_id)],
                         gaps=[
@@ -1417,7 +1424,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         assert isinstance(state, OpenCodeSandboxSession)
         await state.close(self.config.session_close_timeout_seconds)
         observations = state.observations or AgentObservationBundle(
-            source="opencode", gaps=[ObservationGap(code="agent_activation_interrupted")]
+            schema_version="2.0", source="opencode", gaps=[ObservationGap(code="agent_activation_interrupted")]
         )
         # A capture that close finished after the activation returned reports its export failure here.
         observations.gaps.extend(state.take_export_gaps())
@@ -1641,7 +1648,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 stop_reason="timeout",
                 duration_ms=(monotonic() - started) * 1000,
             )
-            state.activation_observations = AgentObservationBundle(source="opencode", records=[invocation])
+            state.activation_observations = AgentObservationBundle(
+                schema_version="2.0", source="opencode", records=[invocation]
+            )
             state.activation_trajectory = TrajectoryRecord(
                 task_id=state.request.task_id.task_id,
                 rollout_id=state.request.episode_id.capture_key,
@@ -1661,7 +1670,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             if failure is not None:
                 observations = state.activation_observations
                 if observations is None:
-                    observations = AgentObservationBundle(source="opencode")
+                    observations = AgentObservationBundle(schema_version="2.0", source="opencode")
                     state.activation_observations = observations
                 if not any(
                     isinstance(r, AgentInvocation) and r.parent_invocation_id is None for r in observations.records
@@ -1878,6 +1887,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             if state.is_continuation and state.harness_session_id is not None:
                 invocation_id += f":{state.harness_session_id}"
             observations = AgentObservationBundle(
+                schema_version="2.0",
                 source="opencode",
                 records=(
                     [
@@ -1987,13 +1997,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     record.error_type = "server_error"
         cancelled = isinstance(failure, asyncio.CancelledError)
         timed_out = result is not None and result["timed_out"]
-        if cancelled or timed_out:
-            # Gym stopped the process, so a tool OpenCode left running ended with that stop.
-            termination = "timeout" if timed_out else "cancelled"
-            for record in observations.records:
-                if isinstance(record, ToolCallObservation) and record.status == "incomplete":
-                    record.status = termination
-                    record.error_type = f"invocation_{termination}"
+        # The enclosing process deadline does not establish a tool's own terminal outcome.
+        # Persisted starts without native completion remain incomplete through normalization.
         if result is not None:
             sandbox_outcome = (
                 "timeout" if timed_out else "cancelled" if cancelled else "failed" if error or failure else "completed"

@@ -972,14 +972,21 @@ async def test_close_reports_the_cancel_on_the_sandbox_and_running_tools(setup, 
         "cancelled",
         241,
     )
-    tools = {record.tool_call_id: record for record in records if record.kind == "tool_call"}
-    assert (tools["running-shell"].status, tools["running-shell"].error_type) == ("cancelled", "invocation_cancelled")
+    tools = {
+        record.native_tool_call_id or record.tool_call_id: record for record in records if record.kind == "tool_call"
+    }
+    assert (tools["running-shell"].status, tools["running-shell"].error_type) == ("incomplete", None)
     assert tools["tool-1"].status != "cancelled"
     invocation = next(record for record in records if record.kind == "agent_invocation")
-    assert {"type": "function_call_output", "call_id": "running-shell", "output": "started"}.items() <= next(
+    assert {
+        "type": "function_call_output",
+        "call_id": tools["running-shell"].tool_call_id,
+        "output": "started",
+    }.items() <= next(
         item.model_dump()
         for item in invocation.conversation
-        if getattr(item, "call_id", None) == "running-shell" and item.type == "function_call_output"
+        if getattr(item, "call_id", None) == tools["running-shell"].tool_call_id
+        and item.type == "function_call_output"
     ).items()
 
 
@@ -2378,6 +2385,9 @@ async def test_close_keeps_captured_events_after_sandbox_release(setup, tmp_path
         assert response.agent_observations is not None
         invocations = [record for record in response.agent_observations.records if record.kind == "agent_invocation"]
         assert any(record.conversation for record in invocations)
+        assert all(record.agent_instance == state.agent_instance for record in invocations)
+        tools = [record for record in response.agent_observations.records if record.kind == "tool_call"]
+        assert tools and all(record.agent_instance == state.agent_instance for record in tools)
         assert state.session.closed
         assert await agent.close_agent_session(request, close) == response
         (sandbox.stop if owned else sandbox.disconnect).assert_awaited_once()
