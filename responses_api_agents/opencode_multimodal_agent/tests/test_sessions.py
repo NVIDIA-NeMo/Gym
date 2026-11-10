@@ -618,3 +618,23 @@ def test_session_rejects_non_inline_images(visual_setup, source):
         agent._session_input(NeMoGymResponseCreateParamsNonStreaming.model_validate(body))
     assert error.value.status_code == 422
     sandbox.launch.assert_not_awaited()
+
+
+def test_session_accepts_image_wider_than_previous_resize_threshold(visual_setup):
+    from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+    from responses_api_agents.opencode_agent.runtime import UNRESTRICTED_IMAGE_ATTACHMENT
+
+    agent, _ = visual_setup
+    agent = agent.model_copy(update={"config": agent.config.model_copy(update={"preserve_image_format": True})})
+    image = io.BytesIO()
+    Image.new("RGB", (9001, 2), "red").save(image, format="PNG")
+    body = request_body()
+    body["input"][0]["content"][1]["image_url"] = (
+        "data:image/png;base64," + base64.b64encode(image.getvalue()).decode()
+    )
+    _, _, media = agent._session_input(NeMoGymResponseCreateParamsNonStreaming.model_validate(body))
+    assert media[0].data == image.getvalue()
+    assert Image.open(io.BytesIO(media[0].data)).size == (9001, 2)
+    policy = agent._build_opencode_config()["attachment"]["image"]
+    for key, value in UNRESTRICTED_IMAGE_ATTACHMENT["image"].items():
+        assert policy[key] == value

@@ -526,9 +526,9 @@ def test_training_image_policy_and_override(monkeypatch):
     obj = agent(monkeypatch)
     assert obj._build_opencode_config()["attachment"]["image"] == {
         "auto_resize": True,
-        "max_width": 8000,
-        "max_height": 8000,
-        "max_base64_bytes": 1024**3,
+        "max_width": 2**31 - 1,
+        "max_height": 2**31 - 1,
+        "max_base64_bytes": 2**31 - 1,
     }
     obj = agent(monkeypatch, image_policy={"auto_resize": False})
     assert obj._build_opencode_config()["attachment"]["image"]["auto_resize"] is False

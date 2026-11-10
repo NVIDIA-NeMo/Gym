@@ -22,13 +22,13 @@ opencode_multimodal_agent:
         bwrap_command: ["???"]
         python_env: ???  # Python with Pillow/numpy/scipy/OpenCV
         plugin_dependencies: ???  # node_modules/@opencode-ai/plugin
-      # Applied to initial attachments and read-tool images. Set auto_resize:
-      # false to disable resizing; the model still has its own image processing.
+      # Match upstream unrestricted limits to preserve prompt and read-tool images.
+      # Lower limits explicitly for endpoints that require smaller images.
       image_policy:
         auto_resize: true
-        max_width: 8000
-        max_height: 8000
-        max_base64_bytes: 1073741824
+        max_width: 2147483647
+        max_height: 2147483647
+        max_base64_bytes: 2147483647
       concurrency: 256
       context_window: 49152
       max_output_tokens: 49152

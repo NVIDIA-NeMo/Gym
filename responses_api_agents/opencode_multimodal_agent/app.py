@@ -40,7 +40,7 @@ from responses_api_agents.opencode_agent.protocol import (
     AGENT_TRAJECTORY_KEY,
     OPENCODE_1_17_11_MAX_STEPS,
 )
-from responses_api_agents.opencode_agent.runtime import OBSERVABILITY_PATCH
+from responses_api_agents.opencode_agent.runtime import OBSERVABILITY_PATCH, UNRESTRICTED_IMAGE_ATTACHMENT
 from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession
 from responses_api_agents.opencode_multimodal_agent.eval_sandbox import EvalSandboxConfig, sandbox_command
 from responses_api_agents.opencode_multimodal_agent.media import final_answer, parse_visual_session, stage_inputs
@@ -66,12 +66,12 @@ def normalize_network_access(value: str) -> str:
 
 
 class OpenCodeImageConfig(BaseModel):
-    """Stock attachment policy for both initial images and tool crops."""
+    """OpenCode attachment limits; defaults preserve initial images and tool crops."""
 
     auto_resize: bool = True
-    max_width: int = Field(default=8000, gt=0)
-    max_height: int = Field(default=8000, gt=0)
-    max_base64_bytes: int = Field(default=1024**3, gt=0)
+    max_width: int = Field(default=UNRESTRICTED_IMAGE_ATTACHMENT["image"]["max_width"], gt=0)
+    max_height: int = Field(default=UNRESTRICTED_IMAGE_ATTACHMENT["image"]["max_height"], gt=0)
+    max_base64_bytes: int = Field(default=UNRESTRICTED_IMAGE_ATTACHMENT["image"]["max_base64_bytes"], gt=0)
 
 
 class OpenCodeMultimodalAgentConfig(OpenCodeAgentConfig):

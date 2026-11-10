@@ -55,9 +55,9 @@ def test_eval_keeps_budget_and_matches_original_prompt_image_tools(monkeypatch, 
     assert "permission" not in cfg["agent"]["build"]
     assert cfg["attachment"]["image"] == {
         "auto_resize": True,
-        "max_width": 8000,
-        "max_height": 8000,
-        "max_base64_bytes": 1024**3,
+        "max_width": 2**31 - 1,
+        "max_height": 2**31 - 1,
+        "max_base64_bytes": 2**31 - 1,
     }
     assert cfg["compaction"] == {"auto": False, "prune": False}
     assert cfg["tools"]["task"] is True
@@ -143,7 +143,7 @@ def test_eval_compaction_and_native_image_resize_are_independent(monkeypatch, tm
     runner.config.compaction_auto = True
     compact = runner._build_opencode_config("test")
     assert compact["compaction"] == {"auto": True, "prune": False}
-    assert compact["attachment"]["image"]["max_width"] == 8000
+    assert compact["attachment"]["image"]["max_width"] == 2**31 - 1
     runner.config.use_default_image_resize = True
     resized = runner._build_opencode_config("test")
     assert "attachment" not in resized

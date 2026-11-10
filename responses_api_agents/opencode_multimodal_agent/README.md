@@ -286,8 +286,17 @@ controls automatic OpenCode compaction.
 
 The agent's `max_images` limits initial attachments. Requests exceeding it fail
 before generation. `max_source_pixels` limits the size of an input image.
-`image_policy` controls attachment resizing; the base policy resizes images
-larger than 8000 pixels in either dimension.
+The default acceptance limit is 150 million pixels per image (width × height).
+Raise `max_source_pixels` to accept larger inputs; exceeding it rejects the image
+rather than resizing it. The model endpoint has separate image limits.
+
+`image_policy` defaults to upstream's unrestricted OpenCode attachment thresholds
+(2,147,483,647 for width, height and base64 bytes), preserving accepted prompt and
+tool images without automatic resizing. Lower these thresholds explicitly if an
+endpoint requires resizing. OpenCode's `auto_resize: false` rejects an image that
+exceeds the thresholds; it does not bypass them. Evaluation's
+`use_default_image_resize: true` explicitly restores OpenCode's stock thresholds;
+it is disabled by default.
 
 The model adapter's separate `max_images` setting limits images accumulated in
 model requests. Additional images are replaced with:
