@@ -929,14 +929,18 @@ class CodexAgent(SimpleResponsesAPIAgent):
                     cwd=workdir,
                     timeout_s=self.config.sandbox_install_timeout_seconds,
                 )
-                reported = (checked.stdout or "").strip()
+                # OpenSandbox may merge stderr warnings into stdout. Match the exact version
+                # record without treating those diagnostics as part of the version string.
+                reported = [
+                    line.strip() for line in (checked.stdout or "").splitlines() if line.startswith("codex-cli ")
+                ]
                 if checked.error_type:
                     # A transport failure or timeout may pass on another attempt.
                     raise RuntimeError(
                         f"Codex could not check the runtime in {runtime} (error_type={checked.error_type}); "
                         f"stdout={checked.stdout}; stderr={checked.stderr}"
                     )
-                if checked.return_code != 0 or reported != f"codex-cli {self.config.codex_version}":
+                if checked.return_code != 0 or reported != [f"codex-cli {self.config.codex_version}"]:
                     # A missing runtime or another version fails the same way every time.
                     raise AgentSeedRejectedError(
                         f"Codex runtime in {runtime} does not run codex_version {self.config.codex_version} "
