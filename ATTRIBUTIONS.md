@@ -48,6 +48,14 @@ revision `8c563b55d7c967755f474299848049834d624617`, by Scale AI, under
 [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/). NeMo Gym reformats the rows, normalizes claims,
 and selects the image-supported tool schemas. The external `ghcr.io/scaleapi/mcp-atlas:1.2.7` runtime image
 is not vendored; `resources_servers/mcp_atlas/tool_catalog.json` contains its exported MCP tool schemas.
+Its 5 `slack_*` schemas are copied from the upstream list-tools export
+(https://gist.githubusercontent.com/geobio/d0272d41ea395376233f1617a3988860/raw/4444343be47c0874fd19631b20caf2738b0168a4/list-tools.json,
+Gist revision `3c562bd9468516a1d80dfadfc8a4dc1e24ed967a`). They are the tool definitions of
+[korotovsky/slack-mcp-server](https://github.com/korotovsky/slack-mcp-server/tree/21eaf72a3be33e7f3fd44c61a07645bedc376ff4)
+`1.1.23` (revision `21eaf72a3be33e7f3fd44c61a07645bedc376ff4`), MIT licensed, Copyright (c) 2025 Dmitrii
+Korotovskii. The catalog header retains the exact source revision and full
+[MIT notice](https://github.com/korotovsky/slack-mcp-server/blob/21eaf72a3be33e7f3fd44c61a07645bedc376ff4/LICENSE);
+these static schemas do not establish authenticated runtime access.
 
 ## Python Package Dependencies
 

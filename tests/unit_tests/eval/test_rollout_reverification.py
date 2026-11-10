@@ -17,7 +17,6 @@ import json
 from asyncio import Semaphore
 from collections import defaultdict
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import orjson
@@ -25,7 +24,6 @@ import pytest
 from pydantic import ValidationError
 
 from nemo_gym.artifacts.rollout_rows import NG_DISPATCH_DRAINED_KEY
-from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.global_config import (
     AGENT_REF_KEY_NAME,
@@ -79,6 +77,7 @@ from nemo_gym.rollouts.rollout_collection import NG_OMITTED_ROLLOUT_KEY, NG_TERM
 from nemo_gym.server_runtime.base_resources_server import ReverifyMode
 from nemo_gym.trajectory.atif_reverification import AtifProjectionError
 from nemo_gym.utils.path_utils import aggregation_sources_path_for
+from tests.helpers.reverification import build_reverification_payload
 
 
 _TOOL_TRAJECTORY_SHA256 = (
@@ -802,73 +801,6 @@ class TestYieldInputsAndRolloutsPaired:
 
 class TestBuildVerifyPayload:
     @pytest.mark.parametrize("errors", [[], ["service_error: HTTP 429"]])
-    async def test_mcp_reverification_rejudges_answer_and_retains_environment(
-        self, errors: list[str], monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from resources_servers.mcp_atlas import app as atlas
-
-        judge = AsyncMock(
-            return_value=SimpleNamespace(
-                choices=[SimpleNamespace(message=SimpleNamespace(content='{"coverage_outcome":"fulfilled"}'))]
-            )
-        )
-        monkeypatch.setattr(atlas, "call_judge", judge)
-        server = atlas.MCPAtlasResourcesServer(
-            config=atlas.MCPAtlasResourcesServerConfig(
-                name="atlas",
-                entrypoint="app.py",
-                host="127.0.0.1",
-                port=0,
-                sandbox_base_url="http://127.0.0.1:1984",
-                sandbox_development_mode=True,
-                judge_model_server={"type": "responses_api_models", "name": "judge"},
-            ),
-            server_client=MagicMock(spec=ServerClient),
-        )
-        pair = InputRolloutPair(
-            input={
-                "responses_create_params": {"input": []},
-                "verifier_metadata": {"task_id": "a", "claims": ["A claim"]},
-            },
-            rollout={
-                "response": {
-                    "id": "r",
-                    "created_at": 0,
-                    "model": "policy",
-                    "object": "response",
-                    "output": [
-                        {
-                            "id": "message",
-                            "type": "message",
-                            "role": "assistant",
-                            "status": "completed",
-                            "content": [{"type": "output_text", "text": "The answer.", "annotations": []}],
-                        }
-                    ],
-                    "parallel_tool_calls": True,
-                    "tool_choice": "auto",
-                    "tools": [],
-                },
-                "service_errors": errors,
-                "tool_calls": 1,
-                "reward": 0.0,
-                NG_FAILURE_CLASS_KEY: JUDGE_FAILED_FAILURE_CLASS,
-            },
-        )
-
-        result = await server.verify(
-            SimpleNamespace(session={}, cookies={}),
-            atlas.MCPAtlasVerifyRequest.model_validate(_build_verify_payload(pair)),
-        )
-
-        assert result.reward == 1.0 and result.coverage == 1.0
-        assert result.mask_sample is bool(errors)
-        assert result.failure_kind == ("mcp_atlas:service_error" if errors else None)
-        assert result.service_errors == errors and result.tool_calls == 1
-        judge.assert_awaited_once()
-        assert "The answer." in judge.await_args.kwargs["json"]["messages"][0]["content"]
-
-    @pytest.mark.parametrize("errors", [[], ["service_error: HTTP 429"]])
     def test_preserves_original_mcp_environment_without_reusing_its_grade(self, errors: list[str]) -> None:
         pair = InputRolloutPair(
             input={
@@ -886,7 +818,7 @@ class TestBuildVerifyPayload:
             },
         )
 
-        assert _build_verify_payload(pair) == {
+        assert build_reverification_payload(input_row=pair.input, saved_row=pair.rollout) == {
             "verifier_metadata": {"task_id": "a", "claims": ["A claim"]},
             "response": {"output": []},
             "service_errors": errors,

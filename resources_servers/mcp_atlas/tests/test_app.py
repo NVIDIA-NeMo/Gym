@@ -25,6 +25,7 @@ from resources_servers.mcp_atlas.sandbox import SandboxError
 from resources_servers.mcp_atlas.tests.fake_agent_environment import FakeAgentEnvironment
 from resources_servers.mcp_atlas.tests.test_sandbox import FakeSandbox, pool
 from resources_servers.mcp_atlas.tests.test_verifier import message, response
+from tests.helpers.reverification import build_reverification_payload
 
 
 TOOLS = ["calculator_calculate", "github_get_repository", "met-museum_get-museum-object"]
@@ -161,8 +162,26 @@ def test_opensandbox_rejects_a_local_sif(tmp_path) -> None:
         )
 
 
-def test_opensandbox_rejects_a_policy_whose_port_restriction_would_be_dropped() -> None:
-    with pytest.raises(ValueError, match="SDK drops or changes"):
+def test_opensandbox_rejects_domain_port_restrictions_before_pool_creation(monkeypatch: pytest.MonkeyPatch) -> None:
+    pool_factory = MagicMock()
+    monkeypatch.setattr("resources_servers.mcp_atlas.app.SandboxPool", pool_factory)
+    rule = {"action": "allow", "target": "service.example"}
+    options = {"network_policy": {"defaultAction": "deny", "egress": [rule]}}
+    server = make_server(
+        "",
+        judge_client(),
+        sandbox_image="ghcr.io/scaleapi/mcp-atlas:1.2.7",
+        sandbox_provider={"opensandbox": {}},
+        sandbox_options=options,
+        sandbox_development_mode=False,
+    )
+    pool_factory.assert_called_once()
+    assert server._pool is pool_factory.return_value
+    assert pool_factory.call_args.kwargs["sandbox_options"] == options
+    pool_factory.reset_mock()
+
+    # SDK versions either discard domain ports or reject them during validation.
+    with pytest.raises(ValueError):
         make_server(
             "",
             judge_client(),
@@ -171,10 +190,39 @@ def test_opensandbox_rejects_a_policy_whose_port_restriction_would_be_dropped() 
             sandbox_options={
                 "network_policy": {
                     "defaultAction": "deny",
-                    "egress": [{"action": "allow", "target": "service.example", "ports": [443]}],
+                    "egress": [{**rule, "ports": [443]}],
                 }
             },
+            sandbox_development_mode=False,
         )
+    pool_factory.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        {"defaultAction": "deny", "egress": [], "unexpectedPolicyField": "reject-me"},
+        {
+            "defaultAction": "deny",
+            "egress": [{"action": "allow", "target": "service.example", "unexpectedRuleField": "reject-me"}],
+        },
+    ],
+)
+def test_opensandbox_rejects_policy_fields_the_sdk_silently_discards(
+    monkeypatch: pytest.MonkeyPatch, policy: dict[str, object]
+) -> None:
+    pool_factory = MagicMock()
+    monkeypatch.setattr("resources_servers.mcp_atlas.app.SandboxPool", pool_factory)
+    with pytest.raises(ValueError, match="SDK drops or changes"):
+        make_server(
+            "",
+            judge_client(),
+            sandbox_image="ghcr.io/scaleapi/mcp-atlas:1.2.7",
+            sandbox_provider={"opensandbox": {}},
+            sandbox_options={"network_policy": policy},
+            sandbox_development_mode=False,
+        )
+    pool_factory.assert_not_called()
 
 
 def test_opensandbox_resolves_provider_and_keeps_control_credentials_host_side(monkeypatch) -> None:
@@ -440,6 +488,52 @@ async def test_reverify_judges_a_saved_row_again(environment) -> None:
     assert again.tool_calls == 1
     assert again.service_errors == first.service_errors
     assert again.mask_sample is True and again.failure_kind == "mcp_atlas:service_error"
+
+
+@pytest.mark.parametrize("errors", [[], ["service_error: HTTP 429"]])
+async def test_mcp_reverification_rejudges_answer_and_retains_environment(errors: list[str]) -> None:
+    client = judge_client("fulfilled")
+    server = make_server("http://unused", client)
+    payload = build_reverification_payload(
+        input_row={
+            "responses_create_params": {"input": []},
+            "verifier_metadata": {"task_id": "a", "claims": ["A claim"]},
+        },
+        saved_row={
+            "response": {
+                "id": "r",
+                "created_at": 0,
+                "model": "policy",
+                "object": "response",
+                "output": [
+                    {
+                        "id": "message",
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": "The answer.", "annotations": []}],
+                    }
+                ],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            },
+            "service_errors": errors,
+            "tool_calls": 1,
+            "reward": 0.0,
+            "_ng_failure_class": "judge_failed",
+        },
+    )
+    result = await server.verify(
+        SimpleNamespace(session={}, cookies={}), MCPAtlasVerifyRequest.model_validate(payload)
+    )
+
+    assert result.reward == 1.0 and result.coverage == 1.0
+    assert result.mask_sample is bool(errors)
+    assert result.failure_kind == ("mcp_atlas:service_error" if errors else None)
+    assert result.service_errors == errors and result.tool_calls == 1
+    client.post.assert_awaited_once()
+    assert "The answer." in client.post.await_args.kwargs["json"]["messages"][0]["content"]
 
 
 async def test_verify_without_a_session_is_masked(environment) -> None:

@@ -50,9 +50,10 @@ so the masks stay the same.
 
 ## Setup
 
-The current integration is pending validation. The committed catalog has no Slack tools, so preparation
-refuses the 60 Slack-enabled tasks until their authenticated schemas are exported and committed. The
-OpenSandbox transport and policy configuration still require real deployment and rollout validation.
+The current integration is pending validation. The five Slack schemas match the pinned package and upstream
+export (see Licensing). An authenticated runtime listing, working Slack credentials and the seeded workspace
+still need validation. The OpenSandbox transport and policy configuration require real deployment and
+rollout validation.
 An evaluated Python tool must be unable to reach other rollouts or the Gym control plane. See the
 [evaluation tutorial](https://docs.nvidia.com/nemo/gym/main/tutorials/evaluation-tutorials/mcp-atlas).
 
@@ -125,4 +126,12 @@ at revision `8c563b55d7c967755f474299848049834d624617`, under
 [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/). Preparation changes the row format, extracts and
 normalizes the claims, and selects the image-supported tool schemas. These are changes to the data's
 representation; they do not change its attribution or license. `tool_catalog.json` records the image from
-which its MCP schemas were exported. The image and its installed services are external runtime dependencies.
+which its MCP schemas were exported. Its 5 `slack_*` schemas are copied from the upstream README's
+[list-tools export](https://gist.githubusercontent.com/geobio/d0272d41ea395376233f1617a3988860/raw/4444343be47c0874fd19631b20caf2738b0168a4/list-tools.json)
+(Gist revision `3c562bd9468516a1d80dfadfc8a4dc1e24ed967a`, SHA-256
+`ca173815297dece47eb5384b53b9f6b77ad3e74987751e9000cf7ef0aa32fea5`), keeping only `name`, `description` and
+`inputSchema`. They are the static tool definitions of `slack-mcp-server@1.1.23`, the version the image pins
+([korotovsky/slack-mcp-server](https://github.com/korotovsky/slack-mcp-server/blob/21eaf72a3be33e7f3fd44c61a07645bedc376ff4/pkg/server/server.go)
+at `21eaf72a3be33e7f3fd44c61a07645bedc376ff4`, MIT, Copyright (c) 2025 Dmitrii Korotovskii), which registers
+the same five tools with matching parameters, types and required fields. The catalog header retains the
+source revision and full MIT notice. The image and its installed services are external runtime dependencies.

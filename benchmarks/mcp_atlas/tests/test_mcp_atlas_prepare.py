@@ -92,6 +92,51 @@ def test_a_partial_server_catalog_cannot_drop_requested_tools() -> None:
     assert row["verifier_metadata"]["dropped_tools"] == []
 
 
+def test_the_pinned_task_keeps_its_row_and_audits_the_unavailable_clinical_tool() -> None:
+    task_id = "6887c6d4614f06dc73af2411"
+    unavailable = "clinicaltrialsgov-mcp-server_clinicaltrials_search_studies"
+    available = "clinicaltrialsgov-mcp-server_clinicaltrials_get_study"
+    record = {
+        "TASK": task_id,
+        "PROMPT": "Identify the clinical study.",
+        "ENABLED_TOOLS": json.dumps([available, unavailable]),
+        "GTFA_CLAIMS": '["The study is identified."]',
+    }
+    catalog = {available: {"name": available, "server": "clinicaltrialsgov-mcp-server"}}
+    row = build_row(record, catalog, ["clinicaltrialsgov-mcp-server"])
+    assert row["task_id"] == task_id
+    assert row["responses_create_params"]["input"] == [{"role": "user", "content": record["PROMPT"]}]
+    assert [tool["name"] for tool in row["responses_create_params"]["tools"]] == [available]
+    assert row["verifier_metadata"] == {
+        "task_id": task_id,
+        "enabled_tools": [available],
+        "servers": ["clinicaltrialsgov-mcp-server"],
+        "claims": ["The study is identified."],
+        "dropped_tools": [unavailable],
+    }
+
+
+@pytest.mark.parametrize(
+    ("task_id", "missing_tool"),
+    [
+        ("6887c6d4614f06dc73af2412", "clinicaltrialsgov-mcp-server_clinicaltrials_search_studies"),
+        ("6887c6d4614f06dc73af2411", "clinicaltrialsgov-mcp-server_clinicaltrials_search_study"),
+        ("6887c6d4614f06dc73af2411", "clinicaltrialsgov-mcp-server_clinicaltrials_get_study"),
+        ("6887c6d4614f06dc73af2411", "slack_channels_list"),
+    ],
+)
+def test_the_unavailable_clinical_tool_exception_does_not_hide_other_missing_exports(task_id, missing_tool) -> None:
+    unavailable = "clinicaltrialsgov-mcp-server_clinicaltrials_search_studies"
+    record = {
+        "TASK": task_id,
+        "PROMPT": "Identify the clinical study.",
+        "ENABLED_TOOLS": json.dumps(sorted({unavailable, missing_tool})),
+        "GTFA_CLAIMS": '["The study is identified."]',
+    }
+    with pytest.raises(ValueError, match=f"missing tools.*{missing_tool}"):
+        build_row(record, {}, ["clinicaltrialsgov-mcp-server", "slack"])
+
+
 def test_catalog_names_carry_their_server_prefix() -> None:
     catalog, servers = load_catalog()
     assert len(servers) == 36

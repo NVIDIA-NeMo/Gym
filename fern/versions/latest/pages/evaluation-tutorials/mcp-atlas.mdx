@@ -58,6 +58,17 @@ Preparation downloads the pinned public Parquet file and writes
 missing from an image-supported server's catalog. Tools belonging to servers the image does not ship
 are recorded in `verifier_metadata.dropped_tools`, following the upstream integration.
 
+The pinned dataset has one tool-version mismatch: task `6887c6d4614f06dc73af2411` requests
+`clinicaltrialsgov-mcp-server_clinicaltrials_search_studies`. The upstream configuration pins
+`clinicaltrialsgov-mcp-server@1.0.8`, which does not register that name. NeMo Gym keeps this task and records it in
+`dropped_tools`, without inventing an alias or upgrading the server. This exception matches only that
+task/tool pair; every other missing tool of a supported server still fails preparation. The
+[pinned package source](https://github.com/cyanheads/clinicaltrialsgov-mcp-server/blob/abd96801b84eaea0b7e1db952d434a393730a5c5/src/mcp-server/server.ts)
+is Apache-2.0 licensed. The
+[pinned Atlas harness](https://github.com/scaleapi/mcp-atlas/blob/5c11ac44e96d31b91b92a0affad5f2648255907a/services/agent-harness/src/mcp-agent/helpers/mcp-client/sandbox-client.ts#L107-L115),
+licensed under MIT, likewise offers only tools actually listed by the image. This handling is implemented
+independently; no package code or replacement schema is copied.
+
 ## Configure and collect
 
 These keys control the benchmark's runtime:

@@ -30,7 +30,8 @@
 Each row gives the model the task prompt and, as function tools, the task's ``ENABLED_TOOLS`` that the
 agent-environment image serves (schemas from ``resources_servers/mcp_atlas/tool_catalog.json``). Tools of
 servers the image does not ship are dropped, as upstream does. Claims are cleaned with upstream's
-``score_claims.py`` rules and stored for the verifier.
+``score_claims.py`` rules and stored for the verifier. One documented task/tool-version mismatch is
+also retained in ``dropped_tools``; other missing tools of supported servers remain errors.
 """
 
 from __future__ import annotations
@@ -51,6 +52,13 @@ TOOL_CATALOG = BENCHMARK_DIR.parent.parent / "resources_servers" / "mcp_atlas" /
 REVISION = "8c563b55d7c967755f474299848049834d624617"  # pragma: allowlist secret (public dataset revision)
 PARQUET_URL = f"https://huggingface.co/datasets/ScaleAI/MCP-Atlas/resolve/{REVISION}/MCP-Atlas.parquet"
 EXPECTED_TASKS = 500
+# The pinned package registers list_studies, not search_studies. No server code is copied here.
+# Source (Apache-2.0):
+# https://github.com/cyanheads/clinicaltrialsgov-mcp-server/tree/abd96801b84eaea0b7e1db952d434a393730a5c5
+# Match only the known dataset task/tool pair; preserve the upstream intersection with actually served tools.
+UNAVAILABLE_TASK_TOOLS: frozenset[tuple[str, str]] = frozenset(
+    {("6887c6d4614f06dc73af2411", "clinicaltrialsgov-mcp-server_clinicaltrials_search_studies")}
+)
 
 
 def clean_claim_text(text: str) -> str:
@@ -100,12 +108,13 @@ def enabled_tool_names(blob: str) -> list[str]:
 
 def build_row(record: dict[str, str], catalog: dict[str, dict[str, Any]], servers: list[str]) -> dict[str, Any]:
     names = enabled_tool_names(record["ENABLED_TOOLS"])
-    unexported = sorted({s for name in names for s in servers if name.startswith(f"{s}_") and name not in catalog})
+    missing_names = {
+        name for name in names if name not in catalog and (record["TASK"], name) not in UNAVAILABLE_TASK_TOOLS
+    }
+    unexported = sorted({s for name in missing_names for s in servers if name.startswith(f"{s}_")})
     if unexported:
         # Missing any requested tool from a supported server changes the task.
-        missing = sorted(
-            name for name in names if name not in catalog and any(name.startswith(f"{s}_") for s in unexported)
-        )
+        missing = sorted(name for name in missing_names if any(name.startswith(f"{s}_") for s in unexported))
         raise ValueError(
             f"task {record['TASK']}: tool_catalog.json is missing tools {missing} of supported servers "
             f"{unexported}; export them first"
