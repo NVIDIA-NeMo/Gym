@@ -10,7 +10,6 @@ from resources_servers.string_match.app import (
     StringMatchResourcesServerConfig,
     StringMatchVerifyRequest,
 )
-from resources_servers.string_match.app_passrate import PassrateStringMatchResourcesServer
 
 
 @pytest.mark.asyncio
@@ -27,14 +26,12 @@ from resources_servers.string_match.app_passrate import PassrateStringMatchResou
         ("a<|im_end|>b", "a<|im_end|>b", True, "a<|im_end|>b", 1.0),
     ],
 )
-@pytest.mark.parametrize("configured", [False, True])
 async def test_verify_preserves_response(
-    text: str, expected_answer: str, case_sensitive: bool, extracted_answer: str, reward: float, configured: bool
+    text: str, expected_answer: str, case_sensitive: bool, extracted_answer: str, reward: float
 ) -> None:
-    server_class = StringMatchResourcesServer if configured else PassrateStringMatchResourcesServer
-    server = server_class(
+    server = StringMatchResourcesServer(
         config=StringMatchResourcesServerConfig(
-            host="127.0.0.1", port=8080, entrypoint="app_passrate.py", name="test", strip_trailing_eos=configured
+            host="127.0.0.1", port=8080, entrypoint="app.py", name="test", strip_trailing_eos=True
         ),
         server_client=MagicMock(spec=ServerClient),
     )
