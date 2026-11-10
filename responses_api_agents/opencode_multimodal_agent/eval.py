@@ -17,6 +17,7 @@ from responses_api_agents.opencode_multimodal_agent.rewards import OpenCodeToolR
 
 
 class OpenCodeMultimodalEvalConfig(OpenCodeMultimodalAgentConfig):
+    require_finalized_trace: bool = False
     tool_rewards: OpenCodeToolRewardConfig | None = None
     final_answer_reserve: int | None = Field(default=None, gt=0)
     strip_reasoning_for_grading: bool = False

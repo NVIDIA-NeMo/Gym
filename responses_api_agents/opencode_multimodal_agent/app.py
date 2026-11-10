@@ -17,7 +17,7 @@ from nemo_gym.agents import AgentSeedRejectedError, AgentSeedSessionRequest, Bod
 from nemo_gym.core import MediaFile, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.models.token_capture import OPENCODE_MAX_STEPS_PROMPT as OPENCODE_1_17_11_MAX_STEPS
 from nemo_gym.sandbox import SandboxProvider, SandboxSpec, read_text, upload_text
-from nemo_gym.trajectory import AgentEpisode, ToolCallObservation
+from nemo_gym.trajectory import AgentEpisode, AgentInvocation, ToolCallObservation
 from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgentConfig, _serialize_replacement_config
 from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession
 from responses_api_agents.opencode_multimodal_agent.media import prepare_image
@@ -48,6 +48,7 @@ class OpenCodeMultimodalAgentConfig(OpenCodeAgentConfig):
     tool_rewards: OpenCodeToolRewardConfig | None = Field(default_factory=OpenCodeToolRewardConfig)
     system_prompt: str | None = (ROOT / "prompts/visual_prefix.txt").read_text().strip()
     compaction_auto: bool = False
+    require_finalized_trace: bool = True
 
     @model_validator(mode="after")
     def validate_final_answer_policy(self) -> "OpenCodeMultimodalAgentConfig":
@@ -201,6 +202,20 @@ class OpenCodeMultimodalAgent(OpenCodeAgent):
         export = json.loads(state.session.artifacts) if state.session.artifacts else {}
         messages = export.get("messages", [])
         turns = sum(message.get("info", {}).get("role") == "assistant" for message in messages)
+        verification_error = None
+        if self.config.require_finalized_trace:
+            assistants = [
+                message.get("info", {}) for message in messages if message.get("info", {}).get("role") == "assistant"
+            ]
+            if any(message.get("info", {}).get("error") for message in messages) or any(
+                isinstance(record, AgentInvocation) and record.status == "failed"
+                for record in (state.observations.records if state.observations else [])
+            ):
+                verification_error = "OpenCode recorded a model/runtime error; do not score this rollout"
+            elif not assistants or (self.config.max_turns is not None and len(assistants) > self.config.max_turns):
+                verification_error = "Missing assistant turns or exceeded max_turns"
+            elif any(not (message.get("time") or {}).get("completed") for message in assistants):
+                verification_error = "Unfinished OpenCode assistant turn"
         if response.status == "completed":
             images = sum(
                 part.get("type") == "file" and part.get("mime", "").startswith("image/")
@@ -211,7 +226,7 @@ class OpenCodeMultimodalAgent(OpenCodeAgent):
             if images != state.expected_images:
                 raise HTTPException(502, "OpenCode dropped initial images")
         tools = None
-        if self.config.tool_rewards is not None and response.status == "completed":
+        if self.config.tool_rewards is not None and verification_error is None:
             call_ids = {
                 record.native_tool_call_id: record.tool_call_id
                 for record in (state.observations.records if state.observations else [])
@@ -247,6 +262,7 @@ class OpenCodeMultimodalAgent(OpenCodeAgent):
             response.model_dump()
             | {
                 "opencode_evidence": EpisodeEvidence(
+                    verification_error=verification_error,
                     turns_used=turns,
                     finished_naturally=response.status == "completed"
                     and bool(final_answer([item.model_dump() for item in response.output])),

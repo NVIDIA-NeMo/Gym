@@ -304,3 +304,33 @@ def test_text_prompt_uses_shared_conditional_image_declaration(visual_setup, ima
             client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).status_code
             == 200
         )
+
+
+@pytest.mark.parametrize("problem", ["unfinished", "model_error", "too_many_turns"])
+def test_training_trace_eligibility_uses_native_messages(visual_setup, problem):
+    agent, sandbox = visual_setup
+    export = json.loads(sandbox.events)
+    if problem == "unfinished":
+        export["messages"][1]["info"]["time"] = {}
+        expected = "Unfinished OpenCode assistant turn"
+    elif problem == "model_error":
+        export["messages"][1]["info"]["error"] = {"name": "APIError", "data": {"message": "failed"}}
+        expected = "model/runtime error"
+    else:
+        agent.config.max_turns = 1
+        export["messages"].append(export["messages"][1])
+        expected = "exceeded max_turns"
+    sandbox.events = json.dumps(export)
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json=body().model_dump(mode="json"))
+        if problem == "too_many_turns":
+            assert result.status_code == 200, result.text
+            assert expected in result.json()["opencode_evidence"]["verification_error"]
+            assert result.json()["opencode_evidence"]["tool_reward"] is None
+        else:
+            # Shared main parsing already rejects these before response construction.
+            assert result.status_code == 502
+            assert ("terminal assistant" if problem == "unfinished" else "APIError") in result.text
+        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))

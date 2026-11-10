@@ -147,6 +147,7 @@ def score_opencode_tools(
 class EpisodeEvidence(BaseModel):
     """Validated native evidence passed explicitly across the responses self-call."""
 
+    verification_error: str | None = None
     turns_used: int
     finished_naturally: bool
     tool_reward: OpenCodeToolReward | None

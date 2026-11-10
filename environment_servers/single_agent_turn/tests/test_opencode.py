@@ -108,12 +108,14 @@ def test_http_bridge_preserves_reward_and_training_tokens(wire_format):
 
 
 @pytest.mark.parametrize("base_reward", [0.0, 1.0])
-async def test_incomplete_response_without_final_tool_evidence_preserves_base_reward_and_tokens(base_reward):
+async def test_incomplete_finalized_trace_preserves_reward_shaping_and_tokens(base_reward):
     base, client = _environment_server(token_capture=True)
     response = _agent_response().model_dump(mode="json")
     response["status"] = "incomplete"
     response["incomplete_details"] = {"reason": "max_output_tokens"}
-    response["opencode_evidence"] = {"turns_used": 1, "finished_naturally": False, "tool_reward": None}
+    call = {"type": "function_call", "call_id": "bash-1", "name": "bash", "arguments": '{"command":"ls"}'}
+    tools = score_opencode_tools({"bash-1": ("bash", "completed", 0)}, [call], [], 0.0, OpenCodeToolRewardConfig())
+    response["opencode_evidence"] = {"turns_used": 1, "finished_naturally": False, "tool_reward": tools.model_dump()}
     client.responses[2] = _Response(response)
     verified = json.loads(client.responses[4].body)
     verified["reward"] = base_reward
@@ -121,9 +123,9 @@ async def test_incomplete_response_without_final_tool_evidence_preserves_base_re
     server = OpenCodeEnvironmentServer(config=base.config, server_client=client)
     result = await server.run_request(_request())
     assert result.failure is None
-    assert result.result.reward == base_reward
+    assert result.result.reward == pytest.approx(base_reward + (0.1 if base_reward else 0.02))
     saved = result.result.model_dump(mode="json")
-    assert saved["opencode_tool_reward"] is None
+    assert saved["opencode_tool_reward"]["bash_success_count"] == 1
     assert saved["finished_naturally"] is False
     assert saved["response"]["output"] == response["output"]
     assert saved["response"]["output"][0]["generation_token_ids"] == [3, 4]
@@ -147,3 +149,26 @@ async def test_completed_response_still_requires_native_evidence_for_shaping():
         await server._verify(
             _request(), SessionHandles(resources_session_id="resource", agent_session_id="agent"), response, None
         )
+
+
+@pytest.mark.parametrize("tool_rewards", [None, {}])
+async def test_unfinished_trace_rejected_before_verifier_and_resources_closed(tool_rewards):
+    base, client = _environment_server(token_capture=True)
+    client.global_config_dict.agent.responses_api_agents.test.tool_rewards = tool_rewards
+    response = _agent_response().model_dump(mode="json")
+    response["status"] = "incomplete"
+    response["opencode_evidence"] = {
+        "turns_used": 1,
+        "finished_naturally": False,
+        "tool_reward": None,
+        "verification_error": "Unfinished OpenCode assistant turn",
+    }
+    client.responses[2] = _Response(response)
+    # No verifier request; the next response is resource cleanup.
+    del client.responses[4]
+    server = OpenCodeEnvironmentServer(config=base.config, server_client=client)
+    result = await server.run_request(_request())
+    assert result.failure is not None
+    assert "Unfinished OpenCode assistant turn" in str(result.failure)
+    assert "/verify" not in [path for _, path, _ in client.calls]
+    assert client.calls[-1][1] == "/close_session"

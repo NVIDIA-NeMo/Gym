@@ -64,6 +64,20 @@ class OpenCodeEnvironmentServer(SingleAgentTurnLegacyEnvironmentServer):
         observations: AgentObservationBundle | None,
         trajectory: TrajectoryRecord | None = None,
     ) -> SingleAgentTurnResult:
+        evidence = (
+            EpisodeEvidence.model_validate((agent_response.model_extra or {}).get("opencode_evidence"))
+            if (agent_response.model_extra or {}).get("opencode_evidence")
+            else None
+        )
+        if evidence and evidence.verification_error:
+            raise self._failure(
+                stage="verification",
+                failure_reason=evidence.verification_error,
+                terminal=True,
+                partial_response=agent_response,
+                agent_observations=observations,
+                trajectory=trajectory,
+            )
         if agent_response.status == "failed":
             # Main has already selected VERIFY from the typed outcome policy. Never judge partial answers.
             return SingleAgentTurnResult.model_validate(
@@ -79,12 +93,13 @@ class OpenCodeEnvironmentServer(SingleAgentTurnLegacyEnvironmentServer):
         result = await super()._verify(
             request, handles, self._scoring_response(agent_response), observations, trajectory
         )
-        evidence = EpisodeEvidence.model_validate((agent_response.model_extra or {}).get("opencode_evidence"))
+        if evidence is None:
+            raise ValueError("Missing native OpenCode evidence")
         tools = evidence.tool_reward
         raw_config = self._agent_options().get("tool_rewards", {})
         base_reward = float(result.reward)
-        # Main may verify an incomplete model response; its tool execution evidence is not final.
-        shape_rewards = raw_config is not None and agent_response.status != "incomplete"
+        # Accepted finalized traces retain shaping even without a natural final answer.
+        shape_rewards = raw_config is not None
         if not shape_rewards:
             tools = None
         if shape_rewards:
