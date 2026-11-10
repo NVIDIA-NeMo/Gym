@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from openai import ConflictError
 
+
 _CACHED_FIELDS = ("tools", "instructions")
 
 
@@ -54,8 +55,9 @@ class HistoryDeltaClient:
             headers = dict(kwargs.get("extra_headers") or {})
             headers["x-gym-history-transport"] = "v1"
             payload = dict(kwargs)
-            reused = [key for key, value in parameters.items()
-                      if mode == "append" and self._parameters.get(key) == value]
+            reused = [
+                key for key, value in parameters.items() if mode == "append" and self._parameters.get(key) == value
+            ]
             if reused:
                 envelope["reuse_fields"] = reused
                 for key in reused:

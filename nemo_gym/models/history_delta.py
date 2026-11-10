@@ -32,7 +32,13 @@ def _extract_history(
     envelope = body.get("_gym_history")
     if not isinstance(envelope, dict):
         raise ValueError("_gym_history must be an object")
-    if set(envelope) - {"reuse_fields"} != {"conversation_id", "request_id", "base_version", "mode", "messages_sha256"}:
+    if set(envelope) - {"reuse_fields"} != {
+        "conversation_id",
+        "request_id",
+        "base_version",
+        "mode",
+        "messages_sha256",
+    }:
         raise ValueError("Invalid history transport fields")
     reused = envelope.get("reuse_fields", [])
     if (

@@ -1394,7 +1394,6 @@ class TestRunWebserverProxyKwargs:
         else:
             self.rollout_routing_setup.assert_not_called()
 
-
     @mark.parametrize("history_enabled", [False, True])
     def test_model_worker_socket_directory_is_created_only_for_history_transport(
         self, monkeypatch: MonkeyPatch, tmp_path, history_enabled: bool
@@ -1416,7 +1415,6 @@ class TestRunWebserverProxyKwargs:
         else:
             create_directory.assert_not_called()
             assert SESSION_SOCKET_DIR_ENV not in os.environ
-
 
     def test_proxy_headers_disabled_by_default_single_worker(self, monkeypatch: MonkeyPatch) -> None:
         kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=1)

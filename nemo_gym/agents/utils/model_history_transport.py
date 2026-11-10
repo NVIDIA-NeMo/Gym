@@ -78,7 +78,9 @@ class DeltaState:
         self.parameters: dict[str, bytes] = {}
         self._lock = threading.Lock()
 
-    def prepare(self, body: dict, field: str, *, full: bool = False) -> tuple[bytes, str, list[bytes], dict[str, bytes]]:
+    def prepare(
+        self, body: dict, field: str, *, full: bool = False
+    ) -> tuple[bytes, str, list[bytes], dict[str, bytes]]:
         items = [_encoded(item) for item in body[field]]
         history_bytes = b"[" + b",".join(items) + b"]"
         with self._lock:

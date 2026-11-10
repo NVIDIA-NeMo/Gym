@@ -103,7 +103,7 @@ class PiSandboxSession(AgentSessionState):
         *,
         command: list[str],
         env: dict[str, str],
-        prompt: str, 
+        prompt: str,
         files: dict[str, str | Path] | None = None,
         history_transport: dict | None = None,
     ) -> SandboxCommand:

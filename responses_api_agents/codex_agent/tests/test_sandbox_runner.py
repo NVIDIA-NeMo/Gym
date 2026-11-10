@@ -109,7 +109,7 @@ def test_delta_wraps_the_node_launcher_and_retains_its_forwarder(tmp_path):
     # Stand in for the CLI only: use the provider override supplied by the
     # real Node launcher, then send two full histories through its 429 proxy.
     cli = tmp_path / "fake_codex.mjs"
-    cli.write_text('''
+    cli.write_text("""
 const args = process.argv.slice(2);
 const override = args[args.indexOf("-c") + 1];
 const base = JSON.parse(override.slice(override.indexOf("=") + 1));
@@ -124,7 +124,7 @@ for (const input of [[first], [first, second]]) {
     await response.text();
 }
 console.log(JSON.stringify({type: "test.done"}));
-''')
+""")
     with upstream_server(Model) as upstream:
         process = launch(
             tmp_path,

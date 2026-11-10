@@ -963,9 +963,6 @@ class SessionRoutingMiddleware(WorkerForwarder):
         return session_id if isinstance(session_id, str) else None
 
 
-
-
-
 async def _conflict(detail: str, scope: Scope, receive: Receive, send: Send) -> None:
     await JSONResponse({"detail": detail}, status_code=409)(scope, receive, send)
 

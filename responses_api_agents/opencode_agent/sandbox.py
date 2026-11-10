@@ -371,12 +371,7 @@ class OpenCodeSandboxSession(AgentSessionState):
             for path in await stage_media(self.session.sandbox, media):
                 command.extend(["--file", path])
         command = await stage_cli_transport(
-            self.session.sandbox, {
-                **payload, 
-                "directory": directory, 
-                "command": command
-                }, 
-                harness="opencode"
+            self.session.sandbox, {**payload, "directory": directory, "command": command}, harness="opencode"
         )
         env = payload["env"]
         params = {
