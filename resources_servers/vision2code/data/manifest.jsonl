@@ -1,5 +1,5 @@
-{"id": "example", "image_path": "example.png", "rubric": "ChartQA"}
-{"id": "example-shapes", "image_path": "example-shapes.png", "rubric": "generic"}
-{"id": "example-line", "image_path": "example-line.png", "rubric": "ChartQA"}
-{"id": "example-triangle", "image_path": "example-triangle.png", "rubric": "geometry3k"}
-{"id": "example-graph", "image_path": "example-graph.png", "rubric": "Graph-Algorithms"}
+{"id": "matplotlib_test_000045_e3d14e5666cb", "image_path": "example-1.png", "rubric": "matplotlib"}
+{"id": "matplotlib_test_000026_ae155987adb4", "image_path": "example-2.png", "rubric": "matplotlib"}
+{"id": "matplotlib_test_000065_22b16f67e54d", "image_path": "example-3.png", "rubric": "matplotlib"}
+{"id": "matplotlib_test_000058_197d20bd57b7", "image_path": "example-4.png", "rubric": "matplotlib"}
+{"id": "matplotlib_test_000112_8cf1fea7b522", "image_path": "example-5.png", "rubric": "matplotlib"}

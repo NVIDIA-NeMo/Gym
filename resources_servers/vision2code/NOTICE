@@ -39,14 +39,21 @@ Both pyplot and Figure saves use Figure.savefig interception, the required outpu
 path, target dimensions, and 100 DPI, overriding explicit cropping and padding
 arguments. Explicit output formats and Matplotlib global cropping settings are preserved.
 
-README revision example
-Reference image: Matplotlib gallery, Errorbar function
-Source: https://matplotlib.org/stable/gallery/statistics/errorbar.html
+README and bundled dataset examples
+Reference images: Matplotlib gallery
+Sources:
+https://matplotlib.org/stable/gallery/statistics/confidence_ellipse.html
+https://matplotlib.org/stable/gallery/userdemo/simple_legend02.html
+https://matplotlib.org/stable/gallery/pyplots/pyplot_simple.html
+https://matplotlib.org/stable/gallery/event_handling/data_browser.html
+https://matplotlib.org/stable/gallery/widgets/buttons.html
 Copyright (c) 2012- Matplotlib Development Team; All Rights Reserved
-License: Matplotlib (see results/revision-example/LICENSE.matplotlib)
-The reference and three model-generated recreations were copied from saved Gym
-rollouts without image edits. Source identity, image hashes, and feedback are
-recorded in results/revision-example/provenance.json.
+License: Matplotlib (see data/LICENSE.matplotlib and results/revision-example/LICENSE.matplotlib)
+References and model-generated recreations were copied from saved Kimi K3 single-pass
+and Qwen3.8-27B three-pass Gym rollouts without image edits. Source identity, image
+hashes, selection criteria, settings, and recorded scores are in data/example-provenance.json
+and results/revision-example/provenance.json. Saved policy requests, responses, and feedback
+are in data/example_rollouts.jsonl and results/revision-example/rollout.jsonl.
 
 Review compatibility changes
 DocVQA and EEE-Bench definitions are restored from the unmodified public source

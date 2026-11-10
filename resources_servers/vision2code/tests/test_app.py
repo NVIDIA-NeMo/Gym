@@ -323,7 +323,7 @@ async def test_committed_reference_is_independent_of_server_working_directory(se
         json.loads(example.read_text().splitlines()[0])["verifier_metadata"]
     )
     monkeypatch.chdir(tmp_path)
-    judge.return_value = judge_result("ChartQA")
+    judge.return_value = judge_result(body.verifier_metadata.rubric)
     result = await server.verify(body)
     assert result.reward == pytest.approx(0.64) and not result.mask_sample
     content = judge.call_args.kwargs["params"].model_dump()["input"][1]["content"]

@@ -182,6 +182,27 @@ path, dimensions, and checksum in verifier metadata so it can check the referenc
 the output. Keep those source files accessible to the resource server. Prepared
 [example tasks](data/example.jsonl) and [real rollouts](data/example_rollouts.jsonl) are included.
 
+### Saved single-pass examples
+
+These five Kimi K3 rollouts come from `kimi-k3-test-mini-gpt61sol-pass1-v2`, with
+GPT-6.1-Sol judging, temperature 0, and uncapped Blend A rewards. They were randomly
+sampled (seed `20261110`) from the run's 11 successful, unmasked Matplotlib examples,
+without filtering by reward. They illustrate individual outputs rather than aggregate performance.
+[Selection, settings, and image hashes](data/example-provenance.json) accompany the
+[tasks](data/example.jsonl) and [saved rollouts](data/example_rollouts.jsonl).
+
+| Example | Reference | Kimi K3 render | Reward |
+| --- | --- | --- | --- |
+| Confidence ellipse | ![Reference confidence ellipse](data/example-1.png) | ![Kimi confidence ellipse](data/example-1-output.png) | 0.67684 |
+| Legends | ![Reference legends](data/example-2.png) | ![Kimi legends](data/example-2-output.png) | 0.64774 |
+| Simple line | ![Reference line plot](data/example-3.png) | ![Kimi line plot](data/example-3-output.png) | 0.48902 |
+| Data browser | ![Reference data browser](data/example-4.png) | ![Kimi data browser](data/example-4-output.png) | 0.68694 |
+| Buttons | ![Reference buttons plot](data/example-5.png) | ![Kimi buttons plot](data/example-5-output.png) | 0.94760 |
+
+Reference images use the [Matplotlib license](data/LICENSE.matplotlib).
+Image bytes and scores are copied from the saved run; they were not regenerated with
+the current infrastructure changes.
+
 ## Training workflow
 
 Choose a reward recipe, prepare a training manifest, and supply the resulting tasks and
@@ -326,17 +347,21 @@ request or adds a repair prompt.
 
 ### Example: passes 1–3
 
-This Qwen3.8-27B rollout uses the `matplotlib` rubric, GPT-6.1-Sol judge, and linear reward.
-The reference and all three renders are reused from the [saved evaluation](#benchmark-results).
+This Qwen3.8-27B rollout comes from `qwen38-test-mini-blend-uncapped-gpt61sol-pass3`,
+using the `matplotlib` rubric, GPT-6.1-Sol judge, temperature 0, and uncapped Blend A rewards.
+The policy received canvas dimensions and rendered-image, judge, and pixel feedback
+between passes. Best-pass selection chose pass 3.
 
-| Reference | Pass 1 · 0.78 | Pass 2 · 0.84 | Pass 3 · 0.92 |
+| Reference | Pass 1 · 0.66074 | Pass 2 · 0.84636 | Pass 3 · 0.90380 |
 | --- | --- | --- | --- |
-| ![Reference error-bar plot](results/revision-example/reference.png) | ![Pass 1 recreation](results/revision-example/pass1.png) | ![Pass 2 recreation](results/revision-example/pass2.png) | ![Pass 3 recreation](results/revision-example/pass3.png) |
+| ![Reference line plot](results/revision-example/reference.png) | ![Pass 1 recreation](results/revision-example/pass1.png) | ![Pass 2 recreation](results/revision-example/pass2.png) | ![Pass 3 recreation](results/revision-example/pass3.png) |
 
-Feedback led to a corrected background, a connected point-to-point line, and removal of
-extra error-bar caps. This is one illustrative improving example; revisions can also
-plateau or regress. [Saved feedback and provenance](results/revision-example/provenance.json).
-Reference: Matplotlib's [error-bar example](https://matplotlib.org/stable/gallery/statistics/errorbar.html),
+Feedback led to closer typography, plot margins, and marker sizes. This is one illustrative
+improving example; revisions can also plateau or regress. The
+[complete saved rollout](results/revision-example/rollout.jsonl) includes all three policy
+responses and feedback. [Settings, scores, and provenance](results/revision-example/provenance.json)
+record the original run; these images were not regenerated with the current infrastructure changes.
+Reference: Matplotlib's [simple line example](https://matplotlib.org/stable/gallery/pyplots/pyplot_simple.html),
 under the [Matplotlib license](results/revision-example/LICENSE.matplotlib).
 
 ## Rewards
