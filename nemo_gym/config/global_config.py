@@ -1878,9 +1878,12 @@ Set the keys individually, in a config or as overrides, e.g.:
                 global_config_dict[dir_key_name] = str(Path(dir_value).expanduser().resolve())
 
             # UV related configuration
-            # UV caching directory overrides to local folders, under the cache root.
+            # An explicit `uv_cache_dir` wins, then a UV_CACHE_DIR the user already exported, then a
+            # local folder under the cache root.
+            exported_uv_cache_dir = environ.get("UV_CACHE_DIR", "").strip()
             global_config_dict.setdefault(
-                UV_CACHE_DIR_KEY_NAME, str(Path(global_config_dict[CACHE_DIR_KEY_NAME]) / "uv")
+                UV_CACHE_DIR_KEY_NAME,
+                exported_uv_cache_dir or str(Path(global_config_dict[CACHE_DIR_KEY_NAME]) / "uv"),
             )
             # Runtime subprocesses inherit the configured cache directory.
             if not parse_config.offline:
