@@ -57,10 +57,10 @@ from nemo_gym.config.global_config import (
     get_global_config_dict,
 )
 from nemo_gym.core.failure_kinds import SERVER_SPINUP_TIMEOUT, SERVER_START_FAILED
-from nemo_gym.orchestration.h2_ping_sidecar.launcher import H2PingSidecarManager, start_h2_ping_sidecar
-from nemo_gym.orchestration.server_venv import get_venv_path, run_command, setup_env_command
 from nemo_gym.server_runtime.ray_support import entrypoint_ray_enabled, initialize_ray, ray_is_installed
 from nemo_gym.server_runtime.registry_server import HeadServer, ServerInstanceDisplayConfig
+from nemo_gym.server_runtime.supervisor.h2_ping_sidecar.launcher import H2PingSidecarManager, start_h2_ping_sidecar
+from nemo_gym.server_runtime.supervisor.server_venv import get_venv_path, run_command, setup_env_command
 from nemo_gym.telemetry.config import MemoryProfilingConfig
 from nemo_gym.telemetry.memory import MemoryProfiler, ServerMemoryTarget, process_tree_memory_supported
 from nemo_gym.telemetry.metrics import record_active_servers

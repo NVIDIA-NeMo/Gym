@@ -42,7 +42,7 @@ def component_subprocess_coverage(tmp_path, monkeypatch):
     sources = os.environ.get("COV_CORE_SOURCE")
     if sources is None:
         return
-    root = Path(__file__).resolve().parents[3]
+    root = Path(__file__).resolve().parents[4]
     # pytest-cov passes relative --cov entries and a config-search sentinel to children.
     # A build worker changes cwd, so both sources and omit patterns need the parent's root.
     if sources != os.pathsep:
@@ -74,7 +74,7 @@ def test_real_component_parent_resolution_preserves_lock_and_manual_packages(
     tmp_path, monkeypatch, capsys, mirror, component_subprocess_coverage
 ):
     """Exercise actual compatibility installs and mirror URLs against Simple Agent."""
-    project = Path(__file__).resolve().parents[3] / "responses_api_agents/simple_agent"
+    project = Path(__file__).resolve().parents[4] / "responses_api_agents/simple_agent"
     original = (project / "uv.lock").read_bytes()
     wheel = tmp_path / "nemo_gym_lock_provider-1.0-py3-none-any.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
@@ -291,7 +291,7 @@ def test_real_uv_locked_sync_and_stale_lock_rejection(tmp_path, monkeypatch):
 
 
 def test_bixbench_mcp_uses_its_lock_without_mutating_scientific_kernels():
-    root = Path(__file__).resolve().parents[3] / "benchmarks/bixbench_hypothesis"
+    root = Path(__file__).resolve().parents[4] / "benchmarks/bixbench_hypothesis"
     dockerfile = (root / "Dockerfile").read_text()
     assert "UV_PROJECT_ENVIRONMENT=/opt/envs/bbh-mcp uv sync --locked" in dockerfile
     assert "COPY pkgs/bbh-mcp /opt/bbh-mcp" in dockerfile
@@ -377,7 +377,7 @@ def test_git_source_subdirectory_matching_retains_exact_revision_checks():
 
 
 def test_osworld_ray_lock_matches_parent_process_constraint() -> None:
-    root = Path(__file__).resolve().parents[3]
+    root = Path(__file__).resolve().parents[4]
     project = root / "responses_api_agents/osworld_agent"
     parent = tomllib.loads((root / "uv.lock").read_text())
     lock = tomllib.loads((project / "uv.lock").read_text())
@@ -436,7 +436,7 @@ def test_sibling_venvs_keep_independent_wheel_projects(tmp_path: Path, monkeypat
 
 
 def test_environment_servers_retain_locked_local_gym_dependencies() -> None:
-    root = Path(__file__).resolve().parents[3]
+    root = Path(__file__).resolve().parents[4]
     servers = sorted((root / "environment_servers").glob("*/app.py"))
     assert servers
     for app in servers:
@@ -466,7 +466,7 @@ def test_environment_servers_retain_locked_local_gym_dependencies() -> None:
     ],
 )
 def test_imported_components_retain_managed_dependency_contracts(component, extra, dependency, version):
-    root = Path(__file__).resolve().parents[3]
+    root = Path(__file__).resolve().parents[4]
     project = root / component
     manifest = tomllib.loads((project / "pyproject.toml").read_text())
     lock = tomllib.loads((project / "uv.lock").read_text())

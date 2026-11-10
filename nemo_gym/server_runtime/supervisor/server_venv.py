@@ -379,7 +379,7 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     try:
         sync_command = [
             sys.executable,
-            str(Path(__file__).parents[1] / "cli" / "_locked_env.py"),
+            str(Path(__file__).with_name("_locked_env.py")),
             "--project",
             str(dir_path.absolute()),
             "--venv",

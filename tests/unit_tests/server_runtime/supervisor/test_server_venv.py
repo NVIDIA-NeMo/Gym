@@ -26,11 +26,11 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 from pytest import MonkeyPatch, raises
 
-import nemo_gym.orchestration.server_venv
+import nemo_gym.server_runtime.supervisor.server_venv
 import nemo_gym.utils.venv_setup
 from nemo_gym import PARENT_DIR
 from nemo_gym.config.global_config import UV_VENV_DIR_KEY_NAME
-from nemo_gym.orchestration.server_venv import (
+from nemo_gym.server_runtime.supervisor.server_venv import (
     _LOCAL_NEMO_GYM_REQUIREMENT_RE,
     _get_nemo_gym_install_flags,
     _get_nemo_gym_version_spec,
@@ -323,7 +323,7 @@ def test_generated_setup_installs_and_activates_before_starting_server(setup_com
     args = shlex.split(runner)
     install_index = args.index("--command") + 1
     args[install_index] = args[install_index].replace(
-        shlex.quote(str(Path(nemo_gym.orchestration.server_venv.__file__).parents[1] / "cli" / "_locked_env.py")),
+        shlex.quote(str(Path(nemo_gym.server_runtime.supervisor.server_venv.__file__).with_name("_locked_env.py"))),
         shlex.quote(str(fake)),
     )
     command = f"{directory_command} && {shlex.join(args)} && {activation}"
@@ -337,15 +337,17 @@ def test_generated_setup_installs_and_activates_before_starting_server(setup_com
 class TestCLISetupCommandRunCommand:
     def _setup(self, monkeypatch: MonkeyPatch) -> tuple[MagicMock, MagicMock]:
         Popen_mock = MagicMock()
-        monkeypatch.setattr(nemo_gym.orchestration.server_venv, "Popen", Popen_mock)
+        monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_venv, "Popen", Popen_mock)
 
         get_global_config_dict_mock = MagicMock(return_value={"uv_cache_dir": "default uv cache dir"})
-        monkeypatch.setattr(nemo_gym.orchestration.server_venv, "get_global_config_dict", get_global_config_dict_mock)
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.supervisor.server_venv, "get_global_config_dict", get_global_config_dict_mock
+        )
 
-        monkeypatch.setattr(nemo_gym.orchestration.server_venv, "environ", dict())
+        monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_venv, "environ", dict())
 
-        monkeypatch.setattr(nemo_gym.orchestration.server_venv, "stdout", "stdout")
-        monkeypatch.setattr(nemo_gym.orchestration.server_venv, "stderr", "stderr")
+        monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_venv, "stdout", "stdout")
+        monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_venv, "stderr", "stderr")
 
         return Popen_mock, get_global_config_dict_mock
 
@@ -372,7 +374,9 @@ class TestCLISetupCommandRunCommand:
 
     def test_custom_pythonpath(self, monkeypatch: MonkeyPatch) -> None:
         Popen_mock, get_global_config_dict_mock = self._setup(monkeypatch)
-        monkeypatch.setattr(nemo_gym.orchestration.server_venv, "environ", {"PYTHONPATH": "existing pythonpath"})
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.supervisor.server_venv, "environ", {"PYTHONPATH": "existing pythonpath"}
+        )
 
         run_command(
             command="my command",
@@ -397,7 +401,7 @@ class TestCLISetupCommandRunCommand:
         server_dir = allowed_root / "responses_api_agents" / "agent"
         server_dir.mkdir(parents=True)
         monkeypatch.setattr(
-            nemo_gym.orchestration.server_venv,
+            nemo_gym.server_runtime.supervisor.server_venv,
             "environ",
             {"NEMO_GYM_ALLOWED_COMPONENT_ROOTS": str(allowed_root)},
         )
@@ -413,7 +417,7 @@ class TestCLISetupCommandRunCommand:
         allowed_root.mkdir()
         stale_server_dir.mkdir(parents=True)
         monkeypatch.setattr(
-            nemo_gym.orchestration.server_venv,
+            nemo_gym.server_runtime.supervisor.server_venv,
             "environ",
             {"NEMO_GYM_ALLOWED_COMPONENT_ROOTS": str(allowed_root)},
         )
@@ -459,7 +463,7 @@ class TestCLISetupCommandRunCommand:
     def test_project_root_precedes_existing_extra_roots(self, monkeypatch: MonkeyPatch) -> None:
         Popen_mock, get_global_config_dict_mock = self._setup(monkeypatch)
         monkeypatch.setattr(
-            nemo_gym.orchestration.server_venv,
+            nemo_gym.server_runtime.supervisor.server_venv,
             "environ",
             {"NEMO_GYM_EXTRA_ROOTS": "/plugin-a:/plugin-b"},
         )
