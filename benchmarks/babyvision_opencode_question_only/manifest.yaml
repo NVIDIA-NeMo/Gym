@@ -7,7 +7,7 @@ domain: other
 description: BabyVision visual-reasoning puzzles, question only, solved by OpenCode
   with a Python image toolkit, GPT-judged final answers.
 modality: text, image
-licensing: unknown
+licensing: MIT
 authors:
 - Danial MohseniTaheri
 reward:

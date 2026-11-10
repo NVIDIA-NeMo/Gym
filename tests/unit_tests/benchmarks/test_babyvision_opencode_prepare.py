@@ -74,6 +74,8 @@ def test_prepare_writes_one_row_per_tsv_row(tsv, tmp_path) -> None:
     output = babyvision.prepare(tmp_path / "out.jsonl")
     rows = [json.loads(line) for line in output.read_text().splitlines()]
     assert [row["source_id"] for row in rows] == ["0", "1"]
+    # `gym eval plan` needs a stable task id.
+    assert [row["task_id"] for row in rows] == ["0", "1"]
     assert babyvision.INSTRUCTION in _content(rows[0])[1]["text"]
 
 
