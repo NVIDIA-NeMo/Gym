@@ -31,6 +31,7 @@ from nemo_gym.agents import (
     RunEvidence,
     SandboxSession,
     SimpleResponsesAPIAgent,
+    model_http_error_outcome,
     resolve_agent_timeout,
 )
 from nemo_gym.config import ModelServerRef, get_global_config_dict
@@ -346,10 +347,13 @@ class PoolAgent(SimpleResponsesAPIAgent):
                 LOG.exception("Could not preserve Pool failure artifacts")
 
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
-        """Name a model error from the proxy's record of the last failed model call (Pool's events carry no status)."""
+        """Name a model error from the proxy's record of the last failed model call (Pool's events carry no status).
+
+        The record keeps the start of the failed reply's body, so a propagated context overflow is a context limit.
+        """
         status = native_result.get("last_model_failure_status")
         if type(status) is int and 400 <= status <= 599:
-            return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
+            return model_http_error_outcome(status, error_body=native_result.get("last_model_failure_body"))
         if native_result.get("last_model_failure_transport") is True:
             return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
         return super().classify_outcome(native_result)

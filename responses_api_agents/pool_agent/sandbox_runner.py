@@ -32,18 +32,23 @@ def strip_cache_hints(body: dict[str, object]) -> None:
             tool["function"].pop("cache_control", None)
 
 
+# Enough of a failed reply's body for its error envelope, whose code names a context overflow.
+_FAILURE_BODY_BYTES = 4096
+
+
 def model_proxy(base_url: str, *, timeout: float = 300, calls_path: Path | None = None) -> ThreadingHTTPServer:
     """Bridge Pool's nonstreaming requests to Gym using a loopback-only threaded server.
 
-    ``calls_path`` records the completed upstream calls and how the last call failed, if it did: its HTTP status,
-    or ``transport`` when no reply came. A later completed call clears the failure.
+    ``calls_path`` records the completed upstream calls and how the last call failed, if it did: its HTTP status and
+    the start of its body (which keeps the endpoint's error code), or ``transport`` when no reply came. A later
+    completed call clears the failure.
     """
 
     completed = 0
     last_failure: dict[str, object] | None = None
     lock = threading.Lock()
 
-    def record(*, status: int | None = None, transport: bool = False) -> None:
+    def record(*, status: int | None = None, transport: bool = False, body: bytes = b"") -> None:
         nonlocal completed, last_failure
         if calls_path is None:
             return
@@ -52,7 +57,11 @@ def model_proxy(base_url: str, *, timeout: float = 300, calls_path: Path | None 
             if status is not None and 200 <= status < 300:
                 completed, last_failure = completed + 1, None
             else:
-                last_failure = {"transport": True} if transport else {"status": status}
+                last_failure = (
+                    {"transport": True}
+                    if transport
+                    else {"status": status, "body": body[:_FAILURE_BODY_BYTES].decode(errors="replace")}
+                )
             temporary = calls_path.with_suffix(".tmp")
             temporary.write_text(json.dumps({"completed": completed, "last_failure": last_failure}))
             temporary.replace(calls_path)
@@ -91,7 +100,7 @@ def model_proxy(base_url: str, *, timeout: float = 300, calls_path: Path | None 
                     # Refused, reset, timed out or cut off before a whole reply: the call got no HTTP status.
                     record(transport=True)
                     raise
-                record(status=status)
+                record(status=status, body=payload)
             except Exception as error:
                 status, content_type = 502, "application/json"
                 payload = json.dumps({"error": str(error)}).encode()

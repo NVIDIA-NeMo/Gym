@@ -34,9 +34,10 @@ class PoolArtifacts:
     runner_pid: int | None = None
     completed_model_calls: int = 0
     # How the last upstream model call failed, when no completed call followed it, as the proxy recorded it: its HTTP
-    # status, or a transport error (no reply).
+    # status and the start of its body, or a transport error (no reply).
     last_model_failure_status: int | None = None
     last_model_failure_transport: bool = False
+    last_model_failure_body: str | None = None
 
 
 @dataclass
@@ -202,6 +203,7 @@ class PoolSession(AgentSessionState):
             if type(failure_status) is int and 400 <= failure_status <= 599
             else None,
             last_model_failure_transport=failure.get("transport") is True,
+            last_model_failure_body=failure.get("body") if isinstance(failure.get("body"), str) else None,
         )
 
     async def close(self, *, timeout: float) -> None:

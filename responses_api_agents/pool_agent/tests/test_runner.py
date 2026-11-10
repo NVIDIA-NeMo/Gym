@@ -116,7 +116,7 @@ def test_proxy_preserves_upstream_status_and_counts_only_successes(tmp_path, sta
             caught.value.close()
         assert json.loads(calls.read_text()) == {
             "completed": int(status == 200),
-            "last_failure": None if status == 200 else {"status": status},
+            "last_failure": None if status == 200 else {"status": status, "body": '{"error":"capacity"}'},
         }
     finally:
         for server in (proxy, upstream):

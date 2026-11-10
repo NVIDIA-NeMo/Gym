@@ -450,6 +450,36 @@ async def test_a_model_error_is_classified_from_the_proxy_record(recorded, repli
     assert agent_outcome_policy(response) == action
 
 
+# The model server's envelope for a context overflow it propagates, as the proxy records the failed reply's body.
+CONTEXT_OVERFLOW_BODY = (
+    '{"error":{"message":"This model\'s maximum context length is 32768 tokens.","type":"invalid_request_error",'
+    '"param":null,"code":"context_length_exceeded"}}'
+)
+
+
+# A context limit is graded as incomplete, before or after the first reply (decision 1). It was failed
+# model_request_rejected on the first request and model_request_error 400 after a reply.
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replied", [0, 1])
+async def test_a_propagated_context_overflow_is_a_graded_context_limit(replied):
+    session = state()
+    session.session.cleanup = receipt(return_code=1)
+    artifacts = PoolArtifacts(
+        events(event("session.exit", reason="model_next_tool_call_http_error")),
+        "",
+        "",
+        1,
+        completed_model_calls=replied,
+        last_model_failure_status=400,
+        last_model_failure_body=CONTEXT_OVERFLOW_BODY,
+    )
+    response = await run_pool(session, artifacts)
+    assert response.status == "incomplete"
+    assert response.metadata["ng_agent_stop_reason"] == "context_limit"
+    assert outcome(response) is None
+    assert agent_outcome_policy(response) == OutcomeAction.VERIFY
+
+
 @pytest.mark.asyncio
 async def test_successful_activation_uses_task_budget_and_explicit_unknown_usage():
     server, session = agent(), state()
