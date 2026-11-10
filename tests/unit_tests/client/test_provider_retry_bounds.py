@@ -59,6 +59,13 @@ OVERSIZED_SHAPES = [
 ]
 
 
+def _assert_bounded_with_same_codes(kept: bytes, full: bytes) -> None:
+    """The kept body fits the cap and still names the error codes of the full body."""
+    assert len(kept) <= openai_client_module.ERROR_BODY_PREFIX_BYTES
+    assert openai_client_module._parsed_error_codes(kept) == openai_client_module._parsed_error_codes(full)
+    json.loads(kept)
+
+
 def _provider(monkeypatch: pytest.MonkeyPatch, answer, *, ceiling: int = 500) -> list[int]:
     """Patch the transport so call ``n`` is answered by ``answer(n)``; return the statuses it sent."""
     sent: list[int] = []
@@ -79,14 +86,28 @@ def _provider(monkeypatch: pytest.MonkeyPatch, answer, *, ceiling: int = 500) ->
     return sent
 
 
+class _Clock:
+    """A fake ``monotonic`` that the fake provider and the fake sleep advance."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
 def _sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Fake the retry sleep; each wait advances a fake clock, so the elapsed budget sees it as real time."""
     waits: list[float] = []
+    clock = _Clock()
 
     async def sleep(seconds: float) -> None:
         waits.append(seconds)
+        clock.now += seconds
         await asyncio.sleep(0)
 
     monkeypatch.setattr(openai_client_module, "sleep", sleep)
+    monkeypatch.setattr(openai_client_module, "monotonic", clock)
     return waits
 
 
@@ -238,7 +259,7 @@ async def test_the_error_body_read_for_a_retry_decision_is_a_bounded_prefix(monk
         await client._request_with_retry(url=f"{BASE_URL}/responses")
 
     assert len(sent) == 3
-    assert seen == [body[:limit]]
+    assert seen == [body[:limit]]  # not JSON: nothing to classify, so the raw prefix is kept
 
 
 async def test_cancelling_a_waiting_request_stops_it_and_sends_nothing_more(monkeypatch):
@@ -290,7 +311,7 @@ async def test_an_oversized_spent_quota_429_still_trips_the_client(monkeypatch, 
     with pytest.raises(PermanentEndpointError) as first:
         await client._request_with_retry(url=f"{BASE_URL}/responses")
     assert sent == [429] and waits == []
-    assert first.value.response_content == body[: openai_client_module.ERROR_BODY_PREFIX_BYTES]
+    _assert_bounded_with_same_codes(first.value.response_content, body)
 
     with pytest.raises(PermanentEndpointError):
         await client._request_with_retry(url=f"{BASE_URL}/responses")
@@ -309,7 +330,7 @@ async def test_an_oversized_invalid_key_reply_still_trips_the_client(monkeypatch
     with pytest.raises(PermanentEndpointError) as first:
         await client._request_with_retry(url=f"{BASE_URL}/responses")
     assert sent == [status] and waits == []
-    assert first.value.response_content == body[: openai_client_module.ERROR_BODY_PREFIX_BYTES]
+    _assert_bounded_with_same_codes(first.value.response_content, body)
 
     with pytest.raises(PermanentEndpointError):
         await client._request_with_retry(url=f"{BASE_URL}/responses")
@@ -334,8 +355,7 @@ async def test_an_oversized_context_overflow_is_terminal_for_its_call_only(monke
 
 
 @pytest.mark.parametrize("internal", [False, True])
-async def test_an_oversized_busy_reply_is_still_retried_and_keeps_only_the_capped_prefix(monkeypatch, internal):
-    limit = openai_client_module.ERROR_BODY_PREFIX_BYTES
+async def test_an_oversized_busy_reply_is_still_retried_and_keeps_a_bounded_body_with_its_codes(monkeypatch, internal):
     body = _oversized("rate_limit_exceeded")
     seen: list[bytes] = []
 
@@ -352,7 +372,8 @@ async def test_an_oversized_busy_reply_is_still_retried_and_keeps_only_the_cappe
         await client._request_with_retry(url=f"{BASE_URL}/responses")
 
     assert len(sent) == 3 and waits == [1.0, 1.0]
-    assert seen == [body[:limit]]
+    assert len(seen) == 1
+    _assert_bounded_with_same_codes(seen[0], body)
 
 
 @pytest.fixture
@@ -402,8 +423,10 @@ async def test_over_real_http_a_mixed_status_provider_ends_with_the_final_status
         await asyncio.wait_for(client.create_chat_completion(**CALL), timeout=10)
 
     assert asyncio.get_running_loop().time() - started < 5
-    assert len(hits) == 6  # five 0.01 s waits fit in 0.055 s; the sixth would pass it
-    assert raised.value.status == statuses[(6 - 1) % len(statuses)]
+    # The elapsed budget includes real response time, so only the bounds are fixed: at least one retry, at most six
+    # requests (five 0.01 s waits fit in 0.055 s), and the final status is the last one the provider sent.
+    assert 2 <= len(hits) <= 6
+    assert raised.value.status == statuses[(len(hits) - 1) % len(statuses)]
     assert raised.value.response_content == b"y" * limit
 
 
@@ -437,3 +460,194 @@ async def test_over_real_http_an_oversized_permanent_error_reaches_the_provider_
             await asyncio.wait_for(client.create_chat_completion(**CALL), timeout=10)
         assert raised.value.status == status
     assert len(hits) == 1
+
+
+OVERSIZED_UNPARSEABLE = b"y" * (3 * openai_client_module.ERROR_BODY_PREFIX_BYTES)
+
+
+@pytest.mark.parametrize("shape", OVERSIZED_SHAPES)
+@pytest.mark.parametrize("code", ["context_length_exceeded", "insufficient_quota", "invalid_api_key"])
+def test_a_bounded_error_body_keeps_the_codes_of_an_oversized_json_error(shape, code):
+    body = _oversized(code, **shape)
+    _assert_bounded_with_same_codes(openai_client_module._bounded_error_body(body), body)
+
+
+def test_a_bounded_error_body_keeps_a_small_body_unchanged_and_an_unparseable_one_as_its_prefix():
+    limit = openai_client_module.ERROR_BODY_PREFIX_BYTES
+    assert openai_client_module._bounded_error_body(OVERFLOW_BODY) is OVERFLOW_BODY
+    exact = b"z" * limit
+    assert openai_client_module._bounded_error_body(exact) is exact
+    assert openai_client_module._bounded_error_body(OVERSIZED_UNPARSEABLE) == OVERSIZED_UNPARSEABLE[:limit]
+
+
+def test_a_bounded_error_body_cuts_a_multibyte_message_to_fit():
+    limit = openai_client_module.ERROR_BODY_PREFIX_BYTES
+    body = json.dumps({"error": {"code": "insufficient_quota", "message": "é" * limit}}).encode()
+    kept = openai_client_module._bounded_error_body(body)
+    _assert_bounded_with_same_codes(kept, body)
+    assert json.loads(kept)["error"]["message"].startswith("é")
+
+
+# --- forwarding: the next client reads what a Gym model server re-emits -------------------------------------------
+
+
+def _forwarded_reply(error: ClientResponseError) -> tuple[int, bytes]:
+    """What the production ``SimpleModelServer`` upstream-error handler answers for ``error``."""
+    from unittest.mock import MagicMock
+
+    from fastapi.testclient import TestClient
+
+    from nemo_gym.client.server_client import ServerClient
+    from nemo_gym.models.base_responses_api_model import BaseResponsesAPIModelConfig, SimpleResponsesAPIModel
+
+    class Forwards(SimpleResponsesAPIModel):
+        async def chat_completions(self, request, body):
+            raise NotImplementedError
+
+        async def responses(self, request, body):
+            raise error
+
+    config = BaseResponsesAPIModelConfig(host="", port=0, openai_api_key="123", entrypoint="", name="policy")
+    server_client = MagicMock(spec=ServerClient)
+    server_client.global_config_dict = {}
+    reply = TestClient(Forwards(config=config, server_client=server_client).setup_webserver()).post(
+        "/v1/responses", json={"input": "x"}
+    )
+    return reply.status_code, reply.content
+
+
+@pytest.mark.parametrize("internal", [False, True])
+@pytest.mark.parametrize("shape", OVERSIZED_SHAPES)
+@pytest.mark.parametrize(
+    "status,code", [(429, "context_length_exceeded"), (429, "insufficient_quota"), (401, "invalid_api_key")]
+)
+async def test_over_real_http_a_forwarded_oversized_terminal_error_is_terminal_for_the_next_client(
+    monkeypatch, stub_provider, internal, shape, status, code
+):
+    base_url, hits, script = stub_provider
+    body = _oversized(code, **shape)
+    script["answer"] = lambda n: (status, body, {})
+    monkeypatch.setattr(openai_client_module.random, "uniform", lambda low, high: 0.01)
+    first_client = NeMoGymAsyncOpenAI(api_key="k", base_url=base_url, internal=internal, max_rate_limit_wait_seconds=5)
+    with pytest.raises(ClientResponseError) as first:
+        await asyncio.wait_for(first_client.create_chat_completion(**CALL), timeout=10)
+    assert len(hits) == 1
+
+    reply_status, reply_body = _forwarded_reply(first.value)
+    assert reply_status == status
+    _assert_bounded_with_same_codes(reply_body, body)
+
+    # The next client reads the forwarded reply from a second server: one request, no wait, no default retries.
+    hits.clear()
+    script["answer"] = lambda n: (reply_status, reply_body, {})
+    waits = _sleeps(monkeypatch)
+    next_client = NeMoGymAsyncOpenAI(api_key="k", base_url=base_url, internal=internal, max_rate_limit_wait_seconds=5)
+    with pytest.raises(ClientResponseError):
+        await asyncio.wait_for(next_client.create_chat_completion(**CALL), timeout=10)
+    assert len(hits) == 1 and waits == []
+
+
+# --- elapsed time, not only sleeps, spends the budget ------------------------------------------------------------
+
+
+def _slow_provider(monkeypatch: pytest.MonkeyPatch, clock: _Clock, *, status: int, latency: float, read: float = 0.0):
+    sent: list[int] = []
+
+    async def request(**kwargs):
+        if len(sent) >= 500:
+            raise _Runaway("still retrying after 500 requests")
+        clock.now += latency
+        response = _answer(status, retry_after="0")
+
+        inner = response.content.read
+
+        async def slow_read(size: int = -1) -> bytes:
+            clock.now += read
+            return await inner(size)
+
+        response.content = SimpleNamespace(read=slow_read)
+        sent.append(status)
+        return response
+
+    async def final_error(response, content=None):
+        raise RuntimeError(f"final status {response.status}")
+
+    async def sleep(seconds: float) -> None:
+        clock.now += seconds
+
+    monkeypatch.setattr(openai_client_module, "request", request)
+    monkeypatch.setattr(openai_client_module, "raise_for_status", final_error)
+    monkeypatch.setattr(openai_client_module, "sleep", sleep)
+    monkeypatch.setattr(openai_client_module, "monotonic", clock)
+    monkeypatch.setattr(openai_client_module.random, "uniform", lambda low, high: 0.01)
+    return sent
+
+
+@pytest.mark.parametrize("internal", [False, True])
+@pytest.mark.parametrize("status", [429, 503])
+async def test_provider_latency_spends_the_retry_budget(monkeypatch, internal, status):
+    clock = _Clock()
+    sent = _slow_provider(monkeypatch, clock, status=status, latency=0.05)
+    client = NeMoGymAsyncOpenAI(api_key="k", base_url=BASE_URL, internal=internal, max_rate_limit_wait_seconds=0.025)
+
+    with pytest.raises(RuntimeError, match=f"final status {status}"):
+        await client._request_with_retry(url=f"{BASE_URL}/responses")
+
+    assert sent == [status]  # the first answer already spent more than the budget; the sleeps alone never would
+
+
+@pytest.mark.parametrize("status", [502, 504, 520])
+async def test_provider_latency_spends_the_internal_retry_budget_for_a_transient_5xx(monkeypatch, status):
+    clock = _Clock()
+    sent = _slow_provider(monkeypatch, clock, status=status, latency=0.05)
+    client = NeMoGymAsyncOpenAI(api_key="k", base_url=BASE_URL, internal=True, max_rate_limit_wait_seconds=0.025)
+
+    with pytest.raises(RuntimeError, match=f"final status {status}"):
+        await client._request_with_retry(url=f"{BASE_URL}/responses")
+
+    assert sent == [status]
+
+
+@pytest.mark.parametrize("internal", [False, True])
+async def test_reading_the_error_body_spends_the_retry_budget(monkeypatch, internal):
+    clock = _Clock()
+    sent = _slow_provider(monkeypatch, clock, status=429, latency=0.0, read=0.05)
+    client = NeMoGymAsyncOpenAI(api_key="k", base_url=BASE_URL, internal=internal, max_rate_limit_wait_seconds=0.025)
+
+    with pytest.raises(RuntimeError, match="final status 429"):
+        await client._request_with_retry(url=f"{BASE_URL}/responses")
+
+    assert sent == [429]
+
+
+@pytest.mark.parametrize("internal", [False, True])
+async def test_latency_and_waits_share_one_elapsed_budget(monkeypatch, internal):
+    clock = _Clock()
+    # Each attempt costs 0.1 s of latency plus a 0.01 s wait: 0.11 s per round against a 0.5 s budget.
+    sent = _slow_provider(monkeypatch, clock, status=429, latency=0.1)
+    client = NeMoGymAsyncOpenAI(api_key="k", base_url=BASE_URL, internal=internal, max_rate_limit_wait_seconds=0.5)
+
+    with pytest.raises(RuntimeError, match="final status 429"):
+        await client._request_with_retry(url=f"{BASE_URL}/responses")
+
+    assert len(sent) == 5  # a sixth round would end at 0.55 s
+
+
+async def test_over_real_http_a_slow_provider_spends_the_retry_budget(monkeypatch, stub_provider):
+    base_url, hits, script = stub_provider
+    real_request = openai_client_module.request
+
+    async def slow_request(**kwargs):
+        await asyncio.sleep(0.05)  # the provider's response time
+        return await real_request(**kwargs)
+
+    monkeypatch.setattr(openai_client_module, "request", slow_request)
+    monkeypatch.setattr(openai_client_module.random, "uniform", lambda low, high: 0.01)
+    client = NeMoGymAsyncOpenAI(api_key="k", base_url=base_url, internal=True, max_rate_limit_wait_seconds=0.025)
+
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(ClientResponseError) as raised:
+        await asyncio.wait_for(client.create_chat_completion(**CALL), timeout=10)
+
+    assert len(hits) == 1 and raised.value.status == 503  # sleeps alone (0.01 s) never reach 0.025 s
+    assert asyncio.get_running_loop().time() - started < 0.15

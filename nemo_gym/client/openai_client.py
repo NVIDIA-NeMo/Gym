@@ -217,6 +217,16 @@ def _decode_error_text(content: bytes | str) -> str:
     return content.decode("utf-8", errors="replace") if isinstance(content, bytes) else content
 
 
+def _error_envelope(payload: object) -> Optional[dict]:
+    """The dict that holds ``error`` in an OpenAI-style error payload, or None when it has none."""
+    if not isinstance(payload, dict):
+        return None
+    if "error" not in payload and isinstance(payload.get("detail"), dict):
+        # A NeMo Gym model server returns a propagated provider error body as FastAPI's `detail`.
+        return payload["detail"]
+    return payload
+
+
 def _parsed_error_codes(content: bytes | str) -> list[str]:
     """error.code / error.type tokens from an OpenAI-style error body."""
     text = _decode_error_text(content)
@@ -224,17 +234,51 @@ def _parsed_error_codes(content: bytes | str) -> list[str]:
         payload = json.loads(text)
     except json.JSONDecodeError:
         return []
-    if not isinstance(payload, dict):
-        return []
-    if "error" not in payload and isinstance(payload.get("detail"), dict):
-        # A NeMo Gym model server returns a propagated provider error body as FastAPI's `detail`.
-        payload = payload["detail"]
-    error = payload.get("error")
+    envelope = _error_envelope(payload)
+    error = envelope.get("error") if envelope is not None else None
     if isinstance(error, str):
         return [error]
     if not isinstance(error, dict):
         return []
     return [str(error[key]) for key in ("code", "type") if error.get(key) is not None]
+
+
+def _bounded_error_body(body: bytes) -> bytes:
+    """An error body of at most ``ERROR_BODY_PREFIX_BYTES`` that still names the same error codes.
+
+    A small body is returned unchanged. An oversized JSON error is rebuilt with its ``code`` and ``type`` intact
+    and its long text cut, so the next client that reads it (a Gym model server forwards this body) classifies it
+    as the first one did. Anything else keeps its raw prefix: there is no code to preserve.
+    """
+    if len(body) <= ERROR_BODY_PREFIX_BYTES:
+        return body
+    prefix = body[:ERROR_BODY_PREFIX_BYTES]
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        return prefix
+    envelope = _error_envelope(payload)
+    error = envelope.get("error") if envelope is not None else None
+    if isinstance(error, str):
+        kept: object = error[:1024]
+    elif isinstance(error, dict):
+        kept = {key: error[key] for key in ("code", "type", "param") if isinstance(error.get(key), (str, int))}
+        if isinstance(error.get("message"), str):
+            # Cut to the cap first so the loop below only trims escapes and framing, not a huge message.
+            kept["message"] = error["message"][:ERROR_BODY_PREFIX_BYTES]
+    else:
+        return prefix
+    # Cut the message until the rebuilt body fits; code/type are short strings, so this converges quickly.
+    while True:
+        rebuilt = {"error": kept}
+        if envelope is not payload:
+            rebuilt = {"detail": rebuilt}
+        encoded = json.dumps(rebuilt, ensure_ascii=False).encode("utf-8")
+        if len(encoded) <= ERROR_BODY_PREFIX_BYTES or not isinstance(kept, dict) or not kept.get("message"):
+            return encoded if len(encoded) <= ERROR_BODY_PREFIX_BYTES else prefix
+        # A character encodes to at most 4 bytes (or 6 as a JSON escape), so this never over-cuts by much.
+        overflow = len(encoded) - ERROR_BODY_PREFIX_BYTES
+        kept["message"] = kept["message"][: max(0, len(kept["message"]) - max(1, overflow // 6))]
 
 
 def _error_body_is_permanent_quota(content: bytes | str) -> bool:
@@ -329,8 +373,9 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         default=3600.0,
         ge=0,
         description=(
-            "Total time to wait out 429 and 503 answers before failing the request, instead of "
-            "max_http_attempts tries; the request fails once the next wait would pass it. 0 keeps 429 and 503 "
+            "Seconds one call may spend, counted from its start and including provider response time, waiting out "
+            "429 and 503 answers instead of max_http_attempts tries; the request fails once the elapsed time "
+            "plus the next wait would pass it. 0 keeps 429 and 503 "
             "on the max_http_attempts count. Internal NeMo Gym servers wait out every 429, 502, 503, 504 and 520 "
             "answer on this budget."
         ),
@@ -569,7 +614,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                 failure = observe_http_failure(response)
                 body = await _read_error_body(response, failure)
                 permanent_auth = _error_body_is_permanent_auth(body)
-                content = body[:ERROR_BODY_PREFIX_BYTES]
+                content = _bounded_error_body(body)
                 del body
                 if permanent_auth:
                     observe_terminal(
@@ -607,7 +652,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             body = await _read_error_body(response, last_failure)
             permanent_quota = response.status == 429 and _error_body_is_permanent_quota(body)
             context_overflow = _error_body_is_context_overflow(body)
-            content = body[:ERROR_BODY_PREFIX_BYTES]
+            content = _bounded_error_body(body)
             del body
             if permanent_quota:
                 observe_terminal(
@@ -629,7 +674,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                 await _raise_exhausted(response, content, last_failure)
 
             wait = _retry_wait_seconds(tries, response)
-            # One counter (``tries``) and one elapsed budget (``waited``) cover every retryable status, so a changing
+            # One counter (``tries``) and one elapsed budget (time since the call started, response time included) cover every retryable status, so a changing
             # status sequence never resets them. A busy provider is waited out until max_rate_limit_wait_seconds is
             # spent: a positive budget ends the request even when max_http_attempts allows more tries, and 0 leaves
             # the busy statuses on the max_http_attempts count. Internal NeMo Gym servers wait out every
@@ -642,7 +687,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                 and response.status in wait_out_codes
                 and self.max_rate_limit_wait_seconds > 0
             ):
-                if waited + wait > self.max_rate_limit_wait_seconds:
+                if monotonic() - request_started + wait > self.max_rate_limit_wait_seconds:
                     observe_terminal(
                         operation_id=operation_id,
                         outcome="failed",

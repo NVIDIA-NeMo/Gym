@@ -624,6 +624,17 @@ def _busy(status: int = 429, retry_after: str | None = None) -> SimpleNamespace:
     )
 
 
+def _sleep_on_a_fake_clock(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """A mocked retry sleep whose waits advance a fake clock, so the elapsed-time budget sees them as real time."""
+    now = [0.0]
+
+    async def advance(seconds: float) -> None:
+        now[0] += seconds
+
+    monkeypatch.setattr("nemo_gym.client.openai_client.monotonic", lambda: now[0])
+    return AsyncMock(side_effect=advance)
+
+
 class TestProviderBackoff:
     """How the client waits on a provider that is busy: growing jittered waits, Retry-After, a time budget."""
 
@@ -658,7 +669,7 @@ class TestProviderBackoff:
         self, monkeypatch: pytest.MonkeyPatch, status: int
     ) -> None:
         request = AsyncMock(return_value=_busy(status))
-        sleep = AsyncMock()
+        sleep = _sleep_on_a_fake_clock(monkeypatch)
         monkeypatch.setattr("nemo_gym.client.openai_client.request", request)
         monkeypatch.setattr("nemo_gym.client.openai_client.sleep", sleep)
 
@@ -689,9 +700,21 @@ class TestProviderBackoff:
     async def test_an_internal_client_stops_waiting_out_a_busy_server_when_its_budget_is_spent(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        request = AsyncMock(return_value=_busy(429, retry_after="1"))
+        # The mocked sleep advances a fake clock, as a real one would. The provider has a request ceiling, so a loop
+        # that no longer ends fails here at once instead of spinning (mocked awaits never yield to a timeout).
+        now = [0.0]
+
+        async def sleep(seconds: float) -> None:
+            now[0] += seconds
+
+        async def busy_server(**kwargs):
+            assert request.await_count < 50, "retried past the budget"
+            return _busy(429, retry_after="1")
+
+        request = AsyncMock(side_effect=busy_server)
         monkeypatch.setattr("nemo_gym.client.openai_client.request", request)
-        monkeypatch.setattr("nemo_gym.client.openai_client.sleep", AsyncMock())
+        monkeypatch.setattr("nemo_gym.client.openai_client.sleep", sleep)
+        monkeypatch.setattr("nemo_gym.client.openai_client.monotonic", lambda: now[0])
         monkeypatch.setattr(
             "nemo_gym.client.openai_client.raise_for_status", AsyncMock(side_effect=RuntimeError("still busy"))
         )
@@ -708,7 +731,7 @@ class TestProviderBackoff:
         self, monkeypatch: pytest.MonkeyPatch, status: int
     ) -> None:
         request = AsyncMock(return_value=_busy(status, retry_after="1"))
-        sleep = AsyncMock()
+        sleep = _sleep_on_a_fake_clock(monkeypatch)
         monkeypatch.setattr("nemo_gym.client.openai_client.request", request)
         monkeypatch.setattr("nemo_gym.client.openai_client.sleep", sleep)
 
