@@ -93,6 +93,7 @@ from nemo_gym.rollouts.health.timeouts import TimeoutEvent
 from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
     SESSION_OWNER_HEADER,
+    TOOL_CALL_ID_HEADER,
     TOOL_ERROR_HEADER,
     Activation,
     ActivationOutOfOrderError,
@@ -747,7 +748,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                             url=f"{_tools_base_url(tool_access, resources_prefix)}/{output_function_call.name}",
                             json=parsed_arguments,
                             cookies=resources_server_cookies,
-                            headers=dict(tool_access.headers),
+                            # The call's ID lets the server join its record to this trajectory and recognize the
+                            # client's resend of a call whose connection dropped.
+                            headers=dict(tool_access.headers) | {TOOL_CALL_ID_HEADER: output_function_call.call_id},
                             _internal=True,
                         )
                     else:

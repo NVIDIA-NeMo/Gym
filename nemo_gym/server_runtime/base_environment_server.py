@@ -45,7 +45,12 @@ from nemo_gym.server_runtime.episode_tokens import (
 )
 from nemo_gym.server_runtime.episode_tools import EpisodeToolset, ToolArgumentsError, ToolCallRecord, ToolSpec
 from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
-from nemo_gym.server_runtime.tool_access import TOOL_ERROR_HEADER, DirectHTTPToolAccess, ToolAccess
+from nemo_gym.server_runtime.tool_access import (
+    TOOL_CALL_ID_HEADER,
+    TOOL_ERROR_HEADER,
+    DirectHTTPToolAccess,
+    ToolAccess,
+)
 from nemo_gym.telemetry.concurrency import MeteredSemaphore
 
 
@@ -599,6 +604,8 @@ class _OpenEpisode:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     # The call that holds the lock, so the end of the episode can stop it.
     running: Optional[asyncio.Task] = None
+    # The reply to the last recorded call, which a resend of that call gets again.
+    last_reply: Optional[tuple[int, JsonValue, bool]] = None
 
 
 class _EpisodeTokensOpenOnlyTools:
@@ -642,6 +649,10 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
 
     The tool route takes every one-segment ``POST`` path that the server does not route when ``setup_webserver``
     returns, so a subclass that adds its own routes gives them more than one path segment.
+
+    An agent may send the model's ``call_id`` in ``X-NeMo-Gym-Tool-Call-Id``; the record keeps it. A call with the
+    same ID, tool and arguments as the episode's last recorded call is a resend after a dropped connection: it gets
+    that call's reply, and the tool does not run again.
 
     The base refuses ``checkpoint_mode = "exported"``: a restored attempt has a new episode ID, and the agent's
     grant still names the old one.
@@ -742,13 +753,29 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
             arguments = await request.json()
         except ValueError:
             arguments = None
+        call_id = request.headers.get(TOOL_CALL_ID_HEADER) or None
         async with episode.lock:
             # The episode can end while this call waits for its body or for the calls before it.
             if self._open_episodes.get(claims.episode_id) is not episode:
                 return _refusal(410, f"Episode {claims.episode_id.capture_key} is not running on this server")
-            episode.running = asyncio.ensure_future(self._call_tool(episode, tool_name, arguments))
+            last = episode.calls[-1] if episode.calls else None
+            if (
+                call_id is not None
+                and episode.last_reply is not None
+                and last is not None
+                and (last.call_id, last.name, last.arguments) == (call_id, tool_name, arguments)
+            ):
+                # The agent's client resends a call whose connection dropped, and the resend waits behind the call it
+                # repeats; it gets that call's reply, so the tool does not run, or charge, twice.
+                status, output, is_error = episode.last_reply
+                return JSONResponse(
+                    status_code=status, content=output, headers={TOOL_ERROR_HEADER: "true"} if is_error else None
+                )
+            episode.last_reply = None  # until this call answers, so a recorded call with no reply is never replayed
+            episode.running = asyncio.ensure_future(self._call_tool(episode, tool_name, arguments, call_id))
             try:
                 status, output, is_error = await episode.running
+                episode.last_reply = (status, output, is_error)
             except asyncio.CancelledError:
                 if asyncio.current_task().cancelling():
                     raise
@@ -760,7 +787,9 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
             status_code=status, content=output, headers={TOOL_ERROR_HEADER: "true"} if is_error else None
         )
 
-    async def _call_tool(self, episode: _OpenEpisode, name: str, arguments: Any) -> tuple[int, JsonValue, bool]:
+    async def _call_tool(
+        self, episode: _OpenEpisode, name: str, arguments: Any, call_id: Optional[str] = None
+    ) -> tuple[int, JsonValue, bool]:
         """Run one call, under the episode's rollout, and record it, including a call to a tool it does not have."""
         started = perf_counter()
         status, is_error = 200, False
@@ -773,6 +802,7 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
                     output=output,
                     is_error=is_error,
                     duration_seconds=perf_counter() - started,
+                    call_id=call_id,
                 )
             )
 

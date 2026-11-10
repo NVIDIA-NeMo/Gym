@@ -68,6 +68,8 @@ class ToolCallRecord(BaseModel):
     output: JsonValue
     is_error: bool
     duration_seconds: float
+    # The model's ID for the call, when the agent sent one (``X-NeMo-Gym-Tool-Call-Id``), to join the agent's trajectory.
+    call_id: str | None = None
 
 
 class ToolArgumentsError(ValueError):
