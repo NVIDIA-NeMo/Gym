@@ -5,7 +5,8 @@
 Resources servers keep per-rollout state under the cookie session ID.
 The participant learns each session's lifecycle from the requests that already define it:
 a successful session start binds the session to the episode named by the request's rollout prefix,
-and a successful ``/close_session`` or ``/verify`` ends it.
+and a successful ``/close_session`` or ``/verify`` ends it. A verifier whose cleanup is still pending
+keeps the session tracked until release succeeds, even when its score returned successfully.
 A replayable ``/verify`` is the exception when its caller says it closes the session afterwards.
 The caller says so with ``CHECKPOINT_CLOSE_FOLLOWS_HEADER``, and the session stays tracked until that close.
 A checkpoint may keep the caller's boundary from before the verification even when the verification finishes first,
@@ -147,12 +148,18 @@ class ResourcesParticipant(CheckpointParticipant):
     record_model = ResourcesSessionRecord
 
     def __init__(
-        self, hooks: ResourcesSessionHooks, mode: CheckpointMode, *, verify_step_type: StepType = "wait"
+        self,
+        hooks: ResourcesSessionHooks,
+        mode: CheckpointMode,
+        *,
+        verify_step_type: StepType = "wait",
+        session_release_pending: Callable[[str], bool] | None = None,
     ) -> None:
         super().__init__()
         self.hooks = hooks
         self.mode = mode
         self.verify_step_type = verify_step_type
+        self._session_release_pending = session_release_pending
         # Requests the checkpoint does not wait for:
         # a verification the server declared replayable does not change checkpointed state.
         # A seed is waited for, so the session matches the environment's boundary.
@@ -270,7 +277,14 @@ class ResourcesParticipant(CheckpointParticipant):
         """A request on ``path`` ended ``session_id``.
 
         A replayable ``/verify`` whose caller closes the session afterwards leaves it tracked until that close.
+        A verification whose cleanup failed also stays tracked so retirement can still release it.
         """
+        if (
+            path == "/verify"
+            and self._session_release_pending is not None
+            and self._session_release_pending(session_id)
+        ):
+            return
         if not (close_follows and path in self.replayable_paths):
             self.ended(session_id)
 

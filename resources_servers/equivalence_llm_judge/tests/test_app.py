@@ -754,6 +754,72 @@ class TestJudgeParsing:
         assert _match_verdict_labels(text, equal_label, not_equal_label, case_insensitive=True) == expected
         assert _match_verdict_labels(text, equal_label, not_equal_label) == []
 
+    @mark.parametrize(
+        "text,verdict",
+        [
+            ("Reasoning: the answers agree.\nJudgement: **no**\nConfidence: **95%**", "Judgement: no"),
+            ("Reasoning: the answers differ.\nJudgement: **yes**\nConfidence: **90%**", "Judgement: yes"),
+            ("**Judgement:** no", "Judgement: no"),
+            ("**Judgement: yes**", "Judgement: yes"),
+            ("Judgement: *no*", "Judgement: no"),
+            ("Judgement: _yes_", "Judgement: yes"),
+            ("`Judgement: no`", "Judgement: no"),
+            ("Judgement: `yes`", "Judgement: yes"),
+            ("Judgement:**No**", "Judgement: no"),
+            ("Judgement:\n**YES**", "Judgement: yes"),
+        ],
+    )
+    async def test_markup_around_the_verdict_does_not_hide_it(self, server, monkeypatch, text, verdict) -> None:
+        server.config.judge_labels_case_insensitive = True
+        recorded = []
+        monkeypatch.setattr(
+            "resources_servers.equivalence_llm_judge.app.record_parsed_judge_verdict", lambda: recorded.append(1)
+        )
+
+        is_equal, record = await self._judge(server, text)
+
+        assert is_equal is (verdict == "Judgement: yes")
+        assert record.verdict_label == verdict
+        assert record.judgement_parsing_issues == []
+        assert recorded == [1]
+
+    @mark.parametrize("text", ["Judgement: **no**", "**Judgement:** yes", "Judgement: `yes`"])
+    async def test_markup_around_the_verdict_stays_unparsed_without_the_opt_in(self, server, text) -> None:
+        is_equal, record = await self._judge(server, text)
+
+        assert (is_equal, record.verdict_label, record.judgement_parsing_issues) == (False, None, ["no_verdict"])
+
+    @mark.parametrize(
+        "text,verdict,issues",
+        [
+            ("Judgement: **yes**\nJudgement: **no**", "Judgement: no", ["conflicting_verdicts"]),
+            ("**Judgement:** no, wait, `Judgement: yes`", "Judgement: yes", ["conflicting_verdicts"]),
+            ("Judgement: **maybe**", None, ["no_verdict"]),
+            ("The answers match.", None, ["no_verdict"]),
+            ("Judgement: ****", None, ["no_verdict"]),
+        ],
+    )
+    async def test_ambiguous_or_missing_marked_up_verdicts_are_not_recorded_as_parsed(
+        self, server, monkeypatch, text, verdict, issues
+    ) -> None:
+        server.config.judge_labels_case_insensitive = True
+        recorded = []
+        monkeypatch.setattr(
+            "resources_servers.equivalence_llm_judge.app.record_parsed_judge_verdict", lambda: recorded.append(1)
+        )
+
+        is_equal, record = await self._judge(server, text)
+
+        assert is_equal is (verdict == "Judgement: yes")  # the last verdict wins, as without markup
+        assert (record.verdict_label, record.judgement_parsing_issues) == (verdict, issues)
+        assert recorded == []
+
+    def test_labels_differing_only_in_markup_are_rejected_when_markup_is_ignored(self, server) -> None:
+        fields = server.config.model_dump() | {"judge_equal_label": "**yes**", "judge_not_equal_label": "yes"}
+        LLMJudgeResourcesServerConfig.model_validate(fields)  # byte-exact matching tells them apart
+        with raises(ValidationError, match="differ only in case or markup"):
+            LLMJudgeResourcesServerConfig.model_validate(fields | {"judge_labels_case_insensitive": True})
+
     def test_labels_differing_only_in_case_are_rejected_when_case_is_ignored(self, server) -> None:
         fields = server.config.model_dump() | {"judge_equal_label": "YES", "judge_not_equal_label": "yes"}
         LLMJudgeResourcesServerConfig.model_validate(fields)  # byte-exact matching tells them apart

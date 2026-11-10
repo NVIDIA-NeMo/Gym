@@ -61,7 +61,6 @@ from nemo_gym.sandbox import (
     exec_as_root,
     resolve_provider_config,
 )
-from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 
 
 LOGGER = logging.getLogger(__name__)
@@ -359,9 +358,6 @@ class OracleAgent(SimpleResponsesAPIAgent):
                 total_tokens=0,
             ),
         )
-
-    async def run(self, body: BaseRunRequest = Body()) -> BaseVerifyResponse:
-        raise HTTPException(501, "The oracle agent runs only through an environment server, not the legacy /run route")
 
 
 if __name__ == "__main__":
