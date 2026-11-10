@@ -75,8 +75,10 @@ An evaluated Python tool must be unable to reach other rollouts or the Gym contr
    private env file. 411 of the 500 ground-truth trajectories call at least one key-gated server; five servers
    (Airtable, Google Calendar, Notion, MongoDB, Slack) also need the upstream `data_exports/` seeded into the
    accounts. Management, model and judge credentials must not be forwarded as workload credentials.
-4. The sandbox needs internet access to the services and to PyPI, npm and GitHub, because some servers install
-   packages when they start. `sandbox_files` pins that resolution to the image date (2026-07-17).
+4. Allow the task's service endpoints and any bootstrap hosts needed when a server misses its image cache.
+   `sandbox_files` pins package resolution to the image date (2026-07-17). OpenSandbox defaults preserve
+   the image's private uv/npm caches; Apptainer development keeps writable scratch caches. An explicit
+   `sandbox_files` mapping replaces these defaults, including an empty mapping.
 
 `sandbox_ttl_s` is passed to the provider and controls the in-process idle reaper. Verify the deployment's
 TTL behavior. Shutdown reports failed stops and propagates the error, retaining ownership for a later

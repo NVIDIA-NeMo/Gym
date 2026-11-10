@@ -85,6 +85,11 @@ SERVICE_ENV_NAMES = (
 # the 1.2.7 image date: later releases (mcp 2.x) break several servers. They are files, not variables, because
 # MCP stdio clients pass only HOME, PATH and a few more variables to the servers they start.
 DEFAULT_SANDBOX_FILES = {
+    "/root/.config/uv/uv.toml": 'exclude-newer = "2026-07-17T00:00:00Z"\n',
+    "/root/.npmrc": "before=2026-07-17\nupdate-notifier=false\n",
+}
+# Apptainer's image paths may be read-only; its development sandboxes need writable scratch caches.
+APPTAINER_SANDBOX_FILES = {
     "/root/.config/uv/uv.toml": 'exclude-newer = "2026-07-17T00:00:00Z"\ncache-dir = "/tmp/uv-cache"\n',
     "/root/.npmrc": "before=2026-07-17\ncache=/tmp/npm-cache\nupdate-notifier=false\n",
 }
@@ -146,7 +151,8 @@ class MCPAtlasResourcesServerConfig(BaseResourcesServerConfig):
     # OpenSandbox create options. The requested policy is not evidence of deployment enforcement.
     sandbox_options: dict[str, Any] = Field(default_factory=dict)
     sandbox_env: dict[str, str] = Field(default_factory=dict)
-    sandbox_files: dict[str, str] = Field(default_factory=lambda: dict(DEFAULT_SANDBOX_FILES))
+    # None selects provider defaults; an explicit mapping replaces them, including an empty mapping.
+    sandbox_files: Optional[dict[str, str]] = None
     service_env_names: list[str] = Field(default_factory=lambda: list(SERVICE_ENV_NAMES))
     sandbox_port_range: tuple[int, int] = (27000, 28999)
     sandbox_max_concurrency: PositiveInt = 32
@@ -276,6 +282,9 @@ class MCPAtlasResourcesServer(SimpleResourcesServer):
                     )
             else:
                 raise ValueError("MCP-Atlas supports OpenSandbox, or Apptainer in explicit development mode")
+            sandbox_files = self.config.sandbox_files
+            if sandbox_files is None:
+                sandbox_files = APPTAINER_SANDBOX_FILES if provider_name == "apptainer" else DEFAULT_SANDBOX_FILES
             services = {name: os.environ[name] for name in self.config.service_env_names if os.environ.get(name)}
             logger.info("MCP-Atlas sandboxes get %d of %d service credentials", len(services), len(SERVICE_ENV_NAMES))
             self._pool = SandboxPool(
@@ -286,7 +295,7 @@ class MCPAtlasResourcesServer(SimpleResourcesServer):
                     self.config.sandbox_provider, self.server_client.global_config_dict
                 ),
                 sandbox_env={**self.config.sandbox_env, **services},
-                sandbox_files=self.config.sandbox_files,
+                sandbox_files=dict(sandbox_files),
                 port_range=self.config.sandbox_port_range,
                 max_concurrency=self.config.sandbox_max_concurrency,
                 startup_timeout_s=self.config.sandbox_startup_timeout_s,

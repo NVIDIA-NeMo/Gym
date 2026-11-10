@@ -21,9 +21,9 @@ from resources_servers.mcp_atlas.app import (
     MCPAtlasVerifyRequest,
     tool_output_text,
 )
-from resources_servers.mcp_atlas.sandbox import SandboxError
+from resources_servers.mcp_atlas.sandbox import HTTP_HELPER_PATH, SandboxError
 from resources_servers.mcp_atlas.tests.fake_agent_environment import FakeAgentEnvironment
-from resources_servers.mcp_atlas.tests.test_sandbox import FakeSandbox, pool
+from resources_servers.mcp_atlas.tests.test_sandbox import ExecSandbox, FakeSandbox, pool
 from resources_servers.mcp_atlas.tests.test_verifier import message, response
 from tests.helpers.reverification import build_reverification_payload
 
@@ -248,6 +248,78 @@ def test_opensandbox_resolves_provider_and_keeps_control_credentials_host_side(m
     assert server._pool.sandbox_metadata == {"team": "atlas"}
     assert server._pool.sandbox_env == {"EXA_API_KEY": "service-only", "PYTHONUNBUFFERED": "1"}
     assert server._pool.sandbox_options == options
+
+
+@pytest.mark.parametrize("provider_name", ["opensandbox", "apptainer"])
+@pytest.mark.parametrize("files_mode", ["omitted", "none", "custom", "empty"])
+async def test_resolved_provider_stages_cache_defaults_and_preserves_file_overrides(
+    provider_name: str, files_mode: str, tmp_path, monkeypatch
+) -> None:
+    custom_files = {
+        "/root/.config/uv/uv.toml": 'cache-dir = "/tmp/custom-uv-cache"\n',
+        "/root/.npmrc": "cache=/tmp/custom-npm-cache\nupdate-notifier=true\n",
+        "/root/custom.conf": "caller configuration\n",
+    }
+    requested_files = None
+    if files_mode == "custom":
+        requested_files = custom_files
+    elif files_mode == "empty":
+        requested_files = {}
+    before = dict(requested_files) if requested_files is not None else None
+    overrides = {} if files_mode == "omitted" else {"sandbox_files": requested_files}
+    client = judge_client()
+    client.global_config_dict = {"runtime": {provider_name: {}}}
+    image = "ghcr.io/scaleapi/mcp-atlas:1.2.7"
+    options = {"network_policy": {"defaultAction": "deny", "egress": []}}
+    if provider_name == "apptainer":
+        sif = tmp_path / "atlas.sif"
+        sif.touch()
+        image, options = str(sif), {}
+    server = make_server(
+        "",
+        client,
+        sandbox_image=image,
+        sandbox_provider="runtime",
+        sandbox_options=options,
+        sandbox_development_mode=provider_name == "apptainer",
+        sandbox_scratch_root=str(tmp_path),
+        service_env_names=[],
+        **overrides,
+    )
+    assert server._pool.sandbox_provider == {provider_name: {}}
+    specs = []
+
+    def runtime(provider, spec):
+        specs.append(spec)
+        if provider_name == "opensandbox":
+            return ExecSandbox(spec)
+        return FakeSandbox(provider, spec, tools=["calculate"])
+
+    # Keep config resolution, the real pool, and SandboxSpec construction; fake only the external runtime.
+    monkeypatch.setattr(server._pool, "_factory", runtime)
+    try:
+        await server._pool.start("cache-defaults", servers=["calculator"], tools=["calculator_calculate"])
+        assert len(specs) == 1
+        staged = {path: content for path, content in specs[0].files.items() if path != HTTP_HELPER_PATH}
+        if files_mode in {"omitted", "none"}:
+            if provider_name == "opensandbox":
+                expected = {
+                    "/root/.config/uv/uv.toml": 'exclude-newer = "2026-07-17T00:00:00Z"\n',
+                    "/root/.npmrc": "before=2026-07-17\nupdate-notifier=false\n",
+                }
+            else:
+                expected = {
+                    "/root/.config/uv/uv.toml": 'exclude-newer = "2026-07-17T00:00:00Z"\ncache-dir = "/tmp/uv-cache"\n',
+                    "/root/.npmrc": "before=2026-07-17\ncache=/tmp/npm-cache\nupdate-notifier=false\n",
+                }
+        else:
+            expected = before
+        assert staged == expected
+        assert server.config.sandbox_files == before
+        assert requested_files == before
+        assert (HTTP_HELPER_PATH in specs[0].files) is (provider_name == "opensandbox")
+    finally:
+        await server._shutdown()
 
 
 def test_tool_output_text() -> None:

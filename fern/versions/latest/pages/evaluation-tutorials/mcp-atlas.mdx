@@ -11,11 +11,12 @@ at revision `8c563b55d7c967755f474299848049834d624617`, with the upstream
 `ghcr.io/scaleapi/mcp-atlas:1.2.7` agent-environment image.
 
 <Warning>
-This integration is pending validation. The committed catalog lacks the authenticated Slack schemas
-needed by 60 tasks. Preparation fails until those schemas are exported and committed; credentials alone
-do not repair the catalog. The OpenSandbox exec transport and network policy still require deployment
-validation: evaluated code must be unable to reach other rollouts or the NeMo Gym control plane before
-benchmark scoring. Unit tests and a policy request do not establish that boundary.
+This integration is pending runtime validation. The catalog includes the five Slack definitions recovered
+from the upstream export and matched to the pinned package, and preparation covers all 500 tasks.
+An authenticated listing, account scopes and seeded workspace still require validation. The OpenSandbox
+exec transport and network policy also require deployment validation: evaluated code must be unable to
+reach other rollouts or the NeMo Gym control plane before benchmark scoring. Unit tests and a policy
+request do not establish that boundary.
 </Warning>
 
 ## Prepare the runtime and accounts
@@ -29,8 +30,9 @@ to validate image architecture, user permissions and filesystem access on the de
 
 Supply an operator-reviewed YAML overlay that sets `mcp_atlas_sandbox_options.network_policy` with
 explicit `defaultAction: deny`. The server rejects fields the installed OpenSandbox SDK drops or changes,
-including unsupported port restrictions. The policy must allow the real task services and bootstrap hosts
-(PyPI, npm and GitHub), while the deployed boundary protects peer, host, provider and NeMo Gym destinations.
+including unsupported port restrictions. Allow only the task-service and bootstrap endpoints actually
+needed on the deployment; cached tools may start without package downloads. The deployed boundary must
+protect peer, host, provider and NeMo Gym destinations.
 Verify IP-level enforcement, IPv6 handling and policy-management protection from evaluated code; DNS-only
 filtering is insufficient. Run simultaneous A/B private-marker tests with trusted host-proxy positive
 controls under the same deployment and policy before scoring. No service allowlist is invented here.
@@ -40,14 +42,20 @@ Provision the service credentials in the runtime environment using the upstream 
 Airtable, Google Calendar, Notion, MongoDB and Slack also require accounts populated with the upstream
 `data_exports/` fixtures. Use approved secret configuration; do not put credential values in commands or commits.
 
-Export the missing Slack tool schemas from an authenticated image using
+The default `sandbox_files: null` selects provider-specific package configuration with the existing
+July 17, 2026 resolution cutoff. OpenSandbox keeps the image's private uv and npm cache locations;
+Apptainer development uses writable `/tmp/uv-cache` and `/tmp/npm-cache`. A supplied `sandbox_files`
+mapping replaces these defaults, including an empty mapping. The required OpenSandbox HTTP helper
+is still staged.
+
+Validate the committed Slack schemas against an authenticated image export using
 [`export_tool_catalog.py`](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/mcp_atlas/export_tool_catalog.py).
 The exporter combines saved `/list-tools` responses. Preserve every supported tool requested by the tasks;
 do not remove Slack tasks or replace their schemas with guesses.
 
 ## Prepare all 500 tasks
 
-After the complete catalog is available, run from the repository root:
+Run from the repository root:
 
 ```bash
 gym eval prepare --benchmark mcp_atlas
