@@ -17,24 +17,32 @@ from uuid import uuid4
 from minisweagent.models.utils.actions_toolcall_response import BASH_TOOL_RESPONSE_API
 from pydantic import BaseModel, Field, TypeAdapter
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
+    AGENT_ROUTE_FAILED,
+    HARNESS_TERMINATION_UNCONFIRMED,
+    FailureBoundary,
+    FailureReportRow,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseInputItem,
     NeMoGymResponseUsage,
+    NgFailureEvent,
+    agent_route_failure,
+    report_for_current_request,
 )
-from nemo_gym.rollout_observability import (
+from nemo_gym.sandbox import AsyncSandbox
+from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
     ModelCallRef,
     ObservationGap,
+    SandboxObservation,
     ToolCallObservation,
     TrajectoryRecord,
     TrajectoryTurn,
 )
-from nemo_gym.sandbox import AsyncSandbox
 from responses_api_agents.miniswe_sandboxed_agent.bootstrap import bootstrap_assets
 
 
@@ -99,7 +107,10 @@ def project_native_trajectory(trajectory: dict) -> tuple[list[dict], list[dict]]
                 error = extra.get("exception_type")
                 tool.update(
                     message={"role": "tool", "tool_call_id": message["call_id"], "content": message["output"]},
-                    completed_at=extra.get("timestamp"),
+                    started_at=extra.get("started_at"),
+                    # The environment's own end time; artifacts without it keep the observation's save time.
+                    completed_at=extra.get("completed_at", extra.get("timestamp")),
+                    duration_ms=extra.get("duration_ms"),
                     status="timeout"
                     if error == "TimeoutExpired"
                     else "failed"
@@ -109,6 +120,16 @@ def project_native_trajectory(trajectory: dict) -> tuple[list[dict], list[dict]]
                 )
         elif message.get("role") in {"system", "user", "assistant"}:
             conversation.append({k: v for k, v in message.items() if k != "extra"})
+        elif message.get("role") == "exit" and extra.get("exit_status") == "Submitted" and extra.get("tool_call_id"):
+            # mini-SWE submits only after the command exited 0; the exit message carries its timing, no output.
+            tool = next((t for t in reversed(tools) if t["tool_call_id"] == extra["tool_call_id"]), None)
+            if tool is not None:
+                tool.update(
+                    started_at=extra.get("started_at"),
+                    completed_at=extra.get("completed_at"),
+                    duration_ms=extra.get("duration_ms"),
+                    status="completed",
+                )
     return history, tools
 
 
@@ -230,6 +251,9 @@ class MiniSWEHarness:
         uv, python = await bootstrap_assets(arch, libc)
         await self.sandbox.upload(uv, remote + "/uv.tar.gz")
         await self.sandbox.upload(python, remote + "/python.tar.gz")
+        await self.sandbox.upload(
+            Path(__file__).with_name("runtime") / "requirements.txt", remote + "/requirements.txt"
+        )
         # Extract as the task user: uploads may be root-owned and non-root task
         # users must own both the executable and the new Python environment.
         result = await self.sandbox.exec(
@@ -237,7 +261,7 @@ class MiniSWEHarness:
             f"uv-{arch}-unknown-linux-musl/uv && "
             f"tar -xzf {remote}/python.tar.gz -C {remote} && "
             f"UV_PYTHON_DOWNLOADS=never {remote}/uv --no-config venv {remote}/venv --python {remote}/python/bin/python3 && "
-            f"{remote}/uv --no-config pip install --python {remote}/venv/bin/python mini-swe-agent==2.4.6",
+            f"{remote}/uv --no-config pip install --python {remote}/venv/bin/python -r {remote}/requirements.txt",
             user=self.context.user,
             cwd=self.context.workdir,
             timeout_s=self.context.setup_timeout_sec,
@@ -327,7 +351,7 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
                 "cost_limit": 0,
             },
             "environment": {
-                "environment_class": "local",
+                "environment_class": "timed_environment.TimedLocalEnvironment",
                 "cwd": self.context.workdir or "",
                 "timeout": max(1, int(min(budget, self.config.step_timeout_sec))),
             },
@@ -346,15 +370,20 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
             "export MSWEA_CONFIGURED=true MSWEA_SILENT_STARTUP=true LITELLM_LOCAL_MODEL_COST_MAP=true "
             "MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT=1; "
             f"export MSWEA_GLOBAL_CONFIG_DIR={quote(remote + '/config')}; "
-            f"exec {quote(remote + '/venv/bin/python')} -m minisweagent.run.mini "
+            f"exec {quote(remote + '/venv/bin/python')} {quote(remote + '/timed_environment.py')} "
             f"-c mini.yaml -c {quote(remote + '/config.yaml')} -o {quote(remote + '/trajectory.json')} "
             f"> {quote(remote + '/agent.log')} 2>&1"
         )
         termination = HarnessOutcome(reason="completed")
         started = monotonic()
         run_result = None
+        cleanup_failure = cleanup_termination = None
+        execution_failure = None
         try:
             await self.sandbox.upload(local_config, f"{remote}/config.yaml")
+            await self.sandbox.upload(
+                Path(__file__).with_name("timed_environment.py"), f"{remote}/timed_environment.py"
+            )
             # --wait keeps this single exec open until mini-SWE exits. There is
             # no host-side request loop or sandbox polling between model calls.
             run_result = await self.sandbox.exec(
@@ -365,6 +394,14 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
             )
             if run_result.error_type:
                 termination = HarnessOutcome(reason="infrastructure_error", detail=run_result.error_type)
+                execution_failure = NgFailureEvent(
+                    boundary="agent",
+                    failure_kind=AGENT_ROUTE_FAILED,
+                    failure_reason="Sandbox command completion is unconfirmed",
+                    exception_type=str(run_result.error_type),
+                    operation="harness.run",
+                    stage="agent",
+                )
             elif run_result.return_code:
                 termination = HarnessOutcome(
                     reason="infrastructure_error",
@@ -376,6 +413,8 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
             termination = HarnessOutcome(reason="timeout")
         except Exception as error:
             termination = HarnessOutcome(reason="infrastructure_error", detail=f"{type(error).__name__}: {error}")
+            execution_failure = agent_route_failure(error, operation="harness.run", stage="agent")
+            execution_failure.__cause__ = error
         finally:
             try:
                 await self.close()
@@ -383,7 +422,17 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
                 termination = HarnessOutcome(reason="cancelled")
             except Exception as error:
                 LOGGER.exception("Failed to stop mini-SWE processes; resources must quiesce the sandbox")
-                termination = HarnessOutcome(reason="infrastructure_error", detail=f"Process cleanup failed: {error}")
+                # The run's processes may still be alive. It is the run's failure unless mini-SWE stopped at a limit.
+                cleanup_failure = NgFailureEvent(
+                    boundary=FailureBoundary.HARNESS,
+                    failure_kind=HARNESS_TERMINATION_UNCONFIRMED,
+                    failure_reason="mini-SWE harness termination was not confirmed",
+                    operation="harness.terminate",
+                )
+                cleanup_failure.__cause__ = error
+                cleanup_termination = HarnessOutcome(
+                    reason="infrastructure_error", detail=f"Process cleanup failed: {error}"
+                )
 
         try:
             await self.sandbox.download(f"{remote}/agent.log", self.directory / "agent.log")
@@ -411,10 +460,21 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
                 termination = HarnessOutcome(reason="completed")
             elif status in {"LimitsExceeded", "RepeatedFormatError", "ContextWindowExceededError", "TimeExceeded"}:
                 termination = HarnessOutcome(reason="nonzero_exit", detail=status)
+            elif not status and native_trajectory is not None:
+                # mini-SWE saves the trajectory after every step and records an exit status whenever its loop
+                # ends, even on an exception, so a saved trajectory without one means the process was killed
+                # mid-run: by the agent's own command or by the per-process OOM killer.
+                termination = HarnessOutcome(
+                    reason="killed", exit_code=run_result.return_code, detail=termination.detail
+                )
             else:
                 termination = HarnessOutcome(
                     reason="infrastructure_error", detail=status or "mini-SWE produced no trajectory"
                 )
+        if cleanup_termination is not None and termination.reason != "nonzero_exit":
+            # Only a native limit or format stop settles the run without a submitted answer; otherwise, a submission
+            # included, the failed cleanup is the run's failure.
+            termination = cleanup_termination
 
         history, tool_history = project_native_trajectory(result)
         responses = []
@@ -448,6 +508,17 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
             else None,
         )
         extra = {"harness_version": info.get("mini_version")}
+        if execution_failure is not None:
+            report = report_for_current_request(execution_failure)
+            if termination.reason != "infrastructure_error" or termination is cleanup_termination:
+                report = report.model_copy(update={"failure_id": None})
+            extra.update(FailureReportRow.fields(report))
+        if cleanup_failure is not None:
+            report = report_for_current_request(cleanup_failure)
+            if termination is not cleanup_termination:
+                # The native limit stands as the result: the failed cleanup is an observation, not the run's cause.
+                report = report.model_copy(update={"failure_id": None})
+            FailureReportRow.merged_into(extra, report)
         if native_trajectory is not None:
             extra["mini_swe_trajectory"] = native_trajectory
             termination.artifacts = [str(self.directory / "trajectory.json")]
@@ -456,6 +527,10 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
         if self.observability_enabled:
             invocation = AgentInvocation(invocation_id=self.context.session_id)
             observations = AgentObservationBundle(source="miniswe", records=[invocation])
+            # The resources server owns the sandbox lifecycle; the agent observes only which sandbox it ran in.
+            sandbox_id = getattr(self.sandbox, "sandbox_id", None)
+            if sandbox_id is not None:
+                observations.records.append(SandboxObservation(role="agent", sandbox_id=sandbox_id))
             trajectory = TrajectoryRecord(
                 task_id=self.context.task_id or self.context.session_id,
                 rollout_id=self.context.rollout_id or self.context.session_id,
@@ -528,6 +603,7 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
                     ToolCallObservation(
                         invocation_id=invocation.invocation_id,
                         tool_call_id=tool["tool_call_id"],
+                        sandbox_id=sandbox_id,
                         tool_name="bash",
                         started_at=tool.get("started_at"),
                         completed_at=tool.get("completed_at"),

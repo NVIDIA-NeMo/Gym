@@ -7,6 +7,8 @@ import json
 import pytest
 from fastapi import Request
 
+from nemo_gym.agents import is_harness_termination_failure
+from nemo_gym.core import NgFailureEvent
 from responses_api_agents.openclaw_agent.tests.test_sandbox import seed, setup  # noqa: F401
 
 
@@ -51,13 +53,25 @@ async def test_invalid_runtime_preserves_output_and_confirmed_close(setup, runti
 @pytest.mark.parametrize(
     "invalid", [{"cleanup_confirmed": 1}, {"cleanup_confirmed": "true"}, {"cleanup_confirmed": False}]
 )
-async def test_bad_cleanup_keeps_state_retryable_without_reading_runtime(setup, invalid):
+async def test_unconfirmed_receipt_skips_runtime_and_distinguishes_terminal_failure(setup, invalid):
     state, sandbox, payload = await session(setup)
     sandbox.result.update(invalid)
-    with pytest.raises(RuntimeError):
+    # A malformed receipt stays a retryable RuntimeError; a negative one is the harness's final typed failure.
+    final = invalid["cleanup_confirmed"] is False
+    with pytest.raises(NgFailureEvent if final else RuntimeError) as failure:
         await state.execute(payload, timeout=5, close_timeout=1)
+    assert is_harness_termination_failure(failure.value) is final
     assert state.session.cleanup is None
     assert state.runtime_info is None
+    if invalid["cleanup_confirmed"] is False:
+        await state.close(1)
+        assert state.session.closed
+        assert state.session.termination_error is not None
+        assert state.session.capture_error is state.session.termination_error
+        assert state.runtime_info is None
+        sandbox.disconnect.assert_awaited_once()
+        sandbox.stop.assert_not_awaited()
+        return
     with pytest.raises(RuntimeError):
         await state.close(1)
     assert not state.session.closed

@@ -45,14 +45,14 @@ from typing import Any, Dict, List
 from fastapi import FastAPI
 from pydantic import ConfigDict
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.core import NeMoGymResponse
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.openai_utils import NeMoGymResponse
 
 
 LOG = logging.getLogger(__name__)
@@ -192,7 +192,6 @@ class RagtruthVerifyResponse(BaseVerifyResponse):
 
 
 class RagtruthResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: RagtruthResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

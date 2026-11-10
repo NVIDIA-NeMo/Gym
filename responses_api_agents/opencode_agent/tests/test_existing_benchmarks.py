@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 from omegaconf import DictConfig, OmegaConf
 
-from nemo_gym.agent_registry import discover_agents
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig, get_first_server_config_dict
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig, get_first_server_config_dict
+from nemo_gym.environment import discover_agents
 from responses_api_agents.opencode_agent.app import OpenCodeAgentConfig
 from responses_api_agents.opencode_sandboxed_agent.app import OpenCodeSandboxedAgentConfig
 
@@ -57,7 +57,10 @@ def test_permission_profile_loads_with_cli_override(override: bool, monkeypatch:
         "*git *@*:*",
     ):
         assert permissions.bash[command] == "deny"
-    assert settings.opencode_config.tools.webfetch is False
+    assert [permissions[tool] for tool in ("webfetch", "websearch", "skill")] == ["deny"] * 3
+    # OpenCode applies the last matching rule, so the denials must follow "*"; a `tools` map would be placed before it.
+    assert list(permissions).index("*") < list(permissions).index("webfetch")
+    assert "tools" not in settings.opencode_config
     assert "opencode_version" not in settings
 
 
@@ -71,6 +74,7 @@ def test_permission_profile_is_not_a_standalone_agent_variant(monkeypatch: pytes
     [
         ("swebench/verified", "swebench_verified"),
         ("swebench/multilingual", "swebench_multilingual"),
+        ("swebench/multimodal", "swebench_multimodal"),
         ("swebench/pro", "swebench_pro"),
         ("terminal_bench_2_1", "terminal_bench_2_1"),
     ],
@@ -130,8 +134,8 @@ def test_deepswe_runs_opencode_sessions_in_the_resources_sandbox(monkeypatch: py
     agent_config = _deepswe_agent_config(config)
     assert agent_config.timeout == 10800
     assert agent_config.max_output_tokens == agent_config.context_window == 262144
-    # The previous recipe graded runs that ended on an error and read the repository's AGENTS.md/CLAUDE.md.
-    assert agent_config.session_return_failed_runs is True
+    assert agent_config.report_agent_sandbox_oom is True
+    # The previous recipe let OpenCode read the repository's AGENTS.md or CLAUDE.md.
     assert agent_config.session_project_config is True
     # Resources lends its no-network task sandbox; the agent never creates one.
     assert agent_config.sandbox_provider is None
@@ -145,8 +149,11 @@ def test_deepswe_runs_opencode_sessions_in_the_resources_sandbox(monkeypatch: py
     assert resources.sandbox_model_server.name == agent_config.model_server.name
     environment = config.deepswe_environment_server.environment_servers
     assert list(environment) == ["single_agent_turn_legacy"]
-    assert environment.single_agent_turn_legacy.agent_server.name == "deepswe_opencode_agent"
-    assert environment.single_agent_turn_legacy.resources_server.name == "deepswe_opencode_resources_server"
+    episode = environment.single_agent_turn_legacy
+    assert episode.agent_server.name == "deepswe_opencode_agent"
+    assert episode.resources_server.name == "deepswe_opencode_resources_server"
+    # An episode ends before the provider reclaims its agent sandbox.
+    assert agent_config.timeout < episode.default_episode_timeout_seconds <= resources.sandbox_config.ttl_s
 
 
 @pytest.mark.parametrize("staged", [False, True])
@@ -155,7 +162,11 @@ def test_nemotron_overlays_bind_deepswe_opencode_sessions(staged: bool, monkeypa
     config = _resolve_config(f"benchmarks/nemotron_3.5_super/eval_container_config{suffix}.yaml", monkeypatch)
     assert "deepswe_opencode_sandboxed_agent" not in config
     agent_config = _deepswe_agent_config(config)
-    assert agent_config.sandbox_runtime_binaries == {"glibc": "/mnt/s3-data/data/bxyu/opencode/opencode-linux-x64"}
+    # The no-network agent sandbox runs the mounted binary, checked against its digest.
+    assert agent_config.sandbox_executable_path == "/mnt/s3-data/data/bxyu/opencode/opencode-linux-x64"
+    assert agent_config.sandbox_executable_sha256 == (
+        "0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded"  # pragma: allowlist secret
+    )
     settings = get_first_server_config_dict(config, "deepswe_opencode_agent")
     assert [(dataset.name, dataset.num_repeats) for dataset in settings.datasets] == (
         [("deepswe_v1_1", 5)] if staged else []

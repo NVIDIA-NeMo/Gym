@@ -97,7 +97,7 @@ current authoritative default branch (`upstream/main` for a fork or
 **Quick Start:**
 
 ```bash
-# Install uv 0.11.21 or newer (required for the repository's Python version).
+# Install uv 0.13.4 or newer (required by the managed lockfiles).
 curl -LsSf https://astral.sh/uv/install.sh | sh
 source $HOME/.local/bin/env
 
@@ -112,6 +112,11 @@ uv venv --python 3.13.14 && source .venv/bin/activate
 uv sync --extra dev --extra telemetry --extra mlflow --extra wandb
 pre-commit install
 ```
+
+Existing contributors using an older uv release should run `uv self update`
+(or rerun the installer), then verify `uv --version` is at least 0.13.4. The
+managed lockfiles reject older uv versions; no lock regeneration is needed
+when upgrading uv.
 
 The `dev` extra provides development tools, but it does not install the optional
 SDKs exercised by the core unit tests. Include `telemetry`, `mlflow`, and `wandb`
@@ -184,7 +189,7 @@ If DCO checks fail after you have already pushed, see the [Development Setup Gui
 
 - Declare each new import in the narrowest appropriate dependency file. Keep
   environment-, agent-, and model-specific packages in that component's
-  `pyproject.toml` or `requirements.txt`; add a root dependency only when shared
+  `pyproject.toml` (with its `uv.lock`); add a root dependency only when shared
   Gym runtime code requires it.
 - Root dependencies in `pyproject.toml` must record why they are needed, when
   they were updated, and their license. Do not introduce a license incompatible
@@ -205,11 +210,14 @@ Gym has three CI entry points:
 2. **Main Gym CICD** — `cicd-main.yml` runs on mirrored PR branches and pushes to `main`, and also on a four-hour schedule or manual dispatch. Its unit and component scope follows the change classifier; scheduled and manual runs add configured container and GPU E2E coverage.
 3. **Unconditional full suite** — `full-test-suite.yml` runs every four hours or by manual dispatch, without change detection.
 
+For mirrored PR pushes, main Gym CICD resolves the PR merge commit once and uses that exact revision for change detection, builds, and tests. A stale mirror or unavailable merge commit fails revision selection rather than testing the unmerged PR head. Main pushes, scheduled/manual runs, and merge-queue runs retain their event revision.
+
 **Triggering trusted CI (`/ok to test`):** The mirrored Gym CICD and Fern
 workflows run automatically for verified commits from NVIDIA-NeMo members. If
 your commits are unverified, or you are an external contributor, these trusted
 workflows do not start until a qualified NVIDIA-NeMo vetter comments
-`/ok to test <full commit SHA>` on the PR. Approval applies to the current
+`/ok to test <full commit SHA>` on the PR. Use the full 40-character SHA
+(`git rev-parse HEAD`), not an abbreviation. Approval applies to the current
 head; after an unverified head changes, a qualified vetter must approve the new
 full SHA.
 GitHub-hosted checks such as lint, copyright, secrets, DCO, and the Fern preview

@@ -21,7 +21,7 @@ from typing import Any, Optional
 
 from metrics import FINGERPRINTS, canonical_smiles, decode_safe, score_fragments, score_safe, score_smiles
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
@@ -105,7 +105,6 @@ class MolDeToxVerifyResponse(BaseVerifyResponse):
 
 
 class MolDeToxResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: BaseResourcesServerConfig
 
     def get_key_metrics(self, agent_metrics: dict[str, Any]) -> dict[str, Any]:

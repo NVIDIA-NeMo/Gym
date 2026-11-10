@@ -15,7 +15,7 @@
 
 from typing import List, Optional
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
@@ -50,7 +50,6 @@ class RulerVerifyResponse(RulerVerifyRequest, BaseVerifyResponse):
 
 
 class RulerResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: RulerResourcesServerConfig
 
     async def verify(self, body: RulerVerifyRequest) -> BaseVerifyResponse:

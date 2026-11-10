@@ -18,7 +18,7 @@ from typing import List, Optional
 
 from fastapi import FastAPI
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
@@ -90,7 +90,6 @@ def _parse_grid(text: str) -> Optional[List[List[int]]]:
 
 
 class ARCAGIResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: ARCAGIResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

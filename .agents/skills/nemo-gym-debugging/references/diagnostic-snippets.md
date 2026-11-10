@@ -145,4 +145,4 @@ print("duplicate task/rollout keys", [k for k, c in rollouts.items() if c > 1][:
 PY
 ```
 
-If the target repo uses different global key names, inspect `nemo_gym/global_config.py` and substitute them.
+If the target repo uses different global key names, inspect `nemo_gym/config/global_config.py` and substitute them.

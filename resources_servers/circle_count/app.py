@@ -15,7 +15,7 @@
 import re
 from typing import Any, Dict, List, Optional
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
@@ -39,7 +39,6 @@ class CircleCountVerifyResponse(BaseVerifyResponse):
 
 
 class CircleCountResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: CircleCountConfig
 
     async def verify(self, body: CircleCountVerifyRequest) -> CircleCountVerifyResponse:

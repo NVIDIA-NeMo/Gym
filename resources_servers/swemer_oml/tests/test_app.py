@@ -123,6 +123,12 @@ class TestVerificationFiles:
         assert "/root/.m2/settings.xml" in files  # Maven Central mirror, as in swemer_v1
         assert files[f"{TESTS_DIR}/grade.py"] == "print('grader')\n"
 
+    def test_skips_only_maven_settings_when_overwrite_disabled(self) -> None:
+        files = verification_files(_inputs(), overwrite_maven_settings=False)
+        assert "/root/.m2/settings.xml" not in files
+        assert "/root/.gradle/init.d/nemo_gym_mirror.gradle" in files
+        assert f"{TESTS_DIR}/test.sh" in files
+
     def test_omits_blank_patch_and_blank_test_patch(self) -> None:
         files = verification_files(_inputs(patch="   ", test_patch=""))
         assert "/tmp/nemo_gym_patch.diff" not in files

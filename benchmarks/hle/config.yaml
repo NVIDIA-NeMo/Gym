@@ -16,6 +16,7 @@ hle_equivalence_llm_judge_resources_server:
       judge_system_message: ""
       judge_equal_label: "Judgement: yes"
       judge_not_equal_label: "Judgement: no"
+      judge_labels_case_insensitive: true
       judge_prompt_template_fpath: ../../benchmarks/hle/prompts/judge.txt
       response_extract_regex: null
       question_extract_regex: null
@@ -26,7 +27,7 @@ hle_equivalence_llm_judge_simple_agent:
   _inherit_from: equivalence_llm_judge_simple_agent
   responses_api_agents:
     simple_agent:
-      max_steps: null
+      max_steps: 1
       resources_server:
         name: hle_equivalence_llm_judge_resources_server
       datasets:
@@ -40,6 +41,9 @@ hle_equivalence_llm_judge_simple_agent:
 hle_equivalence_llm_judge_environment_server:
   _inherit_from: equivalence_llm_judge_environment_server
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: hle_equivalence_llm_judge_resources_server
       agent_server:
         name: hle_equivalence_llm_judge_simple_agent

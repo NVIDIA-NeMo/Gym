@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Tuple
 
 from fastapi import FastAPI
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
@@ -39,7 +39,10 @@ class FormatVerificationVerifyResponse(BaseVerifyResponse):
 
 
 class FormatVerificationResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
+    # Each verification checks the response format alone: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     config: FormatVerificationResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

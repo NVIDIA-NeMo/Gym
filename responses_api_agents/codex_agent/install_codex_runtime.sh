@@ -8,12 +8,11 @@ runtime=$1
 codex_version=$2
 node_version=22.19.0
 [[ "$codex_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'An exact Codex version is required' >&2; exit 1; }
-[ "$(uname -s)" = Linux ] || { echo 'Native Codex requires Linux' >&2; exit 1; }
-python3 -c 'import sys; assert sys.version_info >= (3, 8), "Native Codex requires Python >=3.8"'
+[ "$(uname -s)" = Linux ] || { echo 'Codex in the task sandbox requires Linux' >&2; exit 1; }
 case "$(uname -m)" in
   x86_64) arch=x64 ;;
   aarch64) arch=arm64 ;;
-  *) echo 'Native Codex supports Linux x86_64/aarch64 sandboxes only' >&2; exit 1 ;;
+  *) echo 'Codex in the task sandbox supports Linux x86_64/aarch64 sandboxes only' >&2; exit 1 ;;
 esac
 platform="linux-${arch}"
 node_dist="https://nodejs.org/dist/v${node_version}"
@@ -24,19 +23,19 @@ elif [[ "$(ldd --version 2>&1 || true)" == *musl* ]]; then
   platform=linux-x64-musl
   node_dist="https://unofficial-builds.nodejs.org/download/release/v${node_version}"
 else
-  echo 'Native Codex requires glibc or musl; could not identify sandbox libc' >&2
+  echo 'Codex in the task sandbox requires glibc or musl; could not identify sandbox libc' >&2
   exit 1
 fi
 
 install_packages() {
-  [ "$(id -u)" = 0 ] || { echo "Native Codex requires $*: preinstall them or use a root image." >&2; exit 1; }
+  [ "$(id -u)" = 0 ] || { echo "Codex in the task sandbox requires $*: preinstall them or use a root image." >&2; exit 1; }
   if command -v apk >/dev/null 2>&1; then
     apk add --no-cache "$@"
   elif command -v apt-get >/dev/null 2>&1; then
     apt-get update
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@"
   else
-    echo "Native Codex requires $*: preinstall them (automatic installation requires apt-get or apk)." >&2
+    echo "Codex in the task sandbox requires $*: preinstall them (automatic installation requires apt-get or apk)." >&2
     exit 1
   fi
 }
@@ -65,10 +64,6 @@ if [ ! -f "$runtime/ready" ]; then
   if [ "$missing" = 1 ]; then
     install_packages curl ca-certificates tar gzip coreutils gawk
   fi
-  if [ "$platform" = linux-x64-musl ] && ! python3 -c 'import ctypes; ctypes.CDLL("libstdc++.so.6")' 2>/dev/null; then
-    install_packages libstdc++
-  fi
-
   cd "$runtime"
   archive="node-v${node_version}-${platform}.tar.gz"
   curl -fsSL --retry 3 "${node_dist}/${archive}" -o "$archive"
@@ -76,17 +71,26 @@ if [ ! -f "$runtime/ready" ]; then
   awk -v archive="$archive" '$2 == archive' SHASUMS256.txt | sha256sum -c -
   mkdir -p node
   tar -xzf "$archive" --strip-components=1 -C node
-  if [ "$platform" = linux-x64-musl ] && ! "$runtime/node/bin/node" --version; then
-    # Old Alpine's C++ runtime lacks symbols required by Node 22. Only the private
-    # Node binary sees this pinned library; task libraries and LD_LIBRARY_PATH stay intact.
-    command -v patchelf >/dev/null 2>&1 || install_packages patchelf
-    curl -fsSL --retry 3 \
-      'https://dl-cdn.alpinelinux.org/alpine/v3.19/main/x86_64/libstdc++-13.2.1_git20231014-r0.apk' \
-      -o libstdc++.apk
-    echo '3cf66a7164240ef590106496d3c75f486bac46cba9cf2198c0c3b318c53ad027  libstdc++.apk' | sha256sum -c -
-    mkdir -p libstdcpp
-    tar -xzf libstdc++.apk -C libstdcpp usr/lib
-    patchelf --set-rpath '$ORIGIN/../../libstdcpp/usr/lib' "$runtime/node/bin/node"
+  if [ "$platform" = linux-x64-musl ] && ! node_probe=$("$runtime/node/bin/node" --version 2>&1); then
+    printf '%s\n' "$node_probe" >&2
+    # Let musl resolve its configured search paths. Missing runtime libraries need packages;
+    # an existing but older C++ library can use the private repair below, even without root.
+    case "$node_probe" in
+      *"Error loading shared library libstdc++.so.6:"*|*"Error loading shared library libgcc_s.so.1:"*)
+        install_packages libstdc++ ;;
+    esac
+    if ! "$runtime/node/bin/node" --version; then
+      # Old Alpine's C++ runtime lacks symbols required by Node 22. Only the private
+      # Node binary sees this pinned library; task libraries and LD_LIBRARY_PATH stay intact.
+      command -v patchelf >/dev/null 2>&1 || install_packages patchelf
+      curl -fsSL --retry 3 \
+        'https://dl-cdn.alpinelinux.org/alpine/v3.19/main/x86_64/libstdc++-13.2.1_git20231014-r0.apk' \
+        -o libstdc++.apk
+      echo '3cf66a7164240ef590106496d3c75f486bac46cba9cf2198c0c3b318c53ad027  libstdc++.apk' | sha256sum -c -
+      mkdir -p libstdcpp
+      tar -xzf libstdc++.apk -C libstdcpp usr/lib
+      patchelf --set-rpath '$ORIGIN/../../libstdcpp/usr/lib' "$runtime/node/bin/node"
+    fi
   fi
   "$runtime/node/bin/node" --version
   PATH="$runtime/node/bin:$PATH" "$runtime/node/bin/node" \

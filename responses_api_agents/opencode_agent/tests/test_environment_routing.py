@@ -16,17 +16,23 @@ from environment_servers.single_agent_turn.app import (
     SingleAgentTurnEnvironmentServer,
     SingleAgentTurnEnvironmentServerConfig,
 )
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig, get_first_server_config_dict
-from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig, get_first_server_config_dict
+from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper
 from responses_api_agents.opencode_agent.app import OpenCodeAgentConfig
-from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import seed, setup  # noqa: F401
+from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import (
+    capture_observations,
+    rejected_events,
+    seed,
+    setup,  # noqa: F401
+)
 
 
 class _Response:
     def __init__(self, payload: dict, cookies: dict[str, str] | None = None) -> None:
         self.payload = payload
         self.cookies = SimpleCookie(cookies or {})
+        self.headers = {}
         self.ok = True
         self.status = 200
 
@@ -74,16 +80,16 @@ def _resolved_config():
     )
 
 
-@pytest.mark.parametrize("model_error", [False, True])
+@pytest.mark.parametrize("outcome", ["completed", "initial-rejection", "later-rejection"])
 async def test_session_composition_routes_collector_through_environment_and_responses(
-    setup, monkeypatch: pytest.MonkeyPatch, model_error: bool
+    setup, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, outcome: str
 ):
     agent, sandbox = setup
-    if model_error:
-        # A run that ends on a model error is still verified when the agent returns failed runs.
-        export = json.loads(sandbox.events)
-        export["messages"][-1]["info"]["error"] = {"name": "APIError", "message": "context length exceeded"}
-        sandbox.events = json.dumps(export)
+    if outcome != "completed":
+        sandbox.events = rejected_events(after_work=outcome == "later-rejection")
+        sandbox.result["return_code"] = 1
+        capture_observations(sandbox, tmp_path)
+    reward = {"completed": 1.0, "initial-rejection": 0.0, "later-rejection": 0.5}[outcome]
     monkeypatch.chdir(Path(__file__).resolve().parents[3])
     # The benchmark's existing allowlist is unchanged; this integration is opt-in.
     monkeypatch.setenv("NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING", "1")
@@ -98,7 +104,6 @@ async def test_session_composition_routes_collector_through_environment_and_resp
     # Session routing must not require an execution-mode override.
     assert "execution_mode" not in type(agent.config).model_fields
     assert agent.config.opencode_config["permission"]["bash"]["*git submodule update*"] == "deny"
-    agent.config.session_return_failed_runs = model_error
     agent.server_client.global_config_dict = config
     client = MagicMock(spec=ServerClient)
     client.global_config_dict = config
@@ -118,7 +123,7 @@ async def test_session_composition_routes_collector_through_environment_and_resp
         TestClient(environment.setup_webserver()) as environment_http,
     ):
 
-        async def dispatch(*, server_name, url_path, json, cookies=None):
+        async def dispatch(*, server_name, url_path, json, cookies=None, headers=None):
             nonlocal seed_id, responses_body
             body = json.model_dump(mode="json") if isinstance(json, BaseModel) else json
             calls.append((server_name, url_path, body))
@@ -131,7 +136,7 @@ async def test_session_composition_routes_collector_through_environment_and_resp
                 assert url_path != "/run", "Environment collection must not call agent /run"
                 agent_http.cookies.clear()
                 agent_http.cookies.update(cookies or {})
-                response = await asyncio.to_thread(agent_http.post, url_path, json=body)
+                response = await asyncio.to_thread(agent_http.post, url_path, json=body, headers=headers)
                 assert response.status_code == 200, response.text
                 if url_path == "/v1/agent_sessions":
                     seed_id = body["agent_session_id"]
@@ -155,7 +160,7 @@ async def test_session_composition_routes_collector_through_environment_and_resp
             if url_path == "/verify":
                 sandbox.disconnect.assert_awaited_once()
                 assert body["response"] == responses_body
-                return _Response({**body, "reward": 1.0})
+                return _Response({**body, "reward": reward, "evaluation_completed": True, "mask_sample": False})
             assert url_path == "/close_session"
             return _Response({"resources_session_id": body["resources_session_id"]})
 
@@ -180,7 +185,9 @@ async def test_session_composition_routes_collector_through_environment_and_resp
         )
         _, result = await next(RolloutCollectionHelper().run_examples(rows))
     assert result["failure"] is None, result
-    assert result["result"]["reward"] == 1.0
+    assert result["result"]["reward"] == reward
+    assert result["result"]["evaluation_completed"] is True
+    assert result["result"]["mask_sample"] is False
     assert [path for _, path, _ in calls] == [
         "/run",
         "/seed_session",
@@ -193,8 +200,12 @@ async def test_session_composition_routes_collector_through_environment_and_resp
     assert calls[0][0] == environment_name
     assert calls[3][2]["input"] == "Fix the code"
     assert "grader-only" not in json.dumps(calls[3][2])
-    assert responses_body["output"][-1]["content"][0]["text"] == "Fixed"
-    assert responses_body["status"] == ("failed" if model_error else "completed")
-    assert responses_body["usage"]["total_tokens"] == 16
+    assert responses_body["status"] == ("completed" if outcome == "completed" else "failed")
+    if outcome == "initial-rejection":
+        assert responses_body["output"] == []
+        assert responses_body["usage"]["total_tokens"] == 0
+    else:
+        assert responses_body["output"][-1]["content"][0]["text"] == "Fixed"
+        assert responses_body["usage"]["total_tokens"] == 16
     assert not any(record.state is not None for record in agent._session_records.values())
     sandbox.stop.assert_not_awaited()

@@ -21,6 +21,7 @@ from unittest.mock import AsyncMock
 import pytest
 from harbor.models.trajectories import Trajectory
 
+import nemo_gym.client.http_client
 from responses_api_agents.harbor_agent_general import app
 from responses_api_agents.harbor_agent_general.app import HarborAgent, HarborVerifyResponse
 
@@ -255,6 +256,161 @@ async def test_run_job_rejects_failed_steps_and_invalidates_resume(tmp_path, mon
         assert result_path.exists()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_location", ["trial", "step"])
+@pytest.mark.parametrize("reward", [1.0, 0.0, None])
+async def test_run_job_keeps_graded_agent_timeouts(tmp_path, monkeypatch, failure_location, reward):
+    """Harbor runs the tests after an agent timeout; their result is the score, pass or fail, as in Harbor."""
+    from harbor.models.job.config import JobConfig
+
+    from responses_api_agents.harbor_agent_general import app
+
+    trial_dir = tmp_path / "job" / "trial"
+    trial_dir.mkdir(parents=True)
+    result_path = trial_dir / "result.json"
+    result_path.write_text("{}")
+    timeout = SimpleNamespace(exception_type="AgentTimeoutError", exception_message="timed out after 900.0 seconds")
+    verifier_result = None if reward is None else SimpleNamespace(rewards={"reward": reward})
+    trial = SimpleNamespace(
+        task_name="task",
+        exception_info=timeout if failure_location == "trial" else None,
+        verifier_result=verifier_result if failure_location == "trial" else None,
+        step_results=[
+            SimpleNamespace(
+                exception_info=timeout if failure_location == "step" else None,
+                verifier_result=verifier_result if failure_location == "step" else None,
+            )
+        ],
+    )
+    monkeypatch.setattr(app.TrialResult, "model_validate_json", lambda _: trial)
+    monkeypatch.setattr(app.Job, "create", AsyncMock(return_value=SimpleNamespace(run=AsyncMock())))
+    config = JobConfig(job_name="job", jobs_dir=tmp_path)
+
+    # Without a test result (the sandbox ends at the agent's deadline) the timeout is still the trial's outcome.
+    assert Path(await HarborAgent.run_job(config.model_dump(mode="json"), "task")) == trial_dir
+    assert result_path.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "exception_type,message",
+    [
+        ("RuntimeError", "Sandbox is not running; call start() first."),
+        ("ConversationRunError", "LLMTimeoutError: the LLM request timed out after 5 retries"),
+    ],
+    ids=["sandbox-not-running-without-a-deadline", "llm-timeout-after-retries"],
+)
+async def test_run_job_retries_the_harbor_failures_that_are_not_agent_timeouts(
+    tmp_path, monkeypatch, exception_type, message
+):
+    from harbor.models.job.config import JobConfig
+
+    from responses_api_agents.harbor_agent_general import app
+
+    trial_dir = tmp_path / "job" / "trial"
+    trial_dir.mkdir(parents=True)
+    result_path = trial_dir / "result.json"
+    result_path.write_text("{}")
+    failure = SimpleNamespace(exception_type=exception_type, exception_message=message)
+    trial = SimpleNamespace(task_name="task", exception_info=failure, verifier_result=None, step_results=[])
+    monkeypatch.setattr(app.TrialResult, "model_validate_json", lambda _: trial)
+    monkeypatch.setattr(app.Job, "create", AsyncMock(return_value=SimpleNamespace(run=AsyncMock())))
+    config = JobConfig(job_name="job", jobs_dir=tmp_path)
+
+    with pytest.raises(RuntimeError, match=exception_type):
+        await HarborAgent.run_job(config.model_dump(mode="json"), "task")
+    assert not result_path.exists(), "Gym retries must not reuse the failed trial's result"
+
+
+def test_an_agent_timeout_without_a_test_result_is_a_terminal_graded_zero(tmp_path, monkeypatch) -> None:
+    """The row is scored 0.0 and completed, unmasked, named agent_timeout: no resume runs it again."""
+    from responses_api_agents.harbor_agent_general import app
+
+    monkeypatch.setattr(app, "get_global_config_dict", lambda: {})
+    agent = HarborAgent.model_construct()
+    agent.config = app.HarborAgentConfig.model_validate(
+        {
+            "name": "harbor_agent_general",
+            "host": "0.0.0.0",
+            "port": 8080,
+            "entrypoint": "app.py",
+            "job": {
+                "jobs_dir": tmp_path / "jobs",
+                "datasets": [{"path": tmp_path / "tasks"}],
+                "agents": [{"name": "opencode", "model_name": "native-model"}],
+            },
+        }
+    )
+    task_dir = tmp_path / "tasks" / "task"
+    task_dir.mkdir(parents=True)
+    app.TaskPaths(task_dir).instruction_path.write_text("Do the task.")
+    trial_dir = tmp_path / "jobs" / "job" / "trial"
+    trial_dir.mkdir(parents=True)
+    app.TrialPaths(trial_dir).result_path.write_text("{}")
+    timeout = SimpleNamespace(exception_type="AgentTimeoutError", exception_message="timed out after 900.0 seconds")
+    trial = SimpleNamespace(
+        id="trial-1",
+        task_name="task",
+        config=SimpleNamespace(task=SimpleNamespace(get_local_path=lambda: task_dir)),
+        exception_info=timeout,
+        verifier_result=None,
+        step_results=[],
+        finished_at=None,
+        compute_token_cost_totals=lambda: (0, 0, 0, 0),
+    )
+    monkeypatch.setattr(app.TrialResult, "model_validate_json", lambda _: trial)
+    body = app.HarborRunRequest.model_validate(
+        {
+            "task_name": "task",
+            app.TASK_INDEX_KEY_NAME: 0,
+            app.ROLLOUT_INDEX_KEY_NAME: 0,
+            "responses_create_params": {"input": []},
+        }
+    )
+
+    row = agent.success_response(body, trial_dir).model_dump()
+    assert (row["reward"], row["failure_kind"], row["evaluation_completed"], row["mask_sample"]) == (
+        0.0,
+        "agent_timeout",
+        True,
+        False,
+    )
+    assert row["response"]["output"] == []
+    assert row["atif_conversion"]["warnings"] == ["the agent timed out before it wrote its trajectory"]
+    assert "_ng_failure_class" not in row
+
+
+@pytest.mark.asyncio
+async def test_run_job_rejects_a_graded_timeout_beside_another_failed_step(tmp_path, monkeypatch):
+    """One step's graded timeout doesn't excuse another step's failure."""
+    from harbor.models.job.config import JobConfig
+
+    from responses_api_agents.harbor_agent_general import app
+
+    trial_dir = tmp_path / "job" / "trial"
+    trial_dir.mkdir(parents=True)
+    result_path = trial_dir / "result.json"
+    result_path.write_text("{}")
+    timeout = SimpleNamespace(exception_type="AgentTimeoutError", exception_message="timed out after 900.0 seconds")
+    failure = SimpleNamespace(exception_type="RuntimeError", exception_message="notebook unavailable")
+    trial = SimpleNamespace(
+        task_name="task",
+        exception_info=None,
+        verifier_result=None,
+        step_results=[
+            SimpleNamespace(exception_info=timeout, verifier_result=SimpleNamespace(rewards={"reward": 1.0})),
+            SimpleNamespace(exception_info=failure, verifier_result=None),
+        ],
+    )
+    monkeypatch.setattr(app.TrialResult, "model_validate_json", lambda _: trial)
+    monkeypatch.setattr(app.Job, "create", AsyncMock(return_value=SimpleNamespace(run=AsyncMock())))
+    config = JobConfig(job_name="job", jobs_dir=tmp_path)
+
+    with pytest.raises(RuntimeError, match="notebook unavailable"):
+        await HarborAgent.run_job(config.model_dump(mode="json"), "task")
+    assert not result_path.exists()
+
+
 @pytest.fixture
 def agent(monkeypatch: pytest.MonkeyPatch) -> HarborAgent:
     """An agent built without a server: compute_metrics reads only the rollouts it is handed."""
@@ -281,3 +437,209 @@ def test_compute_metrics_scores_pass_at_k_from_the_verifier_reward(agent: Harbor
 def test_compute_metrics_leaves_an_unscored_rollout_out_of_the_average(agent: HarborAgent) -> None:
     """A row carrying no reward is a rollout nobody scored, which is not the same as a zero."""
     assert agent.compute_metrics([[{"reward": 1.0}, {}]])["pass@1/accuracy"] == 100.0
+
+
+def test_failure_response_uses_native_agent_model(agent: HarborAgent, tmp_path: Path) -> None:
+    agent.config = app.HarborAgentConfig.model_validate(
+        {
+            "name": "harbor_agent_general",
+            "host": "0.0.0.0",
+            "port": 8080,
+            "entrypoint": "app.py",
+            "job": {
+                "jobs_dir": tmp_path / "jobs",
+                "datasets": [{"path": tmp_path / "tasks"}],
+                "agents": [{"name": "opencode", "model_name": "native-model"}],
+            },
+        }
+    )
+    body = app.HarborRunRequest.model_validate(
+        {
+            "task_name": "task",
+            app.TASK_INDEX_KEY_NAME: 0,
+            app.ROLLOUT_INDEX_KEY_NAME: 0,
+            "responses_create_params": {"input": []},
+        }
+    )
+    response = agent.failure_response(body, RuntimeError("trial failed"))
+    assert response.response.model == "native-model"
+    assert response.response.status == "failed"
+    assert response.failure_reason == "RuntimeError: trial failed"
+
+    # A Ray task error wraps the worker's exception: the reason names Harbor's own failure, not the wrapper.
+    trial = RuntimeError("Harbor trial failed with AgentTimeoutError: Agent execution timed out after 1800.0 seconds")
+    wrapped = RuntimeError("ray task traceback ...")
+    wrapped.cause = trial
+    timed_out = agent.failure_response(body, wrapped)
+    assert timed_out.failure_reason == (
+        "RuntimeError: Harbor trial failed with AgentTimeoutError: Agent execution timed out after 1800.0 seconds"
+    )
+    assert timed_out.model_dump()["_ng_failure_class"] == "harbor_failed"
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_worker_initializes_and_flushes_telemetry_inside_runtime_environment(monkeypatch, fails):
+    import asyncio
+    import os
+
+    from opentelemetry import trace
+
+    events = []
+    loop = asyncio.new_event_loop()
+    monkeypatch.setattr(app, "_RAY_WORKER_EVENT_LOOP", loop)
+    monkeypatch.setattr(app, "_RAY_WORKER_HTTP_CONFIG", None)
+    monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", None)
+    monkeypatch.setattr(
+        nemo_gym.client.http_client, "get_global_config_dict", lambda **kwargs: pytest.fail("Worker parsed Hydra")
+    )
+    monkeypatch.setattr(
+        app,
+        "init_telemetry",
+        lambda **kwargs: events.append(("init", os.environ["NEMO_GYM_OTEL_ENABLED"])) or object(),
+    )
+    monkeypatch.setattr(
+        trace,
+        "get_tracer_provider",
+        lambda: SimpleNamespace(
+            force_flush=lambda **kwargs: events.append(("flush", os.environ["NEMO_GYM_OTEL_ENABLED"]))
+        ),
+    )
+
+    async def run_job(config, task_name):
+        events.append(("run", task_name))
+        if fails:
+            raise RuntimeError("trial failed")
+        return "/synthetic/trial"
+
+    monkeypatch.setattr(app.HarborAgent, "run_job", run_job)
+    monkeypatch.delenv("NEMO_GYM_OTEL_ENABLED", raising=False)
+    try:
+        if fails:
+            with pytest.raises(RuntimeError, match="trial failed"):
+                app.harbor_job_worker._function({}, "example", {"NEMO_GYM_OTEL_ENABLED": "1"}, {})
+        else:
+            assert (
+                app.harbor_job_worker._function({}, "example", {"NEMO_GYM_OTEL_ENABLED": "1"}, {})
+                == "/synthetic/trial"
+            )
+        assert events == [("init", "1"), ("run", "example"), ("flush", "1")]
+        assert "NEMO_GYM_OTEL_ENABLED" not in os.environ
+    finally:
+        if nemo_gym.client.http_client.is_global_aiohttp_client_setup():
+            loop.run_until_complete(nemo_gym.client.http_client.get_global_aiohttp_client().close())
+        loop.close()
+
+
+def test_sequential_worker_jobs_share_live_http_client_and_limits(monkeypatch):
+    import asyncio
+
+    import httpx
+    from aiohttp import web
+
+    from nemo_gym.sandbox import OpenSandboxProvider
+
+    loop = asyncio.new_event_loop()
+    monkeypatch.setattr(app, "_RAY_WORKER_EVENT_LOOP", loop)
+    monkeypatch.setattr(app, "_RAY_WORKER_HTTP_CONFIG", None)
+    monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", None)
+    monkeypatch.setattr(
+        nemo_gym.client.http_client, "get_global_config_dict", lambda **kwargs: pytest.fail("Worker parsed Hydra")
+    )
+    monkeypatch.setattr(app, "init_telemetry", lambda **kwargs: None)
+    sessions = []
+    connections = []
+
+    async def handler(request):
+        connections.append(request.transport)
+        return web.Response(text="ok")
+
+    async def start_server():
+        server = web.Application()
+        server.router.add_get("/", handler)
+        runner = web.AppRunner(server)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        return runner, f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}/"
+
+    runner, url = loop.run_until_complete(start_server())
+
+    async def run_job(config, task_name):
+        session = nemo_gym.client.http_client.get_global_aiohttp_client()
+        assert session._loop is asyncio.get_running_loop()
+        assert session.connector.limit == 7
+        assert session.connector.limit_per_host == 3
+        sessions.append(session)
+        provider = OpenSandboxProvider()
+        try:
+            async with httpx.AsyncClient(transport=provider._get_transport()) as client:
+                assert (await client.get(url)).text == "ok"
+        finally:
+            await provider.aclose()
+        assert not session.closed
+        return task_name
+
+    monkeypatch.setattr(app.HarborAgent, "run_job", run_job)
+    http_config = {"global_aiohttp_connector_limit": 7, "global_aiohttp_connector_limit_per_host": 3}
+    try:
+        for name in ["first", "second"]:
+            assert app.harbor_job_worker._function({}, name, {}, http_config) == name
+        assert sessions[0] is sessions[1]
+        assert connections[0] is connections[1]
+        with pytest.raises(RuntimeError, match="HTTP settings changed"):
+            app.harbor_job_worker._function({}, "third", {}, {"global_aiohttp_connector_limit": 8})
+    finally:
+        loop.run_until_complete(runner.cleanup())
+        if nemo_gym.client.http_client.is_global_aiohttp_client_setup():
+            loop.run_until_complete(nemo_gym.client.http_client.get_global_aiohttp_client().close())
+        loop.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "running, phase",
+    [
+        ({"environment_setup": (True, False)}, "setup"),
+        ({"environment_setup": (True, True), "agent_setup": (True, True), "agent_execution": (True, False)}, "agent"),
+        ({"agent_execution": (True, True), "verifier": (True, False)}, "verify"),
+        ({"agent_execution": (True, True)}, "unknown"),
+    ],
+)
+async def test_a_failed_trial_names_the_phase_it_was_in(tmp_path, monkeypatch, running, phase):
+    from harbor.models.job.config import JobConfig
+
+    from responses_api_agents.harbor_agent_general import app
+
+    trial_dir = tmp_path / "job" / "trial"
+    trial_dir.mkdir(parents=True)
+    (trial_dir / "result.json").write_text("{}")
+    timings = {
+        name: SimpleNamespace(started_at="t0" if started else None, finished_at="t1" if finished else None)
+        for name, (started, finished) in running.items()
+    }
+    failure = SimpleNamespace(exception_type="SandboxApiException", exception_message="sandbox ended")
+    trial = SimpleNamespace(task_name="task", exception_info=failure, step_results=[], **timings)
+    monkeypatch.setattr(app.TrialResult, "model_validate_json", lambda _: trial)
+    monkeypatch.setattr(app.Job, "create", AsyncMock(return_value=SimpleNamespace(run=AsyncMock())))
+    config = JobConfig(job_name="job", jobs_dir=tmp_path)
+
+    with pytest.raises(RuntimeError) as raised:
+        await HarborAgent.run_job(config.model_dump(mode="json"), "task")
+    message = str(raised.value)
+    assert message.startswith(f"[sandbox phase={phase} ")
+    assert " reason=SandboxApiException] Harbor trial failed with SandboxApiException: sandbox ended" in message
+
+
+def test_startup_logs_the_deprecation_notice(agent: HarborAgent, caplog: pytest.LogCaptureFixture) -> None:
+    """The server says on startup that it is deprecated, where its replacement lives, and that users need not act yet."""
+    with caplog.at_level("WARNING", logger="responses_api_agents.harbor_agent_general.app"):
+        agent.model_post_init(None)
+    notices = {record.getMessage() for record in caplog.records if "deprecated" in record.getMessage()}
+    assert len(notices) == 1
+    (notice,) = notices
+    assert "responses_api_agents/harbor_agent_general is deprecated" in notice
+    assert "environment_servers/harbor" in notice
+    # The notice names the repo path, not a docs URL, so it does not break when the docs pages move.
+    assert "docs.nvidia.com" not in notice
+    # Users of the built-in benchmarks did not pick this agent, so the notice says no action is needed yet.
+    assert "no action is needed" in notice

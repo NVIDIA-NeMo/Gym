@@ -19,7 +19,8 @@ Downloads the original IFEval test data from the google-research GitHub repo
 and converts it to Gym JSONL format compatible with the
 `instruction_following` resources server.
 
-Each output row has two keys:
+Each output row has:
+  task_id                  — the source row's `key`, a stable id that does not depend on row order
   responses_create_params  — the agent input (user message with the prompt)
   verifier_metadata        — scoring fields read by the resources server
 
@@ -56,6 +57,7 @@ def prepare() -> Path:
             prompt = entry["prompt"]
             row = {
                 "id": idx,
+                "task_id": str(entry["key"]),
                 "responses_create_params": {
                     "input": [{"role": "user", "content": prompt}],
                     "tools": [],

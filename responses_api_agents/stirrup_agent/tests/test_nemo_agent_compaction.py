@@ -20,6 +20,7 @@ from stirrup.core.models import (
 from stirrup.prompts import MESSAGE_SUMMARIZER
 
 from responses_api_agents.stirrup_agent.nemo_agent import (
+    CompactionSummaryError,
     NeMoAgent,
     NeMoSessionAgent,
     _is_meaningful_compaction_summary,
@@ -140,10 +141,6 @@ def test_compaction_minimum_must_be_positive() -> None:
         _agent(_FakeClient(), min_words=0)
 
 
-def test_session_agent_uses_the_hardened_compaction_override() -> None:
-    assert NeMoSessionAgent.summarize_messages is NeMoAgent.summarize_messages
-
-
 @pytest.mark.asyncio
 async def test_summarization_retries_degenerate_outputs_and_persists_only_sanitized_text() -> None:
     good_summary = _words(60)
@@ -194,8 +191,10 @@ async def test_summarization_fails_closed_after_three_degenerate_outputs() -> No
     agent = _agent(client, logger, min_words=50)
     metadata = {"assistant-1": {"code_exec": []}}
 
-    with pytest.raises(RuntimeError, match="usable text after 3 attempts"):
+    with pytest.raises(CompactionSummaryError, match="usable text after 3 attempts") as raised:
         await agent.summarize_messages(_history(), metadata)
+
+    assert raised.value.messages == _history()
 
     assert len(client.calls) == 3
     assert metadata == {"assistant-1": {"code_exec": []}}

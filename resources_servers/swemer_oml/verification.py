@@ -153,7 +153,7 @@ def build_eval_script(inputs: VerificationInputs) -> str:
     )
 
 
-def verification_files(inputs: VerificationInputs) -> dict[str, str]:
+def verification_files(inputs: VerificationInputs, *, overwrite_maven_settings: bool = True) -> dict[str, str]:
     """Files placed in the verification sandbox before the eval script runs."""
     files = {
         "/tmp/nemo_gym_eval.sh": build_eval_script(inputs),
@@ -168,7 +168,7 @@ def verification_files(inputs: VerificationInputs) -> dict[str, str]:
         files[PATCH_FILE] = inputs.patch
     # Maven Central 429s under concurrent load (seen in this dataset's first smoke); the
     # Google-hosted mirror fix from swemer_v1 is harmless for non-JVM rows.
-    files.update(mirror_files())
+    files.update(mirror_files(maven_settings=overwrite_maven_settings))
     return files
 
 

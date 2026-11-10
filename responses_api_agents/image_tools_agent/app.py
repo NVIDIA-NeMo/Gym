@@ -11,26 +11,20 @@ from fastapi import Request, Response
 from PIL import Image
 from pydantic import ConfigDict, PrivateAttr
 
-from nemo_gym.base_resources_server import (
-    AggregateMetrics,
-    AggregateMetricsRequest,
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-)
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponseUsage,
+    accumulate_response_usage,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from resources_servers.image_tools import (
     ImageToolsGymToolConfig,
     ImageToolsGymToolLogic,
@@ -135,22 +129,6 @@ def _extract_image_refs(params: NeMoGymResponseCreateParamsNonStreaming) -> list
     return image_refs
 
 
-def _response_usage_add(
-    running: Optional[NeMoGymResponseUsage],
-    latest: Optional[NeMoGymResponseUsage],
-) -> Optional[NeMoGymResponseUsage]:
-    if latest is None:
-        return running
-    if running is None:
-        return latest
-    running.input_tokens += latest.input_tokens
-    running.output_tokens += latest.output_tokens
-    running.total_tokens += latest.total_tokens
-    running.input_tokens_details.cached_tokens = 0
-    running.output_tokens_details.reasoning_tokens = 0
-    return running
-
-
 def _final_assistant_response(response: NeMoGymResponse) -> NeMoGymResponse:
     for output_item in reversed(response.output):
         if getattr(output_item, "type", None) == "message" and getattr(output_item, "role", None) == "assistant":
@@ -159,7 +137,6 @@ def _final_assistant_response(response: NeMoGymResponse) -> NeMoGymResponse:
 
 
 class ImageToolsAgent(SimpleResponsesAPIAgent):
-    ray_enabled = False
     config: ImageToolsAgentConfig
     _logic: ImageToolsGymToolLogic = PrivateAttr()
 
@@ -306,7 +283,7 @@ class ImageToolsAgent(SimpleResponsesAPIAgent):
 
             model_response, model_cookies = await self._call_model(model_body, model_cookies, model_url_path)
             new_outputs.extend(model_response.output)
-            usage = _response_usage_add(usage, model_response.usage)
+            usage = accumulate_response_usage(usage, model_response.usage)
             final_response = model_response
 
             assistant_text = _extract_text_from_response(model_response)
@@ -389,7 +366,10 @@ class ImageToolsAgent(SimpleResponsesAPIAgent):
         aux_reward = float(rollout_info["image_tools_aux_reward"])
         verify_response_json["base_reward"] = base_reward
         verify_response_json["image_tools_aux_reward"] = aux_reward
-        verify_response_json["reward"] = base_reward + aux_reward
+        # Add auxiliary rewards to the base score, capped above at 1.0.
+        # Positive bonuses can raise any score below the cap; negative penalties
+        # still apply at every base score, including a correct answer's 1.0.
+        verify_response_json["reward"] = min(1.0, base_reward + aux_reward)
         verify_response_json["image_tools_base_agent_ref"] = body.image_tools_base_agent_ref
         verify_response_json.update(rollout_info)
         verify_response_json["response"] = model_response.model_dump()

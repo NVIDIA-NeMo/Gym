@@ -6,10 +6,19 @@ name: Harness conformance
 on:
   workflow_call:
     inputs:
+      checkout-ref:
+        description: Exact revision selected by the caller; empty keeps the event default
+        type: string
+        required: false
+        default: ""
       base-ref:
         description: Base ref for the full PR diff; empty runs all registered harnesses
         type: string
         default: ""
+
+env:
+  # Check publication targets the event head; evidence identifies the checked-out tree.
+  TESTED_SHA: ${{ inputs.checkout-ref || github.sha }}
 
 permissions:
   contents: read
@@ -27,6 +36,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
+          ref: ${{ inputs.checkout-ref }}
           fetch-depth: 0
           persist-credentials: false
       - name: Select affected harnesses
@@ -47,6 +57,8 @@ jobs:
     if: needs.select.outputs.harnesses != '' && needs.select.outputs.harnesses != '[]'
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    # NOOA's private task runtime belongs to a disposable container, never the runner host.
+    container: ${{ matrix.harness == 'nooa' && fromJSON('{"image":"python:3.13.14-slim","options":"--init"}') || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -54,10 +66,20 @@ jobs:
     env:
       HARNESS: ${{ matrix.harness }}
     steps:
+      - name: Install NOOA container tools
+        if: matrix.harness == 'nooa'
+        run: apt-get update && apt-get install -y --no-install-recommends git curl
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
+          ref: ${{ inputs.checkout-ref }}
           submodules: recursive
           persist-credentials: false
+      - name: Trust checkout for NOOA container builds
+        if: matrix.harness == 'nooa'
+        run: |
+          # Checkout adds safe.directory under a temporary HOME. Later packaging
+          # needs the same trust in this disposable container's normal Git config.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Set output and runtime directories
         run: |
           echo "RESULTS=$RUNNER_TEMP/harness-conformance-$HARNESS" >> "$GITHUB_ENV"
@@ -76,6 +98,8 @@ jobs:
           {
             source scripts/ci/setup_dev.sh
             python -m scripts.harness_conformance.ci install --harness "$HARNESS"
+            # Agent session setup needs the installer in later steps too.
+            dirname "$(command -v uv)" >> "$GITHUB_PATH"
           } 2>&1 | tee "$RESULTS/setup.log"
           echo "$NPM_CONFIG_PREFIX/bin" >> "$GITHUB_PATH"
       - name: Validate probes, checker, and adapter
@@ -84,7 +108,7 @@ jobs:
           HARNESS: ${{ matrix.harness }}
         run: |
           .venv/bin/python -m pytest -o addopts= --import-mode=importlib -q \
-            scripts/harness_conformance/tests tests/unit_tests/harness_capabilities \
+            scripts/harness_conformance/tests tests/unit_tests/rollouts/harness_capabilities \
             "responses_api_agents/${HARNESS}_agent/tests" 2>&1 | tee "$RESULTS/tests.log"
       - name: Run full scenario suite
         id: probes
@@ -126,7 +150,7 @@ jobs:
           echo "[Download conformance report and logs]($ARTIFACT_URL) — open probes/conformance_report.md in the artifact." >> "$GITHUB_STEP_SUMMARY"
 
   report:
-    name: Publish P0 check
+    name: Publish check
     needs: [select, probe]
     if: always()
     runs-on: ubuntu-latest
@@ -138,10 +162,44 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
+          ref: ${{ inputs.checkout-ref }}
           persist-credentials: false
-      - name: Publish P0 result from this attempt's evidence
+      - name: Publish result from this attempt's evidence
         env:
           GH_TOKEN: ${{ github.token }}
           SELECTED_HARNESSES: ${{ needs.select.outputs.harnesses }}
           PROBE_JOB_RESULT: ${{ needs.probe.result }}
         run: python3 -m scripts.harness_conformance.checks
+
+  docs_table:
+    name: Render documentation table
+    needs: [select, probe]
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.checkout-ref }}
+          persist-credentials: false
+      - name: Install table renderer dependencies
+        timeout-minutes: 8
+        run: source scripts/ci/setup_dev.sh
+      - name: Download and render this attempt's measurements
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          .venv/bin/python -m scripts.harness_conformance.ci_table \
+            --repo "$GITHUB_REPOSITORY" --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" --commit "$TESTED_SHA" \
+            --output "$RUNNER_TEMP/harness-conformance-docs/table.mdx"
+      - name: Upload rendered documentation table
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: harness-conformance-docs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/harness-conformance-docs/table.mdx
+          if-no-files-found: error
+          retention-days: 14

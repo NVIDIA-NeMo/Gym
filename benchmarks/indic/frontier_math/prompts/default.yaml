@@ -1,0 +1,4 @@
+user: |-
+  Solve the following mathematics problem. Write your reasoning in {language}. Put only your final answer inside \boxed{{...}}. Give the exact integer or exact symbolic expression in LaTeX; do not round or use decimal approximations.
+
+  {question}
