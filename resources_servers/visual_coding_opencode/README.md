@@ -22,8 +22,8 @@ Server opens an agent session, sends the task and closes the session.
 - Each task runs OpenCode in its own sandbox. The resources server lends it: the episode's seed starts the sandbox
   and the episode's close stops it. The sandbox reaches only the model server (`sandbox_network_access: model_only`),
   so the model cannot look answers up. The sandbox size (2 CPUs, 8 GiB) is in the resources server's `sandbox_config`.
-- The question image is uploaded into the sandbox and attached with `opencode run --file`. The model entry declares
-  image input, so `read` also returns images to the model. This is how the model looks at the crops and plots that
+- The question image is uploaded into the sandbox and attached with `opencode run --file`. The agent sets
+  `image_input: true`, so the model entry declares image input and `read` also returns images to the model. This is how the model looks at the crops and plots that
   it makes.
 - The prompt is one user message: the visual-reasoning instruction, `---`, the question, and
   "Please answer the question and put the final answer within \boxed{}."

@@ -21,7 +21,15 @@ ROOT = Path(__file__).resolve().parents[3]
 SESSION_CONFIG = ROOT / "resources_servers" / "visual_coding_opencode" / "configs" / "visual_coding_opencode.yaml"
 EXAMPLE_ROWS = ROOT / "resources_servers" / "visual_coding_opencode" / "data" / "example.jsonl"
 # The settings OpenCode runs with inside the sandbox. The provider, image and model name come from the run.
-SESSION_KEYS = ("opencode_version", "thinking", "timeout", "context_window", "max_output_tokens", "opencode_config")
+SESSION_KEYS = (
+    "opencode_version",
+    "thinking",
+    "timeout",
+    "context_window",
+    "max_output_tokens",
+    "image_input",
+    "opencode_config",
+)
 
 
 def session_agent_config() -> dict:
@@ -69,6 +77,11 @@ def setup():
         provider_factory.return_value.name = "opensandbox"
         agent = OpenCodeAgent(config=config, server_client=client)
         yield agent, sandbox
+
+
+def test_the_session_config_declares_image_input_for_the_model_s_crops():
+    # OpenCode's read tool returns the crops and plots as images only when the model entry declares image input.
+    assert session_agent_config()["image_input"] is True
 
 
 def test_the_session_config_runs_without_a_step_limit_or_compaction():
