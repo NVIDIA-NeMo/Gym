@@ -34,6 +34,8 @@ env:
   NUM_SHARDS: "8"
   # Managed lockfiles require uv 0.13.4+, including the corrected certificate trust store.
   UV_INSTALL_URL: "https://astral.sh/uv/0.13.4/install.sh"
+  CRANE_URL: "https://github.com/google/go-containerregistry/releases/download/v0.22.1/go-containerregistry_Linux_x86_64.tar.gz"
+  CRANE_SHA256: "0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0"
 
 jobs:
   full-test-suite:
@@ -128,9 +130,36 @@ jobs:
         run: |
           source .venv/bin/activate
           source scripts/ci/test_worker_env.sh
+          # Capture what the server venvs and tests download at the paths the Gym image uses,
+          # so the offline-image job can layer them onto the image.
+          export UV_CACHE_DIR="${RUNNER_TEMP}/gym-offline-cache/opt/nemo-gym/cache/uv"
+          export XDG_CACHE_HOME="${RUNNER_TEMP}/gym-offline-cache/opt/nemo-gym/cache/xdg"
+          export npm_config_cache="${XDG_CACHE_HOME}/npm"
           python scripts/ci/server_test_workers.py "${{ matrix.shard }}" "${{ env.NUM_SHARDS }}" \
             +fail_on_total_and_test_mismatch=true \
             +delete_venvs_after_each_test=true
+
+      - name: Log in to ECR
+        id: ecr
+        if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
+        uses: aws-actions/amazon-ecr-login@fa648b43de3d4d023bcb3f89ed6940096949c419 # v2.1.5
+        env:
+          AWS_REGION: us-east-1
+
+      # Runs after failed tests too: a failing assertion still downloaded its dependencies.
+      - name: Publish dependency cache layer
+        if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
+        env:
+          REPOSITORY: ${{ steps.ecr.outputs.registry }}/gym
+          SHARD: ${{ matrix.shard }}
+        run: |
+          curl -fsSL "$CRANE_URL" -o "$RUNNER_TEMP/crane.tar.gz"
+          echo "$CRANE_SHA256  $RUNNER_TEMP/crane.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/crane.tar.gz" -C "$RUNNER_TEMP" crane
+          tar -C "$RUNNER_TEMP/gym-offline-cache" --numeric-owner --owner=65532 --group=65532 \
+            -czf "$RUNNER_TEMP/cache.tar.gz" opt/nemo-gym/cache
+          "$RUNNER_TEMP/crane" append --new_layer "$RUNNER_TEMP/cache.tar.gz" \
+            --new_tag "$REPOSITORY:main-cache-$SHARD"
 
       - name: Upload server worker logs
         if: always()
@@ -154,6 +183,38 @@ jobs:
           fi
           echo "One or more server-suite shards failed (result: ${{ needs.server-suite.result }})."
           exit 1
+
+  # Stacks every shard's dependency cache onto gym:main as gym:main-offline, an image that runs
+  # the server suite without network access. Layers are stacked in the registry, not rebuilt.
+  offline-image:
+    name: Publish offline server image
+    runs-on: nemo-ci-aws-cpu-4-16
+    needs: [server-suite]
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
+    steps:
+      - name: Log in to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@fa648b43de3d4d023bcb3f89ed6940096949c419 # v2.1.5
+        env:
+          AWS_REGION: us-east-1
+
+      - name: Stack shard caches onto gym:main
+        env:
+          REPOSITORY: ${{ steps.ecr.outputs.registry }}/gym
+        run: |
+          curl -fsSL "$CRANE_URL" -o "$RUNNER_TEMP/crane.tar.gz"
+          echo "$CRANE_SHA256  $RUNNER_TEMP/crane.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/crane.tar.gz" -C "$RUNNER_TEMP" crane
+          crane="$RUNNER_TEMP/crane"
+          layers=()
+          for shard in $(seq 0 $((NUM_SHARDS - 1))); do
+            digest="$("$crane" manifest "$REPOSITORY:main-cache-$shard" |
+              python3 -c 'import json, sys; print(json.load(sys.stdin)["layers"][0]["digest"])')"
+            "$crane" blob "$REPOSITORY@$digest" > "$RUNNER_TEMP/cache-$shard.tar.gz"
+            layers+=(--new_layer "$RUNNER_TEMP/cache-$shard.tar.gz")
+          done
+          "$crane" append --base "$REPOSITORY:main" "${layers[@]}" \
+            --new_tag "$REPOSITORY:main-offline" --set-base-image-annotations
 
   test-wheel-install:
     name: Test Wheel Use
