@@ -170,10 +170,26 @@ def _should_mask_sample(
 
 
 RUNTIME_MISSING = "anyswe_agent:runtime_missing"
+SETUP_FAILED = "anyswe_agent:setup_failed"
 
 
 class _RuntimeMissingError(RuntimeError):
     """The task image lacks the agent runtime: a configuration error, not a provider failure."""
+
+
+class _RuntimeSetupError(RuntimeError):
+    """A completed setup command reported that the agent runtime cannot be set up (for example a bad archive)."""
+
+
+def _setup_command_failed(result: Any) -> bool:
+    """Whether a setup ``exec`` completed and reported a failure.
+
+    An ``error_type`` (timeout, sandbox) means the command did not complete, so its exit code says nothing about
+    the setup; that is a sandbox failure, raised as a plain error that keeps the ``provider_unavailable`` default.
+    """
+    if result.error_type is not None:
+        raise RuntimeError(f"the sandbox could not run the setup command ({result.error_type})")
+    return result.return_code != 0
 
 
 def _masked_failure_kind(
@@ -836,7 +852,7 @@ class AnySweAgent(SimpleResponsesAPIAgent):
                     raise RuntimeError(f"agent runtime fetch failed: {(fetched.stderr or '')[:300]}")
             else:
                 runtime = await sandbox.exec("test -x /agent_deps_mount/bin/python", timeout_s=30, user="root")
-                if runtime.return_code != 0:
+                if _setup_command_failed(runtime):
                     raise _RuntimeMissingError("task image does not contain /agent_deps_mount/bin/python")
             if external_runtime:
                 unpacked = await sandbox.exec(
@@ -846,8 +862,8 @@ class AnySweAgent(SimpleResponsesAPIAgent):
                     timeout_s=600,
                     user="root",
                 )
-                if unpacked.return_code != 0:
-                    raise RuntimeError(f"agent runtime extraction failed: {(unpacked.stderr or '')[:300]}")
+                if _setup_command_failed(unpacked):
+                    raise _RuntimeSetupError(f"agent runtime extraction failed: {(unpacked.stderr or '')[:300]}")
             if _dataset_family(params.problem_info.get("dataset_name", "")) == "r2e":
                 await sandbox.exec(
                     "rm -rf /r2e_tests /root/r2e_tests /testbed/r2e_tests; "
@@ -882,6 +898,8 @@ class AnySweAgent(SimpleResponsesAPIAgent):
                 sandbox_failure_kind = exc.failure_kind
             elif isinstance(exc, _RuntimeMissingError):
                 sandbox_failure_kind = RUNTIME_MISSING
+            elif isinstance(exc, _RuntimeSetupError):
+                sandbox_failure_kind = SETUP_FAILED
             sandbox_failure_reason = repr(exc)
             sandbox_failed = True
             update_metrics(

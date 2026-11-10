@@ -437,6 +437,17 @@ class _SetupError(RuntimeError):
     """A run cannot start because its local inputs are wrong (missing runtime or task tests), not the provider."""
 
 
+def _setup_command_failed(result: Any) -> bool:
+    """Whether a setup ``exec`` completed and reported a failure.
+
+    An ``error_type`` (timeout, sandbox) means the command did not complete, so its exit code says nothing about
+    the setup; that is a sandbox failure, raised as a plain error that keeps the ``provider_unavailable`` default.
+    """
+    if result.error_type is not None:
+        raise RuntimeError(f"the sandbox could not run the setup command ({result.error_type})")
+    return result.return_code != 0
+
+
 def _masked_failure(
     agent_error_type: Optional[str],
     eval_error_type: Optional[str],
@@ -594,7 +605,7 @@ class RunTerminalAgent(BaseModel):
                 raise RuntimeError(result.stderr or "failed to fetch agent runtime")
         else:
             result = await sandbox.exec("test -x /agent_deps_mount/bin/python", timeout_s=30, user="root")
-            if result.return_code != 0:
+            if _setup_command_failed(result):
                 raise _SetupError("task image does not contain /agent_deps_mount/bin/python")
         if external_runtime:
             result = await sandbox.exec(
@@ -603,8 +614,8 @@ class RunTerminalAgent(BaseModel):
                 timeout_s=900,
                 user="root",
             )
-            if result.return_code != 0:
-                raise RuntimeError(result.stderr or "failed to extract agent runtime")
+            if _setup_command_failed(result):
+                raise _SetupError(result.stderr or "failed to extract agent runtime")
 
     async def _stage_remote_tests(self, sandbox: AsyncSandbox, cfg: AnyTerminalInstanceConfig) -> None:
         archive = await asyncio.to_thread(self._archive, cfg.persistent_dir / "staging" / "tests")

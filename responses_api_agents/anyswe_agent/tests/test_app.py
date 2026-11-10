@@ -695,3 +695,72 @@ class TestReturnedGradingFailures:
         assert response.failure_kind == failure_kind
         assert reason_part in response.failure_reason
         assert "resolved" not in response.failure_reason
+
+
+class TestRuntimeSetupFailures:
+    """A setup command that could not run keeps a provider kind; one that completed and failed is a setup failure."""
+
+    @pytest.mark.parametrize(
+        "archive,failing,result,failure_kind,reason_part",
+        [
+            (False, "test -x", dict(error_type="timeout"), "provider_unavailable", "timeout"),
+            (False, "test -x", dict(error_type="sandbox"), "provider_unavailable", "sandbox"),
+            (False, "test -x", dict(return_code=1), "anyswe_agent:runtime_missing", "does not contain"),
+            (True, "tar -xzf", dict(error_type="sandbox"), "provider_unavailable", "sandbox"),
+            (True, "tar -xzf", dict(error_type="timeout"), "provider_unavailable", "timeout"),
+            (
+                True,
+                "tar -xzf",
+                dict(return_code=2, stderr="gzip: stdin: not in gzip format"),
+                "anyswe_agent:setup_failed",
+                "not in gzip format",
+            ),
+        ],
+    )
+    async def test_runtime_setup_command_outcome(
+        self, tmp_path, monkeypatch, archive, failing, result, failure_kind, reason_part
+    ) -> None:
+        with patch.object(AnySweAgent, "model_post_init", lambda self, context: None):
+            agent = AnySweAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        agent._server = AnySweServerConfig(
+            run_session_id="s",
+            base_results_dir=tmp_path,
+            model_server_url="http://model:9000",
+            resolved_sandbox_provider={"opensandbox": {}},
+            sandbox_default_metadata={},
+            agent_deps_archive=tmp_path / "deps.tar.gz" if archive else None,
+        )
+        agent._sem = asyncio.Semaphore(1)
+        monkeypatch.setattr(AnySweAgent, "rollout_id_from_run", lambda self, body: None)
+        failing_result = SimpleNamespace(
+            **{"return_code": 0, "error_type": None, "stdout": "", "stderr": "", **result}
+        )
+
+        class Sandbox:
+            async def start(self):
+                pass
+
+            async def stop(self):
+                pass
+
+            async def upload(self, local, remote):
+                pass
+
+            async def exec(self, command, **kwargs):
+                if failing in command:
+                    return failing_result
+                return SimpleNamespace(return_code=0, error_type=None, stdout="", stderr="")
+
+        monkeypatch.setattr("responses_api_agents.anyswe_agent.app.AsyncSandbox", lambda *args: Sandbox())
+        body = AnySweRunRequest(
+            responses_create_params={"input": "fix it", "metadata": {"instance_id": "repo__repo-1"}}
+        )
+
+        response = await agent.run(body)
+
+        assert response.reward == 0.0
+        assert response.mask_sample is True
+        assert response.failure_kind == failure_kind
+        assert reason_part in response.failure_reason
+        if failure_kind == "provider_unavailable":
+            assert "does not contain" not in response.failure_reason
