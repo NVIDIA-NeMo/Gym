@@ -48,7 +48,7 @@ Where they mislead:
 
 - `run.artifacts.healthy: true` means only that nothing is missing and no rollout is recorded twice. Failure limits are unset by default, so a run with many failed rollouts still shows `true`; read `failed`.
 - `unobserved` is not healthy: the rollout lacked evidence a check needs, such as a trajectory, agent turns, model calls, or the references that tie calls to turns. When most rollouts are `unobserved`, the report says little about them; `coverage` shows which checks could not run.
-- The printed line (`Rollout health: N checked, ...`) counts only the saved rollouts' verdicts; `gym --json eval health-check` prints the whole result.
+- The printed `rollout quality:` line counts only the saved rollouts' verdicts, and the `run health` line above it is `run.artifacts.healthy`; `gym --json eval health-check` prints the whole result.
 - Each run or `--resume` deletes the previous reports first, so they describe the latest job. A job stopped by SIGTERM leaves only a provisional summary (`partial: true`): the run accounting, without verdicts. A benchmark with its own `rollout_collection_driver`, such as GDPval, runs the full check instead, so its summary does not show that the job was stopped.
 - Reports from before #4788 have no run accounting, those from before #4841 have no timeouts, and check IDs change between commits. To compare the health of runs from different commits, rebuild both runs' reports with the same Gym checkout.
 - `gym eval health-check <run_dir>` rebuilds both reports and overwrites them in the run directory, so copy a shared or read-only run first.

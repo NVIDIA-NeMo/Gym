@@ -198,6 +198,8 @@ def test_legacy_adapter_preserves_task_identity_and_data():
             cleanup_timeout_seconds=10,
             resources_server={"type": "resources_servers", "name": "resources"},
             agent_server={"type": "responses_api_agents", "name": "agent"},
+            # Explicit, like resources_server, so the server never reads the agent's config from this bare client.
+            tool_servers=[],
         ),
         server_client=MagicMock(spec=ServerClient),
     )
@@ -398,9 +400,28 @@ async def test_flat_rows_and_episode_requests_project_the_same_result() -> None:
     )
 
     legacy_result = await legacy_adapter.run_legacy(flat_row)
-    episode_result = await episode_adapter.run_legacy(episode_request.model_dump(mode="json"))
+    episode_reply = await episode_adapter.run_legacy(episode_request.model_dump(mode="json"))
 
-    assert episode_result == legacy_result
+    assert "result" not in legacy_result and "episode_id" not in legacy_result
+    assert episode_reply["episode_id"] == {"rollout_id": "3-2", "attempt": 1}
+    assert episode_reply["task_id"] == {"taskset": "resources", "task_id": "task"}
+    assert episode_reply["failure"] is None
+    projected = {
+        key: value for key, value in episode_reply["result"].items() if value is not None or key in legacy_result
+    }
+    projected["agent_ref"] = legacy_result["agent_ref"]
+    assert projected == legacy_result
+
+    from nemo_gym.rollouts.rollout_collection import _native_episode_record
+
+    row = {
+        "_ng_task_index": 3,
+        "_ng_rollout_index": 2,
+        "_ng_attempt_index": 1,
+        "task_id": {"taskset": "resources", "task_id": "task"},
+        "task_input": {},
+    }
+    assert _native_episode_record(row, episode_reply)["_ng_task_id"] == episode_reply["task_id"]
 
 
 @pytest.mark.parametrize("legacy", [False, True])

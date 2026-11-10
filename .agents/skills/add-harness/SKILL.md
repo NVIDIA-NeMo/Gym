@@ -51,7 +51,7 @@ Before moving on, confirm each of these in the code:
 - [ ] An adapter that creates its own sandbox exposes `network_access` (`inherit`, `model_only`, `model_and_tools`) and passes the spec through `restrict_sandbox_network` before creating it. Settings it cannot enforce raise `AgentSeedRejectedError` (a final 422), and a restricted sandbox gets its runtime by upload or from a preinstalled `sandbox_runtime_dir`. See [Restrict the egress of an owned sandbox](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#restrict-the-egress-of-an-owned-sandbox).
 - [ ] Controls the harness does not support are rejected or documented, not silently dropped.
 - [ ] The harness's own files (configuration, history, caches) stay out of the task repository. Where the harness has no setting to move them, the README says what it writes under the task's home.
-- [ ] A sandbox runner that needs only the standard library is uploaded as `RUNNER_FILE` from `nemo_gym.agents.utils.sandbox_session` and launched by a `SandboxCommand` with `stdlib_runner=True`, as `codex_agent` does. It then runs under a neutral process name with no `.py` in its command line, so a `pkill python3` or `pkill -f '\.py'` in the task cannot stop it.
+- [ ] A CLI harness launches through the shared `harness_runner.sh` (`HARNESS_RUNNER_FILE` and `HARNESS_RUNNER_SCRIPT`) with `SandboxCommand(argv=...)`. A Python SDK shim uses an explicit interpreter from an adapter-managed runtime, such as `SandboxPythonRuntime`, rather than the task image's Python. See [Code layout](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#code-layout).
 - [ ] Only an error that ends the harness's run fails the response, by the harness's own rule at the pinned version. See [Convert outputs without silent loss](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#convert-outputs-without-silent-loss).
 - [ ] Usage is reported only when every model call has a usage record, with call references collected from every record the harness writes. Otherwise usage stays unknown, with a gap.
 
@@ -59,7 +59,7 @@ Before moving on, confirm each of these in the code:
 
 Cover the behaviors in [Runtime and compatibility](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#runtime-and-compatibility) that apply to your execution model. At minimum:
 
-- Each unsupported seed returns a final 422. Use `nemo_gym.agents.testing.agent_session_conformance.check_agent_seed_rejected`, as `responses_api_agents/hermes_agent/tests/test_app.py` does.
+- Each unsupported seed returns a terminal 422. Use `nemo_gym.agents.testing.agent_session_conformance.check_agent_seed_rejected`, as `responses_api_agents/hermes_agent/tests/test_app.py` does.
 - For MCP support, cover authenticated discovery and tool calls, required-server failure before inference, optional-server failure, name collisions, and cleanup. If enforcement depends on a plugin or hook, test a run where it does not load. Test each supported sandbox ownership path; a sandbox-only smoke does not validate MCP grants.
 - An activation runs the harness once. An activation for an unknown or closed session returns 409; a request with no session cookie takes the host path, if the adapter has one.
 - Close returns observations or gaps, and returns `resources_cookies` only when the session holds a Resources cookie jar.

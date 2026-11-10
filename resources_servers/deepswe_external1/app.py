@@ -20,7 +20,7 @@ from pydantic import Field, model_validator
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import ModelServerRef, get_global_config_dict
-from nemo_gym.core import VERIFIER_ERROR
+from nemo_gym.core import ENVIRONMENT_SERVER_FAILED, SESSION_LOST, VERIFIER_ERROR
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxResources,
@@ -81,6 +81,10 @@ sys.exit(result.returncode)
 
 class InvalidSubmissionError(RuntimeError):
     """The seeded repository no longer contains a collectable submission."""
+
+
+class SessionMismatchError(RuntimeError):
+    """The seeded agent sandbox is missing or does not match the task being verified."""
 
 
 VERIFIER_PYTHON_SETUP = """\
@@ -365,18 +369,19 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer):
         result = VerifierResult(evaluation_completed=False, reward=0.0)
         cleanup_errors: list[str] = []
         invalid_submission = False
+        failure_kind = VERIFIER_ERROR
         failure_stage: str | None = "agent_setup"
         try:
             if mode == "agent":
                 session = self._agent_sessions.pop(session_id, None)
                 if session is None:
-                    raise RuntimeError("No seeded agent sandbox exists for this session")
+                    raise SessionMismatchError("No seeded agent sandbox exists for this session")
                 agent_sandbox = session.sandbox
                 agent_id = session.sandbox_handle
                 if session.task_id != task_id or session.image != task.data.image:
-                    raise RuntimeError("Seeded session task/image does not match verification")
+                    raise SessionMismatchError("Seeded session task/image does not match verification")
                 if body.sandbox_handle is not None and body.sandbox_handle != agent_id:
-                    raise RuntimeError("Sandbox handle does not match the seeded session")
+                    raise SessionMismatchError("Sandbox handle does not match the seeded session")
             else:
                 agent_sandbox = await self._create_sandbox(
                     task, phase="agent", files=task.data.files.solution_files() if mode == "golden" else {}
@@ -424,6 +429,13 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer):
                 failure_stage = None
         except Exception as error:
             invalid_submission = mode == "agent" and isinstance(error, InvalidSubmissionError)
+            # Name what the evidence shows: a lost or mismatched session, or a submission that could not be
+            # collected from the agent sandbox. Anything else stays a verifier error. Collecting the golden
+            # solution is the verifier's own work, so only agent mode counts as a collection failure.
+            if isinstance(error, SessionMismatchError):
+                failure_kind = SESSION_LOST
+            elif mode == "agent" and failure_stage == "patch_collection":
+                failure_kind = ENVIRONMENT_SERVER_FAILED
             logger.exception("Task %s failed during %s", task_id, failure_stage)
             result = VerifierResult(
                 evaluation_completed=False, reward=0.0, verifier_error=f"{type(error).__name__}: {error}"
@@ -457,7 +469,7 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer):
                 "mask_sample": not result.evaluation_completed and not invalid_submission,
                 "failure_kind": "deepswe_external1:invalid_submission"
                 if invalid_submission
-                else (VERIFIER_ERROR if not result.evaluation_completed else None),
+                else (failure_kind if not result.evaluation_completed else None),
                 "failure_reason": result.verifier_error,
                 "failure_stage": failure_stage,
                 "cleanup_errors": cleanup_errors,
