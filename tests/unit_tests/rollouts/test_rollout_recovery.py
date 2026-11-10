@@ -37,7 +37,12 @@ from nemo_gym.rollouts.rollout_records import (
     logical_rollout_id,
     read_records,
 )
-from nemo_gym.rollouts.rollout_recovery import RunManifest, manifest_path_for, validate_resume
+from nemo_gym.rollouts.rollout_recovery import (
+    RunManifest,
+    manifest_path_for,
+    saved_failure_classification,
+    validate_resume,
+)
 from nemo_gym.rollouts.rollout_store import RolloutStore
 from tests.unit_tests.rollouts.test_rollout_collection import (
     FakeResponse,
@@ -45,6 +50,30 @@ from tests.unit_tests.rollouts.test_rollout_collection import (
     http_error,
     install_fake_server_client,
 )
+
+
+@pytest.mark.parametrize("setting", [False, True, None, {}])
+def test_saved_failure_classification_accepts_default_resumable_policy(tmp_path, setting):
+    job = tmp_path / "job"
+    output = job / "vs_bench_gameplay" / "artifacts" / "rollouts.jsonl"
+    output.parent.mkdir(parents=True)
+    OmegaConf.save(
+        OmegaConf.create({"driver": {"benchmarks": {"vs_bench_gameplay": {"resumable": setting}}}}),
+        job / "resolved-config.yaml",
+    )
+    assert saved_failure_classification(output) == saved_failure_classification(tmp_path / "standalone.jsonl")
+
+
+def test_saved_failure_classification_rejects_malformed_resumable(tmp_path):
+    job = tmp_path / "job"
+    output = job / "vs_bench_gameplay" / "artifacts" / "rollouts.jsonl"
+    output.parent.mkdir(parents=True)
+    OmegaConf.save(
+        OmegaConf.create({"driver": {"benchmarks": {"vs_bench_gameplay": {"resumable": "invalid"}}}}),
+        job / "resolved-config.yaml",
+    )
+    with pytest.raises(ConfigError, match="resumable must be a mapping"):
+        saved_failure_classification(output)
 
 
 def echo_failure(connection, failure):
