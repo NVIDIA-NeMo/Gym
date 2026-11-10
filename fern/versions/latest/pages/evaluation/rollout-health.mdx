@@ -193,12 +193,19 @@ evaluate; the gap does not suppress evidence of failed calls or hollow turns.
   unobserved even if the trajectory contains an unowned list of model calls.
 </Note>
 
-### Length-Limited Responses
+### Length-Limited and Repetition-Stopped Responses
 
 `model_call_runaway_generation` needs one provider-independent definition of a response the agent can act on. The check
 looks for output text, a message with text or a refusal, or a tool call, in OpenAI Responses, Chat Completions and
 Messages-style responses. Reasoning alone, encrypted or summarized, is not something to act on: a call that reasoned until its
 output limit without an answer or a tool call is a runaway generation, even when a later call recovers.
+
+A provider's explicit `repetition_detected` stop or `repetition` finish reason is also a runaway generation and a faulted model response, even when
+partial answer text or a tool call was saved. The response keeps that output and usage for inspection. Chat Completions
+stop reasons are preserved as `native_stop_reason` on the converted Responses reply. The provider's `repetition` finish
+reason is represented by the SDK-compatible `stop` value while retaining `native_finish_reason: repetition` through
+streaming, capture and conversion. This does not enable a repetition detector or change its settings. The provider's
+completion status and agent-visible output stay unchanged.
 
 ## How Health Checks Interpret Existing Observation Gaps
 

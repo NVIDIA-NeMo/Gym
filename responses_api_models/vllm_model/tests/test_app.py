@@ -5954,6 +5954,78 @@ class TestCompletionsBackendEndToEnd:
         model._session_id_to_client = {}
         return fake_client, captured
 
+    @mark.parametrize("render_chat_template", [False, True], ids=["raw", "chat-template"])
+    @mark.parametrize("responses_api", [False, True], ids=["chat", "responses"])
+    @mark.parametrize(
+        ("finish_reason", "stop_reason"),
+        [
+            ("stop", None),
+            ("stop", 0),
+            ("stop", 11),
+            ("stop", "repetition_detected"),
+            ("repetition", "repetition_detected"),
+        ],
+        ids=["missing", "zero", "eos", "repetition", "stock-repetition"],
+    )
+    def test_provider_stop_reason_survives_completion_translation(
+        self,
+        monkeypatch: MonkeyPatch,
+        render_chat_template: bool,
+        responses_api: bool,
+        finish_reason: str,
+        stop_reason: str | int | None,
+    ) -> None:
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.base_server, "get_global_config_dict", MagicMock(return_value=dict())
+        )
+        model = _make_chat_template_model()[0] if render_chat_template else _make_completions_backend_model()
+        choice = {"index": 0, "text": "Retained answer.", "finish_reason": finish_reason}
+        if stop_reason is not None:
+            choice["stop_reason"] = stop_reason
+        _, captured = self._install_fake_client(
+            model,
+            {
+                "id": "cmpl-stopped",
+                "object": "text_completion",
+                "created": 1,
+                "model": "base-model",
+                "choices": [choice],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+            },
+        )
+        body = {"input": "Question"} if responses_api else {"messages": [{"role": "user", "content": "Question"}]}
+
+        response = TestClient(model.setup_webserver()).post(
+            "/v1/responses" if responses_api else "/v1/chat/completions", json=body
+        )
+
+        assert response.status_code == 200, response.text
+        if responses_api:
+            saved = NeMoGymResponse.model_validate_json(response.content)
+            observed_stop_reason = getattr(saved, "native_stop_reason", None)
+            observed_native_finish_reason = getattr(saved, "native_finish_reason", None)
+            assert ("native_finish_reason" in saved.model_dump()) is (finish_reason == "repetition")
+            assert ("native_stop_reason" in saved.model_dump()) is (stop_reason is not None)
+            assert saved.status == "completed"
+            assert saved.incomplete_details is None
+            assert saved.output_text == "Retained answer."
+            assert (saved.usage.input_tokens, saved.usage.output_tokens, saved.usage.total_tokens) == (3, 2, 5)
+        else:
+            saved = NeMoGymChatCompletion.model_validate_json(response.content)
+            observed_stop_reason = getattr(saved.choices[0], "stop_reason", None)
+            observed_native_finish_reason = getattr(saved.choices[0], "native_finish_reason", None)
+            assert ("native_finish_reason" in saved.choices[0].model_dump()) is (finish_reason == "repetition")
+            assert ("stop_reason" in saved.choices[0].model_dump()) is (stop_reason is not None)
+            assert saved.choices[0].finish_reason == "stop"
+            assert saved.choices[0].message.content == "Retained answer."
+            assert (saved.usage.prompt_tokens, saved.usage.completion_tokens, saved.usage.total_tokens) == (3, 2, 5)
+        assert observed_stop_reason == stop_reason
+        assert type(observed_stop_reason) is type(stop_reason)
+        assert observed_native_finish_reason == ("repetition" if finish_reason == "repetition" else None)
+        assert captured["kwargs"]["prompt"] == (
+            "<|user|>Question<|assistant|>" if render_chat_template else "Question"
+        )
+
     def test_chat_completions_call_routes_to_create_completion(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(
             nemo_gym.server_runtime.base_server, "get_global_config_dict", MagicMock(return_value=dict())

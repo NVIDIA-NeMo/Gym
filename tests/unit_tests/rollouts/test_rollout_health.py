@@ -16,6 +16,8 @@ import nemo_gym.cli.main as cli_main
 import nemo_gym.rollouts.health.checks as health_checks
 import nemo_gym.rollouts.rollout_collection as rollout_collection
 import nemo_gym.rollouts.rollout_health as health
+from nemo_gym.core.responses_api_types import NeMoGymChatCompletion, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.models.chat_completions_converter import ChatCompletionsConverter
 from nemo_gym.rollouts import trajectory_builder
 from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper, _CompletedRollout
 from nemo_gym.rollouts.rollout_health import CHECK_REGISTRY, RolloutStore, run_health_checks
@@ -1261,6 +1263,131 @@ def test_a_length_limited_call_with_only_reasoning_is_a_runaway_generation(
 
     flagged_calls = [f.locator["call_id"] for f in digest.findings if f.check == "model_call_runaway_generation"]
     assert flagged_calls == (["clipped"] if flagged else [])
+
+
+@pytest.mark.parametrize("dialect", ["chat", "responses"])
+@pytest.mark.parametrize(
+    ("output_kind", "stop_reason", "runaway", "faulted"),
+    [
+        *((kind, "repetition_detected", True, True) for kind in ("reasoning", "answer", "tool")),
+        ("reasoning", None, False, True),
+        ("answer", 0, False, False),
+        ("tool", 11, False, False),
+        ("answer", "stop_sequence", False, False),
+    ],
+)
+def test_provider_stop_reason_drives_runaway_health_and_response_faults(
+    tmp_path: Path,
+    output_kind: str,
+    dialect: str,
+    stop_reason: str | int | None,
+    runaway: bool,
+    faulted: bool,
+) -> None:
+    message = {"role": "assistant", "content": None}
+    if output_kind == "reasoning":
+        message["reasoning"] = "Repeated consideration."
+    elif output_kind == "answer":
+        message["content"] = "Retained partial answer."
+    else:
+        message["tool_calls"] = [
+            {"id": "tool-1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}
+        ]
+    response = {
+        "id": "stopped",
+        "created": 0,
+        "object": "chat.completion",
+        "model": "test",
+        "choices": [{"index": 0, "finish_reason": "stop", "stop_reason": stop_reason, "message": message}],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+    }
+    if dialect == "responses":
+        completion = NeMoGymChatCompletion.model_validate(response)
+        if output_kind == "reasoning":
+            completion.choices[0].message.content = "<think>Repeated consideration.</think>"
+        response = (
+            ChatCompletionsConverter(return_token_id_information=False)
+            .chat_completion_to_response(
+                NeMoGymResponseCreateParamsNonStreaming(model="test", input="question"), completion
+            )
+            .model_dump(mode="json")
+        )
+        assert [item["type"] for item in response["output"]] == [
+            {"reasoning": "reasoning", "answer": "message", "tool": "function_call"}[output_kind]
+        ]
+        if output_kind == "reasoning":
+            assert response["output"][0]["summary"][0]["text"] == "Repeated consideration."
+        elif output_kind == "answer":
+            assert response["output"][0]["content"][0]["text"] == "Retained partial answer."
+        else:
+            assert response["output"][0]["name"] == "lookup"
+            assert response["output"][0]["call_id"] == "tool-1"
+    call = build_model_call_record(
+        {"model_call_id": "c1", "status_code": 200, "response": response, "finish_reason": "stop"},
+        call_index=0,
+    ).model_dump(mode="json")
+    record = _record(0, 0, usage={"input_tokens": 3, "output_tokens": 2})
+    rollout_path = _write_fixture(tmp_path, [(record, [call])])
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    findings = [item for item in digest.findings if item.check == "model_call_runaway_generation"]
+    assert [finding.detail for finding in findings] == (
+        [{"finish_reason": "stop", "native_stop_reason": "repetition_detected"}] if runaway else []
+    )
+    assert digest.verdict == ("unhealthy" if runaway else "healthy")
+    assert digest.responses == {"selected": ["c1"], "faulted": ["c1"] if faulted else []}
+    assert (call["tokens_in"], call["tokens_out"]) == (3, 2)
+
+
+@pytest.mark.parametrize(
+    ("finish_reason", "response", "evidence"),
+    [
+        (
+            "repetition",
+            {"choices": [{"finish_reason": "repetition", "message": {"content": "Retained answer."}}]},
+            {"native_finish_reason": "repetition"},
+        ),
+        (
+            "stop",
+            {
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "native_finish_reason": "repetition",
+                        "message": {"content": "Retained answer."},
+                    }
+                ]
+            },
+            {"native_finish_reason": "repetition"},
+        ),
+        (
+            "stop",
+            {"output_text": "Retained answer.", "native_finish_reason": "repetition"},
+            {"native_finish_reason": "repetition"},
+        ),
+        ("repetition", None, {"native_finish_reason": "repetition"}),
+        ("stop", {"output_text": "Retained answer.", "native_finish_reason": "refusal"}, {}),
+    ],
+    ids=["raw-chat", "normalized-chat", "responses", "missing-body", "refusal-control"],
+)
+def test_native_repetition_finish_is_health_evidence(
+    tmp_path: Path, finish_reason: str, response: dict | None, evidence: dict
+) -> None:
+    call = _call(finish_reason=finish_reason, response=response)
+    record = _record(0, 0, usage={"input_tokens": 3, "output_tokens": 2})
+    rollout_path = _write_fixture(tmp_path, [(record, [call])])
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    findings = [item for item in digest.findings if item.check == "model_call_runaway_generation"]
+    assert [finding.detail for finding in findings] == (
+        [{"finish_reason": finish_reason, **evidence}] if evidence else []
+    )
+    assert digest.verdict == ("unhealthy" if evidence else "healthy")
+    assert digest.responses == (
+        None if response is None else {"selected": ["c1"], "faulted": ["c1"] if evidence else []}
+    )
 
 
 _MESSAGES_TURN_CONTENT = {
