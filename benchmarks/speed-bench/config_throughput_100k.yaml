@@ -25,6 +25,9 @@ speed_bench_throughput_100k_simple_agent:
 speed_bench_throughput_100k_simple_environment_server:
   _inherit_from: speed_bench_simple_environment_server
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: speed_bench_throughput_100k_resources_server
       agent_server:
         name: speed_bench_throughput_100k_simple_agent

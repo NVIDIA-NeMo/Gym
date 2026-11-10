@@ -137,8 +137,9 @@ def test_every_split_resolves_and_manifest_matches(tmp_path, splits, model_type)
         agent = config[f"speed_bench_{split}_simple_agent"].responses_api_agents.speed_bench_agent
         assert agent.model_server.name == "policy_model"
         assert agent.resources_server.name == f"speed_bench_{split}_resources_server"
-        env = config[f"speed_bench_{split}_simple_environment_server"].environment_servers.legacy_agent
+        env = config[f"speed_bench_{split}_simple_environment_server"].environment_servers.single_agent_turn_legacy
         assert env.agent_server.name == f"speed_bench_{split}_simple_agent"
+        assert env.resources_server.name == f"speed_bench_{split}_resources_server"
         manifest = load_manifest(ROOT / f"benchmarks/speed-bench/config_{split}/manifest.yaml")
         assert _manifest_dataset(dataset) == manifest.datasets[0]
         assert "prepare_script_args:" not in dump_manifest(manifest)
