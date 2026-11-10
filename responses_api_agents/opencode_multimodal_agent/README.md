@@ -69,6 +69,35 @@ For a disposable local runtime, follow the
 [multimodal setup instructions](../../scripts/harness_conformance/README.md#run-diagnostic-probes).
 That setup also checks that OpenCode and the image libraries work inside the sandbox.
 
+## Training through agent sessions
+
+Compose `configs/train_sessions.yaml` after the training recipe to use main's
+Environment Server lifecycle: seed resources, create an agent session, activate,
+close the agent, verify, and close resources. The OpenCode session uses the shared
+supervisor, prompt-media staging, and token capture. Supply an OpenSandbox image
+with the visual tool dependencies and a preinstalled pinned OpenCode runtime (or
+the pinned offline bundle required by restricted-network sessions). Session
+training does not use the compatibility Bubblewrap mounts or network wrapper.
+
+Set `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY` in the launching environment;
+keep credentials outside configuration files. The image must be accessible to
+the OpenSandbox deployment, and the sandbox must reach the advertised Gym model
+endpoint. Keep control servers bound to loopback or on separate hosts: the
+provider's allowlist permits whole hosts, including every port and path.
+
+The training Environment Server uses `single_agent_turn/opencode_training.py`,
+a small extension of the shared lifecycle. It sends a final-answer copy to the
+verifier, retains the complete response for capture, and applies the same
+answer-dependent tool rewards to native exported execution records. Set
+`tool_rewards: null` on the agent to disable shaping. Final-answer reserve and
+custom prompt plugins remain available in sessions.
+
+OpenSandbox network policies are fixed at creation. Use separate configured
+agent/environment instances and task-source routing for `inherit`, `model_only`,
+and `model_and_tools`; a request cannot change an existing sandbox's policy.
+Restricted sessions require an owned OpenSandbox. The compatibility training
+recipe remains available until end-to-end session training has been validated.
+
 ## Configure the agent
 
 Start with [the agent configuration](configs/opencode_multimodal_agent.yaml).

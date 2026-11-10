@@ -337,16 +337,42 @@ def test_invalid_request_does_not_launch(visual_setup, field, value):
         )
 
 
-@pytest.mark.parametrize("field,value", [("tool_rewards", {}), ("token_id_capture", True)])
-def test_session_rejects_training_controls_before_allocation(visual_setup, field, value):
+@pytest.mark.parametrize("capture", [False, True])
+@pytest.mark.parametrize("exit_code", [0, 1, None])
+def test_session_supports_training_capture_and_rewards(visual_setup, capture, exit_code):
+    from unittest.mock import AsyncMock, patch
+
+    from responses_api_agents.opencode_agent import app as base_app
+    from responses_api_agents.opencode_multimodal_agent.rewards import OpenCodeToolRewardConfig
+
     agent, sandbox = visual_setup
-    setattr(agent.config, field, value)
-    with TestClient(agent.setup_webserver()) as client:
-        response = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
-        assert response.status_code == 422, response.text
-        assert "evaluation-only" in response.text
-        sandbox.launch.assert_not_awaited()
-        sandbox.exec.assert_not_awaited()
+    agent.server_client.global_config_dict.token_id_capture = {"enabled": capture}
+    export = json.loads(sandbox.events)
+    export["messages"][1]["parts"][1]["state"]["metadata"] = {"exit": exit_code}
+    sandbox.events = json.dumps(export)
+    agent.config.token_id_capture = capture
+    agent.config.tool_rewards = OpenCodeToolRewardConfig()
+    base_app.create_provider.return_value.name = "opensandbox"
+    sandbox.provider_name = "opensandbox"
+    sandbox.start = AsyncMock()
+    agent.config.sandbox_config = {"image": "test-image", "workdir": "/app"}
+    body = seed().model_copy(update={"sandbox_access": None})
+    with (
+        patch("responses_api_agents.opencode_agent.app.AsyncSandbox", return_value=sandbox),
+        TestClient(agent.setup_webserver()) as client,
+    ):
+        created = client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        response = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json=request_body())
+        assert response.status_code == 200, response.text
+        evidence = response.json()["opencode_evidence"]["tool_reward"]
+        assert evidence["bash_success_count"] == (1 if exit_code == 0 else 0)
+        assert evidence["tool_error_count"] == (0 if exit_code == 0 else 1)
+        assert evidence["tool_call_count"] == 1
+        config = json.loads(sandbox.params()["env"]["OPENCODE_CONFIG_CONTENT"])
+        assert ("training-token-capture" in config["provider"]["nemo"]["options"]["baseURL"]) is capture
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        assert closed.status_code == 200, closed.text
 
 
 def test_upload_failure_is_not_relaunched_and_session_can_close(visual_setup):
@@ -654,3 +680,31 @@ def test_session_rejects_truncated_image_with_422(visual_setup):
     assert error.value.status_code == 422
     assert "Invalid or truncated" in error.value.detail
     sandbox.launch.assert_not_awaited()
+
+
+@pytest.mark.parametrize("capture", [False, True])
+def test_training_session_rejects_borrowed_sandbox(visual_setup, capture):
+    from responses_api_agents.opencode_multimodal_agent.rewards import OpenCodeToolRewardConfig
+
+    agent, sandbox = visual_setup
+    agent.config.token_id_capture = capture
+    agent.server_client.global_config_dict.token_id_capture = {"enabled": True, "all_agents": not capture}
+    agent.config.tool_rewards = OpenCodeToolRewardConfig()
+    with TestClient(agent.setup_webserver()) as client:
+        result = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+    assert result.status_code == 422
+    assert "owned OpenSandbox" in result.json()["detail"]
+    sandbox.launch.assert_not_awaited()
+
+
+@pytest.mark.parametrize("provider", ["local", "enroot"])
+def test_training_session_rejects_fallback_providers(visual_setup, provider):
+    from types import SimpleNamespace
+
+    from nemo_gym.agents import AgentSeedRejectedError
+    from nemo_gym.sandbox import SandboxSpec
+
+    agent, _ = visual_setup
+    agent.config.token_id_capture = True
+    with pytest.raises(AgentSeedRejectedError, match="owned OpenSandbox"):
+        agent._restrict_owned_sandbox_network(SandboxSpec(image="test"), SimpleNamespace(name=provider), seed())

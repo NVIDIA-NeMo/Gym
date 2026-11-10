@@ -3,12 +3,15 @@
 """Answer-dependent bash rewards using native OpenCode tool execution records."""
 
 import json
+import re
 import sqlite3
 from contextlib import closing
 from pathlib import Path
 from typing import Annotated
 
 from pydantic import BaseModel, Field, field_validator
+
+from nemo_gym.utils import final_assistant_text
 
 
 class OpenCodeToolRewardConfig(BaseModel, extra="forbid"):
@@ -82,11 +85,13 @@ def _identity(item: dict) -> tuple[str, str]:
 
 
 def score_opencode_tools(
-    database: Path,
+    database: Path | None,
     output: list[dict],
     initial_input: list[dict],
     base_reward: float,
     config: OpenCodeToolRewardConfig,
+    *,
+    execution_records: dict[str, tuple[str, str, int | None]] | None = None,
 ) -> OpenCodeToolReward:
     """Score live main-trajectory calls; replay and child calls are not rewarded.
 
@@ -100,8 +105,10 @@ def score_opencode_tools(
     for item in initial_input:
         if item.get("type") == "function_call":
             previous = _identity(item)
-    records = {}
-    if calls:
+    records = dict(execution_records or {})
+    if calls and execution_records is None:
+        if database is None:
+            raise ValueError("Native tool execution records are required for reward shaping")
         with closing(sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
             rows = connection.execute(
                 "SELECT json_extract(data, '$.callID'), json_extract(data, '$.tool'), "
@@ -156,3 +163,21 @@ def score_opencode_tools(
         duplicate_tool_call_count=duplicates,
         bash_call_count=sum(item["name"] == "bash" for item in calls),
     ).for_answer(base_reward, config)
+
+
+class EpisodeEvidence(BaseModel):
+    """Validated native evidence passed explicitly across the responses self-call."""
+
+    turns_used: int
+    finished_naturally: bool
+    tool_reward: OpenCodeToolReward | None
+
+
+def final_answer(output: list[dict], *, strip_reasoning: bool = False) -> str:
+    """Extract the scoring copy; optional training cleanup never mutates history."""
+    text = final_assistant_text(output)
+    if not strip_reasoning:
+        return text
+    text = re.sub(r"<(think|thinking)>.*?</\1>", "", text, flags=re.DOTALL)
+    text = re.split(r"<(?:think|thinking)>", text, maxsplit=1)[0]
+    return re.split(r"</(?:think|thinking)>", text)[-1].strip()

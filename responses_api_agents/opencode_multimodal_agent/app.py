@@ -26,7 +26,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputText,
     NeMoGymResponseUsage,
 )
-from nemo_gym.trajectory import AgentEpisode, ObservationGap, TrajectoryRecord
+from nemo_gym.trajectory import AgentEpisode, ObservationGap, ToolCallObservation, TrajectoryRecord
 from responses_api_agents.opencode_agent.app import (
     OpenCodeAgent,
     OpenCodeAgentConfig,
@@ -51,6 +51,7 @@ from responses_api_agents.opencode_multimodal_agent.media import final_answer, p
 from responses_api_agents.opencode_multimodal_agent.network_config import control_service_urls, server_origin
 from responses_api_agents.opencode_multimodal_agent.network_runner import origin
 from responses_api_agents.opencode_multimodal_agent.rewards import (
+    EpisodeEvidence,
     OpenCodeToolReward,
     OpenCodeToolRewardConfig,
     score_opencode_tools,
@@ -151,14 +152,6 @@ class OpenCodeMultimodalAgentConfig(OpenCodeAgentConfig):
         if any("prompt" in agent for agent in self.opencode_config.get("agent", {}).values()):
             raise ValueError("Keep the runtime default prompt; use system_prompt for additional instructions")
         return self
-
-
-class EpisodeEvidence(BaseModel):
-    """Validated native evidence passed explicitly across the responses self-call."""
-
-    turns_used: int
-    finished_naturally: bool
-    tool_reward: OpenCodeToolReward | None
 
 
 class OpenCodeMultimodalResponse(NeMoGymResponse):
@@ -292,6 +285,38 @@ class OpenCodeMultimodalAgent(MultimodalSessionMixin, OpenCodeAgent):
             )
             if images != state.expected_images:
                 raise HTTPException(502, "OpenCode dropped initial images")
+        tools = None
+        if self.config.tool_rewards is not None and response.status == "completed":
+            call_ids = {
+                record.native_tool_call_id: record.tool_call_id
+                for record in (state.observations.records if state.observations else [])
+                if isinstance(record, ToolCallObservation)
+                and record.invocation_id == export.get("session_id")
+                and record.native_tool_call_id is not None
+            }
+            records = {}
+            for message in messages:
+                for part in message.get("parts", []):
+                    if part.get("type") != "tool":
+                        continue
+                    native_id = part["callID"]
+                    call_id = call_ids.get(native_id, native_id)
+                    if call_id in records:
+                        raise ValueError(f"Ambiguous OpenCode tool record: {call_id}")
+                    tool_state = part.get("state") or {}
+                    records[call_id] = (
+                        part["tool"],
+                        tool_state.get("status"),
+                        (tool_state.get("metadata") or {}).get("exit"),
+                    )
+            tools = score_opencode_tools(
+                None,
+                [item.model_dump() for item in response.output],
+                [],
+                0.0,
+                self.config.tool_rewards,
+                execution_records=records,
+            )
         return OpenCodeMultimodalResponse.model_validate(
             response.model_dump()
             | {
@@ -299,7 +324,7 @@ class OpenCodeMultimodalAgent(MultimodalSessionMixin, OpenCodeAgent):
                     turns_used=turns,
                     finished_naturally=response.status == "completed"
                     and bool(final_answer([item.model_dump() for item in response.output])),
-                    tool_reward=None,
+                    tool_reward=tools,
                 )
             }
         )

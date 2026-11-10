@@ -62,9 +62,16 @@ class MultimodalSessionMixin:
         # the session destroys the container, including detached task processes.
         return state.session.owns_sandbox and state.session.sandbox.provider_name == "opensandbox"
 
+    def _training_session(self) -> bool:
+        return self.config.token_id_capture or self._token_id_capture_enabled()
+
     def _restrict_owned_sandbox_network(
         self, spec: SandboxSpec, provider: SandboxProvider, body: AgentSeedSessionRequest
     ) -> SandboxSpec:
+        if self._training_session():
+            if provider.name != "opensandbox":
+                raise AgentSeedRejectedError("Session training requires an owned OpenSandbox")
+            return super()._restrict_owned_sandbox_network(spec, provider, body)
         if provider.name == "opensandbox" and self.config.network_access != "inherit":
             # OpenSandbox applies egress restrictions at creation, before seed.
             # Every activation uses private plugin/cache directories, so a binary
@@ -95,6 +102,8 @@ class MultimodalSessionMixin:
         return spec
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> OpenCodeSandboxSession:
+        if self._training_session() and body.sandbox_access is not None:
+            raise AgentSeedRejectedError("Session training requires an owned OpenSandbox")
         if self.config.network_access != "inherit" and body.sandbox_access is not None:
             raise AgentSeedRejectedError("Restricted networking requires an owned sandbox")
         if body.continuation is not None:
@@ -165,10 +174,6 @@ class MultimodalSessionMixin:
         return None
 
     def _validate_sandbox_options(self) -> None:
-        if self.config.tool_rewards is not None or self.config.token_id_capture or self._token_id_capture_enabled():
-            raise AgentSeedRejectedError(
-                "Multimodal sessions are evaluation-only; use the compatibility path for training capture and rewards"
-            )
         # The image adapter generates these options itself. Caller-provided plugins,
         # providers and env overrides could escape the capture route or use host paths.
         unsupported = self.config.opencode_config.keys() - {"permission", "tools", "agent"}

@@ -4,7 +4,6 @@
 
 import io
 import json
-import re
 import sqlite3
 from contextlib import closing
 from pathlib import Path
@@ -21,8 +20,8 @@ from nemo_gym.core import (
     split_text_and_media,
 )
 from nemo_gym.trajectory import AgentInvocation
-from nemo_gym.utils import final_assistant_text
 from responses_api_agents.opencode_agent.artifacts import parse_opencode_observations, parse_opencode_session
+from responses_api_agents.opencode_multimodal_agent.rewards import final_answer as final_answer
 
 
 def prepare_image(image: MediaFile, *, max_source_pixels: int, preserve_format: bool) -> MediaFile:
@@ -179,13 +178,3 @@ def parse_visual_session(
             )
         )
     return output, usage, len(assistants)
-
-
-def final_answer(output: list[dict], *, strip_reasoning: bool = False) -> str:
-    """Extract the scoring copy; optional training cleanup never mutates history."""
-    text = final_assistant_text(output)
-    if not strip_reasoning:
-        return text
-    text = re.sub(r"<(think|thinking)>.*?</\1>", "", text, flags=re.DOTALL)
-    text = re.split(r"<(?:think|thinking)>", text, maxsplit=1)[0]
-    return re.split(r"</(?:think|thinking)>", text)[-1].strip()

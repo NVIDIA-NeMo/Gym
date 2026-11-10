@@ -189,3 +189,58 @@ def test_hosted_overlay_preserves_provider_output_limit(monkeypatch):
     assert outbound["max_tokens"] == 32768
     assert policy.propagate_context_overflow_errors
     assert cfg.opencode_multimodal_benchmarks.resources_servers.opencode_multimodal_benchmarks.judge_required
+
+
+def test_training_session_profile_replaces_legacy_lifecycle(monkeypatch):
+    from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
+    from responses_api_agents.opencode_multimodal_agent.app import OpenCodeMultimodalAgentConfig
+
+    monkeypatch.chdir(ROOT)
+    monkeypatch.setenv("OPENSANDBOX_API_KEY", "test-placeholder")
+    initial = OmegaConf.create(
+        {
+            "config_paths": [
+                "responses_api_agents/opencode_multimodal_agent/configs/opencode_multimodal_agent.yaml",
+                "responses_api_agents/opencode_multimodal_agent/configs/train_sessions.yaml",
+                "responses_api_models/vllm_model/configs/vllm_model.yaml",
+                "resources_servers/string_match/configs/string_match.yaml",
+            ],
+            "policy_model_name": "visual-model",
+            "policy_base_url": "http://model.invalid/v1",
+            "policy_api_key": "none",
+            "opencode_multimodal_agent": {
+                "responses_api_agents": {
+                    "opencode_multimodal_agent": {
+                        "model": "visual-model",
+                        "env": {"PATH": "/old/host/tools"},
+                        "sandbox_config": {"image": "visual-runtime:test"},
+                    }
+                }
+            },
+        }
+    )
+    cfg = GlobalConfigDictParser().parse(
+        GlobalConfigDictParserConfig(
+            initial_global_config_dict=initial,
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+            offline=True,
+        )
+    )
+    settings = cfg.opencode_multimodal_agent.responses_api_agents.opencode_multimodal_agent
+    agent = OpenCodeMultimodalAgentConfig.model_validate(
+        OmegaConf.to_container(settings, resolve=True) | {"name": "opencode_multimodal_agent"}
+    )
+    assert agent.env == {}
+    assert agent.sandbox is None
+    assert agent.sandbox_provider == "sandbox" and agent.token_id_capture
+    assert agent.network_access == "model_only"
+    assert cfg.token_id_capture.enabled
+    environments = cfg.opencode_multimodal_agent_environment_server.environment_servers
+    assert set(environments) == {"single_agent_turn"}
+    environment = SingleAgentTurnEnvironmentServerConfig.model_validate(
+        OmegaConf.to_container(environments.single_agent_turn, resolve=True)
+        | {"name": "opencode_multimodal_agent_environment_server"}
+    )
+    assert environment.entrypoint == "opencode_training.py"
+    assert environment.agent_server.name == "opencode_multimodal_agent"
