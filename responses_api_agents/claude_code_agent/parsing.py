@@ -45,15 +45,14 @@ def _extract_thinking(content: list[Any]) -> str:
     return "\n".join(p for p in parts if p)
 
 
-def parse_stream_json(stdout: str, *, fold_thinking: bool = True) -> tuple[list[Any], dict]:
+def parse_stream_json(stdout: str, *, capture_transcript: bool = False) -> tuple[list[Any], dict]:
     """Convert claude -p --output-format=stream-json stdout into (output_items, usage).
 
-    ``fold_thinking=True`` (eval default) prefixes each assistant message with the model's thinking as
-    ``<think>...</think>`` text. Under training-token capture that must be off: Gym attributes the finished
-    transcript to a captured model call by hashing the model-authored text, and the captured call's message
-    holds the bare text (reasoning travels as a separate item). Thinking is then emitted as a ``reasoning``
-    item, which the fingerprint deliberately ignores. Capture output contains only the main conversation,
-    with pending tool calls retained as incomplete. The last main-thread assistant message's served ``id`` is
+    Thinking is emitted as separate ``reasoning`` items in both evaluation and training, so verifiers grade
+    only the model's answer text. ``capture_transcript=True`` retains only the main conversation and keeps
+    pending tool calls as incomplete in model order. Gym attributes this transcript to a captured model call
+    by hashing the model-authored text; the fingerprint deliberately ignores reasoning items.
+    The last main-thread assistant message's served ``id`` is
     returned in internal metadata as ``terminal_response_id`` and becomes ``response.id`` under capture.
     It is not a declared terminal id on the ``/run`` result; other attribution witnesses still corroborate it.
     """
@@ -69,7 +68,6 @@ def parse_stream_json(stdout: str, *, fold_thinking: bool = True) -> tuple[list[
 
     output_items: list[Any] = []
     pending_calls: dict[str, NeMoGymResponseFunctionToolCall] = {}
-    buffered_think: str | None = None
     # Token usage. The result event carries the run's cumulative usage, so it is the total when present.
     # Without one (the CLI was killed or timed out), sum the assistant messages' usage, once per message:
     # stream-json emits one assistant event per content block, each repeating its message's usage.
@@ -120,7 +118,7 @@ def parse_stream_json(stdout: str, *, fold_thinking: bool = True) -> tuple[list[
 
             # Subagent frames belong to a different captured chain. Keep their usage accounting,
             # but never let their text or tool ids testify to the main conversation's terminal call.
-            if not fold_thinking and event.get("parent_tool_use_id"):
+            if capture_transcript and event.get("parent_tool_use_id"):
                 continue
 
             if not isinstance(content, list):
@@ -131,9 +129,7 @@ def parse_stream_json(stdout: str, *, fold_thinking: bool = True) -> tuple[list[
                 terminal_response_id = served_id
 
             think = _extract_thinking(content)
-            if think and fold_thinking:
-                buffered_think = (buffered_think + "\n" + think) if buffered_think else think
-            elif think:
+            if think:
                 output_items.append(
                     NeMoGymResponseReasoningItem(
                         id=f"rs_{uuid4().hex}",
@@ -144,9 +140,6 @@ def parse_stream_json(stdout: str, *, fold_thinking: bool = True) -> tuple[list[
 
             text = _extract_text(content)
             if text:
-                if buffered_think:
-                    text = f"<think>\n{buffered_think}\n</think>\n\n{text}"
-                    buffered_think = None
                 output_items.append(
                     NeMoGymResponseOutputMessage(
                         id=f"msg-{len(output_items)}",
@@ -172,12 +165,12 @@ def parse_stream_json(stdout: str, *, fold_thinking: bool = True) -> tuple[list[
                     status="incomplete",
                 )
                 pending_calls[call_id] = call
-                if not fold_thinking:
+                if capture_transcript:
                     # Preserve model order even when tools finish out of order or never finish.
                     output_items.append(call)
 
         elif etype == "user":
-            if not fold_thinking and event.get("parent_tool_use_id"):
+            if capture_transcript and event.get("parent_tool_use_id"):
                 continue
             message = event.get("message", {})
             content = message.get("content") or []
@@ -191,7 +184,7 @@ def parse_stream_json(stdout: str, *, fold_thinking: bool = True) -> tuple[list[
                 call = pending_calls.pop(tool_id, None)
                 if call:
                     call.status = "completed"
-                    if fold_thinking:
+                    if not capture_transcript:
                         output_items.append(call)
                 result_content = block.get("content") or ""
                 if isinstance(result_content, list):

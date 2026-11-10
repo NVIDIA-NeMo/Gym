@@ -389,7 +389,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 LOG.warning("claude-code timed out after %ds", self.config.timeout)
                 # Keep the actual partial work so capture can corroborate the terminal call.
                 output_items, run_metadata = parse_stream_json(
-                    stdout.decode(errors="replace"), fold_thinking=not self._token_id_capture_enabled()
+                    stdout.decode(errors="replace"), capture_transcript=self._token_id_capture_enabled()
                 )
                 run_metadata.update(
                     status="incomplete",
@@ -410,7 +410,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             stdout_text = stdout.decode(errors="replace")
             LOG.debug("claude-code stdout (%d chars): %s", len(stdout), stdout_text[:2000])
             output_items, run_metadata = parse_stream_json(
-                stdout_text, fold_thinking=not self._token_id_capture_enabled()
+                stdout_text, capture_transcript=self._token_id_capture_enabled()
             )
             run_metadata.setdefault("duration_ms", (monotonic() - process_started_at) * 1000)
             status, error_type = _invocation_outcome(run_metadata, proc.returncode)
@@ -797,7 +797,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             items, run_metadata = await asyncio.to_thread(
                 parse_stream_json,
                 artifacts.events,
-                fold_thinking=not self._token_id_capture_enabled(),
+                capture_transcript=self._token_id_capture_enabled(),
             )
         cleanup = state.session.cleanup
         if cleanup and cleanup["timed_out"]:

@@ -202,13 +202,18 @@ The skills path is resolved like `input_jsonl_fpath` (relative paths check the w
   `anthropic_base_url` runs bypass Gym capture.
 - Enable training-token capture with run-level `token_id_capture.enabled: true` and either the
   agent's `token_id_capture: true` or run-level `token_id_capture.all_agents: true`.
-- With training-token capture on, thinking is returned as separate `reasoning` items instead of
-  `<think>` text. The response `id` is the last non-empty served model response id from the main
+- Thinking is returned as separate `reasoning` items in both evaluation and training-token capture.
+  Assistant message text contains only the model's answer, so verifiers do not grade prefixed reasoning.
+  This changes evaluation output from earlier versions, which folded thinking into `<think>` text;
+  evaluation scores may change. Consumers that need reasoning should read the `reasoning` items.
+  Direct parser callers should replace `fold_thinking=False` with `capture_transcript=True` for capture;
+  evaluation callers should use the default `capture_transcript=False`.
+- With training-token capture on, the response `id` is the last non-empty served model response id from the main
   conversation; subagent frames are excluded from this transcript. Pending tool calls remain as
   `function_call` items with `status="incomplete"` when the CLI times out. These witnesses let Gym
   attribute the parent transcript without assigning its reward to a subagent's captured chain.
   The served id is not a declared terminal id on `/run`; capture still corroborates it against the
-  transcript. Without capture, thinking stays folded and unmatched tool calls remain omitted.
+  transcript. Without capture, subagent frames remain included and unmatched tool calls remain omitted.
 - `turns_used` counts assistant messages, not tool calls.
 - Runs set `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, so Bash has no `run_in_background` option and every
   command runs in the foreground under the Bash tool's timeout. The CLI waits for background tasks before it
