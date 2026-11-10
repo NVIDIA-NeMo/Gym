@@ -520,6 +520,7 @@ class Config(BaseResponsesAPIAgentConfig):
     reject_sandbox_access: bool = False
     fail_the_close: bool = False
     stop_the_lent_sandbox: bool = False
+    accept_pool_eula: bool = False
 
 
 class LendingAgent(SimpleResponsesAPIAgent):
@@ -610,6 +611,33 @@ def test_the_agent_config_takes_the_probe_override_for_what_the_default_config_l
         "claude_code_agent:\n  responses_api_agents:\n    claude_code_agent:\n      claude_code_version: null\n",
     )
     assert probe.agent_config(component)["claude_code_version"] == "2.1.261"
+
+
+def _pool_agent(tmp_path, **config):
+    """A Pool-shaped default config: a component named `pool_agent`, whose agent needs the EULA opt-in."""
+    component = tmp_path / "pool_agent"
+    lines = "".join(f"      {key}: {str(value).lower()}\n" for key, value in config.items())
+    write(component, "configs/pool_agent.yaml", f"pool_agent:\n  responses_api_agents:\n    pool_agent:\n{lines}")
+    return component
+
+
+def test_an_agent_without_its_operator_opt_in_is_not_probed_and_keeps_its_static_findings(
+    lending_component, tmp_path, capsys
+):
+    _, agent = lending_component()
+    component = _pool_agent(tmp_path, accept_pool_eula=False)
+    results = findings("responses_api_agents/pool_agent/app.py", [agent], rules_for(AGENT_SERVER), component=component)
+    assert [f["rule"] for f in results] == ["A1"]
+    assert "A4 not applicable: pool_agent needs the operator to set accept_pool_eula" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("stop", [False, True])
+def test_an_agent_with_its_operator_opt_in_is_probed(lending_component, tmp_path, stop):
+    _, agent = lending_component()
+    component = _pool_agent(tmp_path, accept_pool_eula=True, stop_the_lent_sandbox=stop)
+    results = findings("responses_api_agents/pool_agent/app.py", [agent], rules_for(AGENT_SERVER), component=component)
+    assert _filter_findings(results, "A4") == []
+    assert len(_filter_findings(results, "A5")) == int(stop)
 
 
 def test_a_session_that_disconnects_leaves_the_lent_sandbox_running(lending_component):

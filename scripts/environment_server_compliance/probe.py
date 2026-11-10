@@ -46,6 +46,8 @@ POLICY_MODEL = {
 }
 # Config the agent's default one leaves unset, which its seed requires; values as benchmarks pin them.
 CONFIG_OVERRIDES = {"claude_code_agent": {"claude_code_version": "2.1.261"}}
+# Config flags only the operator may set, such as accepting a licence; without them the agent is not probed.
+OPERATOR_OPT_INS = {"pool_agent": "accept_pool_eula"}
 SANDBOX_REFUSAL = "does not support sandbox access"
 SEED_PATH = "/v1/agent_sessions"
 CLOSE_PATH = "/v1/agent_sessions/close"
@@ -96,6 +98,9 @@ class BorrowableLocalProvider(LocalProvider):
 def agent_config(component: Path) -> dict[str, Any]:
     """The component's default agent config, completed so that the agent can be built and seeded."""
     config = default_agent_config(component)
+    opt_in = OPERATOR_OPT_INS.get(component.name)
+    if opt_in and not config.get(opt_in):
+        raise Unavailable(f"{component.name} needs the operator to set {opt_in}, which the probe does not do for them")
     return {
         "host": "127.0.0.1",
         "port": 1,
