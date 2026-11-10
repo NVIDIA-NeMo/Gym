@@ -123,7 +123,13 @@ def test_real_model_timeout_reaches_environment(tmp_path, exhausted):
     # conformance failure visible; this test establishes that the fixture works.
     assert measured["verdict"] == "not_fulfilled"
     assert checks["timeout.attempts"]["status"] == "fail"
-    if not exhausted:
+    if exhausted:
+        assert measured["p0_verdict"] == "fulfilled", measured["issues"]
+        assert {key for key, check in checks.items() if check["status"] == "fail"} == {
+            "timeout.attempts",
+            "timeout.model_events",
+        }
+    else:
         assert checks["timeout.recovered_outcome"]["status"] == "fail"
 
 
