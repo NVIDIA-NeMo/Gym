@@ -142,6 +142,15 @@ gym eval run --no-serve \
     --temperature 0.0
 ```
 
+## Sandbox memory limits
+
+A provider-confirmed sandbox OOM while executing generated code fails that
+grading attempt. SciCode retains its existing rule: a sub-step passes if any
+configured interpreter passes it. Dependency and test-data preflight runs
+separately; setup OOM, unconfirmed termination and other infrastructure failures
+remain incomplete. Exit code 137 or text mentioning OOM alone is insufficient.
+Reference solutions must be qualified with the same image, test data and limits.
+
 ## Tests
 
 ```bash
