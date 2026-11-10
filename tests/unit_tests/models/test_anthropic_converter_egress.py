@@ -205,11 +205,12 @@ class TestAnthropicConverter:
 
         for item in response.output:
             assert item.model_fields_set == set(type(item).model_fields)
-        # An exclude_unset dump, as request replay makes, still carries defaults and nulls of nested parts.
-        reasoning, message, call = response.model_dump(exclude_unset=True)["output"]
-        assert reasoning["summary"] == [{"text": "plan", "type": "summary_text"}]
-        assert message["content"][0]["logprobs"] is None
-        assert "namespace" in call and call["namespace"] is None
+        # Rebuilding the items from a full dump marked every field, nested parts included, as set. Request
+        # replay reads an exclude_unset dump, so that dump must still equal the full one.
+        assert response.model_dump(exclude_unset=True)["output"] == response.model_dump()["output"]
+        NeMoGymResponseCreateParamsNonStreaming.model_validate(
+            {"input": response.model_dump(exclude_unset=True)["output"]}
+        )
 
     def test_responses_to_anthropic_drops_token_metadata_and_leaves_the_request_unchanged(self) -> None:
         tokens = {"prompt_token_ids": [1, 2], "generation_token_ids": [3], "generation_log_probs": [-0.5]}

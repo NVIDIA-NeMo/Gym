@@ -91,7 +91,9 @@ class AnthropicConverter:
         thinking_budget_tokens: Optional[int],
         extra_body: Dict[str, Any],
     ) -> Dict[str, Any]:
-        # Anthropic requests carry no token metadata, so skip copying the token lists of training items.
+        # Anthropic requests carry no token metadata, so skip copying the token lists of training variants.
+        # A nested exclude slows the dump even when nothing matches, so apply it only when an input item
+        # carries token metadata.
         carries_token_metadata = not isinstance(body.input, str) and any(
             isinstance(item, TokenIDLogProbMixin) for item in body.input
         )
@@ -552,10 +554,16 @@ class AnthropicConverter:
         return message.model_dump(mode="json", exclude_none=True)
 
     def _iter_output_dicts(self, response: NeMoGymResponse) -> List[Dict[str, Any]]:
-        # The Anthropic mapping drops token metadata, so skip copying the token lists into the dumps.
+        # The Anthropic mapping drops token metadata, so skip copying the token lists of training variants
+        # into the dumps. The exclude slows the dump even when nothing matches, so apply it only to them.
         items = []
         for item in response.output or []:
-            items.append(item if isinstance(item, dict) else item.model_dump(exclude=TOKEN_METADATA_FIELDS))
+            if isinstance(item, dict):
+                items.append(item)
+            elif isinstance(item, TokenIDLogProbMixin):
+                items.append(item.model_dump(exclude=TOKEN_METADATA_FIELDS))
+            else:
+                items.append(item.model_dump())
         return items
 
     def _output_message_to_anthropic_blocks(self, item: Dict[str, Any]) -> List[Dict[str, Any]]:
