@@ -218,9 +218,30 @@ async def test_concurrent_attempts_do_not_share_files(fake_sandbox, tmp_path):
     assert len(list(tmp_path.glob("*/output.png"))) == 4
 
 
-@pytest.mark.parametrize("text", ["print(1)", "```python\nprint(1)\n```", "```\nprint(1)\n```"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "print(1)",
+        "```python\nprint(1)\n```",
+        "```py\nprint(1)\n```",
+        "```PYTHON\nprint(1)\n```",
+        "```\nprint(1)\n```",
+        "Here is the code:\n```python\nprint(1)\n```\nThis recreates the image.",
+        "<think>Consider this draft:\n```python\nprint(0)\n```</think>\nprint(1)",
+        "Reasoning without an opening tag.</think>\nprint(1)",
+        "<think>print(1)",
+        "```python\nprint(0)\n```\nFinal program:\n```python\nprint(1)\n```",
+        "```python print(1)```",
+        "```python\nprint(1)\n```\n```python\nunfinished draft",
+    ],
+)
 def test_code_normalization(text):
     assert module.normalize_code(text) == "print(1)\n"
+
+
+@pytest.mark.parametrize("text", ["this is not python !", "```python\nprint(1)"])
+def test_code_normalization_preserves_invalid_or_unclosed_programs(text):
+    assert module.normalize_code(text) == text + "\n"
 
 
 @pytest.mark.parametrize("kind", ["symlink", "bytes", "pixels", "corrupt"])

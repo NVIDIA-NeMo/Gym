@@ -45,10 +45,16 @@ class InfrastructureError(RuntimeError):
 
 
 def normalize_code(text: str) -> str:
-    """Accept raw Python or one complete Python fence; do not repair programs."""
-    text = text.strip()
-    match = re.fullmatch(r"```(?:python|py)?\s*\n(.*?)\n```", text, flags=re.DOTALL | re.IGNORECASE)
-    return (match.group(1) if match else text) + "\n"
+    """Remove thinking markup and extract the last complete code fence, or raw Python."""
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    # Some endpoints omit the opening tag when returning reasoning inline.
+    if "</think>" in text:
+        text = text.rpartition("</think>")[2]
+    text = text.replace("<think>", "")
+    code = text
+    for block in re.finditer(r"```(?:python|py)?\s*(.*?)```", text, flags=re.DOTALL | re.IGNORECASE):
+        code = block.group(1)
+    return code.strip() + "\n"
 
 
 def validate_image(path: Path) -> tuple[int, int]:
