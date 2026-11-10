@@ -586,7 +586,7 @@ class TestTokenAccounting:
         assert row["response"]["usage"]["output_tokens"] == 100
         for i in (0, 2, 3):
             expected_usage = _usage(0, input_tokens=0, cached_tokens=0, reasoning_tokens=0)
-            expected_usage["input_tokens_details"]["cache_write_tokens"] = None
+            expected_usage["input_tokens_details"]["cache_write_tokens"] = 0
             assert row["step_usage"][i]["usage"] == expected_usage
         result = _aggregate([row])
         metrics = result.key_metrics
