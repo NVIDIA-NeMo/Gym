@@ -13,6 +13,7 @@ import subprocess
 import tarfile
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -24,6 +25,7 @@ from yarl import URL
 
 import environment_servers.harbor.overlay as overlay
 import nemo_gym.sandbox.providers.base as sandbox_base
+import nemo_gym.server_runtime.base_environment_server as base_environment_server
 from environment_servers.harbor.app import (
     HarborEnvironmentServer,
     HarborEnvironmentServerConfig,
@@ -73,7 +75,7 @@ from environment_servers.harbor.verifier import (
 from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcomePolicyConfig, OutcomeAction
 from nemo_gym.client import ServerClient
 from nemo_gym.config import AggregateMetricsRequest
-from nemo_gym.core import NgFailureEvent, RequestFailureLog, failure_kinds
+from nemo_gym.core import ModelCallSampling, NgFailureEvent, RequestFailureLog, encode_model_sampling, failure_kinds
 from nemo_gym.data.tasks.harbor import (
     BUILT_IMAGES_FILE,
     DIGEST_KEY,
@@ -208,6 +210,19 @@ class TestRewardFile:
 
 
 class TestEpisode:
+    async def test_the_trained_agents_activation_carries_the_episodes_sampling_values(self, tmp_path, monkeypatch):
+        server, task, _, _ = make_server(tmp_path, monkeypatch)
+        sampling = ModelCallSampling(temperature=0.6, top_p=0.95, max_output_tokens=64)
+
+        response = await server.run_request(episode(task).model_copy(update={"model_sampling": sampling}))
+
+        assert response.failure is None, response.failure
+        assert server.server_client.paths() == [
+            "/v1/agent_sessions",
+            f"/ng-rollout/r1/ng-sampling/{encode_model_sampling(sampling)}/v1/responses",
+            "/v1/agent_sessions/close",
+        ]
+
     async def test_episode_seeds_runs_the_agent_verifies_and_stops_the_sandbox(self, tmp_path, monkeypatch):
         server, task, sandbox, created = make_server(tmp_path, monkeypatch)
         client = server.server_client
@@ -1457,10 +1472,32 @@ class TestAgentStage:
         assert dumped["ng_agent_observations"]["source"] == "harness"
 
     async def test_episode_deadline_stops_the_sandbox(self, tmp_path, monkeypatch):
-        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, default_episode_timeout_seconds=0.1)
-        server.server_client.slow_path = "/ng-rollout/r1/v1/responses"
+        # The episode's own deadline expires while the harness turn is running. A short deadline also covered the
+        # task snapshot and the seed, and on a slow runner fired before the turn was reached, so the turn expires
+        # the real deadline itself instead.
+        bound = 3600.0
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, default_episode_timeout_seconds=bound)
+        deadlines = []
 
-        response = await run_episode(server, task)
+        def recording_timeout(delay):
+            timeout = asyncio.timeout(delay)
+            if delay == bound:
+                deadlines.append(timeout)
+            return timeout
+
+        monkeypatch.setattr(
+            base_environment_server, "asyncio", SimpleNamespace(**{**vars(asyncio), "timeout": recording_timeout})
+        )
+
+        def expire_the_episode_deadline():
+            (deadline,) = deadlines
+            deadline.reschedule(asyncio.get_running_loop().time())
+
+        server.server_client.turn_hooks = [expire_the_episode_deadline]
+        server.server_client.slow_path = "/ng-rollout/r1/v1/responses"
+        server.server_client.slow_seconds = bound
+
+        response = await asyncio.wait_for(run_episode(server, task), 10)
 
         assert response.failure is not None and "timed out" in response.failure.failure_reason
         assert not response.failure.terminal

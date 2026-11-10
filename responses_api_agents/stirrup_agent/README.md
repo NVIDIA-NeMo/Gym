@@ -45,7 +45,7 @@ episode.
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `model_server` | required | The policy model. |
-| `agent_max_turns` | `250` | Turn cap for the agent loop. |
+| `agent_max_turns` | `250` | Turn cap for the agent loop. A run that uses every turn without a finish call answers `status: incomplete` with `metadata.stop_reason: max_turns`. |
 | `concurrency` | `32` | Maximum concurrent episodes. |
 | `temperature` | `0.6` | Sampling temperature when the request sets none. |
 | `finish_tool_names` | `null` | Request tools that end the episode when they succeed; `null` uses Stirrup's own finish tool. |
@@ -91,7 +91,7 @@ These are constructor arguments of `DynamicMaxTokensChatCompletionsClient`
 | `min_completion_tokens` (client) | `1024` | Target per-call completion floor. The hard cap always applies, and the approximate estimate keeps this floor even when it exceeds the context. Agents that write a whole script or deliverable in one tool call may need a higher floor: a 1024-token completion cannot reliably hold one. |
 | `prompt_estimator_truncate_history_thinking` (client) | `None` | Estimator-only. When `True`, the character estimate drops completed reasoning from assistant turns before the last user turn, as Nemotron's template does. It is never sent to the provider and never changes the recorded history. |
 | `truncation_recovery` (client) | `False` | When `True`, a turn that uses its whole completion budget without a schema-valid tool call is followed by one turn that requests thinking off and appends a one-time instruction to act now. The instruction is sent to the model but not recorded in the trajectory. |
-| `min_compaction_summary_words` (agent) | `1` | Minimum word count for a context-compaction summary, counted after a leading `<think>` block is stripped. The agent makes up to 3 summary attempts (the last one without tools) and raises instead of replacing the history with an unusable summary. |
+| `min_compaction_summary_words` (agent) | `1` | Minimum word count for a context-compaction summary, counted after a leading `<think>` block is stripped. The agent makes up to 3 summary attempts (the last one without tools) and never replaces the history with an unusable summary: when every attempt is unusable, the episode ends as a failed response on the turns so far, classified `agent_invalid_output`, so it is graded as the model's result and not retried. |
 
 Thinking control (`enable_thinking`, and the thinking-off turn of
 `truncation_recovery`) is sent as `extra_body.chat_template_kwargs`. It only

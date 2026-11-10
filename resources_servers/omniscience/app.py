@@ -110,26 +110,83 @@ def extract_text_from_response(response: NeMoGymResponse, strip_thinking: bool =
     return ""
 
 
-def parse_judge_grade(judge_text: str) -> str:
-    """Parse the single-letter grade (A/B/C/D) from the judge's response.
+# Grade names from the judge prompt, matched case-sensitively at explicit verdict positions.
+_GRADE_KEYWORDS = {
+    "CORRECT": "A",
+    "INCORRECT": "B",
+    "PARTIAL_ANSWER": "C",
+    "PARTIAL": "C",
+    "NOT_ATTEMPTED": "D",
+}
+_GRADE_KEYWORD_PATTERN = "|".join(_GRADE_KEYWORDS)
+_GRADE_TOKEN_PATTERN = rf"(?:{_GRADE_KEYWORD_PATTERN}|[ABCD])(?![\w+-])"
+_GRADE_TOKEN_RE = re.compile(_GRADE_TOKEN_PATTERN)
+_GRADE_CONNECTOR_PATTERN = r"(?:[:/,&|]|\b(?i:or|and)\b)"
+_UNPARSED_ALTERNATIVE_RE = re.compile(rf"^[\"'*)\]`]*[^\S\n]*{_GRADE_CONNECTOR_PATTERN}")
+_EXPLICIT_GRADE_RE = re.compile(
+    r"^[^\S\n]*(?:"
+    # Closed lead-ins prevent gold answers, negations and other prose from becoming grades.
+    r"(?i:(?:(?:the|final)[^\S\n]+)?"
+    r"(?:(?:grade|verdict)\b[^\S\n]*(?:is\b|:|=)?|answer\b[^\S\n]*(?:is\b|:|=)))[^\S\n]*"
+    r"|(?P<letter>[ABCD])[^\S\n]*:[^\S\n]*"
+    rf"|(?=[\"'*(\[`]*(?:{_GRADE_KEYWORD_PATTERN})(?![\w+-]))"
+    r")[\"'*(\[`]*(?P<grades>"
+    rf"{_GRADE_TOKEN_PATTERN}(?:[\"'*)\]`]*[^\S\n]*{_GRADE_CONNECTOR_PATTERN}"
+    rf"[^\S\n]*[\"'*(\[`]*{_GRADE_TOKEN_PATTERN})*)"
+)
+_UNSTRIPPED_THINK_RE = re.compile(r"</?think(?:ing)?\b", re.IGNORECASE)
+_LETTER_WRAPPER_CHARS = " \t*_`\"'()[].:"
 
-    Returns "A", "B", "C", or "D". Falls back to "B" (INCORRECT) when the
-    output cannot be reliably parsed.
+
+def parse_judge_grade(judge_text: str) -> str:
+    """Parse the grade letter (A/B/C/D) from the judge's response.
+
+    A grade is accepted only when it is unambiguous: the bare letter, the last
+    line (ignoring markdown or punctuation wrappers), or explicit verdicts at
+    the start of a line ("Grade: A", "NOT_ATTEMPTED", "C: PARTIAL_ANSWER").
+    Connected alternatives and conflicting semicolon-separated verdicts remain
+    ambiguous. Residual thinking tags prevent scanning prose for verdicts.
+    ``record_parsed_judge_verdict`` is called only for an unambiguous grade.
+    Otherwise the result is "B" without a recorded verdict, so grading stays
+    unknown and can be graded again.
     """
     cleaned = judge_text.strip()
     if cleaned in ("A", "B", "C", "D"):
         record_parsed_judge_verdict()
         return cleaned
 
-    last_line = cleaned.rsplit("\n", 1)[-1].strip()
-    for letter in ("A", "B", "C", "D"):
-        if last_line == letter:
-            record_parsed_judge_verdict()
-            return letter
+    last_line = cleaned.rsplit("\n", 1)[-1].strip().strip(_LETTER_WRAPPER_CHARS)
+    if last_line in ("A", "B", "C", "D"):
+        record_parsed_judge_verdict()
+        return last_line
 
-    for letter in ("A", "B", "C", "D"):
-        if letter in cleaned:
-            return letter
+    if _UNSTRIPPED_THINK_RE.search(cleaned):
+        return "B"
+
+    candidates: set[str] = set()
+    for line in cleaned.splitlines():
+        clauses = line.split(";")
+        first = _EXPLICIT_GRADE_RE.match(clauses[0])
+        if first is None:
+            continue
+        matches = [first]
+        for clause in clauses[1:]:
+            match = _EXPLICIT_GRADE_RE.match(clause)
+            if match is None:
+                return "B"
+            matches.append(match)
+        for match in matches:
+            # A malformed alternative must not turn a matching prefix into a completed grade.
+            if _UNPARSED_ALTERNATIVE_RE.match(match.string[match.end() :]):
+                return "B"
+            if letter := match.group("letter"):
+                candidates.add(letter)
+            candidates.update(
+                _GRADE_KEYWORDS.get(token, token) for token in _GRADE_TOKEN_RE.findall(match.group("grades"))
+            )
+    if len(candidates) == 1:
+        record_parsed_judge_verdict()
+        return candidates.pop()
 
     return "B"
 
