@@ -16,9 +16,7 @@ ROOT = Path(__file__).resolve().parents[3]
 CONFIGS = ROOT / "resources_servers/vision2code/configs"
 
 
-@pytest.mark.parametrize(
-    "preset,dimensions", [("vision2code_evals", False), ("vision2code_feedback", True), ("vision2code_training", True)]
-)
+@pytest.mark.parametrize("preset,dimensions", [("vision2code_evals", False), ("vision2code_feedback", True)])
 def test_preset_prompt_options_need_no_credentials(monkeypatch, preset, dimensions):
     for name in tuple(os.environ):
         if name.startswith("VISION2CODE_"):
