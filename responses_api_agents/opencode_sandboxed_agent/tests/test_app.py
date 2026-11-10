@@ -1756,6 +1756,45 @@ class TestBenchmarkLifecycle:
         with raises(ValueError, match="tool_servers"):
             await server._start_sandbox()
 
+    async def test_per_row_provider_options_extend_the_network_policy(self, monkeypatch):
+        sandbox = MagicMock(start=AsyncMock())
+        monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
+        monkeypatch.setattr(app_module, "create_provider", lambda *_: SimpleNamespace(name="opensandbox"))
+        monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: SimpleNamespace(name="opensandbox"))
+        monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
+        monkeypatch.setattr(app_module, "AsyncSandbox", MagicMock(return_value=sandbox))
+        monkeypatch.setattr(app_module, "sandbox_server_url", lambda _, **kwargs: "http://10.0.0.2:8000")
+        config = self._create_config()
+        config.network_access = "model_only"
+        config.sandbox_config = {"provider_options": {"a": 1}}
+        server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        row_policy = {"defaultAction": "deny", "egress": [{"action": "allow", "target": "example.org"}]}
+        await server._start_sandbox(provider_options={"network_policy": row_policy, "volumes": ["v"]})
+        options = sandbox.start.await_args.args[0].provider_options
+        assert options["a"] == 1 and options["volumes"] == ["v"]
+        assert options["network_policy"]["egress"] == [
+            {"action": "allow", "target": "example.org"},
+            {"action": "allow", "target": "10.0.0.2"},
+        ]
+        with raises(ValueError, match="defaultAction: deny"):
+            await server._start_sandbox(provider_options={"network_policy": {"defaultAction": "allow"}})
+
+    async def test_upload_inputs_only_from_the_configured_roots(self, tmp_path):
+        (tmp_path / "root").mkdir()
+        allowed = tmp_path / "root" / "a.txt"
+        allowed.write_text("a")
+        outside = tmp_path / "b.txt"
+        outside.write_text("b")
+        config = self._create_config()
+        config.sandbox_upload_roots = [str(tmp_path / "root")]
+        server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        sandbox = MagicMock(upload=AsyncMock())
+        await server._upload_inputs(sandbox, {"/data/a.txt": str(allowed)})
+        sandbox.upload.assert_awaited_once_with(allowed, "/data/a.txt")
+        with raises(ValueError, match="sandbox_upload_roots"):
+            await server._upload_inputs(sandbox, {"/data/b.txt": str(outside)})
+        assert sandbox.upload.await_count == 1
+
     @mark.parametrize("error", [RuntimeError("generation failed"), asyncio.CancelledError()])
     async def test_generation_failure_and_cancellation_cleanup(self, monkeypatch, error):
         seed = MagicMock(cookies={})

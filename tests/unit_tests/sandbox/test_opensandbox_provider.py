@@ -1210,8 +1210,8 @@ async def test_exec_file_operations_and_reference_validation(monkeypatch: pytest
         def __init__(self) -> None:
             self.writes: list[tuple[str, str | bytes]] = []
 
-        async def write_file(self, target_path: str, data: str | bytes) -> None:
-            self.writes.append((target_path, data))
+        async def write_file(self, target_path: str, data: Any) -> None:
+            self.writes.append((target_path, data if isinstance(data, (str, bytes)) else data.read()))
 
         async def read_bytes_stream(self, source_path: str) -> Any:
             async def chunks() -> Any:
