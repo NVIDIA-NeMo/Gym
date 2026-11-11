@@ -12,7 +12,6 @@ import socket
 import tempfile
 from pathlib import Path
 
-
 BENCHMARK_ROOT = Path(__file__).resolve().parent / "benchmark"
 DEFAULT_BUNDLE_ROOT = Path(__file__).resolve().parent / "data/runtime"
 _SYSTEM_ENROOT_CONFIG = Path("/etc/enroot")
@@ -80,6 +79,21 @@ def configure_cache(root: str) -> Path:
         path = cache / suffix
         path.mkdir(parents=True, exist_ok=True)
         os.environ[variable] = str(path)
+    # Extracted app filesystems are platform runtime state, not library caches.
+    # Shared NFS storage cannot provide the namespace-local ownership semantics.
+    platform_root = os.environ.get("SAAS_ENROOT_PLATFORM_ROOT")
+    if platform_root:
+        platform = Path(platform_root).resolve()
+        if platform != Path("/raid/enroot"):
+            raise ValueError("SVG Enroot platform root must be /raid/enroot")
+        identity = "saas-" + os.environ.get("SLURM_JOB_ID", "interactive") + "-" + str(os.getpid())
+        host_uid = os.environ.get("SLURM_JOB_UID", str(os.getuid()))
+        if not host_uid.isdecimal():
+            raise ValueError("SLURM_JOB_UID must identify the platform directory owner")
+        for variable, directory in (("ENROOT_DATA_PATH", "data"), ("ENROOT_RUNTIME_PATH", "runtime")):
+            location = platform / directory / ("user-" + host_uid) / identity
+            location.mkdir(parents=True, exist_ok=True)
+            os.environ[variable] = str(location)
     os.environ["ENROOT_SYSCONF_PATH"] = str(_cpu_enroot_config(cache))
     helper = os.environ.get("SAAS_ENROOT_RUNTIME_DIR")
     paths = [str(cache / "npm-prefix/bin")]
@@ -88,7 +102,18 @@ def configure_cache(root: str) -> Path:
         libraries = str(Path(helper) / "usr/lib/x86_64-linux-gnu")
         existing_libraries = os.environ.get("LD_LIBRARY_PATH", "")
         os.environ["LD_LIBRARY_PATH"] = libraries + (os.pathsep + existing_libraries if existing_libraries else "")
+        shell = Path(helper) / "usr/bin/busybox"
+        if shell.is_file() and os.access(shell, os.X_OK):
+            os.environ["SAAS_STATIC_SHELL"] = str(shell)
     os.environ["PATH"] = os.pathsep.join(paths) + os.pathsep + os.environ.get("PATH", "")
+    if os.environ.get("SAAS_NRT_ENROOT", "").lower() in {"1", "true", "yes"}:
+        required = [name for name in ("enroot", "nsenter", "unshare", "socat", "gcc") if not shutil.which(name)]
+        for name in ("usr/bin/busybox", "usr/bin/slirp4netns"):
+            candidate = Path(helper or "") / name
+            if not helper or not candidate.is_file() or not os.access(candidate, os.X_OK):
+                required.append(str(candidate))
+        if required:
+            raise RuntimeError("Missing SaaS Enroot dependencies before episode admission: " + ", ".join(required))
     # Native refresh sockets need short names; their storage stays workspace-backed.
     temporary = cache / "tmp"
     temporary.mkdir(exist_ok=True)
@@ -111,6 +136,8 @@ def configure_cache(root: str) -> Path:
         os.environ["TMPDIR"] = str(temporary)
     os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
     os.environ["SAAS_UID_SHIM"] = str(cache / "saas-uid-shim.so")
+    if os.environ.get("SAAS_BENCH_JUDGE_HTTP_TIMEOUT"):
+        os.environ["SAAS_VERIFIER_LAUNCHER"] = str(Path(__file__).with_name("verifier_transport.py"))
     return cache
 
 

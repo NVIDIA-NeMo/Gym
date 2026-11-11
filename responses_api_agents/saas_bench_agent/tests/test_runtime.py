@@ -235,3 +235,38 @@ def test_cpu_app_enroot_config_retains_mounts_without_host_gpu_hooks(tmp_path, m
     updated = Path(__import__("os").environ["ENROOT_SYSCONF_PATH"])
     assert updated != target
     assert (target / "hooks.d/10-runtime.sh").read_text() == files["hooks.d/10-runtime.sh"]
+
+
+def test_svg_rootfs_uses_host_slurm_uid_but_caches_stay_in_workspace(tmp_path, monkeypatch):
+    import os
+
+    monkeypatch.setenv("SAAS_ENROOT_PLATFORM_ROOT", "/raid/enroot")
+    monkeypatch.setenv("SLURM_JOB_ID", "123")
+    monkeypatch.setenv("SLURM_JOB_UID", "99353")
+    monkeypatch.setattr(os, "getuid", lambda: 0)
+    monkeypatch.delenv("SAAS_NRT_ENROOT", raising=False)
+    real_mkdir = Path.mkdir
+    created = []
+
+    def mkdir(path, *args, **kwargs):
+        if str(path).startswith("/raid/enroot/"):
+            created.append(str(path))
+        else:
+            real_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", mkdir)
+    runtime.configure_cache(str(tmp_path / "cache"))
+    assert len(created) == 2
+    assert all("/user-99353/saas-123-" in path for path in created)
+    assert os.environ["ENROOT_DATA_PATH"] in created
+    assert Path(os.environ["ENROOT_CACHE_PATH"]).is_relative_to(tmp_path)
+    assert Path(os.environ["UV_CACHE_DIR"]).is_relative_to(tmp_path)
+
+
+def test_enroot_dependency_failure_precedes_episode_work(tmp_path, monkeypatch):
+    monkeypatch.delenv("SAAS_ENROOT_PLATFORM_ROOT", raising=False)
+    monkeypatch.setenv("SAAS_NRT_ENROOT", "1")
+    monkeypatch.setenv("SAAS_ENROOT_RUNTIME_DIR", str(tmp_path / "missing"))
+    monkeypatch.setattr(runtime.shutil, "which", lambda name: None)
+    with pytest.raises(RuntimeError, match="before episode admission: enroot"):
+        runtime.configure_cache(str(tmp_path / "cache"))

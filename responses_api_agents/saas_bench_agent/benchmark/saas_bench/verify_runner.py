@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Source: https://gitlab-master.nvidia.com/pritamb/saas-bench/-/blob/31177a7a80040edf588388dd982af4b678d1e544/saas_bench/verify_runner.py
 # Copyright: SaaS-Bench Authors; see bundled licenses.
-# Vendored for native benchmark evaluation; original behavior retained.
+# Adaptation: optional bounded HTTP transport wrapper; native task checks unchanged.
 """Run each task's verify.py, parse the results, and write them to JSON files.
 
 verify.py output convention (all written to stderr):
@@ -351,17 +351,20 @@ def run_verify(
 
     env = build_verify_env(task, slot_id, port_map, hostname)
 
+    launcher = env.get("SAAS_VERIFIER_LAUNCHER")
+    command = [sys.executable, launcher, verify_path] if launcher else [sys.executable, verify_path]
+    budget = 600 if launcher else 300
     try:
         proc = subprocess.run(
-            [sys.executable, verify_path],
+            command,
             env=env,
             capture_output=True,
             text=True,
-            timeout=300,
+            timeout=budget,
         )
     except subprocess.TimeoutExpired:
         return _save({"task_id": task_id, "status": "ERROR", "score": 0.0,
-                      "checks": [], "error": "timeout after 300s"})
+                      "checks": [], "error": f"timeout after {budget}s"})
     except Exception as e:
         return _save({"task_id": task_id, "status": "ERROR", "score": 0.0,
                       "checks": [], "error": str(e)})

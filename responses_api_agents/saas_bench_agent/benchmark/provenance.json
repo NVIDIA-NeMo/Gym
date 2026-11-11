@@ -46,9 +46,10 @@
       "source_path": "saas_bench/verify_runner.py",
       "source_url": "https://gitlab-master.nvidia.com/pritamb/saas-bench/-/blob/31177a7a80040edf588388dd982af4b678d1e544/saas_bench/verify_runner.py",
       "source_sha256": "bbd35af7f9cf81bf5d3297138f3bb648cec402e513713be8864af0a708933117",
-      "vendored_sha256": "bf9c8afb86e2cdcf5d879b9710647e08803bfd1c40ecf9e7b80429dad869beec",
+      "vendored_sha256": "c352743d632434e1843ae6137309150947a375a176d2cada5d38a75dfe872445",
       "license": "Apache-2.0",
-      "python_ast_unchanged": true
+      "python_ast_unchanged": false,
+      "adaptation": "Optional judge-only HTTP transport launcher; task verifier scripts and weights unchanged"
     },
     {
       "source_path": "saas_bench/runtime_assets.py",
