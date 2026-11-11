@@ -95,8 +95,13 @@ class QwenSession(AgentSessionState):
         if reuse.return_code == 0 and not reuse.error_type:
             return
         await sandbox.upload(Path(__file__).with_name(INSTALLER), f"{directory}/{INSTALLER}")
-        probe = await sandbox.exec("uname -m; getconf GNU_LIBC_VERSION", cwd="/", timeout_s=60)
-        arch, _, libc = (probe.stdout or "").strip().partition("\n")
+        # Each line is printed even when its check fails, so a musl image still yields three lines.
+        probe = await sandbox.exec(
+            "uname -m; getconf GNU_LIBC_VERSION || echo; command -v flock || echo", cwd="/", timeout_s=60
+        )
+        if probe.error_type:
+            raise RuntimeError(f"Cannot probe the sandbox platform: {probe.error_type}")
+        arch, libc, flock = [*(probe.stdout or "").splitlines(), "", "", ""][:3]
         arch_name = {"amd64": "x86_64", "arm64": "aarch64"}.get(arch, arch)
         if arch_name not in NODE_SHA256:
             raise AgentSeedRejectedError(f"No Node.js {NODE_VERSION} build for sandbox architecture {arch_name!r}")
@@ -104,6 +109,8 @@ class QwenSession(AgentSessionState):
         version = libc.removeprefix("glibc ").split(".")
         if not libc.startswith("glibc ") or tuple(map(int, version[:2])) < (2, 28):
             raise AgentSeedRejectedError(f"Qwen Code's Node.js runtime needs glibc 2.28 or newer, not {libc!r}")
+        if not flock:
+            raise AgentSeedRejectedError("Qwen Code's installer needs flock in the sandbox image")
         node, archive = "", ""
         if runtime_archive:
             # For sandboxes without internet access; the installer checks the version it reports.

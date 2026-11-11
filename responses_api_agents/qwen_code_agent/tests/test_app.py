@@ -265,13 +265,20 @@ def test_settings_route_every_model_through_the_rollout():
     assert settings["ui"] == {"theme": "x"}
 
 
-@pytest.mark.parametrize("capture", [True, False])
-def test_token_id_capture_routes_root_and_subagent_calls_to_capture(capture):
+def test_token_id_capture_refuses_a_subagent_server():
     server = agent(
         subagent_model="worker",
         subagent_model_server={"type": "responses_api_models", "name": "worker_model"},
-        token_id_capture=capture,
+        token_id_capture=True,
     )
+    server.server_client.global_config_dict = {"token_id_capture": {"enabled": True}}
+    reason = "Qwen Code token capture is unsupported with subagent_model_server"
+    assert check_agent_seed_rejected(server.setup_webserver(), seed()) == reason
+
+
+@pytest.mark.parametrize("capture", [True, False])
+def test_token_id_capture_routes_root_calls_to_capture(capture):
+    server = agent(token_id_capture=capture)
     server.server_client.global_config_dict = {"token_id_capture": {"enabled": True}}
     server.server_client._build_server_base_url.side_effect = lambda config: f"http://{config['name']}:9000"
     with patch(
@@ -281,8 +288,7 @@ def test_token_id_capture_routes_root_and_subagent_calls_to_capture(capture):
         settings = server.qwen_settings(MagicMock(request=seed()), body())
     capture_path = "/training-token-capture" if capture else ""
     assert [route["baseUrl"] for route in settings["modelProviders"]["openai"]] == [
-        f"http://policy_model:9000/ng-rollout/rollout-1{capture_path}/v1",
-        f"http://worker_model:9000/ng-rollout/rollout-1{capture_path}/v1",
+        f"http://policy_model:9000/ng-rollout/rollout-1{capture_path}/v1"
     ]
 
 
@@ -407,6 +413,30 @@ def test_request_mapping_and_refusals():
                 input=[{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}]
             )
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("probe", "error", "message"),
+    [
+        # A failed probe is a retryable setup error, not a refusal of the episode.
+        (SandboxExecResult("", "", -1, error_type="timeout"), RuntimeError, "Cannot probe"),
+        (SandboxExecResult("riscv64\nglibc 2.39\n/usr/bin/flock\n", "", 0), AgentSeedRejectedError, "'riscv64'"),
+        (SandboxExecResult("x86_64\n\n/usr/bin/flock\n", "", 0), AgentSeedRejectedError, "glibc 2.28"),
+        (SandboxExecResult("x86_64\nglibc 2.39\n\n", "", 0), AgentSeedRejectedError, "needs flock"),
+    ],
+)
+async def test_install_refuses_unsupported_images_and_retries_probe_failures(tmp_path, probe, error, message):
+    missing, ok = SandboxExecResult("", "", 1), SandboxExecResult("", "", 0)
+    sandbox = MagicMock(upload=AsyncMock(), exec=AsyncMock(side_effect=[ok, missing, probe]))
+    state = QwenSession(
+        request=seed(),
+        provider_name="local",
+        sandbox_id="task",
+        session=SandboxSession(sandbox=sandbox, session_dir=str(tmp_path), workdir="/repo", harness="Qwen Code"),
+    )
+    with pytest.raises(error, match=message):
+        await state.install(runtime_archive=None, timeout=10)
 
 
 async def activate(tmp_path: Path, mode: str, *, timeout: float = 20):

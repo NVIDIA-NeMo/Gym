@@ -329,7 +329,7 @@ class QwenCodeAgent(SimpleResponsesAPIAgent):
         def base_url(server: ModelServerRef) -> str:
             return self.model_endpoint(model_server=server, rollout_id=rollout_id).base_url
 
-        # Qwen Code ignores top-level model.generationConfig for provider routes, so each route carries it.
+        # A provider route's generationConfig wins per field, so each route carries the configured block and sampling.
         generation = deepcopy((self.config.settings.get("model") or {}).get("generationConfig") or {})
         sampling = {
             key: value

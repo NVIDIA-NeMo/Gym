@@ -65,7 +65,7 @@ gym eval run --no-serve \
 | `approval_mode` | `yolo` | Headless runs need `yolo` (or `auto-edit`, `auto`) to execute tools. |
 | `timeout` | `3600` | Seconds per activation, children included, enforced by the sandbox's process supervisor. |
 | `exclude_tools` | `[web_fetch, web_search]` | Extra `--exclude-tools`. The web tools are off by default, so tasks are solved without looking answers up online. Set `[]` to turn web access on. A configured list replaces the default. |
-| `settings` | `{}` | Merged under the generated settings (the model routes it sets win). Its `model.generationConfig` (for example `contextWindowSize`, `samplingParams.max_tokens`, `extra_body`) is copied into every model route, because Qwen Code ignores the top-level block for provider routes. |
+| `settings` | `{}` | Merged under the generated settings (the model routes it sets win). Its `model.generationConfig` (for example `contextWindowSize`, `samplingParams.max_tokens`, `extra_body`) is copied into every model route, because a route's own `generationConfig` wins per field over the top-level block. |
 | `network_access` | `inherit` | Egress of an agent-owned sandbox. `model_only` allows only the model servers' host and requires `runtime_archive`. |
 
 `subagent_model` works by writing a user-level `general-purpose` agent definition with that `model`. Its system
@@ -80,7 +80,7 @@ already reports it. The agent server downloads the official Node.js build for th
 its asset cache, checks the SHA-256 pinned in `sandbox.py`, and uploads it; the sandbox checks it again. Qwen Code runs
 as that Node with the package's entry script, so the task's own Node, npm and `PATH` are untouched, and the task's
 `NODE_OPTIONS` and `NODE_PATH` are unset. A sandbox that already has a ready runtime skips the upload and install. The
-sandbox needs glibc 2.28 or newer (other images are refused at seed), bash, `flock`, `sha256sum`, `tar` and network
+sandbox needs glibc 2.28 or newer and `flock` (other images are refused at seed), bash, `sha256sum`, `tar` and network
 access to the npm registry. For sandboxes without internet access, build a runtime archive once with
 [build_runtime.sh](build_runtime.sh) for the sandbox's architecture and set `runtime_archive`. The agent server
 uploads it as is, and the installer checks the version it reports:
