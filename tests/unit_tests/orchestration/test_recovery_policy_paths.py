@@ -102,3 +102,34 @@ def test_provider_stopped_judge_obeys_policy_without_resampling(kind, action, st
     result = decide(row, {"by_failure_kind": {kind: action}})
     assert result.evidence[0].state == state
     assert result.action.value != "resubmit"
+    if action == "fail":
+        assert "policy" in result.reason
+        assert "After the reset" not in result.reason
+
+
+@pytest.mark.parametrize("source", ["result", "failure"])
+@pytest.mark.parametrize("saved_fail", [False, True])
+def test_final_quota_policy_stop_is_not_a_future_reset_wait(source, saved_fail, monkeypatch):
+    monkeypatch.setattr("nemo_gym.orchestration.recovery._now", lambda: 0)
+    row = saved_row_evidence(_xstest_row(None)) | {
+        "mask_sample": True,
+        "failure_kind": "provider_quota_exhausted",
+        "failure_reason": "resets at 2099-01-01 00:00 UTC",
+        "_ng_failure_class": "judge_failed",
+    }
+    if saved_fail:
+        row["failure_outcome_action"] = "fail"
+    policy = RecoveryOutcomePolicyConfig(
+        by_failure_kind={"provider_quota_exhausted": "verify" if saved_fail else "fail"}
+    )
+    result = decide_recovery(
+        materialized=inventory(1),
+        results=[row] if source == "result" else [],
+        failures=[row] if source == "failure" else [],
+        budget=OK_BUDGET,
+        outcome_policy=policy,
+    )
+    assert result.evidence[0].state == "terminal"
+    assert result.evidence[0].reason is None
+    assert "policy" in result.reason
+    assert "After the reset" not in result.reason
