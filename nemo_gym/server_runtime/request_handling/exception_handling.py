@@ -24,7 +24,7 @@ from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from nemo_gym.core.failure_records import FailureReport
-from nemo_gym.core.failure_transport import FailureHeader, RequestFailureLog
+from nemo_gym.core.failure_transport import FailureHeader, RequestFailureLog, TransportResendHeader
 from nemo_gym.core.typed_exceptions import route_reply_error
 
 
@@ -36,6 +36,19 @@ def _add_failure_header(message: Message, report: FailureReport) -> None:
     if inner is not None:
         report = report.merged(inner) if report.failure_id is not None else inner.merged(report)
     headers.update(FailureHeader.encode(report))
+
+
+def _set_transport_resend_header(message: Message, count: int) -> None:
+    """Put this request's transport resends in a reply's header, keeping a larger count the reply already carries.
+
+    A count the route copied from a downstream reply is already part of ``count``, which reached this request's log
+    when that reply arrived. A nested layer of this middleware hands its count to this layer's log before this layer
+    stamps the reply, so it is part of ``count`` too.
+    """
+    headers = MutableHeaders(scope=message)
+    count = max(count, TransportResendHeader.decode(headers))
+    del headers[TransportResendHeader.NAME]
+    headers.update(TransportResendHeader.encode(count))
 
 
 def _is_cancelling_this_request(error: BaseException) -> bool:
@@ -53,7 +66,8 @@ class ExceptionHandlingMiddleware:
 
     A route that raises, or returns without replying, gets ``failure_reply``'s response.
     That response keeps the partial observations the route left in the request state.
-    Every reply, successful or not, carries the failures observed while serving it in its failure header.
+    Every reply, successful or not, carries the failures observed while serving it in its failure header, and the
+    transport resends made while serving it in its resend header.
     Once a reply has started, its status is already sent, so a later failure propagates.
     A cancelled request still gets the failure reply, and then the cancellation propagates to whoever cancelled the
     task.
@@ -71,6 +85,7 @@ class ExceptionHandlingMiddleware:
             await self.app(scope, receive, send)
             return
 
+        enclosing = RequestFailureLog.current()
         with RequestFailureLog.capture() as failure_log:
             error: BaseException | None = None
             started = False
@@ -81,6 +96,10 @@ class ExceptionHandlingMiddleware:
                     started = True
                     # Success or failure, the reply forwards its own failure and those observed while serving it.
                     _add_failure_header(message, failure_log.reply_report(error))
+                    _set_transport_resend_header(message, failure_log.transport_resends)
+                    if enclosing is not None:
+                        # A nested layer: the enclosing layer stamps its own resends plus these, once.
+                        enclosing.transport_resends += failure_log.transport_resends
                 await send(message)
 
             try:
