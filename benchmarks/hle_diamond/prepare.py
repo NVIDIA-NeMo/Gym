@@ -25,8 +25,8 @@ questions carry an ``input_image`` block, so the dataset needs no
 questions without an image as raw fields to be templated at rollout time via
 ``prompt_config`` (``text.yaml`` and the text-only sandboxed presets). ``--prompt opencode``
 materializes every question with ``prompts/opencode.yaml`` instead, the single user
-message the OpenCode sandboxed harness forwards (``opencode_full.yaml``): image
-questions carry the same ``input_image`` block, and there is no system message to drop.
+message the OpenCode sandboxed harness forwards (``opencode_full_legacy_agent.yaml``):
+image questions carry the same ``input_image`` block, and there is no system message to drop.
 
 The corpus is validated before anything is written: a wrong row count, partition
 split, image count or duplicated id aborts preparation. ``--limit N`` is the one
