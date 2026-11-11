@@ -58,6 +58,7 @@ def normalize_code(text: str) -> str:
     # own line, allowing inline backticks in the submitted program as well.
     pattern = (
         r"```(?:python|py)?[ \t]*(?:\r?\n(?P<block>.*?)^[ \t]*```[ \t]*|(?P<inline>[^\r\n]*?)```)"
+        r"|(?P<other>```[^\r\n]*\r?\n.*?^[ \t]*```[ \t]*)"
         r"|(?P<unfinished>```.*\Z)|(?P<tag></?think>)"
     )
     tokens = list(re.finditer(pattern, text, flags=re.DOTALL | re.MULTILINE | re.IGNORECASE))

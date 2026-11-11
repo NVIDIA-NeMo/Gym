@@ -268,6 +268,20 @@ def test_code_normalization_ignores_reasoning_fences_and_preserves_final(final: 
     assert module.normalize_code(text) == final.strip() + "\n"
 
 
+@pytest.mark.parametrize("language", ["text", "json"])
+@pytest.mark.parametrize("position", ["before", "reasoning", "after"])
+def test_code_normalization_skips_non_python_fences(language: str, position: str) -> None:
+    notes = f"```{language}\nUse a white background.\n```"
+    program = "```python\nprint(1)\n```"
+    if position == "before":
+        text = f"Notes:\n{notes}\n{program}"
+    elif position == "reasoning":
+        text = f"<think>\n{notes}\n</think>\n{program}"
+    else:
+        text = f"{program}\n{notes}"
+    assert module.normalize_code(text) == "print(1)\n"
+
+
 @pytest.mark.parametrize("kind", ["symlink", "bytes", "pixels", "corrupt"])
 def test_output_limits(tmp_path, kind):
     path = tmp_path / "output.png"

@@ -76,6 +76,15 @@ async def test_real_execution(tmp_path, code, status):
         ("import sys; sys.stderr.write('[ERROR] deliberate failure\\n'); raise SystemExit(1)", "code_error"),
         (VALID + "\nimport os; os.chmod(OUTPUT_PATH, 0)", "invalid_output"),
         (VALID + "\nimport os; os.chmod('/workspace', 0)", "ok"),
+        pytest.param(
+            f"Notes:\n```text\nUse a white background.\n```\n```python\n{VALID}\n```", "ok", id="text-before-python"
+        ),
+        pytest.param(
+            f"<think>\n```text\nUse a white background.\n```\n</think>\n```python\n{VALID}\n```",
+            "ok",
+            id="text-inside-reasoning",
+        ),
+        pytest.param(f"```python\n{VALID}\n```\n```text\nUse a white background.\n```", "ok", id="text-after-python"),
     ],
 )
 async def test_real_program_outcomes_are_not_masked(tmp_path: Path, monkeypatch, code: str, status: str) -> None:
