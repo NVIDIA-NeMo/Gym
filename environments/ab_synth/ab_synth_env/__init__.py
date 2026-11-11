@@ -483,7 +483,7 @@ def load_environment(
             payload = {"model": requester_model, "messages": messages, **body, **(requester_body or {})}
 
             async def attempt_once() -> dict:
-                response = await request("POST", url, json=payload, headers=headers)
+                response = await request("POST", url, json=payload, headers=headers or {})
                 response.raise_for_status()
                 return (await response.json())["choices"][0]
 

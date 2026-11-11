@@ -376,6 +376,26 @@ class RequesterTest(unittest.TestCase):
         self.assertEqual((sent["json"]["max_tokens"], sent["json"]["temperature"]), (4096, 0.7))
         self.assertEqual(sent["headers"], {"Authorization": "Bearer secret"})
 
+    def test_without_a_key_the_requester_sends_a_headers_dict(self):
+        # nemo_gym.client.request sets Content-Type on the headers it gets, so None would raise.
+        vf_env, _ = load(SINGLE_DAY)
+        sent = {}
+
+        class Response:
+            def raise_for_status(self):
+                pass
+
+            async def json(self):
+                return {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]}
+
+        async def fake_request(method, url, **kwargs):
+            sent.update(kwargs)
+            return Response()
+
+        with unittest.mock.patch("nemo_gym.client.request", fake_request):
+            asyncio.run(vf_env._chat([{"role": "user", "content": "hi"}]))
+        self.assertEqual(sent["headers"], {})
+
     def test_a_requester_that_never_stops_calling_tools_is_unavailable(self):
         vf_env, state = load({**SINGLE_DAY, "requester_services": ["hubspot"]}, max_requester_tool_calls=1)
         call = {"id": "c1", "function": {"name": "api_search", "arguments": "{}"}}
