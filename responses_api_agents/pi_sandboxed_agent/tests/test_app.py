@@ -16,13 +16,15 @@
 import asyncio
 import json
 import logging
+import shlex
 import subprocess
 import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from anyio import CancelScope
 
 from nemo_gym.agents import restricted_network_policy
 from nemo_gym.client import ServerClient
@@ -35,7 +37,11 @@ from responses_api_agents.pi_sandboxed_agent.app import _RUN, PiSandboxedAgent, 
 
 def response(value):
     return SimpleNamespace(
-        cookies={}, ok=True, read=AsyncMock(return_value=json.dumps(value).encode()), raise_for_status=lambda: None
+        cookies={},
+        status=200,
+        ok=True,
+        read=AsyncMock(return_value=json.dumps(value).encode()),
+        raise_for_status=lambda: None,
     )
 
 
@@ -79,6 +85,7 @@ def agent(tmp_path, monkeypatch):
         _handle=SimpleNamespace(sandbox_id="box", provider_name="opensandbox"),
         upload=AsyncMock(),
         stop=AsyncMock(),
+        disconnect=AsyncMock(),
         exec=AsyncMock(return_value=SimpleNamespace(return_code=0, error_type=None)),
     )
     events = [
@@ -149,11 +156,330 @@ def request_body():
     )
 
 
+@pytest.mark.parametrize("descriptor", [False, True])
+async def test_resource_sandbox_connection_preserves_workdir(agent, monkeypatch, descriptor):
+    server, sandbox = agent
+    provider = object()
+    connect = AsyncMock(return_value=sandbox)
+    monkeypatch.setattr(app, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(app, "resolve_provider_config", lambda *args: {})
+    monkeypatch.setattr(app, "create_provider", lambda _: provider)
+    monkeypatch.setattr(app.AsyncSandbox, "connect", connect)
+    handle = {"sandbox_id": "task", "workdir": "/task/repository"}
+    seed = {"sandbox_descriptor": handle} if descriptor else {"sandbox_handle": "task", "workdir": "/task/repository"}
+    assert await PiSandboxedAgent._start_sandbox(server, seed) is sandbox
+    connect.assert_awaited_once_with(handle, provider=provider)
+
+
+@pytest.mark.parametrize("failure", ["connect", "network"])
+async def test_failed_resource_connection_closes_provider(agent, monkeypatch, failure):
+    server, _ = agent
+    provider = SimpleNamespace(aclose=AsyncMock())
+    monkeypatch.setattr(app, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(app, "resolve_provider_config", lambda *args: {})
+    monkeypatch.setattr(app, "create_provider", lambda _: provider)
+    connect = AsyncMock(side_effect=RuntimeError("connect failed"))
+    monkeypatch.setattr(app.AsyncSandbox, "connect", connect)
+    if failure == "network":
+        server.config.network_access = "model_only"
+    with pytest.raises((RuntimeError, ValueError), match="connect failed|resource-owned sandbox"):
+        await PiSandboxedAgent._start_sandbox(server, {"sandbox_descriptor": {"sandbox_id": "task"}})
+    provider.aclose.assert_awaited_once()
+
+
+@pytest.mark.parametrize("seed", [{"sandbox_descriptor": None}, {"sandbox_descriptor": {}}, {"sandbox_handle": ""}])
+async def test_empty_resource_descriptor_does_not_allocate_a_different_task(agent, monkeypatch, seed):
+    server, _ = agent
+    monkeypatch.setattr(server, "_start_sandbox", MethodType(PiSandboxedAgent._start_sandbox, server))
+    provider = MagicMock()
+    monkeypatch.setattr(app, "create_provider", provider)
+    server.server_client.post.side_effect = [response(seed), response({})]
+    with pytest.raises(ValueError, match="nonempty sandbox descriptor"):
+        await server.run(SimpleNamespace(cookies={}), request_body())
+    assert [call.kwargs["url_path"] for call in server.server_client.post.await_args_list] == [
+        "/seed_session",
+        "/close_session",
+    ]
+    provider.assert_not_called()
+
+
+async def test_failed_owned_sandbox_start_stops_partial_allocation(agent, monkeypatch):
+    server, sandbox = agent
+    sandbox.start = AsyncMock(side_effect=RuntimeError("start failed after allocation"))
+    monkeypatch.setattr(app, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(app, "resolve_provider_config", lambda *args: {})
+    monkeypatch.setattr(app, "resolve_provider_metadata", lambda *args: {})
+    monkeypatch.setattr(app, "create_provider", lambda _: object())
+    monkeypatch.setattr(app, "AsyncSandbox", lambda _: sandbox)
+    with pytest.raises(RuntimeError, match="start failed after allocation"):
+        await PiSandboxedAgent._start_sandbox(server, {})
+    sandbox.stop.assert_awaited_once()
+
+
+@pytest.mark.parametrize("failure", [None, "mcp", "connect", "setup", "verify", "cancel", "seed_json"])
+async def test_resources_owner_closes_borrowed_sandbox_on_every_path(agent, monkeypatch, failure):
+    server, sandbox = agent
+    original_post = server.server_client.post.side_effect
+    events = []
+    seeded = response({"sandbox_descriptor": {"sandbox_id": "task", "scope": "operate"}})
+    seeded.cookies = {"resources": "session-id"}
+    if failure == "seed_json":
+        seeded.read.return_value = b"not json"
+
+    async def post(**kwargs):
+        endpoint = kwargs["url_path"]
+        events.append(endpoint)
+        if endpoint == "/seed_session":
+            return seeded
+        if endpoint == "/close_session":
+            assert kwargs["cookies"] == {"caller": "original", "resources": "session-id"}
+            assert kwargs["json"] == {}
+        if endpoint == "/verify" and failure == "verify":
+            raise RuntimeError("verify failed")
+        return await original_post(**kwargs)
+
+    server.server_client.post.side_effect = post
+    sandbox.stop.side_effect = PermissionError("operate lease cannot stop")
+    sandbox.disconnect.side_effect = lambda: events.append("disconnect")
+    if failure in {"mcp", "cancel"}:
+        error = asyncio.CancelledError() if failure == "cancel" else RuntimeError("mcp failed")
+        monkeypatch.setattr(app, "seed_mcp_servers", AsyncMock(side_effect=error))
+    elif failure == "connect":
+        server._start_sandbox.side_effect = RuntimeError("connect failed")
+    elif failure == "setup":
+        sandbox.exec.side_effect = RuntimeError("setup failed")
+    if failure:
+        with pytest.raises((RuntimeError, ValueError, asyncio.CancelledError)):
+            await server.run(SimpleNamespace(cookies={"caller": "original"}), request_body())
+    else:
+        result = await server.run(SimpleNamespace(cookies={"caller": "original"}), request_body())
+        assert result.reward == 1
+    attached = failure not in {"mcp", "connect", "cancel", "seed_json"}
+    assert events[-2:] == (["/close_session", "disconnect"] if attached else ["/seed_session", "/close_session"])
+    assert events.count("/verify") == (1 if failure in {None, "verify"} else 0)
+    assert sandbox.disconnect.await_count == int(attached)
+    sandbox.stop.assert_not_awaited()
+    assert _RUN.get() is None
+
+
+@pytest.mark.parametrize("failure", ["close", "http_error", "timeout", "disconnect", "fallback_denied", "404", "405"])
+async def test_borrowed_cleanup_failures_are_visible_and_transport_is_released(agent, monkeypatch, failure):
+    server, sandbox = agent
+    original_post = server.server_client.post.side_effect
+    server.config.session_close_timeout_seconds = 0.02
+
+    async def post(**kwargs):
+        if kwargs["url_path"] == "/seed_session":
+            return response({"sandbox_handle": "task"})
+        if kwargs["url_path"] == "/close_session":
+            if failure == "close":
+                raise RuntimeError("resource close failed")
+            if failure == "timeout":
+                await asyncio.sleep(1)
+            closed = response({})
+            closed.status = {"405": 405, "404": 404, "fallback_denied": 404, "http_error": 500}.get(failure, 200)
+            return closed
+        return await original_post(**kwargs)
+
+    async def check_status(reply):
+        if reply.status >= 400:
+            raise RuntimeError(f"HTTP {reply.status}")
+
+    monkeypatch.setattr(app, "raise_for_status", check_status)
+    server.server_client.post.side_effect = post
+    if failure == "disconnect":
+        sandbox.disconnect.side_effect = RuntimeError("disconnect failed")
+    if failure == "fallback_denied":
+        sandbox.stop.side_effect = PermissionError("operate lease cannot stop")
+    if failure in {"404", "405"}:
+        result = await server.run(SimpleNamespace(cookies={}), request_body())
+        assert result.reward == 1
+    else:
+        with pytest.raises((RuntimeError, TimeoutError, PermissionError)):
+            await server.run(SimpleNamespace(cookies={}), request_body())
+    assert sandbox.stop.await_count == (1 if failure in {"404", "405", "fallback_denied"} else 0)
+    sandbox.disconnect.assert_awaited_once()
+    assert server.server_client.post.await_args.kwargs["url_path"] == "/close_session"
+    assert _RUN.get() is None
+
+
+async def test_resource_cleanup_survives_cancelled_request_scope(agent):
+    server, sandbox = agent
+
+    async def close(**kwargs):
+        await asyncio.sleep(0)
+        return response({})
+
+    server.server_client.post.side_effect = close
+    with CancelScope() as scope:
+        scope.cancel()
+        await server._close_run(sandbox, cookies={"resources": "session-id"}, borrowed=True)
+    assert server.server_client.post.await_args.kwargs["url_path"] == "/close_session"
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()
+
+
+def exec_result(*, code=0, stdout="", stderr="", error_type=None):
+    return SimpleNamespace(return_code=code, stdout=stdout, stderr=stderr, error_type=error_type)
+
+
+@pytest.mark.parametrize("runtime", [None, "/opt/pi-runtime"])
+async def test_pinned_preinstalled_runtime_is_checked_without_installing(agent, runtime):
+    server, sandbox = agent
+    server.config.pi_version = "0.80.2"
+    server.config.sandbox_runtime_dir = runtime
+    sandbox.exec.side_effect = [exec_result(), exec_result(stdout="0.80.2\n"), exec_result()]
+    result = await server.run(SimpleNamespace(cookies={}), request_body())
+    assert result.reward == 1
+    version = sandbox.exec.await_args_list[1].kwargs
+    assert version["command"] == (
+        "/opt/pi-runtime/node/bin/node /opt/pi-runtime/pi/node_modules/@earendil-works/pi-coding-agent/dist/cli.js --version"
+        if runtime
+        else "pi --version"
+    )
+    assert version["timeout_s"] == server.config.sandbox_install_timeout_seconds
+    assert not any(str(call.args[0]).endswith("install_pi_runtime.sh") for call in sandbox.upload.await_args_list)
+    command = shlex.split(sandbox.exec.await_args.kwargs["command"])
+    assert command[3] == ("/opt/pi-runtime/node/bin/node" if runtime else "pi")
+    sandbox.stop.assert_awaited_once()
+
+
+async def test_missing_pinned_pi_installs_existing_runtime_before_execution(agent):
+    server, sandbox = agent
+    server.config.pi_version = "0.80.2"
+    sandbox.exec.side_effect = [
+        exec_result(),
+        exec_result(code=127, stderr="pi: command not found"),
+        exec_result(),
+        exec_result(stdout="0.80.2\n"),
+        exec_result(),
+    ]
+    result = await server.run(SimpleNamespace(cookies={}), request_body())
+    assert result.reward == 1
+    runtime = "/tmp/nemo-gym-pi-node-22.19.0-0.80.2"
+    installer = next(
+        call for call in sandbox.upload.await_args_list if str(call.args[0]).endswith("install_pi_runtime.sh")
+    )
+    assert installer.args[0] == Path(app.__file__).parent.parent / "pi_agent" / "install_pi_runtime.sh"
+    install = sandbox.exec.await_args_list[2].kwargs
+    assert shlex.split(install["command"]) == ["bash", installer.args[1], runtime, "0.80.2"]
+    assert install["timeout_s"] == server.config.sandbox_install_timeout_seconds
+    version = sandbox.exec.await_args_list[3].kwargs["command"]
+    assert (
+        version
+        == f"{runtime}/node/bin/node {runtime}/pi/node_modules/@earendil-works/pi-coding-agent/dist/cli.js --version"
+    )
+    assert shlex.split(sandbox.exec.await_args.kwargs["command"])[3:5] == shlex.split(version)[:-1]
+    sandbox.stop.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "failure,results,diagnostic",
+    [
+        ("version", [exec_result(stdout="0.79.0")], "does not run pi_version"),
+        ("version_error", [exec_result(code=127, error_type="timeout")], "error_type=timeout"),
+        (
+            "install",
+            [exec_result(code=127), exec_result(code=1, stdout="download failed", stderr="index unavailable")],
+            "index unavailable\\ndownload failed",
+        ),
+        ("install_timeout", [exec_result(code=127), exec_result(error_type="timeout")], "error_type=timeout"),
+        (
+            "installed_version",
+            [exec_result(code=127), exec_result(), exec_result(stdout="0.79.0")],
+            "does not run pi_version",
+        ),
+        ("restricted", [exec_result(code=127)], "Restricted Pi sandboxes"),
+        ("mounted_missing", [exec_result(code=127)], "does not run pi_version"),
+        ("custom_missing", [exec_result(code=127)], "does not run pi_version"),
+    ],
+)
+async def test_runtime_setup_failure_does_not_verify_and_still_stops_sandbox(agent, failure, results, diagnostic):
+    server, sandbox = agent
+    server.config.pi_version = "0.80.2"
+    if failure == "restricted":
+        server.config.network_access = "model_only"
+    elif failure == "mounted_missing":
+        server.config.sandbox_runtime_dir = "/opt/pi-runtime"
+    elif failure == "custom_missing":
+        server.config.command = "/opt/pi"
+    sandbox.exec.side_effect = [exec_result(), *results]
+    with pytest.raises(RuntimeError, match=diagnostic):
+        await server.run(SimpleNamespace(cookies={}), request_body())
+    assert sandbox.exec.await_count == 1 + len(results)
+    assert server.server_client.post.await_count == 1
+    sandbox.download.assert_not_awaited()
+    sandbox.stop.assert_awaited_once()
+    assert _RUN.get() is None
+
+
+@pytest.mark.parametrize("version", [None, "latest", "0.80"])
+async def test_private_runtime_requires_exact_version(agent, version):
+    server, sandbox = agent
+    server.config.pi_version = version
+    server.config.sandbox_runtime_dir = "/opt/pi-runtime"
+    with pytest.raises(ValueError, match="exact pi_version"):
+        await server.run(SimpleNamespace(cookies={}), request_body())
+    assert sandbox.exec.await_count == 1
+    assert server.server_client.post.await_count == 1
+    sandbox.stop.assert_awaited_once()
+
+
+@pytest.mark.parametrize("enable_tools", [False, True])
+@pytest.mark.parametrize("prompt_mode", ["append", "replace"])
+async def test_fixed_policy_matches_session_limits_and_cli_controls(agent, enable_tools, prompt_mode):
+    server, sandbox = agent
+    server.sem = asyncio.Semaphore(1)
+    server.config.output_token_policy = "fixed"
+    server.config.max_output_tokens = 1024
+    server.config.context_window = 32768
+    server.config.bash_timeout = None
+    server.config.sandbox_bash_timeout_seconds = 180
+    server.config.enable_tools = enable_tools
+    server.config.system_prompt_mode = prompt_mode
+    server.config.system_prompt = "Follow the repository instructions."
+    staged = {}
+
+    async def upload(local, remote):
+        staged[remote] = local.read_text()
+
+    sandbox.upload.side_effect = upload
+    result = await asyncio.wait_for(server.run(SimpleNamespace(cookies={}), request_body()), timeout=5)
+    assert result.reward == 1
+    execution = sandbox.exec.await_args.kwargs
+    command = shlex.split(execution["command"])
+    for flag in ("--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes"):
+        assert flag in command
+    assert ("--no-builtin-tools" in command) is (not enable_tools)
+    prompt_flag = "--system-prompt" if prompt_mode == "replace" else "--append-system-prompt"
+    assert command[command.index(prompt_flag) + 1] == server.config.system_prompt
+    extensions = [command[i + 1] for i, value in enumerate(command) if value == "--extension"]
+    assert {Path(path).name for path in extensions} == (
+        {"output-limit.mjs", "outcome.mjs", "runtime-guards.mjs"}
+        if enable_tools
+        else {"output-limit.mjs", "outcome.mjs"}
+    )
+    for path in extensions:
+        assert staged[path] == (Path(app.__file__).parent.parent / "pi_agent" / Path(path).name).read_text()
+    models = next(json.loads(value) for path, value in staged.items() if path.endswith("models.json"))
+    assert models["providers"]["nemo"]["models"][0]["maxTokens"] == 1024
+    assert models["providers"]["nemo"]["models"][0]["contextWindow"] == 32768
+    if enable_tools:
+        assert execution["env"]["NEMO_GYM_PI_BASH_TIMEOUT"] == "180"
+    assert "HOME" not in execution["env"]
+
+
 @pytest.mark.parametrize("cleanup_fails", [False, True])
 async def test_native_execution_preserves_settings_timing_and_verification(agent, cleanup_fails, caplog):
     server, sandbox = agent
     if cleanup_fails:
         sandbox.stop.side_effect = RuntimeError("cleanup unavailable")
+        with pytest.raises(RuntimeError, match="cleanup unavailable"):
+            await server.run(SimpleNamespace(cookies={}), request_body())
+        sandbox.stop.assert_awaited_once()
+        assert _RUN.get() is None
+        assert "Failed to release Pi sandbox" in caplog.text
+        return
     staged = {}
 
     async def upload(local, remote):
@@ -164,20 +490,22 @@ async def test_native_execution_preserves_settings_timing_and_verification(agent
     assert result.reward == 1 and not result.pi_failed
     assert result.response.output[0].content[0].text == "4\u2028done"
     assert next(json.loads(v) for p, v in staged.items() if p.endswith("settings.json")) == {
-        "compaction": {"enabled": False}
+        "compaction": {"enabled": False},
+        "httpIdleTimeoutMs": 600000,
+        "retry": {"provider": {"timeoutMs": 600000}},
     }
     models = next(json.loads(v) for p, v in staged.items() if p.endswith("models.json"))
     assert models["providers"]["nemo"]["baseUrl"] == "http://model.example:8000/ng-rollout/pi-rollout/v1"
     execution = sandbox.exec.await_args.kwargs
     assert execution["timeout_s"] == 600 and execution["env"]["NEMO_GYM_PI_BASH_TIMEOUT"] == "120"
-    assert "remaining-context.mjs" in execution["command"] and "bash-timeout.mjs" in execution["command"]
+    assert "remaining-context.mjs" in execution["command"] and "runtime-guards.mjs" in execution["command"]
+    assert "HOME" not in execution["env"]
+    assert execution["env"]["PI_CODING_AGENT_DIR"].endswith("/home/.pi/agent")
     tool = next(r for r in result.ng_agent_observations.records if isinstance(r, ToolCallObservation))
     assert tool.started_at == 10 and tool.completed_at == 11 and tool.sandbox_id == "box"
     assert not any(g.code == "no_sandbox_runtime" for g in result.ng_agent_observations.gaps)
     sandbox.stop.assert_awaited_once()
     assert _RUN.get() is None
-    if cleanup_fails:
-        assert "Failed to stop Pi sandbox" in caplog.text
 
 
 @pytest.mark.parametrize("budget,expected", [(None, 600), ("12.5", 12.5), ("3600", 600)])
@@ -262,6 +590,12 @@ async def test_failures_preserve_cleanup_and_zero_reward_boundary(agent, failure
         sandbox.exec.side_effect = asyncio.CancelledError()
     else:
         server.server_client.post.side_effect = [response({}), RuntimeError("judge unavailable")]
+    if cleanup_fails:
+        with pytest.raises(RuntimeError, match="cleanup unavailable"):
+            await server.run(SimpleNamespace(cookies={}), request_body())
+        sandbox.stop.assert_awaited_once()
+        assert _RUN.get() is None
+        return
     if failure in {"exit", "timeout_result", "timeout_exit"}:
         result = await server.run(SimpleNamespace(cookies={}), request_body())
         assert result.reward == 0 and result.pi_failed

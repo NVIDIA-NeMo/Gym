@@ -15,8 +15,10 @@
 
 """Run the native Pi CLI in a provider-managed sandbox; parse and grade on the host."""
 
+import asyncio
 import json
 import logging
+import re
 from asyncio import Semaphore
 from contextvars import ContextVar
 from copy import deepcopy
@@ -29,6 +31,7 @@ from time import time
 from typing import Any, ClassVar, Literal
 from uuid import uuid4
 
+from anyio import CancelScope
 from fastapi import Request
 from openai.types.responses.response import IncompleteDetails
 from pydantic import Field, field_validator
@@ -144,7 +147,7 @@ class PiSandboxedAgent(PiAgent):
     calls_model_from_sandbox: ClassVar[bool] = True
 
     def model_post_init(self, __context: Any) -> None:
-        # Pi is preinstalled in the sandbox image, never installed on the Gym host.
+        # Check or install Pi inside the task sandbox, never on the Gym host.
         SimpleResponsesAPIAgent.model_post_init(self, __context)
         _warn_deprecated_once()
         self.sem = Semaphore(self.config.concurrency)
@@ -164,15 +167,27 @@ class PiSandboxedAgent(PiAgent):
         )
 
     async def _start_sandbox(self, seed: dict) -> AsyncSandbox:
-        global_config = get_global_config_dict()
-        provider = create_provider(resolve_provider_config(self.config.sandbox_provider, global_config))
         descriptor = seed.get("sandbox_descriptor")
         if not descriptor and seed.get("sandbox_handle"):
             descriptor = {"sandbox_id": seed["sandbox_handle"]}
+            if seed.get("workdir"):
+                descriptor["workdir"] = seed["workdir"]
+        if ("sandbox_descriptor" in seed or "sandbox_handle" in seed) and (
+            not isinstance(descriptor, dict) or not descriptor
+        ):
+            raise ValueError("Pi resource seed must supply a nonempty sandbox descriptor or handle")
+        global_config = get_global_config_dict()
+        provider = create_provider(resolve_provider_config(self.config.sandbox_provider, global_config))
         if descriptor:
-            if self.config.network_access != "inherit":
-                raise ValueError("Cannot verify network policy on a resource-owned sandbox")
-            return await AsyncSandbox.connect(descriptor, provider=provider)
+            try:
+                if self.config.network_access != "inherit":
+                    raise ValueError("Cannot verify network policy on a resource-owned sandbox")
+                return await AsyncSandbox.connect(descriptor, provider=provider)
+            except BaseException:
+                with CancelScope(shield=True):
+                    async with asyncio.timeout(self.config.session_close_timeout_seconds):
+                        await provider.aclose()
+                raise
         options = deepcopy(self.config.sandbox_config)
         resources = SandboxResources.from_mapping(options.pop("resources", {}))
         env = cpu_cap_env(resources.cpu) if options.pop("derive_cpu_env", True) else {}
@@ -189,8 +204,99 @@ class PiSandboxedAgent(PiAgent):
                 provider.name, urls
             )
         sandbox = AsyncSandbox(provider)
-        await sandbox.start(SandboxSpec(resources=resources, env=env, metadata=metadata, **options))
+        try:
+            await sandbox.start(SandboxSpec(resources=resources, env=env, metadata=metadata, **options))
+        except BaseException:
+            with CancelScope(shield=True):
+                async with asyncio.timeout(self.config.session_close_timeout_seconds):
+                    await sandbox.stop()
+            raise
         return sandbox
+
+    async def _close_run(
+        self, sandbox: AsyncSandbox | None, *, cookies: dict[str, str], borrowed: bool | None
+    ) -> None:
+        with CancelScope(shield=True):
+            try:
+                # A malformed successful seed can still have allocated a task sandbox.
+                if borrowed is not False:
+                    async with asyncio.timeout(self.config.session_close_timeout_seconds):
+                        closed = await self.server_client.post(
+                            server_name=self.config.resources_server.name,
+                            url_path="/close_session",
+                            json={},
+                            cookies=cookies,
+                        )
+                        if closed.status in {404, 405} and sandbox is not None:
+                            # Older resources may lack close. This fallback needs a handle
+                            # that permits stop; an operate-only lease fails visibly.
+                            await sandbox.stop()
+                        else:
+                            await raise_for_status(closed)
+            except BaseException:
+                LOG.exception("Failed to close Pi resources session")
+                raise
+            finally:
+                if sandbox is not None:
+                    try:
+                        async with asyncio.timeout(self.config.session_close_timeout_seconds):
+                            if borrowed:
+                                await sandbox.disconnect()
+                            else:
+                                await sandbox.stop()
+                    except BaseException:
+                        LOG.exception("Failed to release Pi sandbox")
+                        raise
+
+    async def _runtime_command(self, sandbox: AsyncSandbox, *, directory: str) -> list[str]:
+        version = self.config.pi_version
+        runtime = self.config.sandbox_runtime_dir
+        if version is None and runtime is None:
+            return self.config.command_parts
+        if not version or not re.fullmatch(r"\d+\.\d+\.\d+", version):
+            raise ValueError("Pi sandbox runtime setup requires an exact pi_version, for example 0.80.2")
+        if runtime and self.config.command != "pi":
+            raise ValueError("sandbox_runtime_dir cannot be combined with a Pi command override")
+        command = (
+            [f"{runtime}/node/bin/node", f"{runtime}/pi/node_modules/@earendil-works/pi-coding-agent/dist/cli.js"]
+            if runtime
+            else self.config.command_parts
+        )
+        checked = await sandbox.exec(
+            command=join([*command, "--version"]), timeout_s=self.config.sandbox_install_timeout_seconds
+        )
+        # Only a missing default CLI may trigger installation. A broken or mismatched
+        # preinstalled runtime, or a failed version check, remains a setup failure.
+        if checked.return_code == 127 and not checked.error_type and not runtime and self.config.command == "pi":
+            if self.config.network_access != "inherit":
+                raise RuntimeError("Restricted Pi sandboxes require a preinstalled runtime matching pi_version")
+            runtime = f"/tmp/nemo-gym-pi-node-22.19.0-{version}"
+            installer = Path(__file__).parent.parent / "pi_agent" / "install_pi_runtime.sh"
+            await sandbox.upload(installer, f"{directory}/{installer.name}")
+            installed = await sandbox.exec(
+                command=join(["bash", f"{directory}/{installer.name}", runtime, version]),
+                timeout_s=self.config.sandbox_install_timeout_seconds,
+            )
+            if installed.return_code != 0 or installed.error_type:
+                details = "\n".join(part for part in (installed.stderr, installed.stdout) if part)
+                raise RuntimeError(
+                    f"Pi sandbox installation failed (exit {installed.return_code}, "
+                    f"error_type={installed.error_type}): {details[-16000:]}"
+                )
+            command = [
+                f"{runtime}/node/bin/node",
+                f"{runtime}/pi/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+            ]
+            checked = await sandbox.exec(
+                command=join([*command, "--version"]), timeout_s=self.config.sandbox_install_timeout_seconds
+            )
+        if checked.error_type or checked.return_code != 0 or (checked.stdout or "").strip() != version:
+            details = "\n".join(part for part in (checked.stderr, checked.stdout) if part)
+            raise RuntimeError(
+                f"Pi runtime does not run pi_version {version} (exit {checked.return_code}, "
+                f"error_type={checked.error_type}): {details[-16000:]}"
+            )
+        return command
 
     async def _run_pi(
         self,
@@ -210,17 +316,22 @@ class PiSandboxedAgent(PiAgent):
         agent_home = remote + "/home/.pi/agent"
         files = {
             agent_home + "/models.json": json.dumps(self._build_models_config(rollout_id)),
-            agent_home + "/settings.json": json.dumps({"compaction": {"enabled": self.config.auto_compaction}}),
+            agent_home + "/settings.json": json.dumps(self._build_settings_config()),
         }
         files[remote + "/capture.py"] = Path(__file__).with_name("capture.py").read_text()
-        env = dict(self.config.env) | {"HOME": remote + "/home", "PI_SKIP_VERSION_CHECK": "1", "PI_TELEMETRY": "0"}
-        cmd = [*self.config.command_parts, "--print", "--mode", "json", "--no-session"]
-        extensions = []
-        if self.config.bash_timeout is not None:
-            env["NEMO_GYM_PI_BASH_TIMEOUT"] = str(self.config.bash_timeout)
-            extensions.append("bash-timeout.mjs")
-        if self.config.output_token_policy == "remaining_context":
-            extensions.append("remaining-context.mjs")
+        env = dict(self.config.env) | {
+            "PI_CODING_AGENT_DIR": agent_home,
+            "PI_SKIP_VERSION_CHECK": "1",
+            "PI_TELEMETRY": "0",
+        }
+        cmd = ["--print", "--mode", "json", "--no-session", "--no-extensions"]
+        extensions = [
+            "remaining-context.mjs" if self.config.output_token_policy == "remaining_context" else "output-limit.mjs",
+            "outcome.mjs",
+        ]
+        if self.config.enable_tools:
+            env["NEMO_GYM_PI_BASH_TIMEOUT"] = str(self.config.bash_timeout or self.config.sandbox_bash_timeout_seconds)
+            extensions.append("runtime-guards.mjs")
         mcp = {name: server.model_dump() for name, server in self.config.mcp_servers.items()} | context["mcp"]
         if mcp:
             files[remote + "/mcp.json"] = json.dumps(mcp)
@@ -229,11 +340,22 @@ class PiSandboxedAgent(PiAgent):
         for extension in extensions:
             files[remote + "/" + extension] = (Path(__file__).parent.parent / "pi_agent" / extension).read_text()
             cmd.extend(["--extension", remote + "/" + extension])
-        cmd += ["--provider", "nemo", "--model", self.config.model]
+        cmd += [
+            "--provider",
+            "nemo",
+            "--model",
+            self.config.model,
+            "--no-skills",
+            "--no-prompt-templates",
+            "--no-themes",
+        ]
+        if not self.config.enable_tools:
+            cmd.append("--no-builtin-tools")
         if self.config.thinking:
             cmd += ["--thinking", self.config.thinking]
         if system_prompt:
-            cmd += ["--append-system-prompt", system_prompt]
+            flag = "--system-prompt" if self.config.system_prompt_mode == "replace" else "--append-system-prompt"
+            cmd += [flag, system_prompt]
         cmd += self.config.extra_args + [instruction]
         with TemporaryDirectory() as directory:
             for i, (target, contents) in enumerate(files.items()):
@@ -245,12 +367,7 @@ class PiSandboxedAgent(PiAgent):
         setup = await sandbox.exec(command=f"chmod -R go-rwx {quote(remote)}", timeout_s=self.config.timeout)
         if setup.return_code != 0 or setup.error_type:
             raise RuntimeError("Unable to protect Pi session configuration")
-        if self.config.pi_version:
-            version = await sandbox.exec(
-                command=join([*self.config.command_parts, "--version"]), timeout_s=self.config.timeout
-            )
-            if version.return_code != 0 or (version.stdout or "").strip() != self.config.pi_version:
-                raise RuntimeError("Preinstalled Pi version does not match pi_version")
+        cmd = [*await self._runtime_command(sandbox, directory=remote), *cmd]
         # Persist the native stream in the sandbox too: provider stdout may be truncated.
         stdout_path, stderr_path = remote + "/stdout.jsonl", remote + "/stderr.log"
         result = None
@@ -424,20 +541,23 @@ class PiSandboxedAgent(PiAgent):
             )
             await raise_for_status(seeded)
             cookies = request.cookies | seeded.cookies
-            seed = await get_response_json(seeded)
-            mcp = await seed_mcp_servers(
-                self.server_client,
-                self.config.tool_servers,
-                body,
-                cookies,
-                timeout_s=self.config.timeout,
-                require_reachable=self.config.network_access != "inherit",
-            )
-            sandbox = await self._start_sandbox(seed)
-            rollout_id = self.rollout_id_from_run(body) or uuid4().hex
-            context = {"sandbox": sandbox, "body": body, "mcp": mcp}
-            token = _RUN.set(context)
+            sandbox, token, borrowed = None, None, None
+            counted_zero = False
             try:
+                seed = await get_response_json(seeded)
+                borrowed = "sandbox_descriptor" in seed or "sandbox_handle" in seed
+                mcp = await seed_mcp_servers(
+                    self.server_client,
+                    self.config.tool_servers,
+                    body,
+                    cookies,
+                    timeout_s=self.config.timeout,
+                    require_reachable=self.config.network_access != "inherit",
+                )
+                sandbox = await self._start_sandbox(seed)
+                rollout_id = self.rollout_id_from_run(body) or uuid4().hex
+                context = {"sandbox": sandbox, "body": body, "mcp": mcp}
+                token = _RUN.set(context)
                 episode = await self._create_episode(body.responses_create_params, rollout_id=rollout_id)
                 if context["length_limited"]:
                     episode.response.status = "incomplete"
@@ -484,7 +604,7 @@ class PiSandboxedAgent(PiAgent):
                         cookies,
                         force_zero_reward=failed and self.config.execution_failure_reward_zero,
                     )
-                return PiSandboxedAgentVerifyResponse.model_validate(
+                response = PiSandboxedAgentVerifyResponse.model_validate(
                     result
                     | metadata
                     | {
@@ -492,13 +612,19 @@ class PiSandboxedAgent(PiAgent):
                         "finished_naturally": not failed,
                     }
                 )
+                counted_zero = execution.get("failure_outcome_action") == OutcomeAction.COUNT_AS_ZERO
+                return response
             finally:
-                _RUN.reset(token)
-                # Connected resource-owned sandboxes remain alive through verification, just like OpenCode.
+                if token is not None:
+                    _RUN.reset(token)
+                # The resource owner stops borrowed sandboxes after verification.
                 try:
-                    await sandbox.stop()
+                    await self._close_run(sandbox, cookies=cookies, borrowed=borrowed)
                 except Exception:
-                    LOG.exception("Failed to stop Pi sandbox")
+                    # Cleanup is logged by _close_run. It must not revoke a zero
+                    # explicitly selected by the agent-stage outcome policy.
+                    if not counted_zero:
+                        raise
 
 
 if __name__ == "__main__":
