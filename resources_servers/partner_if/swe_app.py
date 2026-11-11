@@ -133,8 +133,7 @@ async def _run(sandbox: AsyncSandbox, command: str, step: str) -> str:
 
 
 class SWEIFResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, ScaleSWEResourcesServer):
-    # Actor sandboxes live in worker memory, so the server runs one worker (see
-    # multiple_workers_unsupported_reason) and no Ray.
+    # Actor sandboxes live in worker memory, so the server runs one worker (see model_post_init) and no Ray.
     ray_enabled = False
 
     config: SWEIFConfig
@@ -147,12 +146,11 @@ class SWEIFResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, ScaleSW
 
     def model_post_init(self, context: object) -> None:
         super().model_post_init(context)
+        if self.config.num_workers not in (None, 1):
+            raise ValueError("Actor sandboxes live in the server's memory, so it requires num_workers=1")
         if self.config.is_verifying_golden_patch:
             raise ValueError("Golden patches are not agent instruction-following trajectories")
         self._adapter_fences = ResourcesSessionFences(self.config.session_close_retry_window_seconds)
-
-    def multiple_workers_unsupported_reason(self) -> str | None:
-        return "actor sandboxes live in the server's memory"
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()

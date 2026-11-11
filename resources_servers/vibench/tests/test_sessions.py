@@ -21,7 +21,6 @@ from nemo_gym.server_runtime import (
     ResourcesSeedSessionRequest,
     check_resources_session_contract,
 )
-from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
 from resources_servers.vibench import app as app_module
 from resources_servers.vibench.app import (
     GraderConfigError,
@@ -635,9 +634,8 @@ def test_shutdown_stops_the_sandboxes_of_open_sessions(server, root, stopped):
 
 
 def test_sessions_require_a_single_worker(checkout, root):
-    refuse_unsupported_num_workers(_server(checkout, root))
-    with pytest.raises(ValueError, match="needs num_workers=1: ViBench sessions are process-local"):
-        refuse_unsupported_num_workers(_server(checkout, root, num_workers=2))
+    with pytest.raises(ValueError, match="num_workers=1"):
+        _server(checkout, root, num_workers=2)
 
 
 def test_close_follows_the_session_contract(server, root, graded):

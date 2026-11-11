@@ -312,15 +312,14 @@ class VibenchResourcesServer(SimpleResourcesServer):
     config: VibenchResourcesServerConfig
 
     def model_post_init(self, context: Any) -> None:
+        if self.config.num_workers not in (None, 1):
+            raise ValueError("ViBench sessions are process-local and require num_workers=1")
         self._sessions: Dict[str, _BuildSession] = {}
         self._locks = ResourcesSessionLocks()
         self._fences: ResourcesSessionFences[EpisodeId] = ResourcesSessionFences(
             self.config.session_close_retry_window_seconds
         )
         super().model_post_init(context)
-
-    def multiple_workers_unsupported_reason(self) -> Optional[str]:
-        return "ViBench sessions are process-local"
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()

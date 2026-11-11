@@ -37,7 +37,6 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import VerifierFixture
 from resources_servers.partner_if.app import (
@@ -187,14 +186,10 @@ class MockToolsResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, Sim
     _session_locks: dict[str | None, asyncio.Lock] = PrivateAttr(default_factory=dict)
     _fences: ResourcesSessionFences[EpisodeId | None] = PrivateAttr()
 
-    def multiple_workers_unsupported_reason(self) -> str | None:
-        return "mock-tool episodes live in the server's memory"
-
     def model_post_init(self, context: object) -> None:
-        # Refuse several workers before loading the tool backend and the task file,
-        # so the worker-count error is the one reported.
-        refuse_unsupported_num_workers(self)
         super().model_post_init(context)
+        if self.config.num_workers not in (None, 1):
+            raise ValueError("Mock-tool episodes live in the server's memory, so it requires num_workers=1")
         self._fences = ResourcesSessionFences(self.config.session_close_retry_window_seconds)
         if self.config.backend is not None:
             self._backend = load_backend(self.config.backend)(self.config.fixture_path)

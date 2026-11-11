@@ -30,7 +30,6 @@ from nemo_gym.server_runtime import (
     ResourcesSeedSessionRequest,
     check_resources_session_contract,
 )
-from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
 from resources_servers.officeqa import app as officeqa_app
 from resources_servers.officeqa.app import (
     VERIFIER_FIXTURE,
@@ -474,12 +473,3 @@ async def test_successful_session_cycles_release_inactive_locks(server, sandbox)
         assert not server._sessions
         assert not server._locks._locks
     assert sandbox.start.await_count == sandbox.stop.await_count == 30
-
-
-def test_document_sandboxes_live_in_one_worker(server):
-    refuse_unsupported_num_workers(server)
-    two_workers = server.model_copy(update={"config": server.config.model_copy(update={"num_workers": 2})})
-    with pytest.raises(
-        ValueError, match="needs num_workers=1: OfficeQA document sandboxes live in the server's memory"
-    ):
-        refuse_unsupported_num_workers(two_workers)

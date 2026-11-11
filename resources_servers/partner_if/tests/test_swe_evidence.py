@@ -14,7 +14,6 @@ from fastapi.testclient import TestClient
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.sandbox import SandboxExecResult
 from nemo_gym.server_runtime import ResourcesSeedSessionRequest, ReverifyMode, check_resources_session_contract
-from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
 from resources_servers.partner_if.swe_app import SWEIFResourcesServer
 
 
@@ -277,8 +276,8 @@ async def test_the_verifier_fixture_grades_its_cases_without_a_judge_or_a_sandbo
 
 
 def test_the_server_requires_one_worker():
-    with pytest.raises(ValueError, match="needs num_workers=1: actor sandboxes live in the server's memory"):
-        refuse_unsupported_num_workers(swe_server(num_workers=2))
+    with pytest.raises(ValueError, match="num_workers=1"):
+        swe_server(num_workers=2)
 
 
 class FakeSandbox:

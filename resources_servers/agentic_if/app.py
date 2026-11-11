@@ -220,11 +220,10 @@ class AgenticIFResourcesServer(SimpleResourcesServer):
     _grade_jobs: set[asyncio.Task[IFResult]] = PrivateAttr(default_factory=set)
     _shutting_down: bool = PrivateAttr(default=False)
 
-    def multiple_workers_unsupported_reason(self) -> str | None:
-        return "agentic IF sessions hold sandbox connections in one process"
-
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
+        if self.config.num_workers not in (None, 1):
+            raise ValueError("agentic IF sessions hold sandbox connections in one process: num_workers must be 1")
         if missing := [str(path) for path in self.config.opencode_runtime_files if not path.is_file()]:
             raise ValueError(
                 f"opencode_runtime_files are missing: {missing}; for the benchmark, run "
