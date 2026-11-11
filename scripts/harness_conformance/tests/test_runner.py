@@ -109,7 +109,7 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_
         import importlib
 
         module = importlib.import_module(f"responses_api_agents.{harness}_agent.app")
-        getattr(module, HARNESSES[harness]["agent"]).model_fields["config"].annotation.model_validate(agent)
+        getattr(module, HARNESSES[harness]).model_fields["config"].annotation.model_validate(agent)
 
 
 @pytest.mark.parametrize("compaction", [False, True])
@@ -209,7 +209,7 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
     module = SimpleNamespace(
         TestAgent=LegacyAgent if interface == "legacy" else SessionAgent, TestAgentConfig=BaseResponsesAPIAgentConfig
     )
-    monkeypatch.setitem(episode.HARNESSES, "codex", {**episode.HARNESSES["codex"], "agent": "TestAgent"})
+    monkeypatch.setitem(episode.HARNESSES, "codex", "TestAgent")
     import_module = episode.importlib.import_module
     monkeypatch.setattr(
         episode,

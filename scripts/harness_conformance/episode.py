@@ -101,6 +101,7 @@ def _base_settings(harness: str, directory: Path, timeout: float) -> DictConfig:
         },
         "crewai": {"overrides": {"timeout": timeout}},
         "openclaw": {
+            "probe": ".provider:OpenClawProbe",
             "overrides": {"timeout": math.ceil(timeout)},
             "legacy": {"agent_overrides": {"workspace_root": workspace}},
         },
@@ -116,6 +117,7 @@ def _base_settings(harness: str, directory: Path, timeout: float) -> DictConfig:
             },
         },
         "nooa": {
+            "probe": ".nooa:NOOAProbe",
             "required_imports": ["scripts.harness_conformance.nooa"],
             "inherit_adapter_fields": ["nooa"],
             "overrides": {
@@ -171,6 +173,7 @@ def _base_settings(harness: str, directory: Path, timeout: float) -> DictConfig:
     }.get(harness, {})
     return OmegaConf.merge(
         {
+            "probe": ".provider:Probe",
             # Whether the episode runner must prepare a sandbox for the agent to borrow.
             "requires_sandbox": False,
             "requires_tmux": False,
@@ -289,7 +292,7 @@ def _config(
 async def run_episode(*, harness: str, scenario_name: str, directory: Path, timeout: float) -> None:
     """Start fresh servers and let Gym write the rollout without modifying the harness."""
     module = importlib.import_module(f"responses_api_agents.{harness}_agent.app")
-    agent_cls = getattr(module, HARNESSES[harness]["agent"])
+    agent_cls = getattr(module, HARNESSES[harness])
     config_cls = agent_cls.model_fields["config"].annotation
     use_agent_sessions = agent_cls.supports_agent_sessions()
     if use_agent_sessions and harness != "simple" and sys.platform != "linux":
@@ -303,7 +306,8 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
     )
     (directory / "runtime.json").write_text(json.dumps(runtime, indent=2) + "\n")
     scenario = next(s for s in SCENARIOS if s.name == scenario_name)
-    probe_module, probe_name = HARNESSES[harness]["probe"].split(":")
+    settings = _base_settings(harness, directory, timeout)
+    probe_module, probe_name = settings.probe.split(":")
     probe_cls = getattr(importlib.import_module(probe_module, package=__package__), probe_name)
     probe = probe_cls(scenario, directory, harness=harness)
     probe.save()
@@ -380,9 +384,7 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
         )
         sandbox_stack = AsyncExitStack()
         try:
-            sandbox_access = await sandbox_stack.enter_async_context(
-                prepare_sandbox(directory, _base_settings(harness, directory, timeout))
-            )
+            sandbox_access = await sandbox_stack.enter_async_context(prepare_sandbox(directory, settings))
             apps = {
                 "policy_model": probe.model_app(
                     assistant_message_header=client.assistant_message_header("policy_model")
