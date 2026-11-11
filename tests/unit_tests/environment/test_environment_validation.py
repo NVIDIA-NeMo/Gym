@@ -954,3 +954,17 @@ def test_custom_driver_is_checked_without_scaffolding(tmp_path: Path) -> None:
     driver_path.unlink()
     with pytest.raises(EnvironmentValidationError, match="Rollout driver module was not found"):
         validate_environment(manifest_path)
+
+
+def test_component_verifier_validation_does_not_require_full_dataset(tmp_path: Path) -> None:
+    manifest_path = _asset(tmp_path, kind="benchmark")
+    (manifest_path.parent / "data/example.jsonl").unlink()
+    with pytest.raises(EnvironmentValidationError, match="Dataset file was not found"):
+        validate_environment(manifest_path)
+    report = validate_environment(manifest_path, validate_datasets=False)
+    assert report.datasets == ()
+    assert report.components
+    # Dataset-free validation must still catch a stale manifest composition.
+    _replace_manifest(manifest_path, resources_server="wrong_server")
+    with pytest.raises(EnvironmentValidationError, match="composition is stale"):
+        validate_environment(manifest_path, validate_datasets=False)

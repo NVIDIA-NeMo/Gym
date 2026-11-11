@@ -253,6 +253,26 @@ def _validate_data_single(test_config: TestConfig) -> None:  # pragma: no cover
     if test_config.dir_path.parts[0] != "resources_servers":
         return
 
+    # Manifest workloads carry verifier fixtures instead of the legacy five-row
+    # rollout artifacts. Exercise every workload sharing this server, offline and
+    # without requiring its full dataset to be downloaded on CI workers.
+    manifest_entries = [
+        entry
+        for entry in discover_environment_catalog()
+        if entry.manifest_path is not None and entry.resources_server == test_config.dir_path.name
+    ]
+    legacy_artifacts = ("example_metrics.json", "example_rollouts.jsonl")
+    if manifest_entries and not any(
+        (test_config.resolved_dir_path / "data" / name).exists() for name in legacy_artifacts
+    ):
+        conflict_paths = glob(str(test_config.resolved_dir_path / "data/*conflict*"))
+        assert not conflict_paths, f"Found conflicting paths: {conflict_paths}"
+        for entry in manifest_entries:
+            validation = validate_environment(entry.manifest_path, entry.config_path, validate_datasets=False)
+            _run_manifest_verifier(entry, update_expected=False, validation=validation)
+        print(f"The verifier fixtures for {test_config.dir_path} have been successfully validated!")
+        return
+
     # Check that the required examples and example metrics are present. Read from the resolved dir
     # (built-ins live under the install root) while messages reference the relative entrypoint.
     example_fpath = test_config.resolved_dir_path / "data/example.jsonl"
