@@ -20,6 +20,7 @@ from typing import Any, Optional
 
 from pydantic import ConfigDict
 
+from nemo_gym.core.failure_kinds import FailureClass, classify_failure
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
@@ -51,8 +52,12 @@ class CollabIntelResourcesServer(SimpleResourcesServer):
     async def verify(self, body: CollabIntelVerifyRequest) -> CollabIntelVerifyResponse:
         r = body.collab_intel or {}
         test = r.get("test") or {}
-        # an episode that ended in an error (timeout, harness crash) is unfinished: test_pass None, left out of the score
-        unfinished = bool((r.get("alone") or {}).get("error") or test.get("error"))
+        # the last episode run decides the row. One that failed for the evaluation's sake (a harness crash, a judge
+        # failure) is unfinished: test_pass None, left out of the score. A model-caused failure (agent_timeout,
+        # model_context_limit) is a measured fail.
+        last = test or r.get("alone") or {}
+        kind = last.get("failure_kind")
+        unfinished = kind is not None and classify_failure(failure_kind=kind) != FailureClass.MODEL
         test_pass = test.get("pass") if r.get("alone_pass") and not unfinished else None
         return CollabIntelVerifyResponse(
             **body.model_dump(),
@@ -62,6 +67,8 @@ class CollabIntelResourcesServer(SimpleResourcesServer):
             alone_pass=bool(r.get("alone_pass")),
             test_pass=test_pass,
             unfinished=unfinished,
+            failure_kind=kind,
+            failure_reason=last.get("failure_reason"),
         )
 
 

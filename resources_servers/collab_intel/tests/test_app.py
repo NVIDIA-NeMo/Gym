@@ -51,9 +51,9 @@ def _request(result: dict) -> CollabIntelVerifyRequest:
         ({"alone_pass": True, "alone": {"pass": True}, "test": {"pass": False}}, 0.0, True, False, False, False),
         # failed alone: not scored
         ({"alone_pass": False, "alone": {"pass": False}, "test": None}, 0.0, False, None, False, True),
-        # a timed-out episode or a missing verdict is unfinished, not a failure
+        # a crashed harness or a missing verdict is unfinished, not a failure
         (
-            {"alone_pass": True, "alone": {"pass": True}, "test": {"pass": False, "error": "timeout"}},
+            {"alone_pass": True, "alone": {"pass": True}, "test": {"pass": False, "failure_kind": "agent_run_error"}},
             0.0,
             True,
             None,
@@ -61,11 +61,28 @@ def _request(result: dict) -> CollabIntelVerifyRequest:
             True,
         ),
         (
-            {"alone_pass": False, "alone": {"pass": False, "error": "no verdict"}, "test": None},
+            {"alone_pass": False, "alone": {"pass": False, "failure_kind": "judge_failed"}, "test": None},
             0.0,
             False,
             None,
             True,
+            True,
+        ),
+        # the policy's own timeout or context limit is a measured fail
+        (
+            {"alone_pass": True, "alone": {"pass": True}, "test": {"pass": False, "failure_kind": "agent_timeout"}},
+            0.0,
+            True,
+            False,
+            False,
+            False,
+        ),
+        (
+            {"alone_pass": False, "alone": {"pass": False, "failure_kind": "model_context_limit"}, "test": None},
+            0.0,
+            False,
+            None,
+            False,
             True,
         ),
     ],
@@ -79,3 +96,5 @@ async def test_verify(result, reward, alone_pass, test_pass, unfinished, mask_sa
         unfinished,
         mask_sample,
     )
+    last = result["test"] or result["alone"]
+    assert response.failure_kind == last.get("failure_kind")

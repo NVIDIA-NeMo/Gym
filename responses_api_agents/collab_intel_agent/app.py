@@ -27,20 +27,24 @@ import asyncio
 import json
 import os
 import re
+import shutil
+import signal
 import subprocess
 import tempfile
 from collections import defaultdict
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 from anyio import CancelScope
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from pydantic import ConfigDict
 
 from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.client import get_response_json, get_server_url, raise_for_status, rollout_path_prefix
 from nemo_gym.config import ROLLOUT_PATH_PREFIX, ModelServerRef, ResourcesServerRef
 from nemo_gym.core import current_rollout_id
+from nemo_gym.core.failure_kinds import AGENT_RUN_ERROR, AGENT_TIMEOUT, JUDGE_FAILED, MODEL_CONTEXT_LIMIT
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.collab_intel.task_data import TaskData
@@ -49,7 +53,36 @@ from resources_servers.collab_intel.task_data import TaskData
 PARTNERS = ["ci-partner-1", "ci-partner-2", "ci-partner-3"]
 JUDGES = ["ci-judge-1", "ci-judge-2", "ci-judge-3"]
 POLICY = "ci-policy"
-THINK = re.compile(r"^\s*<think>.*?</think>\s*", re.S)
+# a leading reasoning block. An unclosed one (cut off by max tokens) is all reasoning.
+THINK = re.compile(r"^\s*<think>(.*?)(?:</think>\s*|\Z)", re.S)
+# the only parts of the server's environment the harness gets: no tokens or keys reach model-written code
+ENV_ALLOWLIST = ("PATH", "LANG", "LC_ALL", "TMPDIR")
+
+
+KEY_METRICS = (
+    "collab_intel/score",
+    "collab_intel/scored_rows",
+    "collab_intel/alone_pass_rate",
+    "collab_intel/unfinished",
+)
+
+
+def split_reasoning(msg: dict[str, Any]) -> None:
+    """Move a leading <think> block of msg's content to msg["reasoning"]."""
+    content = msg.get("content")
+    if isinstance(content, str) and (m := THINK.match(content)):
+        msg["reasoning"], msg["content"] = m.group(1).strip(), content[m.end() :]
+
+
+def _failed(kind: str, reason: str) -> dict[str, Any]:
+    return {"pass": False, "failure_kind": kind, "failure_reason": reason}
+
+
+def _kill_group(proc: asyncio.subprocess.Process) -> None:
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
 
 
 class CollabIntelAgentConfig(BaseResponsesAPIAgentConfig):
@@ -57,7 +90,7 @@ class CollabIntelAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     data_root: str = "benchmarks/collab_intel/data/repo"
     judge_base_url: str
-    judge_model: str = "deepseek-v41-flash"
+    judge_model: str
     judge_extra: dict[str, Any] = {"chat_template_kwargs": {"thinking": False}}
     policy_model: str = "policy_model"
     policy_extra: dict[str, Any] = {}
@@ -80,16 +113,20 @@ class CollabIntelAgent(SimpleResponsesAPIAgent):
         super().model_post_init(context)
         root = Path(self.config.data_root)
         self._root = (root if root.is_absolute() else Path(__file__).resolve().parents[2] / root).resolve()
+        if not (self._root / "pyproject.toml").exists():
+            raise FileNotFoundError(
+                f"{self._root} has no pyproject.toml: run benchmarks/collab_intel/prepare.py first"
+            )
         # the upstream venv lives in the release dir: drop UV_PROJECT_ENVIRONMENT, which would point uv at Gym's own venv
         env = {k: v for k, v in os.environ.items() if k != "UV_PROJECT_ENVIRONMENT"}
-        subprocess.run(
-            ["uv", "sync", "--frozen", "--project", str(self._root)], check=True, capture_output=True, env=env
-        )
+        sync = subprocess.run(["uv", "sync", "--frozen", "--project", str(self._root)], capture_output=True, env=env)
+        if sync.returncode:
+            raise RuntimeError(f"uv sync of {self._root} failed: {sync.stderr.decode(errors='replace')[-4000:]}")
         self._python = str(self._root / ".venv" / "bin" / "python")
         self._tmp = Path(tempfile.mkdtemp(prefix="collab_intel_"))
         self._sem = asyncio.Semaphore(self.config.max_concurrent)
 
-    def _env(self) -> dict[str, str]:
+    def _env(self, home: Path) -> dict[str, str]:
         seat = {
             "base_url": self.config.judge_base_url,
             "api_key_env": "CI_GYM_KEY",
@@ -109,7 +146,8 @@ class CollabIntelAgent(SimpleResponsesAPIAgent):
         }
         compat = {POLICY: policy, **{name: seat for name in PARTNERS + JUDGES}}
         judge, second, tiebreak = JUDGES
-        return {k: v for k, v in os.environ.items() if k != "UV_PROJECT_ENVIRONMENT"} | {
+        return {k: os.environ[k] for k in ENV_ALLOWLIST if k in os.environ} | {
+            "HOME": str(home),
             "CI_GYM_KEY": "dummy",
             "HARNESS_OPENAI_COMPAT": json.dumps(compat),
             "HARNESS_JUDGE_MODEL": judge,
@@ -121,7 +159,8 @@ class CollabIntelAgent(SimpleResponsesAPIAgent):
         }
 
     async def _run(self, path: Path, version: str, seed: int, out: Path) -> dict[str, Any]:
-        """One upstream episode (collab_intel.harness.cli): returns its pass and outcome from the saved transcript."""
+        """One upstream episode (collab_intel.harness.cli): returns its pass and outcome from the saved transcript, or
+        pass false with a failure_kind and failure_reason when it did not finish."""
         cmd = [
             self._python,
             "-m",
@@ -138,39 +177,40 @@ class CollabIntelAgent(SimpleResponsesAPIAgent):
             "--out-dir",
             str(out),
         ]
+        # its own process group, so a timeout or cancel also stops the pytest runs it starts in coding scenarios
         proc = await asyncio.create_subprocess_exec(
             *cmd,
-            env=self._env(),
+            env=self._env(out.parent),
             cwd=str(self._root),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
         )
         try:
             log, _ = await asyncio.wait_for(proc.communicate(), timeout=self.config.episode_timeout_s)
         except TimeoutError:
-            # unfinished, not failed: the row is flagged (error) and left out of the score
-            proc.kill()
+            # the policy's own deadline (Gym's agent_timeout, a model outcome): a measured fail
+            _kill_group(proc)
             await proc.wait()
-            return {"pass": False, "error": f"episode timeout after {self.config.episode_timeout_s} s"}
+            return _failed(AGENT_TIMEOUT, f"episode timeout after {self.config.episode_timeout_s} s")
         except asyncio.CancelledError:
             # stop the harness before the semaphore slot is released
             with CancelScope(shield=True):
-                if proc.returncode is None:
-                    proc.kill()
+                _kill_group(proc)
                 await proc.communicate()
             raise
         runs = list(out.glob(f"*/{version}_seed{seed}.json"))
         if proc.returncode or not runs:
-            error = log.decode(errors="replace")[-2000:]
-            return {"pass": False, "error": error or f"harness exited with code {proc.returncode} and no transcript"}
+            tail = log.decode(errors="replace")[-2000:]
+            reason = tail or f"harness exited with code {proc.returncode} and no transcript"
+            # the Gym model server's code for a policy prompt over its context window (policy_chat passes it through):
+            # a model outcome. Any other crash (a partner or judge outage, a harness bug) is the evaluation's.
+            return _failed(MODEL_CONTEXT_LIMIT if "context_length_exceeded" in tail else AGENT_RUN_ERROR, reason)
         t = json.loads(runs[0].read_text())
         score = t.get("score")
         # a judge failure (upstream judge_failed record) or a missing verdict is unmeasured, not a policy failure
         if t.get("judge_failed") or not isinstance(score, dict) or score.get("pass") is None:
-            return {
-                "pass": False,
-                "error": f"harness transcript has no pass verdict: {t.get('judge_failed') or score}",
-            }
+            return _failed(JUDGE_FAILED, f"harness transcript has no pass verdict: {t.get('judge_failed') or score}")
         return {
             "pass": bool(score["pass"]),
             "outcome": score.get("outcome"),
@@ -185,33 +225,46 @@ class CollabIntelAgent(SimpleResponsesAPIAgent):
         app = super().setup_webserver()
         app.post("/ci_policy/v1/chat/completions")(self.policy_chat)
         app.post(f"/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/ci_policy/v1/chat/completions")(self.policy_chat)
+        parent_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def lifespan(application: FastAPI):
+            async with parent_lifespan(application) as state:
+                try:
+                    yield state
+                finally:
+                    shutil.rmtree(self._tmp, ignore_errors=True)
+
+        app.router.lifespan_context = lifespan
         return app
 
-    async def policy_chat(self, request: Request) -> dict[str, Any]:
+    async def policy_chat(self, request: Request) -> Any:
         """The policy seat's calls: the Gym model server's /v1/chat/completions returns reasoning wrapped in <think> tags
         at the start of content (vllm_model with uses_reasoning_parser). The harness would post that into the team chat,
-        so the partners and judges would read the policy's reasoning. Move it to message.reasoning instead."""
+        so the partners and judges would read the policy's reasoning. Move it to message.reasoning instead.
+        A 4xx (e.g. context_length_exceeded) goes back to the harness as is: it fails at once instead of retrying a 500,
+        and _run reads the code from its log."""
         resp = await self.server_client.post(
             server_name=self.config.model_server.name,
             url_path=self.url_path_for_request("/v1/chat/completions", request),
             json=await request.json(),
         )
+        if 400 <= resp.status < 500:
+            return Response(await resp.read(), status_code=resp.status, media_type="application/json")
         await raise_for_status(resp)
         out = await get_response_json(resp)
         for choice in out.get("choices") or []:
-            msg = choice.get("message") or {}
-            content = msg.get("content")
-            if isinstance(content, str) and (m := THINK.match(content)):
-                msg["reasoning"] = m.group(0).strip()[len("<think>") : -len("</think>")]
-                msg["content"] = content[m.end() :]
+            split_reasoning(choice.get("message") or {})
         return out
 
     @staticmethod
     def _score(tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
         """Upstream score: test pass rate per dimension over completed rows that passed alone, then the mean over
-        dimensions, each weighted equally. A dimension with no such row is left out of the mean."""
+        dimensions, each weighted equally. A dimension with no such row is left out of the mean. Also the gate pass
+        rate over finished rows and the count of unfinished rows, which the score leaves out."""
         by_dimension = defaultdict(list)
-        for rollout in (r for task in tasks for r in task):
+        rollouts = [r for task in tasks for r in task]
+        for rollout in rollouts:
             if not rollout.get("mask_sample") and rollout.get("test_pass") is not None:
                 by_dimension[rollout["dimension"]].append(float(rollout["test_pass"]))
         rates = {d: sum(v) / len(v) for d, v in sorted(by_dimension.items())}
@@ -219,6 +272,10 @@ class CollabIntelAgent(SimpleResponsesAPIAgent):
         if rates:
             metrics["collab_intel/score"] = 100 * sum(rates.values()) / len(rates)
         metrics["collab_intel/scored_rows"] = sum(len(v) for v in by_dimension.values())
+        finished = [bool(r.get("alone_pass")) for r in rollouts if not r.get("unfinished")]
+        if finished:
+            metrics["collab_intel/alone_pass_rate"] = 100 * sum(finished) / len(finished)
+        metrics["collab_intel/unfinished"] = len(rollouts) - len(finished)
         return metrics
 
     def compute_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
@@ -228,7 +285,7 @@ class CollabIntelAgent(SimpleResponsesAPIAgent):
         return self._score(tasks)
 
     def get_key_metrics(self, agent_metrics: dict[str, Any]) -> dict[str, Any]:
-        return {k: v for k, v in agent_metrics.items() if k in ("collab_intel/score", "collab_intel/scored_rows")}
+        return {k: v for k, v in agent_metrics.items() if k in KEY_METRICS}
 
     async def responses(self, request: Request, body: Any = None):
         raise NotImplementedError("collab_intel_agent only supports /run")
@@ -243,13 +300,17 @@ class CollabIntelAgent(SimpleResponsesAPIAgent):
         await raise_for_status(seed)
         out = Path(tempfile.mkdtemp(dir=self._tmp))
         result: dict[str, Any] = {"alone_pass": False, "test": None}
-        async with self._sem:
-            alone = await self._run(self._root / body.gate_path, "solo", body.gate_seed, out / "alone")
-            result["alone"], result["alone_pass"] = alone, alone["pass"]
-            if alone["pass"]:
-                result["test"] = await self._run(
-                    self._root / body.scenario_path, "manipulation", body.seed, out / "test"
-                )
+        try:
+            async with self._sem:
+                alone = await self._run(self._root / body.gate_path, "solo", body.gate_seed, out / "alone")
+                result["alone"], result["alone_pass"] = alone, alone["pass"]
+                if alone["pass"]:
+                    result["test"] = await self._run(
+                        self._root / body.scenario_path, "manipulation", body.seed, out / "test"
+                    )
+        finally:
+            # the rollout keeps the messages and final answers, so the transcripts and coding files go
+            shutil.rmtree(out, ignore_errors=True)
         response = {
             "id": "collab_intel",
             "object": "response",

@@ -21,26 +21,30 @@ The 80 held-out scenarios are not public, and the 3 encrypted GPQA-based scenari
 
 import io
 import json
+import shutil
 import tarfile
 import urllib.request
 from pathlib import Path
 
 
-COMMIT = "3de5f7d"
+COMMIT = "3de5f7d0a652c0b393342b4fbae59b78034034ea"
 URL = f"https://github.com/zou-group/collaborative-intelligence/archive/{COMMIT}.tar.gz"
 DATA_DIR = Path(__file__).parent / "data"
 REPO_DIR = DATA_DIR / "repo"
+MARKER = REPO_DIR / ".commit"  # the commit REPO_DIR was extracted from
 OUTPUT_FPATH = DATA_DIR / "collab_intel_benchmark.jsonl"
 
 
 def prepare() -> Path:
-    if not (REPO_DIR / "benchmark" / "final_set.json").exists():
+    if not MARKER.exists() or MARKER.read_text().strip() != COMMIT:
+        shutil.rmtree(REPO_DIR, ignore_errors=True)
         raw = urllib.request.urlopen(URL, timeout=300).read()
         with tarfile.open(fileobj=io.BytesIO(raw)) as tar:
             members = [m for m in tar.getmembers() if "/" in m.name]
             for m in members:
                 m.name = m.name.split("/", 1)[1]
             tar.extractall(REPO_DIR, members=members, filter="data")
+        MARKER.write_text(COMMIT + "\n")
     final = json.loads((REPO_DIR / "benchmark" / "final_set.json").read_text())
     rows = []
     for dim, items in final["dimensions"].items():

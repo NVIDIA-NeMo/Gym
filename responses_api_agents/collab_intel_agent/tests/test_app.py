@@ -13,22 +13,33 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import os
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from pydantic import ValidationError
 
 from resources_servers.collab_intel.task_data import TaskData
-from responses_api_agents.collab_intel_agent.app import CollabIntelAgent, CollabIntelRunRequest
+from responses_api_agents.collab_intel_agent import app as app_module
+from responses_api_agents.collab_intel_agent.app import CollabIntelAgent, CollabIntelRunRequest, split_reasoning
 
 
 DIMENSIONS = [f"d{i}" for i in range(8)]
 
 
-def _row(dimension: str, test_pass, mask: bool = False) -> dict:
-    return {"reward": float(bool(test_pass)), "dimension": dimension, "test_pass": test_pass, "mask_sample": mask}
+def _row(dimension: str, test_pass, mask: bool = False, alone_pass: bool = True, unfinished: bool = False) -> dict:
+    return {
+        "reward": float(bool(test_pass)),
+        "dimension": dimension,
+        "test_pass": test_pass,
+        "mask_sample": mask,
+        "alone_pass": alone_pass,
+        "unfinished": unfinished,
+    }
 
 
 def test_score_weights_dimensions_equally():
@@ -41,8 +52,41 @@ def test_score_weights_dimensions_equally():
 
 
 def test_score_without_scored_rows_reports_no_score():
-    metrics = CollabIntelAgent._score([[_row("d0", None, mask=True)]])
+    metrics = CollabIntelAgent._score([[_row("d0", None, mask=True, alone_pass=False, unfinished=True)]])
     assert "collab_intel/score" not in metrics and metrics["collab_intel/scored_rows"] == 0
+    assert "collab_intel/alone_pass_rate" not in metrics and metrics["collab_intel/unfinished"] == 1
+
+
+def test_score_reports_gate_pass_rate_and_unfinished_rows():
+    tasks = [
+        [_row("d0", True)],
+        [_row("d0", None, mask=True, alone_pass=False)],
+        [_row("d1", None, mask=True, alone_pass=False)],
+        [_row("d1", None, mask=True, unfinished=True)],
+    ]
+    metrics = CollabIntelAgent._score(tasks)
+    assert metrics["collab_intel/alone_pass_rate"] == pytest.approx(100 / 3)
+    assert metrics["collab_intel/unfinished"] == 1
+    assert set(CollabIntelAgent.get_key_metrics(None, metrics)) == {
+        "collab_intel/score",
+        "collab_intel/scored_rows",
+        "collab_intel/alone_pass_rate",
+        "collab_intel/unfinished",
+    }
+
+
+@pytest.mark.parametrize(
+    "content, reasoning, text",
+    [
+        ("<think>plan</think>\n\nhello", "plan", "hello"),
+        ("<think>cut off by max tokens", "cut off by max tokens", ""),
+        ("hello", None, "hello"),
+    ],
+)
+def test_split_reasoning(content, reasoning, text):
+    msg = {"content": content}
+    split_reasoning(msg)
+    assert (msg.get("reasoning"), msg["content"]) == (reasoning, text)
 
 
 def test_run_request_matches_task_data():
@@ -61,8 +105,11 @@ def test_run_request_matches_task_data():
     }
 
 
-def _agent_with_fake_cli(tmp_path: Path, transcript: dict | None, exit_code: int, monkeypatch) -> CollabIntelAgent:
-    """An agent whose harness interpreter is a script that writes \`transcript\` (or nothing) and exits with \`exit_code\`."""
+def _agent_with_fake_cli(
+    tmp_path: Path, transcript: dict | None, exit_code: int, monkeypatch, log: str = "", timeout_s: float = 60
+) -> CollabIntelAgent:
+    """An agent whose harness interpreter is a script that writes \`transcript\` (or nothing), prints \`log\` and exits
+    with \`exit_code\`."""
     script = tmp_path / "fake_harness"
     script.write_text(
         f"#!{sys.executable}\n"
@@ -73,31 +120,96 @@ def _agent_with_fake_cli(tmp_path: Path, transcript: dict | None, exit_code: int
         "    out = pathlib.Path(arg('--out-dir')) / 'ci-policy'\n"
         "    out.mkdir(parents=True)\n"
         "    (out / f\"{arg('--version')}_seed{arg('--seed')}.json\").write_text(json.dumps(t))\n"
+        f"print({log!r})\n"
         f"sys.exit({exit_code})\n"
     )
     script.chmod(0o755)
     monkeypatch.setattr(CollabIntelAgent, "model_post_init", lambda self, context: None)  # no uv sync, no server
-    agent = CollabIntelAgent.model_construct(config=SimpleNamespace(episode_timeout_s=60))
+    agent = CollabIntelAgent.model_construct(config=SimpleNamespace(episode_timeout_s=timeout_s))
     agent._python, agent._root = str(script), tmp_path
-    agent._env = lambda: {}
+    agent._env = lambda home: {}
     return agent
 
 
 @pytest.mark.parametrize(
-    "transcript, exit_code, measured, passed",
+    "transcript, exit_code, log, failure_kind, passed",
     [
-        ({"score": {"pass": True, "outcome": "ok"}, "messages": [{"seat": "a", "text": "hi"}]}, 0, True, True),
-        ({"score": {"pass": False, "outcome": "wrong"}}, 0, True, False),
-        ({"messages": []}, 0, False, False),  # no score
-        ({"score": {"pass": None}}, 0, False, False),  # empty verdict
-        ({"judge_failed": "Timeout", "score": {"pass": False, "outcome": "judge_failed"}}, 0, False, False),
-        (None, 1, False, False),  # failed process, no output
+        ({"score": {"pass": True, "outcome": "ok"}, "messages": [{"seat": "a", "text": "hi"}]}, 0, "", None, True),
+        ({"score": {"pass": False, "outcome": "wrong"}}, 0, "", None, False),
+        ({"messages": []}, 0, "", "judge_failed", False),  # no score
+        ({"score": {"pass": None}}, 0, "", "judge_failed", False),  # empty verdict
+        ({"judge_failed": "Timeout", "score": {"pass": False}}, 0, "", "judge_failed", False),
+        (None, 1, "", "agent_run_error", False),  # failed process, no output
+        (
+            None,
+            1,
+            "BadRequestError: Error code: 400 - {'code': 'context_length_exceeded'}",
+            "model_context_limit",
+            False,
+        ),
     ],
 )
-def test_run_keeps_unmeasured_results_as_errors(tmp_path, monkeypatch, transcript, exit_code, measured, passed):
-    agent = _agent_with_fake_cli(tmp_path, transcript, exit_code, monkeypatch)
+def test_run_types_unfinished_results(tmp_path, monkeypatch, transcript, exit_code, log, failure_kind, passed):
+    agent = _agent_with_fake_cli(tmp_path, transcript, exit_code, monkeypatch, log=log)
     result = asyncio.run(agent._run(tmp_path / "scenario", "solo", 0, tmp_path / "out"))
-    assert result["pass"] is passed
-    assert bool(result.get("error")) is not measured
-    if measured:
+    assert (result["pass"], result.get("failure_kind")) == (passed, failure_kind)
+    if failure_kind is None:
         assert result["messages"] == transcript.get("messages", [])
+    else:
+        assert result["failure_reason"]
+
+
+def test_timeout_kills_the_harness_process_group(tmp_path, monkeypatch):
+    # the fake harness starts a child that outlives it unless the whole group is killed
+    pid_file = tmp_path / "child.pid"
+    agent = _agent_with_fake_cli(tmp_path, None, 0, monkeypatch, timeout_s=1)
+    script = Path(agent._python)
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+        "time.sleep(60)\n"
+    )
+    result = asyncio.run(agent._run(tmp_path / "scenario", "solo", 0, tmp_path / "out"))
+    assert (result["pass"], result["failure_kind"]) == (False, "agent_timeout")
+    child = int(pid_file.read_text())
+    for _ in range(50):  # the killed child is reaped by init shortly after
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        pytest.fail("the harness's child survived the timeout")
+
+
+def test_policy_chat_passes_a_model_rejection_through(monkeypatch):
+    # a 4xx (e.g. context_length_exceeded) reaches the harness as is, not as a 500 it would retry
+    body = b'{"error": {"message": "too long", "code": "context_length_exceeded"}}'
+    reply = SimpleNamespace(status=400, read=AsyncMock(return_value=body))
+    monkeypatch.setattr(CollabIntelAgent, "model_post_init", lambda self, context: None)
+    agent = CollabIntelAgent.model_construct(
+        config=SimpleNamespace(model_server=SimpleNamespace(name="policy_model")),
+        server_client=SimpleNamespace(post=AsyncMock(return_value=reply)),
+    )
+    request = SimpleNamespace(
+        json=AsyncMock(return_value={"messages": []}), path_params={}, url=SimpleNamespace(path="")
+    )
+    response = asyncio.run(agent.policy_chat(request))
+    assert (response.status_code, response.body) == (400, body)
+
+
+def test_harness_env_is_an_allowlist(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "secret")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setattr(app_module, "get_server_url", lambda name: "http://agent")
+    monkeypatch.setattr(CollabIntelAgent, "model_post_init", lambda self, context: None)
+    config = SimpleNamespace(
+        name="a", judge_base_url="http://judge", judge_model="j", judge_extra={}, policy_model="p", policy_extra={}
+    )
+    agent = CollabIntelAgent.model_construct(config=config)
+    agent._tmp = tmp_path
+    env = agent._env(tmp_path / "row")
+    assert "HF_TOKEN" not in env and env["PATH"] == "/usr/bin" and env["HOME"] == str(tmp_path / "row")
+    assert {"CI_GYM_KEY", "HARNESS_OPENAI_COMPAT", "HARNESS_JUDGE_MODEL"} <= set(env)
