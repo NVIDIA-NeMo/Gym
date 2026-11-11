@@ -482,7 +482,9 @@ class LabSessionResourcesServer(SimpleResourcesServer):
                     },
                 }
                 if kind == "hermes_agent":
-                    result[name]["runtime_pin"] = "26bb847a88493342ca1b194e0455b479073ae21d"
+                    result[name]["runtime_pin"] = (
+                        "26bb847a88493342ca1b194e0455b479073ae21d"  # pragma: allowlist secret
+                    )
         return result
 
     async def _grade(self, state: _TaskSession) -> tuple[dict[str, JsonValue], dict[str, JsonValue]]:
