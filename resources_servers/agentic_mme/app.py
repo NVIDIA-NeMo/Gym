@@ -21,6 +21,7 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import VerifierFixture, call_judge
 from resources_servers.agentic_mme.task_data import GoldenAnswer
 from resources_servers.agentic_mme.verifier_fixture import create_server
@@ -140,6 +141,7 @@ class AgenticMMEConfig(BaseResourcesServerConfig):
     judge_model: str = ""
     judge_temperature: float = 0.0
     judge_max_tokens: int = 1024
+    # Per worker: with num_workers > 1, each worker allows this many judge calls at once.
     judge_max_concurrency: int = Field(default=32, ge=1)
     judge_max_text_chars: int = Field(default=8000, ge=1)
 
@@ -239,3 +241,6 @@ VERIFIER_FIXTURE = VerifierFixture(
 
 if __name__ == "__main__":
     AgenticMMEServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = AgenticMMEServer.run_webserver()  # noqa: F401

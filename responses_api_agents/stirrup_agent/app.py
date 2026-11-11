@@ -20,7 +20,7 @@ supervisor. Shell commands run in the sandbox; task tools are the resources serv
 import asyncio
 import time
 from asyncio import Semaphore
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, ClassVar, Dict, List, Mapping, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
@@ -28,6 +28,7 @@ from pydantic import ConfigDict, Field, ValidationError, model_validator
 from pydantic_core import InitErrorDetails, PydanticCustomError
 
 from nemo_gym.agents import (
+    AGENT_TIMEOUT_METADATA_KEY,
     AgentCloseSessionResponse,
     AgentOutcome,
     AgentSeedRejectedError,
@@ -39,6 +40,7 @@ from nemo_gym.agents import (
     SandboxSession,
     SimpleResponsesAPIAgent,
     UnsupportedSandboxPlatformError,
+    resolve_agent_timeout,
     sandbox_server_url,
 )
 from nemo_gym.config import ModelServerRef, get_global_config_dict
@@ -68,6 +70,7 @@ from nemo_gym.trajectory import (
     ObservationGap,
     ToolCallObservation,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.stirrup_agent.sandbox import StirrupSessionState
 from responses_api_agents.stirrup_agent.stirrup_utils import messages_from_input
 
@@ -283,6 +286,8 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
 
 class StirrupAgentWrapper(SimpleResponsesAPIAgent):
     config: StirrupAgentWrapperConfig
+    # The runner runs inside the sandbox and calls the model server from there.
+    calls_model_from_sandbox: ClassVar[bool] = True
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -422,10 +427,12 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 "truncation_recovery": self.config.truncation_recovery,
             },
         }
+        # A task row's own budget shortens the run; it never extends the configured one.
+        timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.sandbox_runner_timeout_seconds)
         try:
             output = await state.execute(
                 payload,
-                timeout=self.config.sandbox_runner_timeout_seconds,
+                timeout=timeout,
                 close_timeout=self.config.session_close_timeout_seconds,
             )
         except TimeoutError:
@@ -452,6 +459,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             tools=[],
             metadata={
                 "elapsed_seconds": str(output["elapsed_seconds"]),
+                AGENT_TIMEOUT_METADATA_KEY: str(timeout),
                 **({"stop_reason": output["stop_reason"]} if output["stop_reason"] else {}),
             },
             status=output["observations"]["status"],
@@ -488,3 +496,6 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     StirrupAgentWrapper.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = StirrupAgentWrapper.run_webserver()  # noqa: F401
