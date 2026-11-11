@@ -1010,7 +1010,10 @@ class PiAgent(SimpleResponsesAPIAgent):
                 {**self._build_settings_config(), "images": {"autoResize": False}}
             ),
         }
-        output_limit_extension = "output-limit.mjs"
+        # As on the local path, `remaining_context` drops each request's output cap so the server sizes it.
+        output_limit_extension = (
+            "remaining-context.mjs" if self.config.output_token_policy == "remaining_context" else "output-limit.mjs"
+        )
         files[output_limit_extension] = Path(__file__).with_name(output_limit_extension)
         runtime_guards_extension = "runtime-guards.mjs"
         if self.config.enable_tools:
