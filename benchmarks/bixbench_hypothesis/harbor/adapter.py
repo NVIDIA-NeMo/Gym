@@ -38,6 +38,13 @@ class BBHTask:
             self.capsules_dir = Path(self.capsules_dir).expanduser()
 
     @classmethod
+    def from_jsonl(cls, jsonl_file: str | Path, capsules_dir: str | Path) -> Iterator["BBHTask"]:
+        with open(jsonl_file) as f:
+            for line in f:
+                record = json.loads(line)
+                yield cls(**record, capsules_dir=capsules_dir)
+
+    @classmethod
     def from_hf(cls, dataset: Dataset, capsules_dir: str | Path) -> Iterator["BBHTask"]:
         for record in dataset:
             yield cls(**record, capsules_dir=capsules_dir)
@@ -203,9 +210,13 @@ class HarborBBH:
 
     @property
     def tasks(self) -> Iterator[HarborBBHTask]:
-        hf_dataset = load_dataset(self.data_dir, split="train")
-        for source_task in BBHTask.from_hf(hf_dataset, self.capsules_dir):
-            yield HarborBBHTask(source_task, docker_image=self.docker_image)
+        if Path(self.data_dir).is_file():
+            for source_task in BBHTask.from_jsonl(self.data_dir, self.capsules_dir):
+                yield HarborBBHTask(source_task, docker_image=self.docker_image)
+        else:
+            hf_dataset = load_dataset(self.data_dir, split="train")
+            for source_task in BBHTask.from_hf(hf_dataset, self.capsules_dir):
+                yield HarborBBHTask(source_task, docker_image=self.docker_image)
 
     def write(self):
         self.output_dir.mkdir(parents=True, exist_ok=True)

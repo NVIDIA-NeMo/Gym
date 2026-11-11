@@ -14,7 +14,7 @@
 # limitations under the License.
 """The NOOA counter resources server, with a seed failure to inject and a report of what each worker holds.
 
-It also takes untyped seeds, as an agent's own ``/run`` sends them, which never read the session,
+It also takes agent-run seeds, as an agent's own ``/run`` sends them, which never read the session,
 and keeps a second counter per cookie session for them, created by the first call that reads the session.
 
 Only the session routing stress test runs it.
@@ -28,13 +28,14 @@ from typing import Any
 from fastapi import FastAPI, Request
 from pydantic import BaseModel, Field
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client.server_client import SESSION_ID_KEY
+from nemo_gym.server_runtime.base_resources_server import (
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
+from nemo_gym.utils.server_process import is_nemo_gym_fastapi_entrypoint
 from resources_servers.example_session_state_mgmt.nooa_app import NOOAStatefulCounterResourcesServer
 
 
@@ -46,7 +47,7 @@ class SessionRoutingStressServer(NOOAStatefulCounterResourcesServer):
     # Every session this worker ever created a counter for, to find a session created on two workers.
     created: set[str] = Field(default_factory=set)
     failed_once: set[str] = Field(default_factory=set)
-    # The counters of untyped seeds' sessions, and every such session this worker ever created one for.
+    # The counters of agent-run seeds' sessions, and every such session this worker ever created one for.
     plain: dict[str, int] = Field(default_factory=dict)
     plain_created: set[str] = Field(default_factory=set)
 
@@ -98,7 +99,7 @@ class SessionRoutingStressServer(NOOAStatefulCounterResourcesServer):
             "plain_live": sorted(self.plain),
             "plain_created": sorted(self.plain_created),
             "seed_records": len(self.resource_session_seeds),
-            "closed_records": len(self._closed_sessions),
+            "fences": len(self._fences),
         }
 
 

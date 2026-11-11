@@ -71,23 +71,45 @@ install or rebind one. The existing `--agent-type` swap and automatic benchmark-
 still depend on legacy Agent-to-Resources bindings; they are not equivalent to this workflow.
 A new pairing does not need another combined preset.
 
+`configs/profiles/benchmark.yaml` is a swappable profile for benchmarks whose Resources server supplies no sandbox,
+such as HLE. It leaves `resources_server.name` unset (`???`), so Gym composes this agent onto the benchmark's own
+agent instance, and each session creates its own sandbox through the `sandbox` provider. That sandbox must reach the
+model server by address, so the profile sets `use_absolute_ip: true` and keeps the head server and the agent itself
+on `127.0.0.1`: the head server's config endpoint is unauthenticated, and an unseeded request to the agent runs the
+harness on the Gym host. The profile sets the sandbox's lifetime (`ttl_s`), which OpenSandbox otherwise ends after
+10 minutes. Supply the image in `sandbox_config.image`; set other `sandbox_config` keys under the profile's own
+instance name, `codex_agent.responses_api_agents.codex_agent.sandbox_config`.
+It sets `network_access: model_only`, so the sandbox reaches only the model server; a search preset
+overrides it with `model_and_tools`. A restricted sandbox cannot download Codex, so supply
+`sandbox_runtime_dir`.
+
+HLE, HLE Diamond, GPQA and APEX Shortlist need no Environment Server setting: their judges serve no tools, so their
+Environment Servers grant the agent none. This agent rejects a required `direct_http` grant with a 422, so a
+benchmark whose Resources server serves its tools over direct HTTP does not pair with it.
+
 ## Runtime and model requirements
 
 Use a pinned `codex_version` (default **0.144.4**), direct `SandboxAccess`,
-and an absolute task workdir disjoint from the adapter directories. Codex supplies its own shell and
+and an absolute task workdir disjoint from the adapter directories under `/tmp` (`/` is accepted: a task
+image without `WORKDIR` runs there, as Harbor starts it). Codex supplies its own shell and
 file tools. Sessions also accept MCP tool grants (see [Gym MCP tools](#gym-mcp-tools)); required
 direct HTTP grants are rejected. The task sandbox supplies isolation, so `sandbox_mode` must be
 `danger-full-access`. No Codex CLI is required on the agent-server host.
 With several agent workers, session routing sends each session's requests to the worker that seeded it.
 
-The installer accepts Linux x86_64/aarch64 glibc and x86_64 musl/Alpine with Python 3.8+.
-POSIX sh installs missing Python and Bash using apt-get or apk when running as root,
-before invoking the Bash runtime installer; otherwise the image must provide them.
+The installer accepts Linux x86_64/aarch64 glibc and x86_64 musl/Alpine images; the task image needs bash
+but no Python. POSIX sh installs a missing bash using apt-get or apk when running as root,
+before invoking the Bash runtime installer; otherwise the image must provide it.
 The pinned Node 22.19.0 build has no arm64 musl binary.
 Older Alpine images use a checksum-verified private C++ library for Node. Runtime files live
 under `/tmp/nemo-gym-codex-node-*`, and private `CODEX_HOME` configuration lives under
 `/tmp/nemo-gym-codex-sessions/*`. Task HOME, XDG directories, Python, Node, libraries,
 and PATH are preserved.
+By default Codex gets only `PATH`, `LANG`, `LC_ALL`, `HOME` and the XDG directories from the
+sandbox. `inherit_sandbox_environment: true` instead passes the sandbox's whole environment,
+as a harness started in the task container sees it (task variables such as `VIRTUAL_ENV` or
+`OMP_NUM_THREADS`), keeping only `CODEX_HOME` private. Use it only with remote providers,
+where that environment is the task's own.
 Installation errors retain the command, exit status, stdout, and stderr. Runtime compatibility
 must still be checked on actual task images; a mocked installer test is not image validation.
 
@@ -114,27 +136,31 @@ Request `max_output_tokens`, `temperature`, `top_p`, reasoning controls, and uns
 policies are rejected rather than ignored. Codex cannot enforce these request-level controls
 for a custom Gym provider. Set per-call generation settings on the Model Server and inspect
 captured requests to verify the effective values. A configured `reasoning_effort` is likewise
-rejected in sandbox sessions. An explicit request model must match the configured model.
+rejected in sandbox sessions unless `model_server_forwards_reasoning_effort: true` records the
+operator's check that the Model Server forwards Codex's `reasoning` field unchanged to a
+backend that honors it, for example a Model Server that relays Codex's Responses requests
+unchanged to an OpenAI Responses endpoint. Confirm `reasoning.effort` in captured model calls.
+An explicit request model must match the configured model.
 
-Session identity, immutable seed binding, seed/close locking, and close receipts use Gym's
+Session identity, immutable seed binding, seed and close locks, and fences use Gym's
 shared agent-session implementation. Setup returns a session cookie only after installation
 succeeds. Failed setup with failed cleanup retains cleanup-only state through
 `AgentSessionSetupError`: activation/reseeding are rejected, and close can retry.
 
 Each session supports one logical activation. Identical requests join the running invocation
 or replay its result/error; changed requests are rejected. A disconnected HTTP waiter does
-not cancel the invocation. Session close owns cancellation. Shared successful close receipts
+not cancel the invocation. Session close owns cancellation. The shared fence and saved reply of a successful close
 last `session_close_retry_window_seconds` (default 300 seconds) without renewal on retries.
 Stale cookies never fall back to host execution. State is process-local; Resources/provider
 own sandbox expiry and crash recovery. There is no separate per-agent session-expiry timer.
 
-Harness execution uses `nemo_gym.agent_utils.sandbox_session.SandboxSession`, shared with Hermes.
+Harness execution uses `nemo_gym.agents.utils.sandbox_session.SandboxSession`, shared with Hermes.
 The adapter stages its worker input and collects its own output. The shared session
 uploads the supervisor at activation and owns its control files and log access; the common lifecycle
 confirms process cleanup, captures artifacts, then releases the provider connection or
 owned sandbox. Concurrent closes share that work; missing evidence or failed release remains retryable,
 and interrupted activations keep captured observations after session files are removed.
-`supervisor_client.py` handles controller-side launch/stop commands; `process_supervisor.py`
+`supervisor_client.py` handles controller-side launch/stop commands; `process_supervisor.sh`
 runs inside the sandbox. Benchmark Resources session identity/verdict state stays separate.
 Missing worker identity or exit diagnostics become `runtime_info_unavailable` or
 `worker_exit_code_unavailable` observation gaps. When Codex fails before it starts a turn, the end
@@ -143,13 +169,15 @@ gap. Positive cleanup confirmation remains
 required; the adapter validates the captured terminal events without inventing an exit code.
 
 One shared Linux supervisor per activation fences delayed launches.
-The supervisor stops live harness-group processes and reaps its children. On timeout
-or close it preserves children already adopted before the stop, typically services from
-completed tools, and drains newly adopted children within the cleanup deadline, including
-tools in separate sessions. The sandbox owner stops the preserved services later.
+The supervisor stops live harness-group processes. On timeout or close it also kills, within
+the cleanup deadline, the harness's descendants in other process groups (typically tools in
+their own sessions) and processes that inherited the harness's `NEMO_GYM_SUPERVISOR`
+environment marker, such as services a tool daemonizes during the stop. Processes that left
+the harness before the stop, typically services from completed tools, remain for the sandbox
+owner to stop later.
 Natural CLI exit cannot distinguish unfinished tools in other sessions from services;
-those processes may still change task files. The stop-time cutoff also has adoption/PID
-races and cannot classify later service forks. It is not a security boundary.
+those processes may still change task files. The stop-time cutoff also has PID races and
+cannot classify later service forks. It is not a security boundary.
 Services must use task-owned files rather than the temporary agent session directory.
 Close confirms the receipt before cancelling provider execution,
 then removes adapter-owned files and disconnects. Missing/negative termination evidence
@@ -157,12 +185,43 @@ blocks verification. Missing evidence stays retryable; a final negative receipt 
 the borrowed connection without making the failed activation gradable. The borrowing
 agent never destroys the sandbox.
 Cleanup coordinates lifecycle; it is not a security boundary against hostile task code.
+The supervisor and the shared `harness_runner.sh` are bash scripts, and `sandbox_launcher.mjs` runs on
+the runtime's private Node, so a task agent's `pkill -f python3`, `pkill python3` or `killall python3`
+does not end Codex, as it would not under Harbor.
 
 Responses and close observations preserve text, reasoning, tool events, partial output,
 CLI aggregate usage, and sandbox hostname/PID/version. Wall-time and the pinned CLI's explicit
 model-output-limit event yield incomplete, potentially gradable work. Reported provider failures retain partial output and classified cause; the Environment Server decides grading and episode retries. Worker and cleanup failures remain execution errors. Only Resources determines reward.
 
-Native session transcripts supply tool-call IDs and outcomes. The sandbox forwarder retains request statuses and invocation correlation across retries; native cumulative usage supplements CLI totals when a failed turn omits them. Missing/default-zero cache and reasoning details remain unknown, with observation gaps.
+`verify_after_agent_error: true` grades a failed run the way Harbor grades after any agent
+exit: a nonzero or signalled Codex exit, a failed turn, or a missing `turn.completed` returns a
+`failed` response (`incomplete` if the run also hit its time limit; the error is in
+`metadata.graded_agent_error`) with no classified cause instead of an execution error, so the
+Environment Server still verifies it. It applies only when Codex started a turn, the supervisor
+confirmed cleanup, the Codex error that ended the run names no model-endpoint transport or
+429/5xx failure, and the sandbox still reports running and answers a probe command. A lost or
+unresponsive sandbox, an unconfirmed cleanup, and an endpoint outage stay execution errors, so
+the episode is retried. A reported provider failure keeps its classified cause, so the
+Environment Server's outcome policy decides it as before, and a run that failed before its first
+turn stays an execution error that carries Codex's stderr.
+
+The endpoint check reads only the failure that ended the run, after its last model output:
+`turn.failed` and the last error event before it, or the last event when Codex was killed while
+it still retried or waited for the network. A retry followed by model output was recovered, so
+a later unrelated failure (an OOM kill, say) is still graded. It knows Codex 0.154.0's messages:
+`unexpected status` 429, 500, 502, 503 or 504, its `high demand` message for a 500, `exceeded
+retry limit, last status: 429`, `Reconnecting... waiting for network`, and a stream disconnect
+from a transport error, a closed stream, a failed send or the SSE idle timeout. The output
+cap's `stream disconnected before completion: Incomplete response returned, reason:
+max_output_tokens` is not an endpoint failure. A run that completed or hit its time limit is not
+a failed run, so the check never applies to it.
+
+`raise_oom_score_adj: true` raises the score of Codex and everything it starts to 1000 (to 0
+when the sandbox starts it below zero), so a memory-cgroup OOM kill picks agent work rather
+than the sandbox's exec daemon or the supervisor. Docker's equivalent daemon runs outside the
+container's memory cgroup. The runner records the change in the supervisor's `output.log`.
+
+Native session transcripts supply tool-call IDs and outcomes. Codex disables its native HTTP 429 retries, so `sandbox_launcher.mjs` runs it behind a loopback forwarder on the runtime's Node that retries a 429 twice, honoring `Retry-After` up to 30 seconds. The forwarder retains request statuses and invocation correlation across retries; native cumulative usage supplements CLI totals when a failed turn omits them. Missing/default-zero cache and reasoning details remain unknown, with observation gaps.
 Compare CLI totals with captured model calls; do not interpret unavailable usage as zero.
 Known model-metadata/compaction warnings remain visible as gaps after clean completion or a gradable model/wall-time limit.
 
@@ -252,9 +311,9 @@ CODEX_HOME=/tmp/codex_home OPENAI_API_KEY=local \
 
 The agent runs `codex exec --json` as an async subprocess for each request. Codex handles all tool execution (shell commands, file edits, MCP tool calls) internally in a per-rollout scratch working directory. The agent parses the JSONL event stream into NeMoGym output items and forwards the response to a resources server for verification.
 
-Codex talks to the model via the OpenAI Responses API over SSE (`wire_api = "chat"` was removed from Codex). This means it can connect to OpenAI directly, to any endpoint implementing the streaming Responses API, or — via the agent's `model_server` ref — to any NeMo Gym model server, since every Gym model server serves the streaming Responses dialect by sanitizing the request (extra bookkeeping fields, `namespace` tool specs are flattened to plain functions) and re-emitting its complete response as a synthesized SSE stream (see `nemo_gym/responses_streaming.py`).
+Codex talks to the model via the OpenAI Responses API over SSE (`wire_api = "chat"` was removed from Codex). This means it can connect to OpenAI directly, to any endpoint implementing the streaming Responses API, or — via the agent's `model_server` ref — to any NeMo Gym model server, since every Gym model server serves the streaming Responses dialect by sanitizing the request (extra bookkeeping fields, `namespace` tool specs are flattened to plain functions) and re-emitting its complete response as a synthesized SSE stream (see `nemo_gym/models/responses_streaming.py`).
 
-Each request gets a fresh `CODEX_HOME` with a generated `config.toml` that pins a Gym-owned model provider (no `codex login` needed — the `openai_api_key` config value is handed to the subprocess as `OPENAI_API_KEY`, the provider's `env_key`), sets `approval_policy = "never"`, and disables everything that would make a rollout depend on ambient host state or phone home: analytics, update checks, on-disk history, server-side web search, and the multi-agent tool. Session persistence is disabled via `--ephemeral`. The `CODEX_HOME` and scratch working directory are removed after the run, so rollouts cannot contaminate one another.
+Each request gets a fresh `CODEX_HOME` with a generated `config.toml` that pins a Gym-owned model provider (no `codex login` needed — the `openai_api_key` config value is handed to the subprocess as `OPENAI_API_KEY`, the provider's `env_key`), sets `approval_policy = "never"`, and disables everything that would make a rollout depend on ambient host state or phone home: analytics, update checks, on-disk history, server-side web search, and the multi-agent tool (`features`). Session persistence is disabled via `--ephemeral`. The `CODEX_HOME` and scratch working directory are removed after the run, so rollouts cannot contaminate one another.
 
 For legacy callers, Codex is auto-installed lazily on the first local invocation via npm or a local Node.js binary if not already on PATH.
 
@@ -279,7 +338,12 @@ codex_agent:
       codex_version: 0.144.4
       cwd: null
       stream_idle_timeout_ms: null
+      request_max_retries: null
+      stream_max_retries: null
       extra_config: {}
+      features:
+        multi_agent: false
+        code_mode: false
 ```
 
 - `concurrency`: max simultaneous `run()` calls
@@ -295,7 +359,10 @@ codex_agent:
 - `codex_version`: **required** — npm version pinned on auto-install. Every config must pin an explicit version so runs are reproducible and cannot silently drift as new Codex releases land; version bumps become explicit, tested changes
 - `cwd`: working root handed to `codex exec --cd`. `null` creates a fresh temp dir per request and removes it afterwards
 - `stream_idle_timeout_ms`: provider stream idle budget. Gym model servers emit the synthesized SSE only once the full response is computed, so this must cover an entire generation; `null` defaults it to `timeout * 1000`
+- `request_max_retries`, `stream_max_retries`: the provider's resends of a request that fails before its stream starts, and reconnects after a stream drops. `null` (the default) leaves Codex's own defaults. Unlike `extra_config`, they also apply to sandbox sessions
 - `extra_config`: extra `config.toml` content deep-merged over the generated base config — add MCP servers, feature flags, `model_verbosity`, etc. Per-rollout Gym MCP entries take precedence on name collisions
+- `features`: the generated `[features]` table. The defaults turn off `multi_agent` and `code_mode`, whose tool shapes Gym's typed Responses path cannot express. A `null` entry is left out, so the CLI uses its own default, as a launch without a Gym config does; set that only when the model server relays Codex's requests unchanged. Unlike `extra_config`, it also applies to sandbox sessions
+- `sandbox_logs_dir`: sandbox sessions only. After Codex stops, copy its session rollouts (`CODEX_HOME/sessions/**/rollout-*.jsonl`, with per-call token counts and timestamps, also for a run stopped at its time limit) to `<sandbox_logs_dir>/sessions` before the session directory is removed, as Harbor does with `/logs/agent`. Default `null` (not copied)
 - `mcp_tool_timeout_seconds`: per-call timeout for Gym MCP tools, written as `tool_timeout_sec`; a call that runs longer returns an error to the model. At most `timeout`. `null` leaves the pinned CLI's default of 300 seconds
 
 For the full set of Codex config options see the [Codex configuration reference](https://developers.openai.com/codex/config).
@@ -336,3 +403,21 @@ It creates a sandbox, runs there, and destroys it on close; the default workdir 
 never triggers a replacement or host execution. With neither access nor a usable
 provider, setup fails. Verifiers that inspect task files must keep using a
 Resources-owned sandbox, since agent-owned sandboxes are gone before verification.
+
+`network_access: model_only` limits an agent-owned sandbox's egress to the model server's host;
+`model_and_tools` also allows the host of each MCP grant. Each allowed host is open on every port. The
+OpenSandbox policy is set when the sandbox is created, so a session that borrows a task sandbox rejects any value
+other than `inherit` (the default, the provider's network), and it cannot be combined with
+`sandbox_config.provider_options.network_policy`. Such a sandbox cannot download the runtime: set
+`sandbox_runtime_dir` to an absolute sandbox path that holds `node/` and `codex/` as the installer lays them out.
+Build it into the image with `bash install_codex_runtime.sh <dir> <codex_version>`. The image also needs `bash`,
+since the session prepare step would otherwise run `apt-get` or `apk`, which a restricted sandbox cannot reach.
+Task-image Python is not required. Setup checks that the directory reports `codex-cli <codex_version>` (an exact match)
+instead of installing, and refuses the seed with a 422 when it does not. `sandbox_runtime_dir` applies to a borrowed
+sandbox too: it is checked there in the same way, and a borrowed sandbox is never stopped.
+
+Under `model_only`, a required MCP grant is refused at seed with a 422, since the policy would block its host; under
+`model_and_tools`, a grant at an address the sandbox cannot reach, such as loopback, refuses the seed. A borrowed
+sandbox relies on its owner's network policy. The policy is only as strong as the OpenSandbox server's egress mode:
+in `dns` mode only name resolution is filtered, so a hard-coded IP bypasses it; `dns+nft` also enforces it at the IP
+layer and is needed for full isolation.

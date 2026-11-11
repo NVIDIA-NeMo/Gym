@@ -27,8 +27,8 @@ from app import (
     _SessionState,
 )
 
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
+from nemo_gym.core import SESSION_LOST, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 
 
 class _DeadBackend:
@@ -117,6 +117,7 @@ def test_a_missing_session_is_reported_rather_than_scored_zero():
 
     assert dumped["reward"] == 0.0
     assert dumped["failure_reason"] is not None
+    assert (dumped["mask_sample"], dumped["failure_kind"]) == (True, SESSION_LOST)
 
 
 def test_a_browser_that_died_before_scoring_does_not_abort_the_run():
@@ -131,6 +132,7 @@ def test_a_browser_that_died_before_scoring_does_not_abort_the_run():
 
     assert dumped["reward"] == 0.0
     assert "browser unreachable while scoring" in dumped["failure_reason"]
+    assert (dumped["failure_kind"], dumped["mask_sample"]) == ("verifier_error", False)
     assert backend.closed == 1
     assert "rollout-1" not in server._session_id_to_state
 
@@ -152,11 +154,15 @@ def test_a_request_carrying_a_response_field_does_not_break_construction():
     )
 
     dumped = asyncio.run(
-        server.verify(_request(), _body(failure_reason="sent by the caller", reward=99.0))
+        server.verify(
+            _request(),
+            _body(failure_reason="sent by the caller", reward=99.0, mask_sample=True, failure_kind=SESSION_LOST),
+        )
     ).model_dump()
 
     assert dumped["reward"] == 1.0
     assert dumped["failure_reason"] is None
+    assert (dumped["mask_sample"], dumped["failure_kind"]) == (False, None)
 
 
 def _finish(server, request, answer=""):

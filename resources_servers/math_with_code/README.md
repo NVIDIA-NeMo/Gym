@@ -124,6 +124,29 @@ gym eval run --no-serve \
 
 
 
+### Sessions
+
+Each rollout gets its own Python worker process, which keeps variables between `execute_python` calls. The rollout's
+session cookie keys it, and the first `execute_python` call starts it. Workers fork from a forkserver, a separate
+Python process that imports the server module once, so they do not inherit the server's open sockets and each starts in
+milliseconds. The server's first worker also waits while the forkserver starts and imports the module and its numerical
+libraries; later calls reuse the same worker and variables.
+
+Cancelling the first tool request does not abandon a worker still starting in a thread. The server keeps that
+startup owned; close and checkpoint retirement wait for it, then stop the worker.
+
+Concurrent Python calls on the same session execute serially, so each receives its own result. Cancelling a request
+does not release the pipe while its execution is still running. Cleanup can stop a busy worker even when Python
+calls occupy every executor thread.
+
+Under an Environment Server, such as `math_with_code_environment_server` (`single_agent_turn_legacy`),
+`/seed_session` binds the cookie to the `resources_session_id`. `/close_session` stops the worker, even when
+`/verify` never ran, escalating to SIGTERM and then SIGKILL for a worker still running code. A worker that survives
+SIGKILL makes the close fail, so the caller retries it. Closing an unknown session, or closing again with the same
+`episode_id`, succeeds; a close with another `episode_id` gets 409. A seed that arrives after its session closed is
+refused with 409 for `session_close_retry_window_seconds`. An `execute_python` call for a closed session gets 404
+with `failure_kind: session_lost`, and a `/verify` for one returns a masked sample with reward 0.
+
 ### Additional Details
 
 Currently the system prompt looks like this. In the future this can be changed
