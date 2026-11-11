@@ -26,9 +26,9 @@ chartography_opencode:
       description: 'Professional chart reading with tools: OpenCode answers one chart question in a sandbox session
         with a Python image toolkit; graded against a golden answer by the Chartography benchmark''s own LLM judge'
       value: Train and measure tool-assisted, precise reading of specialized charts
-      # A run that ends unfinished (OpenCode's timeout, an output cap or a context limit) scores 0, as in
-      # visual_coding_opencode, instead of being graded on whatever it last wrote.
-      score_incomplete_as_zero: true
+      # A run that does not complete (OpenCode's timeout, an output cap, a context limit or a failed run) scores 0,
+      # as in visual_coding_opencode, instead of being graded on whatever it last wrote.
+      score_unfinished_as_zero: true
       sandbox_provider: sandbox
       sandbox_config:
         image: ${oc.env:CHARTOGRAPHY_OPENCODE_SANDBOX_IMAGE,null}

@@ -330,18 +330,25 @@ def test_only_the_no_tools_setting_runs_with_several_workers(root) -> None:
 
 
 @pytest.mark.parametrize(
-    ("score_incomplete_as_zero", "reward", "judge_calls"),
-    [(True, 0.0, 0), (False, 1.0, 1)],
-    ids=["opencode_setting", "default"],
+    ("score_unfinished_as_zero", "status", "reward", "judge_calls"),
+    [
+        (True, "incomplete", 0.0, 0),
+        (True, "failed", 0.0, 0),
+        (True, "completed", 1.0, 1),
+        (False, "incomplete", 1.0, 1),
+        (False, "failed", 1.0, 1),
+    ],
+    ids=["opencode_incomplete", "opencode_failed", "opencode_completed", "default_incomplete", "default_failed"],
 )
-def test_an_unfinished_run_scores_zero_only_when_configured(score_incomplete_as_zero, reward, judge_calls) -> None:
-    """An unfinished run (a timeout, an output cap or a context limit) whose last message is the right answer."""
-    config = _config(score_incomplete_as_zero=score_incomplete_as_zero)
+def test_an_unfinished_run_scores_zero_only_when_configured(score_unfinished_as_zero, status, reward, judge_calls):
+    """A run whose last message is the right answer. One that did not complete (a timeout, an output cap, a context
+    limit, or a failed run that the outcome policy sends to verify) scores 0 only when configured."""
+    config = _config(score_unfinished_as_zero=score_unfinished_as_zero)
     server = ChartographyResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
     client = TestClient(server.setup_webserver())
     judge = _mock_judge(server, _judge_content(1))
     body = _verify_body()
-    body["response"]["status"] = "incomplete"
+    body["response"]["status"] = status
 
     verified = client.post("/verify", json=body)
 

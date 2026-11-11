@@ -146,5 +146,5 @@ def test_the_agent_pins_the_opencode_build_of_the_shared_sandbox_image():
 
 def test_only_the_opencode_setting_scores_unfinished_runs_zero():
     _, ours = resolve(BENCHMARK)
-    assert ours["chartography_opencode"]["resources_servers"]["chartography"]["score_incomplete_as_zero"] is True
-    assert "score_incomplete_as_zero" not in ours["chartography"]["resources_servers"]["chartography"]
+    assert ours["chartography_opencode"]["resources_servers"]["chartography"]["score_unfinished_as_zero"] is True
+    assert "score_unfinished_as_zero" not in ours["chartography"]["resources_servers"]["chartography"]

@@ -24,8 +24,13 @@ The setting is `resources_servers/chartography/configs/chartography_opencode.yam
 - `thinking: true`: the model reasons on every turn, and its earlier reasoning stays in the history OpenCode
   sends back. Whether the chat template keeps that history is a property of the model server, not of this config.
 - 1800 s per task and no turn cap; 131072-token context, 32768 output tokens per turn; compaction off.
-- A run that ends unfinished (OpenCode's timeout, an output cap or a context limit) scores 0 without a judge call
-  (`score_incomplete_as_zero: true`), as in `visual_coding_opencode`. Unfinished runs are not run again.
+- A run that does not complete (OpenCode's timeout, an output cap, a context limit, or a failed run that the outcome
+  policy still sends to verify) scores 0 without a judge call (`score_unfinished_as_zero: true`), as in
+  `visual_coding_opencode`. Unfinished runs are not run again.
+- The images that `read` returns come between model calls. On NeMo RL's single controller the vLLM worker stages
+  them, so training sees them; Gym's local capture records them only with #5837. Saved rollouts keep the chart in
+  `responses_create_params`, but not the images that `read` returns: OpenCode's saved trajectories keep only the
+  text of each message.
 
 ## Prepare
 
