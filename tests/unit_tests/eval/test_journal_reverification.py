@@ -128,20 +128,12 @@ async def test_original_special_environment_refuses_before_output_changes(tmp_pa
     response["opencode_evidence"] = {"turns_used": 1, "finished_naturally": True, "tool_reward": None}
     result = {"response": response, "reward": 1.0}
     if kind == "failed":
-        from environment_servers.single_agent_turn.app import SessionHandles
-        from environment_servers.single_agent_turn.opencode import OpenCodeEnvironmentServer
-
-        base, producer = _environment_server()
-        failed = type(_agent_response()).model_validate(
-            _agent_response().model_dump(mode="json")
-            | {"status": "failed", "error": {"code": "server_error", "message": "limit"}}
-        )
-        typed_zero = await OpenCodeEnvironmentServer(config=base.config, server_client=producer)._verify(
-            _request(), SessionHandles(resources_session_id="resource", agent_session_id="agent"), failed, None
-        )
-        assert typed_zero.reward == 0 and typed_zero.scorer == "agent-failure" and producer.calls == []
-        assert "opencode_evidence" not in typed_zero.response.model_dump(mode="json")
-        result = typed_zero.model_dump(mode="json")
+        result = {
+            "response": response | {"status": "failed", "error": {"code": "server_error", "message": "limit"}},
+            "reward": 0.0,
+            "scorer": "agent-failure",
+        }
+        result["response"].pop("opencode_evidence")
     elif kind == "verification_error":
         response["opencode_evidence"]["verification_error"] = "unusable native evidence"
         result = {"_ng_failure_class": "judge_failed", "_ng_failure_partial_response": response}
@@ -674,3 +666,25 @@ def test_repeat_plan_uses_verified_source_route_for_a_task_without_any_outcome(t
         {"resources": {"resources_servers": {"fixture": {}}}},
     )
     assert plan == {("plain", "resources"): {0: [0], 1: [0]}}
+
+
+async def test_verifier_owned_tool_reward_replays_with_original_execution_evidence(tmp_path, monkeypatch):
+    evidence = {"schema_version": "2.0", "source": "opencode", "records": []}
+    output, _ = _saved_run(
+        tmp_path,
+        [
+            (
+                "plain",
+                {
+                    "response": _agent_response().model_dump(mode="json"),
+                    "reward": 1.1,
+                    "opencode_tool_reward": {"auxiliary_reward": 0.1},
+                    "ng_agent_observations": evidence,
+                },
+            )
+        ],
+    )
+    client = _replay_client(monkeypatch)
+    await reverify.RolloutReverificationHelper().run_from_config(_config(output, tmp_path / "rescored.jsonl"))
+    assert client.post.await_args.kwargs["json"]["ng_agent_observations"] == evidence
+    assert "opencode_tool_reward" not in client.post.await_args.kwargs["json"]

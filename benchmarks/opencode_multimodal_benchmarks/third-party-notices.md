@@ -5,9 +5,7 @@ additional visual-task instructions. The system prompt in
 `benchmarks/opencode_multimodal_benchmarks/opencode_eval_agent.yaml` reproduces that
 version's `default.txt` prompt.
 
-The final-turn directive in `responses_api_models/vllm_model/app_opencode.py`
-also comes from this revision. `prompts/combined.txt.license` records the prompt
-attribution without adding license text to model input.
+`prompts/combined.txt.license` records the training prompt attribution.
 
 Sources:
 - https://github.com/anomalyco/opencode/blob/67aec2212010d67775c35e696d8b8b54902eb338/packages/core/src/session/runner/max-steps.ts

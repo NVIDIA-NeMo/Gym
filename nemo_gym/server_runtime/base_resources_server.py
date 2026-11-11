@@ -79,7 +79,7 @@ from nemo_gym.server_runtime.request_handling.rollout_context import RolloutCont
 from nemo_gym.server_runtime.request_handling.session_routing import SessionKind
 from nemo_gym.server_runtime.verifier_observability import observe_verifier
 from nemo_gym.telemetry.endpoints import traced_verify_endpoint
-from nemo_gym.trajectory.trajectory_record import VerifierInvocation
+from nemo_gym.trajectory.trajectory_record import AgentObservationBundle, TrajectoryRecord, VerifierInvocation
 from nemo_gym.verification.judge import judge_failsafe
 
 
@@ -188,6 +188,8 @@ class BaseRunRequest(BaseModel):
 
 class BaseVerifyRequest(BaseRunRequest):
     response: NeMoGymResponse
+    ng_trajectory: TrajectoryRecord | None = Field(default=None, exclude_if=lambda value: value is None)
+    ng_agent_observations: AgentObservationBundle | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class BaseVerifyResponse(BaseVerifyRequest):

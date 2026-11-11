@@ -4,11 +4,21 @@
 
 import json
 import re
-from typing import Annotated
+from typing import Annotated, Any
 
 from pydantic import BaseModel, Field, field_validator
 
-from nemo_gym.utils import final_assistant_text
+from nemo_gym.server_runtime import BaseVerifyResponse
+
+
+def final_assistant_text(output: list[dict[str, Any]]) -> str:
+    """Return the last assistant answer, stopping at an unfinished reasoning or tool turn."""
+    for item in reversed(output):
+        if item.get("type") in {"reasoning", "function_call"}:
+            break
+        if item.get("type") == "message" and item.get("role") == "assistant":
+            return "".join(part["text"] for part in item["content"] if part["type"] == "output_text")
+    return ""
 
 
 class OpenCodeToolRewardConfig(BaseModel, extra="forbid"):
@@ -140,27 +150,6 @@ def score_opencode_tools(
     ).for_answer(base_reward, config)
 
 
-class OpenCodeScoringConfig(BaseModel):
-    """Scoring defaults shared by the agent and its environment without importing the agent runtime."""
-
-    tool_rewards: OpenCodeToolRewardConfig | None = Field(default_factory=OpenCodeToolRewardConfig)
-    strip_reasoning_for_grading: bool = True
-
-
-class OpenCodeEvalScoringConfig(OpenCodeScoringConfig):
-    tool_rewards: OpenCodeToolRewardConfig | None = None
-    strip_reasoning_for_grading: bool = False
-
-
-class EpisodeEvidence(BaseModel):
-    """Validated native evidence passed explicitly across the responses self-call."""
-
-    verification_error: str | None = None
-    turns_used: int
-    finished_naturally: bool
-    tool_reward: OpenCodeToolReward | None
-
-
 def final_answer(output: list[dict], *, strip_reasoning: bool = False) -> str:
     """Extract the scoring copy; optional training cleanup never mutates history."""
     text = final_assistant_text(output)
@@ -169,3 +158,113 @@ def final_answer(output: list[dict], *, strip_reasoning: bool = False) -> str:
     text = re.sub(r"<(think|thinking)>.*?</\1>", "", text, flags=re.DOTALL)
     text = re.split(r"<(?:think|thinking)>", text, maxsplit=1)[0]
     return re.split(r"</(?:think|thinking)>", text)[-1].strip()
+
+
+def trajectory_tool_reward(
+    response, trajectory, base_reward: float, config: OpenCodeToolRewardConfig, observations=None
+):
+    """Use the shared harness's canonical execution outcomes, including shell exit failures."""
+    output = [item.model_dump(mode="json") for item in response.output]
+    wanted = {item["call_id"] for item in output if item.get("type") == "function_call"}
+    if not wanted:
+        return score_opencode_tools({}, output, base_reward, config)
+    from nemo_gym.trajectory import AgentInvocation, ToolCallObservation
+
+    invocations = trajectory.invocations if trajectory is not None else []
+    tools = trajectory.tool_calls if trajectory is not None else []
+    if not tools and observations is not None:
+        invocations = [item for item in observations.records if isinstance(item, AgentInvocation)]
+        tools = [item for item in observations.records if isinstance(item, ToolCallObservation)]
+    roots = {inv.invocation_id for inv in invocations if inv.parent_invocation_id is None}
+    records = {}
+    for tool in tools:
+        if tool.invocation_id not in roots:
+            continue
+        call_id = tool.tool_call_id if tool.tool_call_id in wanted else tool.native_tool_call_id
+        if call_id not in wanted:
+            continue
+        if call_id in records:
+            raise ValueError(f"Ambiguous tool evidence for {call_id}")
+        if tool.status in {"incomplete", "unknown"}:
+            raise ValueError(f"Unfinished tool evidence for {call_id}")
+        success = tool.status == "completed"
+        records[call_id] = (tool.tool_name, "completed" if success else "error", 0 if success else None)
+    return score_opencode_tools(records, output, base_reward, config)
+
+
+class ToolRewardScoringConfig(BaseModel):
+    """Opt-in verifier-side shaping for existing training tasks."""
+
+    tool_rewards: OpenCodeToolRewardConfig | None = Field(default_factory=OpenCodeToolRewardConfig)
+    strip_reasoning_for_grading: bool = True
+
+
+class ToolRewardVerifyResponse(BaseVerifyResponse, extra="allow"):
+    pass
+
+
+class ToolRewardVerifier:
+    """Apply the existing training schedule at the verifier boundary, preserving capture."""
+
+    async def verify(self, body):
+        from nemo_gym.trajectory import grading_result_binding
+
+        original = body.response
+        scoring = original.model_dump(mode="json")
+        scoring["output"] = [
+            {
+                "id": "final",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "annotations": [],
+                        "text": final_answer(
+                            scoring["output"],
+                            strip_reasoning=self.config.strip_reasoning_for_grading,
+                        ),
+                    }
+                ],
+            }
+        ]
+        result = await super().verify(body.model_copy(update={"response": type(original).model_validate(scoring)}))
+        if result.mask_sample:
+            return ToolRewardVerifyResponse.model_validate(result.model_dump(mode="json") | {"response": original})
+        base = float(result.reward)
+        tools = (
+            trajectory_tool_reward(
+                original, body.ng_trajectory, base, self.config.tool_rewards, body.ng_agent_observations
+            )
+            if self.config.tool_rewards is not None
+            else None
+        )
+        bonus = tools.auxiliary_reward if tools is not None else 0.0
+        source = result.model_dump(mode="json")
+        source = {key: source[key] for key in ("response", "reward", "reward_components") if key in source}
+        transform = {
+            "kind": "response_projection_reward_offset_v1",
+            "input_result": source,
+            "input_binding_sha256": grading_result_binding(source),
+            "reward_offset": bonus,
+            "reward_component": "opencode_tool_reward",
+            "parameters": {
+                "operation": "opencode_final_answer_tool_reward_v1",
+                "strip_reasoning_for_grading": self.config.strip_reasoning_for_grading,
+                "tool_rewards": self.config.tool_rewards.model_dump(mode="json") if self.config.tool_rewards else None,
+            },
+        }
+        result = ToolRewardVerifyResponse.model_validate(
+            result.model_dump(mode="json")
+            | {
+                "response": original,
+                "reward": base + bonus,
+                "opencode_tool_reward": tools,
+                "reward_components": (source.get("reward_components") or {"verifier": base})
+                | {"opencode_tool_reward": bonus},
+                "ng_grading_transform": transform,
+            }
+        )
+        transform["output_binding_sha256"] = grading_result_binding(result)
+        return result

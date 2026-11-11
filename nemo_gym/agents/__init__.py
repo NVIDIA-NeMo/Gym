@@ -59,7 +59,6 @@ if TYPE_CHECKING:
         SimpleResponsesAPIAgent,
         assert_model_url_reachable_from_sandbox,
     )
-    from nemo_gym.agents.eval_budget import FINAL_TURN_NOTICE, EvalTurnBudget
     from nemo_gym.agents.skills import stage_skills
     from nemo_gym.agents.testing.agent_session_conformance import check_agent_seed_rejected
     from nemo_gym.agents.testing.failure_assertions import raises_agent_failure
@@ -95,8 +94,6 @@ if TYPE_CHECKING:
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
-    "FINAL_TURN_NOTICE": "eval_budget",
-    "EvalTurnBudget": "eval_budget",
     "ActivationConflictError": "utils.ordered_operations",
     "AGENT_ACTIVATION_HEADER": "base_responses_api_agent",
     "AGENT_OUTCOME_METADATA_KEY": "agent_outcome",

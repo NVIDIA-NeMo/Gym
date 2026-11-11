@@ -29,7 +29,7 @@ async def test_cut_resume_preserves_settled_rows_and_rejects_material_drift(tmp_
     global_config = {
         "visual_agent": {
             "responses_api_agents": {
-                "opencode_multimodal_agent": {
+                "opencode_agent": {
                     "model": "vision-fixture",
                     "build_system_prompt": "Answer the question",
                     "resources_server": {"name": "visual", "type": "resources_servers"},
@@ -52,12 +52,12 @@ async def test_cut_resume_preserves_settled_rows_and_rejects_material_drift(tmp_
     # A newly introduced operational default and a changed placement port must
     # not replay the already settled trial or change the run identity.
     collection["dispatch_connect_grace_s"] = 60.0
-    global_config["visual_agent"]["responses_api_agents"]["opencode_multimodal_agent"]["port"] = 8123
+    global_config["visual_agent"]["responses_api_agents"]["opencode_agent"]["port"] = 8123
     with RolloutStore.start_or_resume(output, prepare, resume=True) as resumed:
         assert [row["_ng_task_index"] for row in resumed.pending(3)] == [1, 2]
         assert output.read_bytes() == saved
     for key, value in [("model", "other-model"), ("build_system_prompt", "Different prompt")]:
-        agent = global_config["visual_agent"]["responses_api_agents"]["opencode_multimodal_agent"]
+        agent = global_config["visual_agent"]["responses_api_agents"]["opencode_agent"]
         original = agent[key]
         agent[key] = value
         with pytest.raises(ConfigError):

@@ -88,7 +88,6 @@ from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,
     SandboxExecResult,
-    SandboxProvider,
     SandboxSpec,
     create_provider,
     resolve_provider_config,
@@ -1002,36 +1001,6 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 | ({"ng_trajectory": trajectory.model_dump(mode="json")} if trajectory is not None else {})
             )
 
-    session_state_type: ClassVar[type[OpenCodeSandboxSession]] = OpenCodeSandboxSession
-
-    async def _prepare_session_launch(
-        self,
-        state: OpenCodeSandboxSession,
-        body: NeMoGymResponseCreateParamsNonStreaming,
-        payload: dict[str, Any],
-    ) -> None:
-        """Stage adapter-specific inputs before the shared supervised launch."""
-
-    def _restrict_owned_sandbox_network(
-        self, spec: SandboxSpec, provider: SandboxProvider, body: AgentSeedSessionRequest
-    ) -> SandboxSpec:
-        return restrict_sandbox_network(
-            spec,
-            network_access=self.config.network_access,
-            provider=provider,
-            model_base_url=self.resolve_model_base_url(self.config.model_server.name, trace_context=False),
-            tool_urls=[
-                str(access.connection.url)
-                for access in self.effective_tool_accesses(body)
-                if isinstance(access, MCPToolAccess)
-            ],
-            required_tool_urls=[
-                str(access.connection.url)
-                for access in self.effective_tool_accesses(body)
-                if isinstance(access, MCPToolAccess) and access.required
-            ],
-        )
-
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> OpenCodeSandboxSession:
         """Prepare only the harness runtime; Resources owns borrowed task setup."""
         if self.config.model_server is None:
@@ -1123,7 +1092,22 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         provider = create_provider(resolve_provider_config(provider_ref, get_global_config_dict()))
         if owns_sandbox:
             try:
-                spec = self._restrict_owned_sandbox_network(spec, provider, body)
+                spec = restrict_sandbox_network(
+                    spec,
+                    network_access=self.config.network_access,
+                    provider=provider,
+                    model_base_url=self.resolve_model_base_url(self.config.model_server.name, trace_context=False),
+                    tool_urls=[
+                        str(access.connection.url)
+                        for access in self.effective_tool_accesses(body)
+                        if isinstance(access, MCPToolAccess)
+                    ],
+                    required_tool_urls=[
+                        str(access.connection.url)
+                        for access in self.effective_tool_accesses(body)
+                        if isinstance(access, MCPToolAccess) and access.required
+                    ],
+                )
             except BaseException:
                 await provider.aclose()
                 raise
@@ -1137,7 +1121,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         # Caller-assigned IDs are wire identifiers, never filesystem paths.
         directory = f"/tmp/nemo-gym-opencode-sessions/{uuid4().hex}"
         runtime = f"/tmp/nemo-gym-opencode-runtime-{self.config.opencode_version}"
-        state = self.session_state_type(
+        state = OpenCodeSandboxSession(
             request=body,
             session=SandboxSession(
                 sandbox=sandbox, session_dir=directory, workdir=workdir, harness="OpenCode", owns_sandbox=owns_sandbox
@@ -1864,8 +1848,6 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     # A first activation's budget starts once it holds a slot, as Pi's does: staging spends it,
                     # and OpenCode runs for what remains.
                     deadline = monotonic() + timeout
-                async with asyncio.timeout_at(deadline):
-                    await self._prepare_session_launch(state, body, payload)
                 await state.execute(
                     payload,
                     media=media,

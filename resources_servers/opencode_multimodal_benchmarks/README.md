@@ -20,7 +20,7 @@ transport, setup and unclassified process failures remain retryable or unfinishe
 
 See the [benchmark guide](../../benchmarks/opencode_multimodal_benchmarks/ONBOARDING.md) for
 input formats, preparation, configuration and validation, and the
-[agent README](../../responses_api_agents/opencode_multimodal_agent/README.md)
+[agent README](../../responses_api_agents/opencode_agent/README.md)
 for execution and tool policies.
 
 VTCBench scoring follows the [public evaluator](https://github.com/zhuzil/VTC-Bench/blob/5e0a5533f597b0c56dae7d9705771498202ab19b/eval/eval/VLMEvalKit/vlmeval/dataset/image_vqa.py).

@@ -23,6 +23,7 @@ from nemo_gym.utils import error_to_http_status, explicit_causes, is_nemo_gym_fa
 from nemo_gym.verification import JUDGE_FAILURES, JudgeError, call_judge, is_judge_failure
 from resources_servers.opencode_multimodal_benchmarks.metrics import average_repeats, pass_at_k
 from resources_servers.opencode_multimodal_benchmarks.reporting import benchmark_report
+from resources_servers.opencode_multimodal_benchmarks.rewards import OpenCodeToolRewardConfig
 from resources_servers.opencode_multimodal_benchmarks.verifier import (
     VisualVerifier,
 )
@@ -60,6 +61,7 @@ class VisualBenchmarksConfig(BaseResourcesServerConfig):
     judge_timeout: float = Field(default=120, gt=0)
     judge_attempts: int = Field(default=3, gt=0)
     vtc_llm_fallback: bool = True
+    tool_rewards: OpenCodeToolRewardConfig | None = None
 
     @model_validator(mode="before")
     @classmethod

@@ -3,14 +3,15 @@
 #
 # OpenCode system prompt: MIT, Copyright (c) 2025 opencode.
 # Source: https://github.com/anomalyco/opencode/blob/67aec2212010d67775c35e696d8b8b54902eb338/packages/opencode/src/session/prompt/default.txt
-# Full license: responses_api_agents/opencode_multimodal_agent/third-party-notices.md
+# Full license: benchmarks/opencode_multimodal_benchmarks/third-party-notices.md
 # Evaluation only; native training configurations do not import this profile.
 config_paths:
-- responses_api_agents/opencode_multimodal_agent/configs/eval_55_grace10.yaml
+- responses_api_agents/opencode_agent/configs/permissions/default.yaml
 visual_agent:
+  _inherit_from: opencode_agent
   responses_api_agents:
-    opencode_multimodal_agent:
-      entrypoint: eval.py
+    opencode_agent:
+      entrypoint: app.py
       model_server:
         type: responses_api_models
         name: policy_model
@@ -236,13 +237,19 @@ visual_agent:
       concurrency: 512
       context_window: 131072
       max_output_tokens: 131072
-      max_images: null
-      max_source_pixels: 150000000
       timeout: 14400
-      command_exec_timeout: 120
+      image_input: true
+      opencode_config:
+        agent:
+          build:
+            steps: 65
+        compaction:
+          auto: false
+        permission:
+          webfetch: deny
+          websearch: deny
+          skill: deny
       token_id_capture: false
-      tool_rewards: null
-      compaction_auto: false
       system_prompt_mode: replace
       sandbox_provider: sandbox
       sandbox_config:
@@ -252,8 +259,7 @@ visual_agent:
 policy_model:
   responses_api_models:
     vllm_model:
-      entrypoint: visual_eval.py
-      max_images: null
+      entrypoint: app.py
       return_token_id_information: false
       uses_reasoning_parser: true
       chat_template_kwargs:
@@ -264,4 +270,3 @@ policy_model:
         max_completion_tokens: null
       extra_body: null
       propagate_context_overflow_errors: true
-      turn_state_idle_timeout_seconds: 18000

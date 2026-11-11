@@ -25,15 +25,16 @@ sandbox through Gym's shared agent-session lifecycle.
 This uses the same provider execution boundary as BrowseComp's OpenCode pairing.
 The deployment chooses the provider, task image and network separation. It does
 not replace the benchmark's tools with BrowseComp's Exa wrappers. Prompts,
-sampling, 55+10 turn budgets and scorers are preserved; ZeroBench still uses five
+sampling and scorers are preserved. The former 55+10 grace protocol is replaced
+by OpenCode’s stock advisory final-answer request after 65 steps; ZeroBench still uses five
 repeats and primary pass@5.
 
 All evaluations use owned OpenSandbox sessions. Supply provider credentials through
 runtime environment variables and an image with the visual tools and offline
 OpenCode assets required by the chosen network policy. Evaluation and training
 share the same session implementation; the local relay recipes have been removed.
-See the [agent session setup](../../responses_api_agents/opencode_multimodal_agent/README.md#agent-sessions)
-and [network profiles](../../responses_api_agents/opencode_multimodal_agent/README.md#network-and-tool-profiles).
+See the [agent session setup](../../responses_api_agents/opencode_agent/README.md#sandbox-sessions)
+and [network profiles](../../responses_api_agents/opencode_agent/README.md#sandbox-sessions).
 Resume historical runs with their recorded Gym revision and configuration.
 
 ## Run configuration
@@ -78,9 +79,10 @@ fully observed grading record. It is never labeled model-free grading.
 
 An invalid judge reply is not a model mistake. Transport or parsing failures
 preserve the policy response and become masked `judge_failed` outcomes. Direct
-resource-only rows can be rejudged from the saved answer. OpenCode environment
-rows require its scoring projection and reward shaping; direct `gym eval reverify`
-rejects those rows until environment-aware replay is supported. If a parsing retry succeeds after an unparseable
+resource-only rows can be rejudged from the saved answer. Historical custom OpenCode environment
+rows require environment-aware replay and are rejected by `gym eval reverify`.
+Stock environment rows with verifier-owned rewards can be rejudged when the
+original configuration and execution evidence are available. If a parsing retry succeeds after an unparseable
 reply, the score is retained but the grading operation remains `unknown`: an
 invalid reply is not falsely marked as a parsed verdict. Inspect these outcomes
 before claiming complete grading evidence.
@@ -97,8 +99,8 @@ Catalog pairings have no whole-episode deadline by default. To set one, configur
 event loop's monotonic clock. Cleanup has a separate
 `cleanup_timeout_seconds` budget and runs after the episode deadline.
 
-The OpenCode overlay has a 131072-token context/output ceiling and a 55+10 turn
-budget. Its `timeout` setting (optionally narrowed by request metadata
+The OpenCode overlay has a 131072-token context/output ceiling and requests a
+final answer after 65 steps. This request is advisory; tools remain available. Its `timeout` setting (optionally narrowed by request metadata
 `agent_timeout_sec`) is a separate harness execution deadline, enforced
 by the shared OpenCode sandbox session using the monotonic clock; installation
 uses `sandbox_install_timeout_seconds`, and close uses
@@ -173,3 +175,24 @@ fields. Gym's local `env publish` finalizer currently rejects `unknown`, althoug
 existing experimental catalog entries also use it. Manifest validation and
 verifier checks can pass independently; do not report the publication check as
 passed or replace these values with a guessed license to bypass it.
+
+## Training rewards and row profiles
+
+The benchmark verifier defaults to `tool_rewards: null` for evaluation. Training
+can enable the existing answer-dependent schedule with `tool_rewards: {}` on the
+Resources server. Scoring reads tool execution outcomes from the shared trajectory
+or observation bundle; it never interprets model-visible output as an exit status.
+
+For existing math, MCQA, and string-match training tasks, select `tool_rewards.py`
+as that Resources server's entrypoint. These thin verifier entrypoints share the
+same reward implementation and retain their existing task schemas and graders.
+Set the schedule on the Resources server, not the agent. Original response messages
+and token arrays are preserved; reasoning cleanup affects only the grading view.
+The stock `single_agent_turn` environment forwards the shared execution evidence.
+
+Each row can select a different environment through `task_source`. Bind restricted
+rows to an OpenCode profile with `network_access: model_only`; bind web-enabled rows
+to a separate profile with `network_access: inherit` and appropriate tool permissions.
+The policy is fixed when the owned sandbox is created. Configure OpenSandbox in
+both profiles. Native Exa activation and a configurable bash timeout are separate
+stock-agent follow-ups; the default benchmark profile does not enable web tools.

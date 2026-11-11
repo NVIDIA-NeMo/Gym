@@ -12,7 +12,7 @@ opencode_multimodal_benchmarks:
       host: 127.0.0.1
 visual_agent:
   responses_api_agents:
-    opencode_multimodal_agent:
+    opencode_agent:
       network_access: model_only
       host: 127.0.0.1
       num_workers: 1
@@ -20,7 +20,7 @@ visual_agent:
 visual_environment:
   environment_servers:
     single_agent_turn:
-      entrypoint: opencode.py
+      entrypoint: app.py
       host: 127.0.0.1
       cleanup_timeout_seconds: 180
       agent_server:

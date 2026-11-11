@@ -1,7 +1,7 @@
 # OpenCode benchmark onboarding
 
 All recipes use the shared OpenCode session path and owned OpenSandbox. See the
-[catalog guide](README.md) and [agent setup](../../responses_api_agents/opencode_multimodal_agent/README.md).
+[catalog guide](README.md) and [agent setup](../../responses_api_agents/opencode_agent/README.md).
 Do not change runtime revisions while resuming historical runs.
 
 ## Supported benchmarks
@@ -53,12 +53,12 @@ including last-brace extraction and whitespace behavior. The default is five rep
 
 Compose the selected benchmark YAML with [`opencode_eval.yaml`](opencode_eval.yaml)
 and your policy model configuration. See the
-[agent setup guide](../../responses_api_agents/opencode_multimodal_agent/README.md)
+[agent setup guide](../../responses_api_agents/opencode_agent/README.md)
 for the task image, pinned offline runtime assets, and provider configuration.
 
 The example profile uses OpenCode 1.17.11, a 131072-token context/output ceiling,
-and 55 regular turns plus 10 grace turns. It retains reasoning history, disables
-compaction, and allows at most two tool calls during the grace period. These
+and the stock 65-step limit. It retains reasoning history, disables
+compaction, and uses OpenCode’s native final-answer note at the step limit. These
 settings can be overridden. Match the serving model's context and image capacity
 to your run, and configure sampling and concurrency explicitly.
 

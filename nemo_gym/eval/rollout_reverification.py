@@ -392,7 +392,7 @@ def _check_saved_answer_replay(pair: InputRolloutPair, source: _ReplaySource | N
             _opencode_environment(environment)
             for environment in _saved_environments(original, setup_server_client().global_config_dict)
         )
-    if special or "opencode_tool_reward" in pair.rollout or (native and not ordinary):
+    if special or ((native or "opencode_tool_reward" in pair.rollout) and not ordinary):
         raise ConfigError(
             "reverify: OpenCode environment grading cannot be replayed through a direct resources-server /verify. "
             "Native full-response replay requires a digest-verified original plain SingleAgentTurn environment "
@@ -895,7 +895,15 @@ def _build_verify_payload(pair: InputRolloutPair) -> Dict:
     # Preserve only verifier inputs, not rewards or failure bookkeeping. SciCode's /verify grades the accumulated
     # per-sub-step solutions an agent sent, which a masked row keeps (the response holds only the last step), with the
     # usage accounting that travels through the verifier.
-    for key in ("deliverables_dir", "reference_ids", "solutions", "token_usage_version", "step_usage"):
+    for key in (
+        "deliverables_dir",
+        "reference_ids",
+        "solutions",
+        "token_usage_version",
+        "step_usage",
+        "ng_trajectory",
+        "ng_agent_observations",
+    ):
         if key in pair.rollout:
             payload[key] = pair.rollout[key]
     if replay_patch:
@@ -1381,7 +1389,7 @@ async def _call_aggregate_metrics(
 # ---------------------------------------------------------------------------
 
 
-def _prepare_output_fpaths(
+def _validate_output_fpaths(
     output_name_prefix: str,
     output_jsonl_fpath: str,
     resume_from_cache: bool,
@@ -1392,7 +1400,6 @@ def _prepare_output_fpaths(
 ) -> OutputPaths:
     output_fpath = Path(output_jsonl_fpath)
     output_fpath = output_fpath.with_name(output_name_prefix + output_fpath.name)
-    output_fpath.parent.mkdir(parents=True, exist_ok=True)
     # Inspect both spellings, but retain the destination for atomic publication:
     # replacing an output symlink must not replace its target.
     for target in {output_fpath, resolve_rollout_owner(output_fpath)}:
@@ -1415,6 +1422,30 @@ def _prepare_output_fpaths(
                     "Reverification output must not overwrite source rollout artifacts or its recovery files. "
                     "Choose a separate output path. Saved artifacts were not changed."
                 )
+    return paths
+
+
+def _prepare_output_fpaths(
+    output_name_prefix: str,
+    output_jsonl_fpath: str,
+    resume_from_cache: bool,
+    overwrite: bool,
+    append: bool,
+    *,
+    protected_sources: tuple[Path, ...] = (),
+) -> OutputPaths:
+    paths = _validate_output_fpaths(
+        output_name_prefix,
+        output_jsonl_fpath,
+        resume_from_cache,
+        overwrite,
+        append,
+        protected_sources=protected_sources,
+    )
+    output_fpath = Path(output_jsonl_fpath)
+    output_fpath = output_fpath.with_name(output_name_prefix + output_fpath.name)
+    output_fpath.parent.mkdir(parents=True, exist_ok=True)
+    destination, failures_fpath = paths.output, paths.failures
     if not (append or resume_from_cache):
         # A fresh run must not silently clobber a prior run's rollouts: delete only when the user
         # explicitly opts in via overwrite, otherwise refuse. resume_from_cache and append reuse the file.
@@ -2075,12 +2106,13 @@ class RolloutReverificationHelper(BaseModel):
                     validate_settle_source_snapshot(rollouts_jsonl_fpath, config.settle_source_snapshot_json)
             source_store = RolloutStore.read(rollouts_jsonl_fpath, import_legacy=False)
             replay_source = _replay_source(source_store)
-            output_fpaths = _output_fpaths(
+            output_fpaths = _validate_output_fpaths(
                 output_name_prefix,
                 config.output_jsonl_fpath,
                 config.resume_from_cache,
                 config.overwrite,
                 config.append,
+                protected_sources=tuple(protected_sources),
             )
             reverify_source_fpath = rollouts_jsonl_fpath
             rollout_predicate = None

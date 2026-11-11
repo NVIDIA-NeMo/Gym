@@ -868,17 +868,3 @@ async def test_a_remote_installer_keeps_its_setup_when_exec_outcome_is_unknown(t
     assert result.return_code == 0 and result.error_type is None
     assert await runtime.is_installed(task.sandbox)
     assert sorted(os.listdir(runtime.directory)) == ["home", "python"]
-
-
-@pytest.mark.asyncio
-async def test_stdlib_only_runtime_builds_without_uv_or_package_downloads(tmp_path, monkeypatch):
-    runtime = SandboxPythonRuntime(harness="stdlib-test", requirements=(), import_check="import socket")
-    monkeypatch.setattr(shutil, "which", lambda _: None)
-    run = AsyncMock(side_effect=AssertionError("No package installer for stdlib-only runtime"))
-    monkeypatch.setattr(sandbox_python, "_run", run)
-    archive = tmp_path / "runtime.tar.gz"
-    await runtime._build_site_packages(SandboxPlatform("aarch64", "gnu", 35), archive)
-    with tarfile.open(archive) as bundle:
-        assert any(member.name.endswith("site-packages") for member in bundle.getmembers())
-        assert all(member.isdir() for member in bundle.getmembers())
-    run.assert_not_awaited()

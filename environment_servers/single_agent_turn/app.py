@@ -664,7 +664,12 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 server_name=self.config.resources_server.name,
                 url_path="/verify",
                 # The session cookie identifies the episode.
-                json=self._verify_body(request, agent_response) | verification_failure_fields(agent_response),
+                json=self._verify_body(request, agent_response)
+                | verification_failure_fields(agent_response)
+                | ({"ng_trajectory": trajectory.model_dump(mode="json")} if trajectory is not None else {})
+                | (
+                    {"ng_agent_observations": observations.model_dump(mode="json")} if observations is not None else {}
+                ),
                 cookies=handles.resources_cookies,
                 # Final cleanup closes the session, so the Resources Server keeps tracking it until then.
                 headers={CHECKPOINT_CLOSE_FOLLOWS_HEADER: "1"},

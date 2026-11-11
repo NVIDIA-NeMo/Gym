@@ -15,7 +15,6 @@ from nemo_gym.models.model_call_capture import _CaptureMiddleware
 from nemo_gym.models.token_capture import (
     NG_CAPTURE_FIELD,
     NG_COMMIT_COORDS_FIELD,
-    OPENCODE_MAX_STEPS_PROMPT,
     UNCOMMITTED_CALL_REASON,
     CaptureContext,
     FileLineageStore,
@@ -31,9 +30,9 @@ from nemo_gym.models.token_capture import (
     set_token_sink,
     trajectories_from_source,
 )
+from nemo_gym.models.token_capture.harness_notes.opencode import OPENCODE_MAX_STEPS_PROMPT
 from nemo_gym.models.token_capture.staging import CaptureAdmission, RolloutTokenCapture, StageResult
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
-from responses_api_models.vllm_model.app_opencode import OpenCodeVLLMModel, OpenCodeVLLMModelConfig
 
 
 def _model(client: NeMoGymAsyncOpenAI, **config_overrides: Any) -> VLLMModel:
@@ -312,10 +311,7 @@ def test_external_staging_conversion_failure_does_not_commit(tmp_path, monkeypat
 
 
 @pytest.mark.parametrize("note_content", ["string", "text_parts"])
-@pytest.mark.parametrize("opencode_adapter", [False, True])
-def test_external_staging_chains_calls_across_opencode_max_steps_notes(
-    tmp_path, note_content, opencode_adapter
-) -> None:
+def test_external_staging_chains_calls_across_opencode_max_steps_notes(tmp_path, note_content) -> None:
     """OpenCode's step-limit note is harness text: the model reads it as a user message, and every call chains.
 
     OpenCode 1.17.11 adds the note as a final assistant message to each request from the limit on, and drops
@@ -361,11 +357,6 @@ def test_external_staging_chains_calls_across_opencode_max_steps_notes(
     backend = MagicMock(spec=NeMoGymAsyncOpenAI)
     backend.create_chat_completion = AsyncMock(side_effect=complete)
     model = _model(backend, return_token_id_information=False, supply_prefix_token_ids=False)
-    if opencode_adapter:
-        model = OpenCodeVLLMModel(
-            config=OpenCodeVLLMModelConfig(**model.config.model_dump()), server_client=model.server_client
-        )
-        model._clients = [backend]
     model._external_capture_handler = VLLMWorkerCaptureHandler()
     ledger = FileLineageStore(tmp_path)
     app = _CaptureMiddleware(

@@ -12,7 +12,6 @@ from nemo_gym.server_runtime import (
     observe_llm_judge_grading,
     observe_programmatic_grading,
 )
-from nemo_gym.utils import final_assistant_text as final_answer
 from nemo_gym.verification import JudgeError, record_parsed_judge_verdict
 from resources_servers.opencode_multimodal_benchmarks.mcq import (
     MCQ_SCORER,
@@ -20,6 +19,8 @@ from resources_servers.opencode_multimodal_benchmarks.mcq import (
     matcher_prompt,
     visible_answer,
 )
+from resources_servers.opencode_multimodal_benchmarks.rewards import OpenCodeToolReward, trajectory_tool_reward
+from resources_servers.opencode_multimodal_benchmarks.rewards import final_assistant_text as final_answer
 from resources_servers.opencode_multimodal_benchmarks.task_data import TaskData
 from resources_servers.opencode_multimodal_benchmarks.vtcbench import (
     final_answer_text,
@@ -50,6 +51,8 @@ class VisualVerifyResponse(VisualVerifyRequest, BaseVerifyResponse):
     scorer: str
     extraction_method: str | None = None
     judge_model: str | None = None
+    opencode_tool_reward: OpenCodeToolReward | None = None
+    reward_components: dict[str, float] | None = None
 
 
 class InvalidJudgeVerdict(JudgeError):
@@ -70,8 +73,22 @@ class VisualVerifier:
             prediction = final_answer_text(prediction)
 
         def response(hit: float, extracted: str | None, scorer: str, **details: Any) -> VisualVerifyResponse:
+            tools = (
+                trajectory_tool_reward(
+                    body.response, body.ng_trajectory, float(hit), self.config.tool_rewards, body.ng_agent_observations
+                )
+                if self.config.tool_rewards is not None
+                else None
+            )
+            bonus = tools.auxiliary_reward if tools is not None else 0.0
             return VisualVerifyResponse(
-                **body.model_dump(), reward=float(hit), extracted=extracted, scorer=scorer, **details
+                **body.model_dump(),
+                reward=float(hit) + bonus,
+                extracted=extracted,
+                scorer=scorer,
+                opencode_tool_reward=tools,
+                reward_components={"verifier": float(hit), "opencode_tool_reward": bonus},
+                **details,
             )
 
         if not prediction.strip():
