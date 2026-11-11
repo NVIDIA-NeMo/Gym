@@ -13,6 +13,7 @@ from harbor.models.trial.result import TrialResult
 from pydantic import model_validator
 
 from nemo_gym.config import ModelServerRef, get_first_server_config_dict, get_global_config_dict
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.harbor_agent_general.app import (
     HarborAgent,
     HarborAgentConfig,
@@ -99,3 +100,5 @@ class LegalAgentBenchHarborBridge(HarborAgent):
 
 if __name__ == "__main__":
     LegalAgentBenchHarborBridge.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = LegalAgentBenchHarborBridge.run_webserver()  # noqa: F401

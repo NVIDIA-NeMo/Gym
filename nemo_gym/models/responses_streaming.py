@@ -369,7 +369,8 @@ def _wire_usage(usage: Any) -> Any:
     Gym keeps an unreported cache or reasoning breakdown as ``None`` internally to tell unknown
     from zero. On the wire those counts are integers, and a strict streaming client (the Codex
     CLI) that meets ``null`` fails to parse ``response.completed``, treats the stream as
-    disconnected, and re-sends the whole request.
+    disconnected, and re-sends the whole request. Unknown cache-write counts are omitted
+    rather than represented as null or invented as zero.
     """
     if not isinstance(usage, dict):
         return usage
@@ -380,6 +381,11 @@ def _wire_usage(usage: Any) -> Any:
             usage[group] = {name: 0}
         elif isinstance(details, dict) and details.get(name) is None:
             usage[group] = {**details, name: 0}
+    input_details = usage.get("input_tokens_details")
+    if isinstance(input_details, dict) and input_details.get("cache_write_tokens") is None:
+        input_details = dict(input_details)
+        input_details.pop("cache_write_tokens", None)
+        usage["input_tokens_details"] = input_details
     return usage
 
 

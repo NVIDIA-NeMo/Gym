@@ -643,7 +643,8 @@ def split_servers(
                 refused.append(
                     f"{name} in a run of {display(path)} would merge a {RELAY} server with {inherited}, "
                     f"which switches; keep the name there and replace its definition with a complete {RELAY} server, "
-                    f"deleting _inherit_from and single_agent_turn_legacy, as benchmarks/hle/opencode.yaml does"
+                    f"deleting _inherit_from and single_agent_turn_legacy, "
+                    f"as benchmarks/hle/opencode_legacy_agent.yaml does"
                 )
                 continue
             for declaration in switching:
