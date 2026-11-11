@@ -30,16 +30,21 @@ come from the requester model.
 import asyncio
 import copy
 import json
+import logging
 import math
+import os
 import re
 import typing
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import unquote
 
 from automationbench.rubric.registry import AssertionRegistry
 from automationbench.schema.world import WorldState
 from automationbench.tools.api.fetch import api_fetch as upstream_api_fetch
 
+
+logger = logging.getLogger(__name__)
 
 WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 DAY_ASSERTIONS = {"acted_on_day", "not_acted"}
@@ -142,7 +147,9 @@ class Clock:
             return json.dumps({"now": self.now().isoformat(), "advanced": False})
         while self.events and _time(self.events[0]["at"]) <= target:
             apply_patch(self.world, self.events.pop(0)["patch"])
-        self.world.meta.current_time = target
+        # Keep the seed's awareness: upstream date queries read a naive time as host-local time.
+        aware = self.world.meta.current_time.tzinfo is not None
+        self.world.meta.current_time = target.replace(tzinfo=timezone.utc) if aware else target
         return json.dumps({"now": target.isoformat(), "advanced": True})
 
     def fetch(self, method: str, url: str, params=None, body=None) -> str:
@@ -273,7 +280,9 @@ async def reward(state, **kwargs) -> float:
 
 
 class RequesterUnavailable(RuntimeError):
-    """The requester endpoint gave no usable answer within its tries."""
+    """The requester endpoint gave no usable answer within its tries, or a dated event could not be applied.
+
+    Either way the episode ends with `requester_failed` set, so the rollout is masked instead of scored."""
 
 
 def _state_metric(key: str):
@@ -302,6 +311,8 @@ def load_environment(
     requester_base_url: str | None = None,
     requester_model: str | None = None,
     requester_body: dict | None = None,
+    requester_api_key_env: str | None = None,
+    requester_api_key_file: str | None = None,
     max_user_turns: int = 3,
     max_requester_tool_calls: int = 8,
     requester_max_tries: int = 4,
@@ -313,12 +324,23 @@ def load_environment(
 
     `requester_base_url` and `requester_model` name the OpenAI-compatible chat endpoint that plays the requester on
     multi-turn rows (`user_card` or `requester_services`). Rows without those keys never call it. `requester_body` is
-    merged into every requester request (for example `{"chat_template_kwargs": {"thinking": false}}`). Each requester
-    try ends after `requester_timeout_s`; after `requester_max_tries` failed tries the episode ends with
-    `requester_failed` set.
+    merged into every requester request after the built-in sampling values, so its keys win (for example
+    `{"chat_template_kwargs": {"thinking": false}, "max_tokens": 4096}`). An API key, if the endpoint needs one, is read
+    from the environment variable named by `requester_api_key_env` or from the file at `requester_api_key_file` and
+    sent as a Bearer token. Each requester try ends after `requester_timeout_s`. After `requester_max_tries` failed
+    tries the episode ends with `requester_failed` set.
     """
     if not (0 < requester_timeout_s < math.inf):
         raise ValueError(f"requester_timeout_s must be positive and finite, got {requester_timeout_s!r}")
+    if requester_max_tries < 1:
+        raise ValueError(f"requester_max_tries must be at least 1, got {requester_max_tries!r}")
+    if requester_api_key_env:
+        api_key = os.environ.get(requester_api_key_env)
+        if not api_key:
+            raise ValueError(f"requester_api_key_env names {requester_api_key_env!r}, which is not set")
+    else:
+        api_key = Path(requester_api_key_file).read_text().strip() if requester_api_key_file else None
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
     import verifiers as vf
     from automationbench_env import AutomationBenchEnv
     from datasets import Dataset
@@ -361,7 +383,13 @@ def load_environment(
             reply = state.pop("pending_user_reply", None)
             if reply is not None:
                 return [{"role": "user", "content": reply}]
-            out = await super().env_response(messages, state, **response_kwargs)
+            try:
+                out = await super().env_response(messages, state, **response_kwargs)
+            except vf.ToolCallError as e:
+                # A dated event that cannot be applied is a dataset failure, not the policy's: end the rollout masked.
+                if isinstance(e.__cause__, RequesterUnavailable):
+                    self._requester_failed(state, e.__cause__)
+                raise
             own = set(state["info"].get("requester_services") or [])
             for m in out:
                 hit = OUT_OF_SCOPE.search(str(_get(m, "content") or ""))
@@ -369,6 +397,10 @@ def load_environment(
                     self._unavailable(state, "out_of_scope_calls")
                     state["requester_service_calls"] = state.get("requester_service_calls", 0) + (hit.group(1) in own)
             return out
+
+        def _requester_failed(self, state, error: Exception) -> None:
+            state["requester_failed"] = 1
+            logger.warning("ab_synth: episode ends unscored: %s", str(error)[:200])
 
         @vf.stop
         async def no_tools_called(self, state) -> bool:
@@ -388,8 +420,7 @@ def load_environment(
             try:
                 reply = await (self._acting_reply(state) if info.get("requester_services") else self._reply(state))
             except RequesterUnavailable as e:
-                state["requester_failed"] = 1
-                print(f"[ab_synth] requester unavailable, episode ends unscored: {str(e)[:200]}", flush=True)
+                self._requester_failed(state, e)
                 return True
             if not reply or reply.rstrip(".").upper() == "DONE":
                 return True
@@ -418,13 +449,11 @@ def load_environment(
             counts as a failed try."""
             from nemo_gym.client import request
 
-            if not (requester_base_url and requester_model):
-                raise RequesterUnavailable("requester_base_url and requester_model are not set")
             url = requester_base_url.rstrip("/") + "/chat/completions"
-            payload = {"model": requester_model, "messages": messages, **(requester_body or {}), **body}
+            payload = {"model": requester_model, "messages": messages, **body, **(requester_body or {})}
 
             async def attempt_once() -> dict:
-                response = await request("POST", url, json=payload)
+                response = await request("POST", url, json=payload, headers=headers)
                 response.raise_for_status()
                 return (await response.json())["choices"][0]
 
@@ -484,16 +513,25 @@ def load_environment(
                     msgs.append(
                         {"role": "tool", "tool_call_id": call["id"], "content": result[:REQUESTER_RESULT_CHARS]}
                     )
-            return ""
+            raise RequesterUnavailable("the requester kept calling tools after tool_choice=none")
 
     def wait(until: str, clock: Clock) -> str:
-        return clock.wait(until)
+        try:
+            return clock.wait(until)
+        except Exception as e:  # noqa: BLE001  a broken event row, reported as a requester failure and masked
+            raise RequesterUnavailable(f"dated event failed: {type(e).__name__}: {e}") from e
 
     def api_fetch(method: str, url: str, params=None, body=None, clock: Clock = None) -> str:
         return clock.fetch(method, url, params, body)
 
     with open(tasks_path) as f:
         rows = [json.loads(line) for line in f if line.strip()]
+    if not (requester_base_url and requester_model) and any(
+        r["info"].get("user_card") or r["info"].get("requester_services") for r in rows
+    ):
+        raise ValueError(
+            "multi-turn rows (user_card or requester_services) need requester_base_url and requester_model"
+        )
     dataset = Dataset.from_list(
         [
             {
@@ -511,6 +549,7 @@ def load_environment(
         rubric=vf.Rubric(funcs=funcs, weights=[1.0] + [0.0] * len(METRICS)),
         max_turns=max_turns,
         toolset="api",
+        stop_errors=[RequesterUnavailable],
         **kwargs,
     )
     env.tool_map["api_fetch"] = api_fetch

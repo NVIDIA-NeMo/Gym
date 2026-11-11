@@ -7,9 +7,11 @@ import json
 import tempfile
 import unittest
 import unittest.mock
+from datetime import datetime, timezone
 
+import verifiers as vf
 from automationbench.schema.world import WorldState
-from verifiers.legacy.types import AssistantMessage
+from verifiers.legacy.types import AssistantMessage, ToolCall
 
 from environments.ab_synth import ab_synth_env as env
 
@@ -99,6 +101,13 @@ class ClockTest(unittest.TestCase):
         clock.wait("2026-03-04T03:30:00-05:00")
         self.assertEqual(clock.world.hubspot.contacts[1].lifecyclestage, "opportunity")
 
+    def test_wait_keeps_a_utc_seed_timezone_aware(self):
+        world = WorldState(**{**copy.deepcopy(INITIAL_STATE), "meta": {"current_time": "2026-03-02T09:00:00Z"}})
+        clock = env.Clock(world, [], INFO["period_end"])
+
+        clock.wait("2026-03-03T09:00:00")
+        self.assertEqual(world.meta.current_time, datetime(2026, 3, 3, 9, tzinfo=timezone.utc))
+
     def test_event_for_a_missing_record_names_the_event(self):
         events = [
             {
@@ -180,6 +189,8 @@ SINGLE_DAY = {"initial_state": INITIAL_STATE, "assertions": [PROMOTED]}
 
 
 def load(info, **kwargs):
+    kwargs.setdefault("requester_base_url", "http://127.0.0.1:9/v1")
+    kwargs.setdefault("requester_model", "m")
     row = {"responses_create_params": {"input": PROMPT}, "info": info}
     with tempfile.NamedTemporaryFile("w", suffix=".jsonl") as f:
         f.write(json.dumps(row) + "\n")
@@ -325,6 +336,57 @@ class RequesterTest(unittest.TestCase):
         for bad in (0, -1, float("inf")):
             with self.assertRaises(ValueError):
                 load(SINGLE_DAY, requester_timeout_s=bad)
+
+    def test_multi_turn_rows_need_a_requester_and_at_least_one_try(self):
+        with self.assertRaisesRegex(ValueError, "need requester_base_url and requester_model"):
+            load({**SINGLE_DAY, "user_card": "notes"}, requester_base_url=None)
+        with self.assertRaisesRegex(ValueError, "requester_max_tries"):
+            load(SINGLE_DAY, requester_max_tries=0)
+        load(SINGLE_DAY, requester_base_url=None, requester_model=None)  # single-day rows never call it
+
+    def test_requester_body_overrides_sampling_and_the_key_is_sent(self):
+        with tempfile.NamedTemporaryFile("w") as key:
+            key.write("secret\n")
+            key.flush()
+            vf_env, _ = load(SINGLE_DAY, requester_body={"max_tokens": 4096}, requester_api_key_file=key.name)
+        sent = {}
+
+        class Response:
+            def raise_for_status(self):
+                pass
+
+            async def json(self):
+                return {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]}
+
+        async def fake_request(method, url, **kwargs):
+            sent.update(kwargs)
+            return Response()
+
+        with unittest.mock.patch("nemo_gym.client.request", fake_request):
+            asyncio.run(vf_env._chat([{"role": "user", "content": "hi"}], temperature=0.7, max_tokens=400))
+        self.assertEqual((sent["json"]["max_tokens"], sent["json"]["temperature"]), (4096, 0.7))
+        self.assertEqual(sent["headers"], {"Authorization": "Bearer secret"})
+
+    def test_a_requester_that_never_stops_calling_tools_is_unavailable(self):
+        vf_env, state = load({**SINGLE_DAY, "requester_services": ["hubspot"]}, max_requester_tool_calls=1)
+        call = {"id": "c1", "function": {"name": "api_search", "arguments": "{}"}}
+
+        async def chat(messages, **body):
+            return {"content": "", "tool_calls": [call]}
+
+        vf_env._chat = chat
+        end_turn(state, "Please check your HubSpot.")
+        self.assertTrue(asyncio.run(vf_env.no_tools_called(state)))
+        self.assertEqual(state["requester_failed"], 1)
+
+    def test_a_broken_dated_event_ends_the_rollout_masked(self):
+        events = [{"at": "2026-03-03T08:00:00", "patch": {"app": "hubspot", "collection": "contacts", "id": "999"}}]
+        vf_env, state = load({**INFO, "events": events})
+        call = ToolCall(id="w1", name="wait", arguments=json.dumps({"until": "2026-03-04T09:00:00"}))
+
+        with self.assertRaises(vf.ToolCallError):
+            asyncio.run(vf_env.env_response([AssistantMessage(content="", tool_calls=[call])], state))
+        self.assertEqual(state["requester_failed"], 1)
 
 
 if __name__ == "__main__":

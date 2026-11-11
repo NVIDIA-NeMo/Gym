@@ -17,7 +17,11 @@ ab_synth:
         # Multi-turn rows only: an OpenAI-compatible chat endpoint that plays the requester.
         requester_base_url: null
         requester_model: null
+        # Merged after the built-in sampling values (temperature 0.7, max_tokens 400 or 8192), so these keys win.
         requester_body: {}
+        # For an endpoint that needs a key: an environment variable name or a key file path, never the key itself.
+        requester_api_key_env: null
+        requester_api_key_file: null
         # Each requester try ends after this many seconds; after the last failed try the episode ends unscored.
         requester_timeout_s: 300
         unavailable_call_break: false

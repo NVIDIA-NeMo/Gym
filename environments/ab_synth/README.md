@@ -34,10 +34,15 @@ When the agent ends a turn without tool calls, a requester model answers as the 
   asks, the requester operates them with `api_search` and `api_fetch` (at most `max_requester_tool_calls` calls per
   reply) and reports back. The agent has to hand those steps over with every value they need.
 
-The requester is any OpenAI-compatible chat endpoint (`requester_base_url`, `requester_model`, extra request fields in
-`requester_body`), called through Gym's HTTP client. It sees only the visible conversation, never reasoning or tool
-traffic. Each try ends after `requester_timeout_s` (default 300). A requester that still fails after
-`requester_max_tries` ends the episode and sets the `requester_failed` metric. The agent config in `config.yaml` lists
+The requester is any OpenAI-compatible chat endpoint (`requester_base_url`, `requester_model`), called through Gym's
+HTTP client. `requester_body` fields are merged over the built-in sampling values, so a `max_tokens` or `temperature`
+there wins. An endpoint that needs a key gets it as a Bearer token, read from the environment variable named by
+`requester_api_key_env` or from the file at `requester_api_key_file`. The requester sees only the visible
+conversation, never reasoning or tool traffic. The environment refuses to load multi-turn rows when
+`requester_base_url` or `requester_model` is unset. Each try ends after `requester_timeout_s` (default 300). A requester that still fails after
+`requester_max_tries`, or keeps calling tools after its tool budget, ends the episode and sets the `requester_failed`
+metric. A dated event that cannot be applied (a missing record, an invalid field) does the same, since it is a dataset
+failure and not the agent's. The agent config in `config.yaml` lists
 it in `mask_sample_metrics`, so `verifiers_agent` returns that rollout with `mask_sample: true`
 (`failure_kind: verifiers_agent:requester_failed`) and the reward is not counted as a measurement.
 
@@ -55,6 +60,14 @@ Metrics: `user_turns`, `requester_failed`, `empty_turn`, `unknown_tool_calls`, `
 
 The dataset owns all text the policy reads: the `wait` tool's text comes from each row, and the requester's replies come
 from the requester model.
+
+## Limitations
+
+Simulated time reaches the world's clock (`meta.current_time`, which upstream date queries read) and the write log
+that `acted_on_day` and `not_acted` grade. It does not reach records the agent creates: many upstream AutomationBench
+routes and schema defaults stamp new records with the wall clock (`datetime.now()`), for example QuickBooks `txn_date`
+and Google Ads `conversion_time`. Only `acted_on_day` and `not_acted` grade timing, so row assertions must not depend on
+the timestamps of created records.
 
 ## Run
 
