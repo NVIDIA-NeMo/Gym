@@ -101,3 +101,22 @@ to PATH and its library directory to LD_LIBRARY_PATH. Exact tool hashes are in
 `runtime/enroot/saas-eval-tools.json`. To recreate these additions on SVG, run
 `runtime-image/provision-helpers.py --destination <helper-release> --image-rootfs
 <extracted-evaluation-image>`; it refuses to replace conflicting existing files.
+
+### SVG writable app storage and judge transport
+
+SVG deployments set `SAAS_ENROOT_PLATFORM_ROOT=/raid/enroot` and bind that platform
+path into the driver. Extracted app root filesystems and live Enroot runtime use
+its node-local `data/user-<SLURM_JOB_UID>/saas-<job>-<pid>` and `runtime/...` paths.
+The Slurm UID is intentional: an inner Pyxis process can report UID 0. Keep image
+layer caches, package caches, browser profiles, logs and artifacts in the mounted
+workspace cache. Writable app root filesystems on the shared NFS workspace caused
+permission errors and stale file handles; they are platform runtime, not caches.
+Set `SAAS_STATIC_SHELL=/saas-enroot-runtime/usr/bin/busybox`. Runtime admission
+rejects missing Enroot/network/UID helpers before dispatching episodes.
+
+`SAAS_BENCH_JUDGE_HTTP_TIMEOUT=120` enables the Gym-owned native-verifier transport
+wrapper. Only POST requests to the configured judge's `/chat/completions` endpoint
+receive the longer timeout and one transient retry. Native verifier scripts,
+criteria, weights and payloads remain unchanged; app requests keep their original
+timeouts, and exhausted judge errors remain masked. The opted-in verifier process
+budget is 600 seconds. With the option absent, the native launch path is unchanged.
