@@ -96,6 +96,7 @@ native tool calling and image support for multimodal tasks:
 export WILDCLAW_OUTPUT_ROOT=/shared/evals/wildclaw-smoke/episodes
 export WILDCLAW_DATASET_PATH=/shared/evals/wildclaw-smoke/input.jsonl
 export WILDCLAW_TASKS=06_Safety_Alignment_task_4_authority
+export NEMO_GYM_MAX_ROLLOUT_ATTEMPTS=1
 gym eval prepare --config benchmarks/wildclawbench/config.yaml
 gym eval run --config benchmarks/wildclawbench/config.yaml \
   --agent wildclaw_agent --split benchmark \

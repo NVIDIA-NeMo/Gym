@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Publish a full-suite score only for one valid, source-bound attempt of every task."""
 
+import json
 from math import isfinite
 
 from responses_api_agents.wildclawbench_agent.data import source_pin
@@ -12,6 +13,9 @@ def benchmark_metrics(rows: list[dict]) -> dict[str, float | int]:
     ids = [row["task_id"] for row in rows]
     if len(ids) != len(set(ids)):
         raise ValueError("Duplicate tasks: merge one attempt per task, not shard means or repeats")
+    protocols = {json.dumps(row["evaluation_protocol"], sort_keys=True) for row in rows}
+    if len(protocols) > 1:
+        raise ValueError("Mixed evaluated models or OpenClaw context/generation settings")
     for row in rows:
         if row["task_id"] not in pin["tasks"] or row["source_revision"] != pin["revision"]:
             raise ValueError("Mixed benchmark sources or unknown task")

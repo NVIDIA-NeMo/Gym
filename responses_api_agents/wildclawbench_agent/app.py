@@ -64,6 +64,7 @@ class WildClawVerifyResponse(BaseVerifyResponse):
     native_reward: float | None
     artifact_dir: str
     errors: list[str]
+    evaluation_protocol: dict
 
 
 def worker_environment(config: WildClawConfig, output: Path) -> dict[str, str]:
@@ -183,6 +184,12 @@ class WildClawAgent(SimpleResponsesAPIAgent):
                 context_window=self.config.context_window,
                 max_tokens=self.config.max_tokens,
                 thinking=self.config.thinking,
+                evaluation_protocol=dict(
+                    model_name=self.config.model_name,
+                    context_window=self.config.context_window,
+                    max_tokens=self.config.max_tokens,
+                    thinking=self.config.thinking,
+                ),
             )
             config_file = output / "worker.json"
             config_file.write_text(json.dumps(worker_config, indent=2))

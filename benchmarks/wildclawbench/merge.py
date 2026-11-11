@@ -24,6 +24,7 @@ def merge(paths: list[Path], output: Path) -> dict:
                     "native_reward",
                     "reward",
                     "mask_sample",
+                    "evaluation_protocol",
                 ):
                     if row[key] != receipt[key]:
                         raise ValueError(f"Native/Gym receipt mismatch for {key}: {path}")

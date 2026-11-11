@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi import HTTPException
 
+from benchmarks.wildclawbench.merge import merge
 from nemo_gym.client.server_client import ServerClient
 from responses_api_agents.wildclawbench_agent import data
 from responses_api_agents.wildclawbench_agent.app import WildClawAgent, WildClawConfig, WildClawRunRequest
@@ -106,6 +107,7 @@ def scored_rows():
             reward=0.0,
             native_reward=0.0,
             mask_sample=False,
+            evaluation_protocol=dict(model_name="policy", context_window=131072, max_tokens=8192, thinking="high"),
         )
         for task, name in pin["tasks"].items()
     ]
@@ -137,6 +139,34 @@ def test_task_mean_is_weighted_by_tasks_not_shard_means():
     rows = scored_rows()
     rows[0].update(reward=1.0, native_reward=1.0)
     assert benchmark_metrics(rows)["wildclawbench/overall_score"] == pytest.approx(1 / 60)
+
+
+def test_mixed_models_or_budgets_cannot_be_merged_into_one_score():
+    rows = scored_rows()
+    rows[0]["evaluation_protocol"]["model_name"] = "another-model"
+    with pytest.raises(ValueError, match="Mixed evaluated models"):
+        benchmark_metrics(rows)
+
+
+def test_merger_checks_original_receipts_before_publishing(tmp_path):
+    rows = scored_rows()
+    for row in rows:
+        artifact = tmp_path / row["task_id"]
+        artifact.mkdir()
+        row.update(artifact_dir=str(artifact), workspace_sha256="c" * 64)
+        (artifact / "result.json").write_text(json.dumps(row))
+    paths = [tmp_path / "shard-0.jsonl", tmp_path / "shard-1.jsonl"]
+    for index, path in enumerate(paths):
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows[index::2]))
+    output = tmp_path / "metrics.json"
+    assert merge(paths, output)["wildclawbench/overall_score"] == 0
+    receipt = Path(rows[0]["artifact_dir"]) / "result.json"
+    changed = json.loads(receipt.read_text())
+    changed["reward"] = 0.75
+    receipt.write_text(json.dumps(changed))
+    with pytest.raises(ValueError, match="Native/Gym receipt mismatch"):
+        merge(paths, tmp_path / "must-not-publish.json")
+    assert not (tmp_path / "must-not-publish.json").exists()
 
 
 def test_grader_failures_keep_missing_deliverable_zero_and_mask_nested_judge_errors():
@@ -229,7 +259,7 @@ if '--cleanup' in sys.argv:
     (output/'cleaned').write_text('yes')
 else:
     (output/'executed').open('x').write('one execution only')
-    result=dict(**config['metadata'],reward=0.0,native_reward=0.0,mask_sample=False,errors=[],artifact_dir=str(output),events=[
+    result=dict(**config['metadata'],evaluation_protocol=config['evaluation_protocol'],reward=0.0,native_reward=0.0,mask_sample=False,errors=[],artifact_dir=str(output),events=[
         {'type':'message','id':'a','message':{'role':'assistant','content':[{'type':'text','text':'No deliverable'}]}}
     ])
     (output/'result.json').write_text(json.dumps(result))

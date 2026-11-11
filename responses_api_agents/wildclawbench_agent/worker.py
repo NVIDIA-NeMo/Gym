@@ -175,6 +175,7 @@ def execute(config: dict) -> dict:
         collect_output_from_container(output.name, output)
         return dict(
             **expected,
+            evaluation_protocol=config["evaluation_protocol"],
             native_reward=native_reward,
             reward=0.0 if errors else native_reward,
             mask_sample=bool(errors),
@@ -220,6 +221,7 @@ def main() -> None:
         traceback.print_exc()
         result = dict(
             **config["metadata"],
+            evaluation_protocol=config["evaluation_protocol"],
             reward=0.0,
             native_reward=None,
             mask_sample=True,
