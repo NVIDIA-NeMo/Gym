@@ -1,0 +1,30 @@
+name: mm_browsecomp
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: agent
+description: MM-BrowseComp multimodal web research (400 questions, 243 with images) on the BrowseComp
+  harness with an independent answer judge.
+modality: multimodal
+licensing: MIT
+authors:
+- smohsenitahe
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: browsecomp_advanced_harness
+agent_server: browsecomp_agent
+datasets:
+- name: mm_browsecomp
+  type: benchmark
+  jsonl_fpath: benchmarks/mm_browsecomp/data/mm_browsecomp_benchmark.jsonl
+  prepare_script: benchmarks/mm_browsecomp/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active
