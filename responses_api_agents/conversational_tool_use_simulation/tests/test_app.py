@@ -1223,4 +1223,5 @@ async def test_responses_sums_policy_usage_and_details_across_calls(second_usage
 
     model_response = await agent.responses(RequestStub(), Response(), body)
 
+    expected = expected | {"input_tokens_details": expected["input_tokens_details"] | {"cache_write_tokens": None}}
     assert model_response.usage.model_dump(mode="json") == expected
