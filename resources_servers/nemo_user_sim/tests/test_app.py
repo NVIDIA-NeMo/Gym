@@ -746,6 +746,7 @@ def test_the_session_keeps_its_owner_at_least_as_long_as_the_tombstone(overrides
         setattr(server.config, name, value)
     assert server.owned_session_routing()["close_retry_window_seconds"] == window
 
+
 @pytest.mark.parametrize(
     ("locale", "version", "accepted"),
     [("ko_KR", "0.0.1", True), ("ko_KR", "0.0.2", False), ("ja_JP", "0.0.2", True), ("xx_XX", "0.0.2", False)],
