@@ -1,0 +1,7 @@
+# Terminal Bench 4 on the Harbor task shape: the committed entry for the package-store dataset.
+# `gym dataset pull terminal_bench_4` fetches the source below into this folder (the task folders and
+# manifest.toml it writes are gitignored); `gym dataset validate terminal_bench_4` and
+# `gym eval run terminal_bench_4 ...` then resolve the entry name to this folder.
+[gym]
+# Harbor's package store, tag 4.0.0 (66 tasks). A pull of this reference lands here too.
+source = "harbor:terminal-bench/terminal-bench@4.0.0"

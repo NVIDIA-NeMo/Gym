@@ -292,14 +292,22 @@ rollouts plus `<output>_aggregate_metrics.json`.
 Each prepared sample carries the upstream prompts and tool JSON schemas, read at
 prepare time from `benchmarks/finance_agent_v2/upstream_spec.json` — a generated
 snapshot, because `finance_agent` is installed in this server's venv only while
-`gym eval prepare` runs in the repo-root venv. Bumping the pin means editing
-`requirements.txt` and `_UPSTREAM_SHA` in `prepare.py` together, `uv sync`, then
-regenerating the snapshot from this venv and re-running `gym eval prepare`:
+`gym eval prepare` runs in the repo-root venv. To bump the pin, update the exact
+`finance-agent` Git commit in this server's `pyproject.toml` and `_UPSTREAM_SHA` in
+`benchmarks/finance_agent_v2/prepare.py` together. Regenerate and commit this
+server's `uv.lock`, sync that lock, then regenerate the snapshot from the server
+venv and re-run `gym eval prepare`:
 
 ```bash
-cd resources_servers/finance_agent_v2 && source .venv/bin/activate
-python scripts/export_upstream_spec.py
+cd resources_servers/finance_agent_v2
+uv lock
+UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv sync --locked
+.venv/bin/python scripts/export_upstream_spec.py
 ```
+
+Commit `pyproject.toml`, `uv.lock`, the benchmark pin, and the regenerated
+`benchmarks/finance_agent_v2/upstream_spec.json` together. Do not edit the snapshot
+by hand; the exporter reads the exact commit from the direct project dependency.
 
 `tests/test_upstream_spec.py` fails if the snapshot drifts from the installed
 package, and `prepare.py` refuses to run when the two shas disagree.
@@ -316,7 +324,7 @@ byte-identical to a live call and survives an upstream formatting bump.
 |--------|-------------|
 | `price_history` (Tiingo) | per-`(endpoint, ticker)` master of raw records, sliced on read by the upstream `_records_to_csv` |
 | `edgar_search` (sec-api.io) | raw `filings` list keyed by the normalized request |
-| `parse_html_page` on sec.gov filing URLs | parsed text at `sec_filings/<cik>/<accession>/<primary-doc>.txt`; general web is not cached |
+| `parse_html_page` on sec.gov filing URLs | parsed text at `filings/<cik>/<accession>/<document>.txt` (document path percent-encoded, shared with `finance_sec_search`); general web is not cached |
 
 Caching is on by default. Point `cache_dir` at a shared absolute path so it
 survives across jobs:
@@ -325,6 +333,10 @@ survives across jobs:
 use_cache: true                            # true = read+write, false = off
 cache_dir: /shared/cache/finance_agent_v2  # null -> ~/.cache/nemo_gym/finance_agent_v2
 ```
+
+Cache files are written `0664` and new cache directories `2775`, so users in
+the cache root's group can read and extend a shared cache. Create the root
+yourself with group write and the setgid bit (`chmod 2775`) before sharing it.
 
 `cache_dir` also reads `FINANCE_AGENT_V2_CACHE_DIR`. Tiingo responses are cached
 verbatim and never re-derived, and extending a window keeps already-cached rows, so
@@ -404,7 +416,7 @@ the `retrieval_model_server` reference must resolve even though reverify only ca
 and `benchmarks/finance_agent_v2/`) is licensed under **Apache-2.0**, consistent
 with NeMo Gym and the SPDX headers in each source file.
 
-**Upstream dependencies** (imported, not vendored — see `requirements.txt`):
+**Upstream dependencies** (imported, not vendored — see `pyproject.toml`):
 
 | Package | Source | License |
 |---------|--------|---------|

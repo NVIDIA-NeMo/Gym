@@ -1,5 +1,15 @@
 # Harbor Agent for NeMo Gym
 
+> [!warning]
+> **Deprecated.** This agent is superseded by the Harbor task format, where Harbor tasks run through the Harbor
+> environment server with NeMo Gym's own sandboxed harnesses and the `harbor_oracle` agent, with no Harbor
+> dependency. The built-in benchmarks that still run through this agent (biomnibench_da, biomysterybench,
+> bixbench_hypothesis, genebench_pro, labbench2_pdf, legal_agent_bench, openthoughts_tblite and skillsbench) will be
+> migrated to the
+> [`harbor` environment server](https://github.com/NVIDIA-NeMo/Gym/tree/main/environment_servers/harbor); no action is
+> needed from you yet, and they keep working as they are. New work should use the `harbor` environment server, whose
+> README links to its documentation.
+
 This agent integrates the [Harbor Framework](https://www.harborframework.com/) into NeMo Gym.
 The rollouts are compeletely owned by Harbor and NeMo Gym acts as the orchestrator,
 converting the [Agent Trajectory Format](https://www.harborframework.com/docs/agents/trajectory-format) (ATIF)
@@ -167,7 +177,7 @@ A few notable details make it more general than the [older implementation](../ha
   - New Harbor datasets can be directly used by using appropriate keys in `job.datasets`, which maps directly to the `harbor.models.job.config:DatasetConfig` specification.
 - All parsing of the Harbor trajectory into a Gym rollout trajectory now uses Harbor APIs instead of custom dictionary parsing.
 - Reasoning text is correctly handled via `NeMoGymResponseReasoningItem` objects.
-- A minimum harbor version sets to `0.20.0` in [pyproject.toml](./pyproject.toml) with a supporting lockfile.
+- The minimum Harbor version is `0.24.0` in [pyproject.toml](./pyproject.toml) with a supporting lockfile.
 
 > [!caution]
 > Using this agent for training is currently not supported because underlying Harbor agents may not return
@@ -219,3 +229,13 @@ Example rollout metadata:
   }
 }
 ```
+
+### SkillsBench
+
+`benchmarks/skillsbench/harbor.yaml` and `harbor_opensandbox.yaml` use
+`skillsbench_app.py`, a thin subclass of this bridge. It supplies the Gym model
+server URL to the worker-side OpenHands harness and passes the named sandbox
+provider through `harbor_worker_env`, keeping credentials out of Harbor's
+retained configuration. Scheduling, job execution, scoring, and ATIF conversion
+use this general adapter. See [SkillsBench](../../benchmarks/skillsbench/README.md)
+for preparation and execution.

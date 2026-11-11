@@ -28,19 +28,19 @@ from fastapi import Body, Request
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 from pydantic.json_schema import SkipJsonSchema
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.openai_utils import (
+from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, ModelServerRef
+from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseUsage,
     accumulate_response_usage,
 )
-from nemo_gym.responses_converter import ResponsesConverter, chat_completion_usage_to_response_usage
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.models import ChatCompletionsConverter, chat_completion_usage_to_response_usage
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.conversational_tool_use_scenario_generation.assets import (
     ScenarioAssets,
     load_assets,
@@ -391,7 +391,7 @@ class ConversationalToolUseScenarioGenerationAgent(SimpleResponsesAPIAgent):
         completion: NeMoGymChatCompletion,
     ) -> NeMoGymResponse:
         response_params = body.responses_create_params.model_copy(update={"model": completion.model})
-        return ResponsesConverter(return_token_id_information=False).chat_completion_to_response(
+        return ChatCompletionsConverter(return_token_id_information=False).chat_completion_to_response(
             response_params,
             completion,
         )
@@ -411,3 +411,6 @@ class ConversationalToolUseScenarioGenerationAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     ConversationalToolUseScenarioGenerationAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ConversationalToolUseScenarioGenerationAgent.run_webserver()  # noqa: F401

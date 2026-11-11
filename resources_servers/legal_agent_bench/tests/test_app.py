@@ -3,7 +3,7 @@
 
 from unittest.mock import MagicMock, patch
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 from resources_servers.legal_agent_bench.app import (
     LegalAgentBenchResourcesServer,
     LegalAgentBenchResourcesServerConfig,
@@ -81,6 +81,20 @@ def test_startup_prepares_assets_then_rebuilds_runtime(tmp_path) -> None:
         reward_mode="full_task",
         cache_is_validated=True,
     )
+    assert "/verify" in {route.path for route in app.routes}
+
+
+def test_workers_reuse_the_runtime_tree_the_main_process_built(tmp_path) -> None:
+    server = _server(tmp_path)
+    with (
+        patch("resources_servers.legal_agent_bench.app.is_nemo_gym_fastapi_worker", return_value=True),
+        patch("resources_servers.legal_agent_bench.app.ensure_assets") as ensure,
+        patch("resources_servers.legal_agent_bench.app.hydrate_runtime_tasks") as hydrate,
+    ):
+        app = server.setup_webserver()
+
+    ensure.assert_not_called()
+    hydrate.assert_not_called()
     assert "/verify" in {route.path for route in app.routes}
 
 

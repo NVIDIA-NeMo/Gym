@@ -39,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import shutil
 import tempfile
 from contextlib import asynccontextmanager
@@ -49,7 +50,14 @@ from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Set,
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY
+from nemo_gym.client import SESSION_ID_KEY, get_server_url
+from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
+from nemo_gym.core import AGENT_TIMEOUT, JUDGE_FAILED, SESSION_EXPIRED, SESSION_LOST, EpisodeId, TaskId
+from nemo_gym.environment import is_deliverable
+from nemo_gym.rollouts import NG_TERMINAL_KEY
+from nemo_gym.sandbox import AsyncSandbox, DirectSandboxConnection, SandboxAccess
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
@@ -59,20 +67,14 @@ from nemo_gym.base_resources_server import (
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
     ResourcesSessionConflictError,
-    ResourcesSessionFence,
+    ResourcesSessionFences,
+    ResourcesSessionLocks,
     ResourcesSessionLostError,
     ReverifyMode,
     SimpleResourcesServer,
     lost_session_verification,
 )
-from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
-from nemo_gym.deliverables import is_deliverable
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.failure_kinds import AGENT_TIMEOUT, JUDGE_FAILED, SESSION_EXPIRED, SESSION_LOST
-from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
-from nemo_gym.sandbox import AsyncSandbox
-from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
-from nemo_gym.server_utils import SESSION_ID_KEY, get_server_url
+from nemo_gym.verification.judge import judge_call_failed
 from resources_servers.gdpval import persisted_layout
 from resources_servers.gdpval.judge_panel import (
     ResolvedJudge,
@@ -307,6 +309,16 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     # read tables/charts. Costs ~5-30s per Office file.
     preconvert_office_to_pdf: bool = True
     preconvert_max_concurrent: int = 4
+    # Command that runs LibreOffice for every Office->PDF conversion (comparison
+    # preconvert and rubric rendering), e.g. a container prefix
+    # [apptainer, exec, --bind, /path/to/data, --bind, /tmp, /path/to/libreoffice.sif, libreoffice]
+    # or a wrapper script. It must see persist_deliverables_dir, the reference
+    # deliverables, the temp directory and any other deliverables directory that
+    # /verify gets at the same absolute paths. When set, startup checks it with
+    # --version and probe conversions in the temp directory, persist_deliverables_dir
+    # and the writable reference directories, and fails if the check fails; the host
+    # javaldx check and apt install are skipped. None uses `libreoffice` on PATH.
+    libreoffice_command: Optional[List[str]] = Field(default=None, min_length=1)
 
     # How deliverable/reference files are presented to the judge:
     # - ``"native_pdf"`` (default): PDFs and (preconverted) Office docs are sent
@@ -412,7 +424,8 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
 
     # /verify writes each rollout's files to ``<persist_deliverables_dir>/task_<task_id>/repeat_<n>/``.
     persist_deliverables_dir: str
-    # False persists the deliverables without judging them, e.g. to collect a reference set; the rows are masked.
+    # False persists the deliverables without judging them, e.g. to collect a reference set; the rows are masked
+    # with failure_kind gdpval:judging_disabled.
     judge_deliverables: bool = True
     # Names a top-level sandbox provider block.
     sandbox_provider: str
@@ -548,8 +561,12 @@ def _permanent_judge_failure(
     )
 
 
-# The agent ran out of wall time. The row is retried like any other timeout and left out of the fit if it is waived.
+# The agent ran out of wall time. With the agent's answer kept, this is the model's result: never run again and left
+# out of the fit (`is_answered_agent_deadline`). Without one it is retried like any other timeout.
 _AGENT_TIMEOUT = {NG_FAILURE_CLASS_KEY: AGENT_TIMEOUT, "failure_kind": AGENT_TIMEOUT, "mask_sample": True}
+
+# judge_deliverables=false saves the deliverables without judging them, so the row is masked under this kind.
+JUDGING_DISABLED = "gdpval:judging_disabled"
 
 
 # Recovered by `gym eval reverify --judge-failed-only`, which judges the persisted deliverable again.
@@ -599,8 +616,41 @@ class _TaskSession:
     deliverables_dir: Optional[str] = None
 
 
+async def resolve_deliverables(
+    server: "GDPValResourcesServer", request: Request, body: GDPValVerifyRequest
+) -> Tuple[GDPValVerifyRequest, Optional[Dict[str, Any]]]:
+    """The request with the deliverables to judge, or the masked fields of a row that cannot be judged."""
+    if (body.response.metadata or {}).get("stop_reason") == "wall_time":
+        return body, {"reward": 0.0, **_AGENT_TIMEOUT}
+    session = server._sessions.get(request.session.get(SESSION_ID_KEY))
+    if session is not None:
+        body = body.model_copy(update={"deliverables_dir": await server._collect_deliverables(session)})
+    elif body.reuse_cached_deliverable and body.deliverables_dir is None:
+        body = body.model_copy(update={"deliverables_dir": server._cached_deliverables_dir(body)})
+    elif body.deliverables_dir is None:
+        # A session that is gone (a restart, a checkpoint restore) took its files with it, and judging the
+        # transcript alone would score the agent as if it had submitted nothing.
+        return body, dict(
+            lost_session_verification("No live GDPVal session and no deliverables_dir: there is nothing to judge")
+        )
+    if not server.config.judge_deliverables:
+        return body, {
+            "reward": 0.0,
+            "mask_sample": True,
+            "failure_kind": JUDGING_DISABLED,
+            "failure_reason": "judge_deliverables is false, so the deliverables were saved without judging",
+        }
+    return body, None
+
+
 class GDPValResourcesServer(SimpleResourcesServer):
+    # Its judge calls go through an external SDK client that notes no model request.
+    grading_may_use_uninstrumented_model = True
+
     config: GDPValResourcesServerConfig
+
+    # The agent's working directory in the task sandbox, ``WORKDIR`` when None; a server whose image starts elsewhere sets it.
+    _sandbox_workdir: ClassVar[Optional[str]] = None
 
     def model_post_init(self, context: Any) -> None:
         self._judge_prompt_fpath: str = self.config.judge_prompt_template_fpath or _DEFAULT_JUDGE_PROMPT_FPATH
@@ -611,7 +661,10 @@ class GDPValResourcesServer(SimpleResourcesServer):
         self._sessions: Dict[str, _TaskSession] = {}
         # (task_id, repeat) of the persisted directory each live session will write, to the session holding it.
         self._claimed_directories: Dict[Tuple[str, int], str] = {}
-        self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
+        self._locks = ResourcesSessionLocks()
+        self._fences: ResourcesSessionFences[EpisodeId] = ResourcesSessionFences(
+            self.config.session_close_retry_window_seconds
+        )
         # Normalize the reference-model set: prefer the multi-reference
         # ``reference_models`` mapping; fall back to the legacy single-reference
         # fields (treated as a single reference id ``"reference"``).
@@ -630,7 +683,36 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 raise ValueError(
                     "reward_mode=comparison requires reference_deliverables_dir or reference_models to be set"
                 )
-        if self.config.preconvert_office_to_pdf:
+        if self.config.libreoffice_command is not None:
+            from resources_servers.gdpval.setup_libreoffice import ensure_libreoffice
+
+            # Also probe where /verify persists the deliverables it converts: a command that cannot see that
+            # directory fails the first conversion attempt of every Office file.
+            persist_dir = self.config.persist_deliverables_dir
+            probe_dirs = [Path(persist_dir)] if persist_dir else []
+            # /verify also converts reference deliverables in place.
+            for ref_id, ref in self._references.items():
+                ref_dir = Path(ref.deliverables_dir)
+                if not ref_dir.is_dir():
+                    raise RuntimeError(f"Reference {ref_id!r}: deliverables_dir {ref_dir} is not a directory")
+                if os.access(ref_dir, os.W_OK):
+                    probe_dirs.append(ref_dir)
+                else:
+                    LOGGER.info(
+                        "Not probing reference %r: the server cannot write %s, so its Office files need PDFs already",
+                        ref_id,
+                        ref_dir,
+                    )
+            probe_dirs = list(dict.fromkeys(probe_dirs))
+            if not ensure_libreoffice(self.config.libreoffice_command, probe_dirs=probe_dirs):
+                raise RuntimeError(
+                    f"libreoffice_command {self.config.libreoffice_command} failed its startup check "
+                    "(--version and a probe conversion); the warning above gives the cause. The command must see "
+                    "persist_deliverables_dir, the reference deliverables and the temp directory at the same paths, "
+                    'and must not leave files that the server cannot delete. See "Office to PDF conversion" in '
+                    "resources_servers/gdpval/README.md."
+                )
+        elif self.config.preconvert_office_to_pdf:
             from resources_servers.gdpval.setup_libreoffice import ensure_libreoffice
 
             if not ensure_libreoffice() and self.config.reward_mode == "comparison":
@@ -665,8 +747,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
         session_id = body.resources_session_id
         # The cookie is set only on success: a refusal's reply passes through the session middleware too, and must
         # not hand the caller a cookie for a session that another episode holds.
-        async with self._fence.locked(session_id):
-            self._fence.raise_if_closed(session_id)
+        async with self._locks.locked(session_id):
+            self._fences.raise_if_fenced(session_id)
             session = self._sessions.get(session_id)
             if session is not None:
                 if (session.episode_id, session.task_id) != (body.episode_id, body.task_id):
@@ -704,6 +786,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     task_id=task.task_id,
                     reference_dir=reference_dir,
                     reference_files=reference_files,
+                    workdir=self._sandbox_workdir,
                 )
             except BaseException:
                 self._claimed_directories.pop(directory, None)
@@ -739,7 +822,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     provider_config_ref=self.config.sandbox_provider,
                     descriptor=await session.sandbox.serialize(),
                 ),
-                workdir=WORKDIR,
+                workdir=self._sandbox_workdir or WORKDIR,
             ),
         )
 
@@ -747,9 +830,9 @@ class GDPValResourcesServer(SimpleResourcesServer):
         self, request: Request, body: ResourcesCloseSessionRequest
     ) -> ResourcesCloseSessionResponse:
         session_id = body.resources_session_id
-        async with self._fence.locked(session_id):
-            closed_episode = self._fence.closed_episode(session_id)
-            if closed_episode is None:
+        async with self._locks.locked(session_id):
+            fenced_episode = self._fences.get(session_id)
+            if fenced_episode is None:
                 session = self._sessions.get(session_id)
                 if session is not None:
                     if session.episode_id != body.episode_id:
@@ -760,8 +843,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
                         # A failed stop must not hold the directory: every later seed of it would get a terminal 409.
                         self._claimed_directories.pop((session.task_id.task_id, session.repeat), None)
                     del self._sessions[session_id]
-                self._fence.mark_closed(session_id, body.episode_id)
-            elif closed_episode != body.episode_id:
+                self._fences.fence(session_id, body.episode_id)
+            elif fenced_episode != body.episode_id:
                 raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
         request.session.pop(SESSION_ID_KEY, None)
         return ResourcesCloseSessionResponse(resources_session_id=session_id)
@@ -800,7 +883,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
         session = self._get_session(request)
         if session.sandbox is None:
             raise HTTPException(status_code=409, detail="The task sandbox is no longer available")
-        missing = await missing_files(session.sandbox, body.paths)
+        missing = await missing_files(session.sandbox, body.paths, self._sandbox_workdir)
         if missing:
             raise HTTPException(
                 status_code=400,
@@ -827,7 +910,9 @@ class GDPValResourcesServer(SimpleResourcesServer):
             task_dir = persisted_layout.repeat_dir(
                 self.config.persist_deliverables_dir, session.task_id.task_id, session.repeat
             )
-            await collect_deliverables(session.sandbox, session.finish_call, session.reference_dir, task_dir)
+            await collect_deliverables(
+                session.sandbox, session.finish_call, session.reference_dir, task_dir, self._sandbox_workdir
+            )
             await self._release(session)
             session.deliverables_dir = str(task_dir)
         return session.deliverables_dir
@@ -991,29 +1076,9 @@ class GDPValResourcesServer(SimpleResourcesServer):
         return routed, audio_capable, video_capable
 
     async def verify(self, request: Request, body: GDPValVerifyRequest) -> GDPValVerifyResponse:
-        if (body.response.metadata or {}).get("stop_reason") == "wall_time":
-            return GDPValVerifyResponse(
-                **body.model_dump(), reward=0.0, verify_mode=self.config.reward_mode, **_AGENT_TIMEOUT
-            )
-        session = self._sessions.get(request.session.get(SESSION_ID_KEY))
-        if session is not None:
-            body = body.model_copy(update={"deliverables_dir": await self._collect_deliverables(session)})
-        elif body.reuse_cached_deliverable and body.deliverables_dir is None:
-            body = body.model_copy(update={"deliverables_dir": self._cached_deliverables_dir(body)})
-        elif body.deliverables_dir is None:
-            # A session that is gone (a restart, a checkpoint restore) took its files with it, and judging the
-            # transcript alone would score the agent as if it had submitted nothing.
-            return GDPValVerifyResponse(
-                **body.model_dump(),
-                verify_mode=self.config.reward_mode,
-                **lost_session_verification(
-                    "No live GDPVal session and no deliverables_dir: there is nothing to judge"
-                ),
-            )
-        if not self.config.judge_deliverables:
-            return GDPValVerifyResponse(
-                **body.model_dump(), reward=0.0, mask_sample=True, verify_mode=self.config.reward_mode
-            )
+        body, masked = await resolve_deliverables(self, request, body)
+        if masked is not None:
+            return GDPValVerifyResponse(**body.model_dump(), verify_mode=self.config.reward_mode, **masked)
         if self.config.reward_mode == "comparison":
             return await self._verify_comparison(body)
 
@@ -1073,6 +1138,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 include_text=self.config.judge_pdf_include_text,
                 audio_capable=audio_capable,
                 video_capable=video_capable,
+                libreoffice_command=self.config.libreoffice_command,
             )
             if blocks:
                 deliverable_content_blocks = blocks
@@ -1138,7 +1204,9 @@ class GDPValResourcesServer(SimpleResourcesServer):
         from resources_servers.gdpval.preconvert import preconvert_dir_async
 
         n_ok, n_fail, errors = await preconvert_dir_async(
-            target_dir, max_concurrent=self.config.preconvert_max_concurrent
+            target_dir,
+            max_concurrent=self.config.preconvert_max_concurrent,
+            libreoffice_command=self.config.libreoffice_command,
         )
         if n_ok or n_fail:
             LOGGER.info("preconvert %s: ok=%d fail=%d", label, n_ok, n_fail)
@@ -1697,9 +1765,13 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 return _permanent_judge_failure(
                     body, "comparison", {"error": "permanent_judge_error", "ref_errors": ref_errors}
                 )
-            raise RuntimeError(
-                f"all {attempted_matchups} judge matchup(s) failed for task {body.task_id}; last error: {last_error!r}"
-            )
+            # The judge could not grade this deliverable, which says nothing about the model. Raised as a judge
+            # failure, it leaves the score as a masked row that keeps the saved answer, and recovery grades that
+            # answer again. A bare error would end as an untyped HTTP 500 that reruns the whole episode.
+            raise judge_call_failed(
+                f"all {attempted_matchups} judge matchup(s) failed for task {body.task_id}; last error: {last_error!r}",
+                operation="gdpval.comparison",
+            ) from last_error
 
         total_judged = total_wins + total_losses + total_ties
         strict_failure = _strict_comparison_trial_failure(
@@ -1908,6 +1980,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
         if staged:
             extra["comparison/num_stages"] = len(staged)
             stage_fits: Dict[int, tuple[Optional[float], Optional[float], int]] = {}
+            # Per stage, the rows its fit used: judged ones and losses imputed for a missing evaluation.
+            stage_fit_rows: Dict[int, int] = {}
             for stage_index in sorted(staged):
                 stage_responses = staged[stage_index]
                 _, _, _, stage_ref_totals = _accumulate(stage_responses)
@@ -1933,6 +2007,12 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 extra[f"{prefix}/judged_votes"] = sum(sum(_votes(vr)) for vr in judged_rows)
                 extra[f"{prefix}/imputed_loss_tasks"] = len({vr.get("task_id") for vr in imputed})
                 extra[f"{prefix}/imputed_loss_votes"] = sum(_votes(vr)[1] for vr in imputed)
+                stage_fit_rows[stage_index] = len(
+                    {
+                        (vr.get("_ng_task_index", vr.get("task_id")), vr.get("_ng_rollout_index", 0))
+                        for vr in judged_rows + imputed
+                    }
+                )
 
             headline_stage_index: Optional[int] = None
             headline: Optional[tuple[Optional[float], Optional[float], int]] = None
@@ -1983,6 +2063,10 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 if final_stage_accepted and final_stage_fit:
                     headline_stage_index = expected_final_stage_index
                     headline = candidate
+                    if expected_final_stage_count is not None:
+                        # The headline ELO covers the final stage's fit rows of the rows that stage planned.
+                        extra["metric_coverage/trials"] = stage_fit_rows[expected_final_stage_index]
+                        extra["metric_coverage/expected"] = int(expected_final_stage_count)
                 extra["comparison/final_stage_present"] = int(final_stage_present)
                 extra["comparison/final_stage_complete"] = int(final_stage_complete)
                 extra["comparison/final_stage_partial_accepted"] = int(final_stage_partial_accepted)

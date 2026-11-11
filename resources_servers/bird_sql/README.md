@@ -29,6 +29,20 @@ from resources_servers.bird_sql.setup_bird_sql import ensure_bird_sql
 ensure_bird_sql()
 ```
 
+## Spark SQL dialect (experimental)
+
+Set `dialect: spark` for a model that writes Spark SQL. Its query runs on a local PySpark
+copy of the databases, while the BIRD gold query still runs, untouched, on the original
+SQLite database; only the two result sets are compared (floats rounded, dates as strings).
+No gold SQL is transpiled. Only a single `SELECT`/`WITH` model query is executed (anything
+else scores as a pred error) so the shared warehouse cannot be modified, and a timed-out
+query has its Spark job cancelled.
+
+On first startup each SQLite database is written to Parquet under
+`<bird_sql_dir>/spark_warehouse/` and registered as a Spark database named after its
+`db_id`. Requires a JDK 17 plus `pyspark`, `sqlglot`, `pandas` and `pyarrow` (see
+`benchmarks/birdbench/README.md`); the default SQLite dialect needs none of them.
+
 ## Example usage
 
 ### Running servers
@@ -61,8 +75,16 @@ For a full BIRD dev run, see `benchmarks/birdbench/README.md`.
 2. Execute the predicted SQL against the per-`db_id` SQLite database.
 3. Execute the ground-truth SQL against the same database.
 4. Compare result sets via unordered set equality.
-5. Return reward `1.0` on match, `0.0` otherwise (or on any extraction /
-   execution error).
+5. Return reward `1.0` on match, `0.0` otherwise (no SQL block, a result
+   mismatch, or a predicted query that fails or times out).
+
+When the verifier itself cannot measure the answer (the database file is missing
+or corrupt, the ground-truth query fails or times out, the executor crashes), the
+row keeps the model's answer and is masked instead of scored: `mask_sample=true`,
+`failure_kind=verifier_error`, with `failure_reason` naming the cause
+(`database_missing`, `gold_execution_error`, `gold_execution_timeout`,
+`unknown_error`). These are `failure_reason` values, not failure kinds in the
+registry.
 
 ## Input JSONL format
 
