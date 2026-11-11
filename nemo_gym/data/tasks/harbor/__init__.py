@@ -55,6 +55,7 @@ if TYPE_CHECKING:
         STEP_METADATA_KEY,
         HarborTaskInput,
         materialize_task,
+        taskset_mapping,
     )
     from nemo_gym.data.tasks.harbor.models import (
         HarborArtifact,
@@ -65,7 +66,7 @@ if TYPE_CHECKING:
         HarborTaskStep,
         HarborVerifier,
     )
-    from nemo_gym.data.tasks.harbor.prepare import ORACLE_AGENT
+    from nemo_gym.data.tasks.harbor.prepare import ORACLE_AGENT, PreparedTaskset, prepare_target
     from nemo_gym.data.tasks.harbor.publish import answer_write_command
     from nemo_gym.data.tasks.harbor.python_verifier import VERIFIER_FILE, VerifierShim, write_shim
     from nemo_gym.data.tasks.harbor.records import BUILT_IMAGES_FILE, IMAGE_CONFIGS_FILE, MAIN_SERVICE
@@ -108,6 +109,9 @@ _PUBLIC_API = {
     "ImageConfigError": "registry",
     "MAIN_SERVICE": "records",
     "ORACLE_AGENT": "prepare",
+    "PreparedTaskset": "prepare",
+    "prepare_target": "prepare",
+    "taskset_mapping": "materialize",
     "OverlayRun": "dockerfile",
     "OverlayWorkdir": "dockerfile",
     "RECORD_VERSION": "dockerfile",

@@ -1,0 +1,195 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Compose with the selected RL checkout's exemplar in the preparer.
+defaults: grpo_math_1B_megatron_single_controller.yaml
+cluster:
+  num_nodes: 1
+  gpus_per_node: 4
+grpo:
+  num_prompts_per_step: 8
+  num_generations_per_prompt: 4
+  max_rollout_turns: 1
+  max_num_epochs: 5
+  max_num_steps: 20
+  seed: 42
+  normalize_rewards: true
+  use_leave_one_out_baseline: true
+  advantage_clip_low: -20
+  advantage_clip_high: 20
+  overlong_filtering: true
+  masked_reward_policy: include
+  val_period: 0
+  val_at_start: false
+  val_at_end: false
+  async_grpo: null
+  use_dynamic_sampling: false
+  seq_logprob_error_threshold: 2
+  skip_reference_policy_logprobs_calculation: true
+loss_fn:
+  reference_policy_kl_penalty: 0.0
+  reference_policy_kl_type: k3
+  kl_input_clamp_value: null
+  kl_output_clamp_value: null
+  use_on_policy_kl_approximation: true
+  ratio_clip_min: 0.2
+  ratio_clip_max: 0.28
+  use_importance_sampling_correction: true
+  truncated_importance_sampling_ratio: 5
+  truncated_importance_sampling_ratio_min: 0.2
+  truncated_importance_sampling_type: tis
+  sequence_level_importance_ratios: false
+  token_level_loss: true
+  force_on_policy_ratio: true
+policy:
+  model_name: ???
+  precision: bfloat16
+  max_total_sequence_length: 32768
+  train_global_batch_size: 32
+  train_micro_batch_size: 1
+  logprob_batch_size: 1
+  max_grad_norm: 1.0
+  tokenizer:
+    name: ${policy.model_name}
+    chat_template_kwargs:
+      enable_thinking: true
+  sequence_packing:
+    enabled: true
+  megatron_cfg:
+    enabled: true
+    activation_checkpointing: true
+    # Nemotron-H uses squared ReLU, which bias_activation_fusion does not support.
+    bias_activation_fusion: false
+    tensor_model_parallel_size: 2
+    pipeline_model_parallel_size: 1
+    context_parallel_size: 1
+    expert_model_parallel_size: 1
+    expert_tensor_parallel_size: 1
+    sequence_parallel: true
+    mtp_num_layers: 0
+    fp8_cfg:
+      enabled: false
+    optimizer:
+      optimizer: adam
+      lr: 3.0e-6
+      min_lr: 3.0e-6
+      adam_beta1: 0.9
+      adam_beta2: 0.999
+      adam_eps: 1.0e-8
+      weight_decay: 0.0
+      clip_grad: ${policy.max_grad_norm}
+    scheduler:
+      lr_decay_style: constant
+      lr_warmup_iters: 2
+      lr_warmup_init: 3.0e-7
+  generation:
+    backend: vllm
+    refit_transport: nccl_reshard
+    max_new_tokens: 1024
+    temperature: 1.0
+    top_p: 1.0
+    colocated:
+      enabled: false
+      resources:
+        num_nodes: 1
+        gpus_per_node: 2
+    vllm_cfg:
+      tensor_parallel_size: 2
+      pipeline_parallel_size: 1
+      expert_parallel_size: 1
+      max_model_len: ${policy.max_total_sequence_length}
+      gpu_memory_utilization: 0.85
+      async_engine: true
+      expose_http_server: true
+      skip_tokenizer_init: false
+      http_server_serving_chat_kwargs:
+        enable_auto_tools: true
+        tool_parser: qwen3_coder
+        reasoning_parser: nano_v3
+        default_chat_template_kwargs:
+          enable_thinking: true
+      reasoning_parser_plugin: /opt/nemo-rl/nemo_rl/models/generation/vllm/reasoning_parsers/nano_v3_reasoning_parser.py
+    vllm_kwargs:
+      max_num_seqs: 64
+      max_num_batched_tokens: 32768
+      mamba_ssm_cache_dtype: float32
+      mamba_cache_mode: align
+data:
+  _override_: true
+  max_input_seq_length: null
+  shuffle: false
+  num_workers: 1
+  use_multiple_dataloader: false
+  train:
+    data_path: ???
+  validation: null
+  default:
+    dataset_name: NemoGymDataset
+    env_name: nemo_gym
+    prompt_file: null
+    system_prompt_file: null
+    processor: nemo_gym_data_processor
+env:
+  _override_: true
+  should_use_nemo_gym: true
+  should_log_nemo_gym_responses: true
+  should_mask_flagged_samples: true
+  nemo_gym:
+    port_range_low: 5000
+    port_range_high: 5999
+    use_absolute_ip: true
+    absolute_ip_server_types: [responses_api_models]
+    policy_model:
+      responses_api_models:
+        vllm_model:
+          num_workers: 1
+          chat_template_kwargs:
+            enable_thinking: true
+            truncate_history_thinking: false
+    # The preparer adds Gym's OpenSandbox provider config path. Resolve credentials
+    # there: RL resolves and prints this outer config before Gym starts.
+async_rl:
+  sampler:
+    name: in_order
+    max_lookahead_versions: 0
+  recompute_kv_cache_after_weight_updates: true
+  min_groups_for_streaming_train: ${grpo.num_prompts_per_step}
+  max_inflight_prompts: 8
+  max_buffered_rollouts: ${grpo.num_prompts_per_step}
+  log_full_train_data: true
+  debug_writer:
+    target: json
+  rollout_failure:
+    min_step_batch_fraction: 1.0
+    max_consecutive_dropped_prompts: 0
+    max_skipped_prompts: 0
+    on_dropped_prompt: shrink
+    nemo_gym:
+      rollout_timeout_s: 3600
+  stall_watchdog:
+    stall_timeout_s: 4200
+token_capture:
+  enabled: true
+  selection_policy: returned_history
+data_plane:
+  enabled: true
+  impl: transfer_queue
+  backend: simple
+  simple:
+    num_storage_units: 2
+checkpointing:
+  enabled: true
+  checkpoint_dir: ???
+  metric_name: null
+  save_period: 10
+  keep_top_k: 2
+  save_optimizer: true
+  save_data_plane: true
+rollout_checkpointing:
+  trace: true
+logger:
+  log_dir: ???
+  wandb_enabled: false
+  wandb:
+    project: grpo-dev
+    name: ???
+    log_nemo_gym_full_result_tables: true
