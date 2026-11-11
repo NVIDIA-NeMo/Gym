@@ -172,8 +172,10 @@ def goose_stop_reason(stdout: str, sessions: list[dict[str, Any]]) -> tuple[str 
 def model_server_failure(text: str) -> tuple[str, int | None] | None:
     """The failure kind and HTTP status of Goose's notice for a model call that failed at the model server."""
     error = text.removeprefix(next((h for h in GOOSE_ERROR_NOTICES if text.startswith(h)), ""))
-    if error.startswith("Network error:"):
+    if error.startswith(("Network error:", "Request failed: Failed to read response body:")):
         return MODEL_TRANSPORT_ERROR, None
+    if error.startswith("Endpoint not found (404):"):
+        return MODEL_REQUEST_ERROR, 404
     if error.startswith("Rate limit exceeded:"):
         return MODEL_REQUEST_ERROR, 429
     match = GOOSE_HTTP_STATUS.match(error)

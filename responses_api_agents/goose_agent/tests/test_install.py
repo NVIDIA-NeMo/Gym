@@ -49,5 +49,8 @@ def test_rejects_a_bad_archive_without_publishing_it(tmp_path, problem):
     source = archive(tmp_path, "1.53.0" if problem == "version" else "1.54.0")
     sha256 = "0" * 64 if problem == "checksum" else hashlib.sha256(source.read_bytes()).hexdigest()
     runtime = tmp_path / "runtime"
-    assert install(runtime, source, sha256).returncode != 0
+    result = install(runtime, source, sha256)
+    assert result.returncode != 0
+    if problem == "version":
+        assert "expected Goose 1.54.0, got '1.53.0'" in result.stderr
     assert list(runtime.iterdir()) == []

@@ -21,6 +21,10 @@ trap 'rm -rf "$staging"' EXIT
 export GOOSE_PATH_ROOT="$staging/root"
 echo "$sha256  $archive" | sha256sum -c -
 tar -xzf "$archive" -C "$staging"
-test "$(timeout 30 "$staging/goose" --version 2>/dev/null | tr -d ' ')" = "$version"
+got=$(timeout 30 "$staging/goose" --version 2>"$staging/version.err" | tr -d ' ') || true
+if [ "$got" != "$version" ]; then
+    echo "expected Goose $version, got '$got': $(tail -c 2048 "$staging/version.err")" >&2
+    exit 1
+fi
 # A rename within one directory is atomic, so a concurrent seed never sees a partial binary.
 mv -f "$staging/goose" "$runtime/goose"
