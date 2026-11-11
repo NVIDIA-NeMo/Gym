@@ -91,6 +91,9 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '22'
+      - name: Install terminal runtime
+        if: matrix.harness == 'terminus_2_sandboxed'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends tmux
       - name: Install pinned dependencies and runtime
         timeout-minutes: 12
         env:
@@ -110,7 +113,8 @@ jobs:
           HARNESS: ${{ matrix.harness }}
         run: |
           .venv/bin/python -m pytest -o addopts= --import-mode=importlib -q \
-            scripts/harness_conformance/tests tests/unit_tests/rollouts/harness_capabilities \
+            scripts/harness_conformance/tests tests/unit_tests/tooling/test_check_suite_artifacts.py \
+            tests/unit_tests/rollouts/harness_capabilities \
             "responses_api_agents/${HARNESS}_agent/tests" 2>&1 | tee "$RESULTS/tests.log"
       - name: Run full scenario suite
         id: probes
@@ -118,7 +122,10 @@ jobs:
         env:
           HARNESS: ${{ matrix.harness }}
         run: |
-          if .venv/bin/python -m scripts.run_harness_conformance \
+          launcher=()
+          # The Terminus sandbox contract creates /logs/agent as root.
+          if [[ "$HARNESS" == "terminus_2_sandboxed" ]]; then launcher=(sudo --preserve-env=GITHUB_ACTIONS); fi
+          if "${launcher[@]}" .venv/bin/python -m scripts.run_harness_conformance \
             --harness "$HARNESS" --output "$PROBE_OUTPUT"; then
             code=0
           else
@@ -133,6 +140,10 @@ jobs:
           HARNESS: ${{ matrix.harness }}
           PROBE_EXIT_CODE: ${{ steps.probes.outputs.exit_code || '2' }}
         run: |
+          # Restore access even when a root-run Terminus probe stops partway through.
+          if [[ "$HARNESS" == "terminus_2_sandboxed" && -d "$PROBE_OUTPUT" ]]; then
+            sudo chown -R "$(id -u):$(id -g)" "$PROBE_OUTPUT"
+          fi
           python3 -m scripts.harness_conformance.ci report --harness "$HARNESS" \
             --output "$PROBE_OUTPUT" --exit-code "$PROBE_EXIT_CODE"
       - name: Upload conformance evidence
