@@ -2731,10 +2731,25 @@ async def test_provider_exec_failure_is_not_substituted_with_a_scored_response(t
     server.server_client.post.assert_not_called()
 
 
-@mark.parametrize("error_type", ["UnknownError", None])
-async def test_unconfirmed_exec_result_does_not_grade_a_partial_workspace(tmp_path, error_type):
-    from nemo_gym.core import NgFailureEvent
-    from nemo_gym.sandbox import SandboxExecResult
+@mark.parametrize(
+    "return_code, error_type",
+    [(-1, None), (-1, "UnknownError"), (125, "sandbox"), (125, "pty"), (125, "user_switch_unavailable")],
+)
+async def test_unconfirmed_exec_result_is_a_typed_provider_failure_and_does_not_grade_a_partial_workspace(
+    tmp_path, return_code, error_type
+):
+    from nemo_gym.agents import AgentOutcomePolicyConfig
+    from nemo_gym.core import (
+        FailureClass,
+        FailureHeader,
+        NgFailureEvent,
+        OutcomeAction,
+        StageOutcomePolicyConfig,
+        choose_stage_outcome,
+        failure_report_for,
+    )
+    from nemo_gym.rollouts.rollout_collection import _reply_failure_kind
+    from nemo_gym.sandbox import SandboxExecResult, SandboxHandle
 
     config = TestOpenCodeSandboxedAgent()._create_config()
     config.artifacts_dir = str(tmp_path)
@@ -2743,11 +2758,12 @@ async def test_unconfirmed_exec_result_does_not_grade_a_partial_workspace(tmp_pa
     sandbox = MagicMock(
         exec=AsyncMock(
             return_value=SandboxExecResult(
-                stdout="", stderr="unknown completion", return_code=-1, error_type=error_type
+                stdout="", stderr="unknown completion", return_code=return_code, error_type=error_type
             )
         ),
         download=AsyncMock(),
     )
+    sandbox._handle = SandboxHandle(sandbox_id="box-1", provider_name="opensandbox", raw=None)
     server._sandbox_id_to_sandbox = {"session": sandbox}
     server._create_opencode_config = AsyncMock(return_value={})
     request = SimpleNamespace(
@@ -2756,13 +2772,44 @@ async def test_unconfirmed_exec_result_does_not_grade_a_partial_workspace(tmp_pa
     body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}])
     with raises(NgFailureEvent) as caught:
         await server.responses(request, body)
-    assert caught.value.boundary == "harness"
-    assert caught.value.failure_kind == "agent_route_failed"
-    assert caught.value.operation == "opencode.execute"
-    reason = f" reason={error_type}" if error_type else ""
-    assert caught.value.failure_reason == (
-        f"[sandbox phase=agent{reason} exit=-1 command=opencode_run] Sandbox command outcome cannot be classified"
+
+    # The route failure only routes: the reply names the sandbox event, which keeps the provider's evidence.
+    raised = caught.value
+    assert (raised.boundary, raised.failure_kind, raised.operation, raised.stage) == (
+        "agent",
+        "agent_route_failed",
+        "opencode.execute",
+        "agent",
     )
+    cause = raised.__cause__
+    assert isinstance(cause, NgFailureEvent)
+    assert (cause.boundary, cause.failure_kind, cause.operation) == (
+        "sandbox",
+        "provider_command_outcome_unknown",
+        "exec",
+    )
+    reason = f" reason={error_type}" if error_type else ""
+    assert cause.failure_reason == (
+        f"[sandbox phase=agent provider=opensandbox sandbox=box-1{reason} exit={return_code} command=opencode_run] "
+        "Sandbox command outcome cannot be classified"
+    )
+    assert (cause.details.provider, cause.details.sandbox_id) == ("opensandbox", "box-1")
+    assert cause.details.provider_status_reason == error_type
+    assert cause.details.exit_code is None  # neither a sentinel nor an error type is an observed process exit
+
+    # The collector types the failed /run row by that cause, not by the routing kind.
+    report = failure_report_for(raised)
+    assert report.failure_id == raised.event_id and report.events[raised.event_id].cause_id == cause.event_id
+    assert _reply_failure_kind(FailureHeader.encode(report)) == "provider_command_outcome_unknown"
+
+    # An environment fault on the agent stage is never the model's: it is evaluation-side and not counted as zero.
+    decision = choose_stage_outcome(
+        failure_kind=cause.failure_kind, http_status=None, stage="agent", config=StageOutcomePolicyConfig()
+    )
+    assert decision.attribution == FailureClass.EVALUATION
+    assert decision.action != OutcomeAction.COUNT_AS_ZERO
+    assert AgentOutcomePolicyConfig().by_failure_kind["provider_command_outcome_unknown"] == OutcomeAction.RETRY
+
     sandbox.exec.assert_awaited_once()
     sandbox.download.assert_not_awaited()
     server.server_client.post.assert_not_called()
