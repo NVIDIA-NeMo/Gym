@@ -26,7 +26,7 @@ from nemo_gym.core import NeMoGymResponse
 from nemo_gym.rollouts.harness_capabilities import digest_file
 
 from .registry import BORROWED_SANDBOX_HARNESSES, HARNESSES
-from .scenarios import SCENARIOS
+from .scenarios import SCENARIOS, Scenario
 
 
 class _Server(uvicorn.Server):
@@ -82,17 +82,22 @@ def _nooa_overrides(defaults: dict) -> dict:
     }
 
 
-def _harness_config(harness: str, directory: Path, timeout: float) -> dict:
+def _harness_config(harness: str, directory: Path, timeout: float, scenario: Scenario | None = None) -> dict:
     """Describe probe overrides and setup requirements without applying them."""
     workspace = str(directory / "workspace")
     opencode = {"permission": {"bash": "allow"}}
     settings = {
         "simple": {
             "overrides": {"max_steps": 6},
+            "compaction_overrides": lambda scenario: {"max_steps": scenario.tool_steps + 4},
             "session": {"agent_overrides": {}, "tool_transports": ["direct_http"], "sandbox_backend": None},
         },
         "opencode": {
             "overrides": {"timeout": timeout, "opencode_config": opencode},
+            "compaction_overrides": lambda scenario: {
+                "context_window": 32768 if scenario.compaction else 65536,
+                "max_output_tokens": 8192,
+            },
             "legacy": {
                 "agent_overrides": {
                     "workspace_root": workspace,
@@ -106,6 +111,10 @@ def _harness_config(harness: str, directory: Path, timeout: float) -> dict:
         },
         "pi": {
             "overrides": {"timeout": timeout},
+            "compaction_overrides": lambda scenario: {
+                "context_window": 32768 if scenario.compaction else 65536,
+                "max_output_tokens": 8192,
+            },
             "legacy": {"agent_overrides": {"workspace_root": workspace}},
         },
         "copilot": {
@@ -118,6 +127,10 @@ def _harness_config(harness: str, directory: Path, timeout: float) -> dict:
             "legacy": {"agent_overrides": {"workspace_root": workspace}},
         },
         "codex": {
+            "compaction_overrides": lambda scenario: {
+                "model_context_window": 32768,
+                "model_auto_compact_token_limit": 24000,
+            },
             "legacy": {
                 "requires_workspace": True,
                 "agent_overrides": {
@@ -135,6 +148,7 @@ def _harness_config(harness: str, directory: Path, timeout: float) -> dict:
             "session": {"agent_overrides": {}, "sandbox_backend": "conformance_local"},
         },
         "claude_code": {
+            "compaction_overrides": lambda scenario: {"max_turns": scenario.tool_steps + 4},
             "overrides": {
                 "claude_code_version": "2.1.108",
                 "timeout": int(timeout),
@@ -144,6 +158,7 @@ def _harness_config(harness: str, directory: Path, timeout: float) -> dict:
             },
         },
         "miniswe_sandboxed": {
+            "compaction_overrides": lambda scenario: {"harness": {"step_limit": scenario.tool_steps + 4}},
             "overrides": {
                 "harness": {"step_limit": 6, "step_timeout_sec": 10},
                 "agent_timeout_sec": timeout,
@@ -152,6 +167,11 @@ def _harness_config(harness: str, directory: Path, timeout: float) -> dict:
             },
         },
         "terminus_2_sandboxed": {
+            "compaction_overrides": lambda scenario: {
+                "max_turns": scenario.tool_steps + 4,
+                "enable_summarize": scenario.compaction,
+                "model_context_limit": 32768,
+            },
             "inherit_adapter_defaults": True,
             "overrides": {
                 "max_turns": 6,
@@ -160,7 +180,15 @@ def _harness_config(harness: str, directory: Path, timeout: float) -> dict:
                 "sandbox_timeout": timeout,
             },
         },
+        "stirrup": {
+            "compaction_overrides": lambda scenario: {"context_window_tokens": 32768},
+        },
         "hermes": {
+            "compaction_overrides": lambda scenario: {
+                "compression_enabled": True,
+                "compression_threshold": 0.1,
+                "max_turns": scenario.tool_steps + 4,
+            },
             "overrides": {
                 "max_turns": 6,
                 "enabled_toolsets": ["terminal"],
@@ -179,11 +207,23 @@ def _harness_config(harness: str, directory: Path, timeout: float) -> dict:
         "sandbox_backend": "local",
         **settings.get("session", {}),
     }
+    compaction_overrides = settings.get("compaction_overrides")
+    if scenario is not None and scenario.compaction is not None and compaction_overrides:
+        overrides = settings.setdefault("overrides", {})
+        for key, value in compaction_overrides(scenario).items():
+            # Preserve sibling settings such as Mini-SWE's tool timeout.
+            overrides[key] = {**overrides.get(key, {}), **value} if isinstance(value, dict) else value
     return settings
 
 
 def _config(
-    harness: str, directory: Path, ports: dict[str, int], timeout: float, *, use_agent_sessions: bool = False
+    harness: str,
+    directory: Path,
+    ports: dict[str, int],
+    timeout: float,
+    *,
+    use_agent_sessions: bool = False,
+    scenario: Scenario | None = None,
 ) -> dict:
     def server(port: int) -> dict:
         return {"name": "unused", "host": "127.0.0.1", "port": port, "entrypoint": "app.py", "num_workers": 1}
@@ -194,7 +234,7 @@ def _config(
     defaults = yaml.safe_load(defaults_path.read_text())[f"{harness}_agent"]["responses_api_agents"][
         f"{harness}_agent"
     ]
-    settings = _harness_config(harness, directory, timeout)
+    settings = _harness_config(harness, directory, timeout, scenario)
     mode = settings.get("session" if use_agent_sessions else "legacy", {})
     extra_overrides = settings.get("extra_overrides")
     agent = {
@@ -286,31 +326,8 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
             {name: sock.getsockname()[1] for name, sock in sockets.items()},
             timeout,
             use_agent_sessions=use_agent_sessions,
+            scenario=scenario,
         )
-        if scenario.compaction is not None:
-            agent_config = config["probe_agent"]["responses_api_agents"][f"{harness}_agent"]
-            if harness in ("opencode", "pi"):
-                agent_config.update(context_window=32768 if scenario.compaction else 65536, max_output_tokens=8192)
-            elif harness == "codex":
-                agent_config.update(model_context_window=32768, model_auto_compact_token_limit=24000)
-            elif harness == "stirrup":
-                agent_config.update(context_window_tokens=32768)
-            elif harness == "hermes":
-                agent_config.update(
-                    compression_enabled=True, compression_threshold=0.1, max_turns=scenario.tool_steps + 4
-                )
-            elif harness == "simple":
-                agent_config.update(max_steps=scenario.tool_steps + 4)
-            elif harness == "claude_code":
-                agent_config.update(max_turns=scenario.tool_steps + 4)
-            elif harness == "miniswe_sandboxed":
-                agent_config["harness"]["step_limit"] = scenario.tool_steps + 4
-            elif harness == "terminus_2_sandboxed":
-                agent_config.update(
-                    max_turns=scenario.tool_steps + 4,
-                    enable_summarize=scenario.compaction,
-                    model_context_limit=32768,
-                )
         os.environ["NEMO_GYM_CONFIG_DICT"] = json.dumps(config)
         (directory / "launch.json").write_text(json.dumps(config, indent=2) + "\n")
         if use_agent_sessions:

@@ -112,6 +112,17 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_
         getattr(module, HARNESSES[harness]["agent"]).model_fields["config"].annotation.model_validate(agent)
 
 
+@pytest.mark.parametrize("compaction", [False, True])
+def test_compaction_overrides_preserve_tool_timeout(tmp_path, compaction):
+    scenario = dataclasses.replace(SCENARIO["context_compaction"], compaction=compaction, tool_steps=9)
+    ports = {"policy_model": 10001, "probe_resources": 10002, "probe_agent": 10003, "probe_environment": 10004}
+    config = _config("miniswe_sandboxed", tmp_path, ports, 12, use_agent_sessions=True, scenario=scenario)
+    agent = config["probe_agent"]["responses_api_agents"]["miniswe_sandboxed_agent"]
+    assert agent["harness"] == {"step_limit": 13, "step_timeout_sec": 10}
+    ordinary = _config("miniswe_sandboxed", tmp_path, ports, 12, use_agent_sessions=True)
+    assert ordinary["probe_agent"]["responses_api_agents"]["miniswe_sandboxed_agent"]["harness"]["step_limit"] == 6
+
+
 def test_session_runtime_does_not_require_host_cli(monkeypatch):
     from scripts.harness_conformance import episode
 
