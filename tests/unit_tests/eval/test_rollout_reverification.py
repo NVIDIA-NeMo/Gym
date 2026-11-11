@@ -799,7 +799,8 @@ class TestYieldInputsAndRolloutsPaired:
 
 
 class TestBuildVerifyPayload:
-    def test_saved_agent_evidence_is_forwarded_without_old_tool_rewards(self):
+    @pytest.mark.parametrize("forward", [None, False, True])
+    def test_saved_agent_evidence_requires_explicit_opt_in(self, forward):
         evidence = {"schema_version": "2.0", "source": "opencode", "records": []}
         trajectory = {"turns": [], "invocations": []}
         pair = InputRolloutPair(
@@ -811,9 +812,16 @@ class TestBuildVerifyPayload:
                 "opencode_tool_reward": {"auxiliary_reward": 0.1},
             },
         )
-        payload = _build_verify_payload(pair)
-        assert payload["ng_trajectory"] == trajectory
-        assert payload["ng_agent_observations"] == evidence
+        options = {} if forward is None else {"forward_agent_evidence": forward}
+        payload = _build_verify_payload(pair, **options)
+        if forward:
+            assert payload["ng_trajectory"] == trajectory
+            assert payload["ng_agent_observations"] == evidence
+        else:
+            assert "ng_trajectory" not in payload
+            assert "ng_agent_observations" not in payload
+        assert pair.rollout["ng_trajectory"] == trajectory
+        assert pair.rollout["ng_agent_observations"] == evidence
         assert "opencode_tool_reward" not in payload
 
     def test_keeps_the_environment_server_that_ran_the_rollout(self) -> None:
@@ -1333,13 +1341,15 @@ class TestPreparePayloads:
         build_calls: list = []
         monkeypatch.setattr(
             "nemo_gym.eval.rollout_reverification._build_verify_payload",
-            lambda p: build_calls.append(p) or {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0},
+            lambda p, *, forward_agent_evidence: build_calls.append((p, forward_agent_evidence))
+            or {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0},
         )
 
         _prepare_payloads(tmp_path / "in.jsonl", tmp_path / "r.jsonl", self._paths(tmp_path), resume_from_cache=False)
 
         assert len(build_calls) == 1
-        assert build_calls[0] is pair
+        assert build_calls[0][0] is pair
+        assert build_calls[0][1] is False
 
     def test_resume_from_cache_drops_already_completed_keys(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -2962,6 +2972,32 @@ class TestRunFromConfigResumeFromCache:
 
     def _read_jsonl(self, path: Path) -> list[dict]:
         return [orjson.loads(line) for line in path.read_bytes().splitlines() if line.strip()]
+
+    @pytest.mark.parametrize("forward", [None, False, True])
+    @pytest.mark.parametrize("resume", [False, True])
+    async def test_reverification_config_controls_saved_evidence(self, tmp_path, monkeypatch, forward, resume):
+        evidence = {"source": "opencode", "records": []}
+        trajectory = {"turns": [], "invocations": []}
+        pair = InputRolloutPair(
+            input=self._row("agent_a", 0),
+            rollout={"response": {"output": []}, "ng_trajectory": trajectory, "ng_agent_observations": evidence},
+        )
+        dispatched = []
+        self._patch(monkeypatch, [pair], dispatched)
+        options = {} if forward is None else {"forward_agent_evidence": forward}
+        config = self._make_config(tmp_path, resume_from_cache=resume, **options)
+        assert config.forward_agent_evidence is bool(forward)
+        await RolloutReverificationHelper().run_from_config(config)
+        [payload] = dispatched
+        assert payload["response"] == pair.rollout["response"]
+        if forward:
+            assert payload["ng_trajectory"] == trajectory
+            assert payload["ng_agent_observations"] == evidence
+        else:
+            assert "ng_trajectory" not in payload
+            assert "ng_agent_observations" not in payload
+        assert pair.rollout["ng_trajectory"] == trajectory
+        assert pair.rollout["ng_agent_observations"] == evidence
 
     async def test_resume_preserves_prior_output_and_reruns_only_missing(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

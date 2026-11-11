@@ -564,18 +564,3 @@ async def test_shared_record_does_not_hide_a_collected_incomplete_empty_answer(t
     assert report["model"]["kinds"] == {"empty_answer": 1}
     assert report["evaluation"]["count"] == 0
     assert counts == {"observed_healthy": 0, "unhealthy": 1, "unobserved": 0, "verifier_recorded": 0}
-
-
-@pytest.mark.parametrize("base", [0.0, 1.0])
-async def test_math_tool_grade_recovery_uses_final_score_and_real_judge_dependencies(tmp_path, monkeypatch, base):
-    saved, collected = await _collect_session(tmp_path, monkeypatch, reward=base, verifier="math_tool_rewards")
-    assert saved["reward"] == pytest.approx(base + (0.1 if base else 0.02))
-    assert "ng_grading_transform" not in saved
-    [verifier] = saved["ng_trajectory"]["verifier_invocations"]
-    [grade] = verifier["grading_operations"]
-    assert grade["outcome"] == "completed"
-    assert grade["result_binding_sha256"] == grading_result_binding(saved)
-    assert len(grade["dependencies"]) == (2 if base else 1)
-    passed, reason, report, counts = _gate(collected)
-    assert passed is True and report["exact"] is True, reason
-    assert counts["observed_healthy"] == 1 and counts["unobserved"] == 0

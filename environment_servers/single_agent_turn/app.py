@@ -132,7 +132,6 @@ class SingleAgentTurnEnvironmentServerConfig(BaseEnvironmentServerConfig):
     forward_agent_evidence: bool = False
     # Unset, each falls back to the bound agent's own setting, which also carries the global flag.
     # A pairing moved off the legacy_agent relay then keeps skipping as its agent's /run did.
-    forward_agent_evidence: bool = False
     skip_verification: bool | None = None
     skip_verification_reward: float | None = None
 
