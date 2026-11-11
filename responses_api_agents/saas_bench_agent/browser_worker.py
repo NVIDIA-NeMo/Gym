@@ -21,6 +21,22 @@ from saas_bench.opencode.worker import claim_slot
 from responses_api_agents.saas_bench_agent.runtime import configure_cache
 
 
+def _trace_counts(trajectory: list[dict]) -> tuple[int, int]:
+    actions = errors = 0
+    for step in trajectory:
+        calls = step.get("actions", step.get("action", []))
+        if isinstance(calls, list):
+            actions += len(calls)
+        results = step.get("results", [])
+        result_errors = (
+            sum(bool(result.get("error")) for result in results if isinstance(result, dict))
+            if isinstance(results, list)
+            else 0
+        )
+        errors += result_errors or int(bool(step.get("error")))
+    return actions, errors
+
+
 def execute(config: dict) -> dict:
     configure_cache(config["cache_root"])
     root = Path(config["source_root"]).resolve(strict=True)
@@ -137,6 +153,7 @@ def execute(config: dict) -> dict:
                     slot_id=slot_id,
                     port_map=ports,
                 )
+                tool_calls, tool_errors = _trace_counts(native)
                 result["execution_health"] = {
                     "termination": "native_error"
                     if actor_failed
@@ -144,10 +161,8 @@ def execute(config: dict) -> dict:
                     if verify.get("status") != "PASS"
                     else "final_response",
                     "execution_healthy": not actor_failed,
-                    "tool_calls": sum(
-                        len(row.get("action", [])) for row in native if isinstance(row.get("action"), list)
-                    ),
-                    "tool_errors": sum(bool(row.get("error")) for row in native),
+                    "tool_calls": tool_calls,
+                    "tool_errors": tool_errors,
                     "task_success": None if diagnostics["unavailable"] else verify.get("status") == "PASS",
                 }
             finally:

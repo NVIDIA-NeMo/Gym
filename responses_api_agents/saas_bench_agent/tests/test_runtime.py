@@ -90,7 +90,16 @@ def test_browser_worker_grades_live_state_and_always_stops(
 
     async def run_task(*args, **kw):
         assert __import__("os").environ["LLM_API_KEY"] == "EMPTY"
-        return {"status": actor_status, "trajectory": [{"action": [], "screenshot": "original.png"}]}
+        return {
+            "status": actor_status,
+            "trajectory": [
+                {
+                    "actions": [{"click": {"index": 1}}, {"input_text": {"text": "fixture"}}],
+                    "results": [{"extracted_content": "clicked"}, {"error": "field unavailable"}],
+                    "screenshot": "original.png",
+                }
+            ],
+        }
 
     actor.run_task = run_task
     for name, module in [("loader", loader), ("slot", slots), ("verify_runner", verifier), ("agent", actor)]:
@@ -116,6 +125,9 @@ def test_browser_worker_grades_live_state_and_always_stops(
     )
     assert result["mask_sample"] is masked, result
     assert result["native_trajectory"][0]["screenshot"] == "original.png"
+    assert result["execution_health"]["tool_calls"] == 2
+    assert result["execution_health"]["tool_errors"] == 1
+    assert result["native_trajectory"][0]["results"][1]["error"] == "field unavailable"
     slot.stop_apps.assert_called_once_with(["fixture"])
 
 
