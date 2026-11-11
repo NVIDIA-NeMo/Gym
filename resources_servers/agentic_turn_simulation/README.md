@@ -92,8 +92,9 @@ gym eval run --no-serve \
   seed as for `/run`. `/harness`, `/simulate_tool_call`, `/verify` and close take the session's lock. Close is
   idempotent; a `/harness` or `/simulate_tool_call` after close or verify answers 404 (`session_lost`), and a
   `/verify` after close is masked. A `/verify` sent again with the same body returns the first result without
-  judging again. The server is restart-only for Gym's rollout checkpointing: its seed reply asks for a restart, so an
-  episode a crash interrupts starts over from its input with a new session. The agent's `/run` behind the deprecated
+  judging again, unless that result was masked: then it is scored again. The server is restart-only for Gym's
+  rollout checkpointing: its seed reply asks for a restart, so an episode a crash interrupts starts over from its
+  input with a new session. The agent's `/run` behind the deprecated
   `legacy_agent` relay (`configs/agentic_turn_simulation_legacy_agent.yaml`) seeds with the flat row instead, and its
   `/verify` releases the session.
 - The simulator and judge set throughput. For more than a few hundred rollouts, or to serve them from separate models,

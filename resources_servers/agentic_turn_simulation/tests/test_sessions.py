@@ -9,7 +9,7 @@ import httpx
 from fastapi.testclient import TestClient
 from omegaconf import DictConfig
 
-from nemo_gym.core import SESSION_LOST, EpisodeId, NeMoGymResponse, TaskId
+from nemo_gym.core import SESSION_LOST, EpisodeId, NeMoGymResponse, TaskId, failure_kinds
 from nemo_gym.server_runtime import (
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
@@ -137,6 +137,20 @@ def test_a_resent_verify_returns_the_first_result_without_judging_again() -> Non
     # Another request for the session is scored, with the counts the session left.
     other = client.post("/verify", json=_verify_body("max_steps")).json()
     assert (other["code_gate"], other["simulated_calls"]) == ("unfinished_turn", {"exact": 1})
+
+
+def test_a_resent_verify_whose_judge_failed_is_judged_again() -> None:
+    server, client = _client(make_server(judge_max_attempts=1))
+    client.post("/seed_session", json=_seed())
+    client.post("/simulate_tool_call", json=_READ)
+    sent = script(server, [judge_reply(text="no idea"), judge_reply(VERDICT)])
+
+    failed = client.post("/verify", json=_verify_body("final_message")).json()
+    assert (failed["mask_sample"], failed["failure_kind"]) == (True, failure_kinds.JUDGE_FAILED)
+    # The masked result was not kept: the same request sent again gets a judge of its own, with the session's counts.
+    again = client.post("/verify", json=_verify_body("final_message")).json()
+    assert (again["reward"], again["simulated_calls"]) == (1.0, {"exact": 1}) and not again.get("mask_sample")
+    assert len(sent) == 2
 
 
 def test_close_releases_the_session_and_refuses_later_calls() -> None:

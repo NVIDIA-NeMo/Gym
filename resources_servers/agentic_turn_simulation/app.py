@@ -806,7 +806,8 @@ class AgenticTurnSimulationResourcesServer(SimpleResourcesServer):
             else:
                 retained = dict(verification.retained or {"simulated_calls": {}})
             # The same request again (the caller resent it after losing the reply) gets the first result, judged once.
-            # Another request for the session is scored, with the counts the session left.
+            # Another request for the session is scored, with the counts the session left. A masked result is not kept
+            # (no usable verdict, say), so the same request sent again is scored again.
             fingerprint = hashlib.sha256(body.model_dump_json().encode()).hexdigest()
             if retained.get("fingerprint") == fingerprint:
                 return AgenticTurnSimulationVerifyResponse(**body.model_dump(), **retained["result"])
@@ -815,9 +816,10 @@ class AgenticTurnSimulationResourcesServer(SimpleResourcesServer):
             response = await self._verify(body, simulated_calls=retained["simulated_calls"])
             request_fields = body.model_dump().keys()
             result = {k: v for k, v in response.model_dump(mode="json").items() if k not in request_fields}
-            verification.retain(
-                {"simulated_calls": retained["simulated_calls"], "fingerprint": fingerprint, "result": result}
-            )
+            if not result.get(MASK_SAMPLE_FIELD):
+                verification.retain(
+                    {"simulated_calls": retained["simulated_calls"], "fingerprint": fingerprint, "result": result}
+                )
             return response
 
     async def _verify(
