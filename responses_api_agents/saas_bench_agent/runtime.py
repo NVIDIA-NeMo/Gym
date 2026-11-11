@@ -3,15 +3,54 @@
 """Bundled benchmark locations and explicit writable runtime paths."""
 
 import atexit
+import errno
 import hashlib
+import json
 import os
+import shutil
 import socket
+import tempfile
 from pathlib import Path
 
 
 BENCHMARK_ROOT = Path(__file__).resolve().parent / "benchmark"
 DEFAULT_BUNDLE_ROOT = Path(__file__).resolve().parent / "data/runtime"
+_SYSTEM_ENROOT_CONFIG = Path("/etc/enroot")
+_GPU_ENROOT_HOOKS = {"hooks.d/50-mig-config.sh", "hooks.d/98-nvidia.sh"}
 HARNESS_VERSIONS = {"opencode": "2.1.1", "browser_use": "browser-use-0.13.7"}
+
+
+def _cpu_enroot_config(cache: Path) -> Path:
+    files = {
+        str(path.relative_to(_SYSTEM_ENROOT_CONFIG)): path.read_bytes()
+        for path in sorted(_SYSTEM_ENROOT_CONFIG.rglob("*"))
+        if path.is_file() and str(path.relative_to(_SYSTEM_ENROOT_CONFIG)) not in _GPU_ENROOT_HOOKS
+    }
+    manifest = {name: hashlib.sha256(content).hexdigest() for name, content in files.items()}
+    digest = hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest()[:24]
+    base = cache / "enroot-system"
+    base.mkdir(exist_ok=True)
+    target = base / digest
+    if not target.exists():
+        temporary = Path(tempfile.mkdtemp(prefix=".config-", dir=base))
+        try:
+            for name, content in files.items():
+                path = temporary / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content)
+                path.chmod((_SYSTEM_ENROOT_CONFIG / name).stat().st_mode & 0o777)
+            try:
+                temporary.rename(target)
+            except OSError as exc:
+                if exc.errno not in {errno.EEXIST, errno.ENOTEMPTY}:
+                    raise
+        finally:
+            if temporary.exists():
+                shutil.rmtree(temporary)
+    for name, content in files.items():
+        if (target / name).read_bytes() != content:
+            raise ValueError("Cached CPU Enroot configuration differs: " + name)
+    return target
 
 
 def configure_cache(root: str) -> Path:
@@ -41,6 +80,7 @@ def configure_cache(root: str) -> Path:
         path = cache / suffix
         path.mkdir(parents=True, exist_ok=True)
         os.environ[variable] = str(path)
+    os.environ["ENROOT_SYSCONF_PATH"] = str(_cpu_enroot_config(cache))
     helper = os.environ.get("SAAS_ENROOT_RUNTIME_DIR")
     paths = [str(cache / "npm-prefix/bin")]
     if helper:
@@ -77,10 +117,6 @@ def configure_cache(root: str) -> Path:
 def materialize_bundle(data_dir: str, destination: str | None = None) -> Path:
     """Join shipped verifier/runtime code with a hash-verified external data release."""
     import fcntl
-    import hashlib
-    import json
-    import shutil
-    import tempfile
 
     data = Path(data_dir).resolve(strict=True)
     output = Path(destination) if destination else DEFAULT_BUNDLE_ROOT

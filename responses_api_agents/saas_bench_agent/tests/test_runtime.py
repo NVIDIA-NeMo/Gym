@@ -202,3 +202,36 @@ def test_staged_runtime_tools_are_available_to_native_workers(tmp_path, monkeypa
         str(helper / "usr/lib/x86_64-linux-gnu"),
         "/existing-libs",
     ]
+
+
+def test_cpu_app_enroot_config_retains_mounts_without_host_gpu_hooks(tmp_path, monkeypatch):
+    source = tmp_path / "host-enroot"
+    files = {
+        "enroot.conf": "ENROOT_ROOTFS_WRITABLE=yes\n",
+        "mounts.d/10-runtime.fstab": "/etc/resolv.conf /etc/resolv.conf none bind,ro\n",
+        "hooks.d/10-runtime.sh": "#!/bin/sh\nexit 0\n",
+        "hooks.d/50-mig-config.sh": "#!/bin/sh\nexit 90\n",
+        "hooks.d/98-nvidia.sh": "#!/bin/sh\nexit 91\n",
+    }
+    for name, content in files.items():
+        path = source / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+        path.chmod(0o700)
+    monkeypatch.setattr(runtime, "_SYSTEM_ENROOT_CONFIG", source)
+    cache = tmp_path / "cache"
+    runtime.configure_cache(str(cache))
+    target = Path(__import__("os").environ["ENROOT_SYSCONF_PATH"])
+    for name in ("enroot.conf", "mounts.d/10-runtime.fstab", "hooks.d/10-runtime.sh"):
+        assert (target / name).read_text() == files[name]
+    assert not (target / "hooks.d/50-mig-config.sh").exists()
+    assert not (target / "hooks.d/98-nvidia.sh").exists()
+    before = (target / "hooks.d/10-runtime.sh").stat().st_mtime_ns
+    runtime.configure_cache(str(cache))
+    assert Path(__import__("os").environ["ENROOT_SYSCONF_PATH"]) == target
+    assert (target / "hooks.d/10-runtime.sh").stat().st_mtime_ns == before
+    (source / "hooks.d/10-runtime.sh").write_text("#!/bin/sh\nexit 2\n")
+    runtime.configure_cache(str(cache))
+    updated = Path(__import__("os").environ["ENROOT_SYSCONF_PATH"])
+    assert updated != target
+    assert (target / "hooks.d/10-runtime.sh").read_text() == files["hooks.d/10-runtime.sh"]
