@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from omegaconf import OmegaConf
 
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import BaseServerConfig, ConfigError
@@ -504,14 +505,65 @@ class TestTaskRunner:
 
         assert result.reward == 1.0
 
-    def test_refuses_a_materialized_task_row(self) -> None:
-        materialized = {
-            "task_id": {"taskset": "bench", "task_id": "a"},
+    @staticmethod
+    def _typed_row(task_id: str) -> dict:
+        return {
+            "task_id": {"taskset": "bench", "task_id": task_id},
             "task_input": {"responses_create_params": {"input": []}, "task_data": {}},
         }
 
-        with pytest.raises(ConfigError, match="materialized"):
-            TaskRunner([materialized], registry_server=HEAD)
+    @staticmethod
+    def _registry_config(monkeypatch: pytest.MonkeyPatch, config: dict) -> list:
+        reads: list = []
+
+        def setup_server_client(self, head_server_config=None):
+            reads.append(head_server_config)
+            return type("Client", (), {"global_config_dict": OmegaConf.create(config)})()
+
+        monkeypatch.setattr(RolloutCollectionHelper, "setup_server_client", setup_server_client)
+        return reads
+
+    async def test_runs_a_materialized_task_on_the_environment_server_its_taskset_routes_to(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner = TaskRunner([self._typed_row("a")], registry_server=HEAD)
+        runs = _FakeRuns()
+        self._serve(monkeypatch, runs)
+        self._registry_config(monkeypatch, {"environment_server_routes": {"bench": "bench_env"}})
+
+        result = await runner.run_task("a", rollout_id="trial-1")
+
+        assert result.reward == 1.0
+        (sent,) = runs.sent[0]
+        assert sent["task_id"] == {"taskset": "bench", "task_id": "a"}
+        assert sent["_ng_environment_server"] == "bench_env"
+        assert sent["_ng_rollout_id"] == "trial-1"
+
+    async def test_selects_flat_and_materialized_tasks_by_id_and_reads_the_routes_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner = TaskRunner([_row("flat"), self._typed_row("typed")], registry_server=HEAD)
+        runs = _FakeRuns()
+        self._serve(monkeypatch, runs)
+        reads = self._registry_config(monkeypatch, {"environment_server_routes": {"bench": "bench_env"}})
+
+        await runner.run_task("flat")
+        assert reads == []
+        await runner.run_task("typed")
+        await runner.run_task("typed")
+
+        assert runner.task_ids() == ["flat", "typed"]
+        assert "_ng_environment_server" not in runs.sent[0][0]
+        assert [sent[0].get("_ng_environment_server") for sent in runs.sent[1:]] == ["bench_env", "bench_env"]
+        assert reads == [HEAD]
+
+    async def test_a_materialized_task_without_a_route_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        runner = TaskRunner([self._typed_row("a")], registry_server=HEAD)
+        self._serve(monkeypatch, _FakeRuns())
+        self._registry_config(monkeypatch, {})
+
+        with pytest.raises(ValueError, match="No environment server route is configured for taskset 'bench'"):
+            await runner.run_task("a")
 
     async def test_unknown_task_is_a_config_error(self) -> None:
         with pytest.raises(ConfigError, match="No input rows for task ids"):

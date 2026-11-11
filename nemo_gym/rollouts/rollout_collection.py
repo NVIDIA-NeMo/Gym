@@ -3532,6 +3532,7 @@ class RolloutCollectionHelper(BaseModel):
         num_repeats_add_seed: Union[bool, Dict[str, bool]] = False,
         global_config_dict: Optional[DictConfig] = None,
         task_ids: Optional[Sequence[str]] = None,
+        environment_server_routes: Optional[Mapping[str, str]] = None,
     ) -> List[Dict]:
         """Apply run-level routing and repetition to caller-held rows.
 
@@ -3544,7 +3545,9 @@ class RolloutCollectionHelper(BaseModel):
         their agents here; leave it None to defer that to ``run_examples``, which does it against
         the head server's config. Pass ``task_ids`` to keep only those tasks, selected by the id
         stored in each row (see ``nemo_gym.data.task_selection.select_tasks``), each task once before
-        repetition. Input rows are not mutated; the expanded, stamped copies are returned.
+        repetition. Pass ``environment_server_routes`` (taskset to environment server, as in the run config) when
+        the rows include materialized task rows; they are routed by it, and have no route without it. Input rows are
+        not mutated; the expanded, stamped copies are returned.
         """
         config = RolloutCollectionConfig(
             input_jsonl_fpath="<in-memory>",
@@ -3553,6 +3556,7 @@ class RolloutCollectionHelper(BaseModel):
             fan_out=fan_out,
             num_repeats=num_repeats,
             num_repeats_add_seed=num_repeats_add_seed,
+            environment_server_routes=dict(environment_server_routes or {}),
         )
         selected = range(len(examples)) if task_ids is None else select_tasks(examples, task_ids)
         raw_rows = [
