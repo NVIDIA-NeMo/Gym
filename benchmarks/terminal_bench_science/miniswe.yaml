@@ -1,44 +1,58 @@
+# Terminal-Bench-Science v0.1 with mini-SWE 2.4.6 running inside each task sandbox through agent sessions.
+#
+# As in codex.yaml, the TB4 resources server owns the task and verifier sandboxes and lends the task sandbox
+# through SandboxAccess. mini_swe_agent installs its runtime there and runs mini-SWE, and single_agent_turn_legacy
+# seeds both, closes mini-SWE before grading, then closes Resources. Grading, partial credit, artifacts, and EFS
+# logs are unchanged from the relay profile (miniswe_legacy_agent.yaml). Rows carry the official instruction as
+# their prompt (prepare_codex.py). See README.md, "Profile".
 config_paths:
-- benchmarks/terminal_bench_science/resources.yaml
-terminal_bench_science_miniswe:
+  - benchmarks/terminal_bench_science/resources.yaml
+  - responses_api_agents/mini_swe_agent/configs/mini_swe_agent_sandboxed.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+
+terminal_bench_science_miniswe_resources_server:
+  _inherit_from: terminal_bench_science
+  resources_servers:
+    terminal_bench_4:
+      description: Pinned Terminal-Bench-Science v0.1 tasks lent to sandbox-borrowing harnesses, with separate offline verification.
+      # mini-SWE reconnects through this provider block (resources.yaml) to borrow the task sandbox.
+      sandbox_provider_ref: terminal_bench_science_sandbox
+      datasets:
+        # The Codex profile's rows: each embeds the task's instruction.md as one user message.
+        - name: terminal_bench_science
+          type: benchmark
+          jsonl_fpath: benchmarks/terminal_bench_science/data/benchmark_codex.jsonl
+          prepare_script: benchmarks/terminal_bench_science/prepare_codex.py
+          # One trial per task, as the relay profile. The leaderboard's protocol is three trials per task
+          # (210 in all): ++num_repeats=3.
+          num_repeats: 1
+          license: Apache 2.0
+
+terminal_bench_science_miniswe_agent:
+  _inherit_from: mini_swe_agent
   responses_api_agents:
-    miniswe_sandboxed_agent:
-      entrypoint: app.py
-      domain: agent
-      description: mini-SWE 2.4.6 native bash profile on pinned Terminal-Bench-Science v0.1 resources.
+    mini_swe_agent:
+      # Routes the benchmark dataset to this agent; the Environment Server drives the episode.
       resources_server:
         type: resources_servers
-        name: terminal_bench_science
-      datasets:
-      - name: terminal_bench_science
-        type: benchmark
-        jsonl_fpath: benchmarks/terminal_bench_science/data/benchmark.jsonl
-        prepare_script: benchmarks/terminal_bench_science/prepare.py
-        # One trial per task, as terminal_bench_4/miniswe. The leaderboard's protocol is
-        # three trials per task (210 in all): ++num_repeats=3.
-        num_repeats: 1
-        license: Apache 2.0
-      - name: example
-        type: example
-        jsonl_fpath: benchmarks/terminal_bench_science/data/example.jsonl
-        license: Apache 2.0
-      model_server:
-        type: responses_api_models
-        name: policy_model
-      sandbox_model_base_url: ${oc.select:tbsci_sandbox_model_base_url,null}
-      # Harbor's built-in mini-swe-agent defaults: no step limit and the
-      # 30-second LocalEnvironment command timeout. Each task's own 8-hour
-      # agent budget bounds the episode.
-      harness:
-        step_limit: ${oc.select:tbsci_max_steps,0}
-        step_timeout_sec: ${oc.select:tbsci_step_timeout_sec,30}
-      agent_max_timeout_sec: ${oc.select:tbsci_agent_max_timeout_sec,null}
-      artifacts_dir: ${oc.select:tbsci_agent_artifacts_dir,${oc.select:tbsci_jobs_dir,results/terminal_bench_science}/agent}
+        name: terminal_bench_science_miniswe_resources_server
+      # Harbor's built-in mini-swe-agent defaults, as the relay profile: no step limit and the 30-second
+      # LocalEnvironment command timeout. Each task's own 8-hour agent budget bounds the run.
+      step_limit: ${oc.select:tbsci_max_steps,0}
+      step_timeout: ${oc.select:tbsci_step_timeout_sec,30}
+      sandbox_runner_timeout_seconds: ${oc.select:tbsci_agent_max_timeout_sec,28800}
 
-terminal_bench_science_miniswe_environment_server:
+terminal_bench_science_miniswe:
+  _inherit_from: single_agent_turn_legacy
   environment_servers:
-    legacy_agent:
-      entrypoint: app.py
+    single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: terminal_bench_science_miniswe_resources_server
       agent_server:
         type: responses_api_agents
-        name: terminal_bench_science_miniswe
+        name: terminal_bench_science_miniswe_agent
+      # Provisioning, the mini-SWE runtime installation, the 8-hour agent budget, and verification (up to
+      # 12000 seconds for the slowest verifier, plus its startup).
+      default_episode_timeout_seconds: ${oc.select:tbsci_episode_timeout_sec,46800}
+      cleanup_timeout_seconds: 600

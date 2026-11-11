@@ -286,9 +286,14 @@ A trial whose official evaluation did not complete, such as a verifier timeout, 
 
 ## Profile
 
-`terminal_bench_science/miniswe` runs mini-SWE 2.4.6 through
-[`miniswe_sandboxed_agent`](../../responses_api_agents/miniswe_sandboxed_agent/README.md).
-It uses Gym's model server, so model calls and training tokens are captured.
+`terminal_bench_science/miniswe` (`miniswe.yaml`) runs mini-SWE 2.4.6 inside each task sandbox
+through the agent sessions of
+[`mini_swe_agent`](../../responses_api_agents/mini_swe_agent/README.md#agent-sessions). As with
+[Codex](#codex-in-the-task-sandbox), it is composed with the resources server and
+`single_agent_turn_legacy`, which seeds both, closes mini-SWE before grading, then closes the
+resources session. The resources server lends the task sandbox through `SandboxAccess`; grading,
+partial credit, artifacts and cleanup are the same as for Codex. Model calls go through Gym's
+model server and are captured; token IDs and logprobs are not (see the agent's README).
 
 The defaults follow Harbor's built-in `mini-swe-agent`:
 
@@ -306,6 +311,42 @@ unless you pin a version, so pin it when you compare against Harbor runs.
 
 The public leaderboard uses the Codex, Claude Code and mini-SWE-agent harnesses; there are no
 Terminus-2 entries.
+
+How the profile runs:
+
+- **Prompt.** Rows carry the official instruction as their prompt. The profile uses the Codex
+  profile's rows, which `prepare_codex.py` writes (see below), and mini-SWE renders the
+  instruction with its `mini.yaml` templates.
+- **Runtime.** The agent server uploads mini-SWE's pinned runtime into the task sandbox at seed,
+  so the sandbox needs no PyPI access for it. It needs glibc 2.28 or newer and about 450 MB
+  under `/tmp`; every v0.1 agent image is Debian or Ubuntu based, and none sets `[agent].user`.
+- **Episode bound.** 46800 seconds (`++tbsci_episode_timeout_sec`), as for Codex: the runtime
+  installation, the 8-hour agent budget and the slowest verifier (12000 seconds).
+- **Model address.** mini-SWE calls the model server from inside the sandbox at the address the
+  Gym servers bind (see [Run](#run)); there is no separate sandbox-side URL.
+- **Split sandbox endpoints.** The resources server lends a sandbox through one provider block,
+  so `++tbsci_split_sandbox_endpoints=true` is refused at seed. No task needs a GPU: point
+  `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY` at the CPU deployment.
+- **Working directory `/`.** `ode-law-discovery` and `geometric-pharmacophore-alignment` set no
+  `WORKDIR`, so their agent starts in `/`. `mini_swe_agent` refuses a working directory that
+  contains its session directory under `/tmp`, so these two tasks fail at seed. Each is recorded
+  once in `rollouts_failures.jsonl` as a terminal `environment_server_failed` failure with no
+  reward, so it is left out of `mean/reward`. Count them as fails when you compare with the
+  leaderboard, or run them with `terminal_bench_science/codex` or the `/run` profile.
+
+### `/run` profile
+
+`terminal_bench_science/miniswe_legacy_agent` (`miniswe_legacy_agent.yaml`) is deprecated. It keeps
+the previous profile unchanged: [`miniswe_sandboxed_agent`](../../responses_api_agents/miniswe_sandboxed_agent/README.md)
+over the `legacy_agent` `/run` relay of the resources server, on identity rows (`prepare.py`,
+`data/benchmark.jsonl`), with the instruction delivered by the resources seed. It installs
+mini-SWE from PyPI in the sandbox, runs all 70 tasks including the two above, keeps its agent
+artifacts under `<tbsci_jobs_dir>/agent`, and accepts `++tbsci_sandbox_model_base_url` for a cell
+that reaches the model server only through a proxy. The same `tbsci_max_steps`,
+`tbsci_step_timeout_sec` and `tbsci_agent_max_timeout_sec` settings apply. It stays for
+comparison until the relay is removed; the two adapters are configured differently, so do not
+compare their scores as the same measurement. `data/example.jsonl` and
+`data/example_rollouts.jsonl` belong to this profile.
 
 ### Codex in the task sandbox
 
@@ -406,7 +447,8 @@ export OPENSANDBOX_DOMAIN=... OPENSANDBOX_API_KEY=...
 ```
 
 With `++tbsci_split_sandbox_endpoints=true`, export `OPENSANDBOX_DOMAIN_CPU` and
-`OPENSANDBOX_API_KEY_CPU` instead. No task requests a GPU.
+`OPENSANDBOX_API_KEY_CPU` instead. No task requests a GPU. Only the `/run` profile accepts split
+endpoints; the session profiles lend sandboxes through one provider block.
 
 A run config keeps the model key off the command line and can hold the per-task image map.
 For example, `tbsci-run.yaml`:
@@ -428,11 +470,17 @@ gym eval run --benchmark terminal_bench_science/miniswe --split benchmark \
   '++tbsci_verifier_image="REGISTRY/tbsci/{task}:tests-{digest}"'
 ```
 
+`gym eval prepare` writes the prompt-bearing rows with `prepare_codex.py`, which runs itself in
+the resources server's environment when Gym's lacks `pathspec` (see
+[Codex in the task sandbox](#codex-in-the-task-sandbox)). For the `/run` profile, use
+`--benchmark terminal_bench_science/miniswe_legacy_agent` in both commands.
+
 mini-SWE runs inside each remote sandbox and calls Gym's model server from there, so the Gym
 servers must listen on an address the sandbox cell can reach. `++default_host` binds them to
 that address. `++use_absolute_ip=true` binds to `gethostbyname(gethostname())` instead, which
-is `127.0.1.1` on many Ubuntu hosts and unreachable from the cell. If the cell reaches the
-model server only through a proxy, also set `++tbsci_sandbox_model_base_url=...`.
+is `127.0.1.1` on many Ubuntu hosts and unreachable from the cell. With the `/run` profile, if
+the cell reaches the model server only through a proxy, also set
+`++tbsci_sandbox_model_base_url=...`.
 
 Preparation accepts these filters, which combine:
 
@@ -453,5 +501,5 @@ logging callback; the calls and the run are unaffected.
 The profile runs one trial per task; add `++num_repeats=3` for the leaderboard's three.
 
 `data/example_rollouts.jsonl` holds one capped trial (3 steps, 900 seconds) of each example
-task, run this way on `data/example.jsonl`. Its local paths and the model server address are
+task, run with the `/run` profile on `data/example.jsonl`. Its local paths and the model server address are
 placeholders.

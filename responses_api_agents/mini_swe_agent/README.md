@@ -61,7 +61,7 @@ response output are rebuilt from the CLI's records; the model emitted only the b
 ### mini-SWE adapters
 
 [`miniswe_sandboxed_agent`](../miniswe_sandboxed_agent/README.md) is deprecated but remains available. It also runs mini-SWE 2.4.6 through agent sessions, and
-the Terminal Bench 4 and Terminal-Bench-Science presets use it. It installs mini-SWE in the sandbox at setup, as the
+the Terminal Bench 4 preset and Terminal-Bench-Science's `/run` preset (`miniswe_legacy_agent`) use it. It installs mini-SWE in the sandbox at setup, as the
 task user, from PyPI, so the sandbox needs PyPI access, and it reports `miniswe_termination`. This adapter installs a
 runtime built on the agent server at seed, so the sandbox needs no network; it runs mini-SWE under Gym's process
 supervisor, can start its own sandbox, serves `mcp` tool grants, and reports `mini_swe_termination`. Use this adapter
@@ -72,6 +72,9 @@ must keep the older adapter until they have a supported migration path.
 
 - Terminal Bench 4 Harbor task folders (after `gym dataset pull terminal_bench_4`), in the sandbox the Harbor
   environment server lends.
+- Terminal-Bench-Science v0.1 ([`benchmarks/terminal_bench_science/miniswe.yaml`](../../benchmarks/terminal_bench_science/miniswe.yaml))
+  behind `single_agent_turn_legacy`, in the task sandbox the `terminal_bench_4` resources server lends. Its two tasks
+  whose working directory is `/` are refused (see that benchmark's README).
 - `example_single_tool_call` behind `single_agent_turn_legacy` with `resources_tool_transports: [mcp]`, in a sandbox
   the agent starts.
 

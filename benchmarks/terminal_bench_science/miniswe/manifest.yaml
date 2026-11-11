@@ -4,8 +4,8 @@ experimental: true
 kind: benchmark
 integration_profile: custom-gym-agent-loop
 domain: coding
-description: The pinned 70-task Terminal-Bench-Science v0.1 dataset with the mini-SWE 2.4.6 native loop owned by the
-  agent server and separate offline official verification.
+description: The pinned 70-task Terminal-Bench-Science v0.1 dataset with mini-SWE 2.4.6 running in each task sandbox
+  through agent sessions and separate offline official verification.
 modality: text
 licensing: Apache-2.0
 authors:
@@ -17,19 +17,16 @@ reward:
   higher_is_better: true
 determinism: unknown
 config_path: ../miniswe.yaml
+dataset_owner: terminal_bench_science_miniswe_resources_server
 resources_server: terminal_bench_4
-agent_server: miniswe_sandboxed_agent
+agent_server: mini_swe_agent
 datasets:
 - name: terminal_bench_science
   type: benchmark
-  jsonl_fpath: benchmarks/terminal_bench_science/data/benchmark.jsonl
-  prepare_script: benchmarks/terminal_bench_science/prepare.py
-  num_repeats: 1
-- name: example
-  type: example
-  jsonl_fpath: benchmarks/terminal_bench_science/data/example.jsonl
+  jsonl_fpath: benchmarks/terminal_bench_science/data/benchmark_codex.jsonl
+  prepare_script: benchmarks/terminal_bench_science/prepare_codex.py
   num_repeats: 1
 model_server: policy_model
 canonical_split: benchmark
-prompt_source: agent
+prompt_source: prepared
 lifecycle: active
