@@ -1047,6 +1047,8 @@ class VLLMModel(SimpleResponsesAPIModel):
             NeMoGymAsyncOpenAI(
                 base_url=base_url,
                 api_key=self.config.api_key,
+                # The inference engine is not a NeMo Gym server, so its retries stay bounded.
+                internal=False,
                 default_headers=self.config.default_headers,
                 session_key_headers=self.config.session_key_headers,
                 max_connection_retries=(
@@ -2584,6 +2586,8 @@ class VLLMModel(SimpleResponsesAPIModel):
             NeMoGymAsyncOpenAI(
                 base_url=url,
                 api_key=self.config.api_key,
+                # The inference engine is not a NeMo Gym server, so its retries stay bounded.
+                internal=False,
                 default_headers=self.config.default_headers,
                 session_key_headers=self.config.session_key_headers,
                 max_connection_retries=self.config.endpoint_connection_retries,
