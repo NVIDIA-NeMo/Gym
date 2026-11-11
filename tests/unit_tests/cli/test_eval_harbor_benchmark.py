@@ -22,7 +22,7 @@ from nemo_gym.environment.assets import asset_config_path
 from tests.unit_tests.data.tasks.harbor.harbor_build_helpers import PULL_DOCKERFILE, write_task
 
 
-MINISWE_CONFIG = "responses_api_agents/miniswe_sandboxed_agent/configs/miniswe_sandboxed_agent.yaml"
+MINISWE_CONFIG = "responses_api_agents/mini_swe_agent/configs/mini_swe_agent_sandboxed.yaml"
 
 
 @pytest.fixture(autouse=True)
@@ -34,9 +34,7 @@ def _harbor_config(**extra) -> dict:
     return {
         "harbor_target": "terminal_bench_4",
         "config_paths": [MINISWE_CONFIG],
-        "miniswe_sandboxed_agent": {
-            "responses_api_agents": {"miniswe_sandboxed_agent": {"harness": {"step_limit": 500}}}
-        },
+        "mini_swe_agent": {"responses_api_agents": {"mini_swe_agent": {"step_limit": 500}}},
         **extra,
     }
 
@@ -61,8 +59,8 @@ class TestHarborBenchmarkConfig:
         assert benchmark.config_path == path.resolve()
         assert (benchmark.agent.config_path, benchmark.agent.instance_name, benchmark.agent.impl_name) == (
             path.resolve(),
-            "miniswe_sandboxed_agent",
-            "miniswe_sandboxed_agent",
+            "mini_swe_agent",
+            "mini_swe_agent",
         )
         assert benchmark.agent.runs_in_sandbox
 
@@ -71,10 +69,14 @@ class TestHarborBenchmarkConfig:
         config.pop("harbor_target")
         assert harbor_benchmark(_benchmark(tmp_path, "tb", config)) is None
 
-    def test_the_shipped_harbor_server_settings_may_ride_along(self, tmp_path: Path) -> None:
+    def test_the_benchmarks_own_settings_ride_along(self, tmp_path: Path) -> None:
         overlay = {"environment_servers": {"harbor": {"default_episode_timeout_seconds": 54000}}}
-        benchmark = harbor_benchmark(_benchmark(tmp_path, "tb", _harbor_config(harbor_environment_server=overlay)))
-        assert benchmark.agent.server_settings == overlay
+        config = _harbor_config(harbor_environment_server=overlay, builds={"enabled": False})
+        benchmark = harbor_benchmark(_benchmark(tmp_path, "tb", config))
+        assert benchmark.agent.benchmark_settings == {
+            "harbor_environment_server": overlay,
+            "builds": {"enabled": False},
+        }
 
     @pytest.mark.parametrize(
         "extra,message",
@@ -87,11 +89,43 @@ class TestHarborBenchmarkConfig:
             ({"verifier": {"resources_servers": {"demo": {}}}}, "cannot define verifier"),
             ({"relay": {"environment_servers": {"legacy_agent": {}}}}, "cannot define relay"),
             ({"harbor_environment_server": "54000"}, "must be a mapping of the server's settings"),
+            # A named instance inheriting the shipped one leaves two agent instances once the include is loaded.
+            (
+                {"tb_agent": {"_inherit_from": "mini_swe_agent", "responses_api_agents": {"mini_swe_agent": {}}}},
+                "exactly one responses_api_agents instance",
+            ),
         ],
     )
     def test_refuses_what_the_run_could_not_honor(self, tmp_path: Path, extra: dict, message: str) -> None:
         with pytest.raises(ValueError, match=message):
             harbor_benchmark(_benchmark(tmp_path, "tb", _harbor_config(**extra)))
+
+    def test_refuses_an_inherited_agent_instance(self, tmp_path: Path) -> None:
+        """The run's agent inherits the benchmark's instance; a second, unresolved inheritance would not bind."""
+        config = {
+            "harbor_target": "terminal_bench_4",
+            "tb_agent": {"_inherit_from": "elsewhere", "responses_api_agents": {"mini_swe_agent": {"step_limit": 1}}},
+        }
+        with pytest.raises(ValueError, match="sets `_inherit_from`; define it directly"):
+            harbor_benchmark(_benchmark(tmp_path, "tb", config))
+
+    def test_refuses_a_server_an_included_config_defines(self, tmp_path: Path) -> None:
+        extra = tmp_path / "extra_verifier.yaml"
+        extra.write_text(
+            yaml.safe_dump(
+                {"extra_verifier": {"resources_servers": {"example_single_tool_call": {"entrypoint": "app.py"}}}}
+            )
+        )
+        config = _harbor_config()
+        config["config_paths"] = [MINISWE_CONFIG, str(extra)]
+        with pytest.raises(ValueError, match="configs it includes cannot define extra_verifier"):
+            harbor_benchmark(_benchmark(tmp_path, "tb", config))
+
+    def test_the_agent_may_come_from_an_include_alone(self, tmp_path: Path) -> None:
+        config = _harbor_config()
+        config.pop("mini_swe_agent")
+        benchmark = harbor_benchmark(_benchmark(tmp_path, "tb", config))
+        assert (benchmark.agent.instance_name, benchmark.agent.impl_name) == ("mini_swe_agent", "mini_swe_agent")
 
 
 class TestEvalRunDelegation:
@@ -139,6 +173,36 @@ class TestEvalRunDelegation:
             )
         assert "select it on its own" in capsys.readouterr().err
 
+    @pytest.mark.parametrize("command", ["run", "prepare"])
+    def test_an_included_extra_server_is_refused_before_preparation(
+        self, monkeypatch: MonkeyPatch, tmp_path, capsys, command
+    ) -> None:
+        extra = tmp_path / "extra_verifier.yaml"
+        extra.write_text(yaml.safe_dump({"extra_verifier": {"resources_servers": {"demo": {"entrypoint": "app.py"}}}}))
+        config = _harbor_config()
+        config["config_paths"] = [MINISWE_CONFIG, str(extra)]
+        _benchmark(tmp_path, "tb", config)
+        monkeypatch.setattr(cli_eval, "run_target", lambda *args, **kwargs: pytest.fail("must be refused"))
+        monkeypatch.setattr(cli_eval, "prepare_harbor_benchmark", lambda *args: pytest.fail("must be refused"))
+        argv = ["eval", command, "--search-dir", str(tmp_path), "--benchmark", "tb"]
+        if command == "run":
+            argv += ["--agent-type", "hermes_agent"]
+        with pytest.raises(SystemExit):
+            _main(monkeypatch, argv)
+        assert "cannot define extra_verifier" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("command", ["run", "prepare"])
+    def test_malformed_benchmark_yaml_is_a_usage_error(self, monkeypatch: MonkeyPatch, tmp_path, capsys, command):
+        path = tmp_path / "benchmarks" / "bad" / "config.yaml"
+        path.parent.mkdir(parents=True)
+        path.write_text("config_paths: [\n")
+        with pytest.raises(SystemExit) as raised:
+            _main(monkeypatch, ["eval", command, "--search-dir", str(tmp_path), "--benchmark", "bad"])
+        assert raised.value.code != 0
+        err = capsys.readouterr().err
+        assert "Traceback" not in err
+        assert "expected" in err or "while parsing" in err
+
 
 class _Stop(Exception):
     pass
@@ -147,8 +211,10 @@ class _Stop(Exception):
 class TestRunTargetWithABenchmark:
     """`run_target` with a Harbor-backed benchmark, stopped at preparation."""
 
-    def _run(self, monkeypatch: MonkeyPatch, tmp_path: Path, **flags) -> tuple[dict, argparse.Namespace]:
-        path = _benchmark(tmp_path, "tb", _harbor_config())
+    def _run(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, config: dict | None = None, extra: list[str] = (), **flags
+    ) -> tuple[dict, argparse.Namespace]:
+        path = _benchmark(tmp_path, "tb", config or _harbor_config())
         monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, str(tmp_path))
         seen: dict = {}
 
@@ -165,19 +231,50 @@ class TestRunTargetWithABenchmark:
         if args.agent_type:
             loaded.append(f"+config_paths=[{asset_config_path('agent-type', args.agent_type)}]")
         with pytest.raises(_Stop):
-            cli_eval.run_target(args, [*loaded, "+limit=3"], benchmark=harbor_benchmark(path))
+            cli_eval.run_target(args, [*loaded, *extra, "+limit=3"], benchmark=harbor_benchmark(path))
         return seen, args
 
     def test_the_benchmarks_harness_runs_by_default(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
         seen, args = self._run(monkeypatch, tmp_path)
         assert seen["target"] == args.target == "terminal_bench_4"
-        assert seen["agent"] == "miniswe_sandboxed_agent"
-        assert seen["rows_name"] == "tasks_miniswe_sandboxed_agent.jsonl"
+        assert seen["agent"] == "mini_swe_agent"
+        assert seen["rows_name"] == "tasks_mini_swe_agent.jsonl"
 
     def test_agent_type_swaps_the_harness(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
         seen, _ = self._run(monkeypatch, tmp_path, agent_type="hermes_agent")
         assert seen["agent"] == "hermes_agent"
         assert seen["rows_name"] == "tasks_hermes_agent.jsonl"
+
+    @pytest.mark.parametrize("agent_type", [None, "hermes_agent"])
+    def test_preparation_reads_the_benchmarks_settings(self, monkeypatch: MonkeyPatch, tmp_path, agent_type) -> None:
+        """Preparation runs before the run config exists: it reads the preset's `builds:` block itself."""
+        seen, _ = self._run(
+            monkeypatch, tmp_path, config=_harbor_config(builds={"enabled": False}), agent_type=agent_type
+        )
+        assert seen["build"].enabled is False
+
+    @pytest.mark.parametrize("agent_type", [None, "hermes_agent"])
+    def test_an_explicit_overlay_still_wins_at_preparation(
+        self, monkeypatch: MonkeyPatch, tmp_path, agent_type
+    ) -> None:
+        overlay = tmp_path / "deployment.yaml"
+        overlay.write_text(yaml.safe_dump({"builds": {"enabled": True}}))
+        seen, _ = self._run(
+            monkeypatch,
+            tmp_path,
+            config=_harbor_config(builds={"enabled": False}),
+            extra=[f"+config_paths=[{overlay}]"],
+            agent_type=agent_type,
+        )
+        assert seen["build"].enabled is True
+        seen, _ = self._run(
+            monkeypatch,
+            tmp_path / "cli",
+            config=_harbor_config(builds={"enabled": False}),
+            extra=["++builds.enabled=true"],
+            agent_type=agent_type,
+        )
+        assert seen["build"].enabled is True
 
     def test_agent_is_refused_rather_than_ignored(self, monkeypatch: MonkeyPatch, tmp_path, capsys) -> None:
         path = _benchmark(tmp_path, "tb", _harbor_config())
@@ -200,9 +297,37 @@ def test_the_configs_chosen_for_the_benchmark_leave_the_overrides(tmp_path: Path
         loaded.append(f"+config_paths=[{asset_config_path('agent-type', agent_type)}]")
         loaded.append("+_selected_langgraph_config=x")
     args = argparse.Namespace(target=None, agent=None, agent_type=agent_type)
-    agent, overrides = cli_eval._benchmark_agent(args, [*loaded, "+limit=3"], harbor_benchmark(path))
-    assert agent.impl_name == (agent_type or "miniswe_sandboxed_agent")
+    agent, overrides, preparation = cli_eval._benchmark_agent(args, [*loaded, "+limit=3"], harbor_benchmark(path))
+    assert agent.impl_name == (agent_type or "mini_swe_agent")
     assert overrides == [f"+config_paths=[{other}]", "+limit=3"]
+    # Preparation loads the benchmark below the overlay, so the overlay wins there too.
+    assert preparation == [f"+config_paths=[{json.dumps(str(path.resolve()))},{other}]", "+limit=3"]
+
+
+def _merged_run_config(tmp_path: Path, config: dict, agent_type: str | None, overrides: list[str] = ()):
+    """The run's config files for ``config``, merged as Gym merges them, and the generated server's name."""
+    path = _benchmark(tmp_path, "tb", config)
+    args = argparse.Namespace(target=None, agent=None, agent_type=agent_type)
+    agent, _, _ = cli_eval._benchmark_agent(args, [], harbor_benchmark(path))
+    folder = tmp_path / "ds"
+    tasks = [load_task(write_task(folder / "a", dockerfile=PULL_DOCKERFILE))]
+    prepared = PreparedTaskset("ds", folder, tasks, tmp_path / "out" / "tasks.jsonl", tmp_path / "out")
+    prepared.output_dir.mkdir(parents=True)
+
+    run_config, tokens = build_run(prepared, agent, sandbox=None, overrides=list(overrides))
+
+    paths = [
+        json.loads(entry) if entry.startswith('"') else entry
+        for token in tokens
+        if token.startswith("+config_paths=[")
+        for entry in token[len("+config_paths=[") : -1].split(",")
+    ]
+    _, configs = GlobalConfigDictParser().load_extra_config_paths(paths)
+    merged = OmegaConf.merge(*configs)
+    written = yaml.safe_load(run_config.read_text())
+    (server,) = [name for name, value in written.items() if isinstance(value, dict) and "environment_servers" in value]
+    GlobalConfigDictParser()._recursively_swap_keys(merged)
+    return merged, server
 
 
 @pytest.mark.parametrize("agent_type", [None, "hermes_agent"])
@@ -210,24 +335,21 @@ def test_the_benchmarks_server_settings_win_in_the_runs_merged_config(tmp_path: 
     """The run's config files, merged as Gym merges them, carry the benchmark's episode bound over the server's own
     default, whether the benchmark's harness runs or `--agent-type` swaps in another."""
     overlay = {"environment_servers": {"harbor": {"default_episode_timeout_seconds": 54000}}}
-    path = _benchmark(tmp_path, "tb", _harbor_config(harbor_environment_server=overlay))
-    args = argparse.Namespace(target=None, agent=None, agent_type=agent_type)
-    agent, _ = cli_eval._benchmark_agent(args, [], harbor_benchmark(path))
-    folder = tmp_path / "ds"
-    tasks = [load_task(write_task(folder / "a", dockerfile=PULL_DOCKERFILE))]
-    prepared = PreparedTaskset("ds", folder, tasks, tmp_path / "out" / "tasks.jsonl", tmp_path / "out")
-    prepared.output_dir.mkdir(parents=True)
-
-    run_config, tokens = build_run(prepared, agent, sandbox=None, overrides=[])
-
-    (token,) = [token for token in tokens if token.startswith("+config_paths=[")]
-    paths = [json.loads(entry) for entry in token[len("+config_paths=[") : -1].split(",")]
-    _, configs = GlobalConfigDictParser().load_extra_config_paths(paths)
-    merged = OmegaConf.merge(*configs)
-    written = yaml.safe_load(run_config.read_text())
-    (server,) = [name for name, value in written.items() if isinstance(value, dict) and "environment_servers" in value]
-    GlobalConfigDictParser()._recursively_swap_keys(merged)
+    merged, server = _merged_run_config(tmp_path, _harbor_config(harbor_environment_server=overlay), agent_type)
     assert merged[server].environment_servers.harbor.default_episode_timeout_seconds == 54000
+
+
+@pytest.mark.parametrize("agent_type", [None, "hermes_agent"])
+def test_an_interpolated_server_setting_keeps_its_input(tmp_path: Path, agent_type) -> None:
+    """A swapped-in harness drops the benchmark's agent, not the top-level keys its server settings interpolate."""
+    overlay = {"environment_servers": {"harbor": {"default_episode_timeout_seconds": "${episode_bound}"}}}
+    config = _harbor_config(episode_bound=54000, harbor_environment_server=overlay)
+    merged, server = _merged_run_config(tmp_path, config, agent_type)
+    assert merged[server].environment_servers.harbor.default_episode_timeout_seconds == 54000
+    later = tmp_path / "later.yaml"
+    later.write_text(yaml.safe_dump({"episode_bound": 60000}))
+    merged, server = _merged_run_config(tmp_path / "overlaid", config, agent_type, [f"+config_paths=[{later}]"])
+    assert merged[server].environment_servers.harbor.default_episode_timeout_seconds == 60000
 
 
 class TestEvalPrepareDelegation:
@@ -251,6 +373,23 @@ class TestEvalPrepareDelegation:
         monkeypatch.setattr(cli_main, "dispatch", lambda target, overrides: dispatched.append((target, overrides)))
         _main(monkeypatch, ["eval", "prepare", "--search-dir", str(tmp_path), "--benchmark", "plain"])
         assert dispatched == [("nemo_gym.cli.eval:prepare_benchmark", [f"+config_paths=[{path.resolve()}]"])]
+
+    @pytest.mark.parametrize("agent_type", [None, "hermes_agent"])
+    def test_prepare_reads_the_benchmarks_settings(self, monkeypatch: MonkeyPatch, tmp_path, agent_type) -> None:
+        path = _benchmark(tmp_path, "tb", _harbor_config(builds={"enabled": False}))
+        monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, str(tmp_path))
+        seen: dict = {}
+
+        def fake_prepare(target, **kwargs):
+            seen.update(target=target, **kwargs)
+            raise _Stop
+
+        monkeypatch.setattr(cli_eval, "prepare_target", fake_prepare)
+        args = argparse.Namespace(_parser=argparse.ArgumentParser(), target=None, agent=None, agent_type=agent_type)
+        with pytest.raises(_Stop):
+            cli_eval.prepare_harbor_benchmark(args, [f"+config_paths=[{path.resolve()}]"], harbor_benchmark(path))
+        assert seen["build"].enabled is False
+        assert seen["agent"] == (agent_type or "mini_swe_agent")
 
 
 @pytest.mark.parametrize("command", ["prepare_benchmark", "plan_benchmark"])
