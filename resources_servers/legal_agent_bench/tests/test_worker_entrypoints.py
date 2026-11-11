@@ -10,7 +10,14 @@ import pytest
 
 
 @pytest.mark.parametrize("worker", [False, True])
-@pytest.mark.parametrize("entrypoint", ["resources_servers/legal_agent_bench/harbor_bridge.py"])
+@pytest.mark.parametrize(
+    "entrypoint",
+    [
+        "resources_servers/legal_agent_bench/harbor_bridge.py",
+        "resources_servers/legal_agent_bench/session_app.py",
+        "responses_api_agents/legal_agent_bench_native/app.py",
+    ],
+)
 def test_worker_entrypoint_exports_app_only_when_selected(entrypoint: str, worker: bool) -> None:
     root = Path(__file__).resolve().parents[3]
     with (

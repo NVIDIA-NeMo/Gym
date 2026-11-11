@@ -53,6 +53,7 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
     lost_session_verification,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.legal_agent_bench.app import LegalAgentBenchResourcesServerConfig as _BaseLabConfig
 from resources_servers.legal_agent_bench.app import _build_verifier_env
 from resources_servers.legal_agent_bench.archive_worker import ArchiveLimits
@@ -558,3 +559,5 @@ class LabSessionResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     LabSessionResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = LabSessionResourcesServer.run_webserver()  # noqa: F401

@@ -36,6 +36,7 @@ from nemo_gym.core import (
 from nemo_gym.sandbox import AsyncSandbox, create_provider, resolve_provider_config, upload_text
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.trajectory import AgentObservationBundle, ObservationGap
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.legal_agent_bench.lab_harbor.completion import CompletionState
 from resources_servers.legal_agent_bench.lab_harbor.tools import get_all_tool_definitions
 
@@ -405,3 +406,5 @@ class LegalAgentBenchNativeAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     LegalAgentBenchNativeAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = LegalAgentBenchNativeAgent.run_webserver()  # noqa: F401
