@@ -1683,7 +1683,12 @@ class SharedRolloutCollectionConfig(
 def _credentials_rejected_stop(failures: Sequence[Mapping[str, Any]]) -> IncompleteEvaluationError | None:
     """The end of a run whose provider (sandbox, or the grading API) refused its credentials: no attempt succeeds
     until they are fixed."""
-    rejected = sum(row.get("failure_kind") == PROVIDER_CREDENTIALS_REJECTED for row in failures)
+    rejected = sum(
+        row.get("failure_kind") == PROVIDER_CREDENTIALS_REJECTED
+        and row.get("failure_outcome_action") != "fail"
+        and row.get(NG_TERMINAL_KEY) is not True
+        for row in failures
+    )
     if not rejected:
         return None
     return IncompleteEvaluationError(
@@ -1709,7 +1714,13 @@ def _protocol_violation_stop(server: str, answered: int) -> IncompleteEvaluation
 
 def _quota_exhausted_stop(failures: Sequence[Mapping[str, Any]]) -> IncompleteEvaluationError | None:
     """The end of a run whose grading provider's quota is exhausted: nothing can be graded until it resets."""
-    exhausted = [row for row in failures if row.get("failure_kind") == PROVIDER_QUOTA_EXHAUSTED]
+    exhausted = [
+        row
+        for row in failures
+        if row.get("failure_kind") == PROVIDER_QUOTA_EXHAUSTED
+        and row.get("failure_outcome_action") != "fail"
+        and row.get(NG_TERMINAL_KEY) is not True
+    ]
     if not exhausted:
         return None
     resets = sorted({text for row in exhausted if (text := quota_reset_text(row.get("failure_reason")))})
