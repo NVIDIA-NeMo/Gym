@@ -51,6 +51,7 @@ from resources_servers.chartography.app import (
     extract_final_answer,
 )
 from resources_servers.chartography.task_data import TaskData
+from resources_servers.chartography.verifier_fixture import verify_http_request
 
 
 SERVER_DIR = Path(__file__).resolve().parents[1]
@@ -247,14 +248,14 @@ class TestVerify:
     @pytest.mark.asyncio
     async def test_all_criteria_pass(self, server: ChartographyResourcesServer) -> None:
         _mock_judge(server, _judge_content(1, 1))
-        result = await server.verify(_request([_assistant_msg("Head: 34.8 m")]))
+        result = await server.verify(verify_http_request(), _request([_assistant_msg("Head: 34.8 m")]))
         assert result.reward == 1.0 and result.all_pass == 1.0 and result.num_criteria == 2
         assert [v.passed for v in result.verdicts] == [True, True]
 
     @pytest.mark.asyncio
     async def test_strict_pass_fails_on_any_criterion(self, server: ChartographyResourcesServer) -> None:
         _mock_judge(server, _judge_content(1, 0))
-        result = await server.verify(_request([_assistant_msg("Head: 31 m")]))
+        result = await server.verify(verify_http_request(), _request([_assistant_msg("Head: 31 m")]))
         assert result.reward == 0.0 and result.all_pass == 0.0
         assert [v.passed for v in result.verdicts] == [True, False]
 
@@ -262,7 +263,7 @@ class TestVerify:
     async def test_judge_request_matches_upstream(self, server: ChartographyResourcesServer) -> None:
         mock = _mock_judge(server, _judge_content(1))
         reasoning = NeMoGymResponseReasoningItem(id="r", summary=[], type="reasoning")
-        await server.verify(_request([reasoning, _assistant_msg("Head: 34.8 m")]))
+        await server.verify(verify_http_request(), _request([reasoning, _assistant_msg("Head: 34.8 m")]))
         sent = mock.await_args.kwargs["json"]
         assert mock.await_args.kwargs["server_name"] == "judge"
         (message,) = sent.messages
@@ -278,27 +279,27 @@ class TestVerify:
     async def test_empty_answer_scores_zero_without_judging(self, server: ChartographyResourcesServer) -> None:
         mock = _mock_judge(server, _judge_content(1))
         reasoning = NeMoGymResponseReasoningItem(id="r", summary=[], type="reasoning")
-        result = await server.verify(_request([reasoning]))
+        result = await server.verify(verify_http_request(), _request([reasoning]))
         assert result.reward == 0.0 and mock.await_count == 0 and not result.mask_sample
 
     @pytest.mark.asyncio
     async def test_parse_failure_is_retried(self, server: ChartographyResourcesServer) -> None:
         mock = _mock_judge(server, "not json", _judge_content(1))
-        result = await server.verify(_request([_assistant_msg("Head: 34.8 m")]))
+        result = await server.verify(verify_http_request(), _request([_assistant_msg("Head: 34.8 m")]))
         assert result.reward == 1.0 and result.judge_attempts == 2 and mock.await_count == 2
 
     @pytest.mark.asyncio
     async def test_out_of_range_score_is_retried(self, server: ChartographyResourcesServer) -> None:
         too_large = _judge_content(1).replace('"score": 1', '"score": 1e30')
         mock = _mock_judge(server, too_large, _judge_content(1))
-        result = await server.verify(_request([_assistant_msg("Head: 34.8 m")]))
+        result = await server.verify(verify_http_request(), _request([_assistant_msg("Head: 34.8 m")]))
         assert result.reward == 1.0 and result.judge_attempts == 2 and mock.await_count == 2
 
     @pytest.mark.asyncio
     async def test_parse_failure_exhausts_five_attempts(self, server: ChartographyResourcesServer) -> None:
         mock = _mock_judge(server, '{"scores": []}')
         with raises(JudgeError):
-            await server.verify(_request([_assistant_msg("Head: 34.8 m")]))
+            await server.verify(verify_http_request(), _request([_assistant_msg("Head: 34.8 m")]))
         assert mock.await_count == 5
 
     @pytest.mark.asyncio
@@ -308,7 +309,7 @@ class TestVerify:
         monkeypatch.setattr(judge, "_judge_retry_wait_s", lambda attempt: 0)
         server.server_client.post = AsyncMock(side_effect=ConnectionError("judge down"))
         with raises(NgFailureEvent) as failure:
-            await server.verify(_request([_assistant_msg("Head: 34.8 m")]))
+            await server.verify(verify_http_request(), _request([_assistant_msg("Head: 34.8 m")]))
         assert is_judge_failure(failure.value)
 
     @pytest.mark.asyncio
@@ -317,7 +318,9 @@ class TestVerify:
         self, server: ChartographyResourcesServer, golden: Any, prompt: Any
     ) -> None:
         mock = _mock_judge(server, _judge_content(1))
-        result = await server.verify(_request([_assistant_msg("Head: 34.8 m")], golden=golden, prompt=prompt))
+        result = await server.verify(
+            verify_http_request(), _request([_assistant_msg("Head: 34.8 m")], golden=golden, prompt=prompt)
+        )
         assert result.mask_sample and result.reward == 0.0 and mock.await_count == 0
         assert result.failure_kind == "chartography:invalid_reference"
 
@@ -330,7 +333,7 @@ class TestGradingRecord:
         invocation = VerifierInvocation(invocation_id="verify-1")
         token = verifier_observability._active_verifier.set(invocation)
         try:
-            result = await server.verify(request)
+            result = await server.verify(verify_http_request(), request)
         finally:
             verifier_observability._active_verifier.reset(token)
         return result, invocation.grading_operations

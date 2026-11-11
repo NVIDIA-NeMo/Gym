@@ -21,6 +21,7 @@ from types import SimpleNamespace
 
 import pytest
 from openai.types.completion_usage import CompletionTokensDetails, CompletionUsage, PromptTokensDetails
+from pydantic import ValidationError
 
 from nemo_gym.core.responses_api_types import (
     NeMoGymChatCompletion,
@@ -144,7 +145,7 @@ def test_chat_completion_usage_to_response_usage():
     # The provider total is kept as reported, not recomputed from prompt + completion.
     assert usage.model_dump() == {
         "input_tokens": 300,
-        "input_tokens_details": {"cached_tokens": 100},
+        "input_tokens_details": {"cached_tokens": 100, "cache_write_tokens": None},
         "output_tokens": 1400,
         "output_tokens_details": {"reasoning_tokens": 1200},
         "total_tokens": 1701,
@@ -158,6 +159,17 @@ def test_usage_detail_prefers_nested_details_in_mappings():
     }
 
     assert _usage_detail(usage, "prompt_tokens_details", "cached_tokens", "cached_input_tokens") == 5
+
+
+@pytest.mark.parametrize("count", [None, 0, 7])
+def test_chat_cache_write_usage_preserves_reported_counts(count: int | None) -> None:
+    details = {} if count is None else {"cache_write_tokens": count}
+    usage = CompletionUsage(prompt_tokens=11, completion_tokens=3, total_tokens=99, prompt_tokens_details=details)
+
+    converted = chat_completion_usage_to_response_usage(usage)
+
+    assert converted.input_tokens_details.cache_write_tokens == count
+    assert (converted.input_tokens, converted.output_tokens, converted.total_tokens) == (11, 3, 99)
 
 
 # ===========================================================================
@@ -2344,3 +2356,192 @@ def test_empty_include_preserves_reasoning_and_tool_history(converter: ChatCompl
     assert converted.messages[2]["content"] == "README.md"
     assert params.include == []
     assert params.input[1].summary[0].text == "Check files first"
+
+
+# ===========================================================================
+# Conversion without repeated dump and validation passes
+# ===========================================================================
+
+_TOKENS = {"prompt_token_ids": [1, 2, 3], "generation_token_ids": [4, 5], "generation_log_probs": [-0.1, -0.2]}
+
+
+def _completion(message: dict) -> NeMoGymChatCompletion:
+    return NeMoGymChatCompletion.model_validate(
+        {
+            "id": "chatcmpl-1",
+            "created": 123,
+            "model": "test",
+            "object": "chat.completion",
+            "choices": [{"index": 0, "finish_reason": "tool_calls", "message": message}],
+        }
+    )
+
+
+def test_request_token_metadata_comes_from_the_items_and_is_not_shared_with_them():
+    converter = ChatCompletionsConverter(return_token_id_information=True)
+    request = NeMoGymResponseCreateParamsNonStreaming(
+        input=[
+            {"role": "user", "content": "q"},
+            {"type": "function_call", "call_id": "c1", "name": "f", "arguments": "{}", **_TOKENS},
+            {"type": "function_call_output", "call_id": "c1", "output": "r"},
+            {"role": "assistant", "type": "message", "content": "a", **_TOKENS, "prompt_token_ids": [9]},
+        ]
+    )
+    before = request.model_dump()
+
+    messages = converter.responses_to_chat_completion_create_params(request).messages
+
+    assert messages[1]["prompt_token_ids"] == [1, 2, 3]
+    assert messages[3]["prompt_token_ids"] == [9]
+    # The chat request owns its lists: editing it cannot reach the source request.
+    assert messages[1]["prompt_token_ids"] is not request.input[1].prompt_token_ids
+    assert request.model_dump() == before
+
+
+def test_request_token_metadata_carried_as_extras_still_reaches_the_next_assistant_turn():
+    # A custom tool output has no training variant, so its token fields stay extras on the base model.
+    # As before this change, token metadata on a non-assistant item reaches the next assistant message.
+    converter = ChatCompletionsConverter(return_token_id_information=True, custom_tool_strategy="function_bridge")
+    request = NeMoGymResponseCreateParamsNonStreaming(
+        input=[
+            {"type": "custom_tool_call_output", "call_id": "c1", "output": "r", **_TOKENS},
+            {"role": "assistant", "type": "message", "content": "a"},
+        ]
+    )
+
+    messages = converter.responses_to_chat_completion_create_params(request).messages
+
+    assert messages[1]["prompt_token_ids"] == [1, 2, 3]
+    assert messages[1]["generation_log_probs"] == [-0.1, -0.2]
+
+
+def test_request_token_metadata_null_extras_count_as_absent():
+    converter = ChatCompletionsConverter(return_token_id_information=True, custom_tool_strategy="function_bridge")
+    request = NeMoGymResponseCreateParamsNonStreaming(
+        input=[
+            {"type": "custom_tool_call_output", "call_id": "c1", "output": "r", **_TOKENS},
+            {"role": "assistant", "type": "message", "content": "a"},
+        ]
+    )
+    # A dump with exclude_none drops null extras, so nulled token extras mean no token metadata.
+    for name in _TOKENS:
+        setattr(request.input[0], name, None)
+
+    messages = converter.responses_to_chat_completion_create_params(request).messages
+
+    assert messages[1] == {"role": "assistant", "content": "a"}
+
+
+def test_request_raw_dict_with_null_token_fields_is_rejected():
+    converter = ChatCompletionsConverter(return_token_id_information=True)
+    request = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "q"}])
+    # A raw dict added after validation is dumped with its null values, so its token fields are present
+    # and invalid rather than absent.
+    request.input.append({"type": "message", "role": "assistant", "content": "a", **dict.fromkeys(_TOKENS)})
+
+    with pytest.raises(ValidationError):
+        converter.responses_to_chat_completion_create_params(request)
+
+
+def test_request_without_token_metadata_drops_nothing_from_the_messages():
+    converter = ChatCompletionsConverter(return_token_id_information=True)
+    request = NeMoGymResponseCreateParamsNonStreaming(
+        input=[{"role": "user", "content": "q"}, {"role": "assistant", "type": "message", "content": "a"}]
+    )
+
+    messages = converter.responses_to_chat_completion_create_params(request).messages
+
+    assert messages == [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}]
+
+
+def test_response_items_keep_every_field_set_for_replay():
+    converter = ChatCompletionsConverter(return_token_id_information=False)
+    completion = _completion(
+        {
+            "role": "assistant",
+            "content": "<think>plan</think>answer",
+            "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}}],
+        }
+    )
+
+    response = converter.chat_completion_to_response(
+        NeMoGymResponseCreateParamsNonStreaming(input="q", model="test"), completion
+    )
+
+    for item in response.output:
+        assert item.model_fields_set == set(type(item).model_fields)
+    # An exclude_unset dump, as request replay makes, still carries the null fields.
+    reasoning, message, call = response.model_dump(exclude_unset=True)["output"]
+    assert "encrypted_content" in reasoning and reasoning["encrypted_content"] is None
+    assert "phase" in message and message["phase"] is None
+    assert "namespace" in call and call["namespace"] is None
+
+
+def test_response_token_metadata_is_copied_from_the_backend_completion():
+    converter = ChatCompletionsConverter(return_token_id_information=True)
+    completion = _completion({"role": "assistant", "content": "answer", **_TOKENS})
+
+    response = converter.chat_completion_to_response(
+        NeMoGymResponseCreateParamsNonStreaming(input="q", model="test"), completion
+    )
+
+    (item,) = response.output
+    assert isinstance(item, NeMoGymResponseOutputMessageForTraining)
+    assert item.prompt_token_ids == [1, 2, 3]
+    assert item.model_fields_set == set(type(item).model_fields)
+    assert item.prompt_token_ids is not completion.choices[0].message.prompt_token_ids
+
+
+def test_response_token_metadata_is_dropped_when_not_requested():
+    converter = ChatCompletionsConverter(return_token_id_information=False)
+    completion = _completion({"role": "assistant", "content": "answer", **_TOKENS})
+
+    response = converter.chat_completion_to_response(
+        NeMoGymResponseCreateParamsNonStreaming(input="q", model="test"), completion
+    )
+
+    (item,) = response.output
+    assert type(item) is NeMoGymResponseOutputMessage
+    assert "prompt_token_ids" not in item.model_dump()
+
+
+@pytest.mark.parametrize(
+    ("message", "expected_keys"),
+    [
+        ({"role": "developer", "content": "d"}, {"role", "content"}),
+        ({"role": "system", "content": "s"}, {"role", "content"}),
+        ({"role": "user", "content": "u"}, {"role", "content"}),
+        ({"role": "tool", "content": "t", "tool_call_id": "c1"}, {"role", "content", "tool_call_id"}),
+        ({"role": "assistant", "content": "a"}, {"role", "content"}),
+        ({"role": "assistant", "content": "a", **_TOKENS}, {"role", "content", *_TOKENS}),
+    ],
+)
+def test_chat_message_union_picks_the_member_by_role_and_token_metadata(message, expected_keys):
+    params = NeMoGymChatCompletionCreateParamsNonStreaming(messages=[message])
+
+    assert set(params.messages[0]) == expected_keys
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"role": "narrator", "content": "x"},
+        {"content": "no role"},
+        {"role": "user", "content": "u", **_TOKENS},
+        {"role": "assistant", "content": "a", "prompt_token_ids": [1]},
+        {"role": "developer", "content": [{"type": "image_url", "image_url": {"url": "data:,"}}]},
+    ],
+)
+def test_chat_message_union_rejects_messages_no_member_accepts(message):
+    with pytest.raises(ValidationError):
+        NeMoGymChatCompletionCreateParamsNonStreaming(messages=[message])
+
+
+@pytest.mark.parametrize("message", [{"role": "narrator", "content": "x"}, {"content": "no role"}, "text"])
+def test_chat_message_without_a_known_role_gets_one_error_naming_the_roles(message):
+    with pytest.raises(ValidationError) as excinfo:
+        NeMoGymChatCompletionCreateParamsNonStreaming(messages=[message])
+
+    (error,) = excinfo.value.errors()
+    assert error["type"] == "chat_message_role"
+    assert "role" in error["msg"] and "assistant" in error["msg"]

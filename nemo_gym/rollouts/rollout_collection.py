@@ -76,6 +76,7 @@ from nemo_gym.config.global_config import (
     ATTEMPT_INDEX_KEY_NAME,
     ENVIRONMENT_SERVER_STAMP_KEY_NAME,
     ENVIRONMENT_SERVER_TYPE_KEY_NAME,
+    MODEL_SAMPLING_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
@@ -116,7 +117,9 @@ from nemo_gym.models.model_call_capture import ModelCallCaptureConfig
 from nemo_gym.rollouts.batch_status import (
     BatchStatusTracker,
     RunStatusTracker,
+    _aggregate_entry_for_member,
     _atomic_write_json,
+    _environment_status_members,
     _read_aggregate_entries,
     disable_run_status,
 )
@@ -513,13 +516,17 @@ def _episode_request_body(row: Mapping[str, Any]) -> dict[str, Any]:
     # Decode the identity the way the agent does.
     # An explicit id may carry the attempt suffix itself, as a restored attempt does.
     capture_key = maybe_rollout_id_from_run_body(row) or f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
-    return {
+    body = {
         "episode_id": EpisodeId.from_capture_key(capture_key).model_dump(mode="json"),
         "task": {
             "task_id": row["task_id"],
             "task_input": row["task_input"],
         },
     }
+    # A training framework's sampling values ride beside the task, which they leave unchanged.
+    if row.get(MODEL_SAMPLING_KEY_NAME) is not None:
+        body["model_sampling"] = row[MODEL_SAMPLING_KEY_NAME]
+    return body
 
 
 def _rows_of_first_tasks(numbered_rows: Iterable[tuple[int, str]], limit: int) -> Iterator[tuple[int, str]]:
@@ -852,6 +859,7 @@ def _batch_status_row(result: Dict, agent_refs_by_key: Dict[Tuple[int, int], Dic
         key: result[key]
         for key in (
             AGENT_REF_KEY_NAME,
+            NG_ENVIRONMENT_SERVER_KEY,
             TASK_INDEX_KEY_NAME,
             ROLLOUT_INDEX_KEY_NAME,
             NG_FAILURE_CLASS_KEY,
@@ -2741,12 +2749,18 @@ def _raise_for_aggregation_errors(metrics_fpath: Optional[Path]) -> None:
         )
 
 
-def _refresh_shard_status_aggregation(input_paths: List[str], aggregate_metrics_fpath: Optional[Path]) -> None:
+def _refresh_shard_status_aggregation(
+    input_paths: List[str],
+    aggregate_metrics_fpath: Optional[Path],
+    *,
+    scored_rows: Iterable[Mapping[str, Any]] = (),
+) -> None:
     """Mark each shard's run status with the outcome of the aggregation that merged it, keeping its counts.
 
     EvalRDL sums the shards' status files, so the merged output gets no status file of its own.
     """
     entries, artifact_error = _read_aggregate_entries(aggregate_metrics_fpath)
+    environment_members = _environment_status_members(scored_rows)
     for path in input_paths:
         status_fpath = batch_status_path_for(Path(path))
         # Run status is best-effort: a shard whose status cannot be read or written is logged and skipped, never a
@@ -2757,7 +2771,7 @@ def _refresh_shard_status_aggregation(input_paths: List[str], aggregate_metrics_
             if status.get("tracking") != "enabled" or not isinstance(members, dict):
                 continue
             for agent, member in members.items():
-                entry = entries.get(agent)
+                entry, _ = _aggregate_entry_for_member(entries, agent, environment_member=agent in environment_members)
                 failed = (
                     aggregate_metrics_fpath is None
                     or artifact_error
@@ -5903,7 +5917,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             # The shard's status members, as collection names them: the agent, or the Environment Server a row
             # is routed to.
             status_rows = []
-            for row in examples:
+            for row in dispatched:
                 status_row = _batch_status_row(row, {})
                 if AGENT_REF_KEY_NAME not in status_row:
                     status_row[AGENT_REF_KEY_NAME] = {"name": self._dispatch_name(row)}
@@ -6369,7 +6383,7 @@ class RolloutAggregationHelper(BaseModel):
                 force=True,
             )
         else:
-            _refresh_shard_status_aggregation(input_paths, aggregate_metrics_fpath)
+            _refresh_shard_status_aggregation(input_paths, aggregate_metrics_fpath, scored_rows=scored)
 
         _raise_for_aggregation_errors(aggregate_metrics_fpath)
 
