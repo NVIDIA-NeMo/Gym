@@ -3,7 +3,7 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from aiohttp import ClientConnectorError, ClientOSError, ServerDisconnectedError
+from aiohttp import ClientConnectorError, ClientOSError, ClientTimeout, ServerDisconnectedError
 from omegaconf import DictConfig
 from pydantic import ValidationError
 
@@ -58,6 +58,7 @@ def _client(monkeypatch: pytest.MonkeyPatch, extra: dict) -> tuple[ServerClient,
     request_mock = AsyncMock(return_value="response")
     client_mock = MagicMock()
     client_mock.return_value.request = request_mock
+    client_mock.return_value.timeout = ClientTimeout()
     monkeypatch.setattr("nemo_gym.client.http_client.get_global_aiohttp_client", client_mock)
     return client, request_mock
 

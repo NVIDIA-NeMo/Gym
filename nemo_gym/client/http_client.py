@@ -153,6 +153,24 @@ class GlobalAIOHTTPAsyncClientConfig(BaseModel):
             "Applies to outgoing aiohttp connections and to connections accepted by Gym servers."
         ),
     )
+    global_aiohttp_sock_connect_timeout_seconds: float = Field(
+        default=60.0,
+        gt=0,
+        description=(
+            "Seconds one outgoing TCP handshake may take. It does not count the wait for a free connection-pool "
+            "slot, so a request queued behind a busy pool is not cut short. Total and read time stay unlimited "
+            "unless the caller passes its own timeout."
+        ),
+    )
+    global_aiohttp_internal_retry_budget_seconds: float = Field(
+        default=600.0,
+        ge=0,
+        description=(
+            "Wall-clock budget for retries of a call between Gym servers when the caller passes no attempt or "
+            "retry-window limit: an unbroken run of connection errors, or retries of other errors, ends in the last "
+            "error once it is spent. 0 retries without a time limit."
+        ),
+    )
 
 
 def get_global_aiohttp_client(
@@ -241,7 +259,7 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
     )
     client_session = ClientSession(
         connector=connector,
-        timeout=ClientTimeout(),
+        timeout=ClientTimeout(sock_connect=cfg.global_aiohttp_sock_connect_timeout_seconds),
         cookie_jar=DummyCookieJar(),
     )
 
@@ -276,7 +294,7 @@ def get_global_aiohttp_control_client() -> ClientSession:  # pragma: no cover
                     probes=cfg.global_aiohttp_tcp_keepalive_probes,
                 ),
             ),
-            timeout=ClientTimeout(),
+            timeout=ClientTimeout(sock_connect=cfg.global_aiohttp_sock_connect_timeout_seconds),
             cookie_jar=DummyCookieJar(),
         )
     return _GLOBAL_AIOHTTP_CONTROL_CLIENT
@@ -719,6 +737,14 @@ async def _request_with_retries(
         retries = 0
         retry_start = time.monotonic()
         window = _connection_retry_window
+        # A call between Gym servers retries blips quietly, but not forever: without a caller-owned bound it gets the
+        # configured budget, which covers a run of connection errors (the window) and retries of other errors.
+        internal_budget_s: Optional[float] = None
+        if _internal and _max_num_tries is None and _max_connection_retries is None and window is None:
+            cfg = _GLOBAL_AIOHTTP_CLIENT_CONFIG or GlobalAIOHTTPAsyncClientConfig()
+            if cfg.global_aiohttp_internal_retry_budget_seconds > 0:
+                internal_budget_s = cfg.global_aiohttp_internal_retry_budget_seconds
+                window = ConnectionRetryWindow(internal_budget_s)
         while True:
             if window is not None and window.expired():
                 raise window.last_error
@@ -814,14 +840,16 @@ async def _request_with_retries(
                 attempts = explicit_tries if _max_num_tries is not None else num_tries
                 if _max_connection_retries is not None and attempts >= _max_connection_retries:
                     raise
+                if internal_budget_s is not None and time.monotonic() - retry_start >= internal_budget_s:
+                    raise
 
                 if _max_num_tries is not None:
                     if explicit_tries >= _max_num_tries:
                         raise
                 else:
-                    # Internal calls skip this print and the MAX_NUM_TRIES limit, since the head server shuts
-                    # everything down if a Gym server fails. They still advance `num_tries`, so the
-                    # `_max_connection_retries` check above stops them. Connection errors count in `retries`.
+                    # Internal calls skip this print and the MAX_NUM_TRIES limit so a restarting Gym server is
+                    # retried quietly. They are bounded by `_max_connection_retries` above, or by the internal
+                    # retry budget when the caller passed no bound. Connection errors count in `retries`.
                     if not _internal:
                         print(
                             f"""Hit an exception while making a request (try {num_tries}): {type(e)}: {e}

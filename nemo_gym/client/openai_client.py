@@ -281,7 +281,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
     internal: bool = Field(
         default=False,
-        description="Set this to true for internal NeMo Gym servers, which may retry indefinitely.",
+        description="Set this to true for internal NeMo Gym servers, which keep retrying rate-limit statuses until max_rate_limit_wait_seconds is spent (without a limit when that is 0).",
     )
 
     max_connection_retries: Optional[int] = Field(
@@ -310,7 +310,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         description=(
             "Total time to wait out 429 and 503 answers before failing the request, instead of "
             "max_http_attempts tries; the request fails once the next wait would pass it. 0 keeps 429 and 503 "
-            "on the max_http_attempts count. Internal NeMo Gym servers keep retrying them without limit."
+            "on the max_http_attempts count, except that an internal client then retries rate-limit statuses without limit."
         ),
     )
 
@@ -594,15 +594,20 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             # the caller owns the complete retry schedule. A busy provider is waited
             # out until max_rate_limit_wait_seconds is spent: a positive budget ends the
             # request even when max_http_attempts allows more tries, and 0 leaves 429
-            # and 503 on the max_http_attempts count.
-            if resend and self.max_num_tries is None and response.status in RATE_LIMIT_ERROR_CODES and self.internal:
-                max_num_tries += 1
-            elif (
+            # and 503 on the max_http_attempts count. An internal client spends the same
+            # budget on every retryable rate-limit status; with 0 it retries them without a limit.
+            budgeted = response.status in WAIT_OUT_ERROR_CODES or (
+                self.internal and response.status in RATE_LIMIT_ERROR_CODES
+            )
+            if (
                 resend
                 and self.max_num_tries is None
-                and response.status in WAIT_OUT_ERROR_CODES
-                and self.max_rate_limit_wait_seconds > 0
+                and response.status in RATE_LIMIT_ERROR_CODES
+                and self.internal
+                and (self.max_rate_limit_wait_seconds <= 0)
             ):
+                max_num_tries += 1
+            elif resend and self.max_num_tries is None and budgeted and self.max_rate_limit_wait_seconds > 0:
                 if waited + wait > self.max_rate_limit_wait_seconds:
                     observe_terminal(
                         operation_id=operation_id,

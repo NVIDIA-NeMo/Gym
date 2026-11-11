@@ -686,14 +686,38 @@ class TestProviderBackoff:
         openai_client_module._retry_wait_seconds(tries, _busy())
         assert windows == [(0, 60.0)]
 
-    async def test_an_internal_client_keeps_retrying_a_busy_server_past_a_thousand_tries(
+    @pytest.mark.parametrize("status", [429, 502, 503, 504, 520])
+    async def test_an_internal_client_stops_retrying_a_busy_server_when_the_wait_budget_is_spent(
+        self, monkeypatch: pytest.MonkeyPatch, status: int
+    ) -> None:
+        request = AsyncMock(return_value=_busy(status, retry_after="1"))
+        monkeypatch.setattr("nemo_gym.client.openai_client.request", request)
+        monkeypatch.setattr("nemo_gym.client.openai_client.sleep", AsyncMock())
+
+        async def raise_status(response, content=None):
+            raise RuntimeError("still busy")
+
+        monkeypatch.setattr("nemo_gym.client.openai_client.raise_for_status", raise_status)
+        client = NeMoGymAsyncOpenAI(
+            api_key="abc", base_url="http://127.0.0.1:8000/v1", internal=True, max_rate_limit_wait_seconds=5
+        )
+
+        with pytest.raises(RuntimeError, match="still busy"):
+            await client._request_with_retry(url="http://127.0.0.1:8000/v1/responses")
+
+        # Past the default max_http_attempts of 3, so the internal client did keep waiting, but only to the budget.
+        assert 3 < request.await_count <= 6
+
+    async def test_an_internal_client_without_a_wait_budget_keeps_retrying_a_busy_server(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         success = SimpleNamespace(status=200)
         request = AsyncMock(side_effect=[_busy(429)] * 1025 + [success])
         monkeypatch.setattr("nemo_gym.client.openai_client.request", request)
         monkeypatch.setattr("nemo_gym.client.openai_client.sleep", AsyncMock())
-        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="http://127.0.0.1:8000/v1", internal=True)
+        client = NeMoGymAsyncOpenAI(
+            api_key="abc", base_url="http://127.0.0.1:8000/v1", internal=True, max_rate_limit_wait_seconds=0
+        )
 
         assert await client._request_with_retry(url="http://127.0.0.1:8000/v1/responses") is success
         assert request.await_count == 1026

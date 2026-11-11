@@ -42,6 +42,7 @@ from aiohttp import (
     ClientPayloadError,
     ClientResponseError,
     ClientSession,
+    ClientTimeout,
     ConnectionTimeoutError,
     ServerDisconnectedError,
 )
@@ -2233,7 +2234,7 @@ class TestRolloutCollection:
         monkeypatch.setattr(
             nemo_gym.rollouts.rollout_collection, "setup_server_client_utils", lambda *_args, **_kwargs: client
         )
-        transport = MagicMock()
+        transport = MagicMock(timeout=ClientTimeout())
         failure = (
             ClientConnectorError(MagicMock(), ConnectionRefusedError("not sent"))
             if connection_refused

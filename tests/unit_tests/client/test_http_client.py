@@ -153,7 +153,10 @@ class TestRequestRetries:
         response = MagicMock()
         send = AsyncMock(side_effect=[failure_type("transient failure"), response])
         sleep = AsyncMock()
-        monkeypatch.setattr("nemo_gym.client.http_client.get_global_aiohttp_client", lambda: MagicMock(request=send))
+        monkeypatch.setattr(
+            "nemo_gym.client.http_client.get_global_aiohttp_client",
+            lambda: MagicMock(request=send, timeout=ClientTimeout()),
+        )
         monkeypatch.setattr(nemo_gym.client.http_client.asyncio, "sleep", sleep)
         monkeypatch.setattr(nemo_gym.client.http_client, "is_span_group_enabled", lambda _: False)
 
@@ -162,6 +165,98 @@ class TestRequestRetries:
         assert actual is response
         assert send.await_count == 2
         sleep.assert_awaited_once_with(0.5)
+
+    @staticmethod
+    def _internal_budget_clock(monkeypatch: MonkeyPatch, client: MagicMock, budget_s: float) -> list[float]:
+        """Run ``request`` on a fake clock where every sleep advances time; returns the sleeps."""
+        clock = SimpleNamespace(now=100.0)
+        sleeps: list[float] = []
+
+        async def advance(seconds: float) -> None:
+            sleeps.append(seconds)
+            clock.now += seconds
+
+        config = nemo_gym.client.http_client.GlobalAIOHTTPAsyncClientConfig(
+            global_aiohttp_internal_retry_budget_seconds=budget_s
+        )
+        monkeypatch.setattr(nemo_gym.client.http_client, "_GLOBAL_AIOHTTP_CLIENT_CONFIG", config)
+        monkeypatch.setattr(nemo_gym.client.http_client, "get_global_aiohttp_client", lambda: client)
+        monkeypatch.setattr(nemo_gym.client.http_client, "time", SimpleNamespace(monotonic=lambda: clock.now))
+        monkeypatch.setattr(nemo_gym.client.http_client.asyncio, "sleep", advance)
+        monkeypatch.setattr(nemo_gym.client.http_client, "is_span_group_enabled", lambda _: False)
+        return sleeps
+
+    @mark.parametrize("failure", [ClientOSError(111, "refused"), ServerDisconnectedError("gone")])
+    async def test_an_internal_call_stops_retrying_connection_errors_when_the_budget_is_spent(
+        self, monkeypatch: MonkeyPatch, failure: Exception
+    ) -> None:
+        client = MagicMock(timeout=ClientTimeout())
+        client.request = AsyncMock(side_effect=failure)
+        sleeps = self._internal_budget_clock(monkeypatch, client, budget_s=2.0)
+
+        with raises(type(failure)) as raised:
+            await nemo_gym.client.http_client.request("POST", "http://peer:1/seed_session", _internal=True)
+
+        assert raised.value is failure
+        assert sum(sleeps) == 2.0
+        assert client.request.await_count == 4
+
+    async def test_an_internal_call_stops_retrying_other_errors_when_the_budget_is_spent(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        failure = TimeoutError("peer hung")
+        client = MagicMock(timeout=ClientTimeout())
+        client.request = AsyncMock(side_effect=failure)
+        sleeps = self._internal_budget_clock(monkeypatch, client, budget_s=2.0)
+
+        with raises(TimeoutError) as raised:
+            await nemo_gym.client.http_client.request("POST", "http://peer:1/verify", _internal=True)
+
+        assert raised.value is failure
+        assert sum(sleeps) == 2.0
+
+    async def test_a_zero_internal_budget_keeps_retrying_without_a_limit(self, monkeypatch: MonkeyPatch) -> None:
+        response = MagicMock()
+        client = MagicMock(timeout=ClientTimeout())
+        client.request = AsyncMock(side_effect=[ClientOSError(111, "refused")] * 500 + [response])
+        self._internal_budget_clock(monkeypatch, client, budget_s=0)
+
+        actual = await nemo_gym.client.http_client.request("POST", "http://peer:1/verify", _internal=True)
+
+        assert actual is response
+        assert client.request.await_count == 501
+
+    async def test_a_caller_bound_replaces_the_internal_budget(self, monkeypatch: MonkeyPatch) -> None:
+        client = MagicMock(timeout=ClientTimeout())
+        client.request = AsyncMock(side_effect=TimeoutError("peer hung"))
+        self._internal_budget_clock(monkeypatch, client, budget_s=1000.0)
+
+        with raises(TimeoutError):
+            await nemo_gym.client.http_client.request("POST", "http://peer:1/verify", _internal=True, _max_num_tries=2)
+
+        assert client.request.await_count == 2
+
+    def test_global_clients_bound_the_tcp_handshake_only(self, monkeypatch: MonkeyPatch) -> None:
+        for name in ("_GLOBAL_AIOHTTP_CLIENT", "_GLOBAL_AIOHTTP_CLIENT_LOOP", "_GLOBAL_AIOHTTP_CONTROL_CLIENT"):
+            monkeypatch.setattr(f"nemo_gym.client.http_client.{name}", None)
+
+        async def timeouts() -> list[ClientTimeout]:
+            data = nemo_gym.client.http_client.get_global_aiohttp_client()
+            control = nemo_gym.client.http_client.get_global_aiohttp_control_client()
+            try:
+                return [data.timeout, control.timeout]
+            finally:
+                await data.close()
+                await control.close()
+
+        for timeout in asyncio.run(timeouts()):
+            # The pool-slot wait (`connect`) and the read stay unlimited: a queued request is not a failure.
+            assert (timeout.sock_connect, timeout.connect, timeout.total, timeout.sock_read) == (
+                60.0,
+                None,
+                None,
+                None,
+            )
 
     @staticmethod
     async def _short_body_server(replies: list[bytes]) -> tuple[asyncio.Server, str]:
