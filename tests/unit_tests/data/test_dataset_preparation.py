@@ -18,6 +18,7 @@ import shutil
 from pathlib import Path
 from unittest.mock import MagicMock, mock_open
 
+from omegaconf import OmegaConf
 from pydantic import ValidationError
 from pytest import MonkeyPatch, raises
 
@@ -97,6 +98,27 @@ def _make_agent_instance_config(name: str, dataset_specs: list) -> "ResponsesAPI
 
 
 class TestLoadAndValidateServerInstanceConfigs:
+    def test_prepared_dataset_path_resolves_before_loading(self, tmp_path: Path) -> None:
+        prepared = tmp_path / "prepared.jsonl"
+        prepared.write_text("{}\n")
+        instance = _make_agent_instance_config(
+            "prepared_agent",
+            [{"name": "prepared", "type": "benchmark", "jsonl_fpath": "${paths.prepared}"}],
+        )
+        global_config = DictConfig(
+            {
+                "paths": {"prepared": str(prepared)},
+                "prepared_agent": OmegaConf.to_container(instance.server_type_config_dict),
+            }
+        )
+        config = TrainDataProcessorConfig(
+            output_dirpath=str(tmp_path / "collated"), mode="train_preparation", should_download=False
+        )
+        processor = TrainDataProcessor()
+        instances = processor.load_and_validate_server_instance_configs(config, global_config)
+        assert Path(instances[0].datasets[0].jsonl_fpath) == prepared
+        processor.load_datasets(config, instances)
+
     def test_load_and_validate_server_instance_configs_sanity(self, monkeypatch: MonkeyPatch) -> None:
         # Fix the port returned
         find_open_port_mock = MagicMock()

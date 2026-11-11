@@ -608,6 +608,15 @@ class TrainDataProcessor(BaseModel):
     ) -> List[ServerInstanceConfig]:
         parser = GlobalConfigDictParser()
         server_instance_configs = parser.filter_for_server_instance_configs(global_config_dict)
+        for instance in server_instance_configs:
+            inner = instance.get_inner_run_server_config()
+            if inner.datasets is not None:
+                declared = instance.get_inner_run_server_config_dict().datasets
+                # Resolve dataset inputs against their original config before filtering and file lookup.
+                inner.datasets = [
+                    type(dataset).model_validate(OmegaConf.to_container(raw, resolve=True))
+                    for dataset, raw in zip(inner.datasets, declared, strict=True)
+                ]
         self._all_server_instance_configs = list(server_instance_configs)
 
         # Datasets may be declared by resources servers (the normal, decoupled home: the RS owns
