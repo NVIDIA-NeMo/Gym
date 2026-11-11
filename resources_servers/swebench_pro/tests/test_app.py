@@ -1521,3 +1521,12 @@ async def test_patch_capture_with_filesystem_permission_error(
         assert downloaded[0].exists()
     assert denied
     assert "session" not in server._session_id_to_sandbox
+
+
+def test_several_workers_are_allowed() -> None:
+    """Session routing sends a seed and close by resources_session_id to the worker that holds the sandbox."""
+    from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
+
+    server = make_server(golden=False, num_workers=2)
+    refuse_unsupported_num_workers(server)
+    assert server.routes_sessions_to_owner
