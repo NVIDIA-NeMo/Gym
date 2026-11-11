@@ -71,18 +71,18 @@ def check_runtime(harness: str, *, use_agent_sessions: bool = False) -> dict:
 
 
 def _base_settings(harness: str, directory: Path, timeout: float) -> DictConfig:
-    """Describe probe overrides and setup requirements without applying them."""
+    """Describe harness settings, probe settings and setup requirements."""
     workspace = str(directory / "workspace")
     opencode = {"permission": {"bash": "allow"}}
     settings = {
         "simple": {
-            "overrides": {"max_steps": 6},
-            "session": {"agent_overrides": None, "tool_transports": ["direct_http"], "sandbox_backend": None},
+            "harness_overrides": {"max_steps": 6},
+            "session": {"harness_overrides": None, "tool_transports": ["direct_http"], "sandbox_backend": None},
         },
         "opencode": {
-            "overrides": {"timeout": timeout, "opencode_config": opencode},
+            "harness_overrides": {"timeout": timeout, "opencode_config": opencode},
             "legacy": {
-                "agent_overrides": {
+                "harness_overrides": {
                     "workspace_root": workspace,
                     # Auxiliary requests would consume the scripted policy replies.
                     "opencode_config": {
@@ -92,23 +92,23 @@ def _base_settings(harness: str, directory: Path, timeout: float) -> DictConfig:
             },
         },
         "pi": {
-            "overrides": {"timeout": timeout},
-            "legacy": {"agent_overrides": {"workspace_root": workspace}},
+            "harness_overrides": {"timeout": timeout},
+            "legacy": {"harness_overrides": {"workspace_root": workspace}},
         },
         "copilot": {
-            "overrides": {"timeout": timeout},
-            "legacy": {"agent_overrides": {"workspace_root": workspace}},
+            "harness_overrides": {"timeout": timeout},
+            "legacy": {"harness_overrides": {"workspace_root": workspace}},
         },
-        "crewai": {"overrides": {"timeout": timeout}},
+        "crewai": {"harness_overrides": {"timeout": timeout}},
         "openclaw": {
             "probe": ".provider:OpenClawProbe",
-            "overrides": {"timeout": math.ceil(timeout)},
-            "legacy": {"agent_overrides": {"workspace_root": workspace}},
+            "harness_overrides": {"timeout": math.ceil(timeout)},
+            "legacy": {"harness_overrides": {"workspace_root": workspace}},
         },
         "codex": {
             "legacy": {
                 "requires_workspace": True,
-                "agent_overrides": {
+                "harness_overrides": {
                     "cwd": workspace,
                     "timeout": timeout,
                     "sandbox_mode": "danger-full-access",
@@ -120,7 +120,7 @@ def _base_settings(harness: str, directory: Path, timeout: float) -> DictConfig:
             "probe": ".nooa:NOOAProbe",
             "required_imports": ["scripts.harness_conformance.nooa"],
             "inherit_adapter_fields": ["nooa"],
-            "overrides": {
+            "harness_overrides": {
                 "sandbox_runner_timeout_seconds": timeout,
                 "nooa": {
                     "execution_mode": "sandboxed",
@@ -128,10 +128,10 @@ def _base_settings(harness: str, directory: Path, timeout: float) -> DictConfig:
                 },
             },
             "pop_fields": ["model", "concurrency"],
-            "session": {"agent_overrides": None, "sandbox_backend": "conformance_local"},
+            "session": {"harness_overrides": None, "sandbox_backend": "conformance_local"},
         },
         "claude_code": {
-            "overrides": {
+            "harness_overrides": {
                 "claude_code_version": "2.1.108",
                 "timeout": int(timeout),
                 "max_turns": 6,
@@ -141,7 +141,7 @@ def _base_settings(harness: str, directory: Path, timeout: float) -> DictConfig:
         },
         "miniswe_sandboxed": {
             "requires_sandbox": True,
-            "overrides": {
+            "harness_overrides": {
                 "harness": {"step_limit": 6, "step_timeout_sec": 10},
                 "agent_timeout_sec": timeout,
                 "setup_timeout_sec": timeout,
@@ -152,7 +152,7 @@ def _base_settings(harness: str, directory: Path, timeout: float) -> DictConfig:
             "requires_sandbox": True,
             "requires_tmux": True,
             "inherit_adapter_defaults": True,
-            "overrides": {
+            "harness_overrides": {
                 "max_turns": 6,
                 "enable_summarize": False,
                 "llm_request_timeout": int(timeout),
@@ -160,7 +160,7 @@ def _base_settings(harness: str, directory: Path, timeout: float) -> DictConfig:
             },
         },
         "hermes": {
-            "overrides": {
+            "harness_overrides": {
                 "max_turns": 6,
                 "enabled_toolsets": ["terminal"],
                 "terminal_backend": "local",
@@ -180,12 +180,12 @@ def _base_settings(harness: str, directory: Path, timeout: float) -> DictConfig:
             "session": {
                 # Session sandboxes replace provider settings inherited from adapter YAML.
                 "pop_fields": ["resources_server", "sandbox_config"],
-                "agent_overrides": {"sandbox_provider": "probe_sandbox", "sandbox_config": {"workdir": workspace}},
+                "harness_overrides": {"sandbox_provider": "probe_sandbox", "sandbox_config": {"workdir": workspace}},
                 "tool_transports": [],
                 "sandbox_backend": "local",
             },
             "legacy": {
-                "agent_overrides": {"resources_server": {"type": "resources_servers", "name": "probe_resources"}},
+                "harness_overrides": {"resources_server": {"type": "resources_servers", "name": "probe_resources"}},
             },
         },
         settings,
@@ -196,22 +196,40 @@ def _compaction_settings(harness: str, scenario: Scenario) -> DictConfig:
     """Scenario-specific overrides, applied after constructing the base settings."""
     steps = scenario.tool_steps + 4
     context = {"context_window": 32768 if scenario.compaction else 65536, "max_output_tokens": 8192}
-    overrides = {
-        "simple": {"max_steps": steps},
-        "opencode": context,
-        "pi": context,
-        "codex": {"model_context_window": 32768, "model_auto_compact_token_limit": 24000},
-        "stirrup": {"context_window_tokens": 32768},
-        "hermes": {"compression_enabled": True, "compression_threshold": 0.1, "max_turns": steps},
-        "claude_code": {"max_turns": steps},
-        "miniswe_sandboxed": {"harness": {"step_limit": steps}},
+    settings = {
+        "simple": {"harness_overrides": {"max_steps": steps}},
+        "opencode": {
+            "harness_overrides": context,
+            "probe_overrides": {
+                "responses": [
+                    {"kind": "tool", "input_tokens": 500, "output_tokens": 8},
+                    {"kind": "tool", "input_tokens": 27000, "output_tokens": 8},
+                    *([{"kind": "summary", "input_tokens": 500, "output_tokens": 11}] if scenario.compaction else []),
+                    *[
+                        {"kind": "tool", "input_tokens": 500, "output_tokens": 8}
+                        for _ in range(scenario.tool_steps - 2)
+                    ],
+                    {"kind": "final", "input_tokens": 500, "output_tokens": 8},
+                ],
+            },
+        },
+        "pi": {"harness_overrides": context},
+        "codex": {"harness_overrides": {"model_context_window": 32768, "model_auto_compact_token_limit": 24000}},
+        "stirrup": {"harness_overrides": {"context_window_tokens": 32768}},
+        "hermes": {
+            "harness_overrides": {"compression_enabled": True, "compression_threshold": 0.1, "max_turns": steps}
+        },
+        "claude_code": {"harness_overrides": {"max_turns": steps}},
+        "miniswe_sandboxed": {"harness_overrides": {"harness": {"step_limit": steps}}},
         "terminus_2_sandboxed": {
-            "max_turns": steps,
-            "enable_summarize": scenario.compaction,
-            "model_context_limit": 32768,
+            "harness_overrides": {
+                "max_turns": steps,
+                "enable_summarize": scenario.compaction,
+                "model_context_limit": 32768,
+            },
         },
     }.get(harness, {})
-    return OmegaConf.create({"overrides": overrides})
+    return OmegaConf.create(settings)
 
 
 def _config(
@@ -247,11 +265,11 @@ def _config(
             "model_server": {"type": "responses_api_models", "name": "policy_model"},
         },
         {key: defaults[key] for key in defaults if key.endswith("_version")},
-        settings.get("overrides", {}),
+        settings.get("harness_overrides", {}),
     )
     for field in [*settings.get("pop_fields", []), *mode.get("pop_fields", [])]:
         agent.pop(field, None)
-    agent = OmegaConf.merge(agent, mode.get("agent_overrides") or {})
+    agent = OmegaConf.merge(agent, mode.get("harness_overrides") or {})
     if mode.get("requires_workspace"):
         (directory / "workspace").mkdir()
     environment_type = "single_agent_turn_legacy" if use_agent_sessions else "legacy_agent"
@@ -307,9 +325,11 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
     (directory / "runtime.json").write_text(json.dumps(runtime, indent=2) + "\n")
     scenario = next(s for s in SCENARIOS if s.name == scenario_name)
     settings = _base_settings(harness, directory, timeout)
+    if scenario.compaction is not None:
+        settings = OmegaConf.merge(settings, _compaction_settings(harness, scenario))
     probe_module, probe_name = settings.probe.split(":")
     probe_cls = getattr(importlib.import_module(probe_module, package=__package__), probe_name)
-    probe = probe_cls(scenario, directory, harness=harness)
+    probe = probe_cls(scenario, directory, harness=harness, **settings.get("probe_overrides", {}))
     probe.save()
     tasks = []
     servers = []

@@ -13,7 +13,7 @@ import sys
 import psutil
 import pytest
 from fastapi.testclient import TestClient
-from scripts.harness_conformance.episode import HARNESSES, _config
+from scripts.harness_conformance.episode import HARNESSES, _compaction_settings, _config
 from scripts.harness_conformance.provider import SUMMARY_PROMPTS, OpenClawProbe, Probe, is_compaction_request
 from scripts.harness_conformance.runner import _fingerprint, inspect_episode, main, run_process, run_suite
 from scripts.harness_conformance.scenarios import SCENARIOS, Scenario
@@ -453,6 +453,64 @@ def test_summary_recognition_requires_an_explicit_last_user_instruction(prompt, 
     body["messages"].append({"role": "tool", "content": prompt})
     assert not is_compaction_request(body)
     assert not is_compaction_request({"messages": [{"role": "user", "content": "Run checks"}], "tools": []})
+
+
+@pytest.mark.parametrize("compaction", [True, False])
+def test_opencode_compaction_is_scripted_independently_of_request_text(tmp_path, monkeypatch, compaction):
+    scenario = dataclasses.replace(SCENARIO["context_compaction"], compaction=compaction, tool_steps=2)
+    settings = _compaction_settings("opencode", scenario)
+    probe = Probe(scenario, tmp_path, harness="opencode", **settings.probe_overrides)
+    monkeypatch.setattr(
+        "scripts.harness_conformance.provider.is_compaction_request",
+        lambda *a, **kw: pytest.fail("scripted compaction must not inspect prompt text"),
+    )
+    messages = [{"role": "user", "content": SUMMARY_PROMPTS[0]}]
+    body = {"model": "conformance-model", "messages": messages, "tools": [TOOL]}
+    with TestClient(probe.model_app()) as client:
+        for expected_usage in (500, 27000):
+            response = client.post("/v1/chat/completions", json=body).json()
+            assert response["usage"]["prompt_tokens"] == expected_usage
+            message = response["choices"][0]["message"]
+            call = message["tool_calls"][0]
+            output = subprocess.check_output(
+                json.loads(call["function"]["arguments"])["command"], shell=True, text=True
+            )
+            messages.extend([message, {"role": "tool", "tool_call_id": call["id"], "content": output}])
+        if compaction:
+            # The summary instruction can change freely; the fixture uses request position.
+            response = client.post(
+                "/v1/chat/completions", json={**body, "messages": [{"role": "user", "content": "New wording"}]}
+            ).json()
+            assert response["choices"][0]["message"]["content"] == probe.compaction_summary
+            messages.append({"role": "user", "content": probe.compaction_summary})
+        final = client.post("/v1/chat/completions", json=body).json()
+    assert final["choices"][0]["message"]["content"] == "CONFORMANCE_DONE"
+    assert len(probe.attempts) == 3 + int(compaction)
+    assert len(probe.compaction_response_ids) == int(compaction)
+    assert probe.finished and not probe.violations
+
+
+def test_reply_schedule_controls_response_kind_and_usage(tmp_path):
+    probe = Probe(
+        SCENARIO["context_compaction"],
+        tmp_path,
+        responses=[{"kind": "final", "input_tokens": 123, "output_tokens": 7}],
+    )
+    with TestClient(probe.model_app()) as client:
+        response = client.post("/v1/chat/completions", json={"messages": [], "tools": [TOOL]}).json()
+        assert response["choices"][0]["message"]["content"] == "CONFORMANCE_DONE"
+        assert response["usage"]["prompt_tokens"] == 123
+        assert response["usage"]["completion_tokens"] == 7
+        assert not probe.tool_calls and not probe.compaction_response_ids
+        assert client.post("/v1/chat/completions", json={"messages": []}).status_code == 409
+
+
+@pytest.mark.parametrize("responses", [[], [{"kind": "unknown", "input_tokens": 1, "output_tokens": 1}]])
+def test_reply_schedule_rejects_missing_or_unknown_entries(tmp_path, responses):
+    probe = Probe(SCENARIO["context_compaction"], tmp_path, responses=responses)
+    with TestClient(probe.model_app()) as client:
+        assert client.post("/v1/chat/completions", json={"messages": []}).status_code == 409
+    assert probe.violations and not probe.tool_calls
 
 
 def test_summary_does_not_waive_policy_tool_result_requirement(tmp_path):
