@@ -233,8 +233,26 @@ class AutomationBenchResourcesServer(SimpleResourcesServer):
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
         metrics, _, _, _ = compute_pass_majority_metrics(tasks, score_fn=self._scores)
         metrics.pop("per_sample_aggregate", None)
-        metrics.update(compute_subset_metrics(tasks, subset_key="domain", score_fn=self._scores))
+        metrics.update(
+            compute_subset_metrics([self._with_domain(t) for t in tasks], subset_key="domain", score_fn=self._scores)
+        )
         return metrics
+
+    @staticmethod
+    def _with_domain(rollouts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Label a task that no /verify reached by its task_id, so its counted zeros stay in its domain.
+
+        A rollout counted as zero carries the row's dataset fields, task_id among them, but not the domain /verify
+        computes. A domain any repeat reports wins.
+        """
+        if any(rollout.get("domain") for rollout in rollouts):
+            return rollouts
+        return [
+            {**rollout, "domain": rollout["task_id"].split(".", 1)[0]}
+            if isinstance(rollout.get("task_id"), str) and "." in rollout["task_id"]
+            else rollout
+            for rollout in rollouts
+        ]
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
         key = {

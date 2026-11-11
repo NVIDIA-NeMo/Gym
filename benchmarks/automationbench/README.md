@@ -4,17 +4,18 @@ AutomationBench scored with the Artificial Analysis headline metric by default.
 
 ## Recipes
 
-| Config | Agent | Path |
-| --- | --- | --- |
-| `config.yaml` | `simple_agent` | `single_agent_turn` Environment Server with the [`automationbench` resources server](../../resources_servers/automationbench/README.md) |
-| `config_legacy_agent.yaml` (deprecated) | `verifiers_agent` | `legacy_agent` relay |
+| Config | Version | Agent | Path |
+| --- | --- | --- | --- |
+| `config.yaml` | 0.2.0 | `simple_agent` | `single_agent_turn` Environment Server with the [`automationbench` resources server](../../resources_servers/automationbench/README.md) |
+| `config_legacy_agent.yaml` (deprecated) | 0.1.0 | `verifiers_agent` | `legacy_agent` relay |
 
 Both run the same tasks, prompts, tools and rubric. `config.yaml` keeps each
 task's world in a resources server session and runs the tool loop in
 `simple_agent`, capped at 50 model calls as verifiers' `max_turns` is.
 `config_legacy_agent.yaml` hands the whole episode to verifiers and stays to
 reproduce existing results; the relay will be removed after the Environment
-Server migration.
+Server migration. The two manifests carry different versions because a
+different agent loop is a different measurement, even where the scores agree.
 
 Sampling: both recipes send `temperature` and `top_p` 1.0.
 `config_legacy_agent.yaml` sends them from its agent config; `config.yaml` sets

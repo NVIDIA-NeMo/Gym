@@ -212,6 +212,22 @@ def test_a_row_prepared_without_tools_is_masked_not_scored(client):
     assert result["task_name"] == "sales.multi_hop_lookup"
 
 
+def test_a_task_counted_as_zero_before_verify_stays_in_its_domain():
+    # With count_missing_rollouts_as_zero or count_failure_classes_as_zero, a task whose every repeat failed before
+    # /verify reaches the metrics as reward-0 rows carrying task_id but no domain.
+    scores = {"aa_headline": 1.0, "partial_credit": 1.0, "task_completed_correctly": 1.0}
+    scored = {"task_id": "sales.win/1", "domain": "sales", "reward": 1.0, **scores}
+    counted = {"task_id": "sales.lose/2", "reward": 0.0}
+    metrics = _server().compute_metrics([[scored], [counted]])
+    for name in scores:
+        assert metrics[f"pass@1[avg-of-1]/{name}"] == metrics[f"sales/pass@1[avg-of-1]/{name}"] == 50
+
+    # A domain a repeat reports wins over the task_id's prefix.
+    metrics = _server().compute_metrics([[counted, {**scored, "task_id": "sales.lose/2", "domain": "marketing"}]])
+    assert metrics["marketing/pass@1[avg-of-2]/aa_headline"] == 50
+    assert not any(key.startswith("sales/") for key in metrics)
+
+
 def test_a_task_without_assertions_is_refused(client):
     task = TASK | {"info": TASK["info"] | {"assertions": []}}
 
