@@ -46,7 +46,7 @@ Before moving on, confirm each of these in the code:
 - [ ] A seed the adapter cannot serve (a sandbox it cannot use, a required tool grant it never consumes) raises `AgentSeedRejectedError`; optional grants it does not use are skipped.
 - [ ] If the adapter supports MCP grants, it wires the episode URL and headers into the harness and enforces required-server readiness before inference. Follow [MCP grant integration](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#mcp-grant-integration), including runtimes that silently skip failed plugins. MCP access and sandbox ownership are independent decisions.
 - [ ] Close returns an `AgentObservationBundle`, with gaps for evidence the harness cannot report, even when activation failed.
-- [ ] Agent sessions run with `num_workers: 1`.
+- [ ] All agent-session state lives in the session, so several workers are safe; anything else overrides `multiple_workers_unsupported_reason()`.
 - [ ] A sandbox failure never falls back to running on the host.
 - [ ] An adapter that creates its own sandbox exposes `network_access` (`inherit`, `model_only`, `model_and_tools`) and passes the spec through `restrict_sandbox_network` before creating it. Settings it cannot enforce raise `AgentSeedRejectedError` (a final 422), and a restricted sandbox gets its runtime by upload or from a preinstalled `sandbox_runtime_dir`. See [Restrict the egress of an owned sandbox](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#restrict-the-egress-of-an-owned-sandbox).
 - [ ] Controls the harness does not support are rejected or documented, not silently dropped.
