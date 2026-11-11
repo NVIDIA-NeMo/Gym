@@ -16,11 +16,13 @@ from pydantic import ConfigDict, Field, model_validator
 
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    FailureBoundary,
     FailureReportRow,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
     report_for_current_request,
 )
 from nemo_gym.server_runtime import (
@@ -240,6 +242,19 @@ class HealthBenchRubricResourcesServer(SimpleResourcesServer):
             if not is_judge_failure(error):
                 raise
             reason = str(error)[:2000]
+            # A reply that stayed unusable and a local timeout raise a plain JudgeError, which names no failure event.
+            # Judge-only recovery admits a saved failure by its event's ID, so give it the same typed event an HTTP
+            # failure already has; a failure that is already typed is reported as it is.
+            failure = error
+            if isinstance(error, JudgeError):
+                failure = NgFailureEvent(
+                    boundary=FailureBoundary.RESOURCES_SERVER,
+                    failure_kind="judge_failed",
+                    failure_reason=reason,
+                    operation="judge.verify",
+                    stage="verification",
+                )
+                failure.__cause__ = error
             return HealthBenchRubricVerifyResponse(
                 **(
                     body.model_dump(exclude={"_ng_failure_class", "_ng_failure_judge_error"})
@@ -257,7 +272,7 @@ class HealthBenchRubricResourcesServer(SimpleResourcesServer):
                         "_ng_failure_class": "judge_failed",
                         "_ng_failure_judge_error": reason,
                     }
-                    | FailureReportRow.fields(report_for_current_request(error))
+                    | FailureReportRow.fields(report_for_current_request(failure))
                 )
             )
 
@@ -276,7 +291,13 @@ class HealthBenchRubricResourcesServer(SimpleResourcesServer):
 
     async def _grade_rubric(self, conversation: str, rubric: dict[str, Any]) -> dict[str, Any]:
         rubric_text = f"[{rubric['points']}] {rubric['criterion']}"
-        prompt = GRADER_TEMPLATE.replace("<<conversation>>", conversation).replace("<<rubric_item>>", rubric_text)
+        # One pass over the template: the conversation and criterion are data, so a marker inside either (an answer that
+        # quotes the template, say) must not be substituted a second time.
+        prompt = re.sub(
+            r"<<conversation>>|<<rubric_item>>",
+            lambda match: conversation if match.group() == "<<conversation>>" else rubric_text,
+            GRADER_TEMPLATE,
+        )
 
         messages = [{"role": "user", "content": prompt}]
         if self.config.judge_system_prompt is not None:
