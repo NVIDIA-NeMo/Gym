@@ -183,9 +183,16 @@ Training profiles using tool rewards must also set `forward_agent_evidence: true
 on their `single_agent_turn` Environment Server so the verifier receives the
 trajectory and tool observations. Answer-only evaluation leaves it disabled.
 
-The benchmark verifier defaults to `tool_rewards: null` for evaluation. Training
-can enable the existing answer-dependent schedule with `tool_rewards: {}` on the
-Resources server. Scoring reads tool execution outcomes from the shared trajectory
+The benchmark verifier accepts only `tool_rewards: null` (the default) and never
+adds tool rewards. Non-null settings are rejected. Tool shaping is available only
+through the training adapters below; `tool_rewards: {}` selects their default schedule.
+The default applies penalties only to correct answers, with no positive bonuses.
+Zero to two bash attempts have no count penalty; three, four, five, and six or more
+attempts incur penalties of 0.025, 0.05, 0.075, and 0.10 respectively. Failed bash
+calls incur an additional 0.05 penalty; consecutive successful duplicate calls
+incur a 0.02 penalty. Other tools do not incur failure penalties. Override individual
+`tool_rewards` fields to change this schedule.
+Scoring reads tool execution outcomes from the shared trajectory
 or observation bundle; it never interprets model-visible output as an exit status.
 
 For existing math, MCQA, and string-match training tasks, use the

@@ -4,6 +4,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pydantic import ValidationError
 
 from benchmarks.opencode_multimodal_benchmarks.prepare import task_row
 from nemo_gym.client import ServerClient
@@ -242,3 +243,14 @@ async def test_mcq_invalid_format_gets_one_changed_reference_blind_prompt(server
     assert second.startswith(first)
     assert "Do not solve the image question" in second
     assert "correct option is A" not in second
+
+
+@pytest.mark.parametrize("settings", [{}, {"tool_success_reward": 0.2}, {"correct_only": True}])
+def test_benchmark_config_rejects_tool_rewards(server, settings):
+    config = server.config.model_dump() | {"tool_rewards": settings}
+    with pytest.raises(ValidationError, match="tool_rewards"):
+        VisualBenchmarksConfig.model_validate(config)
+
+
+def test_benchmark_config_accepts_disabled_tool_rewards(server):
+    assert VisualBenchmarksConfig.model_validate(server.config.model_dump()).tool_rewards is None

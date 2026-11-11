@@ -215,6 +215,12 @@ class _ObservedDependencies(_Client):
                         host="127.0.0.1",
                         port=1,
                         entrypoint="math_with_judge_tool_rewards.py",
+                        tool_rewards={
+                            "correct_only": False,
+                            "correct_tool_call_bonuses": [0.0, 0.1],
+                            "tool_success_reward": 0.02,
+                            "tool_success_reward_cap": 0.2,
+                        },
                         judge_model_server={"type": "responses_api_models", "name": "judge"},
                         judge_responses_create_params={"input": []},
                     ),
@@ -223,7 +229,11 @@ class _ObservedDependencies(_Client):
             elif self.verifier != "string_match":
                 server = ToolRewardServer(
                     config=ToolRewardConfig(
-                        name=server_name, host="127.0.0.1", port=1, entrypoint="string_match_tool_rewards.py"
+                        name=server_name,
+                        host="127.0.0.1",
+                        port=1,
+                        entrypoint="string_match_tool_rewards.py",
+                        tool_rewards={"correct_tool_call_bonuses": [0.0, 0.1]},
                     ),
                     server_client=self,
                 )

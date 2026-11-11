@@ -25,21 +25,21 @@ def final_assistant_text(output: list[dict[str, Any]]) -> str:
 class OpenCodeToolRewardConfig(BaseModel, extra="forbid"):
     correct_answer_reward_threshold: float = Field(default=1.0, gt=0, allow_inf_nan=False)
     correct_tool_call_bonuses: tuple[Annotated[float, Field(ge=0, allow_inf_nan=False)], ...] = Field(
-        default=(0.0, 0.1, 0.1, 0.075, 0.05, 0.025, 0.01), min_length=1
+        default=(0.0,), min_length=1
     )
-    tool_success_reward: float = Field(default=0.02, ge=0, allow_inf_nan=False)
-    tool_success_reward_cap: float = Field(default=0.20, ge=0, allow_inf_nan=False)
+    tool_success_reward: float = Field(default=0.0, ge=0, allow_inf_nan=False)
+    tool_success_reward_cap: float = Field(default=0.0, ge=0, allow_inf_nan=False)
     invalid_tool_call_penalty: float = Field(default=-0.05, le=0, allow_inf_nan=False)
     duplicate_tool_call_penalty: float = Field(default=-0.02, le=0, allow_inf_nan=False)
 
-    correct_only: bool = Field(default=False, description="Apply auxiliary rewards only to correct answers.")
+    correct_only: bool = Field(default=True, description="Apply auxiliary rewards only to correct answers.")
     correct_bash_call_penalties: tuple[Annotated[float, Field(le=0, allow_inf_nan=False)], ...] = Field(
-        default=(0.0,),
+        default=(0.0, 0.0, 0.0, -0.025, -0.05, -0.075, -0.10),
         min_length=1,
         description="Penalty by total bash attempts on correct answers; the final entry caps the schedule.",
     )
     invalid_tool_call_names: tuple[str, ...] | None = Field(
-        default=None,
+        default=("bash",),
         description="Tools eligible for failure penalties; None includes all tools.",
     )
 
