@@ -87,6 +87,11 @@ policy independently stops deferred reverification. Change both when that is the
 intended behavior. Defaults remain in the respective config classes; adapters
 should reuse them rather than infer policy from labels or exception strings.
 
+Judge-provider quota and credential stops retain their specific failure kinds and
+use the configured judge and recovery policies. A named future quota reset delays
+otherwise permitted re-grading; an explicit `fail` stays a policy stop, not a wait
+for that reset.
+
 Recovery config belongs in the submit YAML, not a server config:
 
 ```yaml
