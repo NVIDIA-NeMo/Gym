@@ -71,6 +71,7 @@ from nemo_gym.environment.registry import (
     EnvironmentCatalogEntry,
     RegistryError,
     discover_environment_catalog,
+    manifest_workloads_for_server,
     read_environment_details,
     resolve_catalog_entry,
 )
@@ -253,18 +254,13 @@ def _validate_data_single(test_config: TestConfig) -> None:  # pragma: no cover
     if test_config.dir_path.parts[0] != "resources_servers":
         return
 
-    # Manifest workloads carry verifier fixtures instead of the legacy five-row
-    # rollout artifacts. Exercise every workload sharing this server, offline and
-    # without requiring its full dataset to be downloaded on CI workers.
-    manifest_entries = [
-        entry
-        for entry in discover_environment_catalog()
-        if entry.manifest_path is not None and entry.resources_server == test_config.dir_path.name
-    ]
-    legacy_artifacts = ("example_metrics.json", "example_rollouts.jsonl")
-    if manifest_entries and not any(
-        (test_config.resolved_dir_path / "data" / name).exists() for name in legacy_artifacts
-    ):
+    # A server that only manifest workloads use carries verifier fixtures instead of the legacy five-row rollout
+    # artifacts (see manifest_workloads_for_server). Exercise every workload sharing it, offline and without requiring
+    # its full dataset to be downloaded on CI workers.
+    manifest_entries = manifest_workloads_for_server(
+        test_config.dir_path.name, test_config.resolved_dir_path, discover_environment_catalog()
+    )
+    if manifest_entries:
         conflict_paths = glob(str(test_config.resolved_dir_path / "data/*conflict*"))
         assert not conflict_paths, f"Found conflicting paths: {conflict_paths}"
         for entry in manifest_entries:
