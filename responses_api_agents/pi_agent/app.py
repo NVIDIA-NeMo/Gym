@@ -88,6 +88,7 @@ from nemo_gym.trajectory import (
     ObservationGap,
     ToolCallObservation,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.pi_agent.sandbox import PiSandboxSession
 from responses_api_agents.pi_agent.setup_pi import ensure_pi
 
@@ -1009,7 +1010,10 @@ class PiAgent(SimpleResponsesAPIAgent):
                 {**self._build_settings_config(), "images": {"autoResize": False}}
             ),
         }
-        output_limit_extension = "output-limit.mjs"
+        # As on the local path, `remaining_context` drops each request's output cap so the server sizes it.
+        output_limit_extension = (
+            "remaining-context.mjs" if self.config.output_token_policy == "remaining_context" else "output-limit.mjs"
+        )
         files[output_limit_extension] = Path(__file__).with_name(output_limit_extension)
         runtime_guards_extension = "runtime-guards.mjs"
         if self.config.enable_tools:
@@ -1654,3 +1658,6 @@ class PiAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     PiAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = PiAgent.run_webserver()  # noqa: F401

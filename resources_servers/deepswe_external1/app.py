@@ -33,7 +33,6 @@ from nemo_gym.server_runtime import (
     BaseSeedSessionRequest,
     BaseVerifyRequest,
     ReverifyMode,
-    SimpleResourcesServer,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.deepswe.app import (
@@ -47,6 +46,7 @@ from resources_servers.deepswe.app import (
 from resources_servers.deepswe.task_store import task_sandbox_resources
 from resources_servers.deepswe_external1.inline_task import InlineTask
 from resources_servers.deepswe_external1.task_data import TaskData
+from resources_servers.swebench.sandbox_sessions import SandboxSessionResourcesServer
 
 
 logger = logging.getLogger(__name__)
@@ -166,8 +166,11 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer):
     config: DeepsweExternal1ResourcesServerConfig
 
     def model_post_init(self, context: Any, /) -> None:
-        SimpleResourcesServer.model_post_init(self, context)
+        # Skip DeepSWE's initialization, which loads its filesystem task store: these rows carry their whole task.
+        # The shared session base still sets up the episode-session state DeepSWE's close and shutdown use.
+        SandboxSessionResourcesServer.model_post_init(self, context)
         self._agent_sessions = {}
+        self._episode_agent_sandboxes = {}
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
