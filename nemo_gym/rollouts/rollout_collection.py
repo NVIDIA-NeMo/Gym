@@ -76,6 +76,7 @@ from nemo_gym.config.global_config import (
     ATTEMPT_INDEX_KEY_NAME,
     ENVIRONMENT_SERVER_STAMP_KEY_NAME,
     ENVIRONMENT_SERVER_TYPE_KEY_NAME,
+    MODEL_SAMPLING_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
@@ -178,6 +179,7 @@ from nemo_gym.telemetry.gym_metrics import (
     record_rollout_completed,
     record_rollout_health,
     record_rollout_reward,
+    record_run_summary,
 )
 from nemo_gym.telemetry.observer import MeteredAdmission, count_resident, driver_metrics, observe_event_loop
 from nemo_gym.telemetry.setup import is_metrics_exporter_active, is_trace_exporter_active
@@ -512,13 +514,17 @@ def _episode_request_body(row: Mapping[str, Any]) -> dict[str, Any]:
     # Decode the identity the way the agent does.
     # An explicit id may carry the attempt suffix itself, as a restored attempt does.
     capture_key = maybe_rollout_id_from_run_body(row) or f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
-    return {
+    body = {
         "episode_id": EpisodeId.from_capture_key(capture_key).model_dump(mode="json"),
         "task": {
             "task_id": row["task_id"],
             "task_input": row["task_input"],
         },
     }
+    # A training framework's sampling values ride beside the task, which they leave unchanged.
+    if row.get(MODEL_SAMPLING_KEY_NAME) is not None:
+        body["model_sampling"] = row[MODEL_SAMPLING_KEY_NAME]
+    return body
 
 
 def _rows_of_first_tasks(numbered_rows: Iterable[tuple[int, str]], limit: int) -> Iterator[tuple[int, str]]:
@@ -2429,7 +2435,7 @@ def _dispatch_span(row: Mapping[str, Any], dispatch_name: str, *, server_name: s
 
 def _record_rollout_outcome(result: Dict[str, Any], outcome: str, dispatch_name: str) -> None:
     """Count a persisted attempt, including its numeric reward when scored."""
-    if not is_span_group_enabled(GymSpanGroup.ROLLOUT):
+    if not is_metrics_exporter_active():
         return
     # These are the dispatch's original routing fields, captured before the
     # canonical persisted record maps kinds to sidecar classes. Keep main's
@@ -4843,7 +4849,7 @@ executions → not run again (left to recovery)
         coverage = _coverage_report(
             expected_rollouts, scored_rollouts, failure_counts, failures_fpath, imputed=len(imputed)
         )
-        if get_exporters():
+        if get_exporters() or is_metrics_exporter_active():
             failure_metrics = await asyncio.to_thread(
                 _failure_export_metrics,
                 [],
@@ -4851,26 +4857,28 @@ executions → not run again (left to recovery)
                 persisted_success_keys,
                 histories=[store],
             )
-            export_metrics(
-                {
-                    "coverage/expected": expected_rollouts,
-                    "coverage/scored": scored_rollouts,
-                    "coverage/missing": completion["missing"],
-                    "coverage/not_scored": expected_rollouts - scored_rollouts,
-                    "coverage/measured": completion["measured"],
-                    "coverage/masked": completion["masked"],
-                    "coverage/unscored": completion["unscored"],
-                    "coverage/failed": completion["failed"],
-                    "coverage/failed_masked": completion["failed_masked"],
-                    "coverage/omitted": completion["intentionally_omitted"],
-                    "coverage/not_started": completion["not_started"],
-                    "coverage/missing_outcomes": completion["missing"],
-                    "coverage/open": completion["open"],
-                    "coverage/failure_budget_exhausted": completion["failure_budget_exhausted"],
-                    **({"coverage/imputed": len(imputed)} if config.count_missing_rollouts_as_zero else {}),
-                    **failure_metrics,
-                }
-            )
+            run_summary = {
+                "coverage/expected": expected_rollouts,
+                "coverage/scored": scored_rollouts,
+                "coverage/missing": completion["missing"],
+                "coverage/not_scored": expected_rollouts - scored_rollouts,
+                "coverage/measured": completion["measured"],
+                "coverage/masked": completion["masked"],
+                "coverage/unscored": completion["unscored"],
+                "coverage/failed": completion["failed"],
+                "coverage/failed_masked": completion["failed_masked"],
+                "coverage/omitted": completion["intentionally_omitted"],
+                "coverage/not_started": completion["not_started"],
+                "coverage/missing_outcomes": completion["missing"],
+                "coverage/open": completion["open"],
+                "coverage/failure_budget_exhausted": completion["failure_budget_exhausted"],
+                **({"coverage/imputed": len(imputed)} if config.count_missing_rollouts_as_zero else {}),
+                **failure_metrics,
+            }
+            if get_exporters():
+                export_metrics(run_summary)
+            # The same numbers for OTel dashboards, which read no experiment tracker.
+            record_run_summary(run_summary, run_id=store.manifest.run_id)
 
         print(f"""Finished rollout collection! View results at:
 Fully materialized inputs: {config.materialized_jsonl_fpath}
@@ -5618,6 +5626,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         semaphore: Optional[Semaphore] = None,
         *,
         run_id: str | None = None,
+        max_num_tries: Optional[int] = None,
+        connect_grace_s: Optional[float] = None,
     ) -> _RowResultIterator:
         """Yield ``(row, completed_dict | RolloutFailureRecord)`` in completion order.
 
@@ -5628,6 +5638,11 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         a run, overriding any row stamp. Without it, existing row stamps are preserved;
         unstamped rows share a new invocation ID. Returned rows are invocation-owned copies;
         input rows are not modified. ``run_examples`` retains its behavior.
+
+        A refused or dropped connection is resent without limit unless the caller bounds it. ``max_num_tries`` limits
+        how often a ``/run`` whose connection was made and then dropped is sent, and ``connect_grace_s`` is how long a
+        ``/run`` whose every connection was refused (so it was never delivered) keeps being resent; ``gym eval run``
+        uses 2 and ``dispatch_connect_grace_s``. With a bound, the failure record's ``delivery`` can say ``not_sent``.
 
         On early stopping, await the iterator's ``aclose()`` to cancel and join unfinished
         client tasks, or ``aclose_and_drain()`` to also retrieve settled, unconsumed outcomes.
@@ -5642,7 +5657,12 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         return _RowResultIterator(
             self._run_examples_with_metadata(
-                examples, head_server_config=head_server_config, semaphore=semaphore, typed_outcomes=True
+                examples,
+                head_server_config=head_server_config,
+                semaphore=semaphore,
+                typed_outcomes=True,
+                _max_num_tries=max_num_tries,
+                _connect_grace_s=connect_grace_s,
             ),
         )
 
@@ -6438,7 +6458,7 @@ class RolloutAggregationHelper(BaseModel):
                 f"{completion['open']} open (no final result). "
                 f"Details: {report_path}"
             )
-        if get_exporters():  # pragma: no cover
+        if get_exporters() or is_metrics_exporter_active():
             failure_metrics = await asyncio.to_thread(
                 _failure_export_metrics,
                 failures_fpaths,
@@ -6466,7 +6486,11 @@ class RolloutAggregationHelper(BaseModel):
                 metrics["coverage/missing_outcomes"] = completion["missing"]
                 metrics["coverage/open"] = completion["open"]
                 metrics["coverage/failure_budget_exhausted"] = completion["failure_budget_exhausted"]
-            export_metrics(metrics)
+            if get_exporters():
+                export_metrics(metrics)
+            # Only a single shard with attempt history has a run id of its own; a legacy shard has none.
+            single = len(input_paths) == 1 and len(histories) == 1
+            record_run_summary(metrics, run_id=histories[0].manifest.run_id if single else None)
 
         print(f"""Finished rollout aggregation! View results at:
 Merged rollouts: {output_fpath if config.merge_shards else "<not merged>"}

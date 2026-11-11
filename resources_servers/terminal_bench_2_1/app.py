@@ -18,12 +18,22 @@ from traceback import format_exc
 from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from nemo_gym import PARENT_DIR
+from nemo_gym.agents import OutcomeAction, OutcomePolicyConfig, failure_outcome_policy
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
-from nemo_gym.core import EpisodeId
+from nemo_gym.core import (
+    VERIFIER_ERROR,
+    EpisodeId,
+    FailureBoundary,
+    FailureClass,
+    NgFailureEvent,
+    classify_failure,
+    current_verifier_invocation_id,
+    observe_failure,
+)
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,
@@ -46,6 +56,7 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import bounded_text, is_nemo_gym_fastapi_entrypoint
 
 
 LOG = logging.getLogger(__name__)
@@ -62,6 +73,22 @@ if [ "${ID:-}:${VERSION_CODENAME:-}" = "debian:bullseye" ]; then
     sed -i -E "s|^$old$|$new|" "$2"
 fi
 """
+
+
+class TerminalBench21OutcomePolicyConfig(OutcomePolicyConfig):
+    """The verify boundary can mask a sample or score it zero; it cannot fail or grade the episode."""
+
+    default_action: OutcomeAction = OutcomeAction.RETRY
+
+    @model_validator(mode="after")
+    def require_verify_actions(self) -> "TerminalBench21OutcomePolicyConfig":
+        if {OutcomeAction.FAIL, OutcomeAction.VERIFY} & {
+            self.default_action,
+            *self.by_failure_kind.values(),
+            *self.by_status_code.values(),
+        }:
+            raise ValueError("Terminal Bench 2.1 verifier outcome policy supports only retry and count_as_zero")
+        return self
 
 
 class TerminalBench21ResourcesServerConfig(BaseResourcesServerConfig):
@@ -83,6 +110,14 @@ class TerminalBench21ResourcesServerConfig(BaseResourcesServerConfig):
 
     debug: bool = False
 
+    outcome_policy: TerminalBench21OutcomePolicyConfig = Field(
+        default_factory=TerminalBench21OutcomePolicyConfig,
+        description=(
+            "Action for a verifier that could not produce a verdict, selected by the failure's kind: retry masks the "
+            "sample (the default), count_as_zero keeps it as an unmasked zero. The failure event is recorded either way."
+        ),
+    )
+
 
 class TerminalBench21SeedSessionResponse(BaseSeedSessionResponse):
     sandbox_handle: str  # @bxyu-nvidia: Just a plain string URI for now for OpenSandbox backend.
@@ -96,6 +131,28 @@ class TerminalBench21SeedSessionRequest(BaseModel):
 
 class TerminalBench21VerifyRequest(TerminalBench21SeedSessionRequest, BaseVerifyRequest):
     pass
+
+
+_MAX_FAILURE_REASON_CHARS = 1000
+
+
+class _VerifierInfraError(RuntimeError):
+    """The sandbox could not run the verifier; there is no verdict on the model."""
+
+
+def _verifier_failure_reason(cause: BaseException) -> str:
+    """A concise reason for a masked verifier failure; the exception itself stays attached as the event's cause."""
+    if isinstance(cause, NgFailureEvent):
+        detail = cause.failure_reason
+    elif isinstance(cause, _VerifierInfraError):
+        detail = str(cause)
+    else:
+        detail = type(cause).__name__
+    return bounded_text(f"Verifier sandbox error: {detail}", _MAX_FAILURE_REASON_CHARS)
+
+
+class _VerifierDirError(RuntimeError):
+    """/logs/verifier or an upload directory could not be created: the task state the model left behind."""
 
 
 class TerminalBench21VerifyResponse(BaseVerifyResponse):
@@ -198,8 +255,6 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
-        if self.config.num_workers not in (None, 1):
-            raise ValueError("Terminal-Bench process-local sessions require num_workers=1")
 
         self._session_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
         self._session_id_to_state: dict[str, _ResourcesSessionState] = {}
@@ -505,7 +560,12 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
 
             target_fpath = f"{target_dirpath}/{file}"
             mkdir_result = await sandbox.exec(f"mkdir -p {Path(target_fpath).parent}")
-            assert mkdir_result.return_code == 0, mkdir_result
+            if getattr(mkdir_result, "error_type", None) is not None:
+                raise _VerifierInfraError(
+                    f"Could not prepare upload directory: sandbox error {mkdir_result.error_type}"
+                )
+            if mkdir_result.return_code != 0:
+                raise _VerifierDirError(f"Could not prepare upload directory: {mkdir_result}")
 
             with self._patch_golden_patch_solve_sh(task_name, local_fpath, patches, unmatched) as new_local_fpath:
                 await sandbox.upload(local_path=new_local_fpath, remote_path=target_fpath)
@@ -604,21 +664,36 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         if self.config.debug:
             print(f"Running tests for {body.task_name}", file=stderr)
         start_time = time()
+        # An infrastructure failure leaves no verdict on the model: mask the sample instead of scoring it 0.
+        # Only the model's own failures (verifier dir broken, test.sh timeout, no or invalid reward.txt) score 0.
+        failure_cause: BaseException | None = None
         try:
             await self._upload_folder(eval_sandbox, task_folder / "tests", "/tests", TEST_SH_PATCHES, body.task_name)
             # Test scripts write rewards here even if their test runner fails to start.
             setup_result = await eval_sandbox.exec("mkdir -p /logs/verifier", timeout_s=self.config.evaluation_timeout)
+            if getattr(setup_result, "error_type", None) is not None:
+                raise _VerifierInfraError(f"mkdir /logs/verifier failed: sandbox error {setup_result.error_type}")
             if setup_result.return_code != 0:
-                raise RuntimeError(f"Failed to prepare TerminalBench verifier output directory: {setup_result}")
+                raise _VerifierDirError(f"Failed to prepare TerminalBench verifier output directory: {setup_result}")
+            # A raised TimeoutError is ambiguous (a status poll can time out too): only a result reporting
+            # error_type="timeout" is the test script outrunning its deadline.
             eval_result = await eval_sandbox.exec(
                 "bash /tests/test.sh",
                 timeout_s=self.config.evaluation_timeout,
             )
+            error_type = getattr(eval_result, "error_type", None)
+            if error_type not in (None, "timeout"):
+                raise _VerifierInfraError(f"test.sh could not run: sandbox error {error_type}")
             test_output = (eval_result.stderr or "") + (eval_result.stdout or "")
-        except Exception:
+        except _VerifierDirError:
             print(f"Hit exception running TerminalBench 2.1 tests: {format_exc()}", file=stderr)
             eval_result = None
             test_output = ""
+        except Exception as exc:
+            print(f"Hit exception running TerminalBench 2.1 tests: {format_exc()}", file=stderr)
+            eval_result = None
+            test_output = ""
+            failure_cause = exc
         verification_time_taken = time() - start_time
 
         if self.config.debug:
@@ -629,7 +704,15 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         if eval_result is not None:
             try:
                 with NamedTemporaryFile(mode="w+", suffix=".txt") as temp_file:
-                    await eval_sandbox.download("/logs/verifier/reward.txt", temp_file.name)
+                    try:
+                        await eval_sandbox.download("/logs/verifier/reward.txt", temp_file.name)
+                    except Exception as download_exc:
+                        # Typed or not, a failed download does not say the file is missing (OpenSandbox reports a
+                        # missing file as a typed 404 too): it is a failed grade only when the sandbox itself
+                        # confirms that reward.txt is absent.
+                        if await self._reward_file_exists(eval_sandbox):
+                            failure_cause = download_exc
+                        raise
                     # Providers such as Docker can replace the destination file during download.
                     reward = float(Path(temp_file.name).read_text())
 
@@ -638,6 +721,37 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                 if self.config.debug:
                     print(f"Hit an exception downloading and converting reward: {format_exc()}", file=stderr)
 
+        failure_reason: str | None = None
+        counts_as_zero = False
+        outcome_action: OutcomeAction | None = None
+        outcome_attribution: FailureClass | None = None
+        # A typed provider failure keeps its kind; only a verifier-side failure is a verifier_error.
+        failure_kind = failure_cause.failure_kind if isinstance(failure_cause, NgFailureEvent) else VERIFIER_ERROR
+        if failure_cause is not None:
+            failure_reason = _verifier_failure_reason(failure_cause)
+            failure = NgFailureEvent(
+                boundary=FailureBoundary.RESOURCES_SERVER,
+                failure_kind=failure_kind,
+                http_status=failure_cause.http_status if isinstance(failure_cause, NgFailureEvent) else None,
+                failure_reason=failure_reason,
+                operation="verify",
+                operation_id=current_verifier_invocation_id() or body.task_name,
+                stage="verification",
+                exception_type=type(failure_cause).__name__,
+            )
+            # The caught exception is the cause: a provider event keeps its id, kind, status and details.
+            failure.__cause__ = failure_cause
+            observe_failure(failure)
+            evaluation_completed = False
+            reward = 0.0
+            # The configured policy decides whether the failed verification is masked or a scored zero. The applied
+            # decision is part of the result, so a saved row and its recovery read it instead of inferring it.
+            outcome_action = failure_outcome_policy(failure, config=self.config.outcome_policy)
+            outcome_attribution = classify_failure(
+                failure_kind=failure.failure_kind, stage=failure.stage, http_status=failure.http_status
+            )
+            counts_as_zero = outcome_action == OutcomeAction.COUNT_AS_ZERO
+
         return TerminalBench21VerifyResponse(
             **body.model_dump(),
             evaluation_completed=evaluation_completed,
@@ -645,8 +759,24 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             verification_time_taken=verification_time_taken,
             test_output=test_output,
             golden_patch_output=golden_patch_output,
+            mask_sample=failure_reason is not None and not counts_as_zero,
+            failure_kind=failure_kind if failure_reason is not None else None,
+            failure_reason=failure_reason,
+            failure_outcome_action=outcome_action,
+            failure_outcome_attribution=outcome_attribution,
         )
+
+    async def _reward_file_exists(self, eval_sandbox: AsyncSandbox) -> bool:
+        """After a failed reward download: True unless `test -f` answers (exit 1) that the file is absent."""
+        try:
+            probe = await eval_sandbox.exec("test -f /logs/verifier/reward.txt", timeout_s=30)
+        except Exception:
+            return True
+        return getattr(probe, "error_type", None) is not None or probe.return_code != 1
 
 
 if __name__ == "__main__":
     TerminalBench21ResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = TerminalBench21ResourcesServer.run_webserver()  # noqa: F401
