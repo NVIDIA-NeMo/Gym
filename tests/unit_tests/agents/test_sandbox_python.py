@@ -266,6 +266,27 @@ async def test_concurrent_cold_seeds_share_one_build_and_a_failed_build_is_retri
     assert "--no-binary" not in host.installs[-1].argv
 
 
+@pytest.mark.parametrize(
+    ("override", "expected_constraints"),
+    [
+        ("Rich>=14.3.3,<15", "openai==1.2.3\n"),
+        ('rich>=14.3.3,<15; sys_platform == "linux"', "openai==1.2.3\nrich==15.0.0\n"),
+    ],
+)
+async def test_adapter_override_replaces_only_its_unconditional_host_pin(
+    host, monkeypatch, override, expected_constraints
+) -> None:
+    monkeypatch.setattr(sandbox_python, "_agent_environment_pins", lambda: ("openai==1.2.3", "rich==15.0.0"))
+    runtime = SandboxPythonRuntime(
+        harness="hermes", requirements=("hermes-agent==1",), import_check="import x", overrides=(override,)
+    )
+
+    await runtime._site_packages_archive(SandboxPlatform("x86_64", "gnu", 35))
+
+    assert host.installs[0].constraints == expected_constraints
+    assert host.installs[0].overrides == f"{override}\n"
+
+
 async def test_the_adapter_overrides_reach_the_host_install(host) -> None:
     runtime = SandboxPythonRuntime(
         harness="stirrup", requirements=("stirrup==0.1.12",), import_check="import x", overrides=("pillow==12.3.0",)
@@ -274,6 +295,7 @@ async def test_the_adapter_overrides_reach_the_host_install(host) -> None:
     await runtime._site_packages_archive(SandboxPlatform("x86_64", "gnu", 35))
 
     assert host.installs[0].overrides == "pillow==12.3.0\n"
+    assert host.installs[0].constraints == "openai==1.2.3\n"
     assert (
         runtime.directory
         != SandboxPythonRuntime(

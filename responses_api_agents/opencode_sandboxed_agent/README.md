@@ -13,6 +13,18 @@
 > return only a `sandbox_handle` (such as `swebench`, `swe_gym` and `r2e_gym`) and the HLE search presets
 > (`tool_servers`). Existing configs keep working; the agent logs a deprecation warning when it starts.
 
+For borrowed task sandboxes, `/seed_session` can return a complete
+`sandbox_descriptor` from `sandbox.serialize(scope="operate")` or the existing
+`sandbox_handle`, with the repository `workdir`. A present but unusable handoff
+fails instead of creating another workspace. After verification, or a failure
+after a successful seed, the agent calls the resource owner's `/close_session`
+with `{}` and the original merged seed cookies, then disconnects its client.
+The resources server must support that flat close body. A valid seed with neither
+sandbox field retains agent-owned execution and stops that sandbox directly.
+Cleanup uses `session_close_timeout_seconds` for each phase. Failures propagate;
+pending owner cookies or sandbox handles remain available for retry and shutdown.
+Repeated caller cancellation waits for that bounded cleanup.
+
 ```bash
 # In terminal 1
 gym env start \

@@ -12,6 +12,7 @@ from time import monotonic, time
 from typing import Any, ClassVar
 from uuid import uuid4
 
+from anyio import CancelScope
 from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field
 
@@ -26,10 +27,15 @@ from nemo_gym.agents import (
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.sandbox import AsyncSandbox, create_provider, resolve_provider_config
+from nemo_gym.sandbox import AsyncSandbox, SandboxProvider, create_provider, resolve_provider_config
 from nemo_gym.server_runtime import CHECKPOINT_CLOSE_FOLLOWS_HEADER, BaseRunRequest, BaseVerifyResponse
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
 from responses_api_agents.hermes_sandboxed_agent.runner import classify_stop, split_input
+from responses_api_agents.hermes_sandboxed_agent.session_runtime import (
+    prepare_runtime,
+    runtime_payload,
+    trajectory_result,
+)
 
 
 LOG = logging.getLogger(__name__)
@@ -56,7 +62,9 @@ class HermesSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
     model: str
     sandbox_provider: str = "sandbox"
-    runtime_python: str = "/opt/hermes/bin/hermes-python"
+    # None selects the pinned hermes_agent runtime, installed in the task sandbox.
+    runtime_python: str | None = "/opt/hermes/bin/hermes-python"
+    sandbox_install_timeout_seconds: float = Field(default=600, gt=0)
     remote_run_root: str = "/tmp"
     results_dir: str = "responses_api_agents/hermes_sandboxed_agent/results"
     concurrency: int = Field(default=4, ge=1)
@@ -149,13 +157,17 @@ def trajectory_response(result, body, model, error_type=None):
             "tool_choice": body.tool_choice,
             "tools": body.tools,
             "parallel_tool_calls": body.parallel_tool_calls,
-            "usage": {
-                "input_tokens": inputs,
-                "output_tokens": outputs,
-                "total_tokens": inputs + outputs,
-                "input_tokens_details": {"cached_tokens": usage.get("cached_tokens", 0)},
-                "output_tokens_details": {"reasoning_tokens": usage.get("reasoning_tokens", 0)},
-            },
+            "usage": (
+                {
+                    "input_tokens": inputs,
+                    "output_tokens": outputs,
+                    "total_tokens": inputs + outputs,
+                    "input_tokens_details": {"cached_tokens": usage.get("cached_tokens", 0)},
+                    "output_tokens_details": {"reasoning_tokens": usage.get("reasoning_tokens", 0)},
+                }
+                if result.get("usage", {}) is not None
+                else None
+            ),
         }
     )
 
@@ -173,7 +185,39 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
     async def responses(self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
         raise HTTPException(400, "Use /run: Hermes requires a resources-server seeded sandbox")
 
-    async def _download_output_tail(self, sandbox: AsyncSandbox, *, remote: str, local: Path) -> str:
+    async def _close_run(
+        self, sandbox: AsyncSandbox | None, provider: SandboxProvider | None, *, cookies: dict[str, str]
+    ) -> None:
+        with CancelScope(shield=True):
+            try:
+                async with asyncio.timeout(self.config.cleanup_timeout):
+                    cleaned = await self.server_client.post(
+                        server_name=self.config.resources_server.name,
+                        url_path="/close_session",
+                        json={},
+                        cookies=cookies,
+                    )
+                    if (
+                        self.config.runtime_python is not None
+                        and getattr(cleaned, "status", None) in {404, 405}
+                        and sandbox is not None
+                    ):
+                        # Older resources may lack close. An operate-only lease cannot stop,
+                        # so a rejected fallback remains a visible cleanup failure.
+                        await sandbox.stop()
+                    else:
+                        await raise_for_status(cleaned)
+            finally:
+                async with asyncio.timeout(self.config.cleanup_timeout):
+                    if sandbox is not None:
+                        await sandbox.disconnect()
+                    elif provider is not None:
+                        # Failed connect still leaves this process owning the transport.
+                        await provider.aclose()
+
+    async def _download_output_tail(
+        self, sandbox: AsyncSandbox, *, remote: str, local: Path, runtime_python: str | None = None
+    ) -> str:
         # Bound bytes inside the sandbox: downloading first still permits unbounded
         # transfer and memory use when a task service keeps writing diagnostics.
         script = (
@@ -188,9 +232,11 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
             "    target.write(prefix + source.read(count))\n"
         )
         bounded = f"{remote}/output.tail.log"
+        runtime_python = runtime_python or self.config.runtime_python
+        if runtime_python is None:
+            raise RuntimeError("Hermes runtime was not prepared")
         copied = await sandbox.exec(
-            f"{quote(self.config.runtime_python)} -I -c {quote(script)} "
-            f"{quote(remote + '/output.log')} {quote(bounded)}",
+            f"{quote(runtime_python)} -I -c {quote(script)} {quote(remote + '/output.log')} {quote(bounded)}",
             timeout_s=30,
         )
         if copied.return_code or copied.error_type:
@@ -243,19 +289,39 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
                 "temperature": body.temperature if body.temperature is not None else self.config.temperature,
                 "max_tokens": body.max_output_tokens if body.max_output_tokens is not None else self.config.max_tokens,
             }
+            runtime_python = self.config.runtime_python
+            managed = runtime_python is None
+            if managed:
+                payload = runtime_payload(params, run_id=run_id)
+                runtime_python = await prepare_runtime(
+                    sandbox, remote=remote, timeout=self.config.sandbox_install_timeout_seconds
+                )
+                runner = (
+                    f"{quote(runtime_python)} -E -s {quote(remote + '/sandbox_runner.py')} "
+                    f"{quote(remote + '/request.json')} {quote(remote + '/result.json')}"
+                )
+            else:
+                payload = params
+                runner = f"{quote(runtime_python)} -I {quote(remote + '/runner.py')} {quote(remote + '/request.json')}"
             # Only model input goes into the task container. Benchmark gold/test metadata stays outside.
-            (local / "request.json").write_text(json.dumps(params))
+            (local / "request.json").write_text(json.dumps(payload))
             await sandbox.upload(local / "request.json", f"{remote}/request.json")
-            await sandbox.upload(Path(__file__).with_name("runner.py"), f"{remote}/runner.py")
+            if not managed:
+                await sandbox.upload(Path(__file__).with_name("runner.py"), f"{remote}/runner.py")
             await sandbox.upload(SUPERVISOR_SCRIPT, f"{remote}/{SUPERVISOR_FILE}")
             launched = True
             executed = await sandbox.exec(
                 f"bash {quote(f'{remote}/{SUPERVISOR_FILE}')} "
                 f"--timeout {self.config.sandbox_timeout} --cleanup-timeout {DEFAULT_CLEANUP_TIMEOUT} "
                 f"--receipt {quote(remote + '/cleanup.json')} --stop-file {quote(remote + '/stop.request')} -- "
-                f"{quote(self.config.runtime_python)} -I {quote(remote + '/runner.py')} {quote(remote + '/request.json')} "
-                f">{quote(remote + '/output.log')} 2>&1",
-                cwd=remote,
+                f"{runner} >{quote(remote + '/output.log')} 2>&1",
+                cwd=params["workdir"] if managed else remote,
+                env={
+                    "HERMES_API_TIMEOUT": str(self.config.api_timeout),
+                    "HERMES_API_CALL_STALE_TIMEOUT": str(self.config.api_timeout),
+                }
+                if managed
+                else None,
                 # The runner owns the model budget; leave time for process cleanup.
                 timeout_s=exec_timeout(timeout=self.config.sandbox_timeout),
             )
@@ -264,7 +330,9 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
             # Detached services can inherit worker output. A file prevents them
             # from keeping the provider's response pipe open after termination.
             try:
-                stdout += await self._download_output_tail(sandbox, remote=remote, local=local)
+                stdout += await self._download_output_tail(
+                    sandbox, remote=remote, local=local, runtime_python=runtime_python
+                )
             except Exception:
                 LOG.warning("Could not retrieve Hermes supervisor output; artifacts: %s", local, exc_info=True)
             await sandbox.download(f"{remote}/cleanup.json", local / "cleanup.json")
@@ -283,6 +351,8 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
                 # iteration checkpoints the last known transcript independently.
                 await sandbox.download(f"{remote}/progress.json", local / "result.json")
             result = json.loads((local / "result.json").read_text())
+            if managed:
+                result = trajectory_result(result, n_input=len(payload["history"]) + 1)
             if error_type == "timeout":
                 result = classify_stop(result, timed_out=True)
             elif return_code and not error_type:
@@ -291,6 +361,8 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
             error_type = error_type or type(exc).__name__
             result = result | {"completed": False, "error": str(exc)}
             LOG.exception("Hermes sandbox execution failed; artifacts: %s", local)
+            if self.config.runtime_python is None and not launched:
+                raise
         finally:
             (local / "agent_result.json").write_text(
                 json.dumps(
@@ -390,13 +462,21 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
                     headers={CHECKPOINT_CLOSE_FOLLOWS_HEADER: "1"},
                 )
                 await raise_for_status(verified)
+                cookies.update(verified.cookies)
                 result = await get_response_json(verified)
                 result["agent_image_provenance"] = seed.get("image_provenance")
                 result["verifier_reward"] = result["reward"]
                 budget_stop = (
                     response.status == "incomplete" and (response.metadata or {}).get("budget_exhausted") == "true"
                 )
-                if response.status != "completed" and not budget_stop:
+                verifier_masked = self.config.runtime_python is None and (
+                    result.get("evaluation_completed") is False or result.get("mask_sample") is True
+                )
+                if verifier_masked:
+                    # RL applies the verifier's mask and configured denominator policy. A
+                    # scored, masked row is not a no-result transport failure.
+                    failure = None
+                elif response.status != "completed" and not budget_stop:
                     failure = f"Hermes response status: {response.status}"
                 elif result.get("evaluation_completed") is False:
                     failure = result.get("error") or "Verification did not complete"
@@ -426,32 +506,19 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
                     }
                 )
             finally:
-                try:
-                    async with asyncio.timeout(self.config.cleanup_timeout):
-                        cleaned = await self.server_client.post(
-                            server_name=self.config.resources_server.name,
-                            url_path="/close_session",
-                            json={},
-                            cookies=cookies,
-                        )
-                        await raise_for_status(cleaned)
-                except Exception:
-                    LOG.exception("Failed to stop Hermes sandbox")
-                    if sandbox is not None:
+                # Shield both AnyIO request cancellation and asyncio Task.cancel while
+                # bounded owner cleanup and transport release finish.
+                with CancelScope(shield=True):
+                    cleanup = asyncio.create_task(self._close_run(sandbox, provider, cookies=cookies))
+                    cancelled = False
+                    while not cleanup.done():
                         try:
-                            async with asyncio.timeout(self.config.cleanup_timeout):
-                                await sandbox.stop()
-                        except Exception:
-                            LOG.exception("Sandbox fallback cleanup also failed")
-                finally:
-                    # The resources server owns the container, but this process
-                    # owns the transport used to attach to it (also on failed connect).
-                    if provider is not None:
-                        try:
-                            async with asyncio.timeout(self.config.cleanup_timeout):
-                                await provider.aclose()
-                        except Exception:
-                            LOG.exception("Failed to release Hermes sandbox transport")
+                            await asyncio.shield(cleanup)
+                        except asyncio.CancelledError:
+                            cancelled = True
+                    cleanup.result()
+                    if cancelled:
+                        raise asyncio.CancelledError
 
 
 if __name__ == "__main__":
