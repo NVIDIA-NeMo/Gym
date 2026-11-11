@@ -25,13 +25,14 @@ from fastapi.responses import PlainTextResponse
 from pydantic import Field, PrivateAttr
 
 from nemo_gym.client import SESSION_ID_KEY
-from nemo_gym.core import VERIFIER_ERROR
+from nemo_gym.core import VERIFIER_ERROR, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.metrics import compute_pass_majority_metrics, compute_subset_metrics, highest_k_metrics
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ResourcesSeedRejectedError,
     ResourcesSessionLostError,
     SimpleResourcesServer,
     lost_session_verification,
@@ -53,8 +54,8 @@ SCORE_NAMES = (
     "objectives_passed",
     "objectives_total",
 )
-# A row without tools is one prepared before this server existed: the model could not touch the world, so its zero
-# is no grade of the model.
+# A row without tools is one prepared before this server existed: the model could not touch the world, so the seed
+# refuses it before any model call instead of scoring a zero that is no grade of the model.
 NO_TOOLS_REASON = (
     "The row's responses_create_params carries no tools, so the model could not act on the task's world. Rows "
     "prepared before the automationbench resources server lack them: re-run `gym eval prepare --benchmark "
@@ -142,7 +143,11 @@ def score(state: Dict[str, Any], *, export_assertion_results: bool) -> Dict[str,
 
 
 class AutomationBenchSeedRequest(TaskData, BaseSeedSessionRequest):
-    """A seed's ``task_data``: one AutomationBench row."""
+    """A seed's ``task_data``: one AutomationBench row, with the task's ``responses_create_params`` that a typed seed
+    carries beside it."""
+
+    # Read only to refuse a row without tools; the agent, not this server, sends them to the model.
+    responses_create_params: Optional[NeMoGymResponseCreateParamsNonStreaming] = None
 
 
 @dataclass
@@ -168,6 +173,9 @@ class AutomationBenchResourcesServer(SimpleResourcesServer):
         return session_id in self._episodes
 
     async def initialize_session_state(self, session_id: str, body: AutomationBenchSeedRequest) -> None:
+        # A seed without the params (a caller that does not send them) cannot be checked, and is served.
+        if body.responses_create_params is not None and not body.responses_create_params.tools:
+            raise ResourcesSeedRejectedError(NO_TOOLS_REASON)
         self._episodes[session_id] = _Episode(new_world_state(body.info.model_dump()))
 
     async def release_session_state(self, session_id: str) -> None:
@@ -195,16 +203,12 @@ class AutomationBenchResourcesServer(SimpleResourcesServer):
             if verification.is_live:
                 state = self._episodes[session_id].state
                 task_name = state["info"]["task_name"]
-                if not body.responses_create_params.tools:
-                    LOG.error("AutomationBench task %s: %s", body.task_id, NO_TOOLS_REASON)
-                    scores = {"failure_reason": NO_TOOLS_REASON}
-                else:
-                    try:
-                        scores = score(state, export_assertion_results=self.config.export_assertion_results)
-                    except Exception as error:
-                        # verifiers would score the raising function 0.0; that zero is no grade of the answer.
-                        LOG.exception("Scoring AutomationBench task %s failed", body.task_id)
-                        scores = {"failure_reason": f"AutomationBench rubric raised: {type(error).__name__}: {error}"}
+                try:
+                    scores = score(state, export_assertion_results=self.config.export_assertion_results)
+                except Exception as error:
+                    # verifiers would score the raising function 0.0; that zero is no grade of the answer.
+                    LOG.exception("Scoring AutomationBench task %s failed", body.task_id)
+                    scores = {"failure_reason": f"AutomationBench rubric raised: {type(error).__name__}: {error}"}
                 verification.retain({"task_name": task_name, **scores})
             result = dict(verification.retained)
         task_name = result.pop("task_name")

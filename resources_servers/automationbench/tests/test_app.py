@@ -46,11 +46,13 @@ def client():
 
 
 def _seed(session_id: str = "session", task: dict[str, Any] = TASK) -> ResourcesSeedSessionRequest:
+    # As single_agent_turn seeds: task_data without the params, and the params beside it.
     return ResourcesSeedSessionRequest(
         resources_session_id=session_id,
         episode_id=EpisodeId(rollout_id=f"{session_id}-0"),
         task_id=TaskId(taskset="automationbench", task_id=task["task_id"]),
         task_data={key: value for key, value in task.items() if key != "responses_create_params"},
+        responses_create_params=task["responses_create_params"],
     )
 
 
@@ -201,15 +203,28 @@ def test_a_rubric_that_raises_masks_the_sample(client, monkeypatch):
     assert result["failure_reason"] == "AutomationBench rubric raised: KeyError: 'assertion'"
 
 
-def test_a_row_prepared_without_tools_is_masked_not_scored(client):
-    # Rows prepared before this server carry no tools; the model could not act, so 0 would be no grade of it.
-    _post_seed(client, _seed())
+def test_a_row_prepared_without_tools_is_refused_at_seed(client):
+    # Rows prepared before this server carry no tools; the model could not act, so the episode fails before any
+    # model call instead of scoring a zero that is no grade of it.
+    task = TASK | {
+        "responses_create_params": {
+            key: value for key, value in TASK["responses_create_params"].items() if key != "tools"
+        }
+    }
 
-    result = client.post("/verify", json=_verify_body(tools=[])).json()
+    response = _post_seed(client, _seed(task=task))
 
-    assert (result["mask_sample"], result["failure_kind"], result["reward"]) == (True, "verifier_error", 0.0)
-    assert "gym eval prepare --benchmark automationbench" in result["failure_reason"]
-    assert result["task_name"] == "sales.multi_hop_lookup"
+    assert response.status_code == 422
+    assert "gym eval prepare --benchmark automationbench" in response.json()["detail"]
+    assert client.post("/api_search", json={"query": "gmail"}).status_code == 404
+
+
+def test_a_seed_without_the_params_is_served(client):
+    # A caller that sends only task_data cannot be checked for tools; the session is seeded as before.
+    seed = _seed().model_copy(update={"responses_create_params": None})
+
+    assert _post_seed(client, seed).status_code == 200
+    assert _verify(client)["reward"] == 0.0
 
 
 def test_a_task_counted_as_zero_before_verify_stays_in_its_domain():
