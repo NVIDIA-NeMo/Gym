@@ -798,6 +798,28 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
         sys.exit(1)
 
 
+def _eval_prepare(args: argparse.Namespace, overrides: list[str]) -> None:
+    target = getattr(args, "target", None)
+    if target:
+        # A task folder or `harbor:<dataset>` reference: prepare it for the named harness, without starting servers.
+        from nemo_gym.cli.eval import prepare_target_run
+
+        prepare_target_run(args, overrides)
+        return
+    for name, flag in (
+        ("agent", "--agent"),
+        ("sandbox", "--sandbox"),
+        ("only_tasks", "--only-tasks"),
+        ("exclude_tasks", "--exclude-tasks"),
+        ("skip_unloadable", "--skip-unloadable"),
+    ):
+        if getattr(args, name, None):
+            # Register-only flags: without a TARGET nothing consumes them, and a silently ignored flag would
+            # prepare something other than what was asked for.
+            args._parser.error(f"{flag} applies to a task TARGET; pass a Harbor task folder or harbor: reference")
+    dispatch("nemo_gym.cli.eval:prepare_benchmark", overrides)
+
+
 def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
     target = getattr(args, "target", None)
     if target:
@@ -872,6 +894,14 @@ EXCLUDE_TASKS = Flag(
         "--exclude-tasks",
         metavar="PATTERNS",
         help="Comma-separated task names or globs to leave out of a task TARGET (e.g. `fp8-*,jax-speedrun-gpu`).",
+    ),
+)
+
+SKIP_UNLOADABLE = Flag(
+    register=lambda p: p.add_argument(
+        "--skip-unloadable",
+        action="store_true",
+        help="Use the loadable subset of a Harbor TARGET; record omitted tasks in skipped.json.",
     ),
 )
 
@@ -1444,9 +1474,19 @@ COMMANDS = {
     ),
     "env status": Command(target="nemo_gym.cli.env:status", summary="Print the server status.", flags=(JSON,)),
     "eval prepare": Command(
-        target="nemo_gym.cli.eval:prepare_benchmark",
-        summary="Prepare benchmark data and dump it to disk.",
-        flags=(CONFIG, BENCHMARK, SEARCH_DIR),
+        target=_eval_prepare,
+        summary="Prepare benchmark data, or a Harbor task TARGET, and dump it to disk.",
+        flags=(
+            TASK_TARGET,
+            SANDBOX,
+            SKIP_UNLOADABLE,
+            CONFIG,
+            BENCHMARK,
+            SEARCH_DIR,
+            _value_flag("agent", "agent_name", "Agent harness a task TARGET is prepared for.", aliases=("-a",)),
+            EXCLUDE_TASKS,
+            ONLY_TASKS,
+        ),
     ),
     "eval plan": Command(
         target="nemo_gym.cli.eval:plan_benchmark",
@@ -1468,13 +1508,7 @@ COMMANDS = {
         flags=(
             TASK_TARGET,
             SANDBOX,
-            Flag(
-                register=lambda p: p.add_argument(
-                    "--skip-unloadable",
-                    action="store_true",
-                    help="Run the loadable subset of a Harbor TARGET; record omitted tasks in skipped.json.",
-                )
-            ),
+            SKIP_UNLOADABLE,
             CONFIG,
             BENCHMARK,
             ENVIRONMENT,
@@ -2403,9 +2437,9 @@ def main() -> None:
         except ValueError as exc:
             getattr(args, "_parser", parser).error(str(exc))
 
-        # argparse can capture a bare Hydra override in eval run's optional TARGET slot.
+        # argparse can capture a bare Hydra override in the optional TARGET slot of eval run and eval prepare.
         # Restore it before coalescing, keeping translated flags before raw overrides.
-        if command.target is _eval_run and args.target and _is_positional_hydra_override(args.target):
+        if command.target in (_eval_run, _eval_prepare) and args.target and _is_positional_hydra_override(args.target):
             overrides = [args.target, *overrides]
             args.target = None
 

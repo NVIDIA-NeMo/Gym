@@ -2223,6 +2223,63 @@ def test_eval_run_keeps_long_configuration_values(monkeypatch, serve):
     assert OverridesParser.create().parse_override(overrides[0]).value() == value
 
 
+def test_eval_prepare_hands_a_task_target_to_the_target_preparation(monkeypatch):
+    captured = []
+    monkeypatch.setattr(cli_main, "dispatch", lambda *args: pytest.fail("a task target must not prepare a benchmark"))
+    monkeypatch.setattr(cli_eval, "prepare_target_run", lambda args, overrides: captured.append((args, overrides)))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "gym",
+            "eval",
+            "prepare",
+            "~/tasks",
+            "--agent",
+            "opencode_agent",
+            "--sandbox",
+            "opensandbox",
+            "--only-tasks",
+            "a*",
+        ],
+    )
+    cli_main.main()
+    ((args, overrides),) = captured
+    assert (args.target, args.agent, args.sandbox, args.only_tasks) == (
+        "~/tasks",
+        "opencode_agent",
+        "opensandbox",
+        "a*",
+    )
+    assert overrides == ["+agent_name=opencode_agent"]
+
+
+def test_eval_prepare_without_a_target_still_prepares_the_benchmark(monkeypatch):
+    target, overrides = _dispatch_for(monkeypatch, ["eval", "prepare", "+limit=3"])
+    assert target == "nemo_gym.cli.eval:prepare_benchmark"
+    assert overrides == ["+limit=3"]
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ["--agent", "opencode_agent"],
+        ["--sandbox", "opensandbox"],
+        ["--only-tasks", "a"],
+        ["--exclude-tasks", "a"],
+        ["--skip-unloadable"],
+    ],
+)
+def test_eval_prepare_task_flags_need_a_target(monkeypatch, capsys, flags):
+    """Register-only flags: without a TARGET nothing consumes them, so they are refused, not dropped."""
+    monkeypatch.setattr(cli_main, "dispatch", lambda *args: pytest.fail("a dropped flag must not dispatch"))
+    monkeypatch.setattr(sys, "argv", ["gym", "eval", "prepare", *flags])
+    with pytest.raises(SystemExit) as exc:
+        main()
+    assert exc.value.code == 2
+    assert "applies to a task TARGET" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("serve", [False, True])
 @pytest.mark.parametrize("flag", ["--only-tasks", "--exclude-tasks"])
 def test_eval_run_task_selection_flags_need_a_target(monkeypatch, capsys, serve, flag):
