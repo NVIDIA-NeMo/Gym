@@ -24,6 +24,7 @@ from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
+    ENVIRONMENT_SERVER_STAMP_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
@@ -32,6 +33,7 @@ from nemo_gym.config.global_config import (
 from nemo_gym.rollouts.batch_status import (
     BatchManifest,
     BatchStatusTracker,
+    RunStatusTracker,
     observe_materialized_rows,
     validate_batch_manifest,
 )
@@ -81,6 +83,105 @@ def manifest_payload(rows: list[dict], metric_keys: dict[str, list[str]] | None 
 def write_manifest(path: Path, rows: list[dict], metric_keys: dict[str, list[str]] | None = None) -> Path:
     path.write_bytes(orjson.dumps(manifest_payload(rows, metric_keys), option=orjson.OPT_INDENT_2))
     return path
+
+
+@pytest.mark.parametrize("with_manifest", [False, True])
+@pytest.mark.parametrize(
+    "aggregate_case",
+    [
+        "matched",
+        "wrong_route",
+        "missing_route",
+        "duplicate_route",
+        "error",
+        "missing_metric",
+        "label_collision",
+        "selected_error_with_label_collision",
+    ],
+)
+def test_aggregation_status_uses_saved_route_instead_of_a_coincidental_agent_label(
+    tmp_path: Path, with_manifest: bool, aggregate_case: str
+) -> None:
+    rows = [materialized_row("environment", "source", 0, 0) | {ENVIRONMENT_SERVER_STAMP_KEY_NAME: "environment"}]
+    tracker = (
+        BatchStatusTracker(write_manifest(tmp_path / "batch_manifest.json", rows), rows)
+        if with_manifest
+        else RunStatusTracker(tmp_path / "rollouts_batch_status.json", (row for row in rows))
+    )
+    entry = {
+        AGENT_REF_KEY_NAME: {"name": "candidate"},
+        ENVIRONMENT_SERVER_STAMP_KEY_NAME: "environment",
+        "key_metrics": {"mean/reward": 0.5},
+    }
+    if aggregate_case in ("wrong_route", "missing_route"):
+        entry[AGENT_REF_KEY_NAME] = {"name": "environment"}
+        if aggregate_case == "wrong_route":
+            entry[ENVIRONMENT_SERVER_STAMP_KEY_NAME] = "other_environment"
+        else:
+            del entry[ENVIRONMENT_SERVER_STAMP_KEY_NAME]
+    elif aggregate_case in ("error", "selected_error_with_label_collision"):
+        entry["aggregation_error"] = {"type": "ClientResponseError", "http_status": 500, "message": "private"}
+    if aggregate_case == "missing_metric":
+        entry["key_metrics"] = {}
+    entries = [entry]
+    if aggregate_case == "label_collision":
+        entries.append({AGENT_REF_KEY_NAME: {"name": "environment"}, AGGREGATION_ERROR_KEY: {"type": "WrongEntry"}})
+    if aggregate_case == "selected_error_with_label_collision":
+        entries.append({AGENT_REF_KEY_NAME: {"name": "environment"}, "key_metrics": {"mean/reward": 0.0}})
+    if aggregate_case == "duplicate_route":
+        entries.append(entry | {AGENT_REF_KEY_NAME: {"name": "other_candidate"}})
+    metrics = tmp_path / "rollouts_aggregate_metrics.json"
+    metrics.write_bytes(orjson.dumps(entries))
+
+    tracker.write_status(rows, [], aggregate_metrics_fpath=metrics, force=True)
+
+    status = json.loads(tracker.status_fpath.read_text())
+    member = status["members"]["environment"]
+    assert member["completed_rollout_count"] == member["expected_rollout_count"] == 1
+    expected = (
+        "complete"
+        if aggregate_case in ("matched", "label_collision")
+        or (aggregate_case == "missing_metric" and not with_manifest)
+        else "error"
+    )
+    assert member["aggregation_status"] == expected
+    if with_manifest and aggregate_case == "missing_metric":
+        assert member["aggregation_error"] == {
+            "type": "MissingExpectedMetricKeys",
+            "missing_metric_keys": ["mean/reward"],
+        }
+    assert orjson.loads(metrics.read_bytes()) == entries
+    assert "private" not in tracker.status_fpath.read_text()
+
+
+@pytest.mark.parametrize("with_manifest", [False, True])
+@pytest.mark.parametrize("route", [None, "other_environment", "candidate"])
+def test_agent_status_keeps_exact_metric_label_with_mixed_routes(
+    tmp_path: Path, with_manifest: bool, route: str | None
+) -> None:
+    rows = [materialized_row("candidate", "source", index, 0) for index in range(2)]
+    rows[0][ENVIRONMENT_SERVER_STAMP_KEY_NAME] = "candidate"
+    if route is not None:
+        rows[1][ENVIRONMENT_SERVER_STAMP_KEY_NAME] = route
+    tracker = (
+        BatchStatusTracker(write_manifest(tmp_path / "batch_manifest.json", rows), rows)
+        if with_manifest
+        else RunStatusTracker(tmp_path / "rollouts_batch_status.json", (row for row in rows))
+    )
+    entries = [{AGENT_REF_KEY_NAME: {"name": "candidate"}, "key_metrics": {"mean/reward": 0.75}}]
+    if route == "candidate":
+        entries[0][ENVIRONMENT_SERVER_STAMP_KEY_NAME] = "candidate"
+    metrics = tmp_path / "aggregate_metrics.json"
+    metrics.write_bytes(orjson.dumps(entries))
+
+    tracker.write_status(rows, [], aggregate_metrics_fpath=metrics, force=True)
+
+    member = orjson.loads(tracker.status_fpath.read_bytes())["members"]["candidate"]
+    assert member["aggregation_status"] == "complete"
+    assert member["expected_rollout_count"] == member["completed_rollout_count"] == 2
+    if with_manifest:
+        assert member["observed_metric_keys"] == ["mean/reward"]
+    assert orjson.loads(metrics.read_bytes()) == entries
 
 
 class TestObserveMaterializedRows:
@@ -697,7 +798,8 @@ def test_run_status_reports_failures_and_model_final_results_by_kind(tmp_path: P
 def test_run_status_matches_environment_stamped_metrics(tmp_path: Path, failed: bool, member: str) -> None:
     from nemo_gym.rollouts.batch_status import RunStatusTracker
 
-    rows = [materialized_row(member, "", 0, 0)]
+    # Environment membership comes from the saved route, never from a coincidental agent label.
+    rows = [materialized_row(member, "", 0, 0) | {ENVIRONMENT_SERVER_STAMP_KEY_NAME: "visual_environment"}]
     entry = {
         "agent_ref": {"name": "visual_agent"},
         "_ng_environment_server": "visual_environment",
