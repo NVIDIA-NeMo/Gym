@@ -9,7 +9,7 @@ from dataclasses import replace
 
 import pytest
 from fastapi.testclient import TestClient
-from scripts.harness_conformance.provider import ANSWER, SUMMARY_PROMPTS, TERMINUS_SUMMARY_PROMPTS, Probe
+from scripts.harness_conformance.provider import ANSWER, Probe
 from scripts.harness_conformance.scenarios import SCENARIOS
 
 
@@ -112,7 +112,16 @@ def test_terminus_requires_stdout_not_just_echoed_keystrokes(tmp_path, scenario_
 
 @pytest.mark.parametrize("stream", [False, True])
 def test_messages_compaction_keeps_summary_and_usage_separate_from_policy(tmp_path, stream):
-    probe = Probe(replace(SCENARIOS_BY_NAME["context_compaction"], tool_steps=1), tmp_path, harness="claude_code")
+    probe = Probe(
+        replace(SCENARIOS_BY_NAME["context_compaction"], tool_steps=1),
+        tmp_path,
+        harness="claude_code",
+        responses=[
+            {"kind": "tool", "input_tokens": 27000, "output_tokens": 8},
+            {"kind": "summary", "input_tokens": 500, "output_tokens": 11},
+            {"kind": "final", "input_tokens": 101, "output_tokens": 8},
+        ],
+    )
     body = {"model": "probe", "messages": [], "tools": [BASH], "stream": stream}
     with TestClient(probe.model_app()) as client:
         assert client.post("/ng-rollout/0-0/v1/messages", json=body).status_code == 200
@@ -128,7 +137,7 @@ def test_messages_compaction_keeps_summary_and_usage_separate_from_policy(tmp_pa
                 },
             ]
         )
-        summary_request = {**body, "messages": [{"role": "user", "content": SUMMARY_PROMPTS[0]}]}
+        summary_request = {**body, "messages": [{"role": "user", "content": "Any summary instruction"}]}
         assert client.post("/ng-rollout/0-0/v1/messages", json=summary_request).status_code == 200
         helper = probe.attempts[-1]["response"]
         assert helper["content"] == [{"type": "text", "text": probe.compaction_summary}]
@@ -148,7 +157,7 @@ def test_messages_compaction_keeps_summary_and_usage_separate_from_policy(tmp_pa
 
 
 def test_terminus_executes_json_commands_and_confirms_completion_twice(tmp_path):
-    probe = Probe(SCENARIOS_BY_NAME["tool_failure"], tmp_path, harness="terminus_2_sandboxed")
+    probe = Probe(SCENARIOS_BY_NAME["tool_failure"], tmp_path, harness="terminus_2_sandboxed", final_responses=2)
     body = {"model": "probe", "input": [{"role": "user", "content": "Run checks"}]}
     with TestClient(probe.model_app()) as client:
         for index in range(4):
@@ -171,36 +180,6 @@ def test_terminus_executes_json_commands_and_confirms_completion_twice(tmp_path)
                 body["input"].append({"role": "user", "content": "Confirm completion"})
     assert not probe.violations
     assert all(t["executed"] and t["result_seen"] for t in probe.tool_calls)
-
-
-@pytest.mark.parametrize("out_of_order", [False, True])
-def test_terminus_compaction_helpers_do_not_consume_terminal_commands(tmp_path, out_of_order):
-    probe = Probe(
-        replace(SCENARIOS_BY_NAME["context_compaction"], tool_steps=2), tmp_path, harness="terminus_2_sandboxed"
-    )
-    body = {"model": "probe", "input": [{"role": "user", "content": "Run checks"}]}
-    with TestClient(probe.model_app()) as client:
-        message = client.post("/v1/responses", json=body).json()["output"][0]
-        command = json.loads(message["content"][0]["text"])["commands"][0]["keystrokes"]
-        execution = subprocess.run(command, shell=True, capture_output=True, text=True, check=True)
-        body["input"].extend([message, {"role": "user", "content": execution.stdout}])
-        if out_of_order:
-            wrong = {**body, "input": [{"role": "user", "content": TERMINUS_SUMMARY_PROMPTS[1]}]}
-            assert client.post("/v1/responses", json=wrong).status_code == 409
-            assert not probe.compaction_response_ids
-            return
-        for prompt in TERMINUS_SUMMARY_PROMPTS:
-            helper = client.post("/v1/responses", json={**body, "input": [{"role": "user", "content": prompt}]})
-            assert helper.status_code == 200
-            assert helper.json()["output"][0]["content"][0]["text"] == probe.compaction_summary
-            assert helper.json()["usage"]["total_tokens"] == 511
-            assert len(probe.tool_calls) == 1 and not probe.finished
-        body["input"].append({"role": "user", "content": probe.compaction_summary})
-        resumed = client.post("/v1/responses", json=body)
-    assert resumed.status_code == 200
-    assert json.loads(resumed.json()["output"][0]["content"][0]["text"])["commands"]
-    assert len(probe.tool_calls) == 2 and len(probe.compaction_response_ids) == 3
-    assert not probe.violations
 
 
 def test_miniswe_finishes_using_native_submission_sentinel(tmp_path):

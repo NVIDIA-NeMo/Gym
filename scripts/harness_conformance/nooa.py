@@ -79,6 +79,7 @@ class NOOAProbe(Probe):
     native_tool_calls: list[dict] = field(default_factory=list, init=False)
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         register_provider("conformance_local", BorrowableLocalProvider, override=True)
 
     def save(self) -> None:
