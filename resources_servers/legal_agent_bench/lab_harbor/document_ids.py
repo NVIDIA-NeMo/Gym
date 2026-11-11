@@ -13,7 +13,7 @@ DOC_004, DOC_006, or DOC_021 by filename, so their identities are not guessed.
 """
 
 CORRECTION_VERSION = "production-document-identities-v1"
-SOURCE_REVISION = "9e9fa7fe126103de1fceb2227b7c70bf59b67f73"
+SOURCE_REVISION = "9e9fa7fe126103de1fceb2227b7c70bf59b67f73"  # pragma: allowlist secret
 TASK_ID = "litigation-dispute-resolution/categorize-document-production-set-by-relevance-and-privilege"
 
 _DOCUMENT_IDS = {
