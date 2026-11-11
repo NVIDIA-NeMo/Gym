@@ -208,13 +208,16 @@ def reason_override(root: Path, path: Path, name: str) -> ast.FunctionDef | None
 def refuses_in_every_configuration(override: ast.FunctionDef) -> bool:
     """Whether every path through the override returns a reason.
 
-    An override that can return None, or fall off its end, refuses only in some configurations.
+    Only a string literal or an f-string counts as a reason.
+    Any other return value, such as a variable or a conditional expression, might be None,
+    so an override that returns one, or that can fall off its end, refuses only in some configurations.
     """
     if not override.body or not isinstance(override.body[-1], ast.Return):
         return False
     for node in ast.walk(override):
-        if isinstance(node, ast.Return) and (
-            node.value is None or (isinstance(node.value, ast.Constant) and node.value.value is None)
+        if isinstance(node, ast.Return) and not (
+            isinstance(node.value, ast.JoinedStr)
+            or (isinstance(node.value, ast.Constant) and isinstance(node.value.value, str))
         ):
             return False
     return True
@@ -399,6 +402,39 @@ class TestContractChecker:
             "            return 'sidecar'\n"
             "        return 'state'\n\n"
             "Never.run_webserver()\n",
+        )
+
+        assert contract_violations(repo) == []
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "return 'sidecar' if self.config.sidecar else None",
+            "return self._reason()",
+            "reason = None\n        return reason",
+        ],
+    )
+    def test_a_computed_reason_might_be_none_so_it_also_needs_the_adapter(self, repo: Path, body: str) -> None:
+        _write(
+            repo,
+            "resources_servers/computed/app.py",
+            "class Computed:\n"
+            f"    def multiple_workers_unsupported_reason(self):\n        {body}\n\n"
+            "Computed.run_webserver()\n",
+        )
+
+        [violation] = contract_violations(repo)
+
+        assert violation.startswith("resources_servers/computed/app.py: Computed refuses several workers only in some")
+
+    def test_an_f_string_reason_refuses_in_every_configuration(self, repo: Path) -> None:
+        _write(
+            repo,
+            "resources_servers/formatted/app.py",
+            "class Formatted:\n"
+            "    def multiple_workers_unsupported_reason(self):\n"
+            "        return f'{self.config.name} keeps state'\n\n"
+            "Formatted.run_webserver()\n",
         )
 
         assert contract_violations(repo) == []
