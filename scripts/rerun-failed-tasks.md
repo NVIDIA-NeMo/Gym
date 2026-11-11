@@ -6,9 +6,9 @@ Use the original benchmark checkout, registrations, reference assets, and scorer
 
 ## Prepare the selection
 
-Keep selection files, datasets, configuration containing credentials, and all generated artifacts outside Git. The utility rejects an output directory inside a Git worktree and never overwrites an existing output directory.
+Reviewed metadata-only selection indices may be committed, including the LHA selection below. Keep task datasets, raw rollouts, configuration containing credentials, and all generated artifacts outside Git. The utility rejects an output directory inside a Git worktree and never overwrites an existing output directory.
 
-The selection JSONL contains one row per failed **attempt**, including repeated attempts at the same task:
+The selection JSONL contains one row per selected **attempt**, including repeated attempts at the same task:
 
 ```json
 {"benchmark":"fictional_workflow","orig_trajectory_id":"failed-attempt-a","orig_task_index":7,"orig_rollout_index":2,"dataset_row_index":7,"expected_task_sha256":"<canonical-task-row-sha256>"}
@@ -16,9 +16,25 @@ The selection JSONL contains one row per failed **attempt**, including repeated 
 
 `dataset_row_index` is the zero-based position in the original task dataset, not an index into saved rollouts. Its canonical digest is produced by the script's `canonical_sha256`: UTF-8 JSON with sorted keys, compact separators, `ensure_ascii=False`, and no nonfinite numbers. Verify this binding against original run provenance before preparing a selection. Original failure verdicts are selection evidence, not reference answers for fresh outputs.
 
+## Included LHA Agent-IF selection
+
+[`selections/lha-agentic-if-attempts.jsonl`](selections/lha-agentic-if-attempts.jsonl) contains all **1,494 recorded original attempts across 558 tasks** selected from the `nemotron3.5-super-vl-ga` rollouts. The original 988 zero-reward Agent-IF failure traces are included; the expansion adds the other recorded attempts for the same tasks. The expanded selection contains **1,174 zero-reward attempts and 320 successful attempts**, with their original attempt indices preserved.
+
+| Recorded attempts per task | Unique tasks | Selected attempts |
+|---|---:|---:|
+| 1 | 90 | 90 |
+| 3 | 468 | 1,404 |
+| **Total** | **558** | **1,494** |
+
+The 90 single-attempt tasks belong to `big_law_bench_agentic`, `dassault_enterprise`, `dassault_scaled`, `legal_agent_bench`, `palantir_fde`, `perplexity_facts`, and `perplexity_frames`. Their source files record only attempt 0. These source files leave 180 historical slots unrecorded relative to 558 × 3 attempts; the selection includes only the existing original attempts.
+
+[`selections/lha-agentic-if-manifest.json`](selections/lha-agentic-if-manifest.json) records the index SHA-256, benchmark counts, task/attempt distribution, and original reward totals. The index contains only benchmark names, original task/attempt/trajectory identifiers, dataset row positions, and task-row hashes. Original prompts, model responses, references, and credentials remain in their existing sources.
+
+The commands below use this checked-in selection directly. Supply another reviewed index with `--selection` to choose a different cohort. Task datasets and required assets still download from their original registrations through the supplied routes catalog.
+
 ## Download existing registered datasets
 
-Use `download_failed_task_sources.py` for any number of benchmark routes. Each route identifies its original agent, dataset declaration and registry version. The helper uses the original Gym registry reader and `TrainDataProcessor`; it does not fetch a separately published failure dataset. Only the small failure index above is supplied locally. Original task datasets do not contain the historical checkpoint's reward or failure-analysis labels, so those selection identities must come from its saved results.
+Use `download_failed_task_sources.py` for any number of benchmark routes. Each route identifies its original agent, dataset declaration and registry version. The helper uses the original Gym registry reader and `TrainDataProcessor`; it does not fetch a separately published failure dataset. Selection identities come from a reviewed metadata-only index, such as the checked-in LHA selection above. Original task datasets do not contain the historical checkpoint's reward or failure-analysis labels, so those selection identities must come from its saved results.
 
 A portable download catalog contains config paths relative to the original Gym checkout, rather than local original-dataset locations:
 
@@ -47,14 +63,14 @@ The original declaration must match this registry identifier. GitLab and Hugging
 
 ```bash
 python scripts/download_failed_task_sources.py prepare \
-  --selection /private/failed-attempt-index.jsonl \
+  --selection scripts/selections/lha-agentic-if-attempts.jsonl \
   --routes /private/original-downloads.json \
   --gym-root /path/to/original-gym-checkout \
   --python /path/to/original-gym-checkout/.venv/bin/python \
   --output-dir /private/failed-task-workspace
 ```
 
-This command performs original dataset downloads, validates and caches complete task rows, binds the selected failures by their full row digests, and creates `/private/failed-task-workspace/prepared/prepared_manifest.json`. References, rubrics, tools and unknown fields are preserved. Every failed attempt remains represented, including repeated attempts at the same task; native dataset repetition is normalized to one before the failure index supplies its intended multiplicity. Repeating this command with identical bindings revalidates and reuses the completed cache without new downloads. A failed or incomplete transfer is never published as a valid cache.
+This command performs original dataset downloads, validates and caches complete task rows, binds the selected attempts by their full row digests, and creates `/private/failed-task-workspace/prepared/prepared_manifest.json`. References, rubrics, tools and unknown fields are preserved. Every selected attempt remains represented, including repeated attempts at the same task; native dataset repetition is normalized to one before the selection index supplies its intended multiplicity. Repeating this command with identical bindings revalidates and reuses the completed cache without new downloads. A failed or incomplete transfer is never published as a valid cache.
 
 Original auxiliary assets can be downloaded through the same catalog's optional `registry_assets` list. Each entry supplies `name`, `registry_identifier`, the original artifact `sha256`, and its native configuration location `config_key`. Regular file assets become hash-pinned original location overrides. For an archive, add `archive: {"format":"tar.gz","strip_prefix":"original_tasks","select_prefixes":["task-a"]}`. Only declared regular files/directories are extracted after the complete archive hash is verified. Set `runtime_copy: true` when the original integration modifies task mirrors; the existing runner then supplies a fresh writable copy for each job.
 
@@ -105,7 +121,7 @@ python scripts/rerun_failed_tasks.py prepare \
 
 Preparation performs no model calls. It checks the complete selection before writing, preserves all fields of each original task row, and emits a separate input JSONL per benchmark. It adds original-source identifiers, records and replaces Gym's two rollout bookkeeping indices, and supplies the declared original agent only when the task row has no agent reference. Conflicting identities or agent routes fail validation.
 
-Each selected failed attempt becomes one input row. Repeated attempts share a stable task index and receive distinct rollout indices. Runs use `--num-repeats 1`; applying task-ID deduplication or another repeat multiplier would change the intended attempt count. The mapping sidecars preserve original and new indices even if an original verifier drops extra source metadata.
+Each selected attempt becomes one input row. Repeated attempts share a stable task index and receive distinct rollout indices. Runs use `--num-repeats 1`; applying task-ID deduplication or another repeat multiplier would change the intended attempt count. The mapping sidecars preserve original and new indices even if an original verifier drops extra source metadata.
 
 ## Plan or execute the original integrations
 
