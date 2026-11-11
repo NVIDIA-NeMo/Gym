@@ -2,7 +2,6 @@
 
 > Current upstream draft: see [the qualification benchmark](../../benchmarks/gym_v_smoke/README.md).
 > Current Gym installs this component using `pyproject.toml` and `uv.lock`.
-> The retained `requirements-historical.txt` is the historical training-install interface.
 > Binary evaluation is opt-in with `reward_mode: task_success`; native accumulated
 > training reward remains the default. Missing reward sessions are masked.
 
@@ -52,10 +51,9 @@ resources_servers/gym_v/
   schemas.py              # Pydantic wire shapes
   _metadata.py            # JSON-safe Observation.metadata walker
   _observation.py         # observation_to_user_message + image_to_data_url
-  _dataset_cache.py       # per-class LRU cache on reasoning-gym _make_dataset
   configs/gym_v.yaml      # server defaults
   data/example.jsonl      # smoke-test task rows
-  requirements-historical.txt # rohitrango/gym-v @ 7ccf14e... + pillow
+  pyproject.toml / uv.lock # pinned Gym-V provider and managed dependencies
   tests/test_server.py
 ```
 
@@ -98,7 +96,7 @@ keeps the accumulated float `reward` as the learner signal and emits a separate
 Predicates can be supplied per task row with `success_criterion` or through the
 server's exact `success_criteria_by_env_id` allowlist. The checked-in config
 requires a criterion and contains predicates audited for its five example
-environments against the Gym-V revision pinned in `requirements-historical.txt`. An
+environments against the Gym-V revision pinned in `pyproject.toml`. An
 unlisted row is rejected instead of silently converting positive partial credit
 into success. Legacy configs may leave `require_success_criterion=false`; those
 rows return `task_success=null` and are not suitable for mixed-suite accuracy,
@@ -130,3 +128,6 @@ attempt toward the task horizon. This is audited against Gym-V revision
 `7ccf14ecb5241f37372dd530accf77f7e7ef5fc6`,
 `gym_v/envs/multi_turn/spatial/2d/{empty,doorkey}.py`. Other exceptions remain
 masked; matching an exception's text is never used to classify it.
+
+The adapter uses the provider's native dataset construction. It does not monkeypatch
+private dataset methods or share mutable datasets across sessions.

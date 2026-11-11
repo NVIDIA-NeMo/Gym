@@ -978,38 +978,6 @@ class TestSanity:
             _make_config(max_steps=0)
 
 
-class TestDebugPayloadsAreNotBuiltWhenDisabled:
-    async def test_message_summary_is_never_called_without_the_debug_env_var(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.delenv("NEMO_RL_DEBUG_RESPONSES_PIPELINE_DIR", raising=False)
-
-        def _boom(*args: object, **kwargs: object) -> None:
-            raise AssertionError("_message_summary was called with debug dumping disabled")
-
-        monkeypatch.setattr(gymv_agent_app, "_message_summary", _boom)
-
-        agent = _make_agent(max_steps=1)
-        env_id = str(uuid.uuid4())
-        dotjson_mock = AsyncMock()
-        dotjson_mock.json.side_effect = [
-            _seed_session(env_id=env_id),
-            _model_response("\\boxed{step}"),
-            _step(done=True, reward=1.0),
-            {"message": "ok", "success": True},
-        ]
-        dotjson_mock.raise_for_status = MagicMock()
-        dotjson_mock.cookies = None
-        agent.server_client.post = AsyncMock(return_value=dotjson_mock)
-
-        await agent.responses(
-            GymVAgentRunRequest(
-                task_idx=0,
-                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
-            )
-        )
-
-
 class TestModelRequestSerialization:
     """The model request must keep the token metadata that makes replay on-policy."""
 

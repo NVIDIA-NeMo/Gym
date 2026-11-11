@@ -91,7 +91,6 @@ def _server(
     env: StubGymVEnv,
     **config_overrides: Any,
 ) -> gymv_app.GymVResourcesServer:
-    monkeypatch.setattr(gymv_app, "install_dataset_cache", lambda: None)
     monkeypatch.setattr(gymv_app.gym_v, "make", lambda *_args, **_kwargs: env)
     config = GymVResourcesServerConfig(
         name="gym_v_test",

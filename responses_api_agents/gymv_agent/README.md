@@ -13,7 +13,7 @@ Requires the shared `nemo_gym.agents.context_management` API from
 [Gym #3368](https://github.com/NVIDIA-NeMo/Gym/pull/3368), including the
 per-observation omission-marker repair (RecencyHistoryPolicy v3). This adapter
 does not include a private copy of that framework. Until the dependency lands,
-this branch is a stacked draft, not a standalone main-compatible release.
+this branch depends on #3368 and is not a standalone main-compatible release.
 
 Merge `configs/first_last_two.yaml` after the ordinary agent config, with the
 same top-level agent name. It keeps the first and latest two reasoning blocks

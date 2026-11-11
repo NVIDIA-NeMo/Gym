@@ -46,7 +46,6 @@ from nemo_gym.server_runtime import (
     reject_partial_typed_seed,
 )
 from nemo_gym.verification import VerifierFixture
-from resources_servers.gym_v._dataset_cache import install_dataset_cache
 from resources_servers.gym_v._observation import (
     _attach_env_info,
     observation_to_user_message,
@@ -148,8 +147,6 @@ class GymVResourcesServer(SimpleResourcesServer):
                         logger.exception("Invalid Gym-V task row in %s:%s", jsonl_path, line_no)
                         raise
                     self.task_rows.append(validated.model_dump(mode="json"))
-
-        install_dataset_cache()
 
     def multiple_workers_unsupported_reason(self) -> str:
         return "Native environments are keyed by the adapter's env_id and require a single owning worker."

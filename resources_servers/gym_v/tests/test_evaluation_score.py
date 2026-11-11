@@ -22,7 +22,6 @@ from resources_servers.gym_v.schemas import (
     ],
 )
 def test_score_contract(mode, success, expected, masked, monkeypatch):
-    monkeypatch.setattr("resources_servers.gym_v.app.install_dataset_cache", lambda: None)
     server = GymVResourcesServer.model_construct(
         config=GymVResourcesServerConfig(
             name="test", host="127.0.0.1", port=12345, entrypoint="app.py", reward_mode=mode

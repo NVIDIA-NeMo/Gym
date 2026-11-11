@@ -20,15 +20,11 @@ the assistant's plain text and posts to Gym-V's `/step` endpoint with
 """
 
 import asyncio
-import hashlib
 import json
 import logging
-import os
 import re
 import uuid
 from collections.abc import Sequence
-from pathlib import Path
-from time import time
 from typing import Any, Literal, cast
 
 import aiohttp
@@ -43,7 +39,6 @@ from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponseInput,
     NeMoGymResponseOutputItem,
     accumulate_response_usage,
 )
@@ -100,103 +95,6 @@ def _as_core_input_message(message: Any) -> Any:
 
 
 logger = logging.getLogger(__name__)
-
-
-def _debug_jsonl_path(component: str) -> Path | None:
-    debug_dir = os.environ.get("NEMO_RL_DEBUG_RESPONSES_PIPELINE_DIR")
-    if not debug_dir:
-        return None
-    path = Path(debug_dir)
-    path.mkdir(parents=True, exist_ok=True)
-    return path / f"{component}.jsonl"
-
-
-def _preview_text(value: Any, limit: int = 500) -> str | None:
-    if value is None:
-        return None
-    text = str(value)
-    return text if len(text) <= limit else text[:limit] + f"...<truncated {len(text) - limit} chars>"
-
-
-def _seq_summary(values: Any, *, limit: int = 12) -> dict[str, Any]:
-    if values is None:
-        return {"present": False, "len": 0}
-    if not isinstance(values, list):
-        return {"present": True, "type": type(values).__name__}
-    return {
-        "present": True,
-        "len": len(values),
-        "head": values[:limit],
-        "tail": values[-limit:] if len(values) > limit else [],
-    }
-
-
-def _image_url_summary(image_url: Any) -> dict[str, Any]:
-    if isinstance(image_url, dict):
-        image_url = image_url.get("url")
-    if not isinstance(image_url, str):
-        return {"present": False, "type": type(image_url).__name__}
-    return {
-        "present": True,
-        "len": len(image_url),
-        "sha256_16": hashlib.sha256(image_url.encode("utf-8")).hexdigest()[:16],
-        "prefix": image_url[:32],
-    }
-
-
-def _content_summary(content: Any) -> Any:
-    if isinstance(content, str):
-        return {"kind": "str", "len": len(content), "preview": _preview_text(content)}
-    if not isinstance(content, list):
-        return {"kind": type(content).__name__, "repr": _preview_text(content)}
-    parts = []
-    for part in content:
-        if hasattr(part, "model_dump"):
-            part = part.model_dump(mode="json")
-        if not isinstance(part, dict):
-            parts.append({"kind": type(part).__name__, "repr": _preview_text(part)})
-            continue
-        summary = {"type": part.get("type"), "keys": sorted(part.keys())}
-        if "text" in part:
-            text = part.get("text")
-            summary["text_len"] = len(text) if isinstance(text, str) else None
-            summary["text_preview"] = _preview_text(text)
-        if "image_url" in part:
-            summary["image_url"] = _image_url_summary(part.get("image_url"))
-        parts.append(summary)
-    return {"kind": "list", "len": len(content), "parts": parts}
-
-
-def _message_summary(message: Any) -> dict[str, Any]:
-    if hasattr(message, "model_dump"):
-        message = message.model_dump(mode="json")
-    if not isinstance(message, dict):
-        return {"type": type(message).__name__, "repr": _preview_text(message)}
-    return {
-        "keys": sorted(message.keys()),
-        "id": message.get("id"),
-        "role": message.get("role"),
-        "type": message.get("type"),
-        "content": _content_summary(message.get("content")),
-        "summary": _content_summary(message.get("summary")),
-        "prompt_token_ids": _seq_summary(message.get("prompt_token_ids")),
-        "generation_token_ids": _seq_summary(message.get("generation_token_ids")),
-        "generation_log_probs": _seq_summary(message.get("generation_log_probs")),
-    }
-
-
-def _debug_enabled() -> bool:
-    """Gate expensive message/image summaries before their payload is built."""
-    return bool(os.environ.get("NEMO_RL_DEBUG_RESPONSES_PIPELINE_DIR"))
-
-
-def _debug_dump(component: str, event: str, payload: dict[str, Any]) -> None:
-    path = _debug_jsonl_path(component)
-    if path is None:
-        return
-    row = {"event": event, "created_at": time(), **payload}
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(row, default=str) + "\n")
 
 
 # Matches the last `\boxed{...}` in the assistant's plain text.
@@ -520,25 +418,10 @@ class GymVAgent(SimpleResponsesAPIAgent):
                 "tools": list(body.tools or []),
             }
         )
-        if _debug_enabled():
-            _debug_dump(
-                "gymv_agent",
-                "initial_agent_state",
-                {
-                    "task_idx": group_task_index,
-                    "env_id": seed_session_response.env_id,
-                    "body_input": [_message_summary(m) for m in body.input],
-                    "seed_obs": [_message_summary(m) for m in seed_obs],
-                    "agent_state_input_len": len(agent_state.input),
-                    "max_output_tokens": body.max_output_tokens,
-                    "effective_max_steps": effective_max_steps,
-                },
-            )
 
         env_id = seed_session_response.env_id
         model_response: NeMoGymResponse | None = None
         total_usage = None
-        agent_state_history: list[NeMoGymResponseInput] = []
         # The initial observation is returned separately as `seed_obs`. Keep it
         # out of the flat output so downstream multimodal consumers see it once.
         all_messages: list[NeMoGymResponseOutputItem] = []
@@ -582,28 +465,6 @@ class GymVAgent(SimpleResponsesAPIAgent):
                         await raise_for_status(raw_model_response)
                         model_server_cookies = raw_model_response.cookies
                         model_response_json = await raw_model_response.json()
-                    if _debug_enabled():
-                        _debug_dump(
-                            "gymv_agent",
-                            "raw_model_response_json",
-                            {
-                                "task_idx": group_task_index,
-                                "env_id": env_id,
-                                "step": step,
-                                "response_keys": sorted(model_response_json.keys())
-                                if isinstance(model_response_json, dict)
-                                else None,
-                                "output": [_message_summary(item) for item in model_response_json.get("output", [])]
-                                if isinstance(model_response_json, dict)
-                                else None,
-                                "usage": model_response_json.get("usage")
-                                if isinstance(model_response_json, dict)
-                                else None,
-                                "incomplete_details": model_response_json.get("incomplete_details")
-                                if isinstance(model_response_json, dict)
-                                else None,
-                            },
-                        )
                 except ContextGuardRejected:
                     # A measured rejection generated no new action. A previous
                     # accepted response may terminate the episode; never invent one.
@@ -637,27 +498,13 @@ class GymVAgent(SimpleResponsesAPIAgent):
                     logger.warning(f"Error validating model response: {e!r}. Response: {model_response_json!r}.")
                     break
 
-                if not self.config.return_transitions and pending_obs:
+                if pending_obs:
                     all_messages.extend(pending_obs)
                     pending_obs = []
 
                 model_output = model_response.output
                 assistant_text = self._extract_assistant_text(model_output)
                 action_string = self._extract_boxed(assistant_text)
-                if _debug_enabled():
-                    _debug_dump(
-                        "gymv_agent",
-                        "validated_model_output",
-                        {
-                            "task_idx": group_task_index,
-                            "env_id": env_id,
-                            "step": step,
-                            "output": [_message_summary(item) for item in model_output],
-                            "assistant_text_len": len(assistant_text),
-                            "assistant_text_preview": _preview_text(assistant_text),
-                            "extracted_action": action_string,
-                        },
-                    )
 
                 done = False
                 obs: Sequence[GymVEnvStateEasyInputMessage | NeMoGymEasyInputMessage]
@@ -683,34 +530,18 @@ class GymVAgent(SimpleResponsesAPIAgent):
                     env_response = GymVStepResponse.model_validate(await raw_env_response.json())
                     obs = self._maybe_inject_rules_summary(env_response.obs)
                     done = env_response.done
-                    if _debug_enabled():
-                        _debug_dump(
-                            "gymv_agent",
-                            "env_step_response",
-                            {
-                                "task_idx": group_task_index,
-                                "env_id": env_id,
-                                "step": step,
-                                "action_string": action_string,
-                                "done": done,
-                                "obs": [_message_summary(m) for m in obs],
-                            },
-                        )
 
                 agent_state = agent_state.model_copy(
                     update={"input": agent_state.input + model_output + [_as_core_input_message(m) for m in obs]}
                 )
-                if self.config.return_transitions:
-                    agent_state_history.append(cast(NeMoGymResponseInput, agent_state.input))
-                else:
-                    all_messages.extend(model_output)
-                    # Do not publish this observation yet.  The next successful
-                    # model response proves that its prompt/token bundle covered
-                    # the observation, at which point the block above commits it.
-                    # This applies to both real env observations and synthetic
-                    # no-boxed recovery messages.
-                    if not done:
-                        pending_obs = list(obs)
+                all_messages.extend(model_output)
+                # Do not publish this observation yet.  The next successful
+                # model response proves that its prompt/token bundle covered
+                # the observation, at which point the block above commits it.
+                # This applies to both real env observations and synthetic
+                # no-boxed recovery messages.
+                if not done:
+                    pending_obs = list(obs)
 
                 if done:
                     break
@@ -729,16 +560,12 @@ class GymVAgent(SimpleResponsesAPIAgent):
         output_overrides = {
             "env_id": env_id,
             "group_id": str(group_task_index),
-            "contains_transitions": self.config.return_transitions,
+            "contains_transitions": False,
             "usage": total_usage,
             # seed_obs is the post-rules-injection initial observation that
             # vLLM saw before the first model call. It stays separate from
             # output so multimodal consumers do not process it twice.
-            "seed_obs": (
-                [m.model_dump(mode="json") if hasattr(m, "model_dump") else m for m in seed_obs]
-                if not self.config.return_transitions
-                else None
-            ),
+            "seed_obs": [m.model_dump(mode="json") if hasattr(m, "model_dump") else m for m in seed_obs],
             # Effective initial input as vLLM saw it on the first
             # /v1/responses call: `body.input` here has already been mutated by
             # _maybe_prepend_system_prompt (and any string→message coercion).
@@ -747,37 +574,13 @@ class GymVAgent(SimpleResponsesAPIAgent):
             # input would be missing the system prompt and produce a
             # token-count mismatch against vLLM.
             "agent_input": [m.model_dump(mode="json") if hasattr(m, "model_dump") else m for m in body.input],
-            "output": (agent_state_history if self.config.return_transitions else all_messages),
+            "output": all_messages,
         }
-        if _debug_enabled():
-            _debug_dump(
-                "gymv_agent",
-                "final_response_before_validation",
-                {
-                    "task_idx": group_task_index,
-                    "env_id": env_id,
-                    "return_transitions": self.config.return_transitions,
-                    "seed_obs": [_message_summary(item) for item in (output_overrides["seed_obs"] or [])],
-                    "output": [_message_summary(item) for item in output_overrides["output"]]
-                    if isinstance(output_overrides["output"], list)
-                    else None,
-                },
-            )
         try:
             response = GymVNeMoGymResponse.model_validate(model_response.model_dump() | output_overrides)
         except BaseException:
             await self._close_session(env_id, discard_reward=True)
             raise
-        if _debug_enabled():
-            _debug_dump(
-                "gymv_agent",
-                "final_response_after_validation",
-                {
-                    "task_idx": group_task_index,
-                    "env_id": env_id,
-                    "output": [_message_summary(item) for item in response.model_dump(mode="json").get("output", [])],
-                },
-            )
         return response
 
     async def run(self, body: GymVAgentRunRequest) -> GymVAgentVerifyResponse:
