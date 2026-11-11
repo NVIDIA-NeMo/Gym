@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -40,7 +41,7 @@ class MemorySandbox:
         destination.write_text(self.files[source])
 
 
-def runner() -> tuple[SandboxNOOARunner, MemorySandbox]:
+def runner(*, settings_file: Path | None = None) -> tuple[SandboxNOOARunner, MemorySandbox]:
     p = payload()
     sandbox = MemorySandbox()
     return SandboxNOOARunner(
@@ -52,6 +53,7 @@ def runner() -> tuple[SandboxNOOARunner, MemorySandbox]:
         model_server_name=p.model_server_name,
         max_policy_calls=3,
         context_window=p.context_window,
+        settings_file=settings_file,
     ), sandbox
 
 
@@ -105,6 +107,63 @@ async def test_launch_quotes_paths_runs_in_task_and_preserves_cookies(limit: int
     assert request.model_cookies == {"model": "new"}
     assert r.session.cleanup == cleanup_receipt()
     assert not r.session.owns_sandbox
+
+
+async def test_settings_are_copied_once_per_session_and_scoped_to_the_worker(tmp_path, monkeypatch) -> None:
+    source = tmp_path / "controller settings.yaml"
+    first_text = "atom:\n  context_error_policy: raise\n  summarization:\n    policy: none\n"
+    source.write_text(first_text)
+    monkeypatch.setenv("NEMO_OO_SETTINGS", "unchanged-controller-settings")
+    first, first_sandbox = runner(settings_file=source)
+    await first.prepare()
+    source.write_text("atom:\n  summarization:\n    policy: token_budget\n")
+    second, second_sandbox = runner(settings_file=source)
+    await second.prepare()
+    assert first.directory != second.directory
+    assert first_sandbox.files[first.directory + "/settings.yaml"] == first_text
+    assert second_sandbox.files[second.directory + "/settings.yaml"] == source.read_text()
+    for instance, sandbox in ((first, first_sandbox), (second, second_sandbox)):
+        command = await instance._stage_activation(payload().request)
+        assert command.argv[:4] == [
+            "env",
+            f"NEMO_OO_SETTINGS={instance.directory}/settings.yaml",
+            instance.python,
+            "-I",
+        ]
+        assert str(source) not in json.dumps(command.argv)
+        assert all(path.startswith(instance.directory + "/") for path in sandbox.files)
+        await instance.close()
+        sandbox.disconnect.assert_awaited_once()
+        sandbox.stop.assert_not_awaited()
+    assert first_sandbox.files[first.directory + "/settings.yaml"] == first_text
+    assert os.environ["NEMO_OO_SETTINGS"] == "unchanged-controller-settings"
+
+
+async def test_staged_settings_parse_with_the_sdk_layered_loader(tmp_path, monkeypatch) -> None:
+    from nooa_atom.workspace.options import AtomOptions
+    from nooa_atom.workspace.settings import load_settings_layers
+
+    source = tmp_path / "controller.yaml"
+    source.write_text("atom:\n  context_error_policy: raise\n  summarization:\n    policy: none\n")
+    instance, sandbox = runner(settings_file=source)
+    await instance.prepare()
+    command = await instance._stage_activation(payload().request)
+    variable, staged_path = command.argv[1].split("=", 1)
+    # Materialize exactly the uploaded bytes for the actual SDK parser, without
+    # creating an agent, model client, runtime process or remote sandbox.
+    staged = tmp_path / "staged.yaml"
+    staged.write_text(sandbox.files[staged_path])
+    workspace = tmp_path / "workspace"
+    (workspace / ".nooa").mkdir(parents=True)
+    (workspace / ".nooa/settings.yaml").write_text("atom:\n  summarization:\n    policy: token_budget\n")
+    monkeypatch.setenv(variable, str(staged))
+    monkeypatch.setenv("NEMO_OO_USER_DIR", str(tmp_path / "isolated-user"))
+    layers = load_settings_layers(workspace / ".nooa")
+    assert layers["atom"]["context_error_policy"] == "raise"
+    options = AtomOptions.load(workspace)
+    assert options.summarization.policy == "none"
+    assert options.context_error_policy == "raise"
+    await instance.close()
 
 
 @pytest.mark.asyncio

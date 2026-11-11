@@ -89,6 +89,7 @@ class GymTraceHooks:
     def __init__(self, *, on_progress: Callable[[], None] | None = None) -> None:
         self._current: ContextVar[str] = ContextVar("gym_nooa_invocation", default="root")
         self._invocations: dict[str, AgentInvocation] = {}
+        self._agent_ids: dict[str, str] = {}
         self._events: list[GymModelCall | _ToolCall] = []
         self._python_outputs: dict[tuple[str, str], str] = {}
         self._captured_python_outputs: dict[tuple[str, str], str] = {}
@@ -115,10 +116,14 @@ class GymTraceHooks:
             if key[0] == call.invocation_id and value in visible_text
         )
 
-    def before_agent_call(self, *, call_id: str, parent_call_id: str | None, **_: Any) -> _AgentCall:
+    def before_agent_call(
+        self, *, call_id: str, parent_call_id: str | None, agent: Agent | None = None, **_: Any
+    ) -> _AgentCall:
         self._invocations[call_id] = AgentInvocation(
             invocation_id=call_id, parent_invocation_id=parent_call_id, status="incomplete"
         )
+        if agent is not None:
+            self._agent_ids[call_id] = agent.agent_id
         return _AgentCall(call_id, perf_counter(), self._current.set(call_id))
 
     def after_agent_call(self, *, context: Any, exception: BaseException | None, **_: Any) -> None:
@@ -472,6 +477,27 @@ class GymTraceHooks:
         # usage of its own; it must not erase known totals or invent per-call zeroes.
         usages = [call.response.usage for call in state.calls if call.response is not None]
         latest_response = next((call.response for call in reversed(state.calls) if call.response is not None), None)
+        # Ignore pure orchestration wrappers. Atom's root and child session loops have
+        # separate top-level invocations; the first model-calling root owns the task.
+        # Its stable agent identity also covers later turns after a Waiting outcome.
+        root_invocation = next(
+            (item for item in invocations.values() if item.parent_invocation_id is None and item.model_calls), None
+        )
+        root_agent_id = self._agent_ids.get(root_invocation.invocation_id) if root_invocation else None
+        terminal_response_id = next(
+            (
+                call.response.id
+                for call in reversed(state.calls)
+                if call.response is not None
+                and call.response.id
+                and root_invocation is not None
+                and (
+                    call.invocation_id == root_invocation.invocation_id
+                    or (root_agent_id is not None and self._agent_ids.get(call.invocation_id) == root_agent_id)
+                )
+            ),
+            None,
+        )
         episode = AgentEpisode(
             response=NeMoGymResponse(
                 id=f"nooa-{rollout_id}",
@@ -486,6 +512,7 @@ class GymTraceHooks:
                 usage=(
                     NeMoGymResponseUsage.sum_from_list(usages) if all(usage is not None for usage in usages) else None
                 ),
+                metadata={"terminal_response_id": terminal_response_id} if terminal_response_id else None,
             ),
             observations=observations,
         )

@@ -12,7 +12,7 @@ import pytest
 from fastapi import HTTPException
 from nooa import Agent, CodeActStrategy, strategy
 from nooa.config import CodeActConfig
-from nooa.errors import GenerationError
+from nooa.errors import GenerationError, IterationLimitExceeded, RetryLimitExceeded
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import (
@@ -117,8 +117,8 @@ def iteration_agent(*, scenario: str = "iterations", sentinel: Path | None = Non
                 NeMoGymResponseFunctionToolCall(
                     id="function-1",
                     call_id="call-1",
-                    name="execute_python",
-                    arguments=arguments,
+                    name="return_result" if scenario == "result_validation" else "execute_python",
+                    arguments='{"result": {"wrong": "type"}}' if scenario == "result_validation" else arguments,
                 )
             )
         response = model_response(*output)
@@ -200,7 +200,12 @@ async def test_real_codeact_response_retains_partial_evidence_without_verificati
 
 @pytest.mark.parametrize(
     ("scenario", "reason"),
-    [*LIMIT_SCENARIOS, ("output_then_success", None), ("output_then_outage", None), ("model_outage", None)],
+    [
+        *LIMIT_SCENARIOS,
+        ("output_then_success", NOOATerminationReason.MAX_OUTPUT_TOKENS_EXCEEDED),
+        ("output_then_outage", NOOATerminationReason.MAX_OUTPUT_TOKENS_EXCEEDED),
+        ("model_outage", None),
+    ],
 )
 async def test_real_codeact_environment_verifies_partial_response_once(
     scenario: str, reason: NOOATerminationReason | None, tmp_path: Path
@@ -221,7 +226,7 @@ async def test_real_codeact_environment_verifies_partial_response_once(
     client.post.side_effect = post
     result = await environment.run_request(_request())
     assert not sentinel.exists()
-    if scenario in {"output_then_outage", "model_outage"}:
+    if scenario == "model_outage":
         assert result.failure.stage == "agent"
         assert result.result is None
         assert len(model_calls) == 2
@@ -232,15 +237,8 @@ async def test_real_codeact_environment_verifies_partial_response_once(
         return
     assert result.failure is None
     assert result.result.reward == 0.75
-    if scenario == "output_then_success":
-        assert result.result.response.status == "completed"
-        assert result.result.response.error is None
-        assert result.result.response.incomplete_details is None
-        assert result.result.response.output[-1].content[0].text == "recovered"
-        assert len(model_calls) == 2
-    else:
-        assert_partial_evidence(result.result.response, scenario=scenario)
-        assert len(model_calls) == 1
+    assert_partial_evidence(result.result.response, scenario=scenario)
+    assert len(model_calls) == 1
     assert len(verified) == _paths(client).count("/verify") == 1
     assert verified[0]["response"] == result.result.response.model_dump(mode="json")
     record = _episode_record(result.model_dump(mode="json"))
@@ -254,7 +252,7 @@ async def test_real_codeact_environment_verifies_partial_response_once(
     assert _paths(client)[-3:] == ["/v1/agent_sessions/close", "/verify", "/close_session"]
 
 
-@pytest.mark.parametrize("scenario", ["retries", "text_only", "model_outage"])
+@pytest.mark.parametrize("scenario", ["text_only", "model_outage"])
 async def test_other_codeact_limits_and_unrecovered_outage_fail_agent_activation(scenario: str) -> None:
     instance, model_calls = iteration_agent(scenario=scenario)
     req = await open_session(instance)
@@ -271,11 +269,14 @@ async def test_other_codeact_limits_and_unrecovered_outage_fail_agent_activation
     assert NOOATerminationReason.MAX_ITERATIONS_EXCEEDED not in gaps
 
 
-async def test_matching_generation_error_message_is_not_a_gradable_execution_limit() -> None:
+@pytest.mark.parametrize("error_type", [GenerationError, IterationLimitExceeded, RetryLimitExceeded])
+async def test_matching_generation_error_message_is_not_a_gradable_execution_limit(
+    error_type: type[GenerationError],
+) -> None:
     instance, model_calls = iteration_agent()
 
     async def invoke_error(agent: object, request: object) -> object:
-        raise GenerationError("Generation failed after 1 iterations (max_iterations=1). Unable to complete `analyze`.")
+        raise error_type("Generation failed after 1 iterations (max_iterations=1). Unable to complete `analyze`.")
 
     req = await open_session(instance)
     instance._require_agent_session("session").runner._invocation_adapter = invoke_error
@@ -339,3 +340,25 @@ async def test_codeact_cleanup_failure_after_iteration_exhaustion_skips_verifica
     assert NOOATerminationReason.INFRASTRUCTURE_ERROR in gaps
     assert NOOATerminationReason.MAX_ITERATIONS_EXCEEDED not in gaps
     assert saved_reply.agent_observations.records
+
+
+@pytest.mark.parametrize(
+    "scenario,reason",
+    [
+        ("retries", NOOATerminationReason.CODE_RETRIES_EXHAUSTED),
+        ("result_validation", NOOATerminationReason.RESULT_VALIDATION_EXHAUSTED),
+    ],
+)
+async def test_pinned_model_retry_exhaustion_preserves_calls_and_reaches_verifier(scenario, reason):
+    instance, calls = iteration_agent(scenario=scenario)
+    environment, client = _environment(instance)
+    result = await environment.run_request(_request())
+    assert result.failure is None
+    assert result.result.response.status == "incomplete"
+    assert result.result.response.error is None
+    assert len(calls) == 1
+    assert result.result.response.output
+    assert _paths(client).count("/verify") == 1
+    record = _episode_record(result.model_dump(mode="json"))
+    assert reason.value in {gap["code"] for gap in record["ng_agent_observations"]["gaps"]}
+    assert record["ng_agent_observations"]["records"][0]["model_calls"]
