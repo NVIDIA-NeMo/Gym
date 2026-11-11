@@ -2,7 +2,7 @@
 
 When a task calls for a skill, does the model open its instructions? This benchmark scores the instructions returned in Harbor's recorded tool results. It does not measure task completion or the official SkillsBench score.
 
-**Version 0.2 is an experimental, new execution profile.** It uses Harbor's existing agents, skill loading, timeouts, and trajectories. The earlier experiment's results and its 2,092-trial scorer comparison do not validate this version. Fresh model runs are required.
+**Version 0.2.1 is experimental.** It uses Harbor's existing agents, skill loading, timeouts, and trajectories. The bounded validation below reports new observations. The earlier experiment's evidence was deleted without a backup; its results and 2,092-trial scorer comparison cannot validate or reproduce this release.
 
 ## Tasks and configurations
 
@@ -106,7 +106,7 @@ Gym and Harbor own scheduling, failure collection, and cleanup. This contributio
 python -m pytest --confcutdir=benchmarks/skill_trigger/tests benchmarks/skill_trigger/tests
 ```
 
-Tests cover source integrity, hidden-label exclusion, packaging, score success/miss/error cases, all five resolved Gym configurations, and the two guidance overrides. Before release, validate representative real-model runs for each profile and inspect their trajectories. Keep the PR draft until source clearance and model validation are complete.
+Tests cover source integrity, hidden-label exclusion, packaging, score success/miss/error cases, all five resolved Gym configurations, and the two guidance overrides. Before release, validate representative real-model runs for each profile and inspect their trajectories. Keep incomplete validation as a draft. An experimental release must identify its cleared evaluated subset and inspected model evidence; the nine blocked cases remain unavailable for packaging.
 
 
 ## Revision 0.2.1 and negative controls
@@ -154,3 +154,80 @@ Each summary includes the numerator, scored denominator, unscored count, and pen
 count. No scored attempts means an unavailable rate, never zero. This ledger summary
 supplements Gym's native `gym eval profile`; it does not infer absent attempts from
 successful rollouts. Never pool exploratory probes with benchmark baselines.
+
+## Release 0.2.1 validation
+
+The November 11, 2026 (UTC) pilot used `nvidia/nvidia/nemotron-3.5-super-vl` at `https://inference-api.nvidia.com/v1`, Python 3.13.14, and Harbor 0.25.0 with the five pinned agents above. All five profiles have inspected read=1/no-tools=0 Gym CLI fixtures. Two separately labeled Codex follow-ups closed initial rate-limit failures; those earlier failures remain unscored.
+
+### Frozen positive sample
+
+From the unchanged 110-case selection, exclude catalogs intersecting recorded source blockers: 101 cases remain eligible (35 BioNeMo, 41 SkillsBench, 25 Addy). Before outcomes, rank each collection by ascending `SHA256(seed + NUL + suite + NUL + case_id)` and take four cases. The seed is `gym-pr5031-positive-baseline-v021-20261110`. No outcome-driven replacement occurred. The remaining 89 eligible cases were not evaluated in this pilot, and nine source-blocked cases remain excluded.
+
+Canonical selection SHA-256: `2c78cf0fb5b5a38011f4ab0345288a4084b80df212978b1cf61d18644ab3ee64`. Positive release manifest SHA-256: `24040e3161f2a2b8973a8400bf87ef3c1b93bc3302555632810dd4fbbb66aaed`. The evaluated derivative retains only selected, blocker-free catalogs and preserves source notices. The canonical selection and its source guard are unchanged.
+
+| Collection | Stable task ID | Intended skill |
+|---|---|---|
+| addy | `case-e77693cc5b01` | `using-agent-skills` |
+| addy | `case-cf967863230e` | `planning-and-task-breakdown` |
+| addy | `case-9dff18a1894a` | `deprecation-and-migration` |
+| addy | `case-8189d9d117c3` | `spec-driven-development` |
+| bionemo | `case-23c2cefe07ab` | `complexa-evaluate-pdbs` |
+| bionemo | `case-45de3de16826` | `parabricks` |
+| bionemo | `case-322349ba33ee` | `codonfm-setup` |
+| bionemo | `case-864fc41fbb4a` | `kermt-pretrain-scratch` |
+| skillsbench | `case-6a0cf37ce517` | `testing-python` |
+| skillsbench | `case-3125f9458362` | `radar-vital-signs` |
+| skillsbench | `case-f5b43c7d29b3` | `pymatgen` |
+| skillsbench | `case-332af49dfeda` | `light-curve-preprocessing` |
+
+Upstream source revisions are BioNeMo toolkit `5fe8b184cda54c48e73214824df6ee04f040b88d`, SkillsBench `f860ecf02ef53412a030f8661c83d644b739ff01`, and Addy agent-skills `aeac41d4d005999432bb7312f7ff06383a91d59d`, as recorded in the canonical selection. Rollouts used source `a271411d39072d2386ed75fe9b302d4bf61208d8`; subsequent main integration leaves benchmark code unchanged.
+
+### Positive results
+
+All 180 planned attempts finished once: 12 cases × three attempts × five profiles. There are 127 scored observations, 53 unscored failures (43 rate limits and 10 agent timeouts), and zero pending attempts. Each fraction below is the mean binary target-opening reward on scored attempts; errors are not counted as misses.
+
+| Profile | Collection | Target opened / scored | Unscored | Pending | Planned |
+|---|---|---:|---:|---:|---:|
+| codex | addy | 0/10 | 2 | 0 | 12 |
+| codex | bionemo | 8/11 | 1 | 0 | 12 |
+| codex | skillsbench | 0/4 | 8 | 0 | 12 |
+| codex_guidance | addy | 0/12 | 0 | 0 | 12 |
+| codex_guidance | bionemo | 5/8 | 4 | 0 | 12 |
+| codex_guidance | skillsbench | 0/1 | 11 | 0 | 12 |
+| hermes | addy | 3/11 | 1 | 0 | 12 |
+| hermes | bionemo | 8/10 | 2 | 0 | 12 |
+| hermes | skillsbench | 0/5 | 7 | 0 | 12 |
+| hermes_guidance | addy | 0/9 | 3 | 0 | 12 |
+| hermes_guidance | bionemo | 5/8 | 4 | 0 | 12 |
+| hermes_guidance | skillsbench | 1/2 | 10 | 0 | 12 |
+| pi | addy | 5/12 | 0 | 0 | 12 |
+| pi | bionemo | 12/12 | 0 | 0 | 12 |
+| pi | skillsbench | 5/12 | 0 | 0 | 12 |
+
+All 132 available saved trajectories agree under reviewed and revised scoring, including every scored observation. Synthetic regressions demonstrate the corrected missing-content and signed-exit defects; their frequency in the deleted historical experiment is unknown. One verified Codex main-session opening before a later timeout is reported separately from scored rates. All frozen input bytes and modes and all 180 effective 120-second agent limits were verified. Agent setup and provider waits can extend total request duration beyond the agent execution window.
+
+These rates are conditional on scorable attempts. Failures and censoring are not assumed random; profiles ran sequentially in fixed case order, so endpoint availability can confound comparisons. The balanced 12-case sample is not population weighted, and its three attempts per task are repeated observations. It establishes neither harness rankings, full-suite performance, task completion, historical reproduction, nor statistical confidence. The intended label is narrow: in three Codex-guidance misses for Addy `using-agent-skills`, the agent successfully read the relevant alternative `debugging-and-error-recovery`. Useful alternative-skill behavior is not task failure.
+
+### Separate negative results
+
+The six controls ran three times per profile: 90 terminal attempts, 82 scored, eight unscored rate-limit failures, and zero pending. All 82 scored attempts recorded zero unnecessary, any, and session-start openings. Negative release SHA-256: `afc6a528c44da2f56e7a1e81270e5135bdd699b638664a32c8d0f67ea26d8dcc`.
+
+| Profile | Collection | Unnecessary / scored | Any opening / scored | Session-start / scored | Unscored | Pending | Planned |
+|---|---|---:|---:|---:|---:|---:|---:|
+| codex | addy | 0/6 | 0/6 | 0/6 | 0 | 0 | 6 |
+| codex | bionemo | 0/4 | 0/4 | 0/4 | 2 | 0 | 6 |
+| codex | skillsbench | 0/6 | 0/6 | 0/6 | 0 | 0 | 6 |
+| codex_guidance | addy | 0/4 | 0/4 | 0/4 | 2 | 0 | 6 |
+| codex_guidance | bionemo | 0/3 | 0/3 | 0/3 | 3 | 0 | 6 |
+| codex_guidance | skillsbench | 0/6 | 0/6 | 0/6 | 0 | 0 | 6 |
+| hermes | addy | 0/6 | 0/6 | 0/6 | 0 | 0 | 6 |
+| hermes | bionemo | 0/6 | 0/6 | 0/6 | 0 | 0 | 6 |
+| hermes | skillsbench | 0/6 | 0/6 | 0/6 | 0 | 0 | 6 |
+| hermes_guidance | addy | 0/6 | 0/6 | 0/6 | 0 | 0 | 6 |
+| hermes_guidance | bionemo | 0/5 | 0/5 | 0/5 | 1 | 0 | 6 |
+| hermes_guidance | skillsbench | 0/6 | 0/6 | 0/6 | 0 | 0 | 6 |
+| pi | addy | 0/6 | 0/6 | 0/6 | 0 | 0 | 6 |
+| pi | bionemo | 0/6 | 0/6 | 0/6 | 0 | 0 | 6 |
+| pi | skillsbench | 0/6 | 0/6 | 0/6 | 0 | 0 | 6 |
+
+These arithmetic/repetition controls do not estimate general skill-selection specificity or positive performance. The earlier 18-attempt Pi/Harbor 0.24 cohort is separate and excluded here. Full catalog-description readback was recorded after the initial Pi run and during Hermes; later profiles followed that review. This timing deviation is disclosed rather than described as a completed pre-execution gate. Addy session-start exemptions remain explicit, and the bulk-read regression still fails indiscriminate reading.
