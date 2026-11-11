@@ -484,9 +484,9 @@ class TestConfigs:
         [("opencode_full_legacy_agent.yaml", False), ("opencode_search_full_legacy_agent.yaml", True)],
     )
     def test_full_presets_swap_only_the_dataset_of_the_opencode_agent(self, config_file, with_search):
-        """The 1000-row variants keep opencode_sandboxed_agent (agent sessions take text only) with the text
-        presets' effort, tools and network policy over the OpenCode-prompted full set with no rollout-time
-        prompt; only opencode_full_legacy_agent declares the dataset."""
+        """The 1000-row variants keep opencode_sandboxed_agent (no session preset covers the image questions yet)
+        with the relay presets' effort, tools and network policy over the OpenCode-prompted full set with no
+        rollout-time prompt; only opencode_full_legacy_agent declares the dataset."""
         resolved = _resolve(config_file)
         agent = get_first_server_config_dict(resolved, FULL_AGENT)
 
@@ -577,8 +577,8 @@ class TestConfigs:
             get_first_server_config_dict(resolved, "hle_diamond_judge_model")["openai_model"] == "vendor/other-judge"
         )
 
-    def test_judge_knobs_default_off_and_only_hle_diamond_enables_them(self):
-        """The shared judge server's slice hook and case-insensitive labels stay off for hle and hle_verified."""
+    def test_judge_knobs_default_off_and_only_hle_diamond_enables_the_slice_hook(self):
+        """The slice hook stays off for hle and hle_verified; they share the tolerant verdict-label match."""
         fields = LLMJudgeResourcesServerConfig.model_fields
         assert fields["report_slice_fields"].default_factory() == []
         assert fields["judge_labels_case_insensitive"].default is False
@@ -586,9 +586,11 @@ class TestConfigs:
             (REPO_ROOT / "resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml").read_text()
         )["equivalence_llm_judge"]["resources_servers"]["equivalence_llm_judge"]
         assert not {"report_slice_fields", "judge_labels_case_insensitive"} & set(base)
+        assert "judge_labels_case_insensitive" not in str(base)
         for sibling in ("hle", "hle_verified"):
             sibling_text = (REPO_ROOT / "benchmarks" / sibling / "config.yaml").read_text(encoding="utf-8")
-            assert "judge_labels_case_insensitive" not in sibling_text and "report_slice_fields" not in sibling_text
+            assert "judge_labels_case_insensitive: true" in sibling_text
+            assert "report_slice_fields" not in sibling_text
 
         shipped = yaml.safe_load((HLE_DIAMOND_DIR / "config.yaml").read_text())[JUDGE_SERVER]["resources_servers"][
             "equivalence_llm_judge"
@@ -610,7 +612,28 @@ class TestConfigs:
 
 class TestReasoningEffort:
     """D4 on the sandboxed path: Gym's ++responses_create_params.reasoning.effort decorates only Gym's run
-    request, so each harness has to request high effort in its own model call."""
+    request, and OpenCode and Pi build their own model calls inside the sandbox."""
+
+    @pytest.mark.parametrize(
+        ("config_file", "agent_name"),
+        [
+            ("opencode.yaml", "hle_diamond_opencode_agent"),
+            ("opencode_search.yaml", "hle_diamond_opencode_agent"),
+            ("opencode_reference.yaml", REFERENCE_AGENT),
+            ("pi.yaml", "hle_diamond_pi_agent"),
+            ("pi_search.yaml", "hle_diamond_pi_agent"),
+        ],
+    )
+    def test_session_presets_leave_the_effort_to_the_model_server(self, config_file, agent_name):
+        """Neither session agent can put an effort on its harness's calls (OpenCode's session config takes no
+        model options; Pi's generated provider declares no reasoning_effort support, so --thinking never leaves
+        the sandbox), so the README documents the model server's extra_body instead."""
+        agent = get_first_server_config_dict(_resolve(config_file), agent_name)
+
+        assert not {"reasoning_effort", "thinking", "provider_compat"} & set(agent)
+        readme = README.read_text(encoding="utf-8")
+        for model_type in ("vllm_model", "litellm_model"):
+            assert f"++policy_model.responses_api_models.{model_type}.extra_body.reasoning_effort=high" in readme
 
     @pytest.mark.parametrize(
         ("config_file", "agent_name"),
@@ -620,18 +643,17 @@ class TestReasoningEffort:
             ("opencode_reference.yaml", REFERENCE_AGENT),
         ],
     )
-    def test_opencode_presets_make_opencode_request_high_reasoning_effort(self, config_file, agent_name):
+    def test_opencode_session_presets_deny_subagents_and_web_tools(self, config_file, agent_name):
         agent = get_first_server_config_dict(_resolve(config_file), agent_name)
 
-        # opencode_agent sends it as chat reasoning_effort on every OpenCode request.
-        assert agent["reasoning_effort"] == "high"
-        # A session's opencode_config takes permission and tools only: the config turns subagents and web tools
-        # off, as in the sandboxed benchmark profile, and the inherited permissions survive. (OpenCode does not
-        # honor these switches in a session yet; README, Known limitations.)
-        assert set(agent["opencode_config"]) == {"permission", "tools"}
-        tools = agent["opencode_config"]["tools"]
-        assert (tools["task"], tools["webfetch"], tools["websearch"]) == (False, False, False)
-        assert agent["opencode_config"]["permission"]["bash"]["*git clone*"] == "deny"
+        # Subagents and web tools off, as in the sandboxed benchmark profile. OpenCode applies the last matching
+        # rule, so the denies must follow the inherited "*": allow, and no `tools` map may precede them.
+        assert set(agent["opencode_config"]) == {"permission"}
+        permission = agent["opencode_config"]["permission"]
+        rules = list(permission)
+        for tool in ("task", "webfetch", "websearch"):
+            assert permission[tool] == "deny" and rules.index(tool) > rules.index("*"), tool
+        assert permission["bash"]["*git clone*"] == "deny"
 
     @pytest.mark.parametrize(
         "config_file", ["opencode_full_legacy_agent.yaml", "opencode_search_full_legacy_agent.yaml"]
@@ -643,16 +665,6 @@ class TestReasoningEffort:
         # Merged into the inherited OpenCode config, not substituted for it.
         assert list(opencode_config["instructions"]) == ["/tmp/nemo-gym-environment.txt"]
         assert opencode_config["permission"]["webfetch"] == "deny"
-
-    @pytest.mark.parametrize("config_file", ["pi.yaml", "pi_search.yaml"])
-    def test_pi_presets_pass_thinking_high(self, config_file):
-        agent = get_first_server_config_dict(_resolve(config_file), "hle_diamond_pi_agent")
-
-        # Pi's --thinking levels are off, minimal, low, medium, high, xhigh, max.
-        assert agent["thinking"] == "high"
-        # Without this Pi's generated provider never sends reasoning_effort, whatever the thinking level.
-        assert agent["provider_compat"] == {"supportsReasoningEffort": True}
-        assert agent["model_server"]["name"] == "policy_model"  # inherited preset keys survive
 
 
 SESSION_PRESETS = [
@@ -696,9 +708,6 @@ class TestAgentSessions:
         # a sandbox lost before the deadline would make the row an execution error instead of a graded run.
         assert agent["timeout"] == 14400
         assert agent["sandbox_config"]["ttl_s"] >= agent["timeout"] + agent["sandbox_config"]["ready_timeout_s"]
-        # The relay presets scored a failed harness run 0 (execution_failure_reward_zero); a session agent drops it
-        # from the denominator unless it grades the failure.
-        assert agent["verify_after_agent_error"] is True
 
     @pytest.mark.parametrize(("config_file", "agent_name", "harness", "network_access", "note"), SESSION_PRESETS)
     def test_session_agents_validate_against_their_harness_config(
@@ -713,7 +722,36 @@ class TestAgentSessions:
         config_class = {"opencode_agent": OpenCodeAgentConfig, "pi_agent": PiAgentConfig}[harness]
         config = config_class.model_validate(agent | {"name": agent_name})
         assert config.network_access == network_access
-        assert config.verify_after_agent_error is True
+
+    @pytest.mark.parametrize(
+        ("config_file", "agent_name", "hle_agent_name"),
+        [
+            ("opencode.yaml", "hle_diamond_opencode_agent", "hle_opencode_agent"),
+            ("opencode_search.yaml", "hle_diamond_opencode_agent", "hle_opencode_agent"),
+            ("pi.yaml", "hle_diamond_pi_agent", "hle_pi_agent"),
+            ("pi_search.yaml", "hle_diamond_pi_agent", "hle_pi_agent"),
+        ],
+    )
+    def test_session_agents_are_the_hle_agents_on_the_hle_diamond_judge_and_dataset(
+        self, config_file, agent_name, hle_agent_name
+    ):
+        """Both benchmarks compose the shared offline_science profile; HLE-Diamond restates only its judge and its
+        dataset, so the harness settings cannot drift from benchmarks/hle's presets."""
+        agent = OmegaConf.to_container(get_first_server_config_dict(_resolve(config_file), agent_name))
+        hle = OmegaConf.to_container(
+            get_first_server_config_dict(_resolve_paths([f"benchmarks/hle/{config_file}"]), hle_agent_name)
+        )
+
+        differing = {key for key in set(agent) | set(hle) if agent.get(key) != hle.get(key)}
+        assert differing - {"port"} == {"resources_server", "datasets"}
+        assert [dataset["name"] for dataset in agent["datasets"]] == ["hle_diamond_text"]
+        harness = "opencode_agent" if config_file.startswith("opencode") else "pi_agent"
+        session_file = config_file.replace("_search", "")
+        config_paths = yaml.safe_load((HLE_DIAMOND_DIR / session_file).read_text(encoding="utf-8"))["config_paths"]
+        assert config_paths == [
+            "benchmarks/hle_diamond/config.yaml",
+            f"responses_api_agents/{harness}/configs/profiles/offline_science.yaml",
+        ]
 
     @pytest.mark.parametrize("config_file", ["opencode.yaml", "opencode_reference.yaml"])
     def test_restricted_opencode_sandboxes_run_the_images_pinned_binary(self, config_file):
@@ -799,7 +837,7 @@ class TestLegacyAgentPresets:
     )
     def test_full_presets_are_deprecated_without_a_session_preset(self, config_file):
         header = (HLE_DIAMOND_DIR / config_file).read_text(encoding="utf-8")
-        assert header.startswith("# Deprecated: ") and "text input only" in header
+        assert header.startswith("# Deprecated: ") and "no session preset covers the image questions" in header
         assert not (HLE_DIAMOND_DIR / config_file.replace("_legacy_agent", "")).exists()
 
     def test_reference_legacy_agent_is_the_search_legacy_agent_on_the_reference_image(self, monkeypatch):
@@ -872,7 +910,7 @@ class TestLocalDockerOverride:
         note = opencode["system_prompt"]
         assert "NOT restricted" in note and "disabled" not in note
         assert opencode["sandbox_config"]["ttl_s"] == 16200  # the rest of the inherited sandbox_config survives
-        assert opencode["reasoning_effort"] == "high"
+        assert opencode["opencode_config"]["permission"]["task"] == "deny"
 
         full = get_first_server_config_dict(
             _resolve("opencode_search_full_legacy_agent.yaml", "sandbox_docker_local.yaml"), FULL_AGENT
@@ -888,7 +926,7 @@ class TestLocalDockerOverride:
             _resolve("pi_search.yaml", "sandbox_docker_local.yaml"), "hle_diamond_pi_agent"
         )
         assert "NOT restricted" in pi["system_prompt"] and "disabled" not in pi["system_prompt"]
-        assert pi["thinking"] == "high"
+        assert pi["output_token_policy"] == "remaining_context"
 
     def test_override_is_not_a_benchmark_and_documents_the_local_recipe(self):
         text = self.OVERRIDE.read_text(encoding="utf-8")

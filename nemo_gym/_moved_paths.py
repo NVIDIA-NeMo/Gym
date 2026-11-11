@@ -67,7 +67,7 @@ class MovedPath:
 # Old module path -> new module path.
 # A key also covers every submodule under it.
 MOVED_MODULES: dict[str, MovedPath] = {
-    "nemo_gym.cli_setup_command": MovedPath(new="nemo_gym.orchestration.server_venv", since="0.8.0"),
+    "nemo_gym.cli_setup_command": MovedPath(new="nemo_gym.server_runtime.supervisor.server_venv", since="0.8.0"),
     "nemo_gym.benchmarks": MovedPath(new="nemo_gym.environment.benchmarks", since="0.8.0"),
     "nemo_gym.deliverables": MovedPath(new="nemo_gym.environment.deliverables", since="0.8.0"),
     "nemo_gym.registry": MovedPath(new="nemo_gym.environment.registry", since="0.8.0"),
@@ -81,8 +81,10 @@ MOVED_MODULES: dict[str, MovedPath] = {
     "nemo_gym.eval_plan": MovedPath(new="nemo_gym.eval.eval_plan", since="0.8.0"),
     "nemo_gym.comparison": MovedPath(new="nemo_gym.eval.comparison", since="0.8.0"),
     "nemo_gym.rollout_compare": MovedPath(new="nemo_gym.eval.rollout_compare", since="0.8.0"),
-    "nemo_gym.h2_ping_sidecar": MovedPath(new="nemo_gym.orchestration.h2_ping_sidecar", since="0.8.0"),
-    "nemo_gym.cli.setup_command": MovedPath(new="nemo_gym.orchestration.server_venv", since="0.8.0"),
+    "nemo_gym.h2_ping_sidecar": MovedPath(new="nemo_gym.server_runtime.supervisor.h2_ping_sidecar", since="0.8.0"),
+    "nemo_gym.cli.setup_command": MovedPath(new="nemo_gym.server_runtime.supervisor.server_venv", since="0.8.0"),
+    "nemo_gym.cli._locked_env": MovedPath(new="nemo_gym.server_runtime.supervisor._locked_env", since="0.8.0"),
+    "nemo_gym.cli._prepare_worker": MovedPath(new="nemo_gym.server_runtime.supervisor._prepare_worker", since="0.8.0"),
     "nemo_gym.testing": MovedPath(new="nemo_gym.server_runtime.testing", since="0.8.0"),
     "nemo_gym.testing.agent_session_conformance": MovedPath(
         new="nemo_gym.agents.testing.agent_session_conformance", since="0.8.0"
@@ -205,9 +207,9 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             "nemo_gym.client.server_client",
             "0.8.0",
             """
-            _connectable_client_host _TRACEPARENT_PATTERN apply_rollout_prefix ConfigDict ConnectionError
+            _connectable_client_host apply_rollout_prefix ConfigDict ConnectionError
             get_server_url NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME
-            rollout_path_prefix ServerStatus setup_server_client trace_context_path_segment
+            rollout_path_prefix ServerStatus SESSION_ID_KEY setup_server_client trace_context_path_segment
             """,
         ),
         **_names(
@@ -290,11 +292,15 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             """,
         ),
         **_names(
+            "nemo_gym.server_runtime.request_handling.session_routing",
+            "0.8.0",
+            "SESSION_ACQUIRE_SCOPE_KEY SESSION_ID_SCOPE_KEY",
+        ),
+        **_names(
             "nemo_gym.server_runtime.request_handling.trace_context",
             "0.8.0",
             """
-            _restore_trace_segment_on_redirect _ROLLOUT_PREFIX_PATTERN _ROLLOUT_PREFIX_RE _TRACE_CONTEXT_PATH_RE
-            TraceContextPathMiddleware
+            _restore_trace_segment_on_redirect TraceContextPathMiddleware
             """,
         ),
         **_names("nemo_gym.telemetry._fallbacks", "0.8.0", "safe_set_span_attributes"),
@@ -324,7 +330,7 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             _format_upstream_error_log _set_tcp_keepalive GlobalAIOHTTPAsyncClientConfig
             """,
         ),
-        **_names("nemo_gym.client.server_client", "0.8.0", "ServerClient SESSION_ID_KEY"),
+        **_names("nemo_gym.client.server_client", "0.8.0", "ServerClient"),
         **_names("nemo_gym.server_runtime.ray_support", "0.8.0", "_connect_server_to_ray maybe_ray_cluster_exit"),
         **_names(
             "nemo_gym.server_runtime.request_handling.disconnect",
@@ -575,7 +581,7 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             "0.8.0",
             """
             CaptureStore ModelExecutionOutcome _CLIENT_SESSION_HEADER _CaptureMiddleware _OBSERVED_PATHS
-            _PENDING_SUFFIX _ROLLOUT_PATH_RE _TERMINAL_SSE_LINES _classify_exception _classify_status
+            _PENDING_SUFFIX _TERMINAL_SSE_LINES _classify_exception _classify_status
             _consume_terminal_sse_event _exception_http_details _fail_uncommitted_external_call
             _headers_content_type _parse_sse_events _pending_token _preserve_capture_prefix_on_redirect
             _reconstruct_anthropic_sse _reconstruct_chat_sse _reconstruct_responses_sse
@@ -666,6 +672,9 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
         **_names("nemo_gym.sandbox.config", "0.8.0", "SANDBOX_BLOCK_VOLUME_SOURCES_KEY validate_volume_sources"),
         **_names("nemo_gym.utils.path_utils", "0.8.0", "materialized_path_for"),
     },
+    "nemo_gym.comparison.runner": {
+        **_names("nemo_gym.eval.comparison.loading", "0.8.0", "resolve_agent_selections"),
+    },
     "nemo_gym.cli.eval": {
         # Split out of eval. The helpers lost their leading underscore because other modules call them now.
         "_datasets_to_prepare": MovedPath(
@@ -692,7 +701,13 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             "get_first_server_config_dict resolve_dataset_agent taskset_environment_server_name",
         ),
         **_names("nemo_gym.eval.eval_plan", "0.8.0", "PlanBenchmark PlanGym build_eval_plan"),
-        **_names("nemo_gym.orchestration.jobs", "0.8.0", "installed_gym_commit"),
+        **_names("nemo_gym.utils.gym_commit", "0.8.0", "installed_gym_commit"),
+    },
+    "nemo_gym.orchestration.jobs": {
+        **_names("nemo_gym.utils.gym_commit", "0.8.0", "installed_gym_commit"),
+    },
+    "nemo_gym.h2_ping_sidecar.config": {
+        "H2_PING_SIDECAR_KEY_NAME": MovedPath(new="nemo_gym.config.global_config", since="0.8.0"),
     },
     "nemo_gym.cli.main": {
         # Split out of main. The asset lookup lost its leading underscore because other modules call it now.
@@ -704,7 +719,7 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
     "nemo_gym.cli.env": {
         # Split out of env.
         **_names(
-            "nemo_gym.orchestration.server_supervisor",
+            "nemo_gym.server_runtime.supervisor.server_supervisor",
             "0.8.0",
             """
             RAY_ENABLE_AUTO_CONNECT_ENV_VAR_NAME ServerSpinupTimeoutError _BASE_URL_KEY_SUFFIX _ConfiguredServer
@@ -719,7 +734,7 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             """,
         ),
         # Moved, and still imported by env for its own use.
-        **_names("nemo_gym.orchestration.server_supervisor", "0.8.0", "RunHelper _resolve_server_dir"),
+        **_names("nemo_gym.server_runtime.supervisor.server_supervisor", "0.8.0", "RunHelper _resolve_server_dir"),
         # env imported these for code that moved out of it.
         **_names("nemo_gym.client.server_client", "0.8.0", "ServerClient ServerStatus"),
         **_names(
@@ -732,14 +747,14 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             """,
         ),
         **_names(
-            "nemo_gym.orchestration.h2_ping_sidecar.launcher",
+            "nemo_gym.server_runtime.supervisor.h2_ping_sidecar.launcher",
             "0.8.0",
             """
             H2PingSidecarManager start_h2_ping_sidecar
             """,
         ),
         **_names(
-            "nemo_gym.orchestration.server_supervisor",
+            "nemo_gym.server_runtime.supervisor.server_supervisor",
             "0.8.0",
             """
             ListConfig _resolve_under_cwd_or_install pprint

@@ -11,10 +11,11 @@
 # The agent is renamed (hle_diamond_opencode_reference_agent) so that sandbox_docker_local.yaml cannot
 # turn the policy off silently: its block for hle_diamond_opencode_agent no longer applies, and its block
 # for this agent refuses to compose unless HLE_DIAMOND_ACK_UNRESTRICTED_EGRESS is set (see that file).
-# Gym's _inherit_from is a single-step rename, so the agent inherits opencode_agent directly and
-# restates the hle_diamond keys of opencode.yaml and opencode_search.yaml; a test holds the two agents
-# equal apart from the image and the environment note. Not a benchmark of its own (no dataset redeclared),
-# exactly like opencode_search.yaml: selectable with --benchmark, not listed.
+# Gym's _inherit_from is a single-step rename, so the agent inherits opencode_agent directly (which carries
+# the offline_science profile, as in opencode.yaml) and restates the hle_diamond keys of opencode.yaml and
+# opencode_search.yaml; a test holds the two agents equal apart from the image and the environment note.
+# Not a benchmark of its own (no dataset redeclared), exactly like opencode_search.yaml: selectable with
+# --benchmark, not listed.
 #
 # Web tools: the Tavily search and page tools of opencode_search.yaml until the hle_web_tools server
 # (web_search / web_fetch) exists; the note below names neither implementation.
@@ -25,8 +26,6 @@ hle_diamond_opencode_reference_agent:
   _inherit_from: opencode_agent
   responses_api_agents:
     opencode_agent:
-      num_workers: 4
-      concurrency: 512
       resources_server:
         type: resources_servers
         name: hle_diamond_equivalence_llm_judge_resources_server
@@ -37,42 +36,19 @@ hle_diamond_opencode_reference_agent:
         prompt_config: benchmarks/hle_diamond/prompts/opencode.yaml
         prepare_script: benchmarks/hle_diamond/prepare_text.py
         num_repeats: 1
-      # Diamond's "reasoning high" on this harness, as in opencode.yaml.
-      reasoning_effort: high
-      timeout: 14400
-      output_token_policy: remaining_context
-      declare_model_limits: false
-      verify_after_agent_error: true  # a failed run stays in the denominator, as in opencode.yaml
-      opencode_config:  # as in opencode.yaml, and not yet effective in a session either
-        tools:
-          task: false
       network_access: model_and_tools
+      mcp_tool_timeout_seconds: 300  # as in opencode_search.yaml
       tool_servers:
       - type: resources_servers
         name: tavily
-      # The reference image installs the same OpenCode release and checks the same digest (hle_reference_image/Dockerfile).
-      sandbox_executable_path: /usr/local/bin/opencode
-      sandbox_executable_sha256: 0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded  # pragma: allowlist secret (public runtime digest)
       # Only what the reference protocol allows: no SageMath, Lean or /opt/science/README.md.
       system_prompt: |
         Direct internet access is disabled on this machine: no downloads and no package installation. The web search and page-reading tools offered to you are the only way to reach the web; use them if useful for the task.
         Python 3.11 is installed with a shell and these packages: numpy, scipy, sympy, mpmath, networkx, pandas, matplotlib, pillow, scikit-learn, statsmodels, requests, pyyaml. Nothing else is installed.
       sandbox_config:
-        ttl_s: 16200  # the run budget plus the seed, as in opencode.yaml
-        # The reference image, never OPENCODE_SANDBOX_IMAGE (the science image of the other presets).
+        # The reference image, never OPENCODE_SANDBOX_IMAGE (the science image of the other presets). It installs
+        # the profile's OpenCode release and checks the same digest (hle_reference_image/Dockerfile).
         image: ${oc.env:OPENCODE_REFERENCE_SANDBOX_IMAGE,gym-opencode-hle-reference:local}
-        workdir: /workspace
-        entrypoint:
-        - sleep
-        - infinity
-        resources:
-          cpu: 2
-          memory_mib: 8192
-        env:
-          OPENCODE_DISABLE_AUTOUPDATE: '1'
-          OPENCODE_DISABLE_SHARE: '1'
-          OPENCODE_DISABLE_MODELS_FETCH: 'true'
-          EXECD_API_GRACE_SHUTDOWN: 50ms
 hle_diamond_equivalence_llm_judge_environment_server:
   environment_servers:
     single_agent_turn_legacy:

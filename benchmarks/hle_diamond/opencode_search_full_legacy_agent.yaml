@@ -1,5 +1,5 @@
 # Deprecated: opencode_sandboxed_agent and its legacy_agent relay will be removed after the Environment Server
-# migration. Agent sessions take text input only, so no session preset covers the image questions yet;
+# migration. Agent sessions accept prompt images, but no session preset covers the image questions yet;
 # opencode_search.yaml runs opencode_agent on the 728 text-only questions.
 # OpenCode preset with Tavily search on all 1000 HLE-Diamond questions, image questions included:
 # opencode_full_legacy_agent.yaml's sandboxed agent and dataset with opencode_search.yaml's tools, note and network

@@ -92,8 +92,7 @@ benchmark whose Resources server serves its tools over direct HTTP does not pair
 
 ## Runtime and model requirements
 
-Use an exact `pi_version` (default **0.80.2**), and either a Gym `model_server` or a
-`model_base_url` that Pi calls directly.
+Use an exact `pi_version` (default **0.80.2**), and a Gym `model_server`.
 For a Resources-owned task sandbox, supply direct `SandboxAccess` with an absolute
 task working directory. Without access, configure agent-owned creation as noted below.
 Session setup rejects `pi_version: latest`. Pi's `resources_server` setting is required
@@ -161,14 +160,37 @@ extra-argument, and environment overrides; those remain available on the local p
 
 ## Requests and settings
 
-Sandbox session input is one text user message, optionally preceded by a system message. Both sandbox
+Sandbox session input is one user message, optionally preceded by a system message. The user message
+may include images as base64 data-URI `input_image` parts. The adapter stages each image at
+`/tmp/nemo-gym-media/<sha256>.<extension>`, a path named by the image's content, and passes it to Pi as an
+`@file` argument, so the same task gives Pi the same prompt in every sandbox. Staging is part of the
+activation: it spends the agent timeout, and closing the session stops it. Staged images stay in a
+borrowed sandbox after the session ends. A session declares image input on the Gym model when the prompt
+has images or when the agent configuration sets `image_input: true`. With image input declared, Pi also sends the
+model images its tools return, such as task files it reads, and a text-only deployment rejects those requests.
+Without it, Pi replaces such an image with a note saying it was omitted. Set `image_input: true` for a vision model
+whose tasks keep their images in the sandbox, where the prompt has none.
+Images in the system message and image URLs are rejected. Both sandbox
 and local execution combine the configured system prompt, request `instructions`, and input
 system message in that order. Sampling and chat-template settings belong on the Gym Model Server.
 Sandbox sessions reject unsupported request controls before execution.
 
+Pi decides how to send each attached file:
+
+- Pi adds a `<file name="<sandbox path>">` tag to the end of the prompt text for each file, and sends the
+  images after all the text, so the order of text and images in the request is not kept.
+- Pi recognizes an image from its leading bytes, not from the declared media type. Pi inlines a file it
+  does not recognize as an image, such as an animated PNG, into the prompt as text.
+- Sessions turn off Pi's image resizing (`images.autoResize` in `settings.json`), so images reach the model
+  as the environment sent them, both prompt images and images the read tool returns.
+- The `detail` field of an `input_image` part has no effect.
+
+Saved trajectories record the user prompt's text but not its images.
+
 Set the agent configuration's `max_output_tokens` for a per-model-call output cap, including
-reasoning tokens. An adapter-owned Pi extension applies it as `max_tokens`, preserving any
-smaller upstream cap. Limits must be positive JavaScript-safe integers. Request-level
+reasoning tokens. Under the default `output_token_policy: fixed`, an adapter-owned Pi extension applies it as
+`max_tokens`, preserving any smaller upstream cap; under `remaining_context` the extension removes the cap
+(see [Local CLI compatibility](#local-cli-compatibility)). Limits must be positive JavaScript-safe integers. Request-level
 `max_output_tokens` is rejected in sandbox sessions because a total-response budget is not implemented. Model Server
 configuration must not replace the agent's cap with a larger value. Enforcement is tested with Pi 0.80.2.
 
@@ -181,8 +203,7 @@ configuration must not replace the agent's cap with a larger value. Enforcement 
    This installs the harness runtime, not task dependencies or the test environment.
 4. Environment Server calls the rollout-prefixed `/v1/responses` route with the agent-session cookie.
 5. Pi runs in the sandbox, uses its built-in tools, and sends Chat Completions to
-   the rollout-prefixed Gym model-server URL (or to `model_base_url`). The sandbox must be able to
-   reach that URL.
+   the rollout-prefixed Gym model-server URL. The sandbox must be able to reach that URL.
 6. Agent close confirms harness termination, returns observations,
    removes session files, and disconnects. Missing termination evidence keeps close retryable;
    a final negative receipt fails the activation but releases the borrowed connection.
@@ -255,43 +276,6 @@ detail, not a separate endpoint or a setup step users must run.
 - `finish_tool_names`: granted MCP tools whose successful call ends a sandbox session's run; only one required
   grant may offer each (default none; uses Pi's `terminate`, available from Pi 0.69.0)
 - `session_close_timeout_seconds`: sandbox process cleanup timeout (default 60)
-- `model_base_url`, `model_api_key`: an OpenAI-compatible base URL (with `/v1`) that Pi calls directly
-  from the sandbox, instead of a Gym `model_server` (set exactly one), and its key (default `EMPTY`).
-  Gym does not capture these calls.
-- `thinking_level_map`: the generated model's Pi `thinkingLevelMap`, e.g. `{max: max}` so that
-  `thinking: max` sends `reasoning_effort: "max"` (with `provider_compat.supportsReasoningEffort: true`)
-- `provider_compat`: Pi compat flags merged over the generated provider's
-  (`supportsDeveloperRole` and `supportsReasoningEffort` off)
-- `settings`: extra `settings.json` entries merged over Gym's, e.g. `{retry: {maxRetries: 10}}`
-
-Sandbox-session settings for running Pi the way a harness started in the task container runs (the
-[Terminal-Bench-Science profile](../../benchmarks/terminal_bench_science/README.md#pi-in-the-task-sandbox)
-uses all of them):
-
-- `sandbox_env`: further environment for Pi and its tools, e.g. `{PI_OFFLINE: "1"}`
-- `sandbox_runtime_guards`: Gym's bash cap and system-prompt note (default true); false runs Pi's own tools
-  and system prompt unchanged
-- `session_prompt_cache_key`: send one `prompt_cache_key` per session with every model call, so a gateway
-  that routes on it keeps the session on one replica
-- `sandbox_logs_dir`, `log_requests`: a sandbox log directory (e.g. Harbor's `/logs/agent`) for Pi's JSON
-  events without the streaming deltas (`pi.txt`, written when the run is collected), its stderr
-  (`pi_stderr.txt`) and, with `log_requests`,
-  every model request without its conversation (`pi-requests.jsonl`; the first in full in
-  `pi-requests.first.json`)
-- `raise_oom_score_adj`: make Pi and its tools the memory-cgroup OOM killer's preferred victims
-  (`oom_score_adj` 1000, or 0 when the sandbox starts below zero)
-- `verify_after_agent_error`: return a failed run (nonzero or signalled exit, a terminal error, no terminal
-  assistant result) as a gradable `failed` response (`incomplete` at the deadline; the error is in
-  `metadata.graded_agent_error`), as Harbor grades after any agent exit, when cleanup is confirmed, the
-  harness runner started Pi (not its own exit 125, 126 or 127), any granted Gym MCP tools loaded (not exit
-  78), the terminal error is not a transient model-endpoint failure (connection, timeout, 429 or 5xx, as
-  Pi's retry classifier names them) and the sandbox still runs and answers a command. A model error Pi
-  reported itself is not graded here: it keeps its classified cause (`ng_agent_outcome`) for the Environment
-  Server's outcome policy. Anything else stays an execution error and the episode is retried.
-
-Sandbox sessions drop Pi's streaming events (`message_update`, `tool_execution_update`), which repeat the
-whole partial message or tool output on every delta: the harness runner leaves them out of the event log that
-the adapter copies back (`events_exclude`). Pi's raw stdout in the session directory keeps every line.
 
 ## Results and limits
 
@@ -324,8 +308,10 @@ evidence or failed release retains the handle for retry. Cleanup is cooperative,
 
 ## Local CLI compatibility
 
-Local settings retain `output_token_policy` (`fixed` or `remaining_context`),
-`auto_compaction`, and an optional per-call `bash_timeout`. The dedicated
+`auto_compaction` and `output_token_policy` apply to local runs and sandbox sessions alike. Under
+`output_token_policy`, `fixed` caps each request at `max_output_tokens`, and `remaining_context` drops the cap
+so the model server sizes the output from the context the request leaves. The optional per-call `bash_timeout`
+is local only; sandbox sessions use `sandbox_bash_timeout_seconds`. The dedicated
 `pi_sandboxed_agent` also uses this local adapter inside its sandbox and supplies
 `mcp_servers` for authenticated Gym tools. Sandbox sessions take Resources tools from MCP grants
 instead and reject required HTTP tool grants rather than silently ignoring them.

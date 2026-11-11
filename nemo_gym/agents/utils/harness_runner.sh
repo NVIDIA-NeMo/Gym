@@ -12,7 +12,6 @@
 #   setup      bash code run first, before env is applied
 #   unset_env  array of extglob patterns naming inherited variables to drop
 #   events     file receiving each JSON object line of stdout as [seen_at, object]
-#   events_exclude  array of extglob patterns; a stdout line matching one is left out of events
 # Writes runtime.json beside PARAMS. Exits with the command's status, 125 when the runner fails before
 # starting it (including an exit from setup), or 126 or 127 when the command could not be started.
 
@@ -21,7 +20,7 @@ set +o errexit +o nounset +o pipefail
 IFS=$' \t\n'
 shopt -s extglob
 # Inherited variables with these names must not configure the runner or leak into the CLI.
-unset -v cwd command env stdin stdout stderr setup unset_env events events_exclude
+unset -v cwd command env stdin stdout stderr setup unset_env events
 trap 'exit 125' EXIT
 source "$1" || exit
 printf '{"hostname": "%s", "pid": %d}\n' "$HOSTNAME" "$$" >"$(dirname "$1")/runtime.json"
@@ -50,13 +49,9 @@ trap 'kill -TERM "$cli" 2>/dev/null' TERM
 pending=""
 emit() {
     # ${1%$'\r'} would try the suffix at every position of a long line.
-    local line=$1 pattern
+    local line=$1
     [[ ${line: -1} == $'\r' ]] && line=${line%?}
-    [[ $line == {* ]] || return
-    for pattern in "${events_exclude[@]}"; do
-        [[ $line == $pattern ]] && return
-    done
-    printf '[%s, %s]\n' "$seen" "$line" >&4
+    [[ $line == {* ]] && printf '[%s, %s]\n' "$seen" "$line" >&4
 }
 # Stamp new complete lines, keeping a partial one for the next pass. Bash < 5 has whole seconds;
 # bash < 4.2 has no strftime in printf and forks date.

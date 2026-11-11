@@ -21,16 +21,16 @@ Per-sub-step counts are also returned so sub-step accuracy can be computed downs
 
 Each sub-step runs in a subprocess using the configured grading interpreter. Optional
 sandbox execution moves that subprocess and its scientific dependencies off the server host.
+The default local grading environment isolates pinned scientific dependencies from Gym.
 """
 
 import asyncio
 import hashlib
 import os
 import shutil
-import sys
 from functools import partial
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import ClassVar, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 from scicode_integration.runner import (
@@ -41,6 +41,7 @@ from scicode_integration.runner import (
     sanitize_test,
 )
 from scicode_integration.sandbox_runner import ScicodeSandboxConfig, run_sandbox_substep
+from setup_grading_env import ensure_grading_env
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.server_runtime import (
@@ -48,8 +49,10 @@ from nemo_gym.server_runtime import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 # Agent sentinel for a sub-step it could not generate (ran out of context); always fails.
@@ -64,6 +67,9 @@ class ScicodeGradingInterpreter(BaseModel):
 
 
 class ScicodeResourcesServerConfig(BaseResourcesServerConfig):
+    # Grading is a pure function of the request, so the same saved answer can be graded again.
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
+
     num_processes: int = Field(default=20, ge=1)
     # Optional remote execution; interpreter and test-data paths then refer to the image.
     sandbox: Optional[ScicodeSandboxConfig] = None
@@ -73,9 +79,10 @@ class ScicodeResourcesServerConfig(BaseResourcesServerConfig):
     test_data_fpath: Optional[str] = None
     # Optional checksum for binding problem/test releases. Existing SciCode configs leave this unset.
     test_data_md5: Optional[str] = None
-    # Empty preserves the existing behavior of grading with this server's interpreter.
+    grading_venv_path: str = "resources_servers/scicode/.grading_venv"
+    # Empty uses the pinned Python 3.11 grading environment.
     grading_interpreters: List[ScicodeGradingInterpreter] = Field(default_factory=list)
-    # SciCode-Verified sets this to two so a single-interpreter run cannot be mistaken for canonical.
+    # Minimum number of explicitly configured grading environments.
     required_grading_interpreters: int = Field(default=1, ge=1)
     # The canonical OR rule short-circuits after the first pass. Enable this only for diagnostics.
     run_all_grading_interpreters: bool = False
@@ -144,8 +151,7 @@ class ScicodeResourcesServer(SimpleResourcesServer):
         self._semaphore = asyncio.Semaphore(value=self.config.num_processes)
         if self.config.test_data_md5 and not self.config.sandbox:
             self._resolve_test_data()
-        if self.config.sandbox or self.config.grading_interpreters or self.config.required_grading_interpreters > 1:
-            self._resolve_grading_interpreters()
+        self._resolve_grading_interpreters()
 
     def _resolve_test_data(self) -> str:
         if self.config.sandbox:
@@ -221,8 +227,13 @@ class ScicodeResourcesServer(SimpleResourcesServer):
                         f"{interpreter.python_executable!r}."
                     )
                 resolved.append((interpreter.name, executable))
+        elif self.config.required_grading_interpreters == 1:
+            venv_path = Path(self.config.grading_venv_path).expanduser()
+            if not venv_path.is_absolute():
+                venv_path = PARENT_DIR / venv_path
+            resolved = [("scicode", str(ensure_grading_env(venv_path)))]
         else:
-            resolved = [("current", sys.executable)]
+            resolved = []
 
         if len(resolved) < self.config.required_grading_interpreters:
             raise RuntimeError(
@@ -384,3 +395,6 @@ class ScicodeResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     ScicodeResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ScicodeResourcesServer.run_webserver()  # noqa: F401

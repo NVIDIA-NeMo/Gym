@@ -38,6 +38,7 @@ and optionally can set to following:
 - `test_batch_size` per problem test case parallelism
 - `num_parallel_requests` number of problems to evaluate in parallel
 - `time_scale` timeout limit factor, multiply's each problem's inherent time limit
+- `num_workers` uvicorn worker processes; each one loads the full metadata (about 27 GB for the full test set) at startup, so size memory for all of them
 - `grade_all_subtasks` (default `false`) grade every subtask of the row's problem, not only the row's own,
   as NeMo Skills does. Rewards use only the row's own subtask either way, so for training this only
   adds test runs.

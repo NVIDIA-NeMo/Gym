@@ -170,18 +170,12 @@ class ClaudeCodeSandboxSession(AgentSessionState):
         if skills_path:
             await self.stage_skills(skills_path)
         directory = self.session.session_dir
-        # An optional prompt reaches the CLI on stdin; otherwise stdin is empty.
-        stdin = "/dev/null"
-        prompt = payload.pop("prompt", None)
-        if prompt is not None:
-            stdin = f"{directory}/prompt.txt"
-            await upload_text(self.session.sandbox, path=stdin, text=prompt)
         # Regular files avoid waiting for detached task services to close inherited pipes.
         params = {
             "cwd": payload["cwd"],
             "command": payload["command"],
             "env": payload["env"],
-            "stdin": stdin,
+            "stdin": "/dev/null",
             "stdout": f"{directory}/events.jsonl",
             "stderr": f"{directory}/stderr.log",
         }

@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import base64
 import functools
+import hashlib
 import json
 import os
 import re
@@ -10,12 +12,15 @@ import shlex
 import shutil
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import threading
+import zlib
 from contextlib import asynccontextmanager, contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from time import monotonic
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -26,7 +31,7 @@ from omegaconf import OmegaConf
 from pydantic import ValidationError
 
 from nemo_gym.agents import (
-    HARNESS_RUNNER_FAILED,
+    AGENT_TIMEOUT_METADATA_KEY,
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
     AgentCloseSessionRequest,
@@ -37,17 +42,16 @@ from nemo_gym.agents import (
     raises_agent_failure,
 )
 from nemo_gym.client import ServerClient
-from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent, TaskId
-from nemo_gym.data.tasks.harbor import load_task, materialize_task
-from nemo_gym.sandbox import SandboxStatus
-from responses_api_agents.pi_agent.app import (
-    MCP_SETUP_ERROR_EXIT_CODE,
-    PiAgent,
-    PiAgentConfig,
-    PiAgentRunRequest,
-    _merge_settings,
-    _parse_recorded_events,
+from nemo_gym.core import (
+    EpisodeId,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
+    TaskId,
+    split_text_and_media,
 )
+from nemo_gym.data.tasks.harbor import load_task, materialize_task
+from nemo_gym.sandbox import MEDIA_DIRECTORY, SandboxTransferError, SandboxUnavailableError
+from responses_api_agents.pi_agent.app import PiAgent, PiAgentConfig, PiAgentRunRequest, _parse_recorded_events
 
 
 def seed(*, session_id: str = "pi-session") -> AgentSeedSessionRequest:
@@ -112,20 +116,16 @@ def events(*, stop_reason="stop") -> str:
 
 def staged(sandbox) -> dict:
     """The activation as the runner sees it: params.sh sourced by bash, plus the staged prompt."""
-    script = (
-        'source /dev/stdin; printf "%s\\0" "$cwd" "$stderr" "${setup-}" "${#command[@]}" "${command[@]}" "${env[@]}"'
-    )
+    script = 'source /dev/stdin; printf "%s\\0" "$cwd" "${#command[@]}" "${command[@]}" "${env[@]}"'
     params = sandbox.files[f"{sandbox.directory}/params.sh"]
     values = subprocess.run(
         ["bash", "-c", script], input=params, capture_output=True, text=True, check=True
     ).stdout.split("\0")[:-1]
-    count = int(values[3])
+    count = int(values[1])
     return {
         "cwd": values[0],
-        "stderr": values[1],
-        "setup": values[2],
-        "command": values[4 : 4 + count],
-        "env": dict(item.split("=", 1) for item in values[4 + count :]),
+        "command": values[2 : 2 + count],
+        "env": dict(item.split("=", 1) for item in values[2 + count :]),
         "prompt": sandbox.files[f"{sandbox.directory}/prompt.txt"],
     }
 
@@ -157,10 +157,20 @@ class Sandbox:
             return await self.launch(command, **kwargs)
         if "ln -s stop " in command:
             await self.signal()
+        # stage_media renames its partial uploads into place, and removes them when staging fails.
+        if command.startswith("rm -f -- "):
+            for path in shlex.split(command)[3:]:
+                self.files.pop(path, None)
+        for source, destination in re.findall(r"mv -f -- (\S+) (\S+)", command):
+            self.files[shlex.split(destination)[0]] = self.files.pop(shlex.split(source)[0])
         return SimpleNamespace(return_code=0, error_type=None, stdout="", stderr="")
 
     async def upload(self, source, destination):
-        self.files[destination] = Path(source).read_text()
+        data = Path(source).read_bytes()
+        try:
+            self.files[destination] = data.decode()
+        except UnicodeDecodeError:
+            self.files[destination] = data
 
     async def download(self, source, destination):
         Path(destination).write_text(self.files[source])
@@ -240,6 +250,229 @@ def mcp_grant(name, *, required=True):
 
 def seed_with_tools(*accesses):
     return AgentSeedSessionRequest.model_validate({**seed().model_dump(mode="json"), "tool_accesses": list(accesses)})
+
+
+def png(gray: int) -> bytes:
+    """A valid one-pixel grayscale PNG, which Pi recognizes as an image by its signature and IHDR chunk."""
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+    header = struct.pack(">IIBBBBB", 1, 1, 8, 0, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(bytes([0, gray])))
+        + chunk(b"IEND", b"")
+    )
+
+
+def image_part(data: bytes) -> dict:
+    return {
+        "type": "input_image",
+        "image_url": "data:image/png;base64," + base64.b64encode(data).decode(),
+        "detail": "auto",
+    }
+
+
+def activate_over_http(sandbox, client, items) -> dict:
+    """Seed a session, activate it with `items`, close it, and return the staged activation."""
+    created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+    assert created.status_code == 200, created.text
+    result = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": items})
+    assert result.status_code == 200, result.text
+    closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+    assert closed.status_code == 200, closed.text
+    return staged(sandbox)
+
+
+def staged_attachments(sandbox, payload) -> list[bytes]:
+    return [sandbox.files[arg[1:]] for arg in payload["command"] if arg.startswith("@")]
+
+
+def test_session_attaches_prompt_images_and_declares_image_input(setup):
+    agent, sandbox = setup
+    with TestClient(agent.setup_webserver()) as client:
+        payload = activate_over_http(
+            sandbox,
+            client,
+            [{"role": "user", "content": [{"type": "input_text", "text": "What is shown?"}, image_part(png(0))]}],
+        )
+    assert payload["prompt"] == "What is shown?"
+    assert [arg for arg in payload["command"] if arg.startswith("@")][0].endswith(".png")
+    assert staged_attachments(sandbox, payload) == [png(0)]
+    models = json.loads(sandbox.files[f"{sandbox.directory}/home/.pi/agent/models.json"])
+    assert models["providers"]["nemo"]["models"][0]["input"] == ["text", "image"]
+    # Pi would otherwise resize large images before sending them to the model.
+    settings = json.loads(sandbox.files[f"{sandbox.directory}/home/.pi/agent/settings.json"])
+    assert settings["images"] == {"autoResize": False}
+
+
+def test_session_stages_prompt_images_at_content_named_paths(setup):
+    agent, sandbox = setup
+    with TestClient(agent.setup_webserver()) as client:
+        payload = activate_over_http(sandbox, client, [{"role": "user", "content": [image_part(png(0))]}])
+    digest = hashlib.sha256(png(0)).hexdigest()
+    assert [arg for arg in payload["command"] if arg.startswith("@")] == [f"@{MEDIA_DIRECTORY}/{digest}.png"]
+    assert sandbox.files[f"{MEDIA_DIRECTORY}/{digest}.png"] == png(0)
+
+
+async def start_image_activation(agent, metadata=None):
+    """Seed a session and start an activation whose user prompt holds one image."""
+    request = Request({"type": "http", "headers": [], "session": {}, "path_params": {"rollout_id": "pi-smoke-a2"}})
+    seeded = await agent.seed_agent_session(request, seed())
+    body = NeMoGymResponseCreateParamsNonStreaming.model_validate(
+        {"input": [{"role": "user", "content": [image_part(png(0))]}], "metadata": metadata}
+    )
+    return request, seeded.agent_session_id, asyncio.create_task(agent.responses(request, body))
+
+
+async def test_close_during_media_staging_stops_it_before_releasing_the_sandbox(setup):
+    agent, sandbox = setup
+    staging = asyncio.Event()
+    order = []
+    upload = sandbox.upload
+
+    async def blocked_media_upload(source, destination):
+        if destination.startswith(f"{MEDIA_DIRECTORY}/"):
+            staging.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                order.append("staging stopped")
+                raise
+        await upload(source, destination)
+
+    sandbox.disconnect.side_effect = lambda: order.append("sandbox released")
+    with patch.object(sandbox, "upload", side_effect=blocked_media_upload):
+        request, session_id, task = await start_image_activation(agent)
+        await asyncio.wait_for(staging.wait(), 2)
+        await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert order == ["staging stopped", "sandbox released"]
+    sandbox.launch.assert_not_called()
+    assert not [path for path in sandbox.files if path.startswith(f"{MEDIA_DIRECTORY}/")]
+
+
+@pytest.mark.parametrize(
+    ("rename", "error"),
+    [
+        ({"return_code": None, "error_type": "timeout"}, SandboxUnavailableError),
+        ({"return_code": 1, "error_type": None}, SandboxTransferError),
+    ],
+    ids=["provider-timeout", "failed-in-sandbox"],
+)
+async def test_media_staging_failure_reports_the_sandbox_error_and_removes_partial_uploads(setup, rename, error):
+    agent, sandbox = setup
+    execute = sandbox.execute
+
+    async def failing_rename(command, **kwargs):
+        if "mv -f -- " in command:
+            return SimpleNamespace(stdout="", stderr="rename failed", **rename)
+        return await execute(command, **kwargs)
+
+    sandbox.exec.side_effect = failing_rename
+    request, session_id, task = await start_image_activation(agent)
+    with pytest.raises(error) as failure:
+        await asyncio.wait_for(task, 10)
+    # A provider timeout while staging is a sandbox failure, not the activation's deadline.
+    assert not isinstance(failure.value, TimeoutError)
+    sandbox.launch.assert_not_called()
+    assert not [path for path in sandbox.files if path.startswith(f"{MEDIA_DIRECTORY}/")]
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+
+
+async def test_media_staging_spends_the_activation_deadline(setup):
+    agent, sandbox = setup
+    upload = sandbox.upload
+
+    async def slow_media_upload(source, destination):
+        if destination.startswith(f"{MEDIA_DIRECTORY}/"):
+            await asyncio.sleep(5)
+        await upload(source, destination)
+
+    with patch.object(sandbox, "upload", side_effect=slow_media_upload):
+        request, session_id, task = await start_image_activation(agent, metadata={AGENT_TIMEOUT_METADATA_KEY: "0.2"})
+        started = monotonic()
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(task, 10)
+        assert monotonic() - started < 2
+    sandbox.launch.assert_not_called()
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+
+
+def test_retried_activation_does_not_decode_its_images_again(setup):
+    agent, sandbox = setup
+    body = {"input": [{"role": "user", "content": [image_part(png(0))]}]}
+    with (
+        patch("responses_api_agents.pi_agent.app.split_text_and_media", side_effect=split_text_and_media) as decode,
+        TestClient(agent.setup_webserver()) as client,
+    ):
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        first = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json=body)
+        retry = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json=body)
+        assert first.status_code == retry.status_code == 200
+        assert first.json() == retry.json()
+        assert decode.call_count == 1
+        assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
+    sandbox.launch.assert_awaited_once()
+
+
+def test_session_attaches_user_images_in_order_after_a_system_message(setup):
+    agent, sandbox = setup
+    items = [
+        {"role": "system", "content": "Be brief."},
+        {"role": "user", "content": [image_part(png(0)), image_part(png(255))]},
+    ]
+    with TestClient(agent.setup_webserver()) as client:
+        payload = activate_over_http(sandbox, client, items)
+    assert payload["prompt"] == ""
+    assert "Be brief." in payload["command"]
+    assert staged_attachments(sandbox, payload) == [png(0), png(255)]
+
+
+@pytest.mark.parametrize(("image_input", "declared"), [(False, ["text"]), (True, ["text", "image"])])
+def test_text_prompt_declares_image_input_only_when_configured(setup, image_input, declared):
+    agent, sandbox = setup
+    agent.config.image_input = image_input
+    with TestClient(agent.setup_webserver()) as client:
+        payload = activate_over_http(sandbox, client, "task")
+    assert staged_attachments(sandbox, payload) == []
+    models = json.loads(sandbox.files[f"{sandbox.directory}/home/.pi/agent/models.json"])
+    # Without image input, Pi replaces images its tools return with a note, so a text-only deployment keeps working.
+    assert models["providers"]["nemo"]["models"][0]["input"] == declared
+
+
+@pytest.mark.parametrize(
+    ("items", "detail"),
+    [
+        (
+            [{"role": "user", "content": [{**image_part(png(0)), "image_url": "https://example.com/a.png"}]}],
+            "Pi: Media must be a base64 data URI; URLs and file IDs are not fetched",
+        ),
+        (
+            [{"role": "user", "content": [{**image_part(png(0)), "image_url": "data:image/bmp;base64,Qk0="}]}],
+            "Pi: Unsupported media type 'image/bmp'",
+        ),
+        (
+            [{"role": "system", "content": [image_part(png(0))]}, {"role": "user", "content": "task"}],
+            "Pi accepts media only in the user prompt",
+        ),
+    ],
+    ids=["image-url", "unsupported-media-type", "system-image"],
+)
+def test_session_rejects_images_it_cannot_attach(setup, items, detail):
+    agent, sandbox = setup
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": items})
+        assert result.status_code == 422, result.text
+        assert result.json()["detail"].startswith(detail), result.text
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        assert closed.status_code == 200, closed.text
+    assert not sandbox.launch.called
 
 
 def test_http_session_flow_runs_pi_in_borrowed_sandbox(setup):
@@ -377,6 +610,19 @@ def test_session_output_limit_uses_config_default(setup):
         assert client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "Fix the code"}).status_code == 200
         models = json.loads(sandbox.files[f"{sandbox.directory}/home/.pi/agent/models.json"])
         assert models["providers"]["nemo"]["models"][0]["maxTokens"] == 4096
+
+
+def test_session_remaining_context_policy_drops_the_output_cap(setup):
+    agent, sandbox = setup
+    agent.config.output_token_policy = "remaining_context"
+    with TestClient(agent.setup_webserver()) as client:
+        assert client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).status_code == 200
+        assert client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "Fix the code"}).status_code == 200
+        command = staged(sandbox)["command"]
+        extension = f"{sandbox.directory}/remaining-context.mjs"
+        assert command[command.index("--extension") + 1] == extension
+        assert sandbox.files[extension] == Path(__file__).parents[1].joinpath("remaining-context.mjs").read_text()
+        assert f"{sandbox.directory}/output-limit.mjs" not in command
 
 
 def test_invalid_session_config_output_limit_does_not_consume_activation(setup):
@@ -947,6 +1193,49 @@ async def test_close_cancels_active_pi_before_detaching(setup):
     sandbox.signal.assert_awaited_once()
     sandbox.disconnect.assert_awaited_once()
     sandbox.stop.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "stalled",
+    [
+        "home/.pi/agent/models.json",
+        "home/.pi/agent/settings.json",
+        "output-limit.mjs",
+        "runtime-guards.mjs",
+        "outcome.mjs",
+        "gym_mcp.mjs",
+        "mcp-servers.json",
+    ],
+)
+async def test_close_stops_each_activation_upload_before_releasing_the_sandbox(setup, stalled):
+    agent, sandbox = setup
+    events = []
+    started = asyncio.Event()
+    upload = sandbox.upload
+
+    async def stall(source, destination):
+        if not destination.endswith(f"/{stalled}"):
+            return await upload(source, destination)
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            events.append("upload cancelled")
+            raise
+
+    sandbox.upload = stall
+    sandbox.disconnect.side_effect = lambda: events.append("sandbox released")
+    request = Request({"type": "http", "headers": [], "session": {}, "path_params": {"rollout_id": "pi-smoke-a2"}})
+    seeded = await agent.seed_agent_session(request, seed_with_tools(mcp_grant("resources")))
+    task = asyncio.create_task(agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task")))
+    await asyncio.wait_for(started.wait(), 5)
+    await asyncio.wait_for(
+        agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(seeded.agent_session_id))), 10
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 5)
+    assert events == ["upload cancelled", "sandbox released"]
+    sandbox.launch.assert_not_awaited()
 
 
 async def test_terminal_termination_failure_releases_borrowed_session(setup):
@@ -2791,7 +3080,8 @@ def test_task_timeout_metadata_reaches_sandbox_supervisor(
         )
         assert response.status_code == 200, response.text
         command = shlex.split(sandbox.launch.await_args.args[0])
-        assert float(command[command.index("--timeout") + 1]) == expected
+        # Staging spends the budget first, so Pi runs for what remains of it.
+        assert expected - 1 < float(command[command.index("--timeout") + 1]) <= expected
         assert agent.config.timeout == 1800
         assert response.json()["metadata"]["agent_timeout_sec"] == str(float(expected))
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
@@ -2817,328 +3107,6 @@ def test_task_timeout_does_not_allow_other_metadata_or_consume_activation(
         assert accepted.status_code == 200, accepted.text
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
         assert closed.status_code == 200, closed.text
-
-
-# ---------------------------------------------------------------- direct endpoint and task-container settings
-
-TBSCI_COMPAT = {
-    "supportsStore": False,
-    "supportsDeveloperRole": False,
-    "supportsReasoningEffort": True,
-    "maxTokensField": "max_tokens",
-    "supportsStrictMode": False,
-    "supportsLongCacheRetention": False,
-}
-
-
-def configure_direct(agent, **overrides):
-    """The settings benchmarks/terminal_bench_science/pi.yaml gives the agent."""
-    settings = {
-        "model_server": None,
-        "model_base_url": "http://gateway.example:16100/v1/",
-        "model_api_key": "gateway-key",  # pragma: allowlist secret
-        "model": "deepseek-flash",
-        "pi_version": "0.80.10",
-        "thinking": "max",
-        "thinking_level_map": {"max": "max"},
-        "provider_compat": TBSCI_COMPAT,
-        "context_window": 1048576,
-        "max_output_tokens": 393216,
-        "settings": {"retry": {"maxRetries": 10}},
-        "sandbox_env": {"PI_OFFLINE": "1", "GIT_PAGER": "cat"},
-        "sandbox_runtime_guards": False,
-        "session_prompt_cache_key": True,
-        "sandbox_logs_dir": "/logs/agent",
-        "log_requests": True,
-        "raise_oom_score_adj": True,
-        "verify_after_agent_error": True,
-    } | overrides
-    for name, value in settings.items():
-        setattr(agent.config, name, value)
-
-
-def test_direct_endpoint_session_runs_pi_as_a_task_container_harness(setup):
-    agent, sandbox = setup
-    configure_direct(agent)
-    with TestClient(agent.setup_webserver()) as client:
-        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
-        assert created.status_code == 200, created.text
-        # The session prepares Harbor's agent log directory with its own.
-        assert "/logs/agent" in sandbox.exec.await_args_list[0].args[0]
-        assert sandbox.exec.await_args_list[1].args[0].endswith("/tmp/nemo-gym-pi-node-22.19.0-0.80.10 0.80.10")
-        result = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "Fix the code"})
-        assert result.status_code == 200, result.text
-        assert result.json()["status"] == "completed"
-        directory = sandbox.directory
-        models = json.loads(sandbox.files[f"{directory}/home/.pi/agent/models.json"])
-        # Pi calls the endpoint directly: no Gym rollout prefix, the configured key, the configured compat
-        # flags with reasoning_effort allowed, and `--thinking max` mapped to reasoning_effort "max".
-        assert models == {
-            "providers": {
-                "nemo": {
-                    "baseUrl": "http://gateway.example:16100/v1",
-                    "api": "openai-completions",
-                    "apiKey": "gateway-key",  # pragma: allowlist secret
-                    "compat": TBSCI_COMPAT,
-                    "models": [
-                        {
-                            "id": "deepseek-flash",
-                            "reasoning": True,
-                            "input": ["text"],
-                            "contextWindow": 1048576,
-                            "maxTokens": 393216,
-                            "thinkingLevelMap": {"max": "max"},
-                        }
-                    ],
-                }
-            }
-        }
-        settings = json.loads(sandbox.files[f"{directory}/home/.pi/agent/settings.json"])
-        assert settings["retry"] == {"provider": {"timeoutMs": 900000}, "maxRetries": 10}
-        assert settings["compaction"] == {"enabled": True}
-        payload = staged(sandbox)
-        command = payload["command"]
-        extensions = [command[i + 1].rsplit("/", 1)[1] for i, arg in enumerate(command) if arg == "--extension"]
-        # No runtime guards; the request log comes last so it records the final payload.
-        assert extensions == ["output-limit.mjs", "outcome.mjs", "prompt-cache-key.mjs", "request-log.mjs"]
-        for extension in extensions:
-            assert (
-                sandbox.files[f"{directory}/{extension}"] == Path(__file__).parents[1].joinpath(extension).read_text()
-            )
-        assert command[command.index("--thinking") + 1] == "max"
-        assert "--append-system-prompt" not in command
-        assert "Fix the code" not in " ".join(command)
-        assert payload["prompt"] == "Fix the code"
-        env = payload["env"]
-        # The task's HOME stays; Pi's configuration comes from the private session directory.
-        assert "HOME" not in env
-        assert env["PI_CODING_AGENT_DIR"] == f"{directory}/home/.pi/agent"
-        assert (env["PI_OFFLINE"], env["GIT_PAGER"]) == ("1", "cat")
-        assert env["NEMO_GYM_PI_PROMPT_CACHE_KEY"] == "pi-" + directory.rsplit("/", 1)[1]
-        assert env["NEMO_GYM_PI_REQUEST_LOG"] == "/logs/agent/pi-requests.jsonl"
-        assert "gateway-key" not in sandbox.files[f"{directory}/params.sh"]
-        # Pi's stderr goes to the log directory, and collection copies its event lines there.
-        assert payload["stderr"] == "/logs/agent/pi_stderr.txt"
-        assert sandbox.files["/logs/agent/pi.txt"].splitlines() == [
-            json.dumps(json.loads(line)[1]) for line in sandbox.events.splitlines()
-        ]
-        assert "oom_score_adj" in payload["setup"]
-        closed = client.post("/v1/agent_sessions/close", json=close_body(seed().agent_session_id))
-        assert closed.status_code == 200, closed.text
-    agent.server_client.post.assert_not_called()
-
-
-async def test_session_prompt_cache_key_is_unique_per_session(setup):
-    agent, sandbox = setup
-    configure_direct(agent)
-    keys = []
-    for session_id in ("first", "second"):
-        await agent.seed_agent_session(
-            Request({"type": "http", "headers": [], "session": {}}), seed(session_id=session_id)
-        )
-        state = agent._session_records[session_id].state
-        payload = agent._sandbox_payload(state, prompt="task", system="", extensions=agent._sandbox_extensions())
-        keys.append(payload["env"]["NEMO_GYM_PI_PROMPT_CACHE_KEY"])
-    assert keys[0] != keys[1]
-    assert all(key.startswith("pi-") for key in keys)
-    configure_direct(agent, session_prompt_cache_key=False, log_requests=False)
-    payload = agent._sandbox_payload(state, prompt="task", system="", extensions=agent._sandbox_extensions())
-    assert not {"NEMO_GYM_PI_PROMPT_CACHE_KEY", "NEMO_GYM_PI_REQUEST_LOG"} & payload["env"].keys()
-    assert "prompt-cache-key.mjs" not in " ".join(payload["command"])
-
-
-@pytest.mark.parametrize("routes", ["neither", "both"])
-def test_seed_requires_exactly_one_model_route(setup, routes):
-    agent, sandbox = setup
-    if routes == "neither":
-        agent.config.model_server = None
-    else:
-        agent.config.model_base_url = "http://gateway.example/v1"
-    with TestClient(agent.setup_webserver()) as client:
-        response = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
-    assert response.status_code == 422
-    assert "model_server or a model_base_url" in response.text
-    sandbox.exec.assert_not_awaited()
-
-
-def test_task_sandbox_rooted_at_filesystem_root_runs(setup):
-    # Task images without a WORKDIR start in "/": Pi's runtime and session files stay under /tmp.
-    agent, sandbox = setup
-    configure_direct(agent)
-    sandbox.expected_workdir = "/"
-    body = seed()
-    body.sandbox_access.workdir = "/"
-    with TestClient(agent.setup_webserver()) as client:
-        assert client.post("/v1/agent_sessions", json=body.model_dump(mode="json")).status_code == 200
-        response = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "task"})
-        assert response.status_code == 200, response.text
-        state = agent._session_records[body.agent_session_id].state
-        assert state.session.session_dir.startswith("/tmp/nemo-gym-pi-sessions/")
-        assert state.runtime.startswith("/tmp/")
-        assert client.post("/v1/agent_sessions/close", json=close_body(body.agent_session_id)).status_code == 200
-
-
-def failed_events(error_message: str | None) -> str:
-    """Events of a run whose last assistant turn ended in an error, or (None) that stopped mid-turn."""
-    recorded = [json.loads(line)[1] for line in events(stop_reason="error").splitlines()]
-    final = recorded[2]["message"]
-    if error_message is None:
-        final["stopReason"] = "toolUse"
-        final.pop("errorMessage")
-        recorded = recorded[:3]
-    else:
-        final["errorMessage"] = error_message
-        recorded[3]["messages"][0]["stopReason"] = "error"
-        recorded[3]["messages"][0]["errorMessage"] = error_message
-    return "\n".join(json.dumps([float(i), event]) for i, event in enumerate(recorded))
-
-
-@pytest.mark.parametrize(
-    "case,status_code,expected",
-    [
-        # Pi killed mid-turn (e.g. the OOM killer or an agent's pkill) while its sandbox still runs.
-        ("killed", 200, "failed"),
-        # Model errors Pi reported itself are never graded here; the response carries the classified cause for the
-        # Environment Server's outcome policy, which grades a provider rejection (retrying would fail the same way)
-        # and retries a transient endpoint failure.
-        ("bad_request", 200, '{"failure_kind":"model_request_error","status_code":400}'),
-        ("endpoint", 200, '{"failure_kind":"model_transport_error"}'),
-        ("endpoint_status", 200, '{"failure_kind":"model_request_error","status_code":502}'),
-        # A lost sandbox: retried, never graded.
-        ("sandbox_gone", 500, None),
-        ("disabled", 500, None),
-    ],
-)
-async def test_failed_run_is_graded_only_while_its_sandbox_runs(setup, case, status_code, expected):
-    agent, sandbox = setup
-    configure_direct(agent, verify_after_agent_error=case != "disabled")
-    sandbox.status = AsyncMock(return_value=SandboxStatus.STOPPED if case == "sandbox_gone" else SandboxStatus.RUNNING)
-    if case in ("killed", "sandbox_gone", "disabled"):
-        sandbox.events = failed_events(None)
-        sandbox.result["return_code"] = 137
-    else:
-        message = {
-            "bad_request": "400 Invalid tool call format",
-            "endpoint": "Connection error.",
-            "endpoint_status": "502 Bad Gateway",
-        }[case]
-        sandbox.events = failed_events(message)
-        sandbox.result["return_code"] = 0
-    app = agent.setup_webserver()
-    agent.setup_exception_middleware(app)
-    with TestClient(app) as client:
-        assert client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).status_code == 200
-        response = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "task"})
-        assert response.status_code == status_code, response.text
-        if expected is None:
-            assert "Pi agent failed" in response.text
-        elif expected.startswith("{"):
-            body = response.json()
-            assert body["status"] == "failed"
-            assert body["error"] is not None
-            assert "graded_agent_error" not in body["metadata"]
-            assert body["metadata"]["ng_agent_outcome"] == expected
-        else:
-            body = response.json()
-            assert body["status"] == expected
-            assert body["error"] is None
-            assert "graded_agent_error" in body["metadata"]
-            # The partial transcript reaches the verifier with the run's state.
-            assert any(item["type"] == "function_call" for item in body["output"])
-        closed = client.post("/v1/agent_sessions/close", json=close_body(seed().agent_session_id))
-        assert closed.status_code == 200
-        record = closed.json()["agent_observations"]["records"][0]
-        if expected is not None:
-            assert record["status"] == ("failed" if expected.startswith("{") else expected)
-    probed = [call.args[0] for call in sandbox.exec.await_args_list if call.args[0] == "true"]
-    assert len(probed) == int(case == "killed")
-
-
-@pytest.mark.parametrize(
-    "return_code,granted,graded",
-    [
-        # The harness runner failed before starting Pi, or could not start it.
-        (HARNESS_RUNNER_FAILED, False, False),
-        (126, False, False),
-        (127, False, False),
-        # Gym's MCP tools did not load (gym_mcp.mjs exits 78).
-        (MCP_SETUP_ERROR_EXIT_CODE, True, False),
-        # Without a grant, gym_mcp.mjs is not loaded: exit 78 is Pi's own, an ordinary failed run.
-        (MCP_SETUP_ERROR_EXIT_CODE, False, True),
-    ],
-)
-def test_setup_failure_is_not_graded(setup, return_code, granted, graded):
-    # The sandbox still runs, but a run that never got going is a Gym or setup failure, not the agent's result.
-    agent, sandbox = setup
-    configure_direct(agent)
-    sandbox.status = AsyncMock(return_value=SandboxStatus.RUNNING)
-    sandbox.result["return_code"] = return_code
-    sandbox.events = (
-        json.dumps([0.0, {"type": "ng_gym_mcp_setup_failed", "error": "resources: TypeError (ECONNREFUSED)"}])
-        if granted
-        else ""
-    )
-    body = seed_with_tools(mcp_grant("resources")) if granted else seed()
-    app = agent.setup_webserver()
-    agent.setup_exception_middleware(app)
-    with TestClient(app) as client:
-        assert client.post("/v1/agent_sessions", json=body.model_dump(mode="json")).status_code == 200
-        response = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "task"})
-        if graded:
-            assert response.status_code == 200, response.text
-            assert response.json()["status"] == "failed"
-            assert response.json()["metadata"]["graded_agent_error"] == "exit 78: Pi exited with code 78"
-        else:
-            assert response.status_code == 500, response.text
-            assert "Pi agent failed" in response.text
-            assert "graded_agent_error" not in response.text
-        assert client.post("/v1/agent_sessions/close", json=close_body(body.agent_session_id)).status_code == 200
-    probed = [call.args[0] for call in sandbox.exec.await_args_list if call.args[0] == "true"]
-    assert len(probed) == int(graded)
-
-
-@pytest.mark.parametrize(
-    "settings,message",
-    [
-        ({"sandbox_env": {"PI_CODING_AGENT_DIR": "/x"}}, "sandbox_env cannot set PI_CODING_AGENT_DIR"),
-        ({"sandbox_env": {"NEMO_GYM_PI_REQUEST_LOG": "/x"}}, "sandbox_env cannot set NEMO_GYM_PI_REQUEST_LOG"),
-        ({"sandbox_logs_dir": "logs"}, "sandbox_logs_dir must be an absolute"),
-        ({"sandbox_logs_dir": "/"}, "sandbox_logs_dir must be an absolute"),
-        ({"log_requests": True}, "log_requests requires sandbox_logs_dir"),
-    ],
-)
-def test_invalid_sandbox_settings_are_rejected(settings, message):
-    with pytest.raises(ValidationError, match=message):
-        PiAgentConfig(name="pi", host="localhost", port=1, entrypoint="app.py", **settings)
-
-
-def test_sandbox_env_numbers_become_strings():
-    config = PiAgentConfig(name="pi", host="localhost", port=1, entrypoint="app.py", sandbox_env={"PI_OFFLINE": 1})
-    assert config.sandbox_env["PI_OFFLINE"] == "1"
-
-
-def test_settings_merge_recursively_over_gyms():
-    base = {"compaction": {"enabled": True}, "retry": {"provider": {"timeoutMs": 5}}}
-    merged = _merge_settings(base, {"retry": {"maxRetries": 10, "provider": {"maxRetries": 2}}, "extra": [1]})
-    assert merged == {
-        "compaction": {"enabled": True},
-        "retry": {"provider": {"timeoutMs": 5, "maxRetries": 2}, "maxRetries": 10},
-        "extra": [1],
-    }
-    assert base == {"compaction": {"enabled": True}, "retry": {"provider": {"timeoutMs": 5}}}
-
-
-def test_gym_model_server_route_is_unchanged_by_direct_settings(setup):
-    agent, sandbox = setup
-    agent.config.model_api_key = "unused"  # pragma: allowlist secret
-    agent.config.thinking_level_map = {"max": "max"}
-    models = agent._build_models_config("pi-smoke-a2")
-    provider = models["providers"]["nemo"]
-    assert provider["baseUrl"] == "http://model.example:9000/ng-rollout/pi-smoke-a2/v1"
-    assert provider["apiKey"] == "EMPTY"  # pragma: allowlist secret
-    assert provider["compat"] == {"supportsDeveloperRole": False, "supportsReasoningEffort": False}
-    assert provider["headers"] == {"x-session-id": "pi-smoke-a2"}
-    assert provider["models"][0]["thinkingLevelMap"] == {"max": "max"}
 
 
 @pytest.mark.parametrize(

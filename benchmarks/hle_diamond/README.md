@@ -40,13 +40,13 @@ the default and the text subset is the variant. A `hle_diamond/text` run covers 
 **Text and full sandboxed presets.** `opencode`, `opencode_search`, `pi` and `pi_search` run the 728
 text rows, as `benchmarks/hle`'s presets do, so with-tools numbers from them cover 728/1000 questions.
 They run `opencode_agent` and `pi_agent` in agent sessions (Sandboxed agents (with tools) > Agent
-sessions), which take text input only. `opencode_full_legacy_agent` and
-`opencode_search_full_legacy_agent` run all 1000 and therefore stay on the deprecated
-`opencode_sandboxed_agent`: that adapter uploads each
-`input_image` data URI of the user turn into the sandbox and attaches it with `opencode run -f`, so
-the image reaches the model call as an `image_url` part (Sandboxed agents (with tools) > Image
-questions through OpenCode). The Pi adapter still accepts `input_text` parts only, so no Pi preset
-covers the image rows. The search presets are selectable with
+sessions) with the shared settings of `benchmarks/hle`'s presets. `opencode_full_legacy_agent` and
+`opencode_search_full_legacy_agent` run all 1000 on the deprecated `opencode_sandboxed_agent`: that
+adapter uploads each `input_image` data URI of the user turn into the sandbox and attaches it with
+`opencode run -f`, so the image reaches the model call as an `image_url` part (Sandboxed agents (with
+tools) > Image questions through OpenCode). Agent sessions accept prompt images too, but no session
+preset covers the image rows yet, and the deprecated Pi adapter accepts `input_text` parts only, so
+no Pi preset covers them. The search presets are selectable with
 `--benchmark` but, exactly like `hle/opencode_search` and `hle/pi_search`, do not appear in
 `gym list benchmarks` because they extend another preset without redeclaring the dataset;
 `hle_diamond/opencode_reference` restates it (its header says why) and is listed.
@@ -57,8 +57,8 @@ with the relay. `opencode_legacy_agent`, `opencode_search_legacy_agent`, `pi_leg
 `pi_search_legacy_agent` and `opencode_reference_legacy_agent` are the text presets as they ran
 before agent sessions, kept under the agent names of the presets that replace them; the two harnesses
 are configured differently, so do not compare their scores as one measurement (Agent sessions lists
-what changed). The full presets exist only as `*_legacy_agent`, because no session preset takes
-images yet.
+what changed). The full presets exist only as `*_legacy_agent`, because no session preset covers
+the image questions yet.
 
 Dropped at prepare time: `rationale`, `author_name`, `canary`, `image_preview`, `rationale_image`.
 The `image` data URI appears only inside the materialized `input_image` block of the default set and
@@ -149,28 +149,32 @@ was probed per model (Responses API, `reasoning.effort` low against high on the 
 On the no-tools path the effort travels on Gym's Responses request. On the sandboxed path it does
 not: `++responses_create_params.reasoning.effort` decorates only Gym's run request, while OpenCode
 and Pi build their own model calls inside the sandbox (a model-call capture of the stock preset
-showed no `reasoning_effort`, so the gateway default, medium, applied). The presets therefore carry
-each harness's own knob:
+showed no `reasoning_effort`, so the gateway default, medium, applied). How each preset requests
+high effort:
 
-- `opencode.yaml` (inherited by `opencode_search.yaml`; restated by `opencode_reference.yaml`):
-  `opencode_agent`'s `reasoning_effort: high`, which the agent sets as the model's `reasoningEffort`
-  option, so OpenCode sends `reasoning_effort: high` in every chat-completions body. Override per run
-  with `++hle_diamond_opencode_agent.responses_api_agents.opencode_agent.reasoning_effort=<level>`.
+- The agent-session presets (`opencode`, `opencode_search`, `opencode_reference`, `pi`, `pi_search`):
+  through the model server, not the preset. Neither session agent can put an effort on its harness's
+  calls (a session's `opencode_config` takes no model options, and `pi_agent`'s generated provider
+  declares no `reasoning_effort` support, so Pi's `--thinking` level never leaves the sandbox), and
+  both refuse a request `reasoning` field with 422, so `++responses_create_params.reasoning.effort` must
+  not be passed to them. Add the effort to every chat-completions body the policy model server sends
+  with its `extra_body`, for example
+  `++policy_model.responses_api_models.vllm_model.extra_body.reasoning_effort=high` or
+  `++policy_model.responses_api_models.litellm_model.extra_body.reasoning_effort=high` (the key follows
+  `--model-type`). A value the harness sends itself would win over `extra_body`; neither sends one.
+  The override covers every call through that model server, so compose `judge_openai.yaml` (as the
+  documented commands do): with the default judge, which is the policy model, the judge calls would
+  run at high effort too.
 - `opencode_full_legacy_agent.yaml` (inherited by `opencode_search_full_legacy_agent.yaml`), on
   `opencode_sandboxed_agent`, and the text `*_legacy_agent` presets on the same agent:
   `opencode_config.provider.nemo_gym.models.dummy_model.options.reasoningEffort: high`, which
   OpenCode 1.17.11 maps to `reasoning_effort: high` in its chat-completions body (verified in a
   capture). Override per run with
   `++hle_diamond_opencode_full_agent.responses_api_agents.opencode_sandboxed_agent.opencode_config.provider.nemo_gym.models.dummy_model.options.reasoningEffort=<level>`.
-- `pi.yaml` (inherited by `pi_search.yaml`): `thinking: high`, passed to Pi as `--thinking high`
-  (Pi's levels: `off, minimal, low, medium, high, xhigh, max`), with
-  `provider_compat.supportsReasoningEffort: true`. Pi's `openai-completions` path emits
-  `reasoning_effort` only when its provider declares that flag, and `pi_agent` declares it false by
-  default, so the deprecated `pi_sandboxed_agent` presets never transmitted the level. Override per run
-  with `++hle_diamond_pi_agent.responses_api_agents.pi_agent.thinking=<level>`.
 - `pi_legacy_agent.yaml` (inherited by `pi_search_legacy_agent.yaml`), on the deprecated
-  `pi_sandboxed_agent`: `thinking: high` as well, which that agent passes as `--thinking high` without
-  the provider flag, so the level is not transmitted (above).
+  `pi_sandboxed_agent`: `thinking: high`, which that agent passes as `--thinking high`. Pi's
+  `openai-completions` path emits `reasoning_effort` only when its provider declares support, and the
+  generated provider does not, so the level is not transmitted.
 
 ## Dataset format
 
@@ -208,12 +212,13 @@ judge call (`failure_reason: empty_final_answer`). The judge defaults to the pol
 self-judged numbers are not comparable with the published table (see Quickstart).
 
 The verdict labels are matched case-insensitively: `judge_labels_case_insensitive: true` on the single
-judge server instance every preset shares (`str.casefold` on the judge text and on the labels; the
-recorded `verdict_label` is always the configured spelling). Upstream reads a structured
+judge server instance every preset shares (`str.casefold` on the judge text and on the labels, with bold,
+italic and code marks and the spacing around colons ignored, so `Judgement: **no**` reads as
+`Judgement: no`; the recorded `verdict_label` is always the configured spelling). Upstream reads a structured
 `correct: yes|no` field whose case cannot vary, whereas Gym finds the label in free text, and on the
 gold sweep (Harness validation) o3-mini wrote `Judgement: Yes` on 1 of 1000 rows, which the byte-exact
-default scored 0 as `no_verdict`. The knob is off everywhere else, so `hle` and `hle_verified` are
-unchanged; when it is on, labels that differ only in case are rejected at config time.
+default scored 0 as `no_verdict`. The knob is off by default; `hle` and `hle_verified` turn it on as well.
+When it is on, labels that differ only in case or markup are rejected at config time.
 
 Judge request: the judge call carries no `max_output_tokens` and no reasoning parameter
 (`judge_responses_create_params: {input: []}`), so the judge model runs at its default effort and its
@@ -404,11 +409,24 @@ multipleChoice):
   `partition` and `judge_evaluations`, so compute both post hoc (Reading sandboxed results). The
   agent-session presets aggregate through the Environment Server, which forwards to the judge
   resources server.
-- The OpenCode session presets lose two settings of the sandboxed benchmark profile, because a
-  session's `opencode_config` accepts only `permission` and `tools`: the 400-step cap of the build
-  agent and `compaction.auto: false`. `declare_model_limits: false` keeps the model's size unknown to
-  OpenCode, so it compacts only when the endpoint reports a context overflow; the run budget
-  (`timeout`, 14,400 s) bounds the episode instead of the step cap.
+- Output budget on the OpenCode session presets: 32,768 tokens per model call within a 229,376-token
+  context (the shared profile, as in `benchmarks/hle`). OpenCode asks for its output cap on every
+  call, so the sandboxed presets' `remaining_context` policy, which left the cap to the model server,
+  has no equivalent in `opencode_agent`, and asking for the whole 262,144-token window makes vLLM
+  refuse the call. The Pi session presets keep `remaining_context`.
+- The OpenCode session presets lose two settings of the sandboxed benchmark profile, the 400-step cap
+  of the build agent and `compaction.auto: false`: compaction, the step limit and session titles
+  follow OpenCode's defaults, and the run budget (`timeout`, 14,400 s) bounds the episode.
+- Failed runs: a session run that stops at its output, context or time limit is graded on what it
+  produced, as in `benchmarks/hle`. A harness crash (a nonzero exit, no result) is retried and then
+  reported as a failed rollout, so it leaves the denominator; the relay presets'
+  `execution_failure_reward_zero` scored it 0. Both agents report such a crash as failure kind
+  `unknown`, which the Environment Server's `agent_outcome_policy` retries by default. Setting
+  `agent_outcome_policy.by_failure_kind.unknown: verify` on
+  `hle_diamond_equivalence_llm_judge_environment_server` would grade it instead (a partial map keeps
+  the other defaults), but it would grade every unclassified failure, infrastructure ones included,
+  so the presets leave the policy at its default, as `benchmarks/hle` does. Report the failed-rollout
+  count next to every score.
 - The OpenCode session presets start without network access to npm. With any plugin configured
   (the adapter always loads its own), OpenCode 1.17.11 installs `@opencode-ai/plugin` into each
   session's fresh config directory at every start unless the bundle is staged
@@ -419,16 +437,14 @@ multipleChoice):
   everything is allowed except listed bash commands (process killing, `rm -rf` of system paths, raw
   disk writes, git network commands and others). The sandboxed presets allowed every command and
   denied only web fetch, web search and subagents.
-- **Blocker: web fetch and subagents run in the OpenCode session presets.** The presets turn them
-  off (`tools` map: `webfetch`, `websearch` and `task` false), but OpenCode does not honor that in
-  a session. A probe on a public image with open egress fetched `https://example.com` through
-  `webfetch` and ran a `task` subagent, both with the presets as committed and with `deny` rules
-  added under `permission` after the default `"*": allow`. Subagents are therefore on in every
-  OpenCode session preset, unlike the sandboxed presets, which changes what is measured. Under
-  OpenSandbox with `model_only` or `model_and_tools` egress a fetch cannot leave the sandbox (not
-  tested in a rollout); under `sandbox_docker_local.yaml` (open egress) `webfetch` is one more way
-  to read the web besides bash (below). The fix belongs in opencode_agent; until it lands, do not
-  report OpenCode session results.
+- Web fetch and subagents in the OpenCode session presets: the shared profile denies `task` under
+  `permission`, and opencode_agent's `permissions/default.yaml` denies `webfetch`, `websearch` and
+  `skill`, all after its `"*": allow`. A two-row probe on a public image with open egress (2026-11-10)
+  told the model to fetch `https://example.com` with `webfetch` and to run a `task` subagent: every
+  OpenCode request offered only `bash`, `edit`, `glob`, `grep`, `read`, `todowrite` and `write`, and the
+  one `task` call the model made anyway came back as "Model tried to call unavailable tool 'task'".
+  Before opencode_agent.yaml's `tools` map was removed, the same probe fetched the page and ran the
+  subagent.
 - A session's sandbox is created at seed, before the agent's own concurrency limit (`concurrency:
   512`) applies. `pi_agent` waits for a slot only when the activation starts, outside the run
   budget, while the sandbox idles and its TTL runs, so a long wait can use up the 1,800 s of TTL
@@ -608,7 +624,7 @@ gym eval run --benchmark hle_diamond/opencode --split benchmark --model-type lit
     '+config_paths=[benchmarks/hle_diamond/judge_openai.yaml,benchmarks/hle_diamond/sandbox_docker_local.yaml]' \
     --num-repeats 1 --limit 20 \
     ++policy_model_name=<gateway model id> \
-    ++responses_create_params.reasoning.effort=high \
+    ++policy_model.responses_api_models.litellm_model.extra_body.reasoning_effort=high \
     ++observability_enabled=true ++model_call_capture_dir=/abs/path/model-calls \
     --output results/hle_diamond_opencode_pilot.jsonl
 ```
@@ -616,6 +632,9 @@ gym eval run --benchmark hle_diamond/opencode --split benchmark --model-type lit
 - Both overrides travel in one raw `+config_paths` token so they merge after the preset (see
   Scoring > Dedicated judge); with `--config` the search presets' `network_access: model_and_tools`
   would win and fail closed on the Docker provider, and the model would be told internet is disabled.
+- The effort travels on the model server's `extra_body`, not on `responses_create_params`: the
+  session agents refuse a `reasoning` request field with 422, and their harnesses' own calls carry no
+  effort (Prompting > Reasoning effort). The key follows `--model-type`.
 - `sandbox_docker_local.yaml` defines a second provider block, `sandbox_docker` (the content of
   `nemo_gym/sandbox/providers/docker/configs/docker.yaml`), because the composed `sandbox:` block
   cannot be removed or re-typed by an override, and repoints `hle_diamond_opencode_agent`,
@@ -653,7 +672,7 @@ gym eval run --benchmark hle_diamond/opencode --split benchmark --model-type lit
       '+config_paths=[benchmarks/hle_diamond/judge_openai.yaml,benchmarks/hle_diamond/sandbox_docker_local.yaml]' \
       --num-repeats 1 --limit 5 --concurrency 5 \
       ++policy_model_name=<gateway model id> \
-      ++responses_create_params.reasoning.effort=high \
+      ++policy_model.responses_api_models.litellm_model.extra_body.reasoning_effort=high \
       ++observability_enabled=true ++model_call_capture_dir=/abs/path/model-calls \
       ++route_failures_to_sidecar=true \
       ++use_absolute_ip=false ++sandbox_docker.docker.create.network=host \
@@ -693,11 +712,15 @@ gym eval run --benchmark hle_diamond/opencode --split benchmark --model-type lit
   presets, a `tool` part in the harness transcript under the artifacts directory; session presets
   write none there). Otherwise the sandbox was never
   exercised and the run is a no-tools run through a different prompt path, not a with-tools result.
-- Confirm effort: the captured OpenCode and Pi request bodies carry `reasoning_effort: high` (all 15
-  requests of the 5-row `hle_diamond/opencode` pilot capture on `opencode_sandboxed_agent`; on the
-  agent-session presets, all 6 OpenCode and all 5 Pi requests of a 4-row smoke over synthetic
-  questions with the Pi preset's `provider_compat`). Check it on every pilot (Prompting > Reasoning
-  effort).
+- Confirm effort. On the full presets the captured OpenCode request bodies carry `reasoning_effort:
+  high` (all 15 requests of the 5-row `hle_diamond/opencode` pilot capture on
+  `opencode_sandboxed_agent`). On the agent-session presets the model-call capture records the
+  harness's request before the model server adds its `extra_body`, so it shows no effort; check the
+  resolved config (`rollouts_resolved_config.yaml`, the policy model's `extra_body`) instead. A smoke
+  over synthetic questions with a logging proxy in front of the endpoint (2026-11-10) saw
+  `reasoning_effort: high` on every body the model server sent: 3 of 3 OpenCode calls, 7 of 7 Pi
+  calls, and the 5 judge calls, which went to the same model server there. Check it on every pilot
+  (Prompting > Reasoning effort).
 - Token and latency figures are not comparable with the announcement's mean output tokens: the
   harness's system prompt and tool schema dominate the input, and the call is chat-completions.
 
@@ -814,10 +837,10 @@ support a **comparison, not a reproduction**, of that column:
   through OpenCode below). The adapter lifts OpenCode's image limits so that all 272 images, the 26
   larger than 2000 px on a side included, are sent as the dataset's bytes, as upstream sends them; an
   endpoint with an image-size limit can still reject one (GPT-6 Astra rejects the 14950x2780 PNG of
-  `66f1b940f8bb4425f74e4299`, which then scores 0, see Image questions through OpenCode). The Pi
-  adapter accepts text parts only.
-- Reasoning effort: requested through the harness's own knob and transmitted by both (see Prompting >
-  Reasoning effort).
+  `66f1b940f8bb4425f74e4299`, which then scores 0, see Image questions through OpenCode). The
+  deprecated Pi adapter accepts text parts only.
+- Reasoning effort: requested through the model server's `extra_body` on the session presets and
+  through OpenCode's own option on the full presets (see Prompting > Reasoning effort).
 
 State these departures next to every number collected with these presets.
 
@@ -828,7 +851,11 @@ The text presets (`opencode`, `opencode_search`, `pi`, `pi_search`, `opencode_re
 `hle_diamond_equivalence_llm_judge_environment_server` (`single_agent_turn_legacy`), instead of the
 deprecated sandboxed agents behind a `legacy_agent` relay. Each episode seeds the judge resources
 server, opens an agent session, runs one activation with the prepared prompt, closes the session and
-verifies. The agent composes its benchmark profile (`configs/profiles/benchmark.yaml`):
+verifies. The presets compose the agents' shared offline science profiles
+([`opencode_agent`](../../responses_api_agents/opencode_agent/configs/profiles/offline_science.yaml),
+[`pi_agent`](../../responses_api_agents/pi_agent/configs/profiles/offline_science.yaml)), the same as
+`benchmarks/hle`'s presets, and add only the HLE-Diamond judge and dataset; a test holds the agents
+equal to `hle`'s apart from those two keys:
 
 - Sandbox: the judge lends none, so every session creates its own through the `sandbox` (OpenSandbox)
   provider, with the image, resources and entrypoint of the sandboxed presets, and destroys it on
@@ -846,15 +873,15 @@ verifies. The agent composes its benchmark profile (`configs/profiles/benchmark.
   grants none of its own.
 - Environment note: the session agents carry it as `system_prompt`, which OpenCode reads as its
   instructions file and Pi appends to its system prompt.
-- Failed runs: `verify_after_agent_error: true` grades a run that fails after the harness started (a
-  crash, a nonzero exit, the deadline) on what it produced, so the row stays in the denominator,
-  normally at 0. The relay presets' `execution_failure_reward_zero` set such a row to 0 outright.
-  A transient model-endpoint failure, unconfirmed cleanup or a sandbox that no longer answers stays
-  an execution error and the episode is retried.
+- Token limits: OpenCode asks for at most 32,768 output tokens per call within a 229,376-token
+  context; Pi has the 262,144-token window with `output_token_policy: remaining_context`, which drops
+  each request's output cap so the model server sizes it from the context the request leaves.
+- Failed runs: a run that stops at its output, context or time limit is graded on what it produced; a
+  harness crash is retried and then reported as a failed rollout (Known limitations).
 
-What changes against the sandboxed presets is listed under Known limitations (OpenCode's step cap,
-compaction setting, permissions and offline plugin install, when a session's sandbox is created, and
-the web fetch and subagent blocker). The `*_legacy_agent` presets, the full ones included, still run
+What changes against the sandboxed presets is listed under Known limitations (OpenCode's output
+budget, step cap, compaction setting, permissions and offline plugin install, failed runs, when a
+session's sandbox is created, and web fetch and subagents). The `*_legacy_agent` presets, the full ones included, still run
 the sandboxed agents, so their text-question scores come from a different harness than `opencode` and
 are not comparable with it.
 

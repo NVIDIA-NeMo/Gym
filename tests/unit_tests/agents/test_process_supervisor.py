@@ -278,12 +278,28 @@ def test_existing_stop_file_fences_the_launch(tmp_path: Path) -> None:
 
 
 @linux_only
-def test_stop_file_stops_the_harness_with_term_first(tmp_path: Path) -> None:
+@pytest.mark.parametrize("initial_scan_delay", [0, 2.2])
+def test_stop_file_stops_the_harness_with_term_first(tmp_path: Path, initial_scan_delay: float) -> None:
     # The controller requests a stop with this file rather than a signal.
     stop = tmp_path / "stop.request"
-    worker = "trap 'echo saved > checkpoint; exit 0' TERM; touch ready; while :; do sleep 0.05; done"
+    # Model a busy /proc before TERM, then require time to save after TERM. The initial scan must not
+    # consume the harness's grace period, even when it takes longer than that period.
+    supervisor = tmp_path / "supervisor.sh"
+    supervisor.write_text(
+        Path(SUPERVISOR).read_text().replace("    scan\n", f"    sleep {initial_scan_delay}\n    scan\n", 1)
+    )
+    worker = "trap 'sleep 1; echo saved > checkpoint; exit 0' TERM; touch ready; while :; do sleep 0.05; done"
     process = subprocess.Popen(
-        ["bash", SUPERVISOR, "--timeout", "30", "--cleanup-timeout", "2", "--receipt", str(tmp_path / "cleanup.json")]
+        [
+            "bash",
+            str(supervisor),
+            "--timeout",
+            "30",
+            "--cleanup-timeout",
+            "2",
+            "--receipt",
+            str(tmp_path / "cleanup.json"),
+        ]
         + ["--stop-file", str(stop), "--", "bash", "-c", worker],
         cwd=tmp_path,
         stdout=subprocess.PIPE,
@@ -373,6 +389,12 @@ def test_only_detached_services_survive_harness_group_termination(tmp_path: Path
 import ctypes, json, os, pathlib, signal, subprocess, sys, time, urllib.request
 assert ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) == 0
 supervisor, root, ending, detached = sys.argv[1], pathlib.Path(sys.argv[2]), sys.argv[3], sys.argv[4] == 'True'
+def stat_fields(path):
+    # Processes can exit between listing /proc and opening their stat file.
+    try:
+        return path.read_text().rsplit(')', 1)[1].split()
+    except (FileNotFoundError, ProcessLookupError):
+        return None
 service = root / 'service.py'
 service.write_text("from http.server import HTTPServer, BaseHTTPRequestHandler\n"
                   "from pathlib import Path\n"
@@ -408,15 +430,20 @@ worker.write_text("import os, pathlib, signal, subprocess, sys, time\n"
 timed_out = ending in ('timeout', 'grace', 'stubborn')
 process = None
 try:
-    process = subprocess.Popen(['bash', supervisor, '--timeout', '1.5' if timed_out else '10',
-        '--cleanup-timeout', '0.5', '--receipt', str(root / 'cleanup.json'), '--stop-file', str(root / 'stop'), '--',
+    process = subprocess.Popen(['bash', supervisor, '--timeout', '10',
+        '--cleanup-timeout', '0.5', '--receipt', str(root / 'cleanup.json'), '--stop-file', str(root / 'stop'),
+        '--expire-file', str(root / 'expire'), '--',
         sys.executable, str(worker), ending], cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if ending == 'cancel':
+    if ending == 'cancel' or timed_out:
+        # Interrupt the completed-tool phase, not Python or service startup.
         deadline = time.monotonic() + 5
         while not (root / 'ready').exists():
             assert process.poll() is None and time.monotonic() < deadline
             time.sleep(0.01)
-        process.send_signal(signal.SIGTERM)
+        if timed_out:
+            (root / 'expire').touch()
+        else:
+            process.send_signal(signal.SIGTERM)
     stdout, stderr = process.communicate(timeout=15)
     assert process.returncode == 0, (stdout, stderr)
     receipt = json.loads((root / 'cleanup.json').read_text())
@@ -432,17 +459,17 @@ try:
     except ProcessLookupError:
         pass
     else:
-        stats = [p.read_text() for p in pathlib.Path('/proc').glob('[0-9]*/stat')]
+        stats = [stat_fields(p) for p in pathlib.Path('/proc').glob('[0-9]*/stat')]
         group = int((root / 'worker.pid').read_text())
-        live = [s for s in stats if int(s.rsplit(')', 1)[1].split()[2]) == group and s.rsplit(')', 1)[1].split()[0] not in 'ZX']
+        live = [s for s in stats if s is not None and int(s[2]) == group and s[0] not in 'ZX']
         assert not live, ('supervised process group still running', live)
     port = int((root / 'port').read_text())
     if detached:
         with urllib.request.urlopen('http://127.0.0.1:%d/' % port, timeout=2) as response:
             assert response.read() == b'task solved'
     else:
-        stat = pathlib.Path('/proc/' + (root / 'service.pid').read_text() + '/stat')
-        assert not stat.exists() or stat.read_text().rsplit(')', 1)[1].split()[0] in 'ZX'
+        stat = stat_fields(pathlib.Path('/proc/' + (root / 'service.pid').read_text() + '/stat'))
+        assert stat is None or stat[0] in 'ZX'
         try:
             urllib.request.urlopen('http://127.0.0.1:%d/' % port, timeout=0.2)
         except OSError:

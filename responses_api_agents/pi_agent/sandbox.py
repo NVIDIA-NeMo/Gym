@@ -5,29 +5,25 @@
 import asyncio
 import json
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from nemo_gym.agents import (
     HARNESS_RUNNER_FILE,
     AgentSessionState,
     SandboxCommand,
     SandboxSession,
-    prefer_oom_kill_setup,
     shell_assignments,
 )
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.sandbox import read_text, upload_text
+from nemo_gym.core import MediaFile, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.sandbox import read_text, stage_media, upload_text
 from nemo_gym.trajectory import AgentObservationBundle
 
 
 LOG = logging.getLogger(__name__)
-# Streaming events repeat the whole partial message (or tool output) on every delta, so their volume
-# grows quadratically with a turn's length. The adapter reads only completed messages, tool start/end
-# and lifecycle events, so the runner leaves the streaming ones out of the event log. Pi prints each
-# event as JSON with its type first.
-STREAMING_EVENTS = ('{"type":?( )"message_update"*', '{"type":?( )"tool_execution_update"*')
 
 
 class HarnessProcessInfo(BaseModel):
@@ -58,10 +54,6 @@ class PiSandboxSession(AgentSessionState):
     observations: AgentObservationBundle | None = None
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
 
-    async def upload_json(self, name: str, payload: JsonValue) -> None:
-        """Stage adapter input using the shared text-transfer utility."""
-        await upload_text(self.session.sandbox, path=f"{self.session.session_dir}/{name}", text=json.dumps(payload))
-
     async def read_text(self, name: str) -> str:
         """Read adapter output using file transfer."""
         return await read_text(self.session.sandbox, path=f"{self.session.session_dir}/{name}")
@@ -88,25 +80,24 @@ class PiSandboxSession(AgentSessionState):
         command: list[str],
         env: dict[str, str],
         prompt: str,
+        media: Sequence[MediaFile] = (),
         timeout: float,
         close_timeout: float,
-        raise_oom_score_adj: bool = False,
-        stderr: str | None = None,
-        transcript: str | None = None,
+        files: dict[str, str | Path] | None = None,
+        deadline: float | None = None,
     ) -> str:
         """Run through the common lifecycle; the adapter validates terminal events.
 
-        Optional ``stderr`` and ``transcript`` paths (e.g. under a harness log directory) receive Pi's
-        stderr and its JSON lines without the streaming events; otherwise stderr stays in the session
-        directory.
+        ``files`` and ``media`` are staged with the invocation; see ``stage_activation``.
         """
         return await self.session.execute(
             stage_activation=lambda: self.stage_activation(
-                command=command, env=env, prompt=prompt, raise_oom_score_adj=raise_oom_score_adj, stderr=stderr
+                command=command, env=env, prompt=prompt, media=media, files=files
             ),
-            collect=lambda: self.collect_artifacts(transcript=transcript),
+            collect=self.collect_artifacts,
             timeout=timeout,
             close_timeout=close_timeout,
+            deadline=deadline,
         )
 
     async def stage_activation(
@@ -115,11 +106,23 @@ class PiSandboxSession(AgentSessionState):
         command: list[str],
         env: dict[str, str],
         prompt: str,
-        raise_oom_score_adj: bool = False,
-        stderr: str | None = None,
+        media: Sequence[MediaFile] = (),
+        files: dict[str, str | Path] | None = None,
     ) -> SandboxCommand:
-        """Stage the invocation and return the Pi worker command."""
+        """Stage the invocation and return the Pi worker command.
+
+        ``files`` maps paths under the session directory to text or to a local source file, and ``media`` are prompt
+        images. Both are uploaded here, inside the session's execute, so that close cancels and waits for the uploads
+        before it releases the sandbox, and the activation deadline bounds them.
+        """
         directory = self.session.session_dir
+        for name, content in (files or {}).items():
+            if isinstance(content, Path):
+                await self.session.sandbox.upload(content, f"{directory}/{name}")
+            else:
+                await upload_text(self.session.sandbox, path=f"{directory}/{name}", text=content)
+        if media:
+            await stage_media(self.session.sandbox, media)
         await upload_text(self.session.sandbox, path=f"{directory}/prompt.txt", text=prompt)
         params = {
             "cwd": self.session.workdir,
@@ -127,28 +130,19 @@ class PiSandboxSession(AgentSessionState):
             "env": env,
             "stdin": f"{directory}/prompt.txt",
             "stdout": f"{directory}/stdout.log",
-            "stderr": stderr or f"{directory}/stderr.log",
+            "stderr": f"{directory}/stderr.log",
             "events": f"{directory}/events.jsonl",
-            "events_exclude": STREAMING_EVENTS,
         }
-        if raise_oom_score_adj:
-            # Pi and its tools inherit the score; execd and the supervisor keep the sandbox's own.
-            params["setup"] = prefer_oom_kill_setup()
         await upload_text(self.session.sandbox, path=f"{directory}/params.sh", text=shell_assignments(params))
         return SandboxCommand(argv=["bash", f"{directory}/{HARNESS_RUNNER_FILE}", f"{directory}/params.sh"])
 
-    async def collect_artifacts(self, *, transcript: str | None = None) -> str:
-        """Keep partial events even when worker metadata is unavailable; copy them to ``transcript`` if set."""
+    async def collect_artifacts(self) -> str:
+        """Keep partial events even when worker metadata is unavailable."""
         try:
             events = await self.read_text("events.jsonl")
         except Exception as error:
             logs = await self.session.read_output_log()
             raise RuntimeError(f"Pi sandbox runner returned no valid result: {logs}") from error
-        if transcript:
-            try:
-                await upload_text(self.session.sandbox, path=transcript, text=event_lines(events))
-            except Exception:
-                LOG.warning("Pi transcript could not be written to %s", transcript, exc_info=True)
         try:
             runtime = await self.read_text("runtime.json")
         except Exception:
@@ -159,13 +153,3 @@ class PiSandboxSession(AgentSessionState):
             runtime_payload = None
         self.runtime_info = parse_runtime_info(runtime_payload)
         return events
-
-
-def event_lines(events: str) -> str:
-    """Pi's JSON lines as it printed them, from the runner's ``[seen_at, line]`` records."""
-    lines = []
-    for record in events.split("\n"):
-        # The runner writes each line verbatim after the time it was seen.
-        if record.startswith("[") and record.endswith("]") and ", " in record:
-            lines.append(record[record.index(", ") + 2 : -1])
-    return "".join(f"{line}\n" for line in lines)

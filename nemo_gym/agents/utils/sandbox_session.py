@@ -19,7 +19,6 @@ from nemo_gym.agents.utils.supervisor_client import (
     SUPERVISOR_FILE,
     SUPERVISOR_SCRIPT,
     CleanupReceipt,
-    check_stdlib_runner,
     is_harness_termination_failure,
     remove_session_directory,
     stop_and_confirm_cleanup,
@@ -43,9 +42,6 @@ HARNESS_RUNNER_SCRIPT = Path(__file__).with_name(HARNESS_RUNNER_FILE)
 # could not be started. Any other status is the CLI's own.
 HARNESS_RUNNER_FAILED = 125
 HARNESS_COMMAND_NOT_STARTED = (126, 127)
-# Where adapters upload a standard-library Python runner, relative to session_dir. Without a
-# .py suffix, a `pkill -f '\.py'` in the task cannot match the runner's command line.
-RUNNER_FILE = "sandbox_runner"
 _SHELL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
@@ -59,19 +55,9 @@ def _reuse_or_start[T](
 
 @dataclass(frozen=True, kw_only=True)
 class SandboxCommand:
-    """Harness argv, run under the bash process supervisor.
-
-    ``stdlib_runner`` declares a Python runner that needs nothing beyond the standard library.
-    Its argv, which must start with the interpreter, then runs under a neutral process name so
-    that ``pkill python3`` in the task cannot stop it. The renamed interpreter is the base
-    interpreter, outside any virtual environment.
-    """
+    """Harness argv, run under the bash process supervisor."""
 
     argv: list[str]
-    stdlib_runner: bool = False
-
-    def __post_init__(self) -> None:
-        check_stdlib_runner(self.argv, stdlib_runner=self.stdlib_runner)
 
 
 def shell_assignments(values: Mapping[str, str | Sequence[str] | Mapping[str, str]]) -> str:
@@ -103,29 +89,6 @@ def shell_assignments(values: Mapping[str, str | Sequence[str] | Mapping[str, st
     return "".join(f"{line}\n" for line in lines)
 
 
-def prefer_oom_kill_setup(path: str = "/proc/self/oom_score_adj") -> str:
-    """Harness runner ``setup`` making the CLI and its children the memory-cgroup OOM killer's preferred victims.
-
-    Raises oom_score_adj to 1000, or to 0 when the sandbox starts it below zero (a Guaranteed pod's -997),
-    so the sandbox never becomes the node's first victim in a global OOM. Raising needs no privilege; a
-    failure leaves the score unchanged. The CLI inherits the runner's score, while the supervisor and the
-    sandbox's exec daemon keep their own. The runner's stderr, the supervisor's log, records what happened.
-    """
-    return f"""oom_score_adj={quote(path)}
-if read -r before 2>/dev/null <"$oom_score_adj" && [[ $before =~ ^-?[0-9]+$ ]]; then
-    after=1000
-    ((before < 0)) && after=0
-    if echo "$after" 2>/dev/null >"$oom_score_adj"; then
-        echo "oom_score_adj: $before -> $after" >&2
-    else
-        echo "oom_score_adj: unchanged" >&2
-    fi
-else
-    echo "oom_score_adj: unchanged" >&2
-fi
-"""
-
-
 class ExpiryUnsupportedError(Exception):
     """``expire`` cannot stop this running harness: its sandbox's uploads can wait for capacity the harness holds."""
 
@@ -135,7 +98,9 @@ class SandboxSession[Artifacts]:
     """Execute, stop, capture, then release an owned or borrowed sandbox.
 
     Runtime installation belongs in the adapter's seed hook. ``stage_activation``
-    stages input and returns a command; ``collect`` copies harness artifacts
+    stages input and returns a command. Every sandbox write an activation needs
+    belongs there: close cancels staging before it releases the sandbox, but it
+    cannot stop a write made before ``execute``. ``collect`` copies harness artifacts
     to the agent server after cleanup is confirmed. It may run a bounded snapshot
     command, but must not restart the harness. Parsing responses stays in the adapter.
 
@@ -274,7 +239,6 @@ class SandboxSession[Artifacts]:
                 command=command.argv,
                 timeout=timeout,
                 cleanup_timeout=cleanup_timeout,
-                stdlib_runner=command.stdlib_runner,
             )
             self.launch_started = True
             self._exec_task = asyncio.create_task(
@@ -536,9 +500,28 @@ class SandboxSession[Artifacts]:
                 self.capture_error = error
         if self.owns_sandbox:
             if not self.sandbox_stopped:
-                async with asyncio.timeout(timeout):
-                    await self.sandbox.stop()
-                self.sandbox_stopped = True
+                try:
+                    if self.cleanup_confirmed and self.execution_oom is None:
+                        # A local sandbox stops its workspace, but session runtimes can
+                        # live outside it. Reclaim them after capture while exec works.
+                        async with asyncio.timeout(timeout):
+                            await remove_session_directory(
+                                self.sandbox,
+                                session_dir=self._session_root or self.session_dir,
+                                workdir=self.workdir,
+                                timeout=timeout,
+                                harness=self.harness,
+                            )
+                except Exception:
+                    # Once stop succeeds, there is no live sandbox in which to retry
+                    # removal. Preserve the release result and report any leftovers.
+                    LOG.warning(
+                        "Could not remove %s session files; stopping owned sandbox", self.harness, exc_info=True
+                    )
+                finally:
+                    async with asyncio.timeout(timeout):
+                        await self.sandbox.stop()
+                    self.sandbox_stopped = True
             await self._release_exec(timeout=timeout)
         else:
             await self._release_exec(timeout=timeout)
