@@ -21,10 +21,12 @@ from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, maybe_rollout
 from nemo_gym.models import CaptureStore
 from nemo_gym.rollouts import rollout_collection, run_health_checks
 from nemo_gym.rollouts.harness_capabilities import EvidenceScope, inspect_record
-from nemo_gym.utils import materialized_path_for
+from nemo_gym.utils import gym_commit, materialized_path_for
 from resources_servers.agentic_if_realworld.app import ResourcesConfig, ResourcesServer, Verifier, VerifyRequest
 from resources_servers.agentic_if_realworld.benchmark import core
+from resources_servers.agentic_if_realworld.benchmark.runner import run_cell
 from resources_servers.agentic_if_realworld.benchmark.synthetic import create, review
+from resources_servers.agentic_if_realworld.benchmark.transport import RetryableTransportError
 from resources_servers.agentic_if_realworld.tests.test_transport import Response
 from responses_api_agents.simple_agent.tests.test_app import _make_agent, _mock_response
 
@@ -45,6 +47,11 @@ from responses_api_agents.simple_agent.tests.test_app import _make_agent, _mock_
 def test_adaptive_capture_selected_parameters_and_resume(
     tmp_path, monkeypatch, complete_stage, fail_last_dispatch, interrupted, fresh_resume, multiple, reasoning_effort
 ):
+    monkeypatch.setattr(gym_commit, "installed_gym_commit", lambda: "runtime-revision")
+    # Other CI component workers can change unrelated files in the shared checkout.
+    # Keep dispatch scenarios fixed, then exercise the real identity checks on resume.
+    runtime = core.runtime_identity()
+    monkeypatch.setattr(rollout_driver, "runtime_identity", lambda: copy.deepcopy(runtime))
     create(tmp_path / "data", examples=interrupted or multiple)
     dataset = core.Dataset(tmp_path / "data", synthetic=True)
     prepared = tmp_path / "prepared.jsonl"
@@ -463,6 +470,9 @@ def test_adaptive_capture_selected_parameters_and_resume(
         assert not [finding for finding in findings if finding["assertion"].startswith(("steps.", "ownership."))]
     before = {path: core.digest(path) for path in [*store.root.glob("*"), *verifier.receipt_dir.rglob("*.json")]}
     config.resume_from_cache = True
+    # Another component's generated output must not invalidate a completed run.
+    monkeypatch.setattr(rollout_driver, "runtime_identity", core.runtime_identity)
+    monkeypatch.setattr(gym_commit, "installed_gym_commit", lambda: "runtime-revision-dirty")
     asyncio.run(rollout_driver.run_rollout_collection(config, settings))
     assert inventory_path.read_bytes() == inventory_bytes
     assert len(calls) == last_stage + 1 and len(judge_calls) == int(complete_stage is not None)
@@ -470,6 +480,19 @@ def test_adaptive_capture_selected_parameters_and_resume(
     assert all(core.digest(path) == digest for path, digest in before.items())
     assert core.read(tmp_path / "out.jsonl").get("response") == record.get("response")
     artifacts = {path: path.read_bytes() for path in artifacts}
+    original_digest = core.digest
+    with monkeypatch.context() as context:
+        context.setattr(
+            core,
+            "digest",
+            lambda path: "changed-source"
+            if path.as_posix().endswith("simple_agent/app.py")
+            else original_digest(path),
+        )
+        with pytest.raises(ValueError, match="fingerprint mismatch"):
+            asyncio.run(rollout_driver.run_rollout_collection(config, settings))
+    assert all(path.read_bytes() == saved for path, saved in artifacts.items())
+    assert len(calls) == last_stage + 1 and len(judge_calls) == int(complete_stage is not None)
     model_settings = settings["policy_model"]["responses_api_models"]["agentic_if_text"]
     model_settings["reasoning_effort"] = "max" if reasoning_effort is None else None
     with pytest.raises(ValueError, match="fingerprint mismatch"):
@@ -520,10 +543,18 @@ def test_adaptive_capture_selected_parameters_and_resume(
         assert len(calls) == last_stage + 1 and len(judge_calls) == 1
 
 
-def test_runtime_fingerprint_covers_active_agent_and_core(monkeypatch):
-    from nemo_gym.orchestration import jobs
+@pytest.mark.parametrize("revision", [None, "runtime-revision", "runtime-revision-dirty"])
+def test_runtime_fingerprint_normalizes_only_checkout_dirtiness(monkeypatch, revision):
+    monkeypatch.setattr(gym_commit, "installed_gym_commit", lambda: revision)
+    before = core.runtime_identity()
+    assert before["gym_commit"] == ("runtime-revision" if revision is not None else None)
+    monkeypatch.setattr(gym_commit, "installed_gym_commit", lambda: "different-revision-dirty")
+    assert core.runtime_identity() != before
 
-    monkeypatch.setattr(jobs, "installed_gym_commit", lambda: "runtime-revision")
+
+@pytest.mark.parametrize("source", ["simple_agent/app.py", "nemo_gym/rollouts/rollout_collection.py"])
+def test_runtime_fingerprint_covers_active_agent_and_core(monkeypatch, source):
+    monkeypatch.setattr(gym_commit, "installed_gym_commit", lambda: "runtime-revision")
     before = core.runtime_identity()
     assert before["gym_commit"] == "runtime-revision"
     assert before["source_gym_commit"] == core.read(core.ROOT / "source_manifest.json")["gym_commit"]
@@ -534,6 +565,66 @@ def test_runtime_fingerprint_covers_active_agent_and_core(monkeypatch):
     monkeypatch.setattr(
         core,
         "digest",
-        lambda path: "modified-agent" if path.as_posix().endswith("simple_agent/app.py") else digest(path),
+        lambda path: "modified-source" if path.as_posix().endswith(source) else digest(path),
     )
     assert core.runtime_identity() != before
+
+
+@pytest.mark.parametrize("change", ["judge_schema", "active_python", "generated_output", "generated_python"])
+def test_pending_resume_binds_runtime_inputs(tmp_path, monkeypatch, change):
+    create(tmp_path / "data")
+    dataset = core.Dataset(tmp_path / "data", synthetic=True)
+    benchmark = tmp_path / "Gym/resources_servers/agentic_if_realworld/benchmark"
+    shutil.copytree(core.ROOT, benchmark)
+    monkeypatch.setattr(core, "ROOT", benchmark)
+    monkeypatch.setattr(gym_commit, "installed_gym_commit", lambda: "runtime-revision")
+    before = core.runtime_identity()
+    schema = benchmark / "policy/judge_output.schema.json"
+    assert before["sources"]["policy/judge_output.schema.json"] == core.digest(schema)
+    generate = AsyncMock(return_value={"complete": False, "dispatch_status": "not_dispatched"})
+    verify = AsyncMock(side_effect=AssertionError("Pending policy work must not be judged"))
+    args = {
+        "directory": tmp_path / "run",
+        "settings": {"runtime": before},
+        "generate": generate,
+        "verify": verify,
+    }
+    with pytest.raises(RetryableTransportError, match="before dispatch"):
+        asyncio.run(run_cell(dataset, "synthetic", **args))
+    journal = next((tmp_path / "run/cells").glob("*.json"))
+    state = core.read(journal)
+    assert state["attempts"][0]["dispatch_status"] == "not_dispatched"
+    assert "selected" not in state and "result" not in state
+    saved = {path: path.read_bytes() for path in (tmp_path / "run").rglob("*") if path.is_file()}
+    if change == "judge_schema":
+        value = core.read(schema)
+        kind = value["properties"]["constraints"]["items"]["properties"]["response_evidence"]["properties"]["kind"]
+        kind["enum"] = ["missing_required_element"]
+        core.write(schema, value)
+    elif change == "active_python":
+        source = benchmark.parents[2] / "responses_api_agents/simple_agent/app.py"
+        source.parent.mkdir(parents=True)
+        source.write_text("# Active agent source added after the run started\n")
+    elif change == "generated_python":
+        source = benchmark.parents[2] / "resources_servers/ether0/.ether0/src/ether0/runtime.py"
+        source.parent.mkdir(parents=True)
+        source.write_text("# Another component's generated checkout\n")
+    else:
+        (benchmark / "generated-output.txt").write_text("Unrelated workspace output")
+    monkeypatch.setattr(gym_commit, "installed_gym_commit", lambda: "runtime-revision-dirty")
+    after = core.runtime_identity()
+    args["settings"] = {"runtime": after}
+    if change in {"judge_schema", "active_python"}:
+        assert after != before
+        for validate_only in [True, False]:
+            with pytest.raises(ValueError, match="fingerprint mismatch"):
+                asyncio.run(run_cell(dataset, "synthetic", **args, resume=True, validate_only=validate_only))
+    else:
+        assert after == before
+        assert asyncio.run(run_cell(dataset, "synthetic", **args, resume=True, validate_only=True)) is None
+    assert all(path.read_bytes() == data for path, data in saved.items())
+    assert generate.await_count == 1 and verify.await_count == 0
+    if change in {"generated_output", "generated_python"}:
+        with pytest.raises(RetryableTransportError, match="before dispatch"):
+            asyncio.run(run_cell(dataset, "synthetic", **args, resume=True))
+        assert generate.await_count == 2 and verify.await_count == 0
