@@ -11,12 +11,13 @@ import pytest
 
 @pytest.mark.parametrize("worker", [False, True])
 @pytest.mark.parametrize("entrypoint", ["resources_servers/legal_agent_bench/harbor_bridge.py"])
-def test_worker_entrypoint_exports_app_only_when_selected(entrypoint: str, worker: bool) -> None:
+def test_worker_entrypoint_exports_app_only_when_selected(
+    monkeypatch: pytest.MonkeyPatch, entrypoint: str, worker: bool
+) -> None:
     root = Path(__file__).resolve().parents[3]
-    with (
-        patch("nemo_gym.utils.is_nemo_gym_fastapi_entrypoint", return_value=worker),
-        patch("nemo_gym.server_runtime.SimpleServer.run_webserver", return_value=sentinel.app) as start,
-    ):
+    monkeypatch.setenv("IS_NEMO_GYM_FASTAPI_WORKER", "1" if worker else "0")
+    monkeypatch.setenv("IS_NEMO_GYM_FASTAPI_ENTRYPOINT", entrypoint)
+    with patch("nemo_gym.server_runtime.SimpleServer.run_webserver", return_value=sentinel.app) as start:
         namespace = runpy.run_path(str(root / entrypoint), run_name="lab_worker_test")
     if worker:
         start.assert_called_once_with()
