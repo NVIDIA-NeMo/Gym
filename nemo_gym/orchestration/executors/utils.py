@@ -35,6 +35,21 @@ def flatten_run_args(run: dict[str, Any], prefix: str = "") -> list[str]:
     return args
 
 
+def render_target_args(target: str | None, agent: str | None, sandbox: str | None) -> list[str]:
+    """The shell-quoted TARGET, ``--agent`` and ``--sandbox`` of a task run, which go ahead of its Hydra overrides.
+
+    Empty without a target, so a benchmark that sets none renders exactly as before.
+    """
+    if target is None:
+        return []
+    args = [shlex.quote(target)]
+    if agent is not None:
+        args += ["--agent", shlex.quote(agent)]
+    if sandbox is not None:
+        args += ["--sandbox", shlex.quote(sandbox)]
+    return args
+
+
 _EXPORT_SETTING_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_\-]*")
 
 
