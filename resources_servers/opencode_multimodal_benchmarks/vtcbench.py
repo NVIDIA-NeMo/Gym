@@ -13,6 +13,7 @@ Source: https://github.com/zhuzil/VTC-Bench/blob/
 import re
 
 from resources_servers.opencode_multimodal_benchmarks.mcq import infer_option
+from resources_servers.opencode_multimodal_benchmarks.task_data import reference_options
 
 
 MCQ_PROMPT = (
@@ -79,20 +80,6 @@ def final_answer_text(prediction: str) -> str:
         if match:
             return match.group(1).strip()
     return lines[-1] if lines else ""
-
-
-def reference_options(answer: str, options: dict[str, str]) -> str:
-    """Resolve an MCQ reference to sorted letters without guessing ambiguous option text."""
-    answer = answer.strip()
-    if re.fullmatch(r"[A-Ga-g](?:\s*,\s*[A-Ga-g])*", answer):
-        letters = [letter.strip().upper() for letter in answer.split(",")]
-        if len(set(letters)) != len(letters) or any(letter not in options for letter in letters):
-            raise ValueError("VTCBench reference must select distinct available options")
-        return "".join(sorted(letters))
-    matches = [letter for letter, text in options.items() if text.strip().casefold() == answer.casefold()]
-    if len(matches) != 1:
-        raise ValueError("VTCBench reference text must match exactly one option")
-    return matches[0]
 
 
 def rule_score(task: dict, prediction: str) -> int:

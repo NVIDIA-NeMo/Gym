@@ -8,7 +8,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from nemo_gym.server_runtime.base_server import SimpleServer
+from nemo_gym.server_runtime import SimpleServer
 
 
 @pytest.mark.parametrize(

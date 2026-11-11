@@ -316,8 +316,7 @@ async def _collect_session(
 async def test_opencode_projection_and_shaping_preserve_observed_grading(tmp_path, monkeypatch, judged, reward):
     from copy import deepcopy
 
-    from nemo_gym.trajectory import grading_result_binding
-    from nemo_gym.trajectory.trajectory_record import grading_transform_source
+    from nemo_gym.trajectory.trajectory_record import grading_result_binding, grading_transform_source
 
     saved, collected = await _collect_session(tmp_path, monkeypatch, reward=reward, judged=judged, opencode=True)
     assert saved["reward"] == pytest.approx(reward + (0.1 if reward else 0.02))

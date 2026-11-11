@@ -2,14 +2,27 @@
 # SPDX-License-Identifier: Apache-2.0
 """Task-owned fields shared by the four visual benchmark datasets."""
 
+import re
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from resources_servers.opencode_multimodal_benchmarks.vtcbench import reference_options
-
 
 MetadataString = Annotated[str, Field(json_schema_extra={"legacy_location": "verifier_metadata"})]
+
+
+def reference_options(answer: str, options: dict[str, str]) -> str:
+    """Resolve an MCQ reference to sorted letters without guessing ambiguous option text."""
+    answer = answer.strip()
+    if re.fullmatch(r"[A-Ga-g](?:\s*,\s*[A-Ga-g])*", answer):
+        letters = [letter.strip().upper() for letter in answer.split(",")]
+        if len(set(letters)) != len(letters) or any(letter not in options for letter in letters):
+            raise ValueError("VTCBench reference must select distinct available options")
+        return "".join(sorted(letters))
+    matches = [letter for letter, text in options.items() if text.strip().casefold() == answer.casefold()]
+    if len(matches) != 1:
+        raise ValueError("VTCBench reference text must match exactly one option")
+    return matches[0]
 
 
 class TaskData(BaseModel):

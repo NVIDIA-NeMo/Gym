@@ -132,7 +132,7 @@ async def test_unknown_attempt_plan_cannot_establish_completeness(repeated_bench
 
 @pytest.mark.asyncio
 async def test_collection_sidecars_preserve_planned_repeat_denominator(repeated_benchmark, tmp_path, monkeypatch):
-    from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+    from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper
     from tests.unit_tests.rollouts.test_rollout_collection import (
         FakeResponse,
         install_fake_server_client,
