@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """The agentic IF Resources Server: it owns each episode's task sandbox, lends it to the harness and grades it.
 
-Seed borrows the task sandbox from the row's task backend (Scale-SWE or Terminal-Bench 2.1, through their typed
-resources sessions), prepares the actor's workspace, stages the IF OpenCode plugins and lends the sandbox to the agent.
+Seed borrows the task sandbox from the row's task backend (Scale-SWE or Terminal-Bench 2.1, through their episode
+sessions), prepares the actor's workspace, stages the IF OpenCode plugins and lends the sandbox to the agent.
 Verify reads what OpenCode and the plugins recorded, has the task backend verify the task, persists the episode and
 grades instruction following against the row's checks. Close releases the task backend's session, which stops the
 sandbox.
@@ -32,11 +32,11 @@ from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    ClosedResourcesSessionRecords,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
+    ResourcesSessionFences,
     ReverifyMode,
     SimpleResourcesServer,
 )
@@ -215,7 +215,7 @@ class AgenticIFResourcesServer(SimpleResourcesServer):
     # Sessions hold sandbox connections in this process.
     ray_enabled: ClassVar[bool] = False
     _episodes: dict[str, _Episode] = PrivateAttr(default_factory=dict)
-    _closed: ClosedResourcesSessionRecords[EpisodeId] = PrivateAttr()
+    _fences: ResourcesSessionFences[EpisodeId] = PrivateAttr()
     _grading_slots: asyncio.Semaphore = PrivateAttr()
     _grade_jobs: set[asyncio.Task[IFResult]] = PrivateAttr(default_factory=set)
     _shutting_down: bool = PrivateAttr(default=False)
@@ -229,7 +229,7 @@ class AgenticIFResourcesServer(SimpleResourcesServer):
                 f"opencode_runtime_files are missing: {missing}; for the benchmark, run "
                 "`gym eval prepare --benchmark agentic_if`"
             )
-        self._closed = ClosedResourcesSessionRecords(self.config.session_close_retry_window_seconds)
+        self._fences = ResourcesSessionFences(self.config.session_close_retry_window_seconds)
         self._grading_slots = asyncio.Semaphore(self.config.max_concurrent_grades)
 
     def setup_webserver(self) -> FastAPI:
@@ -268,7 +268,7 @@ class AgenticIFResourcesServer(SimpleResourcesServer):
         session_id = body.resources_session_id
         if self._shutting_down:
             raise HTTPException(503, "The agentic IF server is shutting down")
-        if session_id in self._closed:
+        if session_id in self._fences:
             raise HTTPException(409, "Resources session is already closed")
         episode = self._episodes.setdefault(session_id, _Episode())
         async with episode.lock:
@@ -340,7 +340,7 @@ class AgenticIFResourcesServer(SimpleResourcesServer):
             episode_id=body.episode_id,
             task_id=body.task_id,
         )
-        # Typed backend seed, connection, and the agent_user gate.
+        # Backend episode seed, connection, and the agent_user gate.
         await task.prepare()
         _closing(episode)
         sandbox = task.sandbox
@@ -391,7 +391,7 @@ class AgenticIFResourcesServer(SimpleResourcesServer):
             episode.response = None
             return
         if episode.closing and episode.request is not None:
-            self._closed.remember(session_id, episode.request.episode_id)
+            self._fences.fence(session_id, episode.request.episode_id)
         self._episodes.pop(session_id, None)
 
     # ----------------------------------------------------------------------------------------------------- close
@@ -402,24 +402,24 @@ class AgenticIFResourcesServer(SimpleResourcesServer):
         Closing a closed or never-seeded session succeeds; a failed release raises so the caller can retry it.
         """
         session_id = body.resources_session_id
-        closed = self._closed.get(session_id)
-        if closed is not None:
-            if closed != body.episode_id:
+        fenced_episode = self._fences.get(session_id)
+        if fenced_episode is not None:
+            if fenced_episode != body.episode_id:
                 raise HTTPException(409, "episode_id does not match the resources session")
             return ResourcesCloseSessionResponse(resources_session_id=session_id)
         episode = self._episodes.get(session_id)
         if episode is None:
-            self._closed.remember(session_id, body.episode_id)
+            self._fences.fence(session_id, body.episode_id)
             return ResourcesCloseSessionResponse(resources_session_id=session_id)
         if episode.request is not None and episode.request.episode_id != body.episode_id:
             raise HTTPException(409, "episode_id does not match the resources session")
-        # Fence a seed still in progress before waiting for it: it releases what it allocated itself.
+        # Mark a seed still in progress as closing before waiting for it: it releases what it allocated itself.
         episode.closing = True
         async with episode.lock:
             if self._episodes.get(session_id) is episode:
                 await episode.release()
                 self._episodes.pop(session_id, None)
-            self._closed.remember(session_id, body.episode_id)
+            self._fences.fence(session_id, body.episode_id)
         return ResourcesCloseSessionResponse(resources_session_id=session_id)
 
     # ---------------------------------------------------------------------------------------------------- verify
@@ -434,7 +434,7 @@ class AgenticIFResourcesServer(SimpleResourcesServer):
         episode = self._episodes.get(session_id) if session_id is not None else None
         if episode is not None:
             return await self._verify_live(session_id, episode, body)
-        if session_id in self._closed:
+        if session_id in self._fences:
             raise HTTPException(409, "Resources session is closed")
         if body.deliverables_dir is not None:
             return await self._verify_persisted(body)

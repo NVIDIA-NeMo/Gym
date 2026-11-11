@@ -26,8 +26,8 @@ Each request contains a stable string `task_id` and a complete resolved row
 ```
 
 At `/seed_session`, the Resources Server validates required fields, the
-configured NeMo User Sim revision, and the Nemotron-Personas version (`"0.0.2"`,
-or `"synthetic"` for the committed example rows), and rejects guarded health
+configured NeMo User Sim revision, and the Nemotron-Personas version pinned for
+the row's locale (or `"synthetic"` for the committed example rows), and rejects guarded health
 rows. It then stores the row and its canonical SHA-256 digest. At `/verify`, it
 rejects mismatched episode identity, task identity, row content, or trajectory
 identity.
@@ -90,12 +90,13 @@ activation safely.
 Each verification model request is bounded by
 `model_call_timeout_seconds` (300 seconds by default), and the full sequential
 evaluation is bounded by `evaluation_timeout_seconds` (1200 seconds by
-default). Seeded Resources Server sessions expire after `session_ttl_seconds`
+default). Seeded resources sessions expire after `session_ttl_seconds`
 (1980 seconds by default).
 
 The Environment Server registers cleanup before every seed request and closes
-participant and Resources Server sessions on every outcome. Closing is
-idempotent, and a short-lived tombstone prevents a delayed seed from recreating
-closed state. A verify for an unknown or closed Resources Server session returns
-a masked sample with `failure_kind` `session_lost`, and one whose seed outlived
+participant and resources sessions on every outcome. Closing is
+idempotent, and a fence that expires after `session_ttl_seconds` prevents a
+delayed seed from recreating closed state. A verify for an unknown or closed
+resources session returns a masked sample with `failure_kind`
+`session_lost`, and one whose seed outlived
 `session_ttl_seconds` a masked sample with `session_expired`.

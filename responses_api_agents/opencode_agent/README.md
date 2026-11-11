@@ -13,16 +13,24 @@ It preserves the existing command restrictions; run configs can override individ
 permissions under `opencode_agent.responses_api_agents.opencode_agent.opencode_config.permission`.
 These command filters are not network or filesystem isolation.
 They are adapted from Gym's benchmark runner restrictions, not OpenCode defaults,
-and apply to local calls too. Subagents (`task`) are intentionally enabled for this
+and apply to local calls too. The profile also denies the `webfetch`, `websearch` and
+`skill` tools. Subagents (`task`) are intentionally enabled for this
 general-purpose integration; the separate `opencode_sandboxed_agent` benchmark
-profile still disables them. Use explicit tool overrides when comparing scores.
+profile still disables them. Use explicit `permission` overrides when comparing scores.
+The command filters were written for SWE-style repositories: they also deny Git history
+commands (`git reflog`, `git show`, `git log --all`, ...) and every `git fetch`, which some
+terminal tasks need (for example recovering a lost commit or fetching a local bundle).
+Allow those per run with `permission.bash` rules when a benchmark requires them.
+Restrict tools with `permission` rules, not a `tools` map: OpenCode 1.17.11 places the keys
+a `tools` map names before the permission map's `"*"` rule and applies the last matching rule,
+so `"*": allow` then overrides every rule for those keys (naming `bash` voids every command filter).
 
-Existing flat-row benchmarks keep the `opencode_sandboxed_agent` entrypoint
-and configuration for their Resources-owned lifecycle.
+Other flat-row benchmarks keep the `opencode_sandboxed_agent` entrypoint and configuration for their
+Resources-owned lifecycle. HLE and APEX Shortlist run this agent from their plain-named OpenCode presets, with
+`configs/profiles/offline_science.yaml`; their `*_legacy_agent` presets keep the deprecated agent.
 
 The old `opencode_sandboxed_agent` package remains separate; only its shell PATH
-quoting is fixed for directories containing spaces. No benchmark recipes or
-Resources allowlists are migrated by this integration.
+quoting is fixed for directories containing spaces.
 
 ## EnvironmentServer sessions
 
@@ -72,6 +80,24 @@ create an agent-owned sandbox; it is destroyed on close. Verifiers that inspect
 task files must use a Resources-owned sandbox. Missing access and provider is an
 error, never a fallback to local execution.
 
+`network_access: model_only` limits an agent-owned sandbox's egress to the model
+server's host; `model_and_tools` also allows the host of each MCP grant. Each
+allowed host is open on every port. The OpenSandbox policy is set when the sandbox
+is created, so a session that borrows a task sandbox rejects any value other than
+`inherit` (the default, the provider's network), and it cannot be combined with
+`sandbox_config.provider_options.network_policy`. Such a sandbox cannot download
+the runtime: set `sandbox_executable_path` and `sandbox_executable_sha256`, or use an
+image that already holds the runtime at `/tmp/nemo-gym-opencode-runtime-<opencode_version>`
+(see [Offline sandbox runtimes](#offline-sandbox-runtimes-and-native-model-identity)).
+Without either, the seed is accepted and each attempt then fails downloading OpenCode.
+Preinstall `rg` too, since OpenCode otherwise tries to download ripgrep on demand.
+Under `model_only`, a required MCP grant is refused at seed with a 422, since the
+policy would block its host; under `model_and_tools`, a grant at an address the
+sandbox cannot reach, such as loopback, refuses the seed. A borrowed sandbox relies on
+its owner's network policy. The policy is only as strong as the OpenSandbox server's
+egress mode: in `dns` mode only name resolution is filtered, so a hard-coded IP
+bypasses it; `dns+nft` also enforces it at the IP layer and is needed for full isolation.
+
 Session setup installs the pinned OpenCode runtime inside the sandbox. The image
 needs Linux and Bash; it does not need Python. Missing Bash can be installed with
 apt-get or apk when running as root; otherwise preinstall it.
@@ -103,7 +129,7 @@ The CLI must exit before
 its SQLite database is copied to the agent server and exported there; services must use task-owned files rather than the
 agent session directory, which close removes. Capture requires confirmed termination.
 Missing evidence remains retryable; a final negative receipt skips capture and verification
-but permits connection release. Successful close receipts are retained for `session_close_retry_window_seconds` (default 300).
+but permits connection release. A successful close fences the session and keeps its saved reply for `session_close_retry_window_seconds` (default 300).
 Session state lives in the worker that seeded the session.
 With several agent workers, session routing sends each session's requests to the worker that seeded it.
 Provider TTL and the episode owner handle abandoned sessions. Process cleanup is not a hostile-code security boundary.
@@ -116,9 +142,31 @@ its private HOME. The adapter requires a fresh successful-initialization receipt
 the task environment hook before accepting a gradable result. A missing or invalid
 receipt fails the activation even if the CLI ignored a plugin-loading error.
 
-The session path accepts one text task, optional system/developer text and
-`instructions`. Request `temperature` and `top_p` are applied to every OpenCode agent
-(see [Owner extensions](#owner-extensions)). Other controls, images, history replay and
+The session path accepts one user task, optional system/developer text and
+`instructions`. The user task may include images as base64 data-URI `input_image` parts,
+alongside nonempty text. The adapter writes each image to `/tmp/nemo-gym-media/<sha256>.<ext>`
+with `nemo_gym.sandbox.stage_media` and attaches it with `opencode run --file`. OpenCode shows
+that path to the model, so naming the file by its content keeps the prompt the same across
+rollouts of a task. In a borrowed sandbox these files remain after the session closes. OpenCode places the images, in order, before the task text and does
+not use the `detail` setting. A session declares image input on the Gym model when the prompt has images or
+when the agent configuration sets `image_input: true`. With image input declared, OpenCode also sends the model
+images its tools return, such as task files it reads, and a text-only deployment rejects those requests. Without it,
+OpenCode replaces such an image with an error text telling the model it cannot read images. Once an activation
+declares image input, later activations of the session keep declaring it, because OpenCode resends earlier images
+with the session history. Set `image_input: true` for a vision model whose tasks keep their images in the sandbox,
+where the prompt has none. A session that declares image input also lifts OpenCode's image limits, so the model
+gets each image's own bytes: by default OpenCode shrinks or re-encodes an image over 2000 px on a side or 5 MiB of
+base64. A run on an endpoint with image limits can restore them with `attachment` in `opencode_config`, which
+replaces the lifted limits; a limit it leaves out returns to OpenCode's default.
+In a single-activation session, the timeout budget starts once the activation holds a
+concurrency slot. Staging the activation's files, images included, spends it, OpenCode runs
+for the rest, and a budget that runs out before launch fails the activation.
+Images outside the user task and image URLs are rejected. Saved trajectories keep only the
+text of each message, so they do not contain the images. Request `temperature` and `top_p` are applied to every OpenCode agent
+(see [Owner extensions](#owner-extensions)). Gym agents read a request `max_output_tokens` as the
+limit for each model call, as `simple_agent` does, and NeMo RL sets it on every row. It passes when
+it is at least the configured `max_output_tokens`, OpenCode's limit for each call; a smaller value
+returns 422. As in `simple_agent`, nothing limits the sum of output tokens over a session's calls. Other controls, history replay and
 required direct-HTTP tool grants are rejected. MCP tool grants become OpenCode `remote` MCP servers, and the model sees
 their tools as `<grant>_<tool>`. `mcp_tool_timeout_seconds` sets their connection and per-call
 timeout; without it, OpenCode allows 30 seconds to connect and 60 seconds per call. A call still
@@ -130,23 +178,38 @@ also fails, because nothing confirms its required tools; a run that failed for a
 that cause. `context_window` and `max_output_tokens` are independent
 config settings; leave room for the prompt in the served model's context. Request-level overrides
 are not silently ignored.
-Session `opencode_config` permits only `permission` and `tools`, preserving Gym capture.
+Session `opencode_config` permits only `permission`, `tools`, `attachment`, `compaction.auto` and
+`agent.build.steps`, preserving Gym capture. With token capture on, a session refuses
+`agent.build.steps` (see below).
 OpenCode turns a `tools` map into base permission rules and merges `permission` on top,
 so a later `permission` rule such as `"*": "allow"` re-enables tools that `tools`
 disabled. Set `tools: null` (or `{}`) to make `permission` the only rule source; the
 adapter then omits `tools` and passes `permission` exactly as given.
+Setting `compaction.auto: false` keeps OpenCode from
+summarizing the session and continuing from the summary, in model calls that training cannot join
+to the scored call; a run that fills the context then ends with a context-limit error.
+`agent.build.steps` sets the step limit of the `build` agent, which the session runs, for each
+prompt. From the call at the limit on, OpenCode adds an assistant message to each request that
+asks for a text answer. It still offers the tools, so a model that keeps calling them runs past
+the limit. OpenCode counts each pass of its session loop toward the limit, compaction passes included,
+and compaction does not restart the count. A response whose prompt reached the limit carries
+`metadata.harness_step_limit_reached: "true"`. Token capture recognizes this message
+(`nemo_gym.models.token_capture.harness_notes`) and joins the calls after it to the earlier calls of
+the rollout.
 
 Text, reasoning, tool results, partial output and usage come from the persisted
 session tree. Unavailable artifacts or usage details are reported as observation
 gaps. Reported API errors retain their classified cause for the Environment Server to decide grading and retries; worker and cleanup failures remain execution errors; explicit limits can retain
 gradable partial output. This path is eval-only; working inference does not establish
-training token-ID/logprob support or benchmark accuracy.
+training token-ID/logprob support or benchmark accuracy. Sandbox observations use the shared
+`FailureStage` vocabulary: execution is `agent`, while OpenCode’s own setup failure events use `seed`.
+An existing failure stage is preserved when forwarded; scoring and retries belong to the caller’s outcome policy.
 
 For local calls, OpenCode is installed on first use in a shared background-thread
 task, without blocking the event loop. Failed installs can be retried. A configured `repo_dir` is
 preserved; otherwise the temporary workspace is removed after the call. A local
-working directory is not filesystem isolation. Existing sandboxed benchmarks keep
-using `opencode_sandboxed_agent` directly; there is no bridge or execution-mode flag.
+working directory is not filesystem isolation. There is no bridge or execution-mode flag: a sandboxed benchmark
+moves to this agent by changing its preset, as HLE and APEX Shortlist do.
 
 `configs/profiles/benchmark.yaml` is a swappable profile for benchmarks whose Resources server supplies no sandbox,
 such as HLE. It leaves `resources_server.name` unset (`???`), so Gym composes this agent onto the benchmark's own
@@ -155,19 +218,20 @@ model server by address, so the profile sets `use_absolute_ip: true` and keeps t
 on `127.0.0.1`: the head server's config endpoint is unauthenticated, and an unseeded request to the agent runs the
 harness on the Gym host. The profile sets the sandbox's lifetime (`ttl_s`), which OpenSandbox otherwise ends after
 10 minutes. Supply the image in `sandbox_config.image`; set other `sandbox_config` keys under the profile's own
-instance name, `opencode_agent.responses_api_agents.opencode_agent.sandbox_config`.
+instance name, `opencode_agent.responses_api_agents.opencode_agent.sandbox_config`. It sets `network_access: model_only`,
+so the sandbox reaches only the model server; a search preset overrides it with `model_and_tools`. A restricted
+sandbox cannot download OpenCode, so supply `sandbox_executable_path` and `sandbox_executable_sha256` for a binary
+in the image.
 
-The pairing also needs one Environment Server setting. HLE's Environment Server, like those of HLE Diamond, GPQA and
-APEX Shortlist, grants the agent its Resources server over `direct_http`, which this agent cannot use, so every seed
-fails with a 422. The judge offers the agent no tools, so load this alongside the benchmark, the profile and the
-model config, under the benchmark's own Environment Server name (`gym env resolve` shows it):
+`configs/profiles/offline_science.yaml` builds on `benchmark.yaml` for the offline scientific presets
+(`benchmarks/hle/opencode.yaml`, `opencode_search.yaml`, `benchmarks/apex_shortlist/opencode.yaml`). It runs the
+offline science image's pinned OpenCode binary with a 32,768-token output cap in a 229,376-token context, the
+scientific-tools system prompt and subagents denied, and binds only the model server to the address sandboxes reach
+(`absolute_ip_server_types`). The HLE README lists how it differs from the deprecated preset.
 
-```yaml
-hle_equivalence_llm_judge_environment_server:
-  environment_servers:
-    single_agent_turn_legacy:
-      resources_tool_transports: []
-```
+HLE, HLE Diamond, GPQA and APEX Shortlist need no Environment Server setting: their judges serve no tools, so their
+Environment Servers grant the agent none. This agent rejects a required `direct_http` grant with a 422, so a
+benchmark whose Resources server serves its tools over direct HTTP does not pair with it.
 
 ## Configuration compatibility
 
@@ -187,7 +251,7 @@ stricter, single-activation contract described above. The intentional difference
 | System text | Prepended to the user prompt; request `instructions` is not applied | Config/system/developer text and request `instructions` form an instructions file |
 | Provider name | `nemo` | `nemo_gym` (internal alias for the same Gym model server) |
 | `env`, `extra_args`, custom `command` | Applied | Rejected at seed, not silently ignored |
-| Request controls | Existing local compatibility behavior | `temperature` and `top_p` applied with OpenCode 1.17.11; other controls rejected explicitly |
+| Request controls | Existing local compatibility behavior | `temperature` and `top_p` applied with OpenCode 1.17.11; `max_output_tokens` (a per-call limit) accepted when at least the configured limit; other controls rejected explicitly |
 
 Both paths honor configured `thinking` and declare interleaved `reasoning_content`.
 Different prompt placement can affect results; this integration does not establish
@@ -218,8 +282,9 @@ Only the new user input is sent on each call. The adapter resumes the same OpenC
 session, retaining HOME, OpenCode history and compaction state. Runtime installation
 happens once at seed using the existing installer. Identical retries join or replay
 the original response; conflicting inputs, skipped indices and concurrent new
-activations fail. Input validation runs before an index is consumed. A timeout
-before the first process launch leaves the next activation able to start the conversation.
+activations fail. Input validation runs before an index is consumed. When the activation's
+budget runs out before the first process launch, the next activation can still start the
+conversation. A sandbox error while staging prompt images fails the activation instead.
 Retry state is process-local and retained for the session lifetime, without crash recovery.
 
 The existing `metadata.agent_timeout_sec` budget is capped by the configured timeout.
@@ -240,11 +305,12 @@ confirmation. A final negative termination receipt fails the activation and skip
 verification; close releases the borrowed connection with `cleanup_confirmed: false`.
 The task sandbox remains available to its owner for verification or teardown.
 
-Ordinary single-turn sessions keep their existing protocol. With `return_session_trajectory:
-true`, their close also returns the session's trajectory (one turn per saved assistant reply,
-compaction summaries excluded), so rollout collection joins captured calls to those turns and
-the summary call stays on the compaction record. Without it, collection builds one turn per
-captured call, and the summary call of a compaction is counted as a step too.
+By default (`return_session_trajectory: true`), the close of an ordinary single-turn session also
+returns the session's trajectory (one turn per saved assistant reply, compaction summaries
+excluded), so rollout collection joins captured calls to those turns, the harness evidence checks
+match each model call to its step, and the summary call stays on the compaction record. With
+`false`, collection builds one turn per captured call with no message ID, so every call is reported
+as an unmatched assistant message and the summary call of a compaction is counted as a step too.
 
 ### Offline sandbox runtimes and native model identity
 
@@ -266,7 +332,7 @@ These sandbox-session settings are off by default; unset, sessions behave as des
 above. Local calls do not use them. Each is general-purpose: the sandbox owner (usually
 the Resources Server that lends the sandbox) supplies the files, and the adapter stages,
 checks or reads them without any benchmark-specific logic. Seed refuses an unusable
-setting or owner-supplied input with `AgentSeedRejectedError`, a final 422, so the
+setting or owner-supplied input with `AgentSeedRejectedError`, a terminal 422, so the
 episode fails once with the reason; a failure a retry can fix stays a 5xx. In the
 sandbox, their checks, staging, import and export need only a POSIX shell and coreutils
 (`sha256sum`, and `tar` for an archive); the agent server reads OpenCode's session store
@@ -333,6 +399,15 @@ sha256sum opencode-1.17.11-plugin-dependencies.tar.gz
 
 An `rg` already on the task `PATH` takes precedence over the pinned copy, as in stock
 OpenCode.
+
+### Repository project config
+
+Sessions ignore the task repository's OpenCode project config and instruction files
+(`AGENTS.md` or `CLAUDE.md`, `opencode.json`, `.opencode/`) unless `session_project_config`
+is set. With it, the run reads them as OpenCode does when started in that repository; the
+configuration Gym passes is merged last and still takes precedence. A repository can then
+add instructions, agents, plugins or tools, so set it only for task repositories you would
+run OpenCode in yourself. Export and import never read project config.
 
 ### Session exports
 

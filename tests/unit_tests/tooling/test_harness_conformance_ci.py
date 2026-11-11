@@ -167,11 +167,14 @@ def test_custom_check_is_separate_from_required_ci_and_probe_permissions():
     root = Path(__file__).resolve().parents[3]
     main = yaml.safe_load((root / ".github/workflows/cicd-main.yml").read_text())["jobs"]
     workflow = yaml.safe_load((root / ".github/workflows/harness-conformance.yml").read_text())
-    assert main["harness_conformance"]["needs"] == ["pre-flight"]
+    assert main["harness_conformance"]["needs"] == ["pre-flight", "classify_changes"]
     assert main["harness_conformance"]["name"] == "Harness conformance (non-blocking)"
     assert "harness_conformance" not in main["Nemo_CICD_Test"]["needs"]
     assert "harness_conformance" not in main["notify-failure"]["needs"]
     assert workflow["permissions"] == {"contents": "read"}
+    assert workflow["env"]["TESTED_SHA"] == "${{ inputs.checkout-ref || github.sha }}"
+    renderer = [step for job in workflow["jobs"].values() for step in job.get("steps", [])]
+    assert any('--commit "$TESTED_SHA"' in step.get("run", "") for step in renderer)
     assert workflow["defaults"]["run"]["shell"] == "bash"
     assert not workflow["jobs"]["probe"].get("continue-on-error", False)
     assert workflow["jobs"]["probe"]["strategy"]["fail-fast"] is False

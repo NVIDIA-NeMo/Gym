@@ -68,11 +68,13 @@ from nemo_gym.server_runtime import (
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
     ResourcesSessionConflictError,
-    ResourcesSessionFence,
+    ResourcesSessionFences,
+    ResourcesSessionLocks,
     ResourcesSessionLostError,
     SimpleResourcesServer,
     lost_session_verification,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
 from nemo_gym.verification import JUDGE_FAILURES, JudgeError, call_judge, is_judge_failure
 from resources_servers.browsecomp_advanced_harness.judge_prompt import JUDGE_PROMPT_TEMPLATE
 from resources_servers.browsecomp_advanced_harness.sandbox import (
@@ -919,7 +921,7 @@ class _PageWriter:
         return f"pages/{fname}"
 
 
-# A typed seed's resources_session_id names its workspace directory, so it must be one plain path component.
+# An episode seed's resources_session_id names its workspace directory, so it must be one plain path component.
 _WORKSPACE_SESSION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 # What the model reads when the tool sandbox fails; the provider's detail stays in the server log.
 _SHELL_FAILURE_OUTPUT = "[bash error: the sandbox could not run the command]\n[exit_code=-2]"
@@ -972,9 +974,10 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
     _num_requests: int = 0
     _session_id_to_metrics: Optional[Dict[str, TavilySearchMetrics]] = PrivateAttr(default=None)
     _session_workspaces: Dict[str, "_PageWriter"] = PrivateAttr(default_factory=dict)
-    # Environment Server sessions by resources_session_id, with the episode and task each was seeded for.
-    _typed_sessions: Dict[str, tuple[EpisodeId, TaskId]] = PrivateAttr(default_factory=dict)
-    _fence: Optional[ResourcesSessionFence] = PrivateAttr(default=None)
+    # Episode sessions by resources_session_id, with the episode and task each was seeded for.
+    _episode_sessions: Dict[str, tuple[EpisodeId, TaskId]] = PrivateAttr(default_factory=dict)
+    _locks: ResourcesSessionLocks = PrivateAttr(default_factory=ResourcesSessionLocks)
+    _fences: Optional[ResourcesSessionFences[EpisodeId]] = PrivateAttr(default=None)
     _bash_semaphore: Optional[asyncio.Semaphore] = PrivateAttr(default=None)
     _workspace_root: Optional[str] = PrivateAttr(default=None)
     _shell_sessions: dict[str, BrowsecompShellSandbox] = PrivateAttr(default_factory=dict)
@@ -1019,7 +1022,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             print(f"Search provider: exa ({len(self._exa_clients)} key(s))")
 
         self._session_id_to_metrics = defaultdict(TavilySearchMetrics)
-        self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
+        self._fences = ResourcesSessionFences(self.config.session_close_retry_window_seconds)
 
         self._exclude_domains = self._parse_exclude_domains()
         self._page_cache: dict[str, str] = {}
@@ -1047,13 +1050,13 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         @asynccontextmanager
         async def lifespan_wrapper(app):
             async def close_shell(sid: str) -> None:
-                # Best effort. Five close timeouts leave room for a running tool's cleanup under the fence and for
+                # Best effort. Five close timeouts leave room for a running tool's cleanup under the lock and for
                 # the release's phases, each bounded by one close timeout. gym env kills this process one second
                 # after its interrupt unless server_shutdown_timeout_seconds is raised, and Enroot ignores ttl_s, so
                 # a sandbox left behind there needs `enroot remove`.
                 try:
                     async with asyncio.timeout(self.config.sandbox_close_timeout_seconds * 5):
-                        async with self._fence.locked(sid):
+                        async with self._locks.locked(sid):
                             await self._release_session(sid)
                 except Exception:
                     LOG.exception("Could not release BrowseComp shell session %s at shutdown", sid)
@@ -1065,6 +1068,11 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 await asyncio.gather(*(close_shell(sid) for sid in list(self._shell_sessions)))
                 if self.config.dump_session_id_to_metrics_on_exit:
                     out_file = Path(__file__).parent / "session_id_metrics.json"
+                    if is_nemo_gym_fastapi_worker():
+                        # With num_workers > 1, each worker holds only the sessions it served.
+                        # Each writes its own file, so one worker's dump does not overwrite another's.
+                        # The name starts with the server's main process ID, so one run's files share a prefix.
+                        out_file = out_file.with_name(f"session_id_metrics.{os.getppid()}.{os.getpid()}.json")
                     print(f"Dumping session_id metrics to {out_file}")
 
                     to_dump = {k: v.model_dump(mode="json") for k, v in self._session_id_to_metrics.items()}
@@ -1078,13 +1086,13 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
     async def seed_session(
         self, request: Request, body: ResourcesSeedSessionRequest | BaseSeedSessionRequest
     ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
-        """Open a session's workspace and, for an Environment Server session, its tool sandbox.
+        """Open a session's workspace and, for an episode session, its tool sandbox.
 
-        A typed seed is keyed by ``resources_session_id`` and validates ``task_data``. With ``workspace: per_session``
+        An episode seed is keyed by ``resources_session_id`` and validates ``task_data``. With ``workspace: per_session``
         it also starts the tool sandbox. A repeat for the same episode and task reuses the session, and another
         episode or a closed session answers 409. A flat ``/run`` seed is keyed by the cookie, replaces earlier state
         for it, and defers the sandbox to the first ``bash_command``. A missing or invalid sandbox configuration
-        answers 422, and so does a typed seed whose provider cannot be created or whose sandbox shares the host's PID
+        answers 422, and so does an episode seed whose provider cannot be created or whose sandbox shares the host's PID
         namespace.
         """
         if self.config.workspace == "per_session":
@@ -1094,16 +1102,16 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             # without /verify (after a timeout, for example), so its sandbox starts with the first bash_command: only
             # a run that used the shell can leave one behind, and a failed start cannot strand this seed's workspace.
             sid = request.session[SESSION_ID_KEY]
-            async with self._fence.locked(sid):
+            async with self._locks.locked(sid):
                 if self.config.workspace == "per_session":
                     await self._release_session(sid)
                     self._session_workspaces[sid] = _PageWriter(Path(self._workspace_root) / sid)
             return BaseSeedSessionResponse()
 
         sid = body.resources_session_id
-        async with self._fence.locked(sid):
-            self._fence.raise_if_closed(sid)
-            identity = self._typed_sessions.get(sid)
+        async with self._locks.locked(sid):
+            self._fences.raise_if_fenced(sid)
+            identity = self._episode_sessions.get(sid)
             if identity is None:
                 try:
                     BrowsecompTaskData.model_validate(body.task_data)
@@ -1115,7 +1123,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                             f"resources_session_id {sid!r} cannot name a workspace directory"
                         )
                     self._session_workspaces[sid] = _PageWriter(Path(self._workspace_root) / sid)
-                self._typed_sessions[sid] = (body.episode_id, body.task_id)
+                self._episode_sessions[sid] = (body.episode_id, body.task_id)
             elif identity != (body.episode_id, body.task_id):
                 raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
             if self.config.workspace == "per_session":
@@ -1128,16 +1136,16 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
     async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
         # Sessions are keyed by resources_session_id, so a close without the seed's cookie releases the same one.
         sid = body.resources_session_id
-        async with self._fence.locked(sid):
-            closed_episode = self._fence.closed_episode(sid)
-            if closed_episode is None:
-                identity = self._typed_sessions.get(sid)
+        async with self._locks.locked(sid):
+            fenced_episode = self._fences.get(sid)
+            if fenced_episode is None:
+                identity = self._episode_sessions.get(sid)
                 if identity is not None and identity[0] != body.episode_id:
                     raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
                 await self._release_session(sid)
-                self._typed_sessions.pop(sid, None)
-                self._fence.mark_closed(sid, body.episode_id)
-            elif closed_episode != body.episode_id:
+                self._episode_sessions.pop(sid, None)
+                self._fences.fence(sid, body.episode_id)
+            elif fenced_episode != body.episode_id:
                 raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
         return ResourcesCloseSessionResponse(resources_session_id=sid)
 
@@ -1234,7 +1242,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
     def _open_session_id(self, request: Request) -> str:
         """The request's session, refusing a closed one so a late tool call cannot recreate its workspace."""
         sid = request.session[SESSION_ID_KEY]
-        if self._fence.closed_episode(sid) is not None:
+        if self._fences.get(sid) is not None:
             raise ResourcesSessionLostError(f"Resources session {sid} is closed")
         return sid
 
@@ -1258,14 +1266,14 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         Serialized with the session's other tool calls, verify and close. A command the guard blocks answers
         ``[exit_code=-3]`` without starting a sandbox. Otherwise it runs in the session's Resources-owned sandbox,
-        started at seed for an Environment Server session and on the first unblocked command for an agent's
+        started at seed for an episode session and on the first unblocked command for an agent's
         ``/run``; with no ``sandbox_provider`` and ``allow_host_execution`` it runs in-process. A command the
         supervisor ends at its deadline answers ``[exit_code=-1]``. A sandbox that cannot start or run it answers
         ``[exit_code=-2]`` and marks the session so ``/verify`` masks the sample (``provider_unavailable``); after a
         failed start, later commands get the same answer without another start. A closed session answers 404.
         """
         sid = self._open_session_id(request)
-        async with self._fence.locked(sid):
+        async with self._locks.locked(sid):
             self._open_session_id(request)
             page_writer = self._get_page_writer(sid)
             if page_writer is None:
@@ -1583,7 +1591,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return "\n".join(blocks)
 
     async def search(self, request: Request, body: TavilySearchRequest) -> TavilySearchResponse:
-        async with self._fence.locked(request.session[SESSION_ID_KEY]):
+        async with self._locks.locked(request.session[SESSION_ID_KEY]):
             self._open_session_id(request)
             return await self._search(request, body)
 
@@ -1627,7 +1635,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return TavilySearchResponse(results_string="\n\n".join(results))
 
     async def browse(self, request: Request, body: BrowseRequest) -> BrowseResponse:
-        async with self._fence.locked(request.session[SESSION_ID_KEY]):
+        async with self._locks.locked(request.session[SESSION_ID_KEY]):
             self._open_session_id(request)
             return await self._browse(request, body)
 
@@ -1733,9 +1741,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         Masks the sample when the session's tool sandbox failed (``provider_unavailable``), even if the judge could
         not be reached, or when the session is already closed (``session_lost``). A judge failure on an unmasked
         sample raises. For an agent's ``/run``, which sends no close, verify then releases the session's sandbox,
-        workspace and metrics; an Environment Server session is released by ``/close_session``.
+        workspace and metrics; an episode session is released by ``/close_session``.
         """
-        async with self._fence.locked(request.session[SESSION_ID_KEY]):
+        async with self._locks.locked(request.session[SESSION_ID_KEY]):
             return await self._verify(request, body)
 
     async def _verify(self, request: Request, body: TavilySearchVerifyRequest) -> TavilySearchVerifyResponse:
@@ -1749,7 +1757,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         # browsecomp_agent marks a rollout it stopped at rollout_timeout_s.
         timed_out = bool(getattr(body.response, "timed_out", False))
         sid = request.session[SESSION_ID_KEY]
-        if self._fence.closed_episode(sid) is not None:
+        if self._fences.get(sid) is not None:
             # Masked although the score reads only the response, so every server under the resources session contract
             # treats a closed session alike. single_agent_turn verifies before it closes, so only an out-of-order verify
             # lands here. A session the fence never closed, such as an agent's /run, is graded as usual.
@@ -1802,8 +1810,8 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 update={"mask_sample": True, "failure_kind": PROVIDER_UNAVAILABLE, "failure_reason": shell_failure}
             )
 
-        if sid not in self._typed_sessions:
-            # An agent's /run sends no close, so its verify releases the session. An Environment Server session is
+        if sid not in self._episode_sessions:
+            # An agent's /run sends no close, so its verify releases the session. An episode session is
             # released by its close, so a re-sent or retried verify still finds the shell failure and the metrics.
             await self._release_session(sid)
 
@@ -2001,3 +2009,6 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     TavilySearchResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = TavilySearchResourcesServer.run_webserver()  # noqa: F401
