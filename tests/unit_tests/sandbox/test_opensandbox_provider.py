@@ -1505,6 +1505,89 @@ async def test_background_submit_failure_is_not_replayed(
     assert commands.submits == 1
 
 
+def _sdk_transport_failure(*chain: BaseException) -> Exception:
+    """``chain`` (outermost first) wrapped the way the OpenSandbox SDK wraps its HTTP client's error."""
+    from opensandbox.exceptions import SandboxInternalException
+
+    for outer, inner in zip(chain, chain[1:]):
+        outer.__cause__ = inner
+    return SandboxInternalException("Network connectivity error", cause=chain[0])
+
+
+def _aiohttp_connect_timeout() -> list[BaseException]:
+    import aiohttp
+
+    os_error = TimeoutError(110, "Connection timed out")
+    connector = aiohttp.ClientConnectorError(SimpleNamespace(host="sandbox.invalid", port=80, ssl="default"), os_error)
+    return [httpx.ConnectError(str(connector)), connector, os_error]
+
+
+def _aiohttp_reset_after_send() -> list[BaseException]:
+    import aiohttp
+
+    client_error = aiohttp.ClientOSError(104, "Connection reset by peer")
+    return [httpx.ConnectError(str(client_error)), client_error, ConnectionResetError(104, "Connection reset by peer")]
+
+
+@pytest.mark.parametrize(
+    ("chain", "resent"),
+    [
+        pytest.param(lambda: [httpx.ConnectError("[Errno 110] Connection timed out")], True, id="connect"),
+        pytest.param(lambda: [httpx.ConnectTimeout("connect")], True, id="connect-timeout"),
+        pytest.param(lambda: [httpx.PoolTimeout("pool")], True, id="pool-timeout"),
+        pytest.param(_aiohttp_connect_timeout, True, id="aiohttp-connect"),
+        pytest.param(_aiohttp_reset_after_send, False, id="aiohttp-reset-after-send"),
+        pytest.param(lambda: [httpx.ReadTimeout("read")], False, id="read-timeout"),
+        pytest.param(lambda: [httpx.RemoteProtocolError("disconnected")], False, id="dropped"),
+    ],
+)
+async def test_background_submit_is_sent_again_only_when_it_never_left_the_client(
+    monkeypatch: pytest.MonkeyPatch, chain: Any, resent: bool
+) -> None:
+    class FakeCommands:
+        submits = 0
+
+        async def run(self, command: str, *, opts: Any) -> Any:
+            self.submits += 1
+            if self.submits == 1:
+                raise _sdk_transport_failure(*chain())
+            return SimpleNamespace(id="exec-42")
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            return SimpleNamespace(running=False, exit_code=0, error=None)
+
+        async def get_background_command_logs(self, execution_id: str) -> Any:
+            return SimpleNamespace(content="done", cursor=None)
+
+    commands = FakeCommands()
+    provider, handle = _background_provider(monkeypatch, commands, retries=3, retry_delay_s=0, retry_max_delay_s=0)
+
+    if resent:
+        result = await provider.exec(handle, "bash solve.sh", timeout_s=5)
+        assert result.return_code == 0
+        assert commands.submits == 2
+    else:
+        with pytest.raises(NgFailureEvent):
+            await provider.exec(handle, "bash solve.sh", timeout_s=5)
+        assert commands.submits == 1
+
+
+async def test_unsent_submit_stops_at_the_operation_retry_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeCommands:
+        submits = 0
+
+        async def run(self, command: str, *, opts: Any) -> Any:
+            self.submits += 1
+            raise _sdk_transport_failure(httpx.ConnectError("[Errno 110] Connection timed out"))
+
+    commands = FakeCommands()
+    provider, handle = _background_provider(monkeypatch, commands, retries=2, retry_delay_s=0, retry_max_delay_s=0)
+
+    with raises_failure(PROVIDER_UNAVAILABLE):
+        await provider.exec(handle, "bash solve.sh", timeout_s=5)
+    assert commands.submits == 3
+
+
 async def test_background_signal_exit_near_deadline_keeps_unknown_cause(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

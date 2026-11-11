@@ -1,7 +1,7 @@
 {
   "source_run": "https://github.com/NVIDIA-NeMo/Gym/actions/runs/41587144451",
   "source_sha": "e86d0371b405266081be8ec66e0e543c512c37bb",
-  "method": "Estimated seconds between timestamped verbose pytest node lines, charged to the preceding file; core pass only, excludes collection and sandbox.",
+  "method": "Estimated seconds between timestamped verbose pytest node lines, charged to the preceding file; core pass only, excludes collection and sandbox. Environment migration module weights use summed JUnit testcase times from run 42817732452 (head 885364925b4d150619cea7f4f6fdda4fafecc1f4), regrouped by their destination file.",
   "files": {
     "tests/e2e/checkpoint/test_checkpoint_e2e.py": 0.05,
     "tests/e2e/checkpoint/test_checkpoint_multiworker_stress.py": 0.01,
@@ -125,7 +125,7 @@
     "tests/unit_tests/telemetry/test_spans.py": 0.07,
     "tests/unit_tests/telemetry/test_startup.py": 0.38,
     "tests/unit_tests/telemetry/test_trace_context_path.py": 5.87,
-    "tests/unit_tests/tooling/test_add_legacy_agent_environment_servers.py": 477.43,
+    "tests/unit_tests/tooling/test_add_legacy_agent_environment_servers.py": 92.72,
     "tests/unit_tests/environment/test_agent_registry.py": 1.91,
     "tests/unit_tests/agents/test_agent_session_retries.py": 0.47,
     "tests/unit_tests/agents/test_agent_sessions.py": 1.28,
@@ -297,6 +297,13 @@
     "tests/unit_tests/utils/test_cli_compat.py": 1.65,
     "tests/unit_tests/utils/test_install_lock.py": 0.08,
     "tests/unit_tests/verification/test_judge.py": 0.11,
-    "tests/unit_tests/verification/test_verifier_fixture.py": 1.22
+    "tests/unit_tests/verification/test_verifier_fixture.py": 1.22,
+    "tests/unit_tests/tooling/test_agent_environment_default_configs.py": 123.65,
+    "tests/unit_tests/tooling/test_agent_environment_harness_overlays.py": 5.07,
+    "tests/unit_tests/tooling/test_agent_environment_inheritance.py": 28.15,
+    "tests/unit_tests/tooling/test_agent_environment_langgraph.py": 25.63,
+    "tests/unit_tests/tooling/test_agent_environment_repository_configs.py": 24.88,
+    "tests/unit_tests/tooling/test_agent_environment_session_templates.py": 174.05,
+    "tests/unit_tests/tooling/test_agent_environment_switch.py": 107.1
   }
 }

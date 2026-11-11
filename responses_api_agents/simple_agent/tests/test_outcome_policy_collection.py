@@ -173,7 +173,9 @@ async def test_confirmed_timeout_policy_actions_keep_facts_and_collection_budget
         base_url=f"http://127.0.0.1:{port}",
         max_connection_retries=2,
         max_http_attempts=2,
-        request_timeout_seconds=0.04,
+        # The server never answers, so each attempt times out; the budget only has to cover connecting and
+        # finishing the upload that the failure records assert, which a busy runner can stretch.
+        request_timeout_seconds=0.5,
     )
     try:
         with RequestFailureLog.capture() as log:

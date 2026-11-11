@@ -809,7 +809,7 @@ def output_limit_response(*outputs: object, response_id: str = "partial-response
         "metadata": {"upstream_trace": "partial-generation"},
         "usage": {
             "input_tokens": 2,
-            "input_tokens_details": {"cached_tokens": 0},
+            "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": None},
             "output_tokens": 1,
             "output_tokens_details": {"reasoning_tokens": 1},
             "total_tokens": 3,

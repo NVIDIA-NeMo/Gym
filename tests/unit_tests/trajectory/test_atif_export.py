@@ -685,14 +685,33 @@ def test_strict_export_accepts_absent_responses_message_phase_and_function_names
     assert trajectory.steps[2].tool_calls[0].function_name == "search"
 
 
-def test_strict_export_rejects_namespaced_responses_function_calls() -> None:
+@pytest.mark.parametrize(
+    ("index", "field", "value", "message"),
+    (
+        (3, "namespace", "mcp__weather", "namespaced Responses function calls"),
+        (3, "caller", {"type": "program", "caller_id": "p"}, "Responses tool callers"),
+        (5, "caller", {"type": "program", "caller_id": "p"}, "Responses tool callers"),
+    ),
+)
+def test_strict_export_rejects_unrepresentable_responses_function_calls(
+    index: int, field: str, value: Any, message: str
+) -> None:
     rollout = _canonical_rollout()
-    rollout["ng_trajectory"]["invocations"][0]["conversation"][3]["namespace"] = "mcp__weather"
+    rollout["ng_trajectory"]["invocations"][0]["conversation"][index][field] = value
 
-    with pytest.raises(
-        AtifExportError, match="namespaced Responses function calls are not representable in ATIF v1.7"
-    ):
+    with pytest.raises(AtifExportError, match=f"{message} are not representable in ATIF v1.7"):
         gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
+
+
+@pytest.mark.parametrize("index", [3, 5], ids=["function-call", "function-result"])
+def test_strict_export_accepts_null_function_callers(index: int) -> None:
+    rollout = _canonical_rollout()
+    expected = gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
+    rollout["ng_trajectory"]["invocations"][0]["conversation"][index]["caller"] = None
+
+    actual = gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
+
+    assert actual == expected
 
 
 @pytest.mark.parametrize(
@@ -702,6 +721,8 @@ def test_strict_export_rejects_namespaced_responses_function_calls() -> None:
         "web_search_call",
         "shell_call",
         "compaction",
+        "program",
+        "program_output",
     ),
 )
 def test_strict_export_rejects_unprojected_responses_item_families(item_type: str) -> None:
@@ -1522,7 +1543,7 @@ def test_export_writes_hash_verified_files_and_ingress_compatible_manifest(tmp_p
         assert response["status"] == "completed"
         assert response["usage"] == {
             "input_tokens": 232,
-            "input_tokens_details": {"cached_tokens": 13},
+            "input_tokens_details": {"cached_tokens": 13, "cache_write_tokens": None},
             "output_tokens": 24,
             "output_tokens_details": {"reasoning_tokens": 10},
             "total_tokens": 256,

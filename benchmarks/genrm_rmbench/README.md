@@ -10,3 +10,5 @@ uv run python -m benchmarks.genrm_rmbench.prepare
 Source commit: `73c52d7b27b361621361ec959ac6c0eb9bb7a689`.
 
 See [GenRM evaluation](../../resources_servers/genrm_eval/README.md) for evaluation commands and scoring.
+
+For an LLM as a judge, prepare and run with `llm_as_a_judge.yaml`. The [llm_as_a_judge_prompt](../../resources_servers/genrm_eval/configs/llm_as_a_judge_prompt.yaml) is shared with the other GenRM benchmarks.

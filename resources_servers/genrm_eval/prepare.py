@@ -25,7 +25,7 @@ def make_task(
             "metadata": {"response_1": first, "response_2": second},
             "temperature": 1.0,
             "top_p": 0.95,
-            "max_output_tokens": 16384,
+            "max_output_tokens": 32768,
         },
         "verifier_metadata": metadata,
     }

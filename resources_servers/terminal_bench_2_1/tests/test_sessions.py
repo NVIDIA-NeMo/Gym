@@ -16,6 +16,7 @@ import resources_servers.terminal_bench_2_1.app as terminal_bench_app
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.server_runtime import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
+from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
 from resources_servers.terminal_bench_2_1.app import (
     TerminalBench21ResourcesServer,
     TerminalBench21ResourcesServerConfig,
@@ -406,12 +407,14 @@ def test_shutdown_cleans_seeded_sandbox_and_legacy_seed_shape_stays_unchanged(se
     sandbox.stop.assert_awaited_once()
 
 
-def test_process_local_sessions_reject_multiple_workers(setup) -> None:
+def test_several_workers_are_allowed(setup) -> None:
+    """Session routing sends a seed and close by resources_session_id to the worker that holds the sandbox."""
     server, _, _, _ = setup
-    with pytest.raises(ValueError, match="num_workers=1"):
+    refuse_unsupported_num_workers(
         TerminalBench21ResourcesServer(
             config=server.config.model_copy(update={"num_workers": 2}), server_client=server.server_client
         )
+    )
 
 
 @pytest.mark.parametrize("invalid_image", [None, 42])

@@ -81,7 +81,9 @@ Function completion (HumanEval, MBPP), competitive programming, text-to-SQL (BIR
 Graduate-level science (GPQA Diamond), MMLU variants, HLE, multi-hop QA (HotPotQA), factual recall (SimpleQA, OmniScience), and abstract reasoning (ARC-AGI).
 
 **Agentic / Tool Use**
-Multi-step tool calling, web search (BrowseComp), calendar scheduling, financial analysis, text-adventure games (AlfWorld, ScienceWorld), and function-calling datasets.
+Multi-step tool calling, web search (BrowseComp, MM-BrowseComp), calendar scheduling, financial analysis, text-adventure games (AlfWorld, ScienceWorld), and function-calling datasets.
+
+MM-BrowseComp is the multimodal version of BrowseComp: 400 web-research questions, 243 of them with question images. Prepare it with `gym eval prepare --benchmark mm_browsecomp`, then run it with a vision-capable policy as its [README](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/mm_browsecomp/README.md#run) shows. The policy sees the question images, but search and browse return text only. Gym scores answers with the BrowseComp answer judge, not the official MM-BrowseComp checklist judge.
 
 **Instruction Following & Safety**
 IFEval, IFBench, inverse instruction following, VerifIF, jailbreak resistance, over-refusal calibration (XSTest), and structured output validation.

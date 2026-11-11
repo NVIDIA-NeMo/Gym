@@ -37,6 +37,7 @@ from nemo_gym.core import (
     PROVIDER_UNAVAILABLE,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    model_sampling_context,
     rollout_context,
 )
 from responses_api_agents.swe_agents.app import (
@@ -2857,6 +2858,36 @@ class TestSWEBenchWrapperSetupParams:
             assert params.model_server_base_url.endswith("/ng-rollout/rollout-1/training-token-capture")
             # The sandboxed agent reaches the model through the capture-prefixed URL.
             assert "/training-token-capture/" in params.agent_script
+
+    @pytest.mark.parametrize("sampling", [None, "null", "VALUES"])
+    def test_sampling_alone_hands_openhands_the_per_run_url(self, monkeypatch, sampling) -> None:
+        """With capture off, a training run's segment must still reach OpenHands, which ignores llm.base_url."""
+        wrapper = _create_wrapper(monkeypatch)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "django__django-12345.sif").touch()
+            wrapper.config.container_formatter = [str(Path(tmpdir) / "{instance_id}.sif")]
+            self._setup_oh_dirs(wrapper)
+            body = NeMoGymResponseCreateParamsNonStreaming(
+                model="test-model",
+                input=[],
+                metadata={
+                    "problem_statement": "Fix bug",
+                    "instance_id": "django__django-12345",
+                    "base_commit": "abc123",
+                    "dataset_name": "SWE-bench",
+                    "split": "test",
+                    "instance_dict": json.dumps({"repo": "django/django"}),
+                },
+            )
+            monkeypatch.setattr(type(wrapper), "_token_id_capture_enabled", lambda self: False)
+            with rollout_context("rollout-1"), model_sampling_context(sampling):
+                params, _ = wrapper._setup_params(body)
+
+            # Gym-only evaluation (no segment) keeps its bare-URL behavior.
+            assert params.install_openhands_capture_overlay is (sampling is not None)
+            if sampling is not None:
+                assert params.model_server_base_url.endswith(f"/ng-sampling/{sampling}")
+                assert f"/ng-sampling/{sampling}" in params.agent_script
 
     def test_setup_params_raises_when_capture_enabled_without_rollout_id(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)

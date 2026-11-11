@@ -1543,17 +1543,47 @@ async def test_a_stale_restored_agent_session_and_its_live_copy_export_once_and_
     assert retired == ["k"] and not stale_left
 
 
+class _AllAtOnce:
+    """A gate each deletion waits at until all ``expected`` have started, so overlap is shown without timing.
+
+    A deletion that can only start after an earlier one finished leaves that earlier one waiting at the gate
+    until its bounded wait gives up, which makes ``overlapped`` false; the bound keeps that failure from
+    hanging the test.
+    """
+
+    def __init__(self, expected: int) -> None:
+        self.expected = expected
+        self.started = 0
+        self.opened = asyncio.Event()
+        self.gave_up = False
+
+    async def arrive(self) -> None:
+        self.started += 1
+        if self.started == self.expected:
+            self.opened.set()
+        try:
+            await asyncio.wait_for(self.opened.wait(), timeout=10)
+        except TimeoutError:
+            self.gave_up = True
+
+    @property
+    def overlapped(self) -> bool:
+        return self.opened.is_set() and not self.gave_up
+
+
 async def test_stale_copies_on_several_workers_are_deleted_at_once(socket_dir: str, tmp_path: Path) -> None:
+    keys = [f"k{index}" for index in range(6)]
+    gate = _AllAtOnce(len(keys))
+
     class SlowRetire(AgentHooks):
         async def retire_agent_session(self, session_key: str) -> None:
-            await asyncio.sleep(0.3)
+            await gate.arrive()
 
     def slow_agent_worker() -> tuple[AgentSessionParticipant, FastAPI]:
         app = FastAPI()
         app.state.nemo_gym_routing_id = uuid4().hex
         return AgentSessionParticipant(SlowRetire()), app
 
-    keys = [f"k{index}" for index in range(6)]
     async with coordinated(socket_dir, agent_worker) as before:
         for index, key in enumerate(keys):
             before.links[index % 2].participant.open_session(key, EpisodeId(rollout_id=key))
@@ -1566,22 +1596,24 @@ async def test_stale_copies_on_several_workers_are_deleted_at_once(socket_dir: s
             # Every session is seeded again on the worker that does not hold its restored copy.
             [other] = [link for link in after.links if not link.participant.has_session(key)]
             other.participant.open_session(key, EpisodeId(rollout_id=key, attempt=1))
-        started = time.monotonic()
         await commit(after, tmp_path / "ckpt2", [f"{key}-a1" for key in keys], checkpoint_id="c2")
-        elapsed = time.monotonic() - started
         await after.controller.resume(CheckpointRequest(**control("c2")))
 
     assert len(records(tmp_path / "ckpt2", "agent")) == len(keys)
-    # Six deletions of 0.3 s each, three per worker: about one deletion's time, not their sum.
-    assert elapsed < 0.9, elapsed
+    # All six deletions, three per worker, were in progress together rather than one after another.
+    # Serial deletion usually fails earlier, when the gate's wait outlasts the checkpoint deadline.
+    assert gate.overlapped
 
 
 async def test_stale_resources_copies_on_several_workers_are_deleted_at_once(socket_dir: str, tmp_path: Path) -> None:
     """Restored resources sessions seeded again on the other worker: their stale copies go in about one teardown."""
 
+    sessions = [f"s{index}" for index in range(6)]
+    gate = _AllAtOnce(len(sessions))
+
     class SlowTeardownStates(SessionStates):
         async def retire_session_state(self, session_id: str) -> None:
-            await asyncio.sleep(0.3)
+            await gate.arrive()
             await super().retire_session_state(session_id)
 
     def slow_resources_worker() -> tuple[ResourcesParticipant, FastAPI]:
@@ -1589,7 +1621,6 @@ async def test_stale_resources_copies_on_several_workers_are_deleted_at_once(soc
         app.state.nemo_gym_routing_id = uuid4().hex
         return ResourcesParticipant(SlowTeardownStates(), "exported"), app
 
-    sessions = [f"s{index}" for index in range(6)]
     async with coordinated(socket_dir, resources_worker(routed=True)) as before:
         for index, session_id in enumerate(sessions):
             link = before.links[index % 2]
@@ -1605,16 +1636,15 @@ async def test_stale_resources_copies_on_several_workers_are_deleted_at_once(soc
             [other] = [link for link in after.links if session_id not in link.participant.hooks.states]
             other.participant.hooks.states[session_id] = "seeded again"
             other.participant.seeded(session_id, EpisodeId(rollout_id=session_id, attempt=1))
-        started = time.monotonic()
         await commit(after, tmp_path / "ckpt2", [f"{session_id}-a1" for session_id in sessions], checkpoint_id="c2")
-        elapsed = time.monotonic() - started
         await after.controller.resume(CheckpointRequest(**control("c2")))
 
     exported = records(tmp_path / "ckpt2", "resources")
     assert sorted(record["session_id"] for record in exported) == sessions
     assert {record["state"] for record in exported} == {"seeded again"}
-    # Six teardowns of 0.3 s each, three per worker: about one teardown's time, not their sum.
-    assert elapsed < 0.9, elapsed
+    # All six teardowns, three per worker, were in progress together rather than one after another.
+    # Serial teardown usually fails earlier, when the gate's wait outlasts the checkpoint deadline.
+    assert gate.overlapped
 
 
 # -- a cancelled or timed-out message stops the other side's handler -------------------------------
@@ -1915,9 +1945,8 @@ async def test_status_adds_up_what_every_worker_reports(socket_dir: str) -> None
     assert marked["status_workers"] == 2
 
 
-async def test_status_answers_without_a_worker_that_does_not(socket_dir: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(participant_workers_module, "_STATUS_TIMEOUT_SECONDS", 0.2, raising=False)
-
+async def test_status_answers_without_a_worker_that_does_not(socket_dir: str) -> None:
+    # The real status timeout, so the healthy worker's reply over the socket always arrives within it.
     def resources_worker() -> tuple[ResourcesParticipant, FastAPI]:
         return ResourcesParticipant(AsyncMock(), "exported"), FastAPI()
 
@@ -1936,7 +1965,8 @@ async def test_status_answers_without_a_worker_that_does_not(socket_dir: str, mo
         elapsed = time.monotonic() - started
 
     assert status["status_workers"] == 1 and status["workers"] == 2
-    assert elapsed < 1.0
+    # The stuck worker never answers, so returning at all shows the timeout; the bound only stops a hang.
+    assert elapsed < participant_workers_module._STATUS_TIMEOUT_SECONDS + 8
 
 
 async def test_status_reports_the_checkpoint_mode_when_no_worker_answers(

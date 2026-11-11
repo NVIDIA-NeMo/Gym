@@ -54,7 +54,7 @@ uses as the base of that role's requests. The conversation input and NeMo User S
 are applied on top.
 
 At `/seed_session`, the Resources Server validates required fields, the configured NeMo User Sim revision, and
-the Nemotron-Personas version (`"0.0.2"`, or `"synthetic"` for the committed example rows), and rejects guarded
+the Nemotron-Personas version pinned for the row's locale (or `"synthetic"` for the committed example rows), and rejects guarded
 health rows. It then stores the resolved row and its canonical SHA-256 digest. At `/verify`, it rejects mismatched
 episode identity, task identity, resolved-row content, or trajectory identity.
 

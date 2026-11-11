@@ -39,12 +39,20 @@ def _scope(path: str) -> dict:
 
 
 @pytest.mark.parametrize(
-    "agent_instance, token_capture, trace_parent",
-    list(itertools.product([None, "judge", "debater.1"], [False, True], [None, TRACEPARENT])),
+    "agent_instance, token_capture, model_sampling, trace_parent",
+    list(
+        itertools.product(
+            [None, "judge", "debater.1"], [False, True], [None, "null", "eyJ0IjowfQ"], [None, TRACEPARENT]
+        )
+    ),
 )
-def test_every_combination_of_segments_round_trips(agent_instance, token_capture, trace_parent):
+def test_every_combination_of_segments_round_trips(agent_instance, token_capture, model_sampling, trace_parent):
     context = CorrelationContext(
-        capture_key="7-0-a1", agent_instance=agent_instance, token_capture=token_capture, trace_parent=trace_parent
+        capture_key="7-0-a1",
+        agent_instance=agent_instance,
+        token_capture=token_capture,
+        model_sampling=model_sampling,
+        trace_parent=trace_parent,
     )
     path = encode(context) + "/v1/responses"
 
@@ -53,9 +61,20 @@ def test_every_combination_of_segments_round_trips(agent_instance, token_capture
 
 
 def test_segments_appear_in_their_fixed_order():
-    context = CorrelationContext(capture_key="k", agent_instance="user", token_capture=True, trace_parent=TRACEPARENT)
+    context = CorrelationContext(
+        capture_key="k", agent_instance="user", token_capture=True, model_sampling="null", trace_parent=TRACEPARENT
+    )
 
-    assert encode(context) == f"/ng-rollout/k/ng-agent-instance/user/training-token-capture/ng-trace/{TRACEPARENT}"
+    assert encode(context) == (
+        f"/ng-rollout/k/ng-agent-instance/user/training-token-capture/ng-sampling/null/ng-trace/{TRACEPARENT}"
+    )
+
+
+@pytest.mark.parametrize("trace_parent", [None, TRACEPARENT])
+def test_a_path_may_carry_a_sampling_segment_without_a_capture_key(trace_parent):
+    context = CorrelationContext(model_sampling="null", trace_parent=trace_parent)
+
+    assert parse_path(encode(context) + "/v1/messages") == (context, "/v1/messages")
 
 
 def test_a_trace_only_path_carries_no_capture_key():
@@ -96,6 +115,11 @@ def test_a_bare_prefix_is_read_when_allowed():
         (f"/ng-trace/{TRACEPARENT}/ng-agent-instance/judge/v1/responses", "out of order"),
         ("/ng-rollout/k/ng-agent-instance/judge/ng-agent-instance/user/v1/responses", "out of order"),
         ("/ng-rollout/k/ng-rollout/j/v1/responses", "out of order"),
+        (f"/ng-rollout/k/ng-trace/{TRACEPARENT}/ng-sampling/null/v1/responses", "out of order"),
+        ("/ng-rollout/k/ng-sampling/null/ng-sampling/null/v1/responses", "out of order"),
+        ("/ng-sampling/null/ng-agent-instance/judge/v1/responses", "out of order"),
+        ("/ng-rollout/k/ng-sampling//v1/responses", "without a value"),
+        ("/ng-rollout/k/ng-sampling/v1/responses", "invalid model sampling value"),
         ("/ng-agent-instance/judge/v1/responses", "without a preceding capture key"),
         ("/ng-rollout//v1/responses", "without a value"),
         ("/ng-rollout/k/ng-agent-instance//v1/responses", "without a value"),
@@ -120,7 +144,7 @@ def test_valid_agent_instance_names(name):
 @pytest.mark.parametrize(
     "name",
     ["", "Judge", "1judge", "judge.", ".1", "a.b.c", "judge 1", "judge/1", "ng-rollout", "ng-agent-instance"]
-    + ["training-token-capture", "ng-trace", "v1"],
+    + ["training-token-capture", "ng-sampling", "ng-trace", "v1"],
 )
 def test_invalid_and_reserved_agent_instance_names(name):
     with pytest.raises(ValueError, match="invalid agent instance name"):

@@ -67,6 +67,7 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
     observe_llm_judge_grading,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import JudgeError, VerifierFixture, call_judge, record_parsed_judge_verdict
 from resources_servers.chartography import scorer
 from resources_servers.chartography.verifier_fixture import create_chartography_server, invoke_chartography
@@ -92,6 +93,7 @@ class ChartographyConfig(BaseResourcesServerConfig):
     judge_chat_create_params: NeMoGymChatCompletionCreateParamsNonStreaming
     judge_prompt_template_fpath: str = "prompt_templates/judge.txt"
     judge_max_attempts: int = Field(default=scorer.MAX_ATTEMPTS, ge=1)
+    # Per worker: with num_workers > 1, each worker allows this many judge calls at once.
     judge_endpoint_max_concurrency: Optional[int] = Field(default=64, ge=1)
 
 
@@ -275,3 +277,5 @@ VERIFIER_FIXTURE = VerifierFixture(
 
 if __name__ == "__main__":
     ChartographyResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = ChartographyResourcesServer.run_webserver()  # noqa: F401

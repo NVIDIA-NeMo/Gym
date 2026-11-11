@@ -1576,6 +1576,10 @@ async def test_a_seed_slower_than_the_ready_timeout_leaves_the_turns_their_budge
         sandbox_ready_timeout_s=1,
         image_pull_retries=0,
     )
+    # Resolve the snapshot before the 0.1 s lookup deadline: this test exercises a slow sandbox seed,
+    # while the separate slow-lookup test covers falling back to the default episode budget.
+    request = request_for(task)
+    await server._resolve_task(request.task.task_id, request.task.task_input.task_data)
     create = server._create_sandbox
 
     async def slow_create(task, workdir, *, episode_key=None):
@@ -1587,7 +1591,7 @@ async def test_a_seed_slower_than_the_ready_timeout_leaves_the_turns_their_budge
     server.server_client.slow_seconds = 0.2
     started = time.monotonic()
 
-    response = await server.run_request(request_for(task))
+    response = await server.run_request(request)
 
     elapsed = time.monotonic() - started
     assert response.failure is None, response.failure

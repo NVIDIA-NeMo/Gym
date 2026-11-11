@@ -49,6 +49,8 @@ from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NgFailureEvent,
+    RequestFailureLog,
+    model_sampling_path_segment,
     rebuild_failure,
 )
 from nemo_gym.server_runtime import (
@@ -139,6 +141,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
     config: SingleAgentTurnEnvironmentServerConfig
     request_model = SingleAgentTurnRequest
     checkpoint_mode = "exported"
+    applies_model_sampling = True
     response_model = SingleAgentTurnResponse
 
     def model_post_init(self, context: Any, /) -> None:
@@ -587,7 +590,14 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             response_cookies = _cookies(agent_http_response)
             if response_cookies:
                 handles.agent_cookies = response_cookies
-            return NeMoGymResponse.model_validate(await get_response_json(agent_http_response))
+            response = NeMoGymResponse.model_validate(await get_response_json(agent_http_response))
+            # Capture body-carried observations before close or outcome policy can bypass verification.
+            # They are diagnostics, not a selection of the episode's terminal failure.
+            saved = (response.model_extra or {}).get("failure_report")
+            log = RequestFailureLog.current()
+            if saved is not None and log is not None:
+                log.add_saved(saved)
+            return response
         except Exception as error:
             raise dependency_failure(
                 error,
@@ -797,7 +807,9 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             bool(block.get("all_agents", False)) or bool(agent_config.get("token_id_capture", False))
         )
         capture_segment = f"/{TOKEN_CAPTURE_PATH_SEGMENT}" if token_capture else ""
-        return f"/ng-rollout/{request.episode_id.capture_key}{capture_segment}/v1/responses"
+        # The agent is the one the training framework trains, so its model calls carry the episode's values.
+        sampling_segment = model_sampling_path_segment(self.model_sampling_segment(request, trained=True))
+        return f"/ng-rollout/{request.episode_id.capture_key}{capture_segment}{sampling_segment}/v1/responses"
 
     @staticmethod
     def _failure(

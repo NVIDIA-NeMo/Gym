@@ -20,9 +20,31 @@ against capture's normalized view, and the comparison is only sound if the
 fingerprint erases the dialect.
 """
 
+import hashlib
+from types import SimpleNamespace
+
 import pytest
 
-from nemo_gym.models.token_capture.fingerprint import assistant_fingerprint, conversation_digest
+from nemo_gym.models.token_capture import fingerprint
+from nemo_gym.models.token_capture.fingerprint import (
+    assistant_fingerprint,
+    conversation_digest,
+    tool_call_turn_fingerprint,
+)
+
+
+# An agent turn with a tool call and a tool result, each field longer than 2 KiB.
+LONG_HISTORY = [
+    {"role": "system", "content": "You are a coding agent."},
+    {"role": "user", "content": "Fix the failing test."},
+    {
+        "role": "assistant",
+        "content": "x" * 3000,
+        "tool_calls": [{"id": "c1", "function": {"name": "bash", "arguments": '{"cmd": "pytest"}'}}],
+    },
+    {"role": "tool", "tool_call_id": "c1", "content": "y" * 5000},
+    {"role": "assistant", "content": "Done."},
+]
 
 
 def test_the_three_dialect_shapes_hash_identically():
@@ -128,3 +150,48 @@ def test_conversation_digest_ignores_instruction_content_but_not_its_position():
     assert conversation_digest(day1) != conversation_digest([*day1[:2], dict(day1[2], content="done")])
     # The assistant fingerprint never looked at instruction items.
     assert assistant_fingerprint(day1) == assistant_fingerprint(day2)
+
+
+def test_digests_of_a_long_history_keep_their_values():
+    """Lineage stores keep these digests across runs, so a change to how they are computed must not change them.
+
+    The values were computed by hashing each field with its own sha256 update.
+    """
+    # SHA-256 digests, not credentials.
+    fingerprint = "706557779489c60e4b53bfb6068591c2268754103d303174f077870017333bbf"  # pragma: allowlist secret
+    context = "aeb8523a8bbbfa0d8ed08ca75347df903f27675eb573afdf544c461a21b602af"  # pragma: allowlist secret
+    turn = "bb1a94ddb070f4d11db9272a6032a36dbcb5d28d7b285a9e4d1c7f0376204608"  # pragma: allowlist secret
+    assert assistant_fingerprint(LONG_HISTORY) == fingerprint
+    assert conversation_digest(LONG_HISTORY) == context
+    assert tool_call_turn_fingerprint(LONG_HISTORY[2:3]) == turn
+
+
+@pytest.mark.parametrize(
+    "digest",
+    [
+        pytest.param(lambda: assistant_fingerprint(LONG_HISTORY), id="assistant_fingerprint"),
+        pytest.param(lambda: conversation_digest(LONG_HISTORY), id="conversation_digest"),
+        pytest.param(lambda: tool_call_turn_fingerprint(LONG_HISTORY[2:3]), id="tool_call_turn_fingerprint"),
+    ],
+)
+def test_a_long_history_is_hashed_in_one_update(monkeypatch, digest):
+    """On Python 3.13 and 3.14, a hash object releases the GIL on every update after one of 2 KiB or more.
+
+    One update per digest keeps a long history from giving up the GIL three times per field.
+    """
+    updates = []
+
+    class CountingSha256:
+        def __init__(self, data=b""):
+            self._hasher = hashlib.sha256(data)
+
+        def update(self, data):
+            updates.append(len(data))
+            self._hasher.update(data)
+
+        def hexdigest(self):
+            return self._hasher.hexdigest()
+
+    monkeypatch.setattr(fingerprint, "hashlib", SimpleNamespace(sha256=CountingSha256))
+    digest()
+    assert len(updates) == 1

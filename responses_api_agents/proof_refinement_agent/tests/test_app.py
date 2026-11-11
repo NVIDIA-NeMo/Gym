@@ -147,7 +147,9 @@ class TestApp:
         assert [attempt["response"]["id"] for attempt in result.all_attempts] == ["resp-0", "resp-1"]
         assert result.response.id == "resp-1"
         # Usage covers every model call in the episode, not just the last one.
-        assert result.response.usage.model_dump() == _usage(2118, 1424, cached=400, reasoning=1200)
+        expected_usage = _usage(2118, 1424, cached=400, reasoning=1200)
+        expected_usage["input_tokens_details"]["cache_write_tokens"] = None
+        assert result.response.usage.model_dump() == expected_usage
 
     async def test_correction_turns_keep_the_callers_sampling_params(self) -> None:
         config = ProofRefinementAgentConfig(

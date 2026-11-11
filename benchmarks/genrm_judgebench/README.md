@@ -14,3 +14,5 @@ A pair earns credit when the sum is positive. Incomplete pairs count as incorrec
 Source revision: `57dd5e0b9817d07f05ec8f45a91b2ce1e310e308`.
 
 See [GenRM evaluation](../../resources_servers/genrm_eval/README.md) for evaluation commands and scoring.
+
+For an LLM as a judge, prepare and run with `llm_as_a_judge.yaml`. The [llm_as_a_judge_prompt](../../resources_servers/genrm_eval/configs/llm_as_a_judge_prompt.yaml) is shared with the other GenRM benchmarks.

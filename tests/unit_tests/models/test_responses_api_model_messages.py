@@ -23,6 +23,7 @@ from time import time
 from unittest.mock import MagicMock
 from uuid import uuid4
 
+import pytest
 from fastapi import Body, Request
 from fastapi.testclient import TestClient
 
@@ -103,6 +104,23 @@ def _client(model_cls) -> TestClient:
 
 
 class TestDefaultMessagesRoute:
+    @pytest.mark.parametrize("stream", [False, True])
+    @pytest.mark.parametrize("output_config", [None, {"effort": None}, {"effort": "max"}])
+    def test_output_config_effort_remains_ignored(self, output_config: object, stream: bool) -> None:
+        client, server = _client(_BodyOnlyModel)
+        result = client.post(
+            "/v1/messages",
+            json={
+                "model": "synthetic",
+                "messages": [],
+                "max_tokens": 8,
+                "stream": stream,
+                "output_config": output_config,
+            },
+        )
+        assert result.status_code == 200
+        assert "reasoning" not in server.last_params.model_dump(exclude_unset=True)
+
     def test_messages_route_registered_alongside_openai_routes(self) -> None:
         server = _BodyOnlyModel(config=_config(), server_client=MagicMock(spec=ServerClient, global_config_dict={}))
         paths = {route.path for route in server.setup_webserver().routes}

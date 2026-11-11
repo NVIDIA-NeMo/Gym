@@ -42,6 +42,7 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
 )
 from nemo_gym.telemetry import GymSpanGroup, managed_span
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 # =============================================================================
@@ -393,3 +394,6 @@ async def _execute_python(
 
 if __name__ == "__main__":
     NVARCResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = NVARCResourcesServer.run_webserver()  # noqa: F401

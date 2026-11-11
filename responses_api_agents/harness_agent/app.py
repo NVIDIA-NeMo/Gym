@@ -55,6 +55,7 @@ from nemo_gym.sandbox import (
     resolve_provider_metadata,
 )
 from nemo_gym.server_runtime import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.utils.exception_inspection import error_to_http_status, provider_error_reason, sandbox_failure_prefix
 
 
@@ -591,3 +592,6 @@ class HarnessAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     HarnessAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = HarnessAgent.run_webserver()  # noqa: F401

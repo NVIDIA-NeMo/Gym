@@ -71,10 +71,8 @@ class TraceContextPathMiddleware:
         scope = scope_with_routed_path(scope, path[: len(path) - len(rest) - len(segment)] + rest)
         scope["headers"] = headers
         # Inner middleware reads the rewritten path; a trace-only path has no prefix left.
-        remember(
-            scope,
-            (dataclasses.replace(context, trace_parent=None), rest) if context.capture_key is not None else None,
-        )
+        remaining = dataclasses.replace(context, trace_parent=None)
+        remember(scope, (remaining, rest) if encode(remaining) else None)
 
         async def send_with_segment_on_redirect(message: Message) -> None:
             # The client only ever had the URL, so a redirect it follows must carry the segment again.

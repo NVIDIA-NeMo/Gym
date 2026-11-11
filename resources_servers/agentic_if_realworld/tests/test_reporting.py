@@ -237,9 +237,19 @@ def test_driver_aggregation_matches_stock_native_artifact(aggregation, tmp_path,
         relay_name,
         server.config.name,
     ]
-    sent = client.post.call_args_list[0].kwargs["json"]
-    assert all(call.kwargs["json"] == sent for call in client.post.call_args_list)
-    assert "private" not in sent.model_dump_json()
+    sent, collected, forwarded = [call.kwargs["json"] for call in client.post.call_args_list]
+    assert collected == sent
+    # An environment server may consume ng_perf itself instead of forwarding it to
+    # benchmark scoring. Every other piece of benchmark evidence must stay intact.
+    expected = sent.model_dump()
+    actual = forwarded.model_dump()
+    for expected_row, actual_row in zip(expected["verify_responses"], actual["verify_responses"], strict=True):
+        if "ng_perf" not in actual_row:
+            expected_row.pop("ng_perf", None)
+    assert actual == expected
+    for request in (sent, collected, forwarded):
+        assert "private" not in request.model_dump_json()
+    assert [row.get("ng_perf") for row in sent.verify_responses] == [row.get("ng_perf") for row in rows]
     assert sent.verify_responses[0]["response"] == {
         key: rows[0]["response"][key] for key in ("usage", "incomplete_details", "metrics")
     }

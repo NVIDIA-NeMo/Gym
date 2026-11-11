@@ -74,6 +74,7 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
     lost_session_verification,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
 from nemo_gym.verification import JUDGE_FAILURES, JudgeError, call_judge, is_judge_failure
 from resources_servers.browsecomp_advanced_harness.judge_prompt import JUDGE_PROMPT_TEMPLATE
 from resources_servers.browsecomp_advanced_harness.sandbox import (
@@ -1067,6 +1068,11 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 await asyncio.gather(*(close_shell(sid) for sid in list(self._shell_sessions)))
                 if self.config.dump_session_id_to_metrics_on_exit:
                     out_file = Path(__file__).parent / "session_id_metrics.json"
+                    if is_nemo_gym_fastapi_worker():
+                        # With num_workers > 1, each worker holds only the sessions it served.
+                        # Each writes its own file, so one worker's dump does not overwrite another's.
+                        # The name starts with the server's main process ID, so one run's files share a prefix.
+                        out_file = out_file.with_name(f"session_id_metrics.{os.getppid()}.{os.getpid()}.json")
                     print(f"Dumping session_id metrics to {out_file}")
 
                     to_dump = {k: v.model_dump(mode="json") for k, v in self._session_id_to_metrics.items()}
@@ -2003,3 +2009,6 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     TavilySearchResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = TavilySearchResourcesServer.run_webserver()  # noqa: F401

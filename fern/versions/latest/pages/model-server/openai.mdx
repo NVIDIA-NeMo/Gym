@@ -8,6 +8,23 @@ The `openai_model` server connects NeMo Gym to OpenAI without translating betwee
 
 Because it is a pass-through, the Responses endpoint also works with any other backend that implements the Responses API natively — point `openai_base_url` at it. In practice that is rare: most hosted backends only expose Chat Completions and instead go through [Inference Providers](/model-server/inference-providers), which translates between the two formats.
 
+Gym pins OpenAI's Python SDK to **2.45.0**, including `max` reasoning effort and OpenAI's
+programmatic tool calling schema. Responses requests keep typed prompt-cache options,
+the `caller` field of function and custom tool calls (whether the model issued the call directly
+or a `program` item issued it), and opaque `program` / `program_output` items through validation
+and continuation. Chat Completions and Anthropic conversion accept direct callers but reject
+program callers and `program` items because the link between a tool call and its program has no
+representation in those formats; `drop_unrepresentable_request_fields` does not drop that link.
+Both conversions reject non-null `allowed_callers` tool eligibility, including an empty list,
+and function `output_schema` definitions that they cannot preserve. These items do not acquire
+training metadata. Strict ATIF export rejects `program` items and non-null `caller` fields that
+ATIF cannot represent.
+
+Unreported cache-write usage stays unknown internally; explicit zero and reported counts remain
+intact through usage aggregation. Synthesized Responses SSE omits an unknown `cache_write_tokens`
+instead of emitting null or inventing zero. This wire adaptation does not mutate captured usage
+or change provider-reported token totals.
+
 <Info>
 For **training** workloads that require token IDs and log probabilities, use [vLLM](/model-server/vllm) instead. Hosted endpoints do not expose the token-level information needed for RL training.
 

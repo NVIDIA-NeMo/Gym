@@ -224,6 +224,13 @@ GitHub-hosted checks such as lint, copyright, secrets, DCO, and the Fern preview
 may still run directly. The trust gate prevents unreviewed contributor code
 from executing on NVIDIA runners.
 
+The same approval also starts the `Suggest Reviewers` workflow
+(`.github/workflows/suggest-reviewers.yml`). It runs on the `pull-request/<n>`
+mirror push and requests reviewers from the `# suggest:` lines in
+`.github/CODEOWNERS`. Suggestions are advisory and not a merge requirement, and
+draft PRs are skipped. To re-run it for an open PR, dispatch
+`gh workflow run suggest-reviewers.yml -f pr_number=<n>`.
+
 Run the checks applicable to your diff before you push:
 
 ```bash

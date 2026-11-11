@@ -55,6 +55,7 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import JUDGE_FAILURES, JudgeError, reraise_judge_errors
 from resources_servers.big_finance.as_of_tools import AsOfEdgarSearchTool, AsOfFetchUrlTool, parse_as_of
 from resources_servers.big_finance.local_corpus import LocalSecCorpus
@@ -734,3 +735,6 @@ class BigFinanceResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     BigFinanceResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = BigFinanceResourcesServer.run_webserver()  # noqa: F401

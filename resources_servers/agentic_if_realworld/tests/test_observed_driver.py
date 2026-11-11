@@ -44,6 +44,10 @@ from responses_api_models.agentic_if_text.app import TextModel, TextModelConfig
 def test_http_resume_and_connection_recovery(
     tmp_path, monkeypatch, observed, connection_failures, incomplete_first, text, stream_failure
 ):
+    # Other CI workers change source files while installing and testing components.
+    # Keep this synthetic run stable; exercise a deliberate runtime change below.
+    runtime = core.runtime_identity()
+    monkeypatch.setattr(rollout_driver, "runtime_identity", lambda: copy.deepcopy(runtime))
     create(tmp_path / "data")
     dataset = core.Dataset(tmp_path / "data", synthetic=True)
     prepared = tmp_path / "prepared.jsonl"
@@ -241,6 +245,15 @@ def test_http_resume_and_connection_recovery(
         assert core.read(tmp_path / "out.jsonl") == record
         assert len(policy_calls) == len(dispatched) == connection_failures + 1 + int(incomplete_first)
         assert len(judge_calls) == 1 and len(verifications) == 2
+        original_commit = runtime["gym_commit"]
+        runtime["gym_commit"] = "changed-runtime"
+        with pytest.raises(ValueError, match="fingerprint mismatch"):
+            asyncio.run(rollout_driver.run_rollout_collection(config, settings))
+        assert all(path.read_bytes() == value for path, value in saved.items())
+        assert core.read(tmp_path / "out.jsonl") == record
+        assert len(policy_calls) == len(dispatched) == connection_failures + 1 + int(incomplete_first)
+        assert len(judge_calls) == 1 and len(verifications) == 2
+        runtime["gym_commit"] = original_commit
         if observed:
             assert verifications[0]["ng_verifier_invocations"] != verifications[1]["ng_verifier_invocations"]
             assert record["ng_trajectory"]["verifier_invocations"] == verifications[0]["ng_verifier_invocations"]

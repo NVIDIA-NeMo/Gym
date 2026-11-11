@@ -61,7 +61,7 @@ from nemo_gym.server_runtime import (
     lost_session_verification,
 )
 from nemo_gym.trajectory import SandboxObservation
-from nemo_gym.utils import bounded_text
+from nemo_gym.utils import bounded_text, is_nemo_gym_fastapi_entrypoint
 from resources_servers.swebench.sandbox_sessions import SandboxSessionResourcesServer
 from resources_servers.swebench.swebench_patches import (
     patch_swebench_multilingual_golden_patch_pass,
@@ -649,3 +649,6 @@ def _lost_session_response(
 
 if __name__ == "__main__":
     SwebenchResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = SwebenchResourcesServer.run_webserver()  # noqa: F401

@@ -956,3 +956,20 @@ class TestChatCompletionsVariant:
         assert plain, "example.jsonl must keep at least one row without tools"
         for row in plain:
             assert _to_chat_row(row) == row
+
+
+def test_only_the_main_process_fetches_the_ifeval_corpus_at_startup(monkeypatch) -> None:
+    import resources_servers.iheval.app as iheval_app
+    from nemo_gym.utils import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
+
+    fetches: list[str] = []
+    monkeypatch.setattr(iheval_app, "_ensure_nltk_data", lambda: fetches.append("fetch"))
+
+    monkeypatch.delenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, raising=False)
+    _server().setup_webserver()
+    assert fetches == ["fetch"]
+
+    # Each worker then finds the corpus instead of downloading it alongside the others.
+    monkeypatch.setenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, "1")
+    _server().setup_webserver()
+    assert fetches == ["fetch"]

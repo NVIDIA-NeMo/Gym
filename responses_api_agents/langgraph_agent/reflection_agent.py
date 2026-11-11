@@ -55,6 +55,7 @@ from pydantic import ConfigDict
 from nemo_gym.client import raise_for_status
 from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.langgraph_agent.app import LangGraphAgentAdapter, LangGraphAgentConfig, response_output_items
 
 
@@ -227,3 +228,6 @@ class ReflectionAgent(LangGraphAgentAdapter):
 
 if __name__ == "__main__":
     ReflectionAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ReflectionAgent.run_webserver()  # noqa: F401

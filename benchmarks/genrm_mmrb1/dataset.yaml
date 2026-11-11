@@ -19,7 +19,7 @@ genrm_mmrb1_benchmark_agent:
   _inherit_from: genrm_eval_simple_agent
 
 responses_create_params:
-  max_output_tokens: 16384
+  max_output_tokens: 32768
   stream: false
 
 genrm_mmrb1_environment_server:

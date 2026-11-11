@@ -42,6 +42,7 @@ from nemo_gym.core import (
     failure_kinds,
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 LOG = logging.getLogger(__name__)
@@ -280,3 +281,6 @@ def _response(target_name: str, model: str, transcript: list[str]) -> NeMoGymRes
 
 if __name__ == "__main__":
     RnaDesignAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = RnaDesignAgent.run_webserver()  # noqa: F401

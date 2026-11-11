@@ -6,7 +6,8 @@
 The sandbox needs no network, no ``uv`` and no Python of its own. For each sandbox platform, the host downloads a
 pinned python-build-standalone CPython and checks its SHA-256, then installs the harness's requirements for that
 platform with ``uv`` into a separate site-packages archive. Packages are pinned to the versions installed in this
-Agent Server's environment, so the sandbox runs the versions the adapter is tested with. Requirements given as
+Agent Server's environment, so the sandbox runs the versions the adapter is tested with, or to a lock the adapter
+passes when its harness is not the one installed with the server. Requirements given as
 direct URLs, such as a harness pinned to a commit, are built from source on the host; every other package must
 publish a wheel for the sandbox's platform. Both archives are cached on the host under ``sandbox_python`` in Gym's
 ``cache_dir``.
@@ -259,24 +260,32 @@ class SandboxPythonRuntime:
 
     ``import_check`` is Python source that runs without error only in a usable runtime, for example
     ``"import run_agent, mcp"``. ``overrides`` are the uv overrides the adapter's own environment is installed with,
-    such as the lines of its ``overrides.txt``.
+    such as the lines of its ``overrides.txt``. ``constraints`` pins the runtime's packages instead of this Agent
+    Server's environment, for a harness whose versions differ from the ones the server itself runs, such as the lines
+    of a ``uv pip compile`` lock of ``requirements``.
     """
 
     harness: str
     requirements: tuple[str, ...]
     import_check: str
     overrides: tuple[str, ...] = ()
+    constraints: tuple[str, ...] | None = None
+
+    @property
+    def pins(self) -> tuple[str, ...]:
+        """The versions the runtime's packages are constrained to: ``constraints``, or this server's environment."""
+        return _agent_environment_pins() if self.constraints is None else self.constraints
 
     @functools.cached_property
     def directory(self) -> str:
         """Sandbox directory keyed by everything that goes into the runtime.
 
         A runtime found there, such as one an earlier session left in this sandbox, was built from the same inputs and
-        is reused. The key covers every index-installed version in this Agent Server's environment, so a runtime
-        baked into an image is reused only by an Agent Server environment with exactly those versions. The adapter
-        may keep its own harness files here, beside ``python/``.
+        is reused. The key covers every pinned version, by default every index-installed version in this Agent
+        Server's environment, so a runtime baked into an image is reused only by an Agent Server environment with
+        exactly those versions. The adapter may keep its own harness files here, beside ``python/``.
         """
-        inputs = [PYTHON_VERSION, _PYTHON_RELEASE, self.requirements, self.overrides, _agent_environment_pins()]
+        inputs = [PYTHON_VERSION, _PYTHON_RELEASE, self.requirements, self.overrides, self.pins]
         key = hashlib.sha256(json.dumps(inputs).encode()).hexdigest()[:16]
         return f"/tmp/nemo-gym-{self.harness}-runtime-{key}"
 
@@ -366,7 +375,7 @@ class SandboxPythonRuntime:
         scratch = Path(tempfile.mkdtemp(prefix=".build-", dir=destination.parent))
         try:
             constraints = scratch / "constraints.txt"
-            constraints.write_text("".join(f"{pin}\n" for pin in _agent_environment_pins()))
+            constraints.write_text("".join(f"{pin}\n" for pin in self.pins))
             argv = [
                 uv,
                 "pip",

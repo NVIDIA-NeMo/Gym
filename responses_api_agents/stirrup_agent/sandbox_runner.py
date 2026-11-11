@@ -438,6 +438,9 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
                 # The policy model's own summaries were unusable; the episode is graded on the turns so far.
                 finish_params, history = None, [*_completed_turns(session, messages)[:-1], error.messages]
                 stop_reason, invalid_output = "compaction_failed", str(error)
+        if finish_params is None and stop_reason is None:
+            # Stirrup returned on its own without a finish call: the turn budget ran out. Graded like a timeout.
+            stop_reason = "max_turns"
         if model_error is not None or invalid_output is not None:
             status = InvocationStatus.FAILED
         else:

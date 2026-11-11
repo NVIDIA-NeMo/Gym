@@ -2,7 +2,7 @@
 
 Terminal-Bench 2.1 evaluates agents on tasks in isolated containers. The benchmark
 prepares task data and owns sandbox setup, verification, and cleanup. Pi, Codex,
-OpenCode, and OpenClaw can run their model/tool loops in the task sandbox through
+OpenCode, OpenClaw, and Copilot can run their model/tool loops in the task sandbox through
 Gym's Environment Server.
 
 - Integration profile: `custom-gym-verifier`
@@ -66,8 +66,8 @@ The smoke input below wraps the prepared row in `task_id` and `task_input`.
 Its `terminal_bench_2_1` taskset routes directly to `single_agent_turn`.
 Environment Server seeds Resources and the agent, runs the agent, closes it before
 verification, then closes Resources. Resources owns the sandbox throughout.
-Keep one worker for both Resources and the agent because their sessions are
-process-local.
+Both servers accept several workers, because session routing sends each
+session's requests to the worker that holds it.
 
 ### Choose a harness
 
@@ -82,9 +82,11 @@ the harness for this taskset.
 | [Codex](../../responses_api_agents/codex_agent/README.md) | `responses_api_agents/codex_agent/configs/codex_agent.yaml` | `codex_agent` | `model_context_window: 32768`, `model_auto_compact_token_limit: 28672`, `timeout: 600` |
 | [OpenCode](../../responses_api_agents/opencode_agent/README.md) | `responses_api_agents/opencode_agent/configs/opencode_agent.yaml` | `opencode_agent` | `context_window: 32768`, `max_output_tokens: 8192`, `timeout: 600` |
 | [OpenClaw](../../responses_api_agents/openclaw_agent/README.md) | `responses_api_agents/openclaw_agent/configs/openclaw_agent.yaml` | `openclaw_agent` | `context_window: 32768`, `model_timeout_seconds: 600`, `timeout: 600` |
+| [Copilot](../../responses_api_agents/copilot_agent/README.md) | `responses_api_agents/copilot_agent/configs/copilot_agent.yaml` | `copilot_agent` | `context_window: 32768`, `max_output_tokens: 8192`, `timeout: 600` |
 
-All four pairings are allowed by this benchmark. These are single-task smoke
-settings; adjust context windows and budgets for your model and evaluation.
+Pi, Codex, OpenCode, and OpenClaw are allowed by this benchmark. Copilot remains experimental pending
+full qualification; use `--allow-unsupported-pairing` to try its smoke settings. These are single-task
+smoke settings; adjust context windows and budgets for your model and evaluation.
 See each harness's README for runtime prerequisites and model requirements.
 
 ### Model and sandbox provider
@@ -109,8 +111,8 @@ policy_model:
 Gym's vLLM Model Server also adapts Chat Completions to Codex's streaming Responses
 API. Adjust parser settings for your model, or select the OpenAI Model Server for
 a provider that serves the required API directly. Keep sampling and output caps
-on the model server; the Pi/OpenCode agent caps above also limit individual calls.
-Codex/OpenClaw sandbox sessions reject request-level `max_output_tokens`.
+on the model server; the Pi/OpenCode/Copilot agent caps above also limit individual calls.
+Codex/OpenClaw/Copilot sandbox sessions reject request-level `max_output_tokens`.
 
 Put `policy_base_url`, `policy_api_key`, and `policy_model_name` in your private
 `env.yaml`. The task container must reach the Gym Model Server; for Docker on a

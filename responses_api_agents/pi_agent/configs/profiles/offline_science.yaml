@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Shared settings of the offline scientific benchmark presets (benchmarks/hle/pi.yaml,
+# benchmarks/apex_shortlist/pi.yaml), merged into the `pi_agent` instance that each preset's agent inherits. Each
+# session creates its own sandbox from the offline science image with Pi
+# (responses_api_agents/pi_sandboxed_agent/offline_science_image), which reaches only the model server. It builds on
+# profiles/benchmark.yaml; the settings follow pi_sandboxed_agent's configs/benchmark.yaml where pi_agent has them, and
+# the benchmark READMEs list what differs.
+config_paths:
+- responses_api_agents/pi_agent/configs/profiles/benchmark.yaml
+# A sandbox allowed to reach the model server's host reaches every port on it, so only the model server leaves
+# loopback. A search preset adds resources_servers for its tool server.
+absolute_ip_server_types: [responses_api_models]
+pi_agent:
+  responses_api_agents:
+    pi_agent:
+      # pi_agent's module exposes no app for extra workers, so it serves from one process and the deprecated
+      # preset's four workers would not start. Concurrency stays per process: at most 512 sessions at once.
+      num_workers: 1
+      concurrency: 512
+      model: benchmark-model
+      pi_version: 0.85.1
+      # The image lays out Node at /opt/node and Pi at /opt/pi, as install_pi_runtime.sh does under one directory.
+      sandbox_runtime_dir: /opt
+      timeout: 14400
+      sandbox_bash_timeout_seconds: 120
+      context_window: 262144
+      max_output_tokens: 262144
+      # Drop each request's output cap, so the model server sizes it from the context the request leaves.
+      output_token_policy: remaining_context
+      auto_compaction: false
+      system_prompt: |
+        Internet access is disabled on this machine.
+        Scientific Python packages (including NumPy, SciPy, and SymPy), SageMath, and Lean/Mathlib are preinstalled. See /opt/science/README.md for available tools and usage.
+      sandbox_config:
+        # profiles/benchmark.yaml's 14,400 s TTL starts when the seed creates the sandbox, but the 14,400 s run budget
+        # only after the seed (up to the 1,200 s ready wait). A run near its deadline would outlive its sandbox, and a
+        # lost sandbox is retried, not graded: the TTL adds 1,800 s for the seed.
+        ttl_s: 16200
+        image: ${oc.env:PI_SANDBOX_IMAGE}
+        workdir: /workspace
+        entrypoint:
+        - sleep
+        - infinity
+        resources:
+          cpu: 2
+          memory_mib: 8192
+        env:
+          EXECD_API_GRACE_SHUTDOWN: 50ms

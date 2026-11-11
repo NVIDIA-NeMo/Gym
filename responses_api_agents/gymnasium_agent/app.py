@@ -38,6 +38,7 @@ from nemo_gym.server_runtime import (
     BaseRunRequest,
     BaseVerifyResponse,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.gymnasium import EnvResetResponse, EnvStepResponse, extract_text
 
 
@@ -334,3 +335,6 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     GymnasiumAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = GymnasiumAgent.run_webserver()  # noqa: F401

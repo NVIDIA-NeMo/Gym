@@ -695,3 +695,24 @@ class TestDeadlineOnlyOwnsItsOwnExpiry:
 
         with pytest.raises(TimeoutError, match="model server timeout"):
             await agent.responses(request_mock, MagicMock(), body)
+
+
+def test_several_workers_are_allowed() -> None:
+    """Sandboxed sessions are agent sessions, which session routing follows by agent_session_id."""
+    from unittest.mock import MagicMock
+
+    from nemo_gym.client import ServerClient
+    from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
+    from responses_api_agents.browsecomp_agent.app import BrowsecompAgent, BrowsecompAgentConfig
+
+    config = BrowsecompAgentConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="browsecomp_agent",
+        model_server={"type": "responses_api_models", "name": "policy_model"},
+        num_workers=2,
+    )
+    agent = BrowsecompAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    refuse_unsupported_num_workers(agent)
+    assert agent.routes_sessions_to_owner

@@ -61,3 +61,54 @@ def ensure_bird_sql(base_dir: Path | str | None = None) -> Path:
     n_dbs = sum(1 for _ in dev_databases_dir.glob("*/[!.]*.sqlite"))
     logger.info("BIRD dev: %d databases extracted to %s", n_dbs, dev_databases_dir)
     return dev_databases_dir
+
+
+_TRAIN_ZIP_URL = "https://bird-bench.oss-cn-beijing.aliyuncs.com/train.zip"
+
+
+def ensure_bird_train(base_dir: Path | str | None = None) -> Path:
+    """Download and extract the BIRD train split (~9 GB download). Idempotent.
+
+    Extracts the outer ``train.zip`` (contains ``train/train.json`` + ``train/train_databases.zip``), then extracts
+    ``train_databases.zip`` in place. Returns the ``train/`` directory, which holds ``train.json`` and
+    ``train_databases/<db_id>/<db_id>.sqlite``.
+    """
+    base_dir = Path(base_dir) if base_dir else _DEFAULT_DIR
+    train_dir = base_dir / "train"
+    train_databases_dir = train_dir / "train_databases"
+
+    if train_databases_dir.exists() and any(train_databases_dir.glob("*/[!.]*.sqlite")):
+        logger.info("BIRD train databases already present at %s", train_databases_dir)
+        return train_dir
+
+    base_dir.mkdir(parents=True, exist_ok=True)
+    outer_zip_path = base_dir / "train.zip"
+
+    if not outer_zip_path.exists():
+        logger.info("Downloading BIRD train.zip from %s ...", _TRAIN_ZIP_URL)
+        req = urllib.request.Request(_TRAIN_ZIP_URL, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=600) as resp, open(outer_zip_path, "wb") as f:
+            while True:
+                chunk = resp.read(1 << 20)
+                if not chunk:
+                    break
+                f.write(chunk)
+
+    logger.info("Extracting train.zip to %s ...", base_dir)
+    with zipfile.ZipFile(outer_zip_path) as zf:
+        zf.extractall(base_dir)
+
+    inner_zip_path = train_dir / "train_databases.zip"
+    if not inner_zip_path.exists():
+        raise RuntimeError(f"Expected nested archive not found: {inner_zip_path}")
+
+    logger.info("Extracting train_databases.zip to %s ...", train_dir)
+    with zipfile.ZipFile(inner_zip_path) as zf:
+        zf.extractall(train_dir)
+
+    if not any(train_databases_dir.glob("*/[!.]*.sqlite")):
+        raise RuntimeError(f"No train databases found under {train_databases_dir} after extraction")
+
+    n_dbs = sum(1 for _ in train_databases_dir.glob("*/[!.]*.sqlite"))
+    logger.info("BIRD train: %d databases extracted to %s", n_dbs, train_databases_dir)
+    return train_dir
