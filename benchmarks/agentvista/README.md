@@ -52,7 +52,19 @@ SVG, using explicit base image, standalone Python distribution, CLI, uv and sour
 inputs. It verifies the source and CLI, imports the worker dependencies, and writes
 an image digest receipt. An import check does not establish live benchmark success.
 
-SVG build example (the output image is a build destination, not a pre-existing artifact):
+The shared SVG image has been built and import-checked at
+`/lustre/fsw/portfolios/nemotron/users/pritamb/gameplay_home/vlm_eval/saas_bench_assets/serving_containers/agentvista-eval-default-opencode-1.17.11-svg-amd64.sqsh`.
+Its SHA256 is `d97355314b764b47fd29c2acd1ba7bef55af24ed03ac0bcfdbd3c27739d4beb5`;
+the adjacent `.sqsh.json` records source, CLI and dependency provenance. Project
+storage access is required. Factory recipes accept `AGENTVISTA_SVG_ROOT` for a
+separately staged copy of the same assets.
+
+[SVG smoke evidence](smoke-results/svg-20261111.json) records one bounded task for
+each harness with local Super GA and hosted Kimi K3. All four completed execution
+and original answer judging with unmasked zero rewards. These are pipeline checks;
+they do not establish benchmark accuracy or published-score parity.
+
+SVG rebuild example (uses a new output filename):
 
 ```bash
 base=/lustre/fsw/portfolios/nemotron/users/pritamb/gameplay_home/vlm_eval
@@ -62,7 +74,7 @@ python responses_api_agents/agentvista_agent/runtime-image/build.py \
   --opencode "$base/.runtime/opencode-1.17.11/opencode" \
   --uv "$base/.runtime/saas_eval_dual_harness/tools/uv-x86_64-unknown-linux-gnu/uv" \
   --source "$base/agentvista" --work-dir "$base/.runtime/agentvista-image-build" \
-  --output "$base/saas_bench_assets/serving_containers/agentvista-eval-default-opencode-1.17.11-svg-amd64.sqsh"
+  --output "$base/saas_bench_assets/serving_containers/agentvista-eval-default-opencode-1.17.11-svg-amd64-rebuild.sqsh"
 ```
 
 The builder does not submit a Slurm job. Run it in a suitable existing allocation.
