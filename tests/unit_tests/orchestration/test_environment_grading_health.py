@@ -4,6 +4,7 @@
 
 import json
 from pathlib import Path
+from typing import Literal
 from unittest.mock import AsyncMock
 
 import pytest
@@ -24,6 +25,7 @@ from nemo_gym.orchestration.recovery import (
 from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 from nemo_gym.rollouts.rollout_health import run_health_checks
 from nemo_gym.server_runtime.verifier_observability import observe_llm_judge_grading, observe_verifier
+from nemo_gym.trajectory.trajectory_record import grading_result_binding
 from nemo_gym.verification.judge import call_judge, record_parsed_judge_verdict
 from tests.helpers.single_agent_turn import _agent_response, _Client, _environment_server, _request, _Response
 from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect_with_score
@@ -151,6 +153,8 @@ class _ObservedDependencies(_Client):
 
     reward: float = 1.0
     judged: bool = False
+    verifier: Literal["string_match", "tool_rewards", "post_verifier_projection"] | None = None
+    transform_change: Literal["response_metadata", "reward"] | None = None
     capture_dir: Path | None = None
 
     async def post(self, server_name: str, url_path: str, **kwargs) -> _Response:
@@ -181,6 +185,68 @@ class _ObservedDependencies(_Client):
         if url_path != "/verify":
             return await super().post(server_name, url_path, **kwargs)
 
+        if self.verifier is not None:
+            from resources_servers.string_match.app import StringMatchResourcesServer, StringMatchResourcesServerConfig
+            from resources_servers.string_match.tool_rewards import ToolRewardConfig, ToolRewardServer
+
+            if self.verifier != "string_match":
+                server = ToolRewardServer(
+                    config=ToolRewardConfig(name=server_name, host="127.0.0.1", port=1, entrypoint="tool_rewards.py"),
+                    server_client=self,
+                )
+            else:
+                server = StringMatchResourcesServer(
+                    config=StringMatchResourcesServerConfig(
+                        name=server_name, host="127.0.0.1", port=1, entrypoint="app.py"
+                    ),
+                    server_client=self,
+                )
+            with TestClient(server.setup_webserver()) as client:
+                reply = client.post(
+                    f"/ng-rollout/{current_rollout_id()}/verify",
+                    json=kwargs["json"]
+                    | {"expected_answer": "A" if self.reward else "B", "extraction_mode": "full_response"},
+                    headers=kwargs.get("headers"),
+                )
+            assert reply.status_code == 200, reply.text
+            result = reply.json()
+            if self.verifier == "post_verifier_projection":
+                # An environment-side projection retains the underlying HTTP verifier's own observation.
+                original_server = StringMatchResourcesServer(
+                    config=StringMatchResourcesServerConfig(
+                        name=server_name, host="127.0.0.1", port=1, entrypoint="app.py"
+                    ),
+                    server_client=self,
+                )
+                with TestClient(original_server.setup_webserver()) as client:
+                    original = client.post(
+                        f"/ng-rollout/{current_rollout_id()}/verify",
+                        json=kwargs["json"]
+                        | {
+                            "response": result["ng_grading_transform"]["input_result"]["response"],
+                            "expected_answer": "A",
+                            "extraction_mode": "full_response",
+                        },
+                        headers=kwargs.get("headers"),
+                    )
+                assert original.status_code == 200, original.text
+                assert (
+                    grading_result_binding(original.json()) == result["ng_grading_transform"]["input_binding_sha256"]
+                )
+                result["ng_verifier_invocations"] = original.json()["ng_verifier_invocations"]
+            if self.transform_change is not None:
+                # Inject artifact corruption before the managed writer, keeping its journal/snapshot consistent.
+                if self.transform_change == "response_metadata":
+                    result["response"]["created_at"] += 1
+                else:
+                    result["reward"] += 0.25
+                binding = grading_result_binding(result)
+                assert binding is not None
+                result["ng_grading_transform"]["output_binding_sha256"] = binding
+                [invocation] = result["ng_verifier_invocations"]
+                invocation["grading_record"].update(score=result["reward"], result_binding_sha256=binding)
+            return _Response(result)
+
         async def grade():
             reply = await call_judge(
                 self,
@@ -204,18 +270,49 @@ class _ObservedDependencies(_Client):
 
 
 async def _collect_session(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, reward: float, empty=False, judged=False
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    reward: float,
+    empty=False,
+    judged=False,
+    verifier: Literal["string_match", "tool_rewards", "post_verifier_projection"] | None = None,
+    transform_change: Literal["response_metadata", "reward"] | None = None,
 ):
     environment, dependencies = _environment_server(client_type=_ObservedDependencies)
     dependencies.reward = reward
     dependencies.judged = judged
+    dependencies.verifier = verifier
+    dependencies.transform_change = transform_change
+    dependencies.global_config_dict.observability_enabled = True
     dependencies.capture_dir = tmp_path / "captures"
     response = _agent_response().model_dump(mode="json")
     if empty:
         response |= {"status": "incomplete", "output": [{"type": "reasoning", "id": "reasoning", "summary": []}]}
     else:
         response["status"] = "completed"
+    if verifier is not None:
+        response["output"][0]["content"][0]["text"] = "A"
+    if verifier in {"tool_rewards", "post_verifier_projection"}:
+        response["output"][0]["content"][0]["text"] = "<think>private reasoning</think>A"
+        response["output"][:0] = [
+            {"type": "function_call", "call_id": "bash-1", "name": "bash", "arguments": '{"command":"echo evidence"}'},
+            {"type": "function_call_output", "call_id": "bash-1", "output": "evidence"},
+        ]
     trajectory = raw_trial()["ng_trajectory"]
+    if verifier in {"tool_rewards", "post_verifier_projection"}:
+        trajectory["schema_version"] = "2.0"
+        trajectory["capture_key"] = trajectory.pop("rollout_id")
+        trajectory["tool_calls"] = [
+            {
+                "invocation_id": "root",
+                "tool_call_id": "bash-1",
+                "native_tool_call_id": "bash-1",
+                "span_id": "span-bash-1",
+                "tool_name": "bash",
+                "status": "completed",
+            }
+        ]
     trajectory["task_id"] = "task"
     trajectory["verifier_invocations"] = []
     invocation = trajectory["invocations"][0]
@@ -281,13 +378,15 @@ async def _collect_session(
 
 @pytest.mark.parametrize("reward", [0.0, 1.0])
 async def test_collected_taskset_score_is_observed_without_an_agent_ref(tmp_path, monkeypatch, reward):
-    saved, collected = await _collect_session(tmp_path, monkeypatch, reward=reward)
+    saved, collected = await _collect_session(tmp_path, monkeypatch, reward=reward, verifier="string_match")
     assert "agent_ref" not in saved and "agent_ref" not in collected.results[0]
     assert "ng_verifier_invocations" not in saved
     [verifier] = saved["ng_trajectory"]["verifier_invocations"]
     assert verifier["grading_record"]["verifier"] == "resources"
     assert verifier["grading_record"]["score"] == saved["reward"] == reward
+    assert "ng_grading_transform" not in saved
     projected = collected.results[0]
+    assert "_ng_collected_grading_transform" not in projected
     binding = projected["_ng_collected_grading_binding"]
     assert isinstance(binding, str) and len(binding) == 64
     assert (
@@ -297,6 +396,124 @@ async def test_collected_taskset_score_is_observed_without_an_agent_ref(tmp_path
     passed, reason, report, counts = _gate(collected)
     assert passed is True and report["exact"] is True, reason
     assert counts == {"observed_healthy": 1, "unhealthy": 0, "unobserved": 0, "verifier_recorded": 1}
+
+
+async def test_current_tool_reward_projection_is_observed_after_persisted_collection(tmp_path, monkeypatch):
+    saved, collected = await _collect_session(tmp_path, monkeypatch, reward=1.0, verifier="tool_rewards")
+    assert saved["reward"] == pytest.approx(1.1)
+    transform = saved["ng_grading_transform"]
+    assert transform["input_result"]["reward"] == 1.0
+    assert transform["reward_offset"] == pytest.approx(0.1)
+    assert transform["input_result"]["response"]["output"] != saved["response"]["output"]
+    projected = collected.results[0]
+    descriptor = projected["_ng_collected_grading_transform"]
+    assert descriptor == {
+        "input_binding_sha256": transform["input_binding_sha256"],
+        "input_reward": 1.0,
+        "output_binding_sha256": transform["output_binding_sha256"],
+    }
+    assert "ng_grading_transform" not in projected
+    assert "private reasoning" not in json.dumps(projected)
+    [verifier] = projected["ng_trial_observations"]["verifier_invocations"]
+    assert verifier["grading_record"]["score"] == pytest.approx(saved["reward"])
+    assert verifier["grading_record"]["result_binding_sha256"] == descriptor["output_binding_sha256"]
+    passed, reason, report, counts = _gate(collected)
+    assert passed is True and report["exact"] is True, reason
+    assert counts == {"observed_healthy": 1, "unhealthy": 0, "unobserved": 0, "verifier_recorded": 1}
+
+
+async def test_post_verifier_projection_retains_the_original_observed_grade(tmp_path, monkeypatch):
+    saved, collected = await _collect_session(tmp_path, monkeypatch, reward=1.0, verifier="post_verifier_projection")
+    assert saved["reward"] == pytest.approx(1.1)
+    descriptor = collected.results[0]["_ng_collected_grading_transform"]
+    [invocation] = collected.results[0]["ng_trial_observations"]["verifier_invocations"]
+    assert invocation["grading_record"]["score"] == descriptor["input_reward"] == 1.0
+    assert invocation["grading_record"]["result_binding_sha256"] == descriptor["input_binding_sha256"]
+    assert descriptor["input_binding_sha256"] != descriptor["output_binding_sha256"]
+    passed, reason, report, counts = _gate(collected)
+    assert passed is True and report["exact"] is True, reason
+    assert counts == {"observed_healthy": 1, "unhealthy": 0, "unobserved": 0, "verifier_recorded": 1}
+
+
+@pytest.mark.parametrize("change", ["response_metadata", "reward"])
+async def test_semantically_invalid_projection_stays_unobserved_after_rebinding(tmp_path, monkeypatch, change):
+    saved, collected = await _collect_session(
+        tmp_path, monkeypatch, reward=1.0, verifier="tool_rewards", transform_change=change
+    )
+    transform = saved["ng_grading_transform"]
+    assert transform["output_binding_sha256"] == grading_result_binding(saved)
+    [invocation] = saved["ng_trajectory"]["verifier_invocations"]
+    assert invocation["grading_record"]["result_binding_sha256"] == transform["output_binding_sha256"]
+    assert invocation["grading_record"]["score"] == saved["reward"]
+    if change == "response_metadata":
+        assert saved["response"]["created_at"] != transform["input_result"]["response"]["created_at"]
+    else:
+        assert saved["reward"] != transform["input_result"]["reward"] + transform["reward_offset"]
+    assert collected.results[0]["_ng_collected_grading_transform"] is False
+    passed, reason, report, counts = _gate(collected)
+    assert passed is None and report["status"] == "UNVERIFIED", reason
+    assert {key: counts[key] for key in ("observed_healthy", "unhealthy", "unobserved", "verifier_recorded")} == {
+        "observed_healthy": 0,
+        "unhealthy": 0,
+        "unobserved": 1,
+        "verifier_recorded": 0,
+    }
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "false",
+        "malformed",
+        "wrong_output",
+        "source_nan",
+        "source_inf",
+        "record_nan",
+        "record_inf",
+        "boolean_score",
+        "mixed_score",
+        "mixed_binding",
+        "wrong_verifier",
+    ],
+)
+async def test_transformed_grading_requires_intact_descriptor_and_one_owned_pair(tmp_path, monkeypatch, change):
+    _, collected = await _collect_session(tmp_path, monkeypatch, reward=1.0, verifier="tool_rewards")
+    row = collected.results[0]
+    descriptor = row["_ng_collected_grading_transform"]
+    [invocation] = row["ng_trial_observations"]["verifier_invocations"]
+    record = invocation["grading_record"]
+    if change == "false":
+        row["_ng_collected_grading_transform"] = False
+    elif change == "malformed":
+        descriptor.pop("input_binding_sha256")
+    elif change == "wrong_output":
+        descriptor["output_binding_sha256"] = "0" * 64
+    elif change in {"source_nan", "source_inf"}:
+        descriptor["input_reward"] = float("nan" if change == "source_nan" else "inf")
+    elif change in {"record_nan", "record_inf"}:
+        record["score"] = float("nan" if change == "record_nan" else "inf")
+    elif change == "boolean_score":
+        record.update(score=True, result_binding_sha256=descriptor["input_binding_sha256"])
+    elif change == "mixed_score":
+        record["score"] = descriptor["input_reward"]
+    elif change == "mixed_binding":
+        record["result_binding_sha256"] = descriptor["input_binding_sha256"]
+    else:
+        record["verifier"] = "another_resources_server"
+    passed, reason, report, counts = _gate(collected)
+    assert passed is None and report["status"] == "UNVERIFIED", reason
+    assert counts["observed_healthy"] == 0 and counts["verifier_recorded"] == 0
+    assert counts["unobserved"] == 1
+
+
+async def test_nonfinite_final_grade_is_neither_recorded_nor_a_complete_trial(tmp_path, monkeypatch):
+    _, collected = await _collect_session(tmp_path, monkeypatch, reward=1.0, verifier="tool_rewards")
+    row = collected.results[0]
+    [invocation] = row["ng_trial_observations"]["verifier_invocations"]
+    row["reward"] = invocation["grading_record"]["score"] = float("inf")
+    passed, reason, report, counts = _gate(collected)
+    assert passed is None and report is None and counts is None
+    assert "not complete" in reason
 
 
 @pytest.mark.parametrize("reward", [0.0, 1.0])
