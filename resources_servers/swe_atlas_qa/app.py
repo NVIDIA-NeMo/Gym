@@ -7,7 +7,6 @@ import asyncio
 import json
 import logging
 import tempfile
-from collections import defaultdict
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -36,10 +35,14 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
+    ResourcesSessionConflictError,
+    ResourcesSessionFences,
+    ResourcesSessionLocks,
     ReverifyMode,
     SimpleResourcesServer,
     lost_session_verification,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.swe_atlas_qa.prepare import TASKS_DIR, load_task, validate_source
 
 
@@ -98,12 +101,18 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
 
     config: SWEAtlasQAResourcesServerConfig
     _sessions: dict[str, tuple[str, SandboxHandle]] = PrivateAttr(default_factory=dict)
-    _closed_sessions: set[str] = PrivateAttr(default_factory=set)
-    _session_locks: dict[str, asyncio.Lock] = PrivateAttr(default_factory=lambda: defaultdict(asyncio.Lock))
+    # A close or a verify fences the session once its task sandbox is deleted, so a seed within
+    # session_close_retry_window_seconds cannot start another sandbox for it. A fenced session is never in _sessions.
+    _fences: ResourcesSessionFences[None] = PrivateAttr()
+    # Verified sessions whose task sandbox could not be deleted. Seed and verify refuse them, and a close retries the
+    # delete and fences them when it succeeds. Each handle is also in _sandboxes.
+    _cleanup_pending: dict[str, SandboxHandle] = PrivateAttr(default_factory=dict)
+    _locks: ResourcesSessionLocks = PrivateAttr(default_factory=ResourcesSessionLocks)
     _sandboxes: dict[str, SandboxHandle] = PrivateAttr(default_factory=dict)
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
+        self._fences = ResourcesSessionFences(self.config.session_close_retry_window_seconds)
         validate_source(self.config.tasks_dir.parent.parent)
         global_config = self.server_client.global_config_dict
         self._provider = create_provider(resolve_provider_config(self.config.sandbox_provider, global_config))
@@ -131,6 +140,8 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
                             raise result
                 finally:
                     self._sessions.clear()
+                    self._cleanup_pending.clear()
+                    self._fences.clear()
                     await self._provider.aclose()
 
         app.router.lifespan_context = lifespan
@@ -153,9 +164,10 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
     async def seed_session(self, request: Request, body: SWEAtlasQARequest) -> SWEAtlasQASeedSessionResponse:
         task = load_task(self.config.tasks_dir, body.task_id)
         session_id = request.session[SESSION_ID_KEY]
-        async with self._session_locks[session_id]:
-            if session_id in self._closed_sessions:
-                raise ValueError("This SWE Atlas Q&A session has already closed")
+        async with self._locks.locked(session_id):
+            self._fences.raise_if_fenced(session_id)
+            if session_id in self._cleanup_pending:
+                raise ResourcesSessionConflictError(f"Resources session is already closed: {session_id}")
             if session_id in self._sessions:
                 task_id, handle = self._sessions[session_id]
                 if task_id != body.task_id:
@@ -213,16 +225,19 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
         cookie_id = request.session.get(SESSION_ID_KEY)
         if cookie_id != session_id and cookie_id in self._sessions:
             raise ValueError("The session cookie conflicts with resources_session_id")
-        async with self._session_locks[session_id]:
-            if session_id in self._sessions:
+        async with self._locks.locked(session_id):
+            handle = self._cleanup_pending.get(session_id)
+            if handle is None and session_id in self._sessions:
                 handle = self._sessions[session_id][1]
+            if handle is not None:
                 try:
                     await self._close(handle)
                 finally:
                     if handle.sandbox_id not in self._sandboxes:
-                        del self._sessions[session_id]
-                        self._closed_sessions.add(session_id)
-            self._closed_sessions.add(session_id)
+                        self._sessions.pop(session_id, None)
+                        self._cleanup_pending.pop(session_id, None)
+                        self._fences.fence(session_id, None)
+            self._fences.fence(session_id, None)
             return ResourcesCloseSessionResponse(resources_session_id=body.resources_session_id)
 
     async def _grade(self, task_id: str, answer_path: Path, directory: Path) -> dict[str, Any]:
@@ -296,18 +311,23 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
 
     async def verify(self, request: Request, body: SWEAtlasQAVerifyRequest) -> SWEAtlasQAVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
-        async with self._session_locks[session_id]:
-            session = None if session_id in self._closed_sessions else self._sessions.pop(session_id, None)
-            self._closed_sessions.add(session_id)
         result: dict[str, Any] = {"reward": 0.0, "evaluation_completed": True}
-        if session is None:
-            result.update(evaluation_completed=False, **lost_session_verification("Task sandbox session is missing"))
-        else:
-            task_id, handle = session
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            directory = Path(temporary_dir)
+            answer_path = directory / "answer.txt"
             try:
-                with tempfile.TemporaryDirectory() as temporary_dir:
-                    directory = Path(temporary_dir)
-                    answer_path = directory / "answer.txt"
+                # Hold the session's lock until its task sandbox is deleted or left for a close to retry, so a seed or
+                # close never finds the session half released. Grading runs after the lock is released.
+                async with self._locks.locked(session_id):
+                    session = self._sessions.pop(session_id, None)
+                    if session is None:
+                        if session_id not in self._cleanup_pending:
+                            self._fences.fence(session_id, None)
+                        result.update(
+                            evaluation_completed=False, **lost_session_verification("Task sandbox session is missing")
+                        )
+                        return SWEAtlasQAVerifyResponse.model_validate(body.model_dump() | result)
+                    task_id, handle = session
                     try:
                         if task_id != body.task_id:
                             raise ValueError("Verification task does not match the seeded task")
@@ -320,23 +340,26 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
                         if answer_file.error_type is not None or answer_file.return_code not in (0, 1):
                             raise RuntimeError("Agent answer inspection failed")
                         if answer_file.return_code == 0:
-                            await self._provider.download_file(handle, "/logs/agent/answer.txt", answer_path)
+                            async with asyncio.timeout(60):
+                                await self._provider.download_file(handle, "/logs/agent/answer.txt", answer_path)
                     finally:
                         # No agent process can run while private rubric files or judge credentials are staged.
                         try:
                             await self._close(handle)
                         finally:
                             if handle.sandbox_id in self._sandboxes:
-                                self._sessions[session_id] = session
-                    if answer_path.exists():
-                        if answer_path.stat().st_size > self.config.max_answer_bytes:
-                            raise ValueError("Agent answer exceeds the configured size limit")
-                        result["answer"] = answer_path.read_text(errors="replace")
-                        answer_text = result["answer"].strip()
-                        if "<<FINAL_ANSWER>>" in answer_text:
-                            answer_text = answer_text.split("<<FINAL_ANSWER>>")[1].strip()
-                        if answer_text:
-                            result.update(await self._grade(body.task_id, answer_path, directory))
+                                self._cleanup_pending[session_id] = handle
+                            else:
+                                self._fences.fence(session_id, None)
+                if answer_path.exists():
+                    if answer_path.stat().st_size > self.config.max_answer_bytes:
+                        raise ValueError("Agent answer exceeds the configured size limit")
+                    result["answer"] = answer_path.read_text(errors="replace")
+                    answer_text = result["answer"].strip()
+                    if "<<FINAL_ANSWER>>" in answer_text:
+                        answer_text = answer_text.split("<<FINAL_ANSWER>>")[1].strip()
+                    if answer_text:
+                        result.update(await self._grade(body.task_id, answer_path, directory))
             except Exception as error:
                 LOG.warning("SWE Atlas Q&A verification failed (%s)", type(error).__name__)
                 result.update(
@@ -351,3 +374,6 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     SWEAtlasQAResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = SWEAtlasQAResourcesServer.run_webserver()  # noqa: F401

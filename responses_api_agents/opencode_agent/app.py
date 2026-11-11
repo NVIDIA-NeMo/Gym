@@ -43,6 +43,7 @@ from nemo_gym.agents import (
     HARNESS_RUNNER_FAILED,
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
+    HARNESS_STEP_LIMIT_METADATA_KEY,
     AgentCloseSessionResponse,
     AgentContinuationCapabilities,
     AgentOutcome,
@@ -99,7 +100,6 @@ from nemo_gym.trajectory import (
     AgentObservationBundle,
     ObservationGap,
     SandboxObservation,
-    ToolCallObservation,
     TrajectoryRecord,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
@@ -321,6 +321,97 @@ def _serialize_replacement_config(config: dict[str, Any]) -> str:
     return _dump_with_serialized_member(config, "agent", agent_json)
 
 
+def _session_opencode_config_error(opencode_config: Mapping[str, Any]) -> str | None:
+    """Return why a sandbox session cannot use ``opencode_config``, or ``None``.
+
+    The adapter owns the model, provider, prompt and plugins of a sandbox session, so it accepts only:
+
+    - ``permission`` and ``tools``, OpenCode's tool access.
+    - ``attachment``, OpenCode's image limits. A session that declares image input lifts them, and this restores them
+      for an endpoint with image limits.
+    - ``compaction.auto`` (a boolean). Automatic compaction summarizes the session and continues from the
+      summary, in model calls that do not extend the scored call's prefix. With it off, a run that fills the
+      context ends with OpenCode's context-overflow error, which the adapter reports as a context limit.
+    - ``agent.build.steps`` (a positive integer): the step limit of OpenCode's ``build`` agent, which the session
+      runs, for each prompt. From the call at the limit on, OpenCode adds an assistant message to each request that
+      asks for a text answer. It still offers the tools, so a model that keeps calling them runs past the limit.
+      Other agent fields would replace the adapter's prompt, model or sampling. Token capture recognizes that
+      message (``nemo_gym.models.token_capture.harness_notes``) and keeps the calls after it chained.
+    """
+    unsupported = sorted(opencode_config.keys() - {"permission", "tools", "attachment", "compaction", "agent"})
+    if unsupported:
+        return (
+            "supports permission, tools, attachment, compaction.auto and agent.build.steps only; "
+            f"unsupported: {unsupported}"
+        )
+    compaction = opencode_config.get("compaction", {})
+    if not isinstance(compaction, Mapping) or compaction.keys() - {"auto"}:
+        return "compaction supports only auto"
+    if "auto" in compaction and not isinstance(compaction["auto"], bool):
+        return "compaction.auto must be true or false"
+    agent = opencode_config.get("agent", {})
+    if not isinstance(agent, Mapping) or agent.keys() - {"build"}:
+        return "agent supports only build, the agent a session runs"
+    build = agent.get("build", {})
+    if not isinstance(build, Mapping) or build.keys() - {"steps"}:
+        return "agent.build supports only steps"
+    if "steps" in build and (type(build["steps"]) is not int or build["steps"] <= 0):
+        return "agent.build.steps must be a positive integer"
+    return None
+
+
+def _build_step_limit(opencode_config: Mapping[str, Any]) -> int | None:
+    """The configured ``agent.build.steps``, or None when OpenCode runs without a step limit."""
+    agent = opencode_config.get("agent")
+    build = agent.get("build") if isinstance(agent, Mapping) else None
+    steps = build.get("steps") if isinstance(build, Mapping) else None
+    return steps if type(steps) is int and steps > 0 else None
+
+
+def _continues_the_prompt(messages: Sequence[Mapping[str, Any]], index: int) -> bool:
+    """Whether the user message at ``index`` is one that OpenCode's compaction adds, not a new prompt."""
+    if any(part.get("type") == "compaction" for part in messages[index].get("parts") or []):
+        return True
+    # After an automatic compaction's summary, OpenCode continues the prompt with a user message: a synthetic
+    # "Continue if you have next steps" text, or a replay of the prompt when the compaction was for an overflow.
+    return index > 0 and messages[index - 1]["info"].get("summary") is True
+
+
+def reached_step_limit(export: Mapping[str, Any], steps: int | None) -> bool:
+    """Whether the last prompt of an OpenCode export reached the step limit that ``steps`` sets.
+
+    OpenCode 1.17.11's ``opencode run`` runs the session loop in packages/opencode/src/session/prompt.ts. Its counter
+    ``step`` grows by one on each pass of the loop, and ``isLastStep = step >= maxSteps``: from that pass on, each
+    build call appends MAX_STEPS_PROMPT as an assistant message but still offers the tools and leaves toolChoice
+    unset. So the note asks for a final answer and does not force one, and the model may keep calling tools.
+
+    Compaction does not reset the counter, and its passes count too (packages/opencode/src/session/compaction.ts).
+    A build call and a compaction's summary call each take a pass and save an assistant message. A pass can also
+    only start a compaction, when the last finished call overflowed; it saves a user message with a compaction part
+    and no ``overflow`` field. A compaction that a build call starts sets ``overflow`` and takes no pass of its own.
+    The user messages that compaction adds are not new prompts (``_continues_the_prompt``).
+    """
+    if steps is None:
+        return False
+    messages = export.get("messages") or []
+    prompt = max(
+        (
+            index
+            for index, message in enumerate(messages)
+            if message["info"].get("role") == "user" and not _continues_the_prompt(messages, index)
+        ),
+        default=-1,
+    )
+    passes = 0
+    for message in messages[prompt + 1 :]:
+        parts = message.get("parts") or []
+        if message["info"].get("role") == "assistant" or any(
+            part.get("type") == "compaction" and "overflow" not in part for part in parts
+        ):
+            passes += 1
+    return passes >= steps
+
+
 class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef | None = None
     model_server: Optional[ModelServerRef] = None
@@ -373,7 +464,8 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     )
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     report_agent_sandbox_oom: bool = False
-    # Connection and per-call timeout of a sandbox session's MCP tool grants; OpenCode's default is 30 s.
+    # Connection and per-call timeout of a sandbox session's MCP tool grants. Unset, OpenCode connects within 30 s
+    # and each call gets the MCP SDK's 60 s.
     mcp_tool_timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
     # Sandbox sessions only. Absolute sandbox paths of OpenCode plugin files that the sandbox owner staged,
@@ -394,9 +486,16 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # exists at seed, it is imported and the first activation continues that session; its messages stay history.
     session_import_path: str | None = None
     # Sandbox sessions only. Close also returns an ordinary session's own turns (one per saved assistant reply,
-    # compaction summaries left out), as continuation sessions always do. Without them, rollout collection builds one
-    # turn per captured call, so the summary call of a compaction is counted as a step too.
-    return_session_trajectory: bool = False
+    # compaction summaries left out), as continuation sessions always do, so rollout collection joins each captured
+    # call to its step and the harness evidence checks can match them. Without them, collection builds one turn per
+    # captured call with no message ID, every call is reported as an unmatched assistant message, and the summary call
+    # of a compaction is counted as a step too.
+    return_session_trajectory: bool = True
+    # Sandbox sessions only. Let OpenCode's run load the task repository's project config and instruction files
+    # (AGENTS.md or CLAUDE.md, opencode.json, .opencode/), as it does when started in that repository. The configuration
+    # Gym passes is merged last and still wins. Off by default, so a repository cannot add instructions, agents, plugins
+    # or tools.
+    session_project_config: bool = False
 
     @model_validator(mode="after")
     def _validate_prompt_agent(self) -> Self:
@@ -650,17 +749,25 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 if timed_out
                 else parse_opencode_session(db_path, gym_reasoning=self.config.model_server is not None)
             )
-            observations = AgentObservationBundle(source="opencode")
+            observations = AgentObservationBundle(schema_version="2.0", source="opencode")
             if collect_observations:
                 try:
                     observations = _parse_opencode_session(
-                        db_path, invocation_id, trajectory, model_ref=self.config.model_server
+                        db_path,
+                        invocation_id,
+                        trajectory,
+                        model_ref=self.config.model_server,
+                        # This fresh local database is written by one OpenCode launch.
+                        clock_domain=f"opencode-wall:{uuid4().hex}",
+                        agent_instance=f"opencode-agent:{uuid4().hex}",
+                        observation_schema_version="2.0",
                     )
                 except Exception:
                     LOG.exception("failed to read OpenCode session artifact")
                     if trajectory is not None:
                         trajectory.gaps.append(ObservationGap(code="turns_unavailable"))
                     observations = AgentObservationBundle(
+                        schema_version="2.0",
                         source="opencode",
                         records=[AgentInvocation(invocation_id=invocation_id)],
                         gaps=[
@@ -952,12 +1059,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise HTTPException(
                 422, "OpenCode sandbox max_output_tokens must be positive and not exceed context_window"
             )
-        unsupported = self.config.opencode_config.keys() - {"permission", "tools", "attachment"}
-        if unsupported:
-            raise HTTPException(
-                422,
-                f"OpenCode sandbox config supports permission/tools/attachment only; unsupported: {sorted(unsupported)}",
-            )
+        config_error = _session_opencode_config_error(self.config.opencode_config)
+        if config_error is not None:
+            raise HTTPException(422, f"OpenCode sandbox config: {config_error}")
         if self.config.env or self.config.extra_args or self.config.command != "opencode":
             raise HTTPException(422, "env, extra_args and command overrides are supported only by local OpenCode")
         if not all(_is_sandbox_path(path) for path in self.config.plugins):
@@ -1300,7 +1404,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         assert isinstance(state, OpenCodeSandboxSession)
         await state.close(self.config.session_close_timeout_seconds)
         observations = state.observations or AgentObservationBundle(
-            source="opencode", gaps=[ObservationGap(code="agent_activation_interrupted")]
+            schema_version="2.0", source="opencode", gaps=[ObservationGap(code="agent_activation_interrupted")]
         )
         # A capture that close finished after the activation returned reports its export failure here.
         observations.gaps.extend(state.take_export_gaps())
@@ -1332,6 +1436,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             if key in ("stream", "background") and value is False:
                 continue
             if key == "metadata" and value and set(value) <= {AGENT_TIMEOUT_METADATA_KEY}:
+                continue
+            # Gym agents read a request's max_output_tokens as the limit for each model call (simple_agent copies it
+            # into every call), and NeMo RL sets it on every row as its generation limit. OpenCode's own limit for
+            # each call (config.max_output_tokens) already stays within a value at least that large. A tighter one is
+            # refused below. Nothing limits the sum over a session's calls, as in simple_agent.
+            if key == "max_output_tokens" and value is not None and value >= self.config.max_output_tokens:
                 continue
             if value != field.get_default(call_default_factory=True):
                 raise HTTPException(
@@ -1518,7 +1628,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 stop_reason="timeout",
                 duration_ms=(monotonic() - started) * 1000,
             )
-            state.activation_observations = AgentObservationBundle(source="opencode", records=[invocation])
+            state.activation_observations = AgentObservationBundle(
+                schema_version="2.0", source="opencode", records=[invocation]
+            )
             state.activation_trajectory = TrajectoryRecord(
                 task_id=state.request.task_id.task_id,
                 rollout_id=state.request.episode_id.capture_key,
@@ -1538,7 +1650,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             if failure is not None:
                 observations = state.activation_observations
                 if observations is None:
-                    observations = AgentObservationBundle(source="opencode")
+                    observations = AgentObservationBundle(schema_version="2.0", source="opencode")
                     state.activation_observations = observations
                 if not any(
                     isinstance(r, AgentInvocation) and r.parent_invocation_id is None for r in observations.records
@@ -1662,11 +1774,16 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     },
                 }
             },
-            **_without_empty_tools(self.config.opencode_config),
+            # A copy: the replacement prompt and the request sampling below are per session and must not reach
+            # the shared configuration.
+            **copy.deepcopy(_without_empty_tools(self.config.opencode_config)),
         }
         sampling = {name: value for name in ("temperature", "top_p") if (value := getattr(body, name)) is not None}
         if sampling:
-            config["agent"] = {agent: dict(sampling) for agent in _OPENCODE_AGENTS[self.config.opencode_version]}
+            # Merged into each agent, so a configured agent.build.steps stays.
+            agents = config.setdefault("agent", {})
+            for agent in _OPENCODE_AGENTS[self.config.opencode_version]:
+                agents.setdefault(agent, {}).update(sampling)
             if "temperature" in sampling:
                 # OpenCode sends temperature only for models that declare the capability.
                 config["provider"]["nemo_gym"]["models"][self.config.sandbox_model_id]["temperature"] = True
@@ -1676,7 +1793,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         # System instructions are separate from the user's task and applied to every OpenCode model turn.
         if system:
             if self.config.system_prompt_mode == "replace":
-                # Added to the build agent, which keeps the request sampling set above.
+                # Added to the build agent, beside the request sampling and a configured agent.build.steps.
                 config.setdefault("agent", {}).setdefault("build", {})["prompt"] = system
             else:
                 config["instructions"] = [f"{state.session.session_dir}/instructions.md"]
@@ -1717,6 +1834,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": str(self.config.max_output_tokens),
             },
         }
+        if self.config.session_project_config:
+            del payload["env"]["OPENCODE_DISABLE_PROJECT_CONFIG"]
         error = None
         export = {}
         failure = None
@@ -1750,6 +1869,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             if state.is_continuation and state.harness_session_id is not None:
                 invocation_id += f":{state.harness_session_id}"
             observations = AgentObservationBundle(
+                schema_version="2.0",
                 source="opencode",
                 records=(
                     [
@@ -1859,13 +1979,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     record.error_type = "server_error"
         cancelled = isinstance(failure, asyncio.CancelledError)
         timed_out = result is not None and result["timed_out"]
-        if cancelled or timed_out:
-            # Gym stopped the process, so a tool OpenCode left running ended with that stop.
-            termination = "timeout" if timed_out else "cancelled"
-            for record in observations.records:
-                if isinstance(record, ToolCallObservation) and record.status == "incomplete":
-                    record.status = termination
-                    record.error_type = f"invocation_{termination}"
+        # The enclosing process deadline does not establish a tool's own terminal outcome.
+        # Persisted starts without native completion remain incomplete through normalization.
         if result is not None:
             sandbox_outcome = (
                 "timeout" if timed_out else "cancelled" if cancelled else "failed" if error or failure else "completed"
@@ -1948,6 +2063,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             usage=usage,
             error_message=reported_message,
         )
+        if reached_step_limit(export, _build_step_limit(config)):
+            # The environment decides whether an answer given at or after the step limit is scored.
+            response = response.model_copy(
+                update={"metadata": {**(response.metadata or {}), HARNESS_STEP_LIMIT_METADATA_KEY: "true"}}
+            )
         return self.report_outcome(response, native_result)
 
 
