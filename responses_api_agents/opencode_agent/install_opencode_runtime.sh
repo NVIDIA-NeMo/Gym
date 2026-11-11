@@ -8,7 +8,14 @@ version=$2
 source_binary=${3:-}
 source_sha256=${4:-}
 path_prefix=${5:-}
+# Optional SHA-256 of each release download, as "<asset arch>=<digest>" words, for example
+# "x64-baseline=89a6... arm64=c168...". When set, a download whose asset has no digest here is refused.
+release_digests=${6:-}
 if [ -n "$path_prefix" ]; then export PATH="$path_prefix:$PATH"; fi
+# OpenCode 1.x prints the bare version; 2.x prints "opencode v<version>".
+is_requested_version() {
+  [ "$1" = "$version" ] || [ "$1" = "opencode v$version" ]
+}
 
 [ "$(uname -s)" = Linux ] || { echo 'OpenCode sandbox execution requires a Linux task image' >&2; exit 1; }
 # A process as "PID START" from /proc, so a reused PID never matches its former owner; PID alone
@@ -90,7 +97,7 @@ if [ -n "$source_binary" ]; then
   fi
   chmod 755 "$staged"
   # The probe must exit successfully as well as print the exact version.
-  if ! actual=$("$staged" --version) || [ "$actual" != "$version" ]; then
+  if ! actual=$("$staged" --version) || ! is_requested_version "$actual"; then
     echo 'OpenCode executable version mismatch' >&2
     exit 1
   fi
@@ -99,7 +106,7 @@ if [ -n "$source_binary" ]; then
 fi
 cached=false
 # A cached binary must also exit successfully, not only print the version.
-if [ -x "$runtime/opencode" ] && actual=$("$runtime/opencode" --version) && [ "$actual" = "$version" ]; then
+if [ -x "$runtime/opencode" ] && actual=$("$runtime/opencode" --version) && is_requested_version "$actual"; then
   cached=true
 fi
 missing=()
@@ -142,11 +149,27 @@ fi
 if [ "$cached" = true ]; then
   exit 0
 fi
+expected_digest=
+if [ -n "$release_digests" ]; then
+  for entry in $release_digests; do
+    [ "${entry%%=*}" != "$arch" ] || expected_digest=${entry#*=}
+  done
+  [ -n "$expected_digest" ] || { echo "No pinned SHA-256 for opencode-linux-${arch}.tar.gz ${version}" >&2; exit 1; }
+  command -v sha256sum >/dev/null 2>&1 || { echo 'Verifying the OpenCode download requires sha256sum' >&2; exit 1; }
+fi
 curl -fSL --retry 3 "https://github.com/anomalyco/opencode/releases/download/v${version}/opencode-linux-${arch}.tar.gz" -o "$runtime/opencode.tar.gz"
+if [ -n "$expected_digest" ]; then
+  digest=$(sha256sum "$runtime/opencode.tar.gz")
+  if [ "${digest%% *}" != "$expected_digest" ]; then
+    rm -f "$runtime/opencode.tar.gz"
+    echo "OpenCode download digest mismatch: expected $expected_digest, found ${digest%% *}" >&2
+    exit 1
+  fi
+fi
 tar -xzf "$runtime/opencode.tar.gz" -C "$runtime" opencode
 chmod +x "$runtime/opencode"
 actual=$("$runtime/opencode" --version)
-if [ "$actual" != "$version" ]; then
+if ! is_requested_version "$actual"; then
   echo "OpenCode version mismatch: requested $version, found $actual" >&2
   exit 1
 fi

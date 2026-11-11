@@ -38,7 +38,8 @@ OPENCODE_MAX_STEPS_NOTE = HarnessNote(
     text=OPENCODE_MAX_STEPS_PROMPT,
     # Compared on 2026-11-09 with packages/opencode/src/session/prompt/max-steps.txt (1.15.13, 1.17.8) and
     # packages/core/src/session/runner/max-steps.ts (1.17.11, 1.19.4): every release a config on main pins.
-    checked_versions=frozenset({"1.15.13", "1.17.8", "1.17.11", "1.19.4"}),
+    # 2.2.7 (opencode_agent's OpenCode 2 pin) sends the same text from the same file, compared on 2026-11-10.
+    checked_versions=frozenset({"1.15.13", "1.17.8", "1.17.11", "1.19.4", "2.2.7"}),
 )
 
 NOTES = (OPENCODE_MAX_STEPS_NOTE,)
