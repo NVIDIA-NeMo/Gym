@@ -71,7 +71,8 @@ from nemo_gym.sandbox import (
     sandbox_failure,
 )
 from nemo_gym.trajectory import AgentInvocation, SandboxObservation, ToolCallObservation
-from nemo_gym.utils import error_to_http_status, is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
+from nemo_gym.utils.exception_inspection import error_to_http_status
 from responses_api_agents.pi_agent.app import (
     MCP_SETUP_ERROR_EXIT_CODE,
     PiAgent,

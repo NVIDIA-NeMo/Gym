@@ -19,7 +19,8 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.utils import error_to_http_status, explicit_causes, is_nemo_gym_fastapi_entrypoint
+from nemo_gym.utils import explicit_causes, is_nemo_gym_fastapi_entrypoint
+from nemo_gym.utils.exception_inspection import error_to_http_status
 from nemo_gym.verification import JUDGE_FAILURES, JudgeError, call_judge, is_judge_failure
 from resources_servers.opencode_multimodal_benchmarks.metrics import average_repeats, pass_at_k
 from resources_servers.opencode_multimodal_benchmarks.reporting import benchmark_report

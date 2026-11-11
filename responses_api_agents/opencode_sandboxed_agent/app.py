@@ -105,8 +105,8 @@ from nemo_gym.trajectory import (
     ToolCallObservation,
     TrajectoryRecord,
 )
-from nemo_gym.utils import error_to_http_status, is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
-from nemo_gym.utils.exception_inspection import provider_error_reason, sandbox_failure_prefix
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
+from nemo_gym.utils.exception_inspection import error_to_http_status, provider_error_reason, sandbox_failure_prefix
 from responses_api_agents.opencode_agent.observability import (
     append_opencode_turns,
     opencode_tool_outcome,
