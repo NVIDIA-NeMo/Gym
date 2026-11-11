@@ -118,6 +118,7 @@ def test_professional_default_output_is_under_callers_cwd(tmp_path, monkeypatch)
 
 @pytest.mark.parametrize("prepare", [prepare_hb, prepare_hbp])
 def test_local_preparation_limit_and_atomic_failure(tmp_path, prepare):
+    bench = "healthbench"
     p = tmp_path / "source.jsonl"
     p.write_text(json.dumps(source()) + "\n" + json.dumps(source()) + "\n")
     out = tmp_path / "out.jsonl"
@@ -128,6 +129,51 @@ def test_local_preparation_limit_and_atomic_failure(tmp_path, prepare):
     with pytest.raises(ValueError, match="Invalid JSON"):
         prepare(p, out)
     assert out.read_text() == before
+    # A limit takes only the selected records, so a malformed record after them is never parsed.
+    prepare(p, out, 1)
+    assert [row["source_id"] for row in load_jsonl(out)] == [
+        to_gym_row(source(), 1, benchmark_name=bench)["source_id"]
+    ]
+
+
+@pytest.mark.parametrize("prepare", [prepare_hb, prepare_hbp])
+def test_a_string_output_path_from_the_command_line_is_written_as_a_path(tmp_path, prepare):
+    p = tmp_path / "source.jsonl"
+    p.write_text(json.dumps(source()) + "\n")
+    out = tmp_path / "nested" / "out.jsonl"
+    assert prepare(p, str(out)) == out
+    assert out.exists()
+
+
+def _malformed_conversations():
+    return [
+        ("message_without_role", [{"content": "earlier turn"}, {"role": "user", "content": "question"}]),
+        ("message_without_content", [{"role": "user"}, {"role": "user", "content": "question"}]),
+        ("unsupported_role", [{"role": "tool", "content": "x"}, {"role": "user", "content": "question"}]),
+    ]
+
+
+@pytest.mark.parametrize(("case", "conversation"), _malformed_conversations(), ids=lambda value: str(value)[:24])
+def test_malformed_conversation_messages_fail_schema_and_runtime(case, conversation):
+    from pydantic import ValidationError
+
+    from nemo_gym.verification import load_verifier_fixture
+    from resources_servers.healthbench_rubric.app import VERIFIER_FIXTURE, HealthBenchRubricVerifyRequest
+
+    row = to_gym_row(source(), 1, benchmark_name="healthbench")
+    row["conversation"] = conversation
+    with pytest.raises(ValidationError):
+        TaskData.model_validate(row)
+    body = load_verifier_fixture(VERIFIER_FIXTURE.cases_path)[0].request
+    body["conversation"] = conversation
+    with pytest.raises(ValidationError):
+        HealthBenchRubricVerifyRequest.model_validate(body)
+
+
+def test_a_message_with_empty_content_is_still_a_valid_conversation():
+    row = to_gym_row(source(), 1, benchmark_name="healthbench")
+    row["conversation"] = [{"role": "system", "content": ""}, {"role": "user", "content": ""}]
+    assert TaskData.model_validate(row).conversation[0]["content"] == ""
 
 
 def test_professional_field_names():

@@ -89,15 +89,26 @@ class HealthBenchRubricVerifyResponse(BaseVerifyResponse):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+def _content_part_text(part: Any) -> str:
+    """The answer text of one content part: ``output_text`` and ``input_text`` text, and a refusal. Anything else (an
+    image, reasoning) contributes none. A part is a model or a plain mapping, depending on the message that carried it."""
+    fields = part if isinstance(part, dict) else {key: getattr(part, key, None) for key in ("type", "text", "refusal")}
+    kind = fields.get("type")
+    if kind in {"output_text", "input_text"}:
+        return fields.get("text") or ""
+    if kind == "refusal":
+        return fields.get("refusal") or ""
+    return ""
+
+
 def _extract_last_assistant_text(body: BaseVerifyRequest) -> str:
     for output in reversed(body.response.output):
         if getattr(output, "type", None) != "message" or getattr(output, "role", None) != "assistant":
             continue
-        return "".join(
-            item.text if getattr(item, "type", None) == "output_text" else item.refusal
-            for item in output.content
-            if getattr(item, "type", None) in {"output_text", "refusal"}
-        )
+        # An easy message carries its answer as one string; the others carry a list of parts.
+        if isinstance(output.content, str):
+            return output.content
+        return "".join(_content_part_text(part) for part in output.content)
     return ""
 
 

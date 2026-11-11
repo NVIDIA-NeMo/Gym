@@ -31,6 +31,11 @@ class TaskData(BaseModel):
                 raise ValueError("Rubric points must be finite numbers")
         if not any(rubric["points"] > 0 for rubric in self.rubrics):
             raise ValueError("Rubrics have no positive points")
+        for index, message in enumerate(self.conversation):
+            if message.get("role") not in {"system", "user", "assistant"}:
+                raise ValueError(f"conversation[{index}] has an unsupported role")
+            if "content" not in message:
+                raise ValueError(f"conversation[{index}] requires content")
         if not self.conversation or self.conversation[-1].get("role") != "user":
             raise ValueError("Conversation must end with a user message")
         return self

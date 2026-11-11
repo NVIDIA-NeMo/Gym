@@ -200,6 +200,42 @@ async def test_refusal_only_is_judged_as_answer_text():
     assert result.grades
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        "Please seek emergency care.",
+        [{"type": "input_text", "text": "Please seek emergency care."}],
+    ],
+    ids=["string", "input_text_parts"],
+)
+async def test_supported_easy_assistant_messages_are_judged_not_scored_as_empty(content):
+    data = request().model_dump(mode="json")
+    data["response"]["output"][-1] = {"type": "message", "role": "assistant", "content": content}
+    body = HealthBenchRubricVerifyRequest.model_validate(data)
+    assert _extract_last_assistant_text(body) == "Please seek emergency care."
+    server = make_server()
+    with patch("resources_servers.healthbench_rubric.app.call_judge", AsyncMock(return_value=completion())) as judge:
+        result = await server.verify(body)
+    assert "Please seek emergency care." in judge.call_args.kwargs["json"].messages[-1]["content"]
+    assert result.overall_score == 1
+    assert result.grades
+    assert result.failure_kind is None
+
+
+def test_input_image_parts_contribute_no_answer_text():
+    data = request().model_dump(mode="json")
+    data["response"]["output"][-1] = {
+        "type": "message",
+        "role": "assistant",
+        "content": [
+            {"type": "input_text", "text": "see "},
+            {"type": "input_image", "image_url": "data:image/png;base64,AAAA", "detail": "auto"},
+            {"type": "input_text", "text": "above"},
+        ],
+    }
+    assert _extract_last_assistant_text(HealthBenchRubricVerifyRequest.model_validate(data)) == "see above"
+
+
 def test_mixed_text_and_refusal_keeps_content_order():
     data = request().model_dump(mode="json")
     data["response"]["output"][0]["content"] = [

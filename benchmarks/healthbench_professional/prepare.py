@@ -46,14 +46,15 @@ def _iter_source_records(data_dir: str | Path, source_filename: str, revision: s
 
 def prepare(
     data_dir: str | Path = HF_DATASET,
-    output: Path = OUTPUT_FPATH,
+    output: str | Path = OUTPUT_FPATH,
     limit: int | None = None,
     *,
     revision: str = HF_REVISION,
 ) -> Path:
+    # A command-line override reaches this function as a string.
     return write_gym_jsonl(
         _iter_source_records(data_dir, DEFAULT_SOURCE_FILENAME, revision),
-        output=output,
+        output=Path(output),
         benchmark_name=BENCHMARK_NAME,
         limit=limit,
     )

@@ -10,6 +10,7 @@ import math
 import uuid
 import zipfile
 from collections.abc import Iterable, Iterator
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -172,9 +173,10 @@ def write_gym_jsonl(
     tmp_fpath = output.with_suffix(".jsonl.tmp")
     count = 0
     with tmp_fpath.open("w", encoding="utf-8") as stream:
-        for row_number, record in enumerate(tqdm(records), 1):
-            if limit is not None and count >= limit:
-                break
+        # Take only the selected records: asking the source for one more would parse an unselected (possibly
+        # malformed) record before the limit is checked.
+        selected_records = islice(records, limit) if limit is not None else records
+        for row_number, record in enumerate(tqdm(selected_records), 1):
             stream.write(
                 json.dumps(to_gym_row(record, row_number, benchmark_name=benchmark_name), ensure_ascii=False) + "\n"
             )
