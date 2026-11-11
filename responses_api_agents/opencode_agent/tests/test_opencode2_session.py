@@ -348,3 +348,10 @@ async def test_a_local_call_runs_opencode_2_standalone_and_reads_its_store(openc
     assert "plugin" not in call["config"]
     assert output[-1].content[0].text == "Done"
     assert usage["output_tokens"] > 0
+
+
+def test_token_capture_knows_the_step_limit_note_of_the_pinned_opencode_2():
+    from nemo_gym.models import HARNESS_NOTES
+
+    notes = [note for note in HARNESS_NOTES if note.harness == "opencode"]
+    assert notes and all(OPENCODE_V2_VERSION in note.checked_versions for note in notes)

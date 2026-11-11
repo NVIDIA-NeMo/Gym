@@ -66,7 +66,8 @@ def test_permission_profile_loads_with_cli_override(override: bool, monkeypatch:
 
 def test_permission_profile_is_not_a_standalone_agent_variant(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(Path(__file__).resolve().parents[3])
-    assert list(discover_agents()["opencode_agent"].variants) == ["opencode_agent"]
+    # configs/opencode2_agent.yaml is the OpenCode 2 variant; the permission profile is none.
+    assert sorted(discover_agents()["opencode_agent"].variants) == ["opencode2_agent", "opencode_agent"]
 
 
 @pytest.mark.parametrize(
