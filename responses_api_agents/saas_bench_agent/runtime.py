@@ -12,6 +12,7 @@ import socket
 import tempfile
 from pathlib import Path
 
+
 BENCHMARK_ROOT = Path(__file__).resolve().parent / "benchmark"
 DEFAULT_BUNDLE_ROOT = Path(__file__).resolve().parent / "data/runtime"
 _SYSTEM_ENROOT_CONFIG = Path("/etc/enroot")
