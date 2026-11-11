@@ -176,6 +176,13 @@ class TestParsePrimeAgentEvents:
         assert items == []
         assert usage == {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}
 
+    def test_retried_model_error_keeps_the_run(self) -> None:
+        error = _message_end("assistant", [], stopReason="error", errorMessage="503")
+        done = _message_end("assistant", [{"type": "text", "text": "ok"}], usage={"output": 3})
+        items, usage = parse_prime_agent_events(f"{error}\n{done}")
+        assert [item.content[0].text for item in items] == ["ok"]
+        assert usage["output_tokens"] == 3
+
     def test_reasoning_is_preserved_separately(self) -> None:
         line = _message_end(
             "assistant",
@@ -422,7 +429,7 @@ class TestEnvironmentAndCommand:
         socket = tmp_path / "daemon.sock"
         command = agent._build_command("solve it", "be exact", socket)
         assert command[:6] == ["prime-agent", "--print", "--mode", "json", "--no-session", "--daemon-socket"]
-        assert command[-3:] == ["be exact", "--no-skills", "solve it"]
+        assert command[-4:] == ["be exact", "--no-skills", "--", "solve it"]
         assert command[command.index("--daemon-socket") + 1] == str(socket)
         assert command[command.index("--model") + 1] == "test-model"
         assert command[command.index("--thinking") + 1] == "high"

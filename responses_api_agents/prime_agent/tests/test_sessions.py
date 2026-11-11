@@ -16,6 +16,7 @@ from fastapi import HTTPException
 
 from nemo_gym.agents import (
     AGENT_OUTCOME_METADATA_KEY,
+    ROLLOUT_STOP_METADATA_KEY,
     AgentSeedSessionRequest,
     SandboxSession,
     check_agent_seed_rejected,
@@ -42,6 +43,8 @@ mode = os.environ.get("TEST_MODE", "normal")
     "env": {k: v for k, v in os.environ.items() if k.startswith(("PRIME_AGENT_", "PI_"))},
 }))
 subprocess.run(["bash", "-c", 'printf "%s\n%s\n" "$HOME" "$TASK_TEST" > proof.txt'], check=True)
+if mode == "silent":
+    time.sleep(60)
 def end(message):
     print(json.dumps({"type": "message_end", "message": message}), flush=True)
 usage = {"input": 10, "output": 2, "cacheRead": 1}
@@ -50,11 +53,13 @@ end({"role": "assistant", "content": [{"type": "toolCall", "id": "c1", "name": "
 end({"role": "toolResult", "toolCallId": "c1", "content": [{"type": "text", "text": "a.txt"}]})
 if mode == "sleep":
     time.sleep(60)
-if mode == "error":
+if mode in ("error", "retried"):
     end({"role": "assistant", "content": [], "usage": usage, "stopReason": "error",
          "errorMessage": "503 Service Unavailable"})
-else:
+if mode != "error":
     end({"role": "assistant", "content": [{"type": "text", "text": "Done."}], "usage": usage, "stopReason": "stop"})
+if mode == "lost":
+    os.unlink(agent_dir.parent / "stdout.jsonl")
 """.replace("__VERSION__", PRIME_AGENT_VERSION)
 
 
@@ -187,7 +192,7 @@ def test_run_without_resources_server_is_refused():
     assert error.value.status_code == 422
 
 
-async def activate(tmp_path: Path, mode: str, *, timeout: float = 20):
+async def activate(tmp_path: Path, mode: str, *, timeout: float = 20, expire: bool = False):
     workdir = tmp_path / "task repo"
     workdir.mkdir()
     request = seed(workdir=str(workdir))
@@ -225,12 +230,14 @@ async def activate(tmp_path: Path, mode: str, *, timeout: float = 20):
         f"uv-{arch}-unknown-linux-musl.tar.gz",
         f"cpython-3.13.12%2B20260310-{arch}-unknown-linux-gnu-install_only_stripped.tar.gz",
     ]
+    if expire:
+        assert await state.session.expire(timeout=10, reason="stopped")
     state.activation_request = body()
     with patch.object(
         PrimeAgent, "resolve_model_base_url", return_value="http://model.invalid/ng-rollout/rollout-1/v1"
     ):
         response = await asyncio.wait_for(prime._activate_session(state, state.activation_request), timeout=60)
-    seen = json.loads((Path(state.agent_dir) / "seen.json").read_text())
+    seen = None if expire else json.loads((Path(state.agent_dir) / "seen.json").read_text())
     close = await asyncio.wait_for(prime._close_agent_session_state(state), timeout=60)
     return response, close, seen, state, sandbox
 
@@ -274,3 +281,36 @@ async def test_timeout_keeps_partial_work_as_incomplete(tmp_path):
     response, close, _, state, _ = await activate(tmp_path, "sleep", timeout=3)
     assert state.session.cleanup["timed_out"] and response.status == "incomplete"
     assert close.agent_observations.records[1].outcome == "timeout"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "linux", reason="Shared process supervisor requires Linux")
+async def test_model_error_that_prime_agent_retried_is_completed(tmp_path):
+    response, _, _, _, _ = await activate(tmp_path, "retried")
+    assert response.status == "completed"
+    assert [item.type for item in response.output] == ["function_call", "function_call_output", "message"]
+    assert response.usage.output_tokens == 6
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "linux", reason="Shared process supervisor requires Linux")
+async def test_unreadable_stdout_raises_instead_of_scoring_an_empty_answer(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        await activate(tmp_path, "lost")
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "linux", reason="Shared process supervisor requires Linux")
+async def test_rollout_stop_before_any_model_reply_is_incomplete(tmp_path):
+    response, close, _, _, _ = await activate(tmp_path, "normal", expire=True)
+    assert response.status == "incomplete" and response.output == []
+    assert json.loads(response.metadata[ROLLOUT_STOP_METADATA_KEY]) == {"reason": "stopped"}
+    assert close.cleanup_confirmed
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "linux", reason="Shared process supervisor requires Linux")
+async def test_timeout_before_any_model_reply_is_a_classified_failure(tmp_path):
+    response, _, _, _, _ = await activate(tmp_path, "silent", timeout=3)
+    assert response.status == "failed"
+    assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == {"failure_kind": "unknown"}

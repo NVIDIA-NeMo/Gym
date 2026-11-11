@@ -28,7 +28,7 @@ from collections.abc import Mapping
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from time import time
-from typing import Any, ClassVar, Optional
+from typing import Any, ClassVar, Literal, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
@@ -155,6 +155,8 @@ def parse_prime_agent_events(stdout: str) -> tuple[list[Any], dict[str, int]]:
     input_tokens = 0
     output_tokens = 0
     cached_tokens = 0
+    # Prime Agent retries a failed model call after printing its error message, so only a final error fails the run.
+    failed = False
 
     for line in stdout.splitlines():
         line = line.strip()
@@ -177,13 +179,10 @@ def parse_prime_agent_events(stdout: str) -> tuple[list[Any], dict[str, int]]:
             input_tokens += int(usage.get("input") or 0) + int(usage.get("cacheRead") or 0)
             output_tokens += int(usage.get("output") or 0)
             cached_tokens += int(usage.get("cacheRead") or 0)
-            if message.get("stopReason") in {"error", "aborted"}:
+            failed = message.get("stopReason") in {"error", "aborted"}
+            if failed:
                 LOG.warning("Prime Agent stopped with an error: %s", message.get("errorMessage") or "unknown error")
-                return [], {
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                    "cached_tokens": cached_tokens,
-                }
+                continue
             reasoning = [
                 block["thinking"]
                 for block in content
@@ -243,7 +242,7 @@ def parse_prime_agent_events(stdout: str) -> tuple[list[Any], dict[str, int]]:
                 )
             )
 
-    return output_items, {
+    return [] if failed else output_items, {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "cached_tokens": cached_tokens,
@@ -314,6 +313,13 @@ class PrimeAgentConfig(BaseResponsesAPIAgentConfig):
     session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
     sandbox_provider: Optional[str] = None
     sandbox_config: dict[str, JsonValue] = Field(default_factory=dict)
+    network_access: Literal["inherit"] = Field(
+        default="inherit",
+        description=(
+            "Egress of a sandbox Prime Agent creates. Only `inherit` (the provider's network): setup installs "
+            "dependencies from the npm registry, the release host and PyPI."
+        ),
+    )
 
     @property
     def command_parts(self) -> list[str]:
@@ -424,7 +430,8 @@ class PrimeAgent(SimpleResponsesAPIAgent):
         if system_prompt:
             cmd += ["--append-system-prompt", system_prompt]
         cmd += self.config.extra_args
-        cmd.append(instruction)
+        # The terminator keeps a task that starts with "-" or "@" from being read as an option or a file argument.
+        cmd += ["--", instruction]
         return cmd
 
     async def _run_prime_agent(
@@ -723,9 +730,11 @@ class PrimeAgent(SimpleResponsesAPIAgent):
         stop = prime_stop(artifacts.stdout)
         output, usage = parse_prime_agent_events(artifacts.stdout)
         status, incomplete, native = "completed", None, None
-        if timed_out:
-            if not output:
-                raise RuntimeError("Prime Agent timed out before any model response")
+        if timed_out and not output and not state.session.expired:
+            # The deadline passed before any model reply: a classified failure, retried rather than graded.
+            status, native = "failed", {"failure_kind": "unknown"}
+        elif timed_out:
+            # A rollout stop is incomplete even before the first model reply, so report_rollout_stop marks it.
             status = "incomplete"
         elif stop["stopReason"] in ("error", "aborted"):
             # parse_prime_agent_events drops the transcript of a run that ended in an error.

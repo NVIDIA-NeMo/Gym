@@ -149,12 +149,11 @@ class PrimeSession(AgentSessionState):
 
     async def collect(self) -> PrimeArtifacts:
         """Copy stdout and the stderr tail after the supervisor confirms termination."""
+        if self.session.expired_before_launch:
+            return PrimeArtifacts(stdout="", stderr="")  # A rollout stop kept Prime Agent from starting.
         sandbox, directory = self.session.sandbox, self.session.session_dir
-        try:
-            stdout = await read_text(sandbox, path=f"{directory}/stdout.jsonl")
-        except Exception:
-            LOG.warning("Prime Agent stdout unavailable", exc_info=True)
-            stdout = ""
+        # A failed stdout read must raise so the run is retried, not scored as an empty answer.
+        stdout = await read_text(sandbox, path=f"{directory}/stdout.jsonl")
         # stderr is optional diagnostics: failing to fetch it must not discard a completed run's stdout.
         stderr = ""
         try:

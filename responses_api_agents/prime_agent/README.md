@@ -28,6 +28,8 @@ to use a Gym model server. See `configs/prime_agent.yaml` for all options.
 
 ## Agent sessions in task sandboxes
 
+Capability level: Evaluation. A real-model smoke on SWE-bench Pro scored 3 of 3 tasks and resolved 2.
+
 [configs/prime_agent_sandboxed.yaml](configs/prime_agent_sandboxed.yaml) runs Prime Agent **0.7.0**
 inside the task sandbox of a `single_agent_turn` Environment Server, for benchmarks whose Resources
 Server supplies `SandboxAccess`, such as SWE-bench Pro. Training token-ID capture is off by default. With
@@ -55,9 +57,9 @@ single_agent_turn_legacy:
   release package with npm (`--ignore-scripts`) under `/tmp/nemo-gym-prime-runtime-0.7.0-node-22.23.2`,
   checks the version it reports, and reuses a ready runtime. The agent server downloads the official
   Node.js build and the release package (GitHub release) once into its asset cache, checks the SHA-256 values pinned in
-  `sandbox.py`, and uploads them; the sandbox checks them again. Prime Agent runs as that Node with the
+  `sandbox.py`, and uploads them; the sandbox checks them again. The kernel's uv archive has no pinned checksum. Prime Agent runs as that Node with the
   package's CLI, so the task's Node and `PATH` are untouched. The sandbox needs a glibc image, bash,
-  `sha256sum`, `tar` and network access to the npm registry and the release host (for the package's
+  `sha256sum`, `tar`, `gzip`, `flock`, `mktemp` and network access to the npm registry and the release host (for the package's
   own dependencies).
 - **Kernel.** Prime Agent's only built-in tool is an IPython kernel. Setup also installs a private
   Python (the mini-SWE bootstrap build, uploaded with its uv) under the runtime's `kernel` directory,
@@ -65,6 +67,9 @@ single_agent_turn_legacy:
   and the package's `prime-agent-runtime`, then points `PRIME_AGENT_KERNEL_PYTHON` at it. uv installs
   them from the package index, so the sandbox also needs network access to PyPI. The kernel takes about
   440 MB. IPython and Jupyter may write their state under the task's `HOME`.
+- **Network.** A sandbox the agent creates keeps the provider's egress: `network_access` accepts only
+  `inherit`, since setup needs the npm registry, the release host and PyPI. A borrowed sandbox keeps
+  its lender's network.
 - **Isolation.** Models, tools and state live under `PRIME_AGENT_CODING_AGENT_DIR` in a private
   session directory, so tool shells keep the task's `HOME`. `SandboxAccess.env` is forwarded except
   `PRIME_AGENT_*`, `PI_*` and `OPENAI_*`. Close removes only the session directory.
@@ -72,8 +77,9 @@ single_agent_turn_legacy:
   and `system_prompt` are appended to the system prompt; both are argv values under 128 KiB. Other
   request fields are refused with HTTP 422. `command`, `extra_args` and `env` overrides, required
   tool grants and a `SandboxAccess` user override are refused at seed.
-- **Results.** Output and usage come from Prime Agent's `message_end` events. A run that ends with
-  an error stop fails with the model request's status when Prime Agent reports one (for example
+- **Results.** Output and usage come from Prime Agent's `message_end` events. A model error that
+  Prime Agent retries is skipped, and a run whose final message is an error stop fails with the model request's status when Prime Agent reports one (for example
   `model_request_error` 503), a `length` stop is `incomplete`, a supervisor timeout with output is
-  `incomplete`, and a nonzero exit or a run without an answer fails. Model-call ownership, tool
+  `incomplete`, as is a rollout stop at any point. A supervisor timeout before any model reply, a
+  nonzero exit or a run without an answer fails. A failed stdout read raises, so the run is retried. Model-call ownership, tool
   timing and child invocations are reported as observation gaps.
