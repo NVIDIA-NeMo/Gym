@@ -380,6 +380,7 @@ it continues the processes it was running, so the provider reports `snapshot_kee
 | Setting | Effect |
 | --- | --- |
 | `snapshots.send_names: false` (default) | Snapshots are unnamed. E2B files a named snapshot as a team-wide template alias; the checkpointer releases snapshots by id. |
+| `snapshots.keep_guest_clock: true` | AgentENV only. A sandbox created from a snapshot keeps the wall clock the snapshot was taken at (`customExtensionParams: {keepGuestClock: true}`, sent with `create.custom_extension_params`), so a harness that continues in it sees no jump in time. The clock then lags real time by the time the snapshot sat unused: after a long gap, TLS checks and requests signed with the time (S3 allows 15 minutes) can fail in the sandbox. Creates from a template never send it. |
 | `create.lease_s` | Create with this timeout and renew it every third of a lease, so the sandboxes of a process that died end one lease later. |
 | `create.reachable_timeout_s` | After a create, run a no-op command until the gateway reaches the new sandbox (it can answer 502 "could not be reached" at first), for up to this many seconds; a sandbox still unreachable is killed and the create fails. Unset hands the sandbox over at once. |
 | `create.auto_resume: false` | Kill at timeout. Required on AgentENV, which otherwise keeps timed-out sandboxes paused. |

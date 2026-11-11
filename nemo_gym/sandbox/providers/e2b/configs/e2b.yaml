@@ -121,6 +121,10 @@ sandbox:
       # Send checkpoint snapshot names to the service. E2B files a named snapshot as a template
       # alias visible to the whole team, so names stay off: the checkpointer releases snapshots by id.
       send_names: false
+      # AgentENV only: create a sandbox from a snapshot with customExtensionParams {keepGuestClock: true}, so
+      # its wall clock continues from the snapshot's instead of jumping to the current time. The clock then
+      # lags real time by the time the snapshot sat unused.
+      keep_guest_clock: false
     operations:
       # Retries for transient transport/5xx failures. Deterministic errors and
       # rate limits are not retried. Command timeouts are terminal; kill
