@@ -26,10 +26,13 @@ from harbor.models.agent.context import AgentContext
 from harbor.models.metric.usage_info import UsageInfo
 from harbor.models.trial.paths import EnvironmentPaths
 from harbor.utils.logger import logger as harbor_logger
+from openai.types.responses.response_error import ResponseError
 from pydantic import ConfigDict, Field
 
 from nemo_gym.agents import (
+    AGENT_OUTCOME_METADATA_KEY,
     AgentCloseSessionResponse,
+    AgentOutcome,
     AgentSeedSessionRequest,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
@@ -38,6 +41,9 @@ from nemo_gym.agents import (
 from nemo_gym.client import SESSION_ID_KEY, NeMoGymAsyncOpenAI, get_response_json, get_server_url, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.core import (
+    MODEL_TRANSPORT_ERROR,
+    PROVIDER_UNAVAILABLE,
+    FailureBoundary,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -49,7 +55,12 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
     NeMoGymSummary,
+    NgFailureEvent,
+    SandboxFailureDetails,
+    agent_route_failure,
+    failure_report_for,
 )
+from nemo_gym.core.failure_kinds import CANCELLED
 from nemo_gym.data.tasks.harbor import AGENT_TIMEOUT_METADATA_KEY
 from nemo_gym.sandbox import AsyncSandbox, DirectSandboxConnection, create_provider, resolve_provider_config
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
@@ -60,6 +71,7 @@ from nemo_gym.trajectory import (
     TrajectoryRecord,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
+from nemo_gym.utils.exception_inspection import error_to_http_status, provider_error_reason, sandbox_failure_prefix
 from responses_api_agents.terminus_2_sandboxed_agent.observability import TerminusObservations
 from responses_api_agents.terminus_2_sandboxed_agent.terminal import (
     ShellExitedError,
@@ -135,23 +147,6 @@ MODEL_HTTP_ATTEMPTS = 20
 
 class ModelUnreachableError(RuntimeError):
     """The model endpoint never answered: refused connections, request timeouts or a gateway/auth failure after retries."""
-
-
-class SandboxLostError(RuntimeError):
-    """The borrowed sandbox could not run a command."""
-
-
-class Terminus2InfrastructureError(HTTPException):
-    """The run failed for a reason that is not the agent's doing.
-
-    Raised as a 5xx so the environment server records a masked episode failure instead of verifying an
-    unmasked zero. The harness metrics ride along for in-process diagnostics (the legacy ``/run`` path
-    and tests); the HTTP body carries only the detail.
-    """
-
-    def __init__(self, status_code: int, detail: str, metrics: Dict[str, Any]):
-        super().__init__(status_code, detail=detail)
-        self.metrics = metrics
 
 
 def _is_model_infrastructure_error(exc: BaseException) -> bool:
@@ -241,18 +236,53 @@ class NeMoGymSandboxEnvironment:
         return result.return_code == 0
 
     async def _exec(self, command: str, **kwargs: Any) -> Any:
-        # A command that fails inside the sandbox returns a non-zero code; an exception here means the
-        # sandbox itself is gone (dropped connection, dead session), which is not the agent's doing.
+        # A command that fails inside the sandbox returns a result with its exit code, whatever the code: that is
+        # the task's state, not a provider fact. Only a raised provider failure or a structured provider error
+        # (OpenSandbox: exit 125 with `error_type="sandbox"`) is reported as a sandbox failure. A command
+        # timeout keeps Harbor's own semantics and flows through; cancellation is never caught here.
         try:
             result = await self._sandbox.exec(command, **kwargs)
+        except NgFailureEvent:
+            # A provider event keeps its id, kind, status and details.
+            raise
         except Exception as exc:
-            raise SandboxLostError(f"{type(exc).__name__}: {exc}") from exc
-        # Providers also report a lost sandbox as a structured result (OpenSandbox: exit 125 with
-        # `error_type="sandbox"`). A command timeout keeps Harbor's own semantics and flows through.
+            http_status = error_to_http_status(exc)
+            raise NgFailureEvent(
+                boundary=FailureBoundary.SANDBOX,
+                failure_kind=PROVIDER_UNAVAILABLE,
+                failure_reason=self._failure_prefix(reason=provider_error_reason(exc), http_status=http_status)
+                + f"Sandbox command could not run: {type(exc).__name__}",
+                http_status=http_status,
+                details=self._failure_details(),
+                operation="sandbox.exec",
+                stage="agent",
+            ) from exc
         error_type = getattr(result, "error_type", None)
         if error_type not in (None, "timeout"):
-            raise SandboxLostError(f"sandbox exec failed: {error_type} (exit {result.return_code})")
+            raise NgFailureEvent(
+                boundary=FailureBoundary.SANDBOX,
+                failure_kind=PROVIDER_UNAVAILABLE,
+                failure_reason=self._failure_prefix(reason=str(error_type))
+                + "Sandbox command did not run to completion",
+                details=self._failure_details(provider_status_reason=str(error_type)),
+                operation="sandbox.exec",
+                stage="agent",
+            )
         return result
+
+    def _provider_facts(self) -> tuple[str | None, str | None]:
+        handle = getattr(self._sandbox, "_handle", None)
+        provider = getattr(handle, "provider_name", None)
+        sandbox_id = getattr(handle, "sandbox_id", None)
+        return (provider if isinstance(provider, str) else None, sandbox_id if isinstance(sandbox_id, str) else None)
+
+    def _failure_prefix(self, **facts: Any) -> str:
+        provider, sandbox_id = self._provider_facts()
+        return sandbox_failure_prefix(phase="agent", provider=provider, sandbox_id=sandbox_id, **facts)
+
+    def _failure_details(self, **facts: Any) -> SandboxFailureDetails:
+        provider, sandbox_id = self._provider_facts()
+        return SandboxFailureDetails(provider=provider, sandbox_id=sandbox_id, **facts)
 
 
 def _instruction(input_value: Any) -> str:
@@ -688,8 +718,13 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         body: NeMoGymResponseCreateParamsNonStreaming,
         sandbox: AsyncSandbox,
         task_id: str | None = None,
+        report_failure: bool = False,
     ) -> Tuple[NeMoGymResponse, Dict[str, Any]]:
-        """Run one episode; ``task_id`` is the collector's identity for a session run, whose turn body has none."""
+        """Run one episode; ``task_id`` is the collector's identity for a session run, whose turn body has none.
+
+        ``report_failure`` makes an infrastructure failure a failed response for the caller's outcome policy to select
+        from, instead of a raised route failure (an agent session sets it; the legacy ``/run`` path has no policy).
+        """
         start_time = perf_counter()
         instruction = _instruction(body.input)
         run_body = await request.json()
@@ -776,8 +811,8 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
 
             # Outcomes: "completed" and "step_limit" are the agent's own result, "timeout" too (the
             # budget is the task's); all three are verified. An "infrastructure_error" is not the
-            # agent's doing and is refused with a 5xx so the episode is recorded as a masked failure.
-            infrastructure_status: int | None = None
+            # agent's doing: the route fails with the typed event and its owning boundary applies its policy.
+            infrastructure_failure: NgFailureEvent | None = None
             try:
                 async with asyncio.timeout(self._agent_timeout_sec(body)):
                     await agent.run(instruction, environment, context)
@@ -800,24 +835,38 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                 invocation_status = "incomplete"
                 error_type = "TimeoutError"
                 outcome = "timeout"
-            except (ModelUnreachableError, SandboxLostError) as exc:
+            except (ModelUnreachableError, NgFailureEvent) as exc:
                 terminus2_completed = False
                 error = format_exc()
                 invocation_status = "failed"
                 error_type = type(exc).__name__
                 outcome = "infrastructure_error"
-                # 502: the upstream model never answered. 503: the sandbox provider lost the episode.
-                infrastructure_status = 502 if isinstance(exc, ModelUnreachableError) else 503
-                cause = "model unreachable" if isinstance(exc, ModelUnreachableError) else "sandbox lost"
-                infrastructure_detail = f"{cause}: {exc}"
-            except asyncio.CancelledError:
+                if isinstance(exc, NgFailureEvent):
+                    infrastructure_failure = exc
+                else:
+                    infrastructure_failure = NgFailureEvent(
+                        boundary=FailureBoundary.MODEL,
+                        failure_kind=MODEL_TRANSPORT_ERROR,
+                        failure_reason=f"Model endpoint unreachable: {exc}"[:2000],
+                        http_status=error_to_http_status(exc.__cause__) if exc.__cause__ is not None else None,
+                        operation="model.request",
+                        stage="agent",
+                    )
+                    infrastructure_failure.__cause__ = exc
+            except asyncio.CancelledError as exc:
                 terminus2_completed = False
                 error = format_exc()
                 invocation_status = "incomplete"
                 error_type = "CancelledError"
                 outcome = "infrastructure_error"
-                infrastructure_status = 503
-                infrastructure_detail = "agent run cancelled"
+                infrastructure_failure = NgFailureEvent(
+                    boundary=FailureBoundary.AGENT,
+                    failure_kind=CANCELLED,
+                    failure_reason="Agent run was cancelled",
+                    operation="agent.run",
+                    stage="agent",
+                )
+                infrastructure_failure.__cause__ = exc
             except BaseException as exc:
                 terminus2_completed = False
                 error = format_exc()
@@ -887,13 +936,40 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                     *observations.compactions,
                 ],
             )
-        if infrastructure_status is not None:
+        if infrastructure_failure is not None and report_failure and infrastructure_failure.failure_kind != CANCELLED:
+            # An agent session reports the cause and its partial work in a failed response, as Simple Agent does.
+            # The Environment Server selects retry, fail or verify from the failure kind with its configured
+            # ``agent_outcome_policy``, never from the HTTP status; the provider event stays in the report.
             print(f"Terminus 2 infrastructure failure ({error_type}): {error}", file=sys.stderr)
-            raise Terminus2InfrastructureError(
-                infrastructure_status,
-                detail=f"Terminus 2 infrastructure failure, {infrastructure_detail}"[:2000],
-                metrics=metrics,
+            reported = NgFailureEvent(
+                boundary=FailureBoundary.AGENT,
+                failure_kind=infrastructure_failure.failure_kind,
+                failure_reason=infrastructure_failure.failure_reason,
+                operation="agent.run",
+                stage="agent",
             )
+            reported.__cause__ = infrastructure_failure
+            response = response.model_copy(
+                update={
+                    "status": "failed",
+                    "error": ResponseError(code="server_error", message=infrastructure_failure.failure_reason),
+                    "failure_report": failure_report_for(reported).model_dump(mode="json"),
+                    "metadata": {
+                        **(response.metadata or {}),
+                        AGENT_OUTCOME_METADATA_KEY: AgentOutcome(
+                            failure_kind=infrastructure_failure.failure_kind
+                        ).model_dump_json(),
+                    },
+                }
+            )
+            return response, metrics
+        if infrastructure_failure is not None:
+            print(f"Terminus 2 infrastructure failure ({error_type}): {error}", file=sys.stderr)
+            route_failure = agent_route_failure(infrastructure_failure, operation="agent.run", stage="agent")
+            route_failure.__cause__ = infrastructure_failure
+            # The harness observations ride along in-process (episode close, the legacy /run path, tests).
+            route_failure.metrics = metrics
+            raise route_failure
         return response, metrics
 
     async def responses(self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
@@ -914,9 +990,10 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                             body,
                             state.sandbox,
                             task_id=state.request.task_id.task_id,
+                            report_failure=True,
                         )
-                    except Terminus2InfrastructureError as exc:
-                        state.metrics = exc.metrics
+                    except NgFailureEvent as exc:
+                        state.metrics = getattr(exc, "metrics", None)
                         raise
                     return response
 

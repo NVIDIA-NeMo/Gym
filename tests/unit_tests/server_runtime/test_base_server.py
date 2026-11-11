@@ -16,7 +16,9 @@ import asyncio
 import logging
 import os
 import pickle
+import signal
 import socket
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import AsyncMock, MagicMock
 
 import uvicorn
@@ -27,7 +29,7 @@ from fastapi.exceptions import RequestValidationError
 from multidict import CIMultiDict, CIMultiDictProxy
 from omegaconf import DictConfig, OmegaConf
 from pydantic import ValidationError
-from pytest import CaptureFixture, LogCaptureFixture, MonkeyPatch, mark, raises
+from pytest import CaptureFixture, LogCaptureFixture, MonkeyPatch, fail, mark, raises
 from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
 from yarl import URL
 
@@ -991,22 +993,13 @@ class TestServerUtils:
         assert actual.body == expected.body
         assert actual.headers == expected.headers
 
-    async def test_exception_middleware_logs_upstream_error_without_debug(
+    def test_exception_middleware_logs_upstream_error_without_debug(
         self, monkeypatch: MonkeyPatch, capsys: CaptureFixture[str]
     ) -> None:
-        callbacks = []
-        app = MagicMock()
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
 
-        def register_middleware(middleware_type):
-            assert middleware_type == "http"
-
-            def register(callback):
-                callbacks.append(callback)
-                return callback
-
-            return register
-
-        app.middleware.side_effect = register_middleware
+        app = FastAPI()
         server = MagicMock()
         server.get_session_middleware_key.return_value = "TestSimpleServer___my_server"
         SimpleServer.setup_exception_middleware(server, app)
@@ -1020,11 +1013,12 @@ class TestServerUtils:
         error = ClientResponseError(request_info=request_info, history=(), status=500, message="policy failed")
         error.response_content = b"ValueError: actionable inner failure"
 
-        async def fail(_request):
+        @app.post("/fail")
+        async def fail():
             raise error
 
         monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
-        response = await callbacks[0](MagicMock(), fail)
+        response = TestClient(app).post("/fail")
 
         assert response.status_code == 500
         captured = capsys.readouterr().out
@@ -1207,6 +1201,7 @@ class TestRunWebserverProxyKwargs:
         ray_enabled: bool | None = None,
         is_worker: bool = False,
         routes_sessions: bool = False,
+        server_reuse_port: bool | None = None,
         unsupported_reason: str | None = None,
     ) -> dict:
         from fastapi import FastAPI
@@ -1233,12 +1228,20 @@ class TestRunWebserverProxyKwargs:
 
         captured: dict = {}
         self.uvicorn_kwargs = captured
-        monkeypatch.setattr(
-            nemo_gym.server_runtime.base_server.uvicorn, "run", lambda **kwargs: captured.update(kwargs)
-        )
+
+        def run(**kwargs) -> None:
+            captured.update(kwargs)
+            self.blocked_signals_at_run = signal.pthread_sigmask(signal.SIG_BLOCK, ())  # reads the mask, adds nothing
+
+        monkeypatch.setattr(nemo_gym.server_runtime.base_server.uvicorn, "run", run)
 
         server_config = BaseRunServerInstanceConfig(
-            name="my_server", host="127.0.0.1", port=8000, entrypoint="app.py", num_workers=num_workers
+            name="my_server",
+            host="127.0.0.1",
+            port=8000,
+            entrypoint="app.py",
+            num_workers=num_workers,
+            uvicorn_reuse_port=server_reuse_port,
         )
         ray_setting = ray_enabled
 
@@ -1246,7 +1249,7 @@ class TestRunWebserverProxyKwargs:
             ray_enabled = ray_setting
             routes_sessions_to_owner = routes_sessions
 
-            def claimed_session_routing(self) -> dict:
+            def owned_session_routing(self) -> dict:
                 return {}
 
             @classmethod
@@ -1268,6 +1271,101 @@ class TestRunWebserverProxyKwargs:
 
         TestSimpleServer.run_webserver()
         return captured
+
+    @mark.parametrize(
+        ("config_dict", "num_workers", "uses_reuse_port"),
+        [
+            ({"uvicorn_reuse_port": True}, 4, True),
+            ({"uvicorn_reuse_port": True}, 1, False),
+            ({"uvicorn_reuse_port": True}, None, False),
+            ({"uvicorn_reuse_port": False}, 4, False),
+            ({}, 4, False),
+        ],
+    )
+    def test_reuse_port_launches_only_multi_worker_servers(
+        self, monkeypatch: MonkeyPatch, config_dict: dict, num_workers: int | None, uses_reuse_port: bool
+    ) -> None:
+        reuse_port_kwargs: dict = {}
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.base_server,
+            "run_with_reuse_port",
+            lambda **kwargs: reuse_port_kwargs.update(kwargs),
+        )
+
+        plain_kwargs = self._capture_uvicorn_kwargs(monkeypatch, config_dict, num_workers=num_workers)
+
+        launched, skipped = (reuse_port_kwargs, plain_kwargs) if uses_reuse_port else (plain_kwargs, reuse_port_kwargs)
+        assert skipped == {}
+        assert launched["port"] == 8000
+        if uses_reuse_port:
+            # The reuse-port launcher gets the same arguments uvicorn.run would, including the import string.
+            assert launched["workers"] == 4
+            assert launched["app"] == "a.b.app:app"
+
+    @mark.parametrize(
+        ("config_dict", "server_setting", "uses_reuse_port"),
+        [
+            ({}, True, True),
+            ({"uvicorn_reuse_port": False}, True, True),
+            ({"uvicorn_reuse_port": True}, False, False),
+            ({"uvicorn_reuse_port": True}, None, True),
+        ],
+    )
+    def test_a_servers_own_reuse_port_setting_wins_over_the_top_level_key(
+        self, monkeypatch: MonkeyPatch, config_dict: dict, server_setting: bool | None, uses_reuse_port: bool
+    ) -> None:
+        reuse_port_kwargs: dict = {}
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.base_server,
+            "run_with_reuse_port",
+            lambda **kwargs: reuse_port_kwargs.update(kwargs),
+        )
+
+        plain_kwargs = self._capture_uvicorn_kwargs(
+            monkeypatch, config_dict, num_workers=4, server_reuse_port=server_setting
+        )
+
+        assert bool(reuse_port_kwargs) is uses_reuse_port
+        assert bool(plain_kwargs) is not uses_reuse_port
+
+    def _fail_if_serving_starts(self, monkeypatch: MonkeyPatch) -> None:
+        """Make every step from reporting start-up to serving fail the test, so none runs before a refusal."""
+
+        def started(*args: object, **kwargs: object) -> None:
+            fail("the server started up before refusing uvicorn_reuse_port")
+
+        base_server = nemo_gym.server_runtime.base_server
+        monkeypatch.setattr(base_server, "run_with_reuse_port", started)
+        monkeypatch.setattr(base_server, "create_session_socket_dir", started)
+        for step in ("report", "report_when_serving", "announce_serve"):
+            monkeypatch.setattr(base_server.ServerStartupTimeline, step, started)
+
+    @mark.parametrize("dry_run", [False, True])
+    def test_reuse_port_is_refused_off_linux_before_the_server_starts_up(
+        self, monkeypatch: MonkeyPatch, dry_run: bool
+    ) -> None:
+        monkeypatch.setattr(nemo_gym.server_runtime.base_server, "reuse_port_supported", lambda: False)
+        self._fail_if_serving_starts(monkeypatch)
+
+        with raises(RuntimeError, match="my_server sets uvicorn_reuse_port, which needs Linux"):
+            self._capture_uvicorn_kwargs(
+                monkeypatch, {"uvicorn_reuse_port": True, DRY_RUN_KEY_NAME: dry_run}, num_workers=4
+            )
+
+        # The helper replaces uvicorn.run with a recorder; nothing reached it.
+        assert self.uvicorn_kwargs == {}
+
+    def test_off_linux_a_single_worker_server_ignores_reuse_port(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(nemo_gym.server_runtime.base_server, "reuse_port_supported", lambda: False)
+
+        def run_with_reuse_port(**kwargs: object) -> None:
+            fail("a single-worker server was started with per-worker sockets")
+
+        monkeypatch.setattr(nemo_gym.server_runtime.base_server, "run_with_reuse_port", run_with_reuse_port)
+
+        kwargs = self._capture_uvicorn_kwargs(monkeypatch, {"uvicorn_reuse_port": True}, num_workers=1)
+
+        assert kwargs["port"] == 8000
 
     def test_proxy_headers_disabled_by_default_single_worker(self, monkeypatch: MonkeyPatch) -> None:
         kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=1)
@@ -1313,6 +1411,19 @@ class TestRunWebserverProxyKwargs:
         )
 
         assert "workers" not in kwargs
+
+    def test_uvicorn_starts_with_the_shutdown_signals_unblocked(self, monkeypatch: MonkeyPatch) -> None:
+        # A process starts with the signal mask of the thread that launched it, and Ray blocks SIGINT in every thread
+        # of its workers: a server that a Ray worker launched never got RunHelper's interrupt.
+        # SIGTERM is blocked too, so the test fails if the helper unblocks only SIGINT.
+        def launch_from_a_ray_worker_thread() -> None:
+            signal.pthread_sigmask(signal.SIG_BLOCK, (signal.SIGINT, signal.SIGTERM))
+            self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=1)
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(launch_from_a_ray_worker_thread).result()
+
+        assert not {signal.SIGINT, signal.SIGTERM} & self.blocked_signals_at_run
 
     def test_server_without_a_reason_runs_several_workers(self, monkeypatch: MonkeyPatch) -> None:
         kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=2)

@@ -1,0 +1,30 @@
+name: agentic_mme
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: other
+description: Agentic-MME multimodal agentic reasoning (418 tasks) with atomic image tools, optional
+  web retrieval, and task-only answer scoring by an LLM judge.
+modality: text, image
+licensing: Apache-2.0
+authors:
+- DanialTaheri
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: agentic_mme
+agent_server: agentic_mme_agent
+datasets:
+- name: agentic_mme
+  type: benchmark
+  jsonl_fpath: benchmarks/agentic_mme/data/agentic_mme_benchmark.jsonl
+  prepare_script: benchmarks/agentic_mme/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: train
+prompt_source: prepared
+lifecycle: active
