@@ -24,7 +24,8 @@ The setting is `resources_servers/chartography/configs/chartography_opencode.yam
 - `thinking: true`: the model reasons on every turn, and its earlier reasoning stays in the history OpenCode
   sends back. Whether the chat template keeps that history is a property of the model server, not of this config.
 - 1800 s per task and no turn cap; 131072-token context, 32768 output tokens per turn; compaction off.
-- A run that ends unfinished (OpenCode's timeout) is graded on its final reply, or scores 0 when it has none.
+- A run that ends unfinished (OpenCode's timeout, an output cap or a context limit) scores 0 without a judge call
+  (`score_incomplete_as_zero: true`), as in `visual_coding_opencode`. Unfinished runs are not run again.
 
 ## Prepare
 

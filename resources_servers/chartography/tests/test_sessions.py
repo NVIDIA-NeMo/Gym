@@ -327,3 +327,25 @@ def test_without_a_sandbox_provider_a_cookie_seed_is_accepted() -> None:
 def test_only_the_no_tools_setting_runs_with_several_workers(root) -> None:
     assert _plain_server().multiple_workers_unsupported_reason() is None
     assert _server(root).multiple_workers_unsupported_reason() == "lent sandboxes live in one worker's memory"
+
+
+@pytest.mark.parametrize(
+    ("score_incomplete_as_zero", "reward", "judge_calls"),
+    [(True, 0.0, 0), (False, 1.0, 1)],
+    ids=["opencode_setting", "default"],
+)
+def test_an_unfinished_run_scores_zero_only_when_configured(score_incomplete_as_zero, reward, judge_calls) -> None:
+    """An unfinished run (a timeout, an output cap or a context limit) whose last message is the right answer."""
+    config = _config(score_incomplete_as_zero=score_incomplete_as_zero)
+    server = ChartographyResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    client = TestClient(server.setup_webserver())
+    judge = _mock_judge(server, _judge_content(1))
+    body = _verify_body()
+    body["response"]["status"] = "incomplete"
+
+    verified = client.post("/verify", json=body)
+
+    assert verified.status_code == 200, verified.text
+    assert verified.json()["reward"] == reward
+    assert not verified.json().get("mask_sample")
+    assert judge.await_count == judge_calls

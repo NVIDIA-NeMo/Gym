@@ -110,10 +110,12 @@ attaches it, so the model can open it with its tools.
 `verify()` grades only the request, never the sandbox. It stops the sandbox before it calls the judge, and grades a
 verify that has no seed (`allow_missing`), such as a retry after a judge failure. A verify after the episode's close
 is masked as `session_lost`. A lending server runs with one worker (`num_workers: 1`), since its sandboxes live in
-that worker's memory; the no-tools setting runs with any number. A run that ends unfinished, such as OpenCode at its
-timeout, is graded on its final assistant message, or scores 0 when it has none. The sandbox image is
-`visual_coding_opencode`'s (`resources_servers/visual_coding_opencode/sandbox_image`);
-`benchmarks/chartography_opencode/README.md` covers the run.
+that worker's memory; the no-tools setting runs with any number. A run that ends unfinished (response status
+`incomplete`: OpenCode's timeout, an output cap or a context limit) scores 0 without a judge call in the OpenCode
+setting (`score_incomplete_as_zero: true`). The no-tools setting keeps upstream's behavior and grades it on its last
+assistant message. The sandbox image is `visual_coding_opencode`'s
+(`resources_servers/visual_coding_opencode/sandbox_image`); `benchmarks/chartography_opencode/README.md` covers the
+run.
 
 ## Licensing
 

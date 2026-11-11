@@ -142,3 +142,9 @@ def test_the_agent_pins_the_opencode_build_of_the_shared_sandbox_image():
     assert f"{agent['sandbox_executable_sha256']}  {agent['sandbox_executable_path']}" in dockerfile
     assert PurePosixPath(agent["sandbox_plugin_dependencies_path"]).name in dockerfile
     assert f"WORKDIR {resources['sandbox_workdir']}" in dockerfile
+
+
+def test_only_the_opencode_setting_scores_unfinished_runs_zero():
+    _, ours = resolve(BENCHMARK)
+    assert ours["chartography_opencode"]["resources_servers"]["chartography"]["score_incomplete_as_zero"] is True
+    assert "score_incomplete_as_zero" not in ours["chartography"]["resources_servers"]["chartography"]

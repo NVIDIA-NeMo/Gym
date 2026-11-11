@@ -123,6 +123,10 @@ class ChartographyConfig(BaseResourcesServerConfig):
     judge_max_attempts: int = Field(default=scorer.MAX_ATTEMPTS, ge=1)
     # Per worker: with num_workers > 1, each worker allows this many judge calls at once.
     judge_endpoint_max_concurrency: Optional[int] = Field(default=64, ge=1)
+    # True: a run that ended unfinished (response status `incomplete`: a timeout, an output cap or a context limit)
+    # scores 0 without a judge call, whatever text it left. False (upstream's behavior): it is graded on its last
+    # assistant message.
+    score_incomplete_as_zero: bool = False
 
     # With sandbox_provider set, each episode's seed lends the harness a sandbox and verify or the episode's close
     # stops it. Unset keeps sessions empty (the simple_agent setting).
@@ -331,6 +335,8 @@ class ChartographyResourcesServer(SimpleResourcesServer):
             result.failure_reason = "verifier_metadata needs a non-empty prompt and golden_answer"
             return result
 
+        if self.config.score_incomplete_as_zero and body.response.status == "incomplete":
+            return result
         generated = extract_final_answer(body.response)
         if not generated:
             # Empty or unfinished answers score 0.
