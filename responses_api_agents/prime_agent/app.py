@@ -77,6 +77,7 @@ from nemo_gym.sandbox import (
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap, SandboxObservation
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.prime_agent.sandbox import (
     CLI,
     PRIME_AGENT_VERSION,
@@ -901,3 +902,6 @@ class PrimeAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     PrimeAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = PrimeAgent.run_webserver()  # noqa: F401

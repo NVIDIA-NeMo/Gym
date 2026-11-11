@@ -16,6 +16,7 @@ import resources_servers.terminal_bench_2_1.app as terminal_bench_app
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.server_runtime import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
+from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
 from resources_servers.terminal_bench_2_1.app import (
     TerminalBench21ResourcesServer,
     TerminalBench21ResourcesServerConfig,
@@ -174,7 +175,7 @@ async def test_failed_close_retains_owner_for_retry(setup) -> None:
     with pytest.raises(RuntimeError, match="provider unavailable"):
         await server.close_resources_session(close_body(seed))
     assert server._session_id_to_sandbox[seed.resources_session_id] is sandbox
-    assert seed.resources_session_id not in server._closed_session_records
+    assert seed.resources_session_id not in server._fenced_session_records
     await server.close_resources_session(close_body(seed))
     await server.close_resources_session(close_body(seed))
     assert sandbox.stop.await_count == 2
@@ -229,7 +230,7 @@ async def test_initial_setup_failure_retains_sandbox_for_cleanup_retry(
         provider.close.assert_awaited_once()
         provider.aclose.assert_not_awaited()
         assert server._session_id_to_sandbox[seed.resources_session_id] is sandbox
-        assert seed.resources_session_id not in server._closed_session_records
+        assert seed.resources_session_id not in server._fenced_session_records
         if recovery == "close":
             await server.close_resources_session(close_body(seed))
             await server.close_resources_session(close_body(seed))
@@ -406,12 +407,14 @@ def test_shutdown_cleans_seeded_sandbox_and_legacy_seed_shape_stays_unchanged(se
     sandbox.stop.assert_awaited_once()
 
 
-def test_process_local_sessions_reject_multiple_workers(setup) -> None:
+def test_several_workers_are_allowed(setup) -> None:
+    """Session routing sends a seed and close by resources_session_id to the worker that holds the sandbox."""
     server, _, _, _ = setup
-    with pytest.raises(ValueError, match="num_workers=1"):
+    refuse_unsupported_num_workers(
         TerminalBench21ResourcesServer(
             config=server.config.model_copy(update={"num_workers": 2}), server_client=server.server_client
         )
+    )
 
 
 @pytest.mark.parametrize("invalid_image", [None, 42])
@@ -505,7 +508,7 @@ async def test_completed_close_records_expire_without_retry_renewal(setup, monke
     other = close_body(seed).model_copy(update={"resources_session_id": "other"})
     await server.close_resources_session(other)
     assert seed.resources_session_id not in server._session_id_to_state
-    assert seed.resources_session_id not in server._closed_session_records
+    assert seed.resources_session_id not in server._fenced_session_records
     with pytest.raises(HTTPException, match="unknown or closed"):
         await server.verify(request, verify_body(seed))
     sandbox.stop.assert_awaited_once()
@@ -590,7 +593,7 @@ async def test_cancelled_close_fences_slow_seed_until_its_cleanup(
     closing.cancel()
     with pytest.raises(asyncio.CancelledError):
         await closing
-    now = 1000  # A pending allocation cannot lose its fence after the normal retry window.
+    now = 1000  # A pending allocation cannot lose its fence after the close retry window.
     await server.close_resources_session(close_body(seed).model_copy(update={"resources_session_id": "other"}))
     record = server._session_id_to_state[seed.resources_session_id]
     assert record.closing and record.expires_at == float("inf")
@@ -636,7 +639,7 @@ async def test_shutdown_stops_sessions_concurrently_under_their_locks(setup) -> 
     other.stop.assert_awaited_once()
     assert not server._session_id_to_sandbox
     assert not server._session_id_to_state
-    assert not server._closed_session_records
+    assert not server._fenced_session_records
 
 
 @pytest.mark.parametrize("seeded", [False, True])
@@ -729,7 +732,7 @@ async def test_cancelled_close_is_honored_when_verification_unwinds(setup, outco
     assert record.closing
     if stop_fails:
         assert server._session_id_to_sandbox[seed.resources_session_id] is sandbox
-        assert seed.resources_session_id not in server._closed_session_records
+        assert seed.resources_session_id not in server._fenced_session_records
         await server.close_resources_session(close_body(seed))
         assert sandbox.stop.await_count == 2
     assert record.request is None and record.verification_response is None

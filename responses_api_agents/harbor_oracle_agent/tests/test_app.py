@@ -527,7 +527,8 @@ def test_responses_requires_seeded_session(monkeypatch):
 def test_legacy_run_route_is_not_supported(monkeypatch):
     agent, _, _ = make_agent(monkeypatch)
     response = TestClient(agent.setup_webserver()).post("/run", json={"responses_create_params": {"input": []}})
-    assert response.status_code == 501
+    assert response.status_code == 422
+    assert "OracleAgent does not implement /run" in response.json()["detail"]
 
 
 @pytest.mark.parametrize("cap,expected", [(None, 7200.0), (8000.0, 7200.0), (60.0, 60.0), (0.5, 0.5)])
@@ -697,3 +698,13 @@ def test_concurrent_oracle_traces_name_their_task_and_episode(monkeypatch, caplo
         "world: episode r2-a1: running /solution/solve.sh as the sandbox default user in /app with a 120s budget",
         "world: episode r2-a1: /solution/solve.sh exited 3 (failed)",
     ]
+
+
+def test_several_workers_are_allowed() -> None:
+    """Oracle sessions are agent sessions, which session routing follows by agent_session_id."""
+    from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
+
+    config = OracleAgentConfig(host="0.0.0.0", port=8081, entrypoint="", name="harbor_oracle_agent", num_workers=2)
+    agent = OracleAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    refuse_unsupported_num_workers(agent)
+    assert agent.routes_sessions_to_owner

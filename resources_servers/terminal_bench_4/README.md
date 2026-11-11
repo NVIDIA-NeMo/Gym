@@ -1,5 +1,18 @@
 # TB4 resources server
 
+Each episode automatically uses one `nemo.nvidia.com/placement-group` value for its
+agent, verifier, EFS logs helper, and Compose services, seeds, and volume helpers.
+Point the CPU provider at the cell router to distribute episodes while keeping
+their storage and networking on one cell. Compose collections retain separate
+volume directories and cleanup ownership.
+
+With `environment.sandbox_split_endpoints: true`, any task whose agent or verifier
+requires a GPU sends every role and helper directly to `OPENSANDBOX_DOMAIN_GPU`
+using `OPENSANDBOX_API_KEY_GPU`; CPU tasks use the corresponding `_CPU` variables.
+Set the GPU domain to the direct GPU deployment, rather than the CPU router.
+Placement metadata is still sent to direct deployments, where it requires no
+special routing behavior.
+
 ## Contract
 
 `/seed_session` provisions the pinned task and returns its sandbox descriptor,
@@ -122,7 +135,7 @@ Missing, malformed, or unsupported reports yield null counts. Verifier timeouts
 also yield null counts. Report parsing diagnostics identify the source file.
 The official reward and evaluation-completion rules remain unchanged.
 
-## Environment Server sessions (SandboxAccess)
+## Episode sessions (SandboxAccess)
 
 Harnesses that borrow a task sandbox through `SandboxAccess` (for example
 `codex_agent` behind `single_agent_turn` or `single_agent_turn_legacy`) use the
@@ -148,7 +161,7 @@ shared resources-session protocol instead of the contract above, as
   It then waits for in-flight provisioning or grading, stops anything still running
   without grading it (finishing even if the caller disconnects), and fences late seeds.
   A sandbox that cannot be stopped fails the close and keeps the fence; a repeated close
-  retries the deletion, and the provider TTL bounds it. A completed close is remembered
+  retries the deletion, and the provider TTL bounds it. A completed close keeps its fence
   for `session_close_retry_window_seconds` (default 300), so retried closes succeed and
   late seeds are rejected; set it to cover the caller's retry horizon.
 
@@ -199,6 +212,12 @@ values:
 For local checks on a workstation, a single-container task can also use Gym's `docker`
 sandbox provider. An offline verifier then runs with `docker run --network none`. EFS logs
 and Compose still require OpenSandbox.
+
+`environment.sandbox_provider` is an inline single-key provider block (the OpenSandbox default) or the name of a
+top-level sandbox block that a provider config defines, as DeepSWE's `sandbox_provider: sandbox` does. A name
+that no block defines stops the server at startup. A task that needs more than the selected provider offers (Compose
+without `SupportsSandboxNetwork`, an offline verifier outside OpenSandbox and Docker) raises `ProviderCapabilityError`
+at seed time: a terminal infrastructure failure that no retry repeats, with no sandbox started.
 
 `/verify` also reports `partial_credit`: the fraction of reported tests that passed
 (`num_tests_passed / num_tests_total`, so skipped tests count as not passed), never below the
