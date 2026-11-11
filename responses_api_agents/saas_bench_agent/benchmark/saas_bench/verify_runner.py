@@ -279,7 +279,7 @@ def _parse_verify_output(stderr_text: str) -> dict:
             index += 1
             while index < len(lines):
                 next_line = lines[index].strip()
-                if next_line.startswith(("[PASS]", "[FAIL]", "SCORE:", "VERIFIER_ERROR:")):
+                if next_line.startswith(("[PASS]", "[FAIL]", "SCORE:", "VERIFIER_ERROR:", "WARNING: context load failed:", "FATAL:")):
                     break
                 record.append(next_line)
                 index += 1
@@ -295,6 +295,8 @@ def _parse_verify_output(stderr_text: str) -> dict:
                 "detail": detail.strip() if detail else "",
             })
             continue
+        if line.startswith(("WARNING: context load failed:", "FATAL:")):
+            errors.append(line)
         if line.startswith("VERIFIER_ERROR:"):
             errors.append(line.partition(":")[2].strip() or "unspecified verifier error")
         m = _SCORE_RE.match(line)
@@ -388,6 +390,7 @@ def run_verify(
         "all_pass": parsed["all_pass"] if status != "ERROR" else False,
         "checks":   parsed["checks"],
         "returncode": proc.returncode,
+        "diagnostics_stderr": proc.stderr,
         "error":    error,
     }
     if status == "ERROR":

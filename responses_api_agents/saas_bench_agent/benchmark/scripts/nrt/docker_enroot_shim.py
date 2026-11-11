@@ -14,8 +14,10 @@ Exec recipe that works with util-linux 2.37 + Enroot switchroot:
     nsenter -t APP -m --wd=/ \\
       /bin/sh -c 'cd / && PATH=<container> LC_ALL=C exec "$@"' sh ARGS...
 
-Do not pass ``nsenter --root`` or ``-p``: both break PostgreSQL's
-``/proc/self/exe`` lookup. Do not inherit the host PATH: after ``-m`` those
+For ordinary tools retain the legacy namespace recipe for PostgreSQL's
+``/proc/self/exe`` lookup. SQLCMD instead requires target root and PID membership
+to load its resource files; it uses an explicit command-scoped exception.
+Do not inherit the host PATH: after ``-m`` those
 directories are gone and ``psql`` is found via ``/usr/bin`` / ``/usr/lib/postgresql/*/bin``.
 """
 
@@ -247,6 +249,10 @@ def docker_exec(args: list[str]) -> int:
         runtime_env = [entry.decode() for entry in entries if entry.split(b'=', 1)[0].decode(errors='replace') in allowed]
     except OSError:
         pass
+    # SQLCMD resolves resource files through /proc/self/exe, which requires
+    # membership in the target PID namespace as well as its root filesystem.
+    sqlcmd = Path(args[0]).name == "sqlcmd"
+    namespace_flags = ["--pid", "--root", "--wd"] if sqlcmd else ["--wd=/"]
     payload = ["env", *runtime_env, *env_values, *args]
     inner = [
         "/bin/sh",
@@ -270,7 +276,7 @@ def docker_exec(args: list[str]) -> int:
         "-t",
         str(app_pid),
         "-m",
-        "--wd=/",
+        *namespace_flags,
         *inner,
     ]
     result = subprocess.run(cmd, stdin=None if interactive else sys.stdin.buffer)
