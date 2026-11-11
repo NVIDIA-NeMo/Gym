@@ -466,6 +466,32 @@ async def test_final_reviews_the_captured_context_with_its_tool_results(tmp_path
     assert "7-2" not in server._rollouts
 
 
+async def test_final_reviews_each_window_the_agent_replaced(tmp_path: Path) -> None:
+    server = _server(_config(tmp_path), NONE, NONE, global_config=_capture(tmp_path))
+    _call("7-2", tmp_path, [*TASK, *EDITED, *EDITED], EDIT)
+    _call("7-2", tmp_path, [{"role": "user", "content": "Summary: edited the test twice."}], DONE)
+    await server._finish({"rollout_id": "7-2", "response": {"output": DONE}})
+    # Layer 1 sees the window the summary replaced, not only the last one.
+    prompts = [_prompt(server, i) for i in range(2)]
+    assert sorted(p.count("write_file") for p in prompts) == [0, 3] and any("Summary:" in p for p in prompts)
+    assert server._counts["reviews"] == 2
+
+
+async def test_tailer_stops_reading_a_finished_rollouts_capture(tmp_path: Path) -> None:
+    server = _server(_config(tmp_path), NONE, global_config=_capture(tmp_path))
+    _call("7-2", tmp_path, TASK, DONE)
+    await server._finish({"rollout_id": "7-2", "response": {"output": DONE}})
+    path = tmp_path / "capture" / "7-2.capture.jsonl"
+    assert path in server._finished_captures and path not in server._capture_offsets
+    _call("7-2", tmp_path, TASK, DONE)
+    await server._read_captures()
+    assert server._counts["calls"] == 1 and "7-2" not in server._rollouts
+    # A file deleted and written again is read again.
+    path.unlink()
+    await server._read_captures()
+    assert path not in server._finished_captures
+
+
 async def test_final_falls_back_to_the_rollout_without_a_capture(tmp_path: Path) -> None:
     server = _server(_config(tmp_path), NONE)
     await server._finish(ROLLOUT)

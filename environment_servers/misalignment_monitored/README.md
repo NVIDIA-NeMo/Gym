@@ -1,7 +1,9 @@
 # Misalignment-monitored agent environment server
 
 Fronts one agent server like `legacy_agent`, and hands each finished rollout to the misalignment monitor
-(`resources_servers/misalignment_monitor`). Use it in place of the agent's `legacy_agent` environment server:
+(`resources_servers/misalignment_monitor`). Use it in place of the agent's `legacy_agent` environment server.
+It covers agents on the legacy `/run` path only. Agents migrated to session harnesses are not monitored yet.
+A config looks like this:
 
 ```yaml
 my_benchmark_environment_server:

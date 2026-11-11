@@ -37,8 +37,14 @@ from nemo_gym.client import raise_for_status, request
 from nemo_gym.config import ModelServerRef, get_global_config_dict
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollouts import model_call_capture_dirs_from_config
-from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, create_provider, upload_text
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    SandboxSpec,
+    create_provider,
+    resolve_provider_config,
+    resolve_provider_metadata,
+    upload_text,
+)
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
@@ -394,6 +400,8 @@ class MisalignmentMonitorServer(SimpleResourcesServer):
         self._rollouts: dict[str, _Rollout] = {}
         # Each capture file's first bytes, which identify it, and how far it has been read.
         self._capture_offsets: dict[Path, tuple[bytes, int]] = {}
+        # Capture files of rollouts already finished, which the tailer no longer reads.
+        self._finished_captures: set[Path] = set()
         self._capture_lock = asyncio.Lock()
         self._recent_alerts: deque[dict] = deque(maxlen=200)
         self._alignment_alerts: list[dict] = []
@@ -504,10 +512,12 @@ class MisalignmentMonitorServer(SimpleResourcesServer):
         if rollout_id:
             paths = [self._capture_dir / f"{rollout_id}{suffix}"]
         else:
-            paths = list(self._capture_dir.glob(f"*{suffix}"))
+            found = set(self._capture_dir.glob(f"*{suffix}"))
             # Rollout collection deletes a rerun's old capture, so files come and go.
-            for gone in self._capture_offsets.keys() - set(paths):
+            for gone in self._capture_offsets.keys() - found:
                 del self._capture_offsets[gone]
+            self._finished_captures &= found
+            paths = found - self._finished_captures
         lines = []
         for path in paths:
             try:
@@ -544,6 +554,10 @@ class MisalignmentMonitorServer(SimpleResourcesServer):
                     lines.append((path.name.removesuffix(suffix), json.loads(line)))
                 except ValueError:
                     self._counts["unreadable_capture_lines"] += 1
+        if rollout_id and finished:
+            # Its final review has what it needs, so later polls skip the file instead of stating it again.
+            self._capture_offsets.pop(paths[0], None)
+            self._finished_captures.add(paths[0])
         return lines
 
     def _take_call(self, rollout_id: str, exchange: dict[str, Any]) -> None:
@@ -661,7 +675,11 @@ class MisalignmentMonitorServer(SimpleResourcesServer):
                 # A call that was not screened leaves the rollout unscreened.
                 reading["error"] = f"{len(errors)} of {len(readings)} calls not screened: {errors[0]}"
         windows = [*(state.windows if state else []), window]
-        await self._review_and_record(_Case(rollout_id, "final", window, windows, record, reading))
+        cases = [_Case(rollout_id, "final", window, windows, record, reading)]
+        if self.config.review_schedule == "final":
+            # Layer 1 reads one window, so each window the agent's context replaced gets a review of its own.
+            cases += [_Case(rollout_id, "context_rewritten", earlier, windows, record) for earlier in windows[:-1]]
+        await asyncio.gather(*(self._review_and_record(case) for case in cases))
 
     ########################################
     # Layers

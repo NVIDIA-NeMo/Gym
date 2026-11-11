@@ -24,7 +24,8 @@ misalignment_monitor:
       # P0 alerts are also POSTed here as JSON.
       alert_webhook_url: null
       # Hold new rollouts once a P0 alert has been unresolved this long (POST /resolve closes it). null never holds.
-      pause_after_unresolved_p0_minutes: 30
+      # Only for attended runs: the hold has no time limit.
+      pause_after_unresolved_p0_minutes: null
 
       # final: one review per rollout, when it finishes.
       # per_turn: review at the end of each agent turn, when the agent's context is rewritten, when layer 0 flags

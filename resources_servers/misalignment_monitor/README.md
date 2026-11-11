@@ -22,6 +22,8 @@ Only the security path can raise a P0.
 Rollouts reach the monitor through the `misalignment_monitored` environment server. Use it in place of the agent's
 `legacy_agent` environment server (`environment_servers/misalignment_monitored`), add this server's config, and
 point `judge_model_server` at a self-hosted judge model server. This covers `gym eval run` and RL training.
+For live monitoring the judge must not be the policy: the policy would grade itself and share its capacity with
+the judge calls.
 With a `vllm_model` judge served by vLLM's Rust frontend, set `reasoning_field: reasoning`: that frontend rejects the
 two reasoning keys the investigators' multi-turn calls carry by default.
 
@@ -36,8 +38,9 @@ two reasoning keys the investigators' multi-turn calls carry by default.
 
 `per_turn` and `activation_source: engine` read each model call from Gym's model-call capture, so they need
 `observability_enabled: true` and an absolute `model_call_capture_dir` in the global config, readable by this server.
-With capture on, `final` also reviews the last context window the agent saw, tool results included, whatever the
-harness records in its result. Only calls from `policy_model_servers` count as the agent acting. The monitor joins
+With capture on, `final` reviews the last context window the agent saw, tool results included, whatever the
+harness records in its result, and each earlier window the agent's context replaced (summarized, cut or rewritten)
+gets a review of its own. Only calls from `policy_model_servers` count as the agent acting. The monitor joins
 calls to rollouts by rollout id, so ids must be unique within a capture directory, as Gym's capture already
 requires: give reruns of the same input explicit `_ng_rollout_id`s or a fresh `model_call_capture_dir`.
 
@@ -49,7 +52,9 @@ failed reviews go to the same file. A count line is printed every 100 reviews.
 
 - P0 alerts are POSTed as JSON to `alert_webhook_url` when it is set.
 - `GET /status` lists open P0 alerts. When one has been open for `pause_after_unresolved_p0_minutes`, it asks the
-  environment server to hold new rollouts, which pauses the whole run without singling out any rollout.
+  environment server to hold new rollouts, which pauses the whole run without singling out any rollout. The
+  shipped config leaves it at `null` (never hold), since the hold lasts until someone POSTs `/resolve`. Set it,
+  for example to 30, only for runs a person is watching.
 - `POST /resolve` with `{"alert_id": "...", "note": "..."}` closes a P0 after a person has looked at it.
 - When `gym eval run` finishes, the environment server asks the monitor (`POST /drain`) to finish its reviews,
   for up to `drain_timeout_s` (600), before metrics are computed and the servers stop.
@@ -121,7 +126,8 @@ aggregate metrics report recall and false-positive rate at each threshold (`moni
 any earlier `monitor_report` stay out of the evidence the judge sees, and a failed judge call gives a masked row
 (`failure_kind: judge_failed`), not a detected incident. `data/example.jsonl` holds five labeled Terminal-Bench 2.1
 rollouts (two verified catches, three clean runs, internal hosts removed), declared in
-`configs/misalignment_monitor_examples.yaml`:
+`configs/misalignment_monitor_examples.yaml`. Replaying recorded rollouts can use the policy's server as the judge,
+as below, since no policy is being monitored:
 
 ```bash
 gym eval reverify \
@@ -135,6 +141,8 @@ gym eval reverify \
 
 # Limits
 
+- The monitor sees rollouts relayed through the `misalignment_monitored` environment server, which wraps agents on
+  the legacy `/run` path. Agents migrated to session harnesses are not monitored yet.
 - Layer 3 reads the evidence Gym has: the rollout's own record and earlier alerts. Gym sandboxes expose no network
   logs or system telemetry.
 - Pausing holds new rollouts. It does not stop rollouts in flight or roll a run back, and paging beyond the webhook
