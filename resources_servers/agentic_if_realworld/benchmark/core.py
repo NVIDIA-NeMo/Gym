@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 from collections import Counter
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 from .policy import validate_response_judge as judge
@@ -405,8 +406,43 @@ def source_preflight(
     }
 
 
-def runtime_identity() -> dict:
-    """Record dependency versions and actual source bytes in resume fingerprints."""
+# Gym core and the components that the shipped benchmark config runs (benchmarks/agentic_if_realworld/config.yaml).
+RUNTIME_COMPONENTS = (
+    "benchmarks/agentic_if_realworld",
+    "environment_servers/legacy_agent",
+    "nemo_gym",
+    "resources_servers/agentic_if_realworld",
+    "responses_api_agents/simple_agent",
+    "responses_api_models/agentic_if_text",
+)
+
+
+def runtime_components(global_config: Mapping | None = None) -> list[str]:
+    """Return Gym core, this benchmark's components and every server that the run's configuration names."""
+    from omegaconf import OmegaConf
+
+    from nemo_gym.config.global_config import ENTRYPOINT_KEY_NAME, SERVER_TYPE_KEYS
+
+    if OmegaConf.is_config(global_config):
+        # Leave interpolations, such as secrets from the environment, unresolved: only server names are read.
+        global_config = OmegaConf.to_container(global_config, resolve=False)
+    components = set(RUNTIME_COMPONENTS)
+    for instance in (global_config or {}).values():
+        if not isinstance(instance, Mapping):
+            continue
+        for server_type in SERVER_TYPE_KEYS:
+            servers = instance.get(server_type)
+            if isinstance(servers, Mapping):
+                components.update(
+                    f"{server_type}/{name}"
+                    for name, server in servers.items()
+                    if isinstance(server, Mapping) and ENTRYPOINT_KEY_NAME in server
+                )
+    return sorted(components)
+
+
+def runtime_identity(components: Iterable[str] = RUNTIME_COMPONENTS) -> dict:
+    """Record dependency versions and the source bytes of the run's components in resume fingerprints."""
     import importlib.metadata
     import sys
 
@@ -426,9 +462,12 @@ def runtime_identity() -> dict:
     sources = {str(p.relative_to(ROOT)): digest(p) for p in ROOT.rglob("*.py")}
     sources["policy/judge_output.schema.json"] = digest(ROOT / "policy/judge_output.schema.json")
     component_root = ROOT.parents[2]
-    for boundary in ["benchmarks", "resources_servers", "responses_api_models", "responses_api_agents", "nemo_gym"]:
-        for p in (component_root / boundary).rglob("*.py"):
-            # Other components prepare hidden checkouts and caches during concurrent runs.
+    # Only the run's own components: other components' generated files, such as a data checkout that a
+    # concurrent server clones into its folder, must not invalidate a resume.
+    components = sorted(set(components))
+    for component in components:
+        for p in (component_root / component).rglob("*.py"):
+            # Components also prepare hidden checkouts and caches inside their own folders.
             if not any(part.startswith(".") for part in p.relative_to(component_root).parts):
                 sources["gym/" + str(p.relative_to(component_root))] = digest(p)
     # Workspace outputs can toggle Git's checkout-wide dirty flag between calls.
@@ -439,6 +478,7 @@ def runtime_identity() -> dict:
     return {
         "python": sys.version,
         "dependencies": versions,
+        "components": components,
         "sources": sources,
         "gym_commit": gym_commit,
         "source_gym_commit": read(ROOT / "source_manifest.json")["gym_commit"],

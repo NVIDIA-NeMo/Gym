@@ -51,7 +51,7 @@ def test_adaptive_capture_selected_parameters_and_resume(
     # Other CI component workers can change unrelated files in the shared checkout.
     # Keep dispatch scenarios fixed, then exercise the real identity checks on resume.
     runtime = core.runtime_identity()
-    monkeypatch.setattr(rollout_driver, "runtime_identity", lambda: copy.deepcopy(runtime))
+    monkeypatch.setattr(rollout_driver, "runtime_identity", lambda components: copy.deepcopy(runtime))
     create(tmp_path / "data", examples=interrupted or multiple)
     dataset = core.Dataset(tmp_path / "data", synthetic=True)
     prepared = tmp_path / "prepared.jsonl"
@@ -570,7 +570,52 @@ def test_runtime_fingerprint_covers_active_agent_and_core(monkeypatch, source):
     assert core.runtime_identity() != before
 
 
-@pytest.mark.parametrize("change", ["judge_schema", "active_python", "generated_output", "generated_python"])
+def test_runtime_components_follow_the_shipped_config_and_overrides():
+    gym_root = core.ROOT.parents[2]
+    shipped = OmegaConf.merge(
+        *(
+            OmegaConf.load(gym_root / path)
+            for path in [
+                "benchmarks/agentic_if_realworld/config.yaml",
+                "resources_servers/agentic_if_realworld/configs/agentic_if_realworld.yaml",
+            ]
+        )
+    )
+    assert core.runtime_components(shipped) == sorted(core.RUNTIME_COMPONENTS)
+    assert core.runtime_components(None) == sorted(core.RUNTIME_COMPONENTS)
+    overridden = OmegaConf.merge(
+        shipped,
+        {
+            "secret": "${oc.env:AGENTIC_IF_UNSET_FOR_TEST}",
+            "agentic_if_realworld_agent": {"responses_api_agents": {"opencode_agent": {"entrypoint": "app.py"}}},
+        },
+    )
+    components = core.runtime_components(overridden)
+    assert "responses_api_agents/opencode_agent" in components
+    assert set(core.RUNTIME_COMPONENTS) <= set(components)
+
+
+def test_runtime_identity_records_and_binds_its_components(monkeypatch):
+    monkeypatch.setattr(gym_commit, "installed_gym_commit", lambda: "runtime-revision")
+    default = core.runtime_identity()
+    assert default["components"] == sorted(core.RUNTIME_COMPONENTS)
+    assert not [path for path in default["sources"] if path.startswith("gym/responses_api_agents/tau2/")]
+    wider = core.runtime_identity([*core.RUNTIME_COMPONENTS, "responses_api_agents/tau2"])
+    assert wider != default
+    assert any(path.startswith("gym/responses_api_agents/tau2/") for path in wider["sources"])
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "judge_schema",
+        "active_python",
+        "environment_server_python",
+        "generated_output",
+        "generated_python",
+        "unrelated_python",
+    ],
+)
 def test_pending_resume_binds_runtime_inputs(tmp_path, monkeypatch, change):
     create(tmp_path / "data")
     dataset = core.Dataset(tmp_path / "data", synthetic=True)
@@ -605,16 +650,25 @@ def test_pending_resume_binds_runtime_inputs(tmp_path, monkeypatch, change):
         source = benchmark.parents[2] / "responses_api_agents/simple_agent/app.py"
         source.parent.mkdir(parents=True)
         source.write_text("# Active agent source added after the run started\n")
+    elif change == "environment_server_python":
+        source = benchmark.parents[2] / "environment_servers/legacy_agent/app.py"
+        source.parent.mkdir(parents=True)
+        source.write_text("# Environment Server source added after the run started\n")
     elif change == "generated_python":
         source = benchmark.parents[2] / "resources_servers/ether0/.ether0/src/ether0/runtime.py"
         source.parent.mkdir(parents=True)
         source.write_text("# Another component's generated checkout\n")
+    elif change == "unrelated_python":
+        # tau2's server clones tau2-bench into a visible folder next to its data while other tests run.
+        source = benchmark.parents[2] / "responses_api_agents/tau2/tau2-bench-x1y2z3/tau2-bench/src/tau2/agent.py"
+        source.parent.mkdir(parents=True)
+        source.write_text("# Another component's visible generated checkout\n")
     else:
         (benchmark / "generated-output.txt").write_text("Unrelated workspace output")
     monkeypatch.setattr(gym_commit, "installed_gym_commit", lambda: "runtime-revision-dirty")
     after = core.runtime_identity()
     args["settings"] = {"runtime": after}
-    if change in {"judge_schema", "active_python"}:
+    if change in {"judge_schema", "active_python", "environment_server_python"}:
         assert after != before
         for validate_only in [True, False]:
             with pytest.raises(ValueError, match="fingerprint mismatch"):
@@ -624,7 +678,7 @@ def test_pending_resume_binds_runtime_inputs(tmp_path, monkeypatch, change):
         assert asyncio.run(run_cell(dataset, "synthetic", **args, resume=True, validate_only=True)) is None
     assert all(path.read_bytes() == data for path, data in saved.items())
     assert generate.await_count == 1 and verify.await_count == 0
-    if change in {"generated_output", "generated_python"}:
+    if change in {"generated_output", "generated_python", "unrelated_python"}:
         with pytest.raises(RetryableTransportError, match="before dispatch"):
             asyncio.run(run_cell(dataset, "synthetic", **args, resume=True))
         assert generate.await_count == 2 and verify.await_count == 0
