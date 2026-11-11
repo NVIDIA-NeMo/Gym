@@ -104,18 +104,18 @@ class VSBenchReferenceServer(SimpleResourcesServer):
                 stderr=asyncio.subprocess.PIPE,
             )
             try:
-                stdout, _ = await asyncio.wait_for(
+                stdout, stderr = await asyncio.wait_for(
                     process.communicate(json.dumps({"game": game, "row_index": index, "answer": answer}).encode()),
                     timeout=self.config.scorer_timeout_seconds,
                 )
-            except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
-                raise
+            finally:
+                if process.returncode is None:
+                    process.kill()
+                    await process.wait()
         if process.returncode:
             raise RuntimeError(
                 f"Isolated author perception scorer failed for {game} row {index} "
-                f"(exit {process.returncode}); the track is incomplete"
+                f"(exit {process.returncode}); the track is incomplete: {stderr.decode(errors='replace')[-2000:]}"
             )
         result = json.loads(stdout)
         return float(result["reward"])
@@ -153,15 +153,17 @@ class VSBenchReferenceServer(SimpleResourcesServer):
                 stderr=asyncio.subprocess.PIPE,
             )
             try:
-                stdout, _ = await asyncio.wait_for(
+                stdout, stderr = await asyncio.wait_for(
                     process.communicate(json.dumps(payload).encode()), timeout=self.config.scorer_timeout_seconds
                 )
-            except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
-                raise
+            finally:
+                if process.returncode is None:
+                    process.kill()
+                    await process.wait()
         if process.returncode:
-            raise RuntimeError("Unmodified VS-Bench reasoning parser failed")
+            raise RuntimeError(
+                f"Unmodified VS-Bench reasoning parser failed: {stderr.decode(errors='replace')[-2000:]}"
+            )
         return json.loads(stdout)
 
     async def verify(self, body: VSBenchReasoningRequest) -> VSBenchReasoningResponse:

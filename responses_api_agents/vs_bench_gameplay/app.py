@@ -10,6 +10,7 @@ returns and approximate normalized scores using rounded paper anchors.
 
 import asyncio
 import os
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -26,7 +27,7 @@ from benchmarks.vs_bench.reference_identity import validate_author_checkout
 from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, accumulate_response_usage
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.vs_bench_reference.app import author_chat_to_gym, read_frame, write_frame
@@ -59,6 +60,7 @@ class GameplayResponse(BaseVerifyResponse):
     author_model_calls: int
     source_results_path: str
     reward_definition: str
+    response_scope: str = "suite_summary"
 
 
 class VSBenchGameplayAgent(SimpleResponsesAPIAgent):
@@ -230,12 +232,11 @@ class VSBenchGameplayAgent(SimpleResponsesAPIAgent):
                 stderr=asyncio.subprocess.DEVNULL,
             )
             writer_lock = asyncio.Lock()
-            pending = []
-            last_response = None
-            transport_failed = False
+            completed_calls = 0
+            total_usage = None
 
             async def route(frame):
-                nonlocal last_response, transport_failed
+                nonlocal completed_calls, total_usage
                 author_call = frame["request"]
                 params = dict(payload)
                 params["input"] = author_chat_to_gym(author_call["messages"])
@@ -260,8 +261,9 @@ class VSBenchGameplayAgent(SimpleResponsesAPIAgent):
                         finish = "stop"
                     else:
                         raise ValueError("Unexpected policy response status")
-                    last_response = response
+                    completed_calls += 1
                     usage = response.usage
+                    total_usage = accumulate_response_usage(total_usage, usage)
                     result = {
                         "type": "model_response",
                         "request_id": frame["request_id"],
@@ -271,26 +273,23 @@ class VSBenchGameplayAgent(SimpleResponsesAPIAgent):
                         "completion_tokens": usage.output_tokens if usage else None,
                     }
                 except (ClientError, asyncio.TimeoutError, ValueError):
-                    transport_failed = True
                     result = {"type": "model_error", "request_id": frame["request_id"]}
                 async with writer_lock:
                     await write_frame(process.stdin, result)
 
             try:
                 await write_frame(process.stdin, task)
-                while True:
-                    frame = await asyncio.wait_for(read_frame(process.stdout), self.config.frame_timeout_seconds)
-                    if frame["type"] == "complete":
-                        break
-                    if frame["type"] != "model_request":
-                        raise RuntimeError(
-                            f"Original gameplay runner failed: {frame.get('error_type')}: {frame.get('message')}"
-                        )
-                    running = asyncio.create_task(route(frame))
-                    pending.append(running)
-                if pending:
-                    await asyncio.gather(*pending)
-                if await process.wait() != 0 or last_response is None or transport_failed:
+                async with asyncio.TaskGroup() as calls:
+                    while True:
+                        frame = await asyncio.wait_for(read_frame(process.stdout), self.config.frame_timeout_seconds)
+                        if frame["type"] == "complete":
+                            break
+                        if frame["type"] != "model_request":
+                            raise RuntimeError(
+                                f"Original gameplay runner failed: {frame.get('error_type')}: {frame.get('message')}"
+                            )
+                        calls.create_task(route(frame))
+                if await process.wait() != 0 or completed_calls == 0 or frame.get("transport_fallbacks", 0):
                     raise RuntimeError("Gameplay run encountered a policy transport failure")
                 returns, seats, steps = frame["returns"], frame["model_seats"], frame["steps"]
                 if episode is not None:
@@ -301,7 +300,34 @@ class VSBenchGameplayAgent(SimpleResponsesAPIAgent):
                 reward = sum(float(row[seat]) for row in returns) / len(returns)
                 return GameplayResponse(
                     **body.model_dump(),
-                    response=last_response,
+                    response=NeMoGymResponse.model_validate(
+                        {
+                            "id": f"vsbench-{uuid4().hex}",
+                            "object": "response",
+                            "created_at": time.time(),
+                            "model": self.config.model_server.name,
+                            "status": "completed",
+                            "output": [
+                                {
+                                    "id": "suite-summary",
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "status": "completed",
+                                    "content": [
+                                        {
+                                            "type": "output_text",
+                                            "annotations": [],
+                                            "text": f"Completed {len(returns)} {game} episode(s); results are in terminal_returns.",
+                                        }
+                                    ],
+                                }
+                            ],
+                            "parallel_tool_calls": False,
+                            "tool_choice": "auto",
+                            "tools": [],
+                            "usage": total_usage.model_dump() if total_usage is not None else None,
+                        }
+                    ),
                     reward=reward,
                     terminal_returns=returns,
                     model_seats=seats,
@@ -311,10 +337,6 @@ class VSBenchGameplayAgent(SimpleResponsesAPIAgent):
                     reward_definition="mean return of first model-controlled seat; raw, not normalized",
                 )
             finally:
-                for call in pending:
-                    call.cancel()
-                if pending:
-                    await asyncio.gather(*pending, return_exceptions=True)
                 if process.returncode is None:
                     process.kill()
                     await process.wait()

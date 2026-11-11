@@ -33,6 +33,10 @@ async def receive(reader):
     return json.loads(await reader.readexactly(size))
 
 
+class PolicyTransportError(RuntimeError):
+    pass
+
+
 async def run(author_root, task, incoming, outgoing):
     game = task["game"]
     if game not in GAMES or not isinstance(task["episode_id"], int) or task["episode_id"] < 0:
@@ -57,6 +61,20 @@ async def run(author_root, task, incoming, outgoing):
     from eval import decision_making
 
     model_calls = 0
+    transport_fallbacks = 0
+
+    def record_step(step_info):
+        nonlocal transport_fallbacks
+        for info in step_info.agent_infos:
+            if (
+                info
+                and "reasoning" not in info
+                and any(
+                    error.get("type") == "PolicyTransportError" for error in (info.get("exception") or {}).values()
+                )
+            ):
+                transport_fallbacks += 1
+
     next_id = 0
     pending = {}
 
@@ -67,7 +85,7 @@ async def run(author_root, task, incoming, outgoing):
             if frame["type"] == "model_response":
                 future.set_result(frame)
             else:
-                future.set_exception(RuntimeError("Model bridge transport failed"))
+                future.set_exception(PolicyTransportError("Model bridge transport failed"))
 
     reader_task = asyncio.create_task(reader_loop())
 
@@ -118,6 +136,7 @@ async def run(author_root, task, incoming, outgoing):
             pass
 
         def step(self, _, step_info):
+            record_step(step_info)
             self.steps += 1
 
         def episode_end(self, _, env_info):
@@ -139,6 +158,13 @@ async def run(author_root, task, incoming, outgoing):
                         model["params"]["name"] = "vs-bench-gym-policy"
                         model["params"]["version"] = "policy_model"
                 logger = original_logger(config)
+                original_step = logger.step
+
+                def step(episode_id, step_info):
+                    record_step(step_info)
+                    original_step(episode_id, step_info)
+
+                logger.step = step
                 captured["logger"] = logger
                 return logger
 
@@ -153,6 +179,7 @@ async def run(author_root, task, incoming, outgoing):
                 "returns": logger.returns.tolist(),
                 "steps": logger.steps.tolist(),
                 "model_calls": model_calls,
+                "transport_fallbacks": transport_fallbacks,
                 "source_results_path": logger.json_file,
             }
         collector = Collector()
@@ -187,6 +214,7 @@ async def run(author_root, task, incoming, outgoing):
             "steps": collector.steps,
             "model_seats": [seat] if seat is not None else [],
             "model_calls": model_calls,
+            "transport_fallbacks": transport_fallbacks,
             "source_results_path": str(root),
         }
     finally:

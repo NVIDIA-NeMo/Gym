@@ -32,6 +32,9 @@ copies the files to a separate staging directory, applies the checked-in patch,
 verifies all resulting file hashes, and writes a provenance record. It does
 not fetch source or modify the input. The resulting export needs an explicitly
 provisioned Python 3.10 environment with the benchmark dependencies.
+Dependency building and ROM installation are deployment concerns and are
+maintained separately from this adapter. Provision that runtime before
+starting Gym; the adapter does not install packages or download game assets.
 
 ## Isolation and configuration
 
@@ -72,12 +75,19 @@ models. Paper-scheduled gameplay has completed for a baseline and a trained
 checkpoint using disjoint shards; source, checkpoint, coverage, and shard
 identities were checked before combining compact metrics. These runs qualify
 the tested snapshots and runtime, not every deployment or this checkout's
-latest changes. The separate full-ledger reconciliation remains outstanding.
+latest changes. A separate full-ledger reconciliation also completed for
+those historical runs; it does not qualify subsequent adapter changes.
 The original KAZ scorer is known to
 raise on released labels; failures remain failures and must not be silently
 converted to zero. A timed-out gameplay suite has to be replayed as a suite;
 completed suite records can be reused by Gym's verified resume path. The exact
 paper leaderboard normalization anchors have not been recovered.
+
+Gameplay's `response` is an explicit suite summary, with usage summed over
+completed policy calls, rather than one arbitrary episode's final response.
+Use Gym's model-call capture for individual prompts and completions. Transport
+errors recovered by the author's retry loop do not invalidate a completed
+suite; a transport error that contributes to an exhausted-retry fallback does.
 
 The integration remains experimental pending review of dependency provisioning,
 isolation, source distribution, and the factory configuration.

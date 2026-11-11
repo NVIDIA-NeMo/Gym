@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiohttp import ClientConnectionError
 from fastapi.testclient import TestClient
 
 from benchmarks.vs_bench.prepare import AUTHOR_REVISION
@@ -29,6 +30,17 @@ def test_gameplay_runs_actual_author_suite_with_fixture_policy(tmp_path):
 
     async def policy(**kwargs):
         calls.append(kwargs)
+        if len(calls) == 1:
+            raise ClientConnectionError("Transient fixture failure; the author must retry")
+        selected = action
+        if "a1a2" in action:
+            prompt = "\n".join(
+                part.get("text", "")
+                for message in kwargs["json"].model_dump(mode="json")["input"]
+                for part in message["content"]
+            )
+            legal = prompt.split("LEGAL ACTIONS:\n", 1)[1].split(".", 1)[0].split(", ")
+            selected = json.dumps({"action": legal[0]})
         result = {
             "id": f"r{len(calls)}",
             "created_at": 0,
@@ -41,7 +53,7 @@ def test_gameplay_runs_actual_author_suite_with_fixture_policy(tmp_path):
                     "role": "assistant",
                     "status": "completed",
                     "type": "message",
-                    "content": [{"type": "output_text", "text": action, "annotations": []}],
+                    "content": [{"type": "output_text", "text": selected, "annotations": []}],
                 }
             ],
             "parallel_tool_calls": True,
@@ -87,6 +99,9 @@ def test_gameplay_runs_actual_author_suite_with_fixture_policy(tmp_path):
         assert result["model_seats"] == [1]
         assert result["author_model_calls"] == len(calls) > 0
         assert Path(result["source_results_path"]).is_file()
+        assert result["response_scope"] == "suite_summary"
+        assert result["response"]["usage"]["input_tokens"] == (len(calls) - 1) * 10
+        assert result["response"]["usage"]["output_tokens"] == (len(calls) - 1) * 5
         assert result["reward"] == sum(row[1] for row in result["terminal_returns"]) / 10
         aggregated = http.post("/aggregate_metrics", json={"verify_responses": [result]})
         assert aggregated.status_code == 200, aggregated.text

@@ -25,12 +25,13 @@ from resources_servers.vs_bench_reference.app import (
 AUTHOR = Path(os.environ.get("VS_BENCH_TEST_UPSTREAM", "/nonexistent"))
 DATA = Path(os.environ.get("VS_BENCH_TEST_DATASET", "/nonexistent"))
 PYTHON = os.environ.get("VS_BENCH_TEST_AUTHOR_PYTHON", "")
-pytestmark = pytest.mark.skipif(
+requires_author = pytest.mark.skipif(
     not AUTHOR.is_dir() or not DATA.is_dir() or not Path(PYTHON).is_file(),
     reason="Pinned author checkout, dataset and 3.10 runtime required",
 )
 
 
+@requires_author
 def test_actual_gym_verifier_uses_author_parser_and_rejects_retry_case():
     raw = next(pq.ParquetFile(DATA / "reasoning/kuhn_poker.parquet").iter_batches(batch_size=1)).to_pylist()[0]
     prepared = convert_row("reasoning", "kuhn_poker", 0, raw)
@@ -92,3 +93,62 @@ def test_actual_gym_verifier_uses_author_parser_and_rejects_retry_case():
     metadata = dict(prepared["verifier_metadata"], track="perception")
     with pytest.raises(ValueError, match="Only reference reasoning"):
         asyncio.run(server.score_attempt(metadata, answer))
+
+
+@pytest.mark.parametrize("track", ["reasoning", "perception"])
+def test_cancelled_scorer_kills_and_reaps_child(monkeypatch, track):
+    import sys
+    from types import SimpleNamespace
+
+    async def check():
+        started = asyncio.Event()
+        original = asyncio.create_subprocess_exec
+        children = []
+
+        async def spawn(*args, **kwargs):
+            child = await original(
+                sys.executable,
+                "-c",
+                "import time; time.sleep(60)",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            children.append(child)
+            started.set()
+            return child
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+        monkeypatch.setattr(VSBenchReferenceServer, "model_post_init", lambda self, context: None)
+        server = VSBenchReferenceServer.model_construct(
+            config=SimpleNamespace(
+                bwrap_path="/test/bwrap",
+                dataset_root="/test/data",
+                author_venv="/test/venv",
+                author_python_root="/test/python",
+                author_python=sys.executable,
+                author_root="/test/author",
+                scorer_timeout_seconds=60,
+            )
+        )
+        server._scorer_semaphore = asyncio.Semaphore(1)
+        from benchmarks.vs_bench.prepare import AUTHOR_REVISION, DATASET_REVISION
+
+        meta = {
+            "track": track,
+            "game": "kuhn_poker",
+            "row_index": 0,
+            "author_revision": AUTHOR_REVISION,
+            "dataset_revision": DATASET_REVISION,
+            "next_legal_actions": {},
+            "next_action": [],
+        }
+        call = server.score_perception(meta, "{}") if track == "perception" else server.score_attempt(meta, "{}")
+        task = asyncio.create_task(call)
+        await asyncio.wait_for(started.wait(), 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert children[0].returncode is not None
+
+    asyncio.run(check())
