@@ -100,6 +100,11 @@ from nemo_gym.sandbox.compose_fields import DEFAULT_PLATFORM
 logger = logging.getLogger(__name__)
 
 DEFAULT_OUTPUT_ROOT = Path("results/harbor")
+# The command-line setting that moves a task TARGET's rows, run config and skipped list elsewhere than
+# ``DEFAULT_OUTPUT_ROOT``. A submitted run sets it to a folder in its job directory: the driver works in a fresh
+# checkout on every allocation, so a default relative to the working directory would put the rows at a different
+# absolute path each time, and the run config that names them would no longer match a saved run.
+HARBOR_OUTPUT_ROOT_KEY = "harbor_output_root"
 IMAGES_FILE = "images.json"
 ENVIRONMENT_SERVER_CONFIG = "environment_servers/harbor/configs/harbor.yaml"
 ORACLE_AGENT = "harbor_oracle_agent"
@@ -957,6 +962,12 @@ def _has_override(overrides: list[str], key: str) -> bool:
     return _override_value(overrides, key) is not None
 
 
+def output_root_from_overrides(overrides: list[str]) -> Path:
+    """Where a task TARGET's output goes: ``+harbor_output_root=...`` when the command sets it, else ``results/harbor``."""
+    value = _override_value(overrides, HARBOR_OUTPUT_ROOT_KEY)
+    return Path(value) if value else DEFAULT_OUTPUT_ROOT
+
+
 def _override_value(overrides: list[str], key: str) -> str | None:
     for token in overrides:
         name, _, value = token.lstrip("+").partition("=")
@@ -1022,7 +1033,12 @@ def build_run(
         config_paths.append(resolve_sandbox_config(sandbox))
     # Later config files win: explicit user overlays must follow component/provider defaults.
     tokens = [f"+config_paths=[{','.join(json.dumps(str(path), ensure_ascii=False) for path in config_paths)}]"]
-    tokens += [token for token in overrides if not token.startswith("+agent_name=")]
+    # The output root was read above (`output_root_from_overrides`); it is not a run setting.
+    tokens += [
+        token
+        for token in overrides
+        if not token.startswith("+agent_name=") and token.lstrip("+").partition("=")[0] != HARBOR_OUTPUT_ROOT_KEY
+    ]
     if not _has_override(tokens, "split"):
         tokens.append(f"+split={split}")
     return config_path, tokens

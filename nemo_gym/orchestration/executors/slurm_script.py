@@ -1112,9 +1112,14 @@ def build_sbatch_script(
 
     gi = config.driver.gym_install
 
-    target_args = render_target_args(benchmark.target, benchmark.agent, benchmark.sandbox)
+    # A task target's rows live in the job directory, not in the fresh checkout this allocation works in.
+    target_args = render_target_args(
+        benchmark.target, benchmark.agent, benchmark.sandbox, f"{remote_bench_dir}/{ARTIFACTS_DIRNAME}/harbor"
+    )
+    # `gym eval run TARGET` prepares with its own settings, so a separate preparation runs only when one is
+    # configured: one built from the `prepare` block alone would not see settings that only `run` carries.
     prepare_cmd = None
-    if benchmark.prepare or target_args:
+    if benchmark.prepare:
         prepare_cmd = " ".join(["gym eval prepare", *target_args, *flatten_run_args(benchmark.prepare)])
 
     # ABSOLUTE, not relative. The driver `cd`s into the Gym checkout so that a

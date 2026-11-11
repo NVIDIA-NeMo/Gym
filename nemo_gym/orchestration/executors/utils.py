@@ -17,6 +17,7 @@ import re
 import shlex
 from typing import Any
 
+from nemo_gym.data.tasks.harbor.prepare import HARBOR_OUTPUT_ROOT_KEY
 from nemo_gym.utils.text import hydra_literal
 
 
@@ -35,8 +36,14 @@ def flatten_run_args(run: dict[str, Any], prefix: str = "") -> list[str]:
     return args
 
 
-def render_target_args(target: str | None, agent: str | None, sandbox: str | None) -> list[str]:
-    """The shell-quoted TARGET, ``--agent`` and ``--sandbox`` of a task run, which go ahead of its Hydra overrides.
+def render_target_args(target: str | None, agent: str | None, sandbox: str | None, output_root: str) -> list[str]:
+    """The shell-quoted TARGET, ``--agent``, ``--sandbox`` and output root of a task run, which go ahead of its
+    Hydra overrides.
+
+    ``output_root`` is where the run keeps the rows and run config it prepares. The driver works in a fresh checkout
+    on every allocation, so the default (relative to the working directory) would name the rows by a different
+    absolute path each time and a continuation would no longer match the run it resumes; the caller passes a folder
+    in the benchmark's job directory instead.
 
     Empty without a target, so a benchmark that sets none renders exactly as before.
     """
@@ -47,6 +54,7 @@ def render_target_args(target: str | None, agent: str | None, sandbox: str | Non
         args += ["--agent", shlex.quote(agent)]
     if sandbox is not None:
         args += ["--sandbox", shlex.quote(sandbox)]
+    args.append(shlex.quote(f"+{HARBOR_OUTPUT_ROOT_KEY}={output_root}"))
     return args
 
 

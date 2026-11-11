@@ -845,6 +845,7 @@ In place of `--benchmark`, a positional `TARGET` prepares a dataset in the Harbo
 | `--sandbox PROVIDER` | Task `TARGET` only: sandbox provider for the task containers (for example `opensandbox`, `docker`). |
 | `--only-tasks PATTERNS` / `--exclude-tasks PATTERNS` | Task `TARGET` only: comma-separated task names or globs to keep or leave out. |
 | `--skip-unloadable` | Task `TARGET` only: use the loadable subset and record omitted tasks in `skipped.json`. |
+| `+harbor_output_root=DIR` | Task `TARGET` only: write the rows, run config and `skipped.json` under `DIR/<taskset>/` instead of `results/harbor/<taskset>/`. `gym eval run TARGET` takes it too. A submitted run sets it to a folder in its job directory. |
 
 ```bash
 gym eval prepare --benchmark aime24

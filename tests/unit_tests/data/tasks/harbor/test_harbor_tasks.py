@@ -4089,6 +4089,29 @@ class TestComposeVolumeSourcesAtPrepare:
         assert written["environment_routing_mode"] == "taskset"
         assert "harbor_ds_environment" in written
 
+    def test_prepared_rows_do_not_depend_on_the_working_directory_when_the_output_root_is_set(
+        self, tmp_path, monkeypatch
+    ):
+        """A submitted run prepares in a fresh checkout on every allocation. The run config names the rows file, and a
+        continuation compares that config with the saved run's, so with the output root set (to a folder in the job
+        directory) two preparations from different working directories must write the same config."""
+        args = self._target_args(tmp_path)
+        agent = resolve_agent("hermes_agent")
+        root = tmp_path / "job" / "artifacts" / "harbor"
+        overrides = [f"+harbor_output_root={root}"]
+        configs = []
+        for name in ("checkout_a", "checkout_b"):
+            checkout = tmp_path / name
+            checkout.mkdir()
+            monkeypatch.chdir(checkout)
+            prepared, config_path, tokens = cli_eval._prepare_target_run(args, overrides, agent, "opensandbox")
+            assert config_path.parent == root / "ds" and prepared.rows_path.is_relative_to(root)
+            assert not any("harbor_output_root" in token for token in tokens)
+            configs.append(config_path.read_text())
+            assert not (checkout / "results").exists()
+        assert configs[0] == configs[1]
+        assert str(root / "ds") in configs[0]
+
     def test_prepare_for_the_oracle_is_refused_toward_dataset_validate(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         with pytest.raises(SystemExit, match="gym dataset validate"):

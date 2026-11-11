@@ -3320,14 +3320,17 @@ def _render_target(tmp_path, **benchmark):
 
 def test_a_task_target_goes_to_prepare_and_run_before_their_overrides(tmp_path):
     script = _render_target(tmp_path, target="/data/bmb", agent="opencode_agent", sandbox="opensandbox")
+    root = tmp_path / "jobs" / "x" / "bmb" / "artifacts" / "harbor"
 
     prepare = next(line for line in script.splitlines() if "gym eval prepare" in line)
     assert "gym eval prepare /data/bmb --agent opencode_agent --sandbox opensandbox " in prepare
+    assert f"+harbor_output_root={root}" in prepare
     assert "+config_paths=[extra.yaml]" in prepare
     run = script[script.index("GYM_CMD=(") :].split("\n)", 1)[0].split()
     assert run[:8] == ["GYM_CMD=(", "gym", "eval", "run", "/data/bmb", "--agent", "opencode_agent", "--sandbox"]
     assert run[8] == "opensandbox"
-    assert run[9].startswith("+output_jsonl_fpath=")
+    assert run[9] == f"+harbor_output_root={root}"
+    assert run[10].startswith("+output_jsonl_fpath=")
     assert "+num_samples_in_parallel=8" in run
 
 
@@ -3338,21 +3341,33 @@ def test_a_task_target_without_a_sandbox_names_only_the_agent(tmp_path):
     assert "--sandbox" not in script
 
 
-def test_a_task_target_with_an_empty_prepare_still_prepares(tmp_path):
-    script = _render_target(tmp_path, target="/data/bmb", agent="opencode_agent", prepare={})
+def test_a_task_target_with_an_empty_prepare_runs_no_separate_preparation(tmp_path):
+    """`gym eval run TARGET` prepares with its own settings, so a separate preparation built from the `prepare`
+    block alone would miss what only `run` carries (here a waiver of the harness admission check)."""
+    script = _render_target(
+        tmp_path,
+        target="/data/bmb",
+        agent="opencode_agent",
+        prepare={},
+        run={"allow_unsupported_pairing": True},
+    )
 
-    assert "gym eval prepare /data/bmb --agent opencode_agent" in script
+    assert "gym eval prepare" not in script
+    run = script[script.index("GYM_CMD=(") :].split("\n)", 1)[0].split()
+    assert run[:6] == ["GYM_CMD=(", "gym", "eval", "run", "/data/bmb", "--agent"]
+    assert "+allow_unsupported_pairing=True" in run
 
 
 def test_a_task_target_is_shell_quoted():
     from nemo_gym.orchestration.executors.utils import render_target_args
 
-    assert render_target_args("/data/my tasks", "opencode_agent", None) == [
+    assert render_target_args("/data/my tasks", "opencode_agent", None, "/jobs/a b") == [
         "'/data/my tasks'",
         "--agent",
         "opencode_agent",
+        "'+harbor_output_root=/jobs/a b'",
     ]
-    assert render_target_args(None, None, None) == []
+    assert render_target_args(None, None, None, "/jobs") == []
 
 
 def test_a_benchmark_without_a_target_renders_no_target_arguments(tmp_path):

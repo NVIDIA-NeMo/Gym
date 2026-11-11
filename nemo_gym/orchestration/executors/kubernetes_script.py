@@ -220,9 +220,14 @@ def _driver_command(
     manifest_writes: list[str],
 ) -> list[str]:
     gi = config.driver.gym_install
-    target_args = render_target_args(benchmark.target, benchmark.agent, benchmark.sandbox)
+    # A task target's rows live in the run directory, not in the fresh checkout this job works in.
+    target_args = render_target_args(
+        benchmark.target, benchmark.agent, benchmark.sandbox, f"{run_dir}/{ARTIFACTS_DIRNAME}/harbor"
+    )
+    # `gym eval run TARGET` prepares with its own settings, so a separate preparation runs only when one is
+    # configured: one built from the `prepare` block alone would not see settings that only `run` carries.
     prepare_cmd = None
-    if benchmark.prepare or target_args:
+    if benchmark.prepare:
         prepare_cmd = " ".join(["gym eval prepare", *target_args, *flatten_run_args(benchmark.prepare)])
 
     if benchmark.command is None:
