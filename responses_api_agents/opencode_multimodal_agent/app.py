@@ -13,7 +13,13 @@ import yaml
 from fastapi import HTTPException, Request
 from pydantic import Field, model_validator
 
-from nemo_gym.agents import AgentSeedRejectedError, AgentSeedSessionRequest, Body
+from nemo_gym.agents import (
+    AgentCloseSessionResponse,
+    AgentSeedRejectedError,
+    AgentSeedSessionRequest,
+    AgentSessionState,
+    Body,
+)
 from nemo_gym.core import MediaFile, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.models.token_capture import OPENCODE_MAX_STEPS_PROMPT as OPENCODE_1_17_11_MAX_STEPS
 from nemo_gym.sandbox import SandboxProvider, SandboxSpec, read_text, upload_text
@@ -92,6 +98,9 @@ class OpenCodeMultimodalAgent(OpenCodeAgent):
         if body.sandbox_access is not None:
             raise AgentSeedRejectedError("Visual episodes require an owned OpenSandbox")
         return await super()._seed_agent_session_state(body)
+
+    async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
+        return await super()._close_agent_session_state(state)
 
     def _agent_continuation_capabilities(self) -> None:
         return None

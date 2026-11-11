@@ -23,6 +23,12 @@ visual_environment:
       entrypoint: opencode.py
       host: 127.0.0.1
       cleanup_timeout_seconds: 180
+      agent_server:
+        type: responses_api_agents
+        name: visual_agent
+      resources_server:
+        type: resources_servers
+        name: opencode_multimodal_benchmarks
       agent_outcome_policy:
         by_failure_kind:
           provider_oom_killed: retry
