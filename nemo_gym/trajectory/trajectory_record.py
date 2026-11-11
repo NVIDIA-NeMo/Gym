@@ -320,9 +320,12 @@ def grading_transform_source(result: object) -> dict | None:
     ):
         return None
     before, after, offset = source.get("reward"), result.get("reward"), transform.get("reward_offset")
-    if type(offset) not in (int, float) or not math.isfinite(offset):
+    if type(offset) not in (int, float):
         return None
-    if not math.isclose(before + offset, after, rel_tol=1e-12, abs_tol=1e-12):
+    try:
+        if not math.isfinite(offset) or not math.isclose(before + offset, after, rel_tol=1e-12, abs_tol=1e-12):
+            return None
+    except OverflowError:
         return None
     # A projection changes only output items. Capture, identity and other response fields remain intact.
     if {key: value for key, value in source["response"].items() if key != "output"} != {

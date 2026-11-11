@@ -460,6 +460,35 @@ async def test_semantically_invalid_projection_stays_unobserved_after_rebinding(
     }
 
 
+@pytest.mark.parametrize("field", ["reward_offset", "input_reward"])
+async def test_oversized_persisted_grading_numbers_do_not_abort_collection(tmp_path, monkeypatch, field):
+    saved, _ = await _collect_session(tmp_path, monkeypatch, reward=1.0, verifier="tool_rewards")
+    saved.pop("_ng_run_id", None)
+    transform = saved["ng_grading_transform"]
+    if field == "reward_offset":
+        transform["reward_offset"] = 10**400
+    else:
+        transform["input_result"]["reward"] = 10**400
+        transform["input_binding_sha256"] = grading_result_binding(transform["input_result"])
+    transform["output_binding_sha256"] = grading_result_binding(saved)
+    assert transform["input_binding_sha256"] is not None
+    assert transform["output_binding_sha256"] is not None
+    assert saved["reward"] == pytest.approx(1.1)
+    # Raw JSON can contain integers beyond a float's range. Exercise the serialized
+    # collector on disk, rather than mutating its already-projected evidence.
+    output = tmp_path / "artifacts" / "rollouts.jsonl"
+    output.write_text(json.dumps(saved) + "\n")
+    # The standalone collector also supports historical, unmanaged artifacts.
+    # The managed Store uses a stricter JSON parser and rejects this integer earlier.
+    (tmp_path / "artifacts" / "rollouts_manifest.json").unlink()
+    collected = collect_with_score(tmp_path, "[]")
+    assert collected.results[0]["_ng_collected_grading_transform"] is False
+    passed, reason, report, counts = _gate(collected)
+    assert passed is None and report is not None and report["status"] == "UNVERIFIED", reason
+    assert counts["observed_healthy"] == counts["verifier_recorded"] == 0
+    assert counts["unobserved"] == 1
+
+
 @pytest.mark.parametrize(
     "change",
     [
