@@ -46,7 +46,6 @@ from nemo_gym.agents import (
     AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
-    AgentSeedSessionResponse,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
@@ -94,7 +93,6 @@ from nemo_gym.core import (
 from nemo_gym.rollouts.health.timeouts import TimeoutEvent
 from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
-    CHECKPOINT_RESTART_HEADER,
     SESSION_OWNER_HEADER,
     TOOL_CALL_ID_HEADER,
     TOOL_ERROR_HEADER,
@@ -470,15 +468,10 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             trajectory=state.trajectory,
         )
 
-    async def seed_agent_session(
-        self, request: Request, body: AgentSeedSessionRequest, response: Response = None
-    ) -> AgentSeedSessionResponse:
-        reply = await super().seed_agent_session(request, body, response)
-        if body.continuation is not None and self.checkpoint_participant is not None and response is not None:
-            # A checkpoint does not export a continuation session's conversation, so its episode starts over after a
-            # restore. The Environment Server reads this from the seed reply, as from a restart-only agent.
-            response.headers[CHECKPOINT_RESTART_HEADER] = "1"
-        return reply
+    def _seed_restarts(self, body: AgentSeedSessionRequest) -> bool:
+        # A checkpoint does not export a continuation session's conversation, so its episode starts over after a
+        # restore.
+        return body.continuation is not None
 
     def _agent_continuation_capabilities(self) -> AgentContinuationCapabilities | None:
         if not type(self).__dict__.get("continuation_supported", False):

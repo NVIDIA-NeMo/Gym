@@ -42,7 +42,6 @@ from nemo_gym.agents import (
     AgentCloseSessionRequest,
     AgentOutcome,
     AgentSeedSessionRequest,
-    SimpleResponsesAPIAgent,
     check_agent_seed_rejected,
     raises_agent_failure,
 )
@@ -3935,28 +3934,30 @@ class TestContinuationSessions:
         assert [reply.json()["id"] for reply in replies] == ["resp-1", "resp-1"]
         assert server_client.post.await_count == 1
 
-    async def test_with_checkpointing_a_continuation_seed_is_accepted_and_restarts_its_episode(
-        self, monkeypatch: MonkeyPatch
-    ) -> None:
+    async def test_with_checkpointing_a_continuation_seed_is_accepted_and_restarts_its_episode(self) -> None:
         """A checkpoint does not export the conversation, so the seed reply makes the episode a restart."""
         server, _ = _make_agent(False)
-        server._checkpoint_participant = MagicMock()
-        seeded = AsyncMock(return_value=MagicMock())
-        monkeypatch.setattr(SimpleResponsesAPIAgent, "seed_agent_session", seeded)
-        body = AgentSeedSessionRequest(
-            agent_session_id="agent-session",
-            episode_id=EpisodeId(rollout_id="rollout", attempt=0),
+        server._checkpoint_participant = AgentSessionParticipant(server)
+        app = server.setup_webserver()
+        one_turn = AgentSeedSessionRequest(
+            agent_session_id="one-turn",
+            episode_id=EpisodeId(rollout_id="one-turn", attempt=0),
             task_id=TaskId(taskset="example", task_id="0"),
-            continuation={"observations": ["trajectory"]},
         )
-        one_turn = body.model_copy(update={"continuation": None})
-        replies = [Response(), Response()]
 
-        server._new_session_state(body)
-        await server.seed_agent_session(MagicMock(), body, replies[0])
-        await server.seed_agent_session(MagicMock(), one_turn, replies[1])
+        # Each seed comes from its own client, since a seed's reply sets the session cookie.
+        continuation = _seed_continuation(TestClient(app))
+        single = TestClient(app).post("/v1/agent_sessions", json=one_turn.model_dump(mode="json"))
 
-        assert [seed_restarts(reply.headers) for reply in replies] == [True, False]
+        assert continuation.status_code == single.status_code == 200
+        assert [seed_restarts(reply.headers) for reply in (continuation, single)] == [True, False]
+
+    async def test_without_checkpointing_a_continuation_seed_does_not_restart(self) -> None:
+        server, _ = _make_agent(False)
+
+        seed = _seed_continuation(TestClient(server.setup_webserver()))
+
+        assert seed.status_code == 200 and not seed_restarts(seed.headers)
 
     async def test_a_session_restored_without_its_conversation_refuses_its_next_activation(self) -> None:
         server, _ = _make_agent(False)
