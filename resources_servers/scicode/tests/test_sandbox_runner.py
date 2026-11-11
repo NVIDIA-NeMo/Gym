@@ -8,8 +8,7 @@ import pytest
 import scicode_integration.sandbox_runner as runner
 
 import resources_servers.scicode.app as app
-from nemo_gym.core.failure_kinds import PROVIDER_OOM_KILLED, PROVIDER_UNAVAILABLE
-from nemo_gym.core.typed_exceptions import NgFailureEvent
+from nemo_gym.core import PROVIDER_OOM_KILLED, PROVIDER_UNAVAILABLE, NgFailureEvent
 from nemo_gym.sandbox import SandboxExecResult
 from resources_servers.scicode.tests.test_app import _request, _server
 

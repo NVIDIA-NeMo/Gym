@@ -133,7 +133,8 @@ existing grading helper and generated program as files, checks the image's
 interpreter and test-data checksum, executes the grader, and deletes the sandbox
 in a `finally` block. The sandbox also has a finite TTL for interrupted clients.
 No grading environment or HDF5 is needed on the Gym host. API, image, preflight,
-and killed-process failures raise infrastructure errors instead of becoming
-incorrect model answers; ordinary assertions and code timeouts retain their
-existing failure semantics. Keep failed rows unscored and investigate before
-retrying. This backend does not resume or mutate an existing local evaluation.
+and unconfirmed termination failures remain inconclusive. A provider-confirmed
+`provider_oom_killed` during generated-code execution fails that grading attempt;
+a subproblem still passes if either configured interpreter passes. Ordinary
+assertions and code timeouts retain their existing failure semantics. Investigate
+incomplete rows before retrying. This backend does not resume or mutate an existing local evaluation.
