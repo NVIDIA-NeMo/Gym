@@ -24,7 +24,7 @@ Both Codex configurations use a standard custom provider with `supports_websocke
 
 The host-side [verifier](verifier.py) pairs tool calls with their returned content in Harbor's root trajectory. A read must contain 120 normalized characters from the intended skill body, or the whole body if shorter. Front matter, assistant claims, explicit tool errors, and shared boilerplate without a direct skill read do not count. The [matching rule](scoring.py) preserves the original whitespace and Pi character-counting conventions.
 
-A completed trial earns 1 for a matching read and 0 for a miss. Missing, malformed, copied, or incomplete trajectory evidence is an error, not a zero. A root-session miss with delegated trajectories or a recorded completed delegation without child logs remains unscored until those traces can be verified; this version does not infer child-agent success. Use the mean reward across valid trials as the skill-opening rate, not pass@k. Report failed/unscored counts alongside it, and report the three collections separately.
+A verified successful read of the intended skill earns 1, even if later work errors or times out. A finished, observable attempt without that read earns 0. Task completion and application of the instructions are not requirements. Missing, malformed, copied, or incomplete trajectory evidence is an error, not a zero. A root-session miss with delegated trajectories or a recorded completed delegation without child logs remains unscored until those traces can be verified; this version does not infer child-agent success. Use the mean reward across valid trials as the skill-opening rate, not pass@k. Report execution errors and failed/unscored counts alongside it, and report the three collections separately.
 
 The task has a 120-second Harbor agent timeout. Agent defaults govern reasoning, retry behavior, tool selection, and output length. Unlike the original experiment, this version does **not** enforce a shared three-request cap or collect independent filesystem-access evidence. It trusts Harbor's recorded tool results. It must have new result tables rather than reuse historical percentages.
 
@@ -163,7 +163,7 @@ The November 11, 2026 (UTC) pilot used `nvidia/nvidia/nemotron-3.5-super-vl` at 
 
 From the unchanged 110-case selection, exclude catalogs intersecting recorded source blockers: 101 cases remain eligible (35 BioNeMo, 41 SkillsBench, 25 Addy). Before outcomes, rank each collection by ascending `SHA256(seed + NUL + suite + NUL + case_id)` and take four cases. The seed is `gym-pr5031-positive-baseline-v021-20261110`. No outcome-driven replacement occurred. The remaining 89 eligible cases were not evaluated in this pilot, and nine source-blocked cases remain excluded.
 
-Canonical selection SHA-256: `2c78cf0fb5b5a38011f4ab0345288a4084b80df212978b1cf61d18644ab3ee64`. Positive release manifest SHA-256: `24040e3161f2a2b8973a8400bf87ef3c1b93bc3302555632810dd4fbbb66aaed`. The evaluated derivative retains only selected, blocker-free catalogs and preserves source notices. The canonical selection and its source guard are unchanged.
+Canonical selection SHA-256 at study freeze: `2c78cf0fb5b5a38011f4ab0345288a4084b80df212978b1cf61d18644ab3ee64`. Positive release manifest SHA-256: `24040e3161f2a2b8973a8400bf87ef3c1b93bc3302555632810dd4fbbb66aaed`. The evaluated derivative retains only selected, blocker-free catalogs and preserves source notices. The canonical case membership and its source guard are unchanged. The two corrected prompt cases are outside this 12-case sample; all sampled prompts/catalogs are unchanged. No model results for those rewritten prompts are claimed. The current full selection SHA-256 is `c9b2a15108ebfbbce1d130e5c90bd6e2064e0a78fcf313042c8b44955900f6f0`.
 
 | Collection | Stable task ID | Intended skill |
 |---|---|---|
@@ -184,13 +184,13 @@ Upstream source revisions are BioNeMo toolkit `5fe8b184cda54c48e73214824df6ee04f
 
 ### Positive results
 
-All 180 planned attempts finished once: 12 cases × three attempts × five profiles. There are 127 scored observations, 53 unscored failures (43 rate limits and 10 agent timeouts), and zero pending attempts. Each fraction below is the mean binary target-opening reward on scored attempts; errors are not counted as misses.
+All 180 planned attempts finished once: 12 cases × three attempts × five profiles. There are 128 scored observations and 52 unscored outcomes (43 rate limits and nine timeouts without conclusive opening evidence), and zero pending attempts. Each fraction below is the mean binary target-opening reward on scored attempts; errors without conclusive opening evidence are not counted as misses.
 
 | Profile | Collection | Target opened / scored | Unscored | Pending | Planned |
 |---|---|---:|---:|---:|---:|
 | codex | addy | 0/10 | 2 | 0 | 12 |
 | codex | bionemo | 8/11 | 1 | 0 | 12 |
-| codex | skillsbench | 0/4 | 8 | 0 | 12 |
+| codex | skillsbench | 1/5 | 7 | 0 | 12 |
 | codex_guidance | addy | 0/12 | 0 | 0 | 12 |
 | codex_guidance | bionemo | 5/8 | 4 | 0 | 12 |
 | codex_guidance | skillsbench | 0/1 | 11 | 0 | 12 |
@@ -204,7 +204,7 @@ All 180 planned attempts finished once: 12 cases × three attempts × five profi
 | pi | bionemo | 12/12 | 0 | 0 | 12 |
 | pi | skillsbench | 5/12 | 0 | 0 | 12 |
 
-All 132 available saved trajectories agree under reviewed and revised scoring, including every scored observation. Synthetic regressions demonstrate the corrected missing-content and signed-exit defects; their frequency in the deleted historical experiment is unknown. One verified Codex main-session opening before a later timeout is reported separately from scored rates. All frozen input bytes and modes and all 180 effective 120-second agent limits were verified. Agent setup and provider waits can extend total request duration beyond the agent execution window.
+All 132 available saved trajectories agree under reviewed and revised scoring, including every scored observation. Synthetic regressions demonstrate the corrected missing-content and signed-exit defects; their frequency in the deleted historical experiment is unknown. One verified Codex main-session opening is counted as a success despite a later timeout; its execution error is also retained. There were ten execution timeouts in total. The prior execution-clean accounting is preserved as history, not silently overwritten. All frozen input bytes and modes and all 180 effective 120-second agent limits were verified. Agent setup and provider waits can extend total request duration beyond the agent execution window.
 
 These rates are conditional on scorable attempts. Failures and censoring are not assumed random; profiles ran sequentially in fixed case order, so endpoint availability can confound comparisons. The balanced 12-case sample is not population weighted, and its three attempts per task are repeated observations. It establishes neither harness rankings, full-suite performance, task completion, historical reproduction, nor statistical confidence. The intended label is narrow: in three Codex-guidance misses for Addy `using-agent-skills`, the agent successfully read the relevant alternative `debugging-and-error-recovery`. Useful alternative-skill behavior is not task failure.
 

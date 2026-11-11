@@ -867,8 +867,8 @@
       "target": "skills/bionemo-agent-toolkit/skills/complexa-sweep",
       "target_tree_sha256": "1b9805a66497bc033f03ad8ebcf225f30f548c91b5d9ddfefcde3e0eea011ea5",
       "catalog": "bionemo-9984d9c3ec80",
-      "prompt": "Prepare a standalone Complexa sweep configuration and command template for a Pareto analysis of binder quality (iPAE) versus wall-clock time across different beam widths and reward scaling factors. Use placeholders for the target definitions, base pipeline configuration, and output paths. Explain how the template would be applied to targets 02_PDL1 and 22_DerF21 once their configurations are available; no target files or configurations are supplied. Do not inspect files or launch design jobs.",
-      "prompt_sha256": "51e1db0ae235dd9daf41188763369a45f304a0cb00c3ee41793d7dd0158689d8",
+      "prompt": "Prepare a standalone Complexa sweep configuration and command template for a Pareto analysis of binder quality (iPAE) versus wall-clock time across different beam widths and reward scaling factors. Use placeholders for the target definitions, base pipeline configuration, and output paths. Explain how the template would be applied to targets 02_PDL1 and 22_DerF21 once their configurations are available; no target files or configurations are supplied. Do not launch design jobs.",
+      "prompt_sha256": "9631a8d5c22be2ea22a5f3edbf76297a89854fd68dabb6f6e72871379284c811",
       "provenance": {
         "kind": "adapted_completion",
         "path": "skills/bionemo-agent-toolkit/skills/complexa-sweep/evals/evals.json",
@@ -1054,8 +1054,8 @@
       "target": "skills/bionemo-agent-toolkit/skills/kermt-finetune",
       "target_tree_sha256": "7c5428cb551fd85a6f8531432e14e025bb070a740c97a4a99e82ea9d55288216",
       "catalog": "bionemo-9984d9c3ec80",
-      "prompt": "Prepare a standalone KERMT fine-tuning configuration and command template for a pretrained grover_base molecular encoder and a labeled SMILES CSV with three regression targets: logP, solubility, and melting_point. Use a learning rate of 0.0001 and 100 epochs. Use placeholders for the checkpoint, CSV, and output paths; no files are supplied. Explain the required input format and configuration without launching training or launching training.",
-      "prompt_sha256": "478aba05dd106a3c828f04910d6bf8511516a6f998618af91b7c63bd5e7a8200",
+      "prompt": "Prepare a standalone KERMT fine-tuning configuration and command template for a pretrained grover_base molecular encoder and a labeled SMILES CSV with three regression targets: logP, solubility, and melting_point. Use a learning rate of 0.0001 and 100 epochs. Use placeholders for the checkpoint, CSV, and output paths; no files are supplied. Explain the required input format and configuration without launching training.",
+      "prompt_sha256": "61cb60cf5bd4a8c8145238e575a90965b8327625b4266e488e187b56dd1d0ac4",
       "provenance": {
         "kind": "adapted_completion",
         "path": "skills/bionemo-agent-toolkit/skills/kermt-finetune/evals/evals.json",

@@ -244,3 +244,21 @@ def test_path_escape_and_symlinks_rejected(tmp_path, relative):
     (tmp_path / "link").symlink_to(tmp_path)
     with pytest.raises(ValueError):
         source_path(tmp_path, relative)
+
+
+@pytest.mark.parametrize(
+    "skill,ending",
+    [
+        ("complexa-sweep", "Do not launch design jobs."),
+        ("kermt-finetune", "Explain the required input format and configuration without launching training."),
+    ],
+)
+def test_canonical_prompts_allow_skill_opening(skill, ending):
+    selection = Selection.model_validate_json((Path(__file__).resolve().parents[1] / "selection.json").read_bytes())
+    cases = [case for case in selection.cases if case.skill == skill]
+    assert len(cases) == 1
+    case = cases[0]
+    assert case.prompt.endswith(ending)
+    assert "inspect files" not in case.prompt.lower()
+    assert "no files" in case.prompt.lower() or "no target files" in case.prompt.lower()
+    assert case.prompt_sha256 == digest(case.prompt.encode())
