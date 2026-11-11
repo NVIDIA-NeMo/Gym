@@ -52,6 +52,7 @@ from nemo_gym.eval.rollout_reverification import (
     _build_verify_payload,
     _call_aggregate_metrics,
     _check_reverify_mode,
+    _check_saved_answer_replay,
     _drop_cache_from_payloads,
     _get_rs_names,
     _guard_atif_preflight,
@@ -800,7 +801,7 @@ class TestYieldInputsAndRolloutsPaired:
 
 class TestBuildVerifyPayload:
     @pytest.mark.parametrize("shaped", [False, True])
-    def test_opencode_environment_scores_cannot_be_replaced_by_direct_resource_scores(self, shaped):
+    def test_native_evidence_without_original_contract_cannot_authorize_replay(self, shaped):
         pair = InputRolloutPair(
             input={"verifier_metadata": {"answer": "A"}},
             rollout={
@@ -808,8 +809,8 @@ class TestBuildVerifyPayload:
                 "reward": 1.1 if shaped else 1.0,
             },
         )
-        with pytest.raises(ConfigError, match="final-answer scoring view"):
-            _build_verify_payload(pair)
+        with pytest.raises(ConfigError, match="digest-verified original plain"):
+            _check_saved_answer_replay(pair)
 
     def test_keeps_the_environment_server_that_ran_the_rollout(self) -> None:
         """A flat materialized row names no Environment Server; the re-verified row keeps the one the run stamped."""
@@ -3391,6 +3392,9 @@ class TestRunFromConfigJudgeFailedOnly:
         """Stub the dispatch/guard/aggregate delegates; result_fn(payload) chooses each row's /verify
         result (so a test can make some rows re-fail on a first pass)."""
         monkeypatch.setattr("nemo_gym.eval.rollout_reverification._resolve_under_cwd_or_install", lambda p: Path(p))
+        monkeypatch.setattr(
+            "nemo_gym.eval.rollout_reverification.setup_server_client", lambda: MagicMock(global_config_dict={})
+        )
 
         def fake_run(payloads, semaphore=None):
             dispatched.extend(payloads)
