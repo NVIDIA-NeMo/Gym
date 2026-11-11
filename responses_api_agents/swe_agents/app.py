@@ -3860,9 +3860,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         # reaches the model server only through the capture overlay. Install it when the URL carries token capture's
         # route or this rollout's trace context, which is what attaches the model calls to the rollout's trace.
         route_model_calls_through_url = (
-            token_capture_enabled
-            or current_model_sampling_segment() is not None
-            or bool(trace_context_path_segment())
+            token_capture_enabled or current_model_sampling_segment() is not None or bool(trace_context_path_segment())
         )
         # ``model_server_base_url`` also appears in the server config dump; the
         # resolved rollout-specific URL must win.
