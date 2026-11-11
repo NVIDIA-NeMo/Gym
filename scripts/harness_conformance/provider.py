@@ -35,7 +35,7 @@ from nemo_gym.server_runtime import (
 )
 from nemo_gym.verification import call_judge
 
-from .messages import is_title_request, messages_response, messages_sse
+from .messages import is_title_request, messages_response
 from .scenarios import Scenario
 
 
@@ -280,14 +280,26 @@ class Probe:
             payload = messages_response(
                 body["model"],
                 f"resp_{uuid4().hex}",
-                {"type": "text", "text": '{"title":"Conformance check"}'},
+                [
+                    {
+                        "type": "message",
+                        "id": f"msg_{uuid4().hex}",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [
+                            {"type": "output_text", "text": '{"title":"Conformance check"}', "annotations": []}
+                        ],
+                    }
+                ],
                 usage=self.scenario.usage,
                 index=len(self.auxiliary_calls),
             )
             self.auxiliary_calls.append({"request": body, "response": payload, "status_code": 200})
             self.save()
             if body.get("stream"):
-                return StreamingResponse(messages_sse(payload), media_type="text/event-stream")
+                return StreamingResponse(
+                    AnthropicConverter().anthropic_response_to_sse(payload), media_type="text/event-stream"
+                )
             return JSONResponse(payload)
         protocol_body = (
             AnthropicConverter().anthropic_request_to_responses(body).model_dump(mode="json", exclude_none=True)
@@ -423,9 +435,7 @@ class Probe:
                     payload = messages_response(
                         body["model"],
                         response_id,
-                        {"type": "tool_use", "id": output[0]["call_id"], "name": name, "input": arguments}
-                        if calls_tool
-                        else {"type": "text", "text": output[0]["content"][0]["text"]},
+                        output,
                         usage=self.scenario.usage,
                         index=index,
                         input_tokens=prompt_tokens,
@@ -502,7 +512,7 @@ class Probe:
         if status != 200 or not body.get("stream"):
             return JSONResponse(payload, status_code=status, headers={"Retry-After": "0"})
         if messages_api:
-            events = messages_sse(payload)
+            events = AnthropicConverter().anthropic_response_to_sse(payload)
         elif request.url.path.endswith("/chat/completions"):
             events = synthesize_chat_completion_sse(payload, include_usage=True)
         else:
