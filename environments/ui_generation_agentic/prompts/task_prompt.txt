@@ -1,0 +1,13 @@
+{{ user_prompt }}
+
+---
+
+How to deliver this:
+
+- You are working in {{ stack_description }} The project is at `{{ workdir }}`.
+- Put the whole UI in the single file `{{ entry_file }}`. It does not exist yet: create it from scratch. {{ entry_contract }}
+- Build that file in steps: first create a short working version (imports, layout, state and the main sections), then extend it with several edits. Keep each write or edit to a few hundred lines: every reply, reasoning included, has an output limit, and a reply cut off at that limit is lost.
+- Only `{{ entry_file }}` is graded. It is built in a clean copy of this project, so other files you create or change (configs, `package.json`, extra components, `node_modules`) are ignored. Keep everything the UI needs inside this one file.
+- There is no internet access: use only what is already installed. Do not run `npm install` or change the project's configuration.
+- Check your work before you finish: {{ check_command }}
+- Do not start long-running servers (`dev`, `preview`, `start`).
