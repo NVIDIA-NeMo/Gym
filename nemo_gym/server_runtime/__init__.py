@@ -74,21 +74,28 @@ if TYPE_CHECKING:
         BaseSeedSessionResponse,
         BaseVerifyRequest,
         BaseVerifyResponse,
-        ClosedResourcesSessionRecords,
         ResourcesCloseSessionRequest,
         ResourcesCloseSessionResponse,
         ResourcesSeedRejectedError,
         ResourcesSeedSessionRequest,
         ResourcesSeedSessionResponse,
         ResourcesSessionConflictError,
-        ResourcesSessionFence,
+        ResourcesSessionFences,
+        ResourcesSessionLocks,
         ResourcesSessionLostError,
+        ResourcesVerification,
         ResourcesVerifyRequest,
         ReverifyMode,
         SimpleResourcesServer,
         lost_session_verification,
+        reject_partial_typed_seed,
     )
-    from nemo_gym.server_runtime.base_server import SimpleServer
+    from nemo_gym.server_runtime.base_server import (
+        SimpleServer,
+        async_rollout_prefix_hook,
+        rollout_prefix_hook,
+        with_rollout_prefix,
+    )
     from nemo_gym.server_runtime.mcp_auto_exposure import (
         TOKEN_HEADER,
         MCPTool,
@@ -97,8 +104,10 @@ if TYPE_CHECKING:
         maybe_auto_expose,
     )
     from nemo_gym.server_runtime.ray_support import entrypoint_ray_enabled
+    from nemo_gym.server_runtime.request_handling.model_sampling import ModelSamplingMiddleware
     from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
     from nemo_gym.server_runtime.request_handling.session_routing import SESSION_OWNER_HEADER, install_session_routing
+    from nemo_gym.server_runtime.sandbox_lending import LentSandboxes
     from nemo_gym.server_runtime.single_agent_turn_types import (
         SingleAgentTurnFailure,
         SingleAgentTurnRequest,
@@ -124,6 +133,9 @@ if TYPE_CHECKING:
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "async_rollout_prefix_hook": "base_server",
+    "rollout_prefix_hook": "base_server",
+    "with_rollout_prefix": "base_server",
     "Activation": "_checkpoint.agent",
     "ActivationOutOfOrderError": "_checkpoint.agent",
     "AgentSessionParticipant": "_checkpoint.agent",
@@ -142,7 +154,6 @@ _PUBLIC_API = {
     "CheckpointRequest": "_checkpoint.control",
     "CleanupContext": "base_environment_server",
     "CleanupHandle": "base_environment_server",
-    "ClosedResourcesSessionRecords": "base_resources_server",
     "CommitRequest": "_checkpoint.control",
     "DirectHTTPToolAccess": "tool_access",
     "EnvironmentParticipant": "_checkpoint.environment",
@@ -153,7 +164,9 @@ _PUBLIC_API = {
     "LegacyRun": "_checkpoint.agent",
     "MCPStreamableHTTPConnection": "tool_access",
     "MCPTool": "mcp_auto_exposure",
+    "LentSandboxes": "sandbox_lending",
     "MCPToolAccess": "tool_access",
+    "ModelSamplingMiddleware": "request_handling.model_sampling",
     "NEMO_GYM_MCP_METADATA_KEY": "base_resources_server",
     "NEMO_GYM_MCP_SESSION_TOKEN_HEADER": "base_resources_server",
     "ParticipantControlPlane": "_checkpoint.control",
@@ -164,8 +177,10 @@ _PUBLIC_API = {
     "ResourcesSeedSessionRequest": "base_resources_server",
     "ResourcesSeedSessionResponse": "base_resources_server",
     "ResourcesSessionConflictError": "base_resources_server",
-    "ResourcesSessionFence": "base_resources_server",
+    "ResourcesSessionFences": "base_resources_server",
+    "ResourcesSessionLocks": "base_resources_server",
     "ResourcesSessionLostError": "base_resources_server",
+    "ResourcesVerification": "base_resources_server",
     "ResourcesVerifyRequest": "base_resources_server",
     "RestoreRequest": "_checkpoint.control",
     "RestoredAgentSession": "_checkpoint.agent",
@@ -197,6 +212,7 @@ _PUBLIC_API = {
     "lost_session_verification": "base_resources_server",
     "maybe_auto_expose": "mcp_auto_exposure",
     "next_attempt": "_checkpoint.control",
+    "reject_partial_typed_seed": "base_resources_server",
     "observe_llm_judge_grading": "verifier_observability",
     "observe_programmatic_grading": "verifier_observability",
     "observe_verifier": "verifier_observability",

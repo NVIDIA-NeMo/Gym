@@ -29,6 +29,7 @@ from nemo_gym.orchestration.recovery import (
     final_zero_trials,
     gate_summary_from_collected,
     trial_health,
+    trial_verdict,
 )
 
 
@@ -233,3 +234,56 @@ def test_a_graded_row_that_ended_on_an_evaluation_side_failed_request_stays_unve
     passed, reason = trial_health(_decide(collected), collected)
     assert passed is None
     assert "known failures are a lower bound" in reason
+
+
+@pytest.mark.parametrize(
+    "attribution,expected", [("model", True), ("evaluation", False), ("unknown", None), (None, True)]
+)
+@pytest.mark.parametrize("own_status", [None, 503])
+def test_saved_zero_kind_wins_over_last_request_503(attribution, expected, own_status):
+    collected = _collected()
+    _end_on_a_failed_request(collected)
+    meta = _policy_call(collected)["response_metadata"]
+    meta["error_category"] = "upstream_error"
+    meta["failure_report"]["events"]["request-failure-1"]["http_status"] = 503
+    row = collected.results[0]
+    row.update(
+        failure_kind="provider_oom_killed",
+        failure_outcome_action="count_as_zero",
+        failure_outcome_attribution=attribution,
+        evaluation_completed=False,
+        mask_sample=False,
+        _ng_failure_stage="agent",
+        _ng_failure_http_status=own_status,
+    )
+    collected = CollectedEvidence.model_validate_json(collected.model_dump_json())
+    decision = _decide(collected)
+    assert decision.counts == {"scored": 1}
+    assert final_zero_trials(decision, collected) == {(0, 0): "provider_oom_killed"}
+    passed, reason, report = trial_verdict(decision, collected)
+    assert passed is expected, reason
+    category = attribution or "model"
+    assert report[category]["kinds"] == {"provider_oom_killed": 1}
+    assert sum(report[key]["count"] for key in ("model", "evaluation", "unknown")) == 1
+
+
+@pytest.mark.parametrize(
+    "decision_fields",
+    [
+        {},
+        {"failure_outcome_action": "retry"},
+        {"failure_outcome_action": "count_as_zero", "failure_kind": "unregistered"},
+    ],
+)
+def test_last_request_503_inference_remains_without_valid_saved_zero_kind(decision_fields):
+    collected = _collected()
+    _end_on_a_failed_request(collected)
+    meta = _policy_call(collected)["response_metadata"]
+    meta["error_category"] = "upstream_error"
+    meta["failure_report"]["events"]["request-failure-1"]["http_status"] = 503
+    collected.results[0].update({"failure_kind": "provider_oom_killed"} | decision_fields)
+    decision = _decide(collected)
+    assert final_zero_trials(decision, collected) == {(0, 0): "model_server_error"}
+    passed, reason, report = trial_verdict(decision, collected)
+    assert passed is False, reason
+    assert report["evaluation"]["kinds"] == {"model_server_error": 1}

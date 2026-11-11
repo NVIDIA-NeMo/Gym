@@ -1,10 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import configparser
 import json
 import os
+import shlex
+import shutil
 import subprocess
 import sys
+import tomllib
 from collections import Counter
 from pathlib import Path
 
@@ -66,6 +70,118 @@ def test_real_collection_keeps_each_file_and_parameter_exactly_once(tmp_path):
     assert Counter(node for shard in shards for node in shard) == Counter(dict.fromkeys(complete, 1))
     for index in range(8):
         assert sum(any(node.startswith(f"test_{index}.py::") for node in shard) for shard in shards) == 1
+
+
+def test_four_workers_preserve_file_ownership_and_combine_coverage(tmp_path: Path) -> None:
+    """Run actual xdist workers with sharding enabled and check coverage of every assigned file."""
+    from coverage import CoverageData
+
+    (tmp_path / "pytest.ini").write_text("[pytest]\n")
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    (tmp_path / "example_source.py").write_text(
+        "".join(f"def value_{index}():\n    return {index}\n" for index in range(8))
+    )
+    for index in range(8):
+        (tests / f"test_{index}.py").write_text(
+            "import os\nfrom pathlib import Path\nimport pytest\n"
+            f"from example_source import value_{index}\n"
+            "@pytest.mark.parametrize('n', [0, 1])\ndef test_value(n):\n"
+            f"    assert value_{index}() == {index}\n"
+            f"    path = Path(__file__).parents[1] / 'evidence' / f'{index}-{{n}}'\n"
+            "    with path.open('x') as out:\n        out.write(str(os.getpid()))\n"
+        )
+    settings = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["coverage"]["run"]
+    config = configparser.ConfigParser()
+    config["run"] = {
+        "relative_files": str(settings["relative_files"]),
+        "source": "\n".join(settings["source"]),
+        "concurrency": "\n".join(settings["concurrency"]),
+        "omit": "tests/*",
+    }
+    coverage_config = tmp_path / ".coveragerc"
+    with coverage_config.open("w") as stream:
+        config.write(stream)
+    database = tmp_path / ".coverage.core-0"
+    env = {name: value for name, value in os.environ.items() if not name.startswith("COV_CORE_")}
+    env.update(PYTHONPATH=str(ROOT), PYTEST_ADDOPTS="", COVERAGE_FILE=str(database))
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-p",
+            "scripts.ci.core_test_shards",
+            "-n",
+            "4",
+            "--dist=loadfile",
+            "--core-shard-index=0",
+            "--core-num-shards=1",
+            "--cov=.",
+            f"--cov-config={coverage_config}",
+            "--cov-report=",
+            "--cov-fail-under=100",
+            "-q",
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    records = {path.name: path.read_text() for path in evidence.iterdir()}
+    assert len(records) == 16
+    assert len(set(records.values())) == 4
+    for index in range(8):
+        assert records[f"{index}-0"] == records[f"{index}-1"]
+    data = CoverageData(basename=str(database))
+    data.read()
+    assert "example_source.py" in data.measured_files()
+    assert set(data.lines("example_source.py")) == set(range(1, 17))
+
+
+def test_core_launcher_uses_four_workers_and_preserves_shard_and_coverage_options(tmp_path: Path) -> None:
+    """Inspect the actual core launcher after replacing only dependency installation and pytest execution."""
+    ci_dir = tmp_path / "repo/scripts/ci"
+    ci_dir.mkdir(parents=True)
+    for name in ("core_unit_tests.sh", "sanitize_env.sh", "test_worker_env.sh"):
+        shutil.copy2(ROOT / "scripts/ci" / name, ci_dir / name)
+    (ci_dir / "setup_dev.sh").write_text("true\n")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    uv = bin_dir / "uv"
+    uv.write_text("#!/bin/sh\nexit 0\n")
+    uv.chmod(0o755)
+    command = bin_dir / "ng_dev_test"
+    command.write_text(
+        "#!/usr/bin/env python3\nimport json, os\nfrom pathlib import Path\n"
+        "keys = ('PYTEST_ADDOPTS', 'OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS', "
+        "'NUMEXPR_NUM_THREADS')\n"
+        "Path(os.environ['CI_CAPTURE']).write_text(json.dumps({key: os.environ[key] for key in keys}))\n"
+    )
+    command.chmod(0o755)
+    capture = tmp_path / "environment.json"
+    env = dict(
+        os.environ,
+        PATH=f"{bin_dir}:{os.environ['PATH']}",
+        CI_CAPTURE=str(capture),
+        GYM_CI_JUNIT_DIR=str(tmp_path / "junit reports"),
+        PYTEST_ADDOPTS="-n 99",
+        OMP_NUM_THREADS="64",
+    )
+    subprocess.run([str(ci_dir / "core_unit_tests.sh"), "2", "4"], env=env, check=True)
+    recorded = json.loads(capture.read_text())
+    options = shlex.split(recorded["PYTEST_ADDOPTS"])
+    assert options[options.index("-n") + 1] == "4"
+    assert "--dist=loadfile" in options
+    assert "--core-shard-index=2" in options and "--core-num-shards=4" in options
+    assert "--cov-fail-under=0" in options
+    assert f"--junitxml={tmp_path / 'junit reports/core.xml'}" in options
+    for name in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        assert recorded[name] == "1"
 
 
 @pytest.mark.parametrize("args", [["0"], ["-1", "4"], ["4", "4"], ["0", "0"], ["x", "4"], ["0", "4", "x"]])
@@ -244,3 +360,32 @@ def test_docs_only_gate_needs_successful_detection_but_no_tests():
         ["bash", "-c", command], env={"DETECT_RESULT": "success", "RUN_FULL": "false", "RUN_SERVERS": "false"}
     )
     assert completed.returncode == 0
+
+
+def test_migration_modules_have_weights_and_span_runner_shards():
+    """The expensive migration suite must remain schedulable as separate files."""
+    files = [
+        "tests/unit_tests/tooling/test_add_legacy_agent_environment_servers.py",
+        *sorted(
+            path.relative_to(ROOT).as_posix()
+            for path in (ROOT / "tests/unit_tests/tooling").glob("test_agent_environment_*.py")
+        ),
+    ]
+    durations = json.loads(DURATIONS_PATH.read_text())["files"]
+    assert len(files) > 4
+    assert all(file in durations for file in files)
+    # Other expensive suites can fill a runner first; the migration suite must
+    # span runners, not occupy every runner in the full inventory.
+    assignments = partition_files(list(durations), durations, 4)
+    assert len({assignments[file] for file in files}) > 1
+    assert set(partition_files(files, durations, 4).values()) == set(range(4))
+
+
+def test_migration_script_instances_do_not_share_patchable_state(tmp_path, monkeypatch):
+    from tests.helpers.agent_environment_migration import load_migration
+
+    first, second = load_migration(), load_migration()
+    original_root = second.RESOURCES_SERVERS_ROOT
+    monkeypatch.setattr(first, "RESOURCES_SERVERS_ROOT", tmp_path)
+    assert first.main.__globals__["RESOURCES_SERVERS_ROOT"] == tmp_path
+    assert second.main.__globals__["RESOURCES_SERVERS_ROOT"] == original_root
