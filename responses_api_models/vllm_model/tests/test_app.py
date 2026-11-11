@@ -238,10 +238,11 @@ COMMON_RESPONSE_PARAMS = dict(
     status="completed",
     tool_choice="auto",
 )
-OPENAI_2_44_OPTIONAL_CHAT_FIELDS = {
+OPENAI_SDK_OPTIONAL_CHAT_FIELDS = {
     "moderation",
     "prompt_cache_key",
     "prompt_cache_retention",
+    "prompt_cache_options",
     "safety_identifier",
     "verbosity",
     *CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
@@ -850,6 +851,7 @@ class TestApp:
         endpoint_failure_threshold: int = 3,
         endpoint_retry_after_s: float = 60.0,
         forward_session_id_as_conversation_id: bool = False,
+        session_key_headers: list[str] | None = None,
     ):
         config = VLLMModelConfig(
             host="0.0.0.0",
@@ -867,6 +869,7 @@ class TestApp:
             endpoint_failure_threshold=endpoint_failure_threshold,
             endpoint_retry_after_s=endpoint_retry_after_s,
             forward_session_id_as_conversation_id=forward_session_id_as_conversation_id,
+            session_key_headers=session_key_headers or [],
         )
 
         get_global_config_dict_mock = MagicMock()
@@ -1689,6 +1692,16 @@ class TestApp:
 
             assert header == capture_key
             assert capture_key in server._session_id_to_client
+
+    def test_session_key_headers_reach_every_endpoint_client(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch, session_key_headers=["X-Session-Id"])
+
+        assert [client.session_key_headers for client in server._clients] == [["X-Session-Id"]]
+
+    def test_no_session_key_headers_by_default(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch)
+
+        assert [client.session_key_headers for client in server._clients] == [[]]
 
     def test_rollouts_spread_across_endpoints(self, monkeypatch: MonkeyPatch) -> None:
         server = self._setup_server(monkeypatch)
@@ -4182,7 +4195,7 @@ class TestChatCompletionsConverter:
         )
 
         expected_output = test_data["expected_output"]
-        assert expected_output == chat_completion_create_params.model_dump(exclude=OPENAI_2_44_OPTIONAL_CHAT_FIELDS)
+        assert expected_output == chat_completion_create_params.model_dump(exclude=OPENAI_SDK_OPTIONAL_CHAT_FIELDS)
 
     def test_round_trip_chat_completions_return_token_id_information(self) -> None:
         converter = ChatCompletionsConverter(return_token_id_information=True)
@@ -4288,7 +4301,7 @@ class TestChatCompletionsConverter:
         )
 
         expected_output = test_data["expected_output_return_token_id_information"]
-        assert expected_output == chat_completion_create_params.model_dump(exclude=OPENAI_2_44_OPTIONAL_CHAT_FIELDS)
+        assert expected_output == chat_completion_create_params.model_dump(exclude=OPENAI_SDK_OPTIONAL_CHAT_FIELDS)
 
     def test_whitespace_round_trip_chat_completions(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
@@ -7070,7 +7083,156 @@ class TestSamplingOverrides:
     def test_overrides_reach_the_responses_native_path(self) -> None:
         server = self._server({"temperature": 1.0}, is_responses_native=True)
         body = {"model": "dummy_model", "temperature": 0.2}
-        assert server._apply_sampling_overrides(body)["temperature"] == 1.0
+        assert server._apply_sampling_overrides(body, api="chat")["temperature"] == 1.0
+
+    def test_pinned_limit_wins_over_a_request_limit_spelled_differently(self) -> None:
+        """A ``max_tokens`` pin must not lose to a request's ``max_completion_tokens``, which vLLM reads first."""
+        server = self._server({"max_tokens": 100})
+        out = server._preprocess_chat_completion_create_params(
+            MagicMock(), {"messages": [{"role": "user", "content": "hi"}], "max_completion_tokens": 500}
+        )
+        assert out["max_tokens"] == 100
+        assert "max_completion_tokens" not in out
+
+    def test_null_limit_pins_lift_the_request_limit(self) -> None:
+        """Recipes pin every name to null so the engine's remaining-context default replaces the harness's cap."""
+        server = self._server({"max_output_tokens": None, "max_tokens": None, "max_completion_tokens": None})
+        out = server._preprocess_chat_completion_create_params(
+            MagicMock(), {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 262144}
+        )
+        assert out["max_completion_tokens"] is None
+        assert "max_tokens" not in out
+        # Not a Chat Completions field, and stricter endpoints reject it.
+        assert "max_output_tokens" not in out
+
+    def test_pinned_limit_reaches_the_responses_native_path_as_max_output_tokens(self) -> None:
+        """vLLM's Responses endpoint reads only ``max_output_tokens``, so a Chat-spelled pin is sent under that name."""
+        server = self._server({"max_tokens": 100}, is_responses_native=True)
+        provider = MagicMock(spec=NeMoGymAsyncOpenAI)
+        provider.create_response = AsyncMock(
+            return_value={
+                "id": "resp_1",
+                "object": "response",
+                "created_at": FIXED_TIME,
+                "model": "dummy_model",
+                "output": [],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+        )
+        server._clients = [provider]
+
+        response = TestClient(server.setup_webserver()).post(
+            "/v1/responses", json={"input": "hi", "max_output_tokens": 500}
+        )
+
+        assert response.status_code == 200
+        sent = provider.create_response.await_args.kwargs
+        assert sent["max_output_tokens"] == 100
+        assert "max_tokens" not in sent
+
+    def test_pinned_limit_reaches_the_completions_path_as_max_tokens(self) -> None:
+        server = self._server({"max_completion_tokens": 100}, use_completions_api=True)
+        out = server._build_completion_body_from_chat_body({"messages": [], "max_tokens": 500}, "hi")
+        assert out["max_tokens"] == 100
+        assert "max_completion_tokens" not in out
+
+    def test_request_limit_wins_over_an_extra_body_limit_spelled_differently(self) -> None:
+        """A request capped at 11 must not reach vLLM next to an operator default of 4096, which vLLM would read.
+
+        The Responses-to-Chat conversion spells the request's limit ``max_tokens``, so an operator default spelled
+        ``max_completion_tokens`` used to arrive beside it and win.
+        """
+        server = self._server(None, extra_body={"max_completion_tokens": 4096})
+        provider = MagicMock(spec=NeMoGymAsyncOpenAI)
+        provider.create_chat_completion = AsyncMock(
+            return_value={
+                "id": "chatcmpl",
+                "object": "chat.completion",
+                "created": FIXED_TIME,
+                "model": "dummy_model",
+                "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "ok"}}],
+            }
+        )
+        server._clients = [provider]
+
+        response = TestClient(server.setup_webserver()).post(
+            "/v1/responses", json={"input": "hi", "max_output_tokens": 11}
+        )
+
+        assert response.status_code == 200
+        sent = provider.create_chat_completion.await_args.kwargs
+        assert sent["max_tokens"] == 11
+        assert "max_completion_tokens" not in sent
+
+    def test_extra_body_limit_applies_when_the_request_has_none(self) -> None:
+        server = self._server(None, extra_body={"max_completion_tokens": 4096})
+        out = server._preprocess_chat_completion_create_params(
+            MagicMock(), {"messages": [{"role": "user", "content": "hi"}]}
+        )
+        assert out["max_completion_tokens"] == 4096
+
+    def test_completions_path_applies_a_chat_spelled_extra_body_limit(self) -> None:
+        """``/v1/completions`` ignores ``max_completion_tokens``; renaming keeps the default from falling to 16."""
+        server = self._server(None, use_completions_api=True, extra_body={"max_completion_tokens": 1024})
+        out = server._build_completion_body_from_chat_body({"messages": []}, "hi")
+        assert out["max_tokens"] == 1024
+        assert "max_completion_tokens" not in out
+
+    def test_completions_path_keeps_an_extra_body_max_tokens_over_its_chat_spelled_limit(self) -> None:
+        """With both names in ``extra_body``, its completions-native ``max_tokens`` wins over the renamed one."""
+        server = self._server(
+            None, use_completions_api=True, extra_body={"max_tokens": 512, "max_completion_tokens": 1024}
+        )
+        out = server._build_completion_body_from_chat_body({"messages": []}, "hi")
+        assert out["max_tokens"] == 512
+        assert "max_completion_tokens" not in out
+
+    @mark.parametrize("limit_name", ["max_tokens", "max_completion_tokens"])
+    def test_completions_path_null_request_limit_keeps_the_extra_body_default(self, limit_name: str) -> None:
+        """A null request limit is unset, so the operator default still applies instead of vLLM's 16 tokens."""
+        server = self._server(None, use_completions_api=True, extra_body={"max_completion_tokens": 1024})
+        out = server._build_completion_body_from_chat_body({"messages": [], limit_name: None}, "hi")
+        assert out["max_tokens"] == 1024
+
+    def test_completions_path_request_limit_wins_over_the_extra_body_limit(self) -> None:
+        """Renaming the default must not overwrite an explicit request cap."""
+        server = self._server(None, use_completions_api=True, extra_body={"max_completion_tokens": 1024})
+        out = server._build_completion_body_from_chat_body({"messages": [], "max_tokens": 11}, "hi")
+        assert out["max_tokens"] == 11
+
+    def test_mismatched_limit_pins_send_one_value_on_every_endpoint(self, caplog) -> None:
+        """Pins that give the limit different values under different names send the same value on every endpoint,
+        and the server warns at start-up which value that is."""
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.vllm_model"):
+            server = self._server({"max_tokens": 100, "max_completion_tokens": 200})
+        sent = [server._apply_sampling_overrides({}, api=api) for api in ("chat", "completions", "responses")]
+        assert sent == [{"max_completion_tokens": 200}, {"max_tokens": 200}, {"max_output_tokens": 200}]
+        assert "every endpoint sends max_completion_tokens=200" in caplog.text
+
+    def test_a_null_request_limit_keeps_the_extra_body_default(self) -> None:
+        """A request that sends ``max_tokens: null`` sets no limit, so the operator default still applies."""
+        server = self._server(None, extra_body={"max_completion_tokens": 4096})
+        out = server._preprocess_chat_completion_create_params(
+            MagicMock(), {"messages": [{"role": "user", "content": "hi"}], "max_tokens": None}
+        )
+        assert out["max_completion_tokens"] == 4096
+
+    def test_a_responses_spelled_pin_reaches_the_chat_path_as_max_tokens(self) -> None:
+        """vLLM's Chat endpoint ignores ``max_output_tokens``, so a pin under that name must be sent as ``max_tokens``."""
+        server = self._server({"max_output_tokens": 100})
+        out = server._preprocess_chat_completion_create_params(
+            MagicMock(), {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 500}
+        )
+        assert out["max_tokens"] == 100
+        assert "max_output_tokens" not in out
+
+    def test_limit_pins_that_agree_log_no_warning(self, caplog) -> None:
+        """Configs pin every name to null; pins with one value are not a mismatch."""
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.vllm_model"):
+            self._server({"max_output_tokens": None, "max_tokens": None, "max_completion_tokens": None})
+        assert "different values under different names" not in caplog.text
 
     def test_transport_log_records_the_request_the_engine_receives(
         self, monkeypatch: MonkeyPatch, tmp_path, capsys
@@ -7457,6 +7619,15 @@ class TestEndpointFile:
         )
         params.update(overrides)
         return VLLMModel(config=VLLMModelConfig(**params), server_client=MagicMock(spec=ServerClient))
+
+    def test_rebound_clients_keep_session_key_headers(self, tmp_path) -> None:
+        (tmp_path / "endpoint.txt").write_text("http://new-host:8712/v1\n")
+        os.utime(tmp_path / "endpoint.txt", (1000, 1000))
+        server = self._make_server(tmp_path, endpoint_check_interval_s=3600.0, session_key_headers=["X-Session-Id"])
+
+        server._maybe_rebind_endpoint()
+
+        assert [client.session_key_headers for client in server._clients] == [["X-Session-Id"]]
 
     def test_publish_rebinds_clients_and_clears_sessions(self, tmp_path) -> None:
         (tmp_path / "endpoint.txt").write_text("http://new-host:8712/v1\n")
@@ -8664,8 +8835,8 @@ class TestCodexRequests:
     @mark.parametrize(
         "overrides, reasoning, include, expected",
         [
-            # Defaults are unchanged: the SDK enum rejects "max", and the conversion refuses the rest.
-            ({}, {"effort": "max"}, None, 422),
+            # The SDK now accepts "max"; other unsupported fields still require their own options.
+            ({}, {"effort": "max"}, None, "max"),
             ({}, {"effort": "high"}, ["reasoning.encrypted_content"], "failed"),
             ({}, {"effort": "high", "summary": "auto"}, None, "failed"),
             ({}, {"effort": "high", "context": "all_turns"}, None, "failed"),
@@ -8684,7 +8855,7 @@ class TestCodexRequests:
                 ["reasoning.encrypted_content"],
                 "high",
             ),
-            ({"drop_unrepresentable_request_fields": True}, {"effort": "max"}, ["reasoning.encrypted_content"], 422),
+            ({"drop_unrepresentable_request_fields": True}, {"effort": "max"}, ["reasoning.encrypted_content"], "max"),
             (
                 {"drop_unrepresentable_request_fields": True},
                 {"effort": "high", "summary": "auto", "context": "all_turns"},
@@ -8773,6 +8944,7 @@ class TestCodexRequests:
             "id": "call_1",
             "name": "apply_patch",
             "input": self.PATCH,
+            "caller": None,
             "namespace": None,
             "status": "completed",
         }

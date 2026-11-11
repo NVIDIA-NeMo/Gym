@@ -596,6 +596,23 @@ def test_full_test_suite_runs_on_schedule_and_dispatch_not_push() -> None:
     assert "push:" not in on_block
 
 
+def test_full_test_suite_pushes_images_only_from_main() -> None:
+    """Every ECR login and crane push is gated on exactly `refs/heads/main`."""
+    jobs = yaml.safe_load(FULL_TEST_WORKFLOW.read_text())["jobs"]
+    conditions = [jobs["offline-image"]["if"]]
+    for name, job in jobs.items():
+        for step in job.get("steps", []):
+            if name != "offline-image" and (
+                "amazon-ecr-login" in step.get("uses", "") or "crane" in step.get("run", "")
+            ):
+                conditions.append(step["if"])
+
+    assert len(conditions) == 3
+    for condition in conditions:
+        assert "github.ref == 'refs/heads/main'" in condition
+        assert condition.count("refs/") == 1, condition
+
+
 def test_notify_failure_respects_send_notification_input() -> None:
     guard = "(github.event_name != 'workflow_dispatch' || inputs.send_notification)"
     for workflow_file in (CICD_MAIN_WORKFLOW, FULL_TEST_WORKFLOW):

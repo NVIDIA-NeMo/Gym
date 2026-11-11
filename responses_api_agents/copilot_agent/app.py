@@ -93,6 +93,7 @@ from nemo_gym.trajectory import (
     SandboxObservation,
     ToolCallObservation,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.copilot_agent.sandbox import CopilotArtifacts, CopilotRuntime, CopilotSandboxSession
 
 
@@ -449,6 +450,7 @@ class CopilotAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: Optional[ModelServerRef] = None
     model: str
     copilot_version: str = COPILOT_VERSION
+    # Per worker: with num_workers > 1, each worker runs this many Copilot invocations at once.
     concurrency: int = Field(default=8, gt=0)
     timeout: int = Field(default=900, gt=0)
     context_window: Optional[int] = Field(
@@ -1139,3 +1141,5 @@ def _events(raw: str) -> list[tuple[float, dict[str, Any]]]:
 
 if __name__ == "__main__":
     CopilotAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = CopilotAgent.run_webserver()  # noqa: F401

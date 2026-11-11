@@ -268,7 +268,7 @@ async def test_run_usage_sums_every_phase() -> None:
     # A phase whose text fails to parse still spent tokens; usage covers every phase, not just the last.
     assert result.response.usage.model_dump() == {
         "input_tokens": 2118,
-        "input_tokens_details": {"cached_tokens": 400},
+        "input_tokens_details": {"cached_tokens": 400, "cache_write_tokens": None},
         "output_tokens": 1424,
         "output_tokens_details": {"reasoning_tokens": 1200},
         "total_tokens": 3542,
