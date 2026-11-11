@@ -14,11 +14,13 @@
 # limitations under the License.
 
 import io
+import multiprocessing
 import os
 import shutil
 import subprocess
 import sys
 import tarfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -32,6 +34,12 @@ def _no_version_overrides(monkeypatch):
     """Keep expectations independent of the developer's shell."""
     monkeypatch.delenv(setup_openclaw.OPENCLAW_VERSION_ENV, raising=False)
     monkeypatch.delenv(setup_openclaw.NODE_VERSION_ENV, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _private_install_prefix(monkeypatch, tmp_path):
+    """Keep the toolchain, install lock and install record a test writes out of the agent directory."""
+    monkeypatch.setattr(setup_openclaw, "_LOCAL_PREFIX", tmp_path / ".openclaw_node")
 
 
 # Every (sys.platform, platform.machine()) pair we claim to support, mapped to the
@@ -532,6 +540,7 @@ class TestInstallNodeLocallyValidatesCache:
     def test_matching_cache_is_reused(self, monkeypatch, tmp_path):
         requested = setup_openclaw.DEFAULT_NODE_VERSION
         self._write_cached_node(tmp_path, f"#!/bin/sh\necho v{requested}\n")
+        (tmp_path / ".complete").touch()
         monkeypatch.setattr(setup_openclaw, "_LOCAL_PREFIX", tmp_path)
 
         assert setup_openclaw._install_node_locally(requested) == tmp_path / "bin"
@@ -560,6 +569,27 @@ class TestInstallNodeLocallyValidatesCache:
 
         assert downloaded, "the stale cache must be wiped and re-provisioned"
         assert (tmp_path / "bin" / "node").read_bytes() == b"#!/bin/sh\n"
+
+    def test_interrupted_extraction_is_replaced(self, monkeypatch, tmp_path):
+        """A toolchain whose extraction never finished is replaced, even when its node reports the right version."""
+        requested = setup_openclaw.DEFAULT_NODE_VERSION
+        self._write_cached_node(tmp_path, f"#!/bin/sh\necho v{requested}\n")
+        monkeypatch.setattr(setup_openclaw, "_LOCAL_PREFIX", tmp_path)
+        downloaded: list[str] = []
+        monkeypatch.setattr(setup_openclaw, "_download_node_archive", lambda url, dest: downloaded.append(url))
+
+        def fake_extract(archive, prefix):
+            nested = prefix / f"node-v{requested}-linux-x64"
+            (nested / "bin").mkdir(parents=True)
+            (nested / "bin" / "npm").write_text("#!/bin/sh\n")
+
+        monkeypatch.setattr(setup_openclaw, "_extract_node_archive", fake_extract)
+
+        setup_openclaw._install_node_locally(requested)
+
+        assert downloaded, "the unfinished toolchain must be wiped and re-provisioned"
+        assert (tmp_path / "bin" / "npm").is_file()
+        assert not (tmp_path / "bin" / "node").exists()
 
     def test_corrupt_cache_is_replaced(self, monkeypatch, tmp_path):
         """A cache whose node exits non-zero (e.g. wrong-arch binary) is unusable."""
@@ -742,3 +772,42 @@ class TestRealPathSelection:
         setup_openclaw.ensure_openclaw("2026.6.11", node_bin_dir=str(deps))
 
         assert os.environ["PATH"] == path
+
+
+def _first_local_call(results) -> None:
+    try:
+        setup_openclaw.ensure_openclaw()
+        results.put(shutil.which("openclaw") or "not on PATH")
+    except Exception as error:
+        results.put(repr(error))
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="uses POSIX shell launchers and fork")
+def test_concurrent_first_calls_in_two_workers_install_once(monkeypatch, tmp_path):
+    """With several workers, each installs on its first call; only one may run npm, the others reuse its install."""
+    monkeypatch.setattr(setup_openclaw, "_LOCAL_PREFIX", tmp_path / ".openclaw_node")
+    monkeypatch.setattr(setup_openclaw, "_USER_LOCAL_BIN", tmp_path / "home" / ".local" / "bin")
+    _script(tmp_path / "system" / "node", f"echo v{setup_openclaw.DEFAULT_NODE_VERSION}")
+    # npm's global prefix is not on PATH, so a worker finds the install only through npm or the recorded install.
+    _script(tmp_path / "system" / "npm", f"echo {tmp_path / 'npm-global'}")
+    monkeypatch.setenv("PATH", str(tmp_path / "system"))
+
+    def npm_install(npm_bin, version, node_bin_dir):
+        with (tmp_path / "installs").open("a") as log:
+            log.write(f"{os.getpid()}\n")
+        # Long enough for the other worker to reach the install while this one is still in it.
+        time.sleep(0.5)
+        _script(tmp_path / "npm-global" / "bin" / "openclaw", f"echo {version}")
+
+    monkeypatch.setattr(setup_openclaw, "_npm_install", npm_install)
+    context = multiprocessing.get_context("fork")
+    results = context.Queue()
+    workers = [context.Process(target=_first_local_call, args=(results,)) for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    found = [results.get(timeout=60) for _ in workers]
+    for worker in workers:
+        worker.join(timeout=60)
+
+    assert found == [str(tmp_path / "npm-global" / "bin" / "openclaw")] * 2
+    assert len((tmp_path / "installs").read_text().splitlines()) == 1

@@ -29,7 +29,15 @@ class LocalFiles:
         shutil.copyfile(source, destination)
 
 
-def stage(tmp_path, command, *, env=None, timeout=3, model_base_url=None, **activation_fields):
+# Generous enough for a loaded runner to start the harness chain; a test that needs the deadline fires it on
+# purpose through the expire file after the harness is ready, rather than racing the harness start.
+SUPERVISOR_TIMEOUT_SECONDS = 60
+CLEANUP_TIMEOUT_SECONDS = 5
+
+
+def stage(
+    tmp_path, command, *, env=None, timeout=SUPERVISOR_TIMEOUT_SECONDS, model_base_url=None, **activation_fields
+):
     """Stage ``command`` as the Codex CLI exactly as an activation does, and return the runner argv."""
     runtime = tmp_path / "runtime"
     (runtime / "node/bin").mkdir(parents=True)
@@ -57,12 +65,12 @@ def stage(tmp_path, command, *, env=None, timeout=3, model_base_url=None, **acti
     return asyncio.run(state.stage_activation(payload)).argv
 
 
-def launch(tmp_path, command, timeout=3, **options):
+def launch(tmp_path, command, timeout=SUPERVISOR_TIMEOUT_SECONDS, **options):
     argv = stage(tmp_path, command, timeout=timeout, **options)
     return subprocess.Popen(
-        ["bash", str(SUPERVISOR_SCRIPT), "--timeout", str(timeout), "--cleanup-timeout", "0.5"]
+        ["bash", str(SUPERVISOR_SCRIPT), "--timeout", str(timeout), "--cleanup-timeout", str(CLEANUP_TIMEOUT_SECONDS)]
         + ["--stop-file", str(tmp_path / "stop.request"), "--receipt", str(tmp_path / "cleanup.json")]
-        + ["--", *argv],
+        + ["--expire-file", str(tmp_path / "expire.request"), "--", *argv],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
@@ -70,7 +78,7 @@ def launch(tmp_path, command, timeout=3, **options):
 
 def result(tmp_path, process):
     try:
-        stdout, stderr = process.communicate(timeout=10)
+        stdout, stderr = process.communicate(timeout=SUPERVISOR_TIMEOUT_SECONDS)
         assert process.returncode == 0, (stdout, stderr)
         return json.loads((tmp_path / "cleanup.json").read_text())
     finally:
@@ -79,12 +87,24 @@ def result(tmp_path, process):
             process.wait()
 
 
+def stop(tmp_path, process):
+    """Stop a supervisor whose test failed before reading its result, so it cannot outlive the test."""
+    if process is None or process.poll() is not None:
+        return
+    (tmp_path / "stop.request").touch()
+    try:
+        process.wait(timeout=CLEANUP_TIMEOUT_SECONDS + 10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
 def wait_for(path):
-    for _ in range(500):
-        if path.exists():
-            return
+    deadline = time.monotonic() + 30
+    while not path.exists():
+        if time.monotonic() > deadline:
+            raise AssertionError(f"{path} never appeared")
         time.sleep(0.01)
-    raise AssertionError(f"{path} never appeared")
 
 
 def test_capture_stdin_and_environment(tmp_path, monkeypatch):
@@ -117,20 +137,22 @@ def test_capture_stdin_and_environment(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("ending", ["natural", "timeout", "cancel"])
 def test_task_descendants_survive_until_owner_teardown(tmp_path, ending):
+    process = None
     try:
         # A completed tool leaves its detached service, which no longer descends from Codex at the stop.
         tool = "setsid sleep 60 </dev/null >/dev/null 2>&1 & echo $! > child.pid"
         script = f"bash -c '{tool}'; touch ready; " + ("sleep 60" if ending != "natural" else "true")
         process = launch(tmp_path, ["bash", "-c", script])
-        if ending == "cancel":
+        if ending != "natural":
             wait_for(tmp_path / "ready")
-            (tmp_path / "stop.request").touch()
+            (tmp_path / ("stop.request" if ending == "cancel" else "expire.request")).touch()
         summary = result(tmp_path, process)
         assert summary["cleanup_confirmed"] is True
         assert summary["timed_out"] is (ending == "timeout")
         pid = int((tmp_path / "child.pid").read_text())
         assert Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
     finally:
+        stop(tmp_path, process)
         if (tmp_path / "child.pid").exists():
             try:
                 os.kill(int((tmp_path / "child.pid").read_text()), signal.SIGKILL)
