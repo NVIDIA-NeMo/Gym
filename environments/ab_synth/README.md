@@ -66,8 +66,9 @@ from the requester model.
 Simulated time reaches the world's clock (`meta.current_time`, which upstream date queries read) and the write log
 that `acted_on_day` and `not_acted` grade. It does not reach records the agent creates: many upstream AutomationBench
 routes and schema defaults stamp new records with the wall clock (`datetime.now()`), for example QuickBooks `txn_date`
-and Google Ads `conversion_time`. Only `acted_on_day` and `not_acted` grade timing, so row assertions must not depend on
-the timestamps of created records.
+and Google Ads `conversion_time`. Only `acted_on_day` and `not_acted` grade timing. The environment refuses to load a row whose
+world assertion names a date or time field (a key such as `txn_date` or `created_at`, or a `field`, `property` or
+`column` such as `closeDate`), since its result would depend on the date of the run.
 
 ## Run
 
@@ -97,6 +98,9 @@ gym eval run --no-serve --config environments/ab_synth/config.yaml --model-type 
 
 ## Tests
 
+The tests live with the agent that runs this environment, in
+`responses_api_agents/verifiers_agent/tests/test_ab_synth_env.py`:
+
 ```bash
-pytest environments/ab_synth/tests
+gym env test +entrypoint=responses_api_agents/verifiers_agent
 ```

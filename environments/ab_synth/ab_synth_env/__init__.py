@@ -50,6 +50,10 @@ WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 DAY_ASSERTIONS = {"acted_on_day", "not_acted"}
 OUT_OF_SCOPE = re.compile(r'"code": 401, "message": "No (\w+) account is connected')
 THINK = re.compile(r"<think>.*?(</think>|\Z)", re.S)  # an unclosed block runs to the end of the message
+# A world assertion on a date or time field: upstream routes and schema defaults stamp created records with the wall
+# clock (datetime.now()), not simulated time, so such an assertion would change from run to run. Refused at load.
+TIME_FIELD = re.compile(r"(?:^|_)(?:date|time|datetime|timestamp|ts|at|created|updated|modified)(?:_|$)")
+FIELD_KEYS = {"field", "property", "column"}
 REQUESTER_RESULT_CHARS = 30000  # one requester tool result, cut: a whole sheet runs to 70k+ characters
 
 # Instructions to the requester model only. The policy sees the requester's replies, never this text.
@@ -215,6 +219,32 @@ def headline(initial_state: dict, world: WorldState, log: list[dict], assertions
         total += 1
         passed += int(result)
     return passed / total if total else 0.0
+
+
+def _is_time_field(name: str) -> bool:
+    return bool(TIME_FIELD.search(re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name).lower()))  # closeDate -> close_date
+
+
+def time_fields(assertion: dict) -> list[str]:
+    """Date or time fields a world assertion names, as a key or as the `field`/`property`/`column` it checks."""
+    if assertion.get("type") in DAY_ASSERTIONS:
+        return []
+    found = []
+
+    def walk(node) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if _is_time_field(key):
+                    found.append(key)
+                elif key in FIELD_KEYS and isinstance(value, str) and _is_time_field(value):
+                    found.append(value)
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(assertion)
+    return found
 
 
 def replay(info: dict, calls: list[dict]) -> float:
@@ -532,6 +562,13 @@ def load_environment(
         raise ValueError(
             "multi-turn rows (user_card or requester_services) need requester_base_url and requester_model"
         )
+    for i, r in enumerate(rows):
+        for a in r["info"].get("assertions", []):
+            if fields := time_fields(a):
+                raise ValueError(
+                    f"row {i}: assertion {a.get('type')!r} reads date or time fields {fields}. Records the agent creates "
+                    "carry the wall-clock time, not simulated time, so grade timing with acted_on_day or not_acted"
+                )
     dataset = Dataset.from_list(
         [
             {

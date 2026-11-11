@@ -9,11 +9,10 @@ import unittest
 import unittest.mock
 from datetime import datetime, timezone
 
+import ab_synth_env as env
 import verifiers as vf
 from automationbench.schema.world import WorldState
 from verifiers.legacy.types import AssistantMessage, ToolCall
-
-from environments.ab_synth import ab_synth_env as env
 
 
 INITIAL_STATE = {
@@ -343,6 +342,16 @@ class RequesterTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "requester_max_tries"):
             load(SINGLE_DAY, requester_max_tries=0)
         load(SINGLE_DAY, requester_base_url=None, requester_model=None)  # single-day rows never call it
+
+    def test_assertions_on_date_or_time_fields_are_refused_at_load(self):
+        txn_date = {"type": "quickbooks_invoice_exists", "customer_id": "7", "txn_date": "2026-03-04"}
+        close_date = {**PROMOTED, "property": "closeDate", "value": "2026-03-04"}
+        nested = {"type": "zapier_action_called", "params": {"start_datetime": "2026-03-04T09:00:00"}}
+        for assertion, field in ((txn_date, "txn_date"), (close_date, "closeDate"), (nested, "start_datetime")):
+            with self.assertRaisesRegex(ValueError, field):
+                load({**SINGLE_DAY, "assertions": [assertion]})
+        day = {"type": "acted_on_day", "record": "101", "day": "2026-03-04"}
+        load({**SINGLE_DAY, "assertions": [PROMOTED, day, {**PROMOTED, "property": "timezone"}]})
 
     def test_requester_body_overrides_sampling_and_the_key_is_sent(self):
         with tempfile.NamedTemporaryFile("w") as key:
