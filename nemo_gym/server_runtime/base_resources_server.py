@@ -1167,11 +1167,16 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
             if session_id in self._cookie_sessions or (previous is None and self.has_session_state(session_id)):
                 raise ResourcesSessionConflictError("A typed seed cannot replace a cookie-seeded session")
             if session_id not in self._session_episodes:
+                seed_fields = self._typed_seed_fields(body)
                 try:
-                    task = self.seed_request_model.model_validate(self._typed_seed_fields(body))
+                    task = self.seed_request_model.model_validate(seed_fields)
                 except ValidationError as error:
+                    # Name the params too when the model validated them, so a refusal points at the right input.
+                    validated = (
+                        "task_data" if seed_fields is body.task_data else "task_data with responses_create_params"
+                    )
                     raise ResourcesSeedRejectedError(
-                        f"task_data is not a valid {self.seed_request_model.__name__}: {error}"
+                        f"{validated} is not a valid {self.seed_request_model.__name__}: {error}"
                     ) from error
                 if session_id in self._initializing_sessions:
                     # The preceding initialization failed and its cleanup also failed. Retry cleanup before

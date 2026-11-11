@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from fastapi import Request
-from pydantic import ConfigDict, JsonValue
+from pydantic import BaseModel, ConfigDict, JsonValue
 
 from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core.episode_types import EpisodeId, TaskId
@@ -38,6 +38,15 @@ class PromptSeed(BaseSeedSessionRequest):
     responses_create_params: dict[str, JsonValue] | None = None
 
 
+class PromptParams(BaseModel):
+    input: list[dict[str, JsonValue]]
+
+
+class TypedPromptSeed(BaseSeedSessionRequest):
+    value: int
+    responses_create_params: PromptParams | None = None
+
+
 class RecordingServer(SimpleResourcesServer):
     seeds: dict[str, BaseSeedSessionRequest] = {}
 
@@ -60,6 +69,10 @@ class TaskOnlyServer(RecordingServer):
 
 class PromptServer(RecordingServer):
     seed_request_model = PromptSeed
+
+
+class TypedPromptServer(RecordingServer):
+    seed_request_model = TypedPromptSeed
 
 
 def _server(cls: type[RecordingServer]) -> RecordingServer:
@@ -105,6 +118,16 @@ async def test_other_seed_models_validate_task_data_as_before() -> None:
         await _server(TaskOnlyServer).seed_session(
             _seed(responses_create_params=PARAMS).model_copy(update={"task_data": {}}), request=_request()
         )
+
+
+async def test_params_the_seed_model_refuses_are_a_final_422_that_names_them() -> None:
+    # Bad params, like bad task_data, no retry can fix; the refusal names the params, not only task_data.
+    server = _server(TypedPromptServer)
+    with pytest.raises(ResourcesSeedRejectedError) as refused:
+        await server.seed_session(_seed(responses_create_params={"input": "not a list"}), request=_request())
+    assert refused.value.status_code == 422
+    assert refused.value.detail.startswith("task_data with responses_create_params is not a valid TypedPromptSeed")
+    assert "session" not in server.seeds
 
 
 def test_a_seed_without_them_keeps_the_wire_shape() -> None:
