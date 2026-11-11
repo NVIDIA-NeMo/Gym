@@ -31,7 +31,7 @@ from uuid import uuid4
 
 from fastapi import Request
 from openai.types.responses.response import IncompleteDetails
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from nemo_gym.agents import (
     Body,
@@ -43,7 +43,23 @@ from nemo_gym.agents import (
 )
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import (
+    PROVIDER_IO_TIMEOUT,
+    PROVIDER_REQUEST_FAILED,
+    FailureBoundary,
+    FailureReportRow,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
+    OutcomeAction,
+    StageOutcomePolicyConfig,
+    agent_route_failure,
+    choose_stage_outcome,
+    failure_report_for,
+    observe_failure,
+    sdk_error_details,
+)
+from nemo_gym.core.failure_kinds import PROVIDER_COMMAND_OUTCOME_UNKNOWN
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxResources,
@@ -52,9 +68,11 @@ from nemo_gym.sandbox import (
     create_provider,
     resolve_provider_config,
     resolve_provider_metadata,
+    sandbox_failure,
 )
 from nemo_gym.trajectory import AgentInvocation, SandboxObservation, ToolCallObservation
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
+from nemo_gym.utils.exception_inspection import error_to_http_status
 from responses_api_agents.pi_agent.app import (
     MCP_SETUP_ERROR_EXIT_CODE,
     PiAgent,
@@ -93,6 +111,24 @@ class PiSandboxedAgentConfig(PiAgentConfig):
     tool_servers: list[ResourcesServerRef] = Field(default_factory=list)
     execution_failure_reward_zero: bool = False
     artifacts_dir: str = "results/pi_sandboxed"
+    # What a provider failure of the agent's own command becomes. The default stops the rollout ungraded; a rule
+    # may count a kind or status as a zero. Retrying is the collector's, not this agent's.
+    outcome_policy: StageOutcomePolicyConfig = Field(default_factory=StageOutcomePolicyConfig)
+
+    @field_validator("outcome_policy")
+    @classmethod
+    def require_supported_agent_actions(cls, policy: StageOutcomePolicyConfig) -> StageOutcomePolicyConfig:
+        """Only the actions this agent can perform for a failure of its own command."""
+        rules = policy.by_stage.get("agent", policy.default_policy)
+        actions = {
+            rules.default_action,
+            *rules.by_failure_kind.values(),
+            *rules.by_status_code.values(),
+            *rules.by_failure_class.values(),
+        }
+        if actions - {OutcomeAction.FAIL, OutcomeAction.COUNT_AS_ZERO}:
+            raise ValueError("Pi sandboxed agent-stage policy supports only fail and count_as_zero")
+        return policy
 
 
 class PiSandboxedAgentVerifyResponse(PiAgentVerifyResponse):
@@ -225,9 +261,44 @@ class PiSandboxedAgent(PiAgent):
                 env=env,
                 timeout_s=timeout,
             )
+        except NgFailureEvent as exc:
+            if exc.boundary != FailureBoundary.SANDBOX:
+                raise
+            provider_failure = exc
         except Exception as exc:
-            error_type = type(exc).__name__
-            LOG.exception("Pi sandbox execution failed")
+            # An exception, including a provider timeout, does not establish how Pi ended.
+            provider_failure = self._untyped_exec_failure(sandbox, exc)
+        else:
+            provider_failure = self._unclassified_result_failure(sandbox, result)
+        if provider_failure is not None:
+            # Whether the rollout is graded is the configured policy's decision, not the adapter's.
+            decision = choose_stage_outcome(
+                failure_kind=provider_failure.failure_kind,
+                http_status=provider_failure.http_status,
+                stage="agent",
+                config=self.config.outcome_policy,
+            )
+            failure = agent_route_failure(provider_failure, operation="agent.sandbox_exec", stage="agent")
+            failure.__cause__ = provider_failure
+            if decision.action != OutcomeAction.COUNT_AS_ZERO:
+                raise failure
+            observe_failure(failure)
+            results_dir = Path(self.config.artifacts_dir) / sha256((rollout_id or uuid4().hex).encode()).hexdigest()
+            results_dir.mkdir(parents=True, exist_ok=True)
+            context["length_limited"] = False
+            context["execution"] = {
+                "pi_failed": True,
+                "pi_exit_code": None,
+                "pi_error_type": None,
+                "pi_results_dir": str(results_dir),
+                "failure_outcome_action": decision.action,
+                "failure_outcome_attribution": decision.attribution,
+                "failure_kind": provider_failure.failure_kind,
+                "failure_reason": provider_failure.failure_reason,
+                **FailureReportRow.fields(failure_report_for(failure)),
+            }
+            output, usage = parse_pi_events("")
+            return output, usage, self.config.model, []
         root = Path(self.config.artifacts_dir) / sha256((rollout_id or uuid4().hex).encode()).hexdigest()
         root.mkdir(parents=True, exist_ok=True)
         # Export failures propagate; retrying such a request must not become a scored zero.
@@ -285,6 +356,56 @@ class PiSandboxedAgent(PiAgent):
         }
         output, usage = parse_pi_events(stdout)
         return output, usage, self.config.model, events
+
+    @staticmethod
+    def _sandbox_facts(sandbox: AsyncSandbox) -> dict[str, str | None]:
+        handle = getattr(sandbox, "_handle", None)
+        provider = getattr(handle, "provider_name", None)
+        sandbox_id = getattr(handle, "sandbox_id", None)
+        return {
+            "provider": provider if isinstance(provider, str) else None,
+            "sandbox_id": sandbox_id if isinstance(sandbox_id, str) else None,
+        }
+
+    @classmethod
+    def _untyped_exec_failure(cls, sandbox: AsyncSandbox, error: Exception) -> NgFailureEvent:
+        """The sandbox event for an exec that raised something other than a typed provider failure.
+
+        A raised timeout is a provider request that timed out, whose remote outcome is unknown: it is not Pi's
+        command deadline, which a provider returns as a result. Anything else is an unclassified request failure.
+        """
+        code = getattr(getattr(error, "error", None), "code", None)
+        timed_out = isinstance(error, TimeoutError)
+        return sandbox_failure(
+            operation="exec",
+            failure_kind=PROVIDER_IO_TIMEOUT if timed_out else PROVIDER_REQUEST_FAILED,
+            reason="Sandbox exec request timed out; remote outcome is unknown" if timed_out else None,
+            provider_status_reason=code if isinstance(code, str) and code else None,
+            http_status=error_to_http_status(error),
+            # The exception text may carry request or response content; record its type and status only.
+            foreign_error=sdk_error_details(error, message=""),
+            cause=error,
+            **cls._sandbox_facts(sandbox),
+        )
+
+    @classmethod
+    def _unclassified_result_failure(cls, sandbox: AsyncSandbox, result: Any) -> NgFailureEvent | None:
+        """The sandbox event for a returned result that is neither Pi's outcome nor a native command deadline.
+
+        A returned ``timeout`` (or exit 124) is a protocol result and stays gradable. A provider error type, or the
+        ``-1`` sentinel, says the provider could not report how the command ended. Neither is an observed process
+        exit, so no exit code is recorded, and the error type is the provider's reason, not an exception class.
+        """
+        error_type = getattr(result, "error_type", None)
+        if result is None or error_type == "timeout" or not (error_type or getattr(result, "return_code", None) == -1):
+            return None
+        return sandbox_failure(
+            operation="exec",
+            failure_kind=PROVIDER_COMMAND_OUTCOME_UNKNOWN,
+            reason="Sandbox exec returned a result that does not establish the command outcome",
+            provider_status_reason=error_type if isinstance(error_type, str) and error_type else None,
+            **cls._sandbox_facts(sandbox),
+        )
 
     async def responses(
         self,
@@ -350,14 +471,19 @@ class PiSandboxedAgent(PiAgent):
                 payload = body.model_dump(mode="json") | {"response": episode.response.model_dump(mode="json")}
                 root = Path(execution["pi_results_dir"])
                 (root / "generation.json").write_text(json.dumps(payload | metadata))
-                result = await verify_agent_response(
-                    self.server_client,
-                    self.config.resources_server,
-                    body,
-                    episode.response,
-                    cookies,
-                    force_zero_reward=failed and self.config.execution_failure_reward_zero,
-                )
+                if "failure_outcome_action" in execution:
+                    # The agent-stage policy already counted this failure as a zero. Apply it here: a second grading
+                    # call on an empty answer could be masked or unavailable and would revoke the decision.
+                    result = payload | {"reward": 0.0, "mask_sample": False}
+                else:
+                    result = await verify_agent_response(
+                        self.server_client,
+                        self.config.resources_server,
+                        body,
+                        episode.response,
+                        cookies,
+                        force_zero_reward=failed and self.config.execution_failure_reward_zero,
+                    )
                 return PiSandboxedAgentVerifyResponse.model_validate(
                     result
                     | metadata

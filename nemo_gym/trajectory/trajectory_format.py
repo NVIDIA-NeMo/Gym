@@ -32,6 +32,7 @@ _TOOL_FLAT_FIELDS = {"started_at", "completed_at", "duration_ms", "timing_source
 # diagnostics remain visible to legacy consumers, including strict exporters.
 _V2_ONLY_GAPS = frozenset(
     {
+        "failure_report_unavailable",
         "tool_attempt_identity_unavailable",
         "tool_agent_instance_unavailable",
         "tool_clock_domain_unavailable",
