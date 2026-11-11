@@ -18,6 +18,10 @@ Usage:
 python resources_servers/tavily_search/plot_session_id_metrics.py \
     --fpath resources_servers/tavily_search/session_id_metrics.json
 ```
+
+A server run with num_workers > 1 writes one `session_id_metrics.<main pid>.<worker pid>.json` per worker.
+Pass one run's files, which share the main process ID, to `--fpath` to plot that run:
+`--fpath resources_servers/tavily_search/session_id_metrics.<main pid>.*.json`.
 """
 
 import json
@@ -29,11 +33,13 @@ from pandas import DataFrame
 
 
 parser = ArgumentParser()
-parser.add_argument("--fpath", type=str, required=True)
+parser.add_argument("--fpath", type=str, nargs="+", required=True)
 args = parser.parse_args()
 
-with open(args.fpath) as f:
-    data = json.load(f)
+data = {}
+for fpath in args.fpath:
+    with open(fpath) as f:
+        data.update(json.load(f))
 
 rows = []
 for session_id_metrics in data.values():

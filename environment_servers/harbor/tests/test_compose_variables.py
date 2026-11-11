@@ -98,6 +98,31 @@ def test_seed_fills_deployment_values_with_a_rollout_prefixed_model_url(tmp_path
     }
 
 
+def test_in_a_training_run_a_sidecars_model_calls_keep_their_own_sampling(tmp_path, monkeypatch):
+    server, task = sidecar_server(
+        tmp_path,
+        monkeypatch,
+        LITELLM_BASE_URL={"model_server": "user_model"},
+        LITELLM_API_KEY={"value": "sk-test"},
+        SIM_USER_MODEL={"value": "gpt-5.5"},
+    )
+    server.server_client.global_config_dict["policy_model"] = {"responses_api_models": {"vllm_model": {}}}
+    server.server_client.global_config_dict["model_call_sampling"] = {"required_model_servers": ["policy_model"]}
+    monkeypatch.setattr(
+        "environment_servers.harbor.sandboxes.sandbox_server_url",
+        lambda name, *, require_reachable=False: "http://10.0.0.5:9000",
+    )
+
+    document = server._compose_document(task, "r1-a2")
+
+    # The simulated user is never the agent being trained: its URL carries the null segment, so its calls keep their
+    # own sampling instead of failing the training run's check on the policy's values.
+    assert (
+        document["services"]["api"]["environment"]["LITELLM_BASE_URL"]
+        == "http://10.0.0.5:9000/ng-rollout/r1-a2/ng-sampling/null"
+    )
+
+
 async def test_a_variable_the_deployment_leaves_unset_fails_the_seed_terminally(tmp_path, monkeypatch):
     server, task = sidecar_server(tmp_path, monkeypatch, SIM_USER_MODEL={"value": "gpt-5.5"})
 
