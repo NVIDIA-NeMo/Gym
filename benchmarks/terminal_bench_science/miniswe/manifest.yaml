@@ -1,11 +1,12 @@
 name: terminal_bench_science/miniswe
-version: 0.1.0
+version: 0.2.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-agent-loop
 domain: coding
-description: The pinned 70-task Terminal-Bench-Science v0.1 dataset with mini-SWE 2.4.6 running in each task sandbox
-  through agent sessions and separate offline official verification.
+description: Prepares all 70 pinned Terminal-Bench-Science v0.1 tasks for mini-SWE 2.4.6 agent sessions and separate
+  offline verification. At most 68 tasks return rewards; two tasks whose working directory is / fail at seed and
+  are excluded from the default mean. Use terminal_bench_science/miniswe_legacy_agent for full task coverage.
 modality: text
 licensing: Apache-2.0
 authors:

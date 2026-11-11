@@ -2,9 +2,10 @@
 #
 # As in codex.yaml, the TB4 resources server owns the task and verifier sandboxes and lends the task sandbox
 # through SandboxAccess. mini_swe_agent installs its runtime there and runs mini-SWE, and single_agent_turn_legacy
-# seeds both, closes mini-SWE before grading, then closes Resources. Grading, partial credit, artifacts, and EFS
-# logs are unchanged from the relay profile (miniswe_legacy_agent.yaml). Rows carry the official instruction as
-# their prompt (prepare_codex.py). See README.md, "Profile".
+# seeds both, closes mini-SWE before grading, then closes Resources. Resources-server grading, partial credit,
+# trial artifacts and EFS logs follow the relay profile (miniswe_legacy_agent.yaml). mini-SWE's trajectory is
+# returned in the agent close bundle; this profile writes no <tbsci_jobs_dir>/agent artifacts. Rows carry the
+# official instruction as their prompt (prepare_codex.py). See README.md, "Profile".
 config_paths:
   - benchmarks/terminal_bench_science/resources.yaml
   - responses_api_agents/mini_swe_agent/configs/mini_swe_agent_sandboxed.yaml

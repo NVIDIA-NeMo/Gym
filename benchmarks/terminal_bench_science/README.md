@@ -18,6 +18,14 @@ task, and every verifier here runs in its own container with no network.
 
 ## Measurement contract
 
+`terminal_bench_science/miniswe` protocol `0.2.0` prepares all 70 pinned tasks, but its session
+harness supports at most 68 reward-bearing tasks. `ode-law-discovery` and
+`geometric-pharmacophore-alignment` fail at agent seed because their working directory is `/`.
+Those failures have no reward and are excluded from the default `mean/reward`, so the
+unadjusted mean is not a full 70-task leaderboard score. For full task coverage, use
+`terminal_bench_science/miniswe_legacy_agent` protocol `0.1.0`. Session and relay scores are
+separate measurements; the version change records the new adapter and its coverage limit.
+
 A run is comparable with the [public leaderboard](https://www.terminal-bench-science.ai/) when
 it keeps these fixed:
 
@@ -31,9 +39,11 @@ it keeps these fixed:
   artifacts, and a separate verifier image built from `tests/` with its own timeout.
 - **Run conditions.** The agent works with public network access for up to 8 hours (28800
   seconds on every task). The verifier then runs in its own sandbox with all egress denied.
-- **Scoring.** A trial passes only when the verifier's official reward is 1, and `mean/reward`
-  averages that over every trial. The leaderboard runs three trials per task, 210 in all
-  (`++num_repeats=3`). Partial credit is reported separately and never replaces the reward
+- **Scoring.** A trial passes only when the verifier's official reward is 1. The leaderboard
+  runs three trials per task, 210 in all (`++num_repeats=3`), and includes every trial in its
+  denominator. Gym's default `mean/reward` includes only scored trials; count excluded
+  failures as zero when comparing with the leaderboard, including the two unsupported
+  session tasks above. Partial credit is reported separately and never replaces the reward
   ([Scoring](#scoring)).
 - **Deviations.** A few deployment settings differ from the packages. Each is listed with its
   reason and its override in [Deviations from the packages](#deviations-from-the-packages).
@@ -49,8 +59,10 @@ The manifest also records the 70 task package digests. They match the
 `tasks/dataset.toml` of Git tag `v0.1.0` (commit `f81afac4`), and the resources server's
 content hash reproduces each of them from that tag.
 
-Preparation writes identity rows only. The resources server downloads each package and
-verifies its digest before it allocates a sandbox.
+The `/run` profile's `prepare.py` writes identity rows only. The mini-SWE session and Codex
+profiles use `prepare_codex.py`, which also embeds each package's official instruction as the
+row's prompt. The resources server downloads each package and verifies its digest before it
+allocates a sandbox.
 
 ## Images
 
@@ -265,7 +277,8 @@ To run only the 65 single-container tasks, use `++prepare_script_args.category=c
 The reward is the verifier's official binary `reward.txt`, and a trial passes only when it is 1.
 The official protocol is three trials per task, with reward averaged over all 210 trials. Like
 Terminal-Bench 4's profile, this one runs one trial per task; add `++num_repeats=3` for the
-official protocol. `mean/reward` reports the average.
+leaderboard's repeat count. `mean/reward` reports the average over scored trials; the mini-SWE
+session preset still has the coverage limit described in the [Measurement contract](#measurement-contract).
 
 As on Terminal-Bench 4, a verifier timeout is an infrastructure failure and is left out of the
 default aggregates. The leaderboard's denominator counts every trial, so count such a trial as
@@ -281,8 +294,9 @@ when pytest skipped some tests, and a verifier without a usable report gets the 
 reward. `mean/partial_credit` is reported beside `mean/reward` and never replaces it. Partial
 credit is not comparable with leaderboard scores.
 
-A trial whose official evaluation did not complete, such as a verifier timeout, scores 0 for both
-`reward` and `partial_credit`, so the two means always share a denominator.
+A trial whose official evaluation did not complete, such as a verifier timeout, carries 0 in both
+the `reward` and `partial_credit` response fields. The failed evaluation is excluded from both
+default means; those diagnostic zeros do not add it to the denominator.
 
 ## Profile
 
