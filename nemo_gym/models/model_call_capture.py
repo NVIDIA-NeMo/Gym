@@ -460,7 +460,11 @@ def _reconstruct_anthropic_sse(events: list[dict[str, Any]]) -> Optional[dict[st
         etype = event.get("type")
         if etype == "message_start":
             msg = event.get("message") or {}
-            message = {k: msg.get(k) for k in ("id", "type", "role", "model", "stop_reason") if msg.get(k) is not None}
+            message = {
+                k: msg.get(k)
+                for k in ("id", "type", "role", "model", "stop_reason", "native_stop_reason", "native_finish_reason")
+                if msg.get(k) is not None
+            }
             usage.update(msg.get("usage") or {})
         elif etype == "content_block_start":
             blocks[event.get("index", len(blocks))] = dict(event.get("content_block") or {})

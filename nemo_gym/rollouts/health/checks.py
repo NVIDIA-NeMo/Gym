@@ -951,6 +951,7 @@ def _model_call_runaway_generation(bindings: _CallBindings, subject: dict[str, i
         or (
             not _is_length_refusal(call)
             and call.get("finish_reason") in _LENGTH_LIMIT_FINISH_REASONS
+            and call.get("response") is not None
             and not _response_has_usable_output(call.get("response"))
         )
     ]

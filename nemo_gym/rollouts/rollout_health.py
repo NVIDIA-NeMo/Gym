@@ -256,7 +256,6 @@ def evaluate_record(
             for call in bindings.matched_calls
         ):
             unobserved.append(spec.id)
-            continue
         try:
             findings.extend(_ROLLOUT_CHECKS[spec.id](record, trajectory, bindings, subject))
         except Exception as exc:

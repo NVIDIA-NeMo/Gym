@@ -1433,6 +1433,53 @@ def test_a_messages_turn_with_only_thinking_is_not_hollow(tmp_path: Path, conten
     assert any(finding.check == "agent_turn_hollow" for finding in digest.findings) is hollow
 
 
+@pytest.mark.parametrize(
+    ("finish_reason", "response", "evidence", "runaway"),
+    [
+        (
+            "stop",
+            {"output_text": "kept", "native_stop_reason": "repetition_detected"},
+            {"native_stop_reason": "repetition_detected"},
+            True,
+        ),
+        (
+            "stop",
+            {"output_text": "kept", "native_finish_reason": "repetition"},
+            {"native_finish_reason": "repetition"},
+            True,
+        ),
+        ("length", {"output": [{"type": "reasoning", "summary": []}]}, {}, True),
+        ("stop", {"output_text": "kept"}, {}, False),
+    ],
+    ids=["explicit-stop", "native-finish", "saved-reasoning-cap", "usable-control"],
+)
+def test_missing_response_retains_conclusive_runaway_evidence(
+    tmp_path: Path, finish_reason: str, response: dict, evidence: dict, runaway: bool
+) -> None:
+    known = _call(model_call_id="known", response_id="r-known", finish_reason=finish_reason, response=response)
+    unknown = _call(
+        call_index=1, model_call_id="unknown", response_id="r-unknown", finish_reason="length", response=None
+    )
+    record = _record(
+        0,
+        0,
+        refs=[{"model_call_id": "known"}, {"model_call_id": "unknown"}],
+        usage={"input_tokens": 6, "output_tokens": 4},
+    )
+    rollout_path = _write_fixture(tmp_path, [(record, [known, unknown])])
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    findings = [finding for finding in digest.findings if finding.check == "model_call_runaway_generation"]
+    assert [finding.locator["call_id"] for finding in findings] == (["known"] if runaway else [])
+    assert [finding.detail for finding in findings] == (
+        [{"finish_reason": finish_reason, **evidence}] if runaway else []
+    )
+    assert "model_call_runaway_generation" in digest.unobserved
+    assert digest.verdict == ("unhealthy" if runaway else "unobserved")
+    assert digest.responses is None
+
+
 def test_runaway_generation_is_unobserved_without_a_saved_response(tmp_path: Path) -> None:
     rollout_path = _write_fixture(
         tmp_path,
