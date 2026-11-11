@@ -77,100 +77,92 @@ def _config(
     def server(port: int) -> dict:
         return {"name": "unused", "host": "127.0.0.1", "port": port, "entrypoint": "app.py", "num_workers": 1}
 
-    agent = {
-        **server(ports["probe_agent"]),
-        "name": "probe_agent",
-        "concurrency": 1,
-        "model": "conformance-model",
-        "model_server": {"type": "responses_api_models", "name": "policy_model"},
-    }
-    if not use_agent_sessions:
-        agent["resources_server"] = {"type": "resources_servers", "name": "probe_resources"}
     defaults_path = (
         Path(__file__).resolve().parents[2] / f"responses_api_agents/{harness}_agent/configs/{harness}_agent.yaml"
     )
     defaults = yaml.safe_load(defaults_path.read_text())[f"{harness}_agent"]["responses_api_agents"][
         f"{harness}_agent"
     ]
-    agent.update({key: value for key, value in defaults.items() if key.endswith("_version")})
-    if harness == "nooa":
-        agent.pop("model")
-        agent.pop("concurrency")
-        from .nooa import observer_module_name
-
-        agent.update(
-            nooa={
-                **defaults["nooa"],
-                "execution_mode": "sandboxed",
-                "invocation_adapter": f"{observer_module_name()}:invoke_with_witness",
-            }
-        )
-        agent["sandbox_runner_timeout_seconds"] = timeout
-    if use_agent_sessions and harness not in ("simple", "nooa"):
-        # The verifier only reads retained output, so the agent can own this local sandbox.
-        agent.update(sandbox_provider="probe_sandbox", sandbox_config={"workdir": str(directory / "workspace")})
-    if harness == "simple":
-        agent["max_steps"] = 6
-    if harness == "claude_code":
-        agent.update(
-            claude_code_version="2.1.108",
-            timeout=int(timeout),
-            max_turns=6,
-            allowed_tools="Bash",
-            thinking="disabled",
-        )
-    if harness == "miniswe_sandboxed":
-        agent.update(
-            harness={"step_limit": 6, "step_timeout_sec": 10},
-            agent_timeout_sec=timeout,
-            setup_timeout_sec=timeout,
-            artifacts_dir=str(directory / "native"),
-        )
-    if harness == "terminus_2_sandboxed":
-        agent = {
-            **defaults,
-            **agent,
+    workspace = directory / "workspace"
+    overrides = {
+        "simple": {"max_steps": 6},
+        "opencode": {"timeout": timeout, "opencode_config": {"permission": {"bash": "allow"}}},
+        "pi": {"timeout": timeout},
+        "copilot": {"timeout": timeout},
+        "crewai": {"timeout": timeout},
+        "openclaw": {"timeout": math.ceil(timeout)},
+        "nooa": {"sandbox_runner_timeout_seconds": timeout},
+        "claude_code": {
+            "claude_code_version": "2.1.108",
+            "timeout": int(timeout),
+            "max_turns": 6,
+            "allowed_tools": "Bash",
+            "thinking": "disabled",
+        },
+        "miniswe_sandboxed": {
+            "harness": {"step_limit": 6, "step_timeout_sec": 10},
+            "agent_timeout_sec": timeout,
+            "setup_timeout_sec": timeout,
+            "artifacts_dir": str(directory / "native"),
+        },
+        "terminus_2_sandboxed": {
             "max_turns": 6,
             "enable_summarize": False,
             "llm_request_timeout": int(timeout),
             "sandbox_timeout": timeout,
+        },
+        "hermes": {
+            "max_turns": 6,
+            "enabled_toolsets": ["terminal"],
+            "terminal_backend": "local",
+            "terminal_timeout": 10,
+            "compression_enabled": False,
+            "checkpoints_enabled": False,
+            "api_key": "conformance",
+        },
+    }
+    # Terminus also needs its adapter defaults; other probes inherit only runtime pins.
+    agent = {
+        **(defaults if harness == "terminus_2_sandboxed" else {}),
+        **server(ports["probe_agent"]),
+        "name": "probe_agent",
+        "concurrency": 1,
+        "model": "conformance-model",
+        "model_server": {"type": "responses_api_models", "name": "policy_model"},
+        **{key: value for key, value in defaults.items() if key.endswith("_version")},
+        **overrides.get(harness, {}),
+    }
+    if harness == "nooa":
+        from .nooa import observer_module_name
+
+        agent.pop("model")
+        agent.pop("concurrency")
+        agent["nooa"] = {
+            **defaults["nooa"],
+            "execution_mode": "sandboxed",
+            "invocation_adapter": f"{observer_module_name()}:invoke_with_witness",
         }
-        if use_agent_sessions:
-            agent.pop("resources_server", None)
-    if harness in ("opencode", "pi", "copilot"):
-        agent["timeout"] = timeout
-        if not use_agent_sessions:
-            agent["workspace_root"] = str(directory / "workspace")
-    if harness == "crewai":
-        agent["timeout"] = timeout
-    if harness == "openclaw":
-        agent["timeout"] = math.ceil(timeout)
-        if not use_agent_sessions:
-            agent["workspace_root"] = str(directory / "workspace")
-    if harness == "opencode":
-        # Auxiliary title/summary requests would consume the scripted policy replies.
-        agent["opencode_config"] = {"permission": {"bash": "allow"}}
-        if not use_agent_sessions:
+
+    if use_agent_sessions:
+        agent.pop("resources_server", None)
+        if harness not in ("simple", "nooa"):
+            # The verifier only reads retained output, so the agent can own this local sandbox.
+            agent.update(sandbox_provider="probe_sandbox", sandbox_config={"workdir": str(workspace)})
+    else:
+        agent["resources_server"] = {"type": "resources_servers", "name": "probe_resources"}
+        if harness in ("opencode", "pi", "openclaw", "copilot"):
+            agent["workspace_root"] = str(workspace)
+        if harness == "opencode":
+            # Auxiliary title/summary requests would consume the scripted policy replies.
             agent["opencode_config"]["agent"] = {"title": {"disable": True}, "summary": {"disable": True}}
-    if harness == "codex" and not use_agent_sessions:
-        workspace = directory / "workspace"
-        workspace.mkdir()
-        agent.update(
-            cwd=str(workspace),
-            timeout=timeout,
-            sandbox_mode="danger-full-access",
-            extra_config={"features": {"shell_snapshot": False}, "web_search": "disabled"},
-        )
-    if harness == "hermes":
-        agent.update(
-            max_turns=6,
-            enabled_toolsets=["terminal"],
-            terminal_backend="local",
-            terminal_timeout=10,
-            compression_enabled=False,
-            checkpoints_enabled=False,
-            api_key="conformance",
-        )
+        if harness == "codex":
+            workspace.mkdir()
+            agent.update(
+                cwd=str(workspace),
+                timeout=timeout,
+                sandbox_mode="danger-full-access",
+                extra_config={"features": {"shell_snapshot": False}, "web_search": "disabled"},
+            )
     environment_type = "single_agent_turn_legacy" if use_agent_sessions else "legacy_agent"
     environment = {
         **server(ports["probe_environment"]),
