@@ -36,7 +36,11 @@ from nemo_gym.core import EpisodeId, MaterializedTask, TaskId
 from nemo_gym.data import materialize_task
 from nemo_gym.rollouts.rollout_collection import _episode_record
 from nemo_gym.server_runtime import is_handled_episode_failure
-from resources_servers.nemo_user_sim.app import UserSimResourcesServer, UserSimResourcesServerConfig
+from resources_servers.nemo_user_sim.app import (
+    UserSimResourcesServer,
+    UserSimResourcesServerConfig,
+    installed_usersim_revision,
+)
 from resources_servers.nemo_user_sim.episode_contracts import (
     UserSimSimulationResult,
     UserSimTaskInput,
@@ -729,7 +733,7 @@ def _resolved_row() -> dict[str, Any]:
         "trajectory_id": "trajectory",
         "usersim_config": {"max_turns": 1},
         "usersim_provenance": {
-            "code_sha": "a5f676bf6dc5a73914c8a0860f97c10dd2c214ee",  # pragma: allowlist secret
+            "code_sha": installed_usersim_revision(),
             "nemotron_personas_version": "synthetic",
         },
     }

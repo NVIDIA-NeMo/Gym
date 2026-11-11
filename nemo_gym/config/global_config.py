@@ -230,6 +230,7 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
         "claude_code_agent",
         "codex_agent",
         "copilot_agent",
+        "goose_agent",
         "harbor_oracle_agent",
         "hermes_agent",
         "langgraph_agent",

@@ -99,6 +99,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
 
 
 LOG = logging.getLogger(__name__)
@@ -717,6 +718,11 @@ class IHEvalResourcesServer(SimpleResourcesServer):
     config: IHEvalResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:
+        # With num_workers > 1, the main process runs this before uvicorn starts the workers.
+        # Fetching the IFEval corpus here keeps the workers' first verify calls from downloading into the same NLTK
+        # data directory at once; each worker then finds it.
+        if not is_nemo_gym_fastapi_worker():
+            _ensure_nltk_data()
         return super().setup_webserver()
 
     async def verify(self, body: IHEvalVerifyRequest) -> IHEvalVerifyResponse:
@@ -908,3 +914,6 @@ class IHEvalResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     IHEvalResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = IHEvalResourcesServer.run_webserver()  # noqa: F401

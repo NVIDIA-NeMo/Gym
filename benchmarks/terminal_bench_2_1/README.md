@@ -66,8 +66,8 @@ The smoke input below wraps the prepared row in `task_id` and `task_input`.
 Its `terminal_bench_2_1` taskset routes directly to `single_agent_turn`.
 Environment Server seeds Resources and the agent, runs the agent, closes it before
 verification, then closes Resources. Resources owns the sandbox throughout.
-Keep one worker for both Resources and the agent because their sessions are
-process-local.
+Both servers accept several workers, because session routing sends each
+session's requests to the worker that holds it.
 
 ### Choose a harness
 
