@@ -363,6 +363,7 @@ def _split_input_to_user_and_history(input_items) -> tuple[str | list[dict[str, 
 
 
 class HermesAgentConfig(BaseResponsesAPIAgentConfig):
+    gzip_requests_enabled: bool = False
     resources_server: ResourcesServerRef | None = None
     model_server: ModelServerRef
     model: Optional[str] = None
@@ -779,6 +780,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             # A restricted tool list would otherwise hide the tools this episode was granted.
             enabled_toolsets = [*enabled_toolsets, *(access.name for access in mcp_accesses)]
         return {
+            "gzip_requests_enabled": self.config.gzip_requests_enabled,
             "agent_session_id": agent_session_id,
             "chat_template_kwargs_enabled": self.config.chat_template_kwargs_enabled,
             "config_yaml": self._build_config(mcp_accesses),
