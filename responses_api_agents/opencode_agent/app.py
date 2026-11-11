@@ -528,6 +528,7 @@ def reached_step_limit(export: Mapping[str, Any], steps: int | None) -> bool:
 
 
 class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
+    gzip_requests_enabled: bool = False
     resources_server: ResourcesServerRef | None = None
     model_server: Optional[ModelServerRef] = None
     concurrency: int = 8
@@ -1981,6 +1982,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         config.setdefault("plugin", []).append(
             (Path(state.session.session_dir) / TASK_ENVIRONMENT_PLUGIN_FILE).as_uri()
         )
+        if self.config.gzip_requests_enabled:
+            config["plugin"].append((Path(state.session.session_dir) / "request_gzip_plugin.mjs").as_uri())
         if mcp_servers:
             config["plugin"].append((Path(state.session.session_dir) / REQUIRED_MCP_PLUGIN_FILE).as_uri())
         # Owner-staged plugins load after Gym's; a plugin that matters must fail closed through its own receipt.
@@ -1994,6 +1997,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             command.extend(["--session", state.harness_session_id])
         payload = {
             "instructions": system if self.config.system_prompt_mode == "append" else "",
+            "gzip_requests_enabled": self.config.gzip_requests_enabled,
             "path_prefix": self.config.sandbox_path_prefix,
             "cwd": state.session.workdir,
             "command": command,

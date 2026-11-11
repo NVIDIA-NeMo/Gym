@@ -144,6 +144,10 @@ class HermesSandboxSession(AgentSessionState):
 
     async def stage_activation(self, payload: dict[str, JsonValue]) -> SandboxCommand:
         """Stage this activation's input and describe its harness process."""
+        if payload.get("gzip_requests_enabled"):
+            await self.session.sandbox.upload(
+                Path(__file__).with_name("request_gzip.py"), f"{_SANDBOX_RUNTIME_DIR}/request_gzip.py"
+            )
         await self.upload_json("input.json", {**payload, "stop_request_path": self.session.stop_request_path})
         return SandboxCommand(
             argv=[
