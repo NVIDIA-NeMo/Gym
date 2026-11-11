@@ -6,9 +6,9 @@
 # You may obtain a copy of the License at
 #
 # http://www.apache.org/licenses/LICENSE-2.0
-"""Where the Chromium lookup expects Playwright's browsers on Linux."""
+"""Chromium cache location and installation-completion checks."""
 
-import pathlib
+from pathlib import Path
 
 import pytest
 from browser import _chromium
@@ -16,7 +16,7 @@ from browser import _chromium
 
 @pytest.mark.parametrize(
     ("xdg_cache_home", "expected_parent"),
-    [("/xdg/cache", pathlib.Path("/xdg/cache")), ("", None), (None, None)],
+    [("/xdg/cache", Path("/xdg/cache")), ("", None), (None, None)],
     ids=["set", "empty", "unset"],
 )
 def test_browsers_dir_follows_xdg_cache_home_on_linux(monkeypatch, tmp_path, xdg_cache_home, expected_parent):
@@ -30,3 +30,17 @@ def test_browsers_dir_follows_xdg_cache_home_on_linux(monkeypatch, tmp_path, xdg
         monkeypatch.setenv("XDG_CACHE_HOME", xdg_cache_home)
 
     assert _chromium._browsers_dir() == (expected_parent or tmp_path / ".cache") / "ms-playwright"
+
+
+def test_a_build_still_being_unpacked_is_not_installed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path))
+    build = tmp_path / "chromium-1234"
+    executable = build / "chrome-linux64" / "chrome"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("")
+
+    # Another worker's install has unpacked the executable but not the rest of the build.
+    assert not _chromium._executable_present()
+
+    (build / "INSTALLATION_COMPLETE").write_text("")
+    assert _chromium._executable_present()

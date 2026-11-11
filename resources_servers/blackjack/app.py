@@ -29,6 +29,7 @@ from pydantic import JsonValue
 
 from nemo_gym.core import NeMoGymResponse
 from nemo_gym.server_runtime import CheckpointMode
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.gymnasium import GymnasiumServer, extract_text
 
 
@@ -142,3 +143,6 @@ class BlackjackEnv(GymnasiumServer):
 
 if __name__ == "__main__":
     BlackjackEnv.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = BlackjackEnv.run_webserver()  # noqa: F401

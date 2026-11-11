@@ -10,7 +10,6 @@ reasoning_gym:
 reasoning_gym_langgraph_agent:
   responses_api_agents:
     langgraph_agent:
-      num_workers: 1
       entrypoint: reflection_agent.py
       resources_server:
         type: resources_servers

@@ -24,7 +24,7 @@ from fastapi import Request, Response
 from omegaconf import OmegaConf
 
 from nemo_gym.config import ModelServerRef
-from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import ModelCallSampling, NeMoGymResponseCreateParamsNonStreaming, encode_model_sampling
 from responses_api_agents.conversational_tool_use_policy_tool_generation.app import (
     PolicyToolGenerationAgent,
     PolicyToolGenerationAgentConfig,
@@ -159,6 +159,32 @@ def run_body() -> PolicyToolGenerationRunRequest:
     )
 
 
+def _accepted_run_payloads() -> list[dict[str, Any]]:
+    final_tool = '{"name":"lookup","doc":"Lookup","params":null,"returns":null}'
+    return [
+        chat_completion("<policy>draft</policy>", "policy-v1"),
+        chat_completion(f"<tools>{final_tool}</tools>", "tools-v1"),
+        chat_completion("<policy>final</policy>", "policy-refine"),
+        chat_completion(f"<tools>{final_tool}</tools>", "tools-refine"),
+        *[chat_completion("<judgment>true</judgment>", f"cohesion-{index}") for index in range(3)],
+        *[chat_completion("<judgment>0</judgment>", f"golden-{index}") for index in range(4)],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_only_the_policy_calls_sample_with_the_runs_values() -> None:
+    client = QueueClient(_accepted_run_payloads())
+    sampling = ModelCallSampling(temperature=0.6, top_p=0.95, max_output_tokens=64)
+
+    await agent(client).run(request("/run"), run_body().model_copy(update={"model_sampling": sampling}))
+
+    # A training framework trains the policy; the judge keeps its own sampling.
+    values = encode_model_sampling(sampling)
+    assert [call["url_path"] for call in client.calls] == [f"/ng-sampling/{values}/v1/chat/completions"] * 4 + [
+        "/ng-sampling/null/v1/chat/completions"
+    ] * 7
+
+
 @pytest.mark.asyncio
 async def test_internal_run_uses_message_only_chat_calls_and_converts_final_completion() -> None:
     final_tool = '{"name":"lookup","doc":"Lookup","params":null,"returns":null}'
@@ -207,7 +233,7 @@ async def test_run_usage_sums_policy_calls_and_excludes_judges() -> None:
     # Usage covers every policy-model call; judge calls are auxiliary and stay out of the rollout's usage.
     assert result.response.usage.model_dump() == {
         "input_tokens": 2148,
-        "input_tokens_details": {"cached_tokens": 400},
+        "input_tokens_details": {"cached_tokens": 400, "cache_write_tokens": None},
         "output_tokens": 1435,
         "output_tokens_details": {"reasoning_tokens": 1200},
         "total_tokens": 3583,
