@@ -184,7 +184,7 @@ Upstream source revisions are BioNeMo toolkit `5fe8b184cda54c48e73214824df6ee04f
 
 ### Positive results
 
-All 180 planned attempts finished once: 12 cases × three attempts × five profiles. There are 128 scored observations and 52 unscored outcomes (43 rate limits and nine timeouts without conclusive opening evidence), and zero pending attempts. Each fraction below is the mean binary target-opening reward on scored attempts; errors without conclusive opening evidence are not counted as misses.
+All 180 planned attempts finished once: 12 cases × three attempts × five profiles. There are 133 scored observations and 47 unscored outcomes (38 rate limits and nine timeouts without conclusive opening evidence), and zero pending attempts. Each fraction below is the mean binary target-opening reward on scored attempts; errors without conclusive opening evidence are not counted as misses.
 
 | Profile | Collection | Target opened / scored | Unscored | Pending | Planned |
 |---|---|---:|---:|---:|---:|
@@ -192,25 +192,25 @@ All 180 planned attempts finished once: 12 cases × three attempts × five profi
 | codex | bionemo | 8/11 | 1 | 0 | 12 |
 | codex | skillsbench | 1/5 | 7 | 0 | 12 |
 | codex_guidance | addy | 0/12 | 0 | 0 | 12 |
-| codex_guidance | bionemo | 5/8 | 4 | 0 | 12 |
-| codex_guidance | skillsbench | 0/1 | 11 | 0 | 12 |
+| codex_guidance | bionemo | 7/10 | 2 | 0 | 12 |
+| codex_guidance | skillsbench | 2/3 | 9 | 0 | 12 |
 | hermes | addy | 3/11 | 1 | 0 | 12 |
 | hermes | bionemo | 8/10 | 2 | 0 | 12 |
 | hermes | skillsbench | 0/5 | 7 | 0 | 12 |
 | hermes_guidance | addy | 0/9 | 3 | 0 | 12 |
 | hermes_guidance | bionemo | 5/8 | 4 | 0 | 12 |
-| hermes_guidance | skillsbench | 1/2 | 10 | 0 | 12 |
+| hermes_guidance | skillsbench | 2/3 | 9 | 0 | 12 |
 | pi | addy | 5/12 | 0 | 0 | 12 |
 | pi | bionemo | 12/12 | 0 | 0 | 12 |
 | pi | skillsbench | 5/12 | 0 | 0 | 12 |
 
-All 132 available saved trajectories agree under reviewed and revised scoring, including every scored observation. Synthetic regressions demonstrate the corrected missing-content and signed-exit defects; their frequency in the deleted historical experiment is unknown. One verified Codex main-session opening is counted as a success despite a later timeout; its execution error is also retained. There were ten execution timeouts in total. The prior execution-clean accounting is preserved as history, not silently overwritten. All frozen input bytes and modes and all 180 effective 120-second agent limits were verified. Agent setup and provider waits can extend total request duration beyond the agent execution window.
+All 175 available saved trajectories agree under reviewed and revised scoring, including every scored observation. Synthetic regressions demonstrate the corrected missing-content and signed-exit defects; their frequency in the deleted historical experiment is unknown. Six verified main-session openings count despite later errors: one Codex timeout, four Codex-guidance rate errors, and one Hermes-guidance rate error. All 53 execution errors remain recorded. There were ten execution timeouts in total. The prior execution-clean and partial opening-only accounting remain history. The old runner deleted 43 standalone rate-error results; their retained trajectories support these comparisons, and unavailable original files are not reconstructed. The generic Harbor agent now preserves exact failed-result bytes privately before invalidating resume. All frozen input bytes and modes and all 180 effective 120-second agent limits were verified. Agent setup and provider waits can extend total request duration beyond the agent execution window.
 
 These rates are conditional on scorable attempts. Failures and censoring are not assumed random; profiles ran sequentially in fixed case order, so endpoint availability can confound comparisons. The balanced 12-case sample is not population weighted, and its three attempts per task are repeated observations. It establishes neither harness rankings, full-suite performance, task completion, historical reproduction, nor statistical confidence. The intended label is narrow: in three Codex-guidance misses for Addy `using-agent-skills`, the agent successfully read the relevant alternative `debugging-and-error-recovery`. Useful alternative-skill behavior is not task failure.
 
 ### Separate negative results
 
-The six controls ran three times per profile: 90 terminal attempts, 82 scored, eight unscored rate-limit failures, and zero pending. All 82 scored attempts recorded zero unnecessary, any, and session-start openings. Negative release SHA-256: `afc6a528c44da2f56e7a1e81270e5135bdd699b638664a32c8d0f67ea26d8dcc`.
+The six controls ran three times per profile: 90 terminal attempts, 82 scored, eight unscored rate-limit failures, and zero pending. All 82 scored attempts recorded zero unnecessary, any, and session-start openings. The eight error trajectories were also inspected; no conclusive unnecessary opening was found, and those attempts remain unscored rather than successful avoidance. Negative release SHA-256: `afc6a528c44da2f56e7a1e81270e5135bdd699b638664a32c8d0f67ea26d8dcc`.
 
 | Profile | Collection | Unnecessary / scored | Any opening / scored | Session-start / scored | Unscored | Pending | Planned |
 |---|---|---:|---:|---:|---:|---:|---:|
