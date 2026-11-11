@@ -218,7 +218,23 @@ def _compaction_settings(harness: str, scenario: Scenario) -> DictConfig:
         "codex": {"harness_overrides": {"model_context_window": 32768, "model_auto_compact_token_limit": 24000}},
         "stirrup": {"harness_overrides": {"context_window_tokens": 32768}},
         "hermes": {
-            "harness_overrides": {"compression_enabled": True, "compression_threshold": 0.1, "max_turns": steps}
+            "harness_overrides": {
+                "compression_enabled": True,
+                "context_length": 32768 if scenario.compaction else 65536,
+                "compression_threshold": 0.5,
+                "max_turns": steps,
+            },
+            "probe_overrides": {
+                "responses": [
+                    *[
+                        {"kind": "tool", "input_tokens": 1000, "output_tokens": 8}
+                        for _ in range(scenario.tool_steps - 1)
+                    ],
+                    {"kind": "tool", "input_tokens": 27000, "output_tokens": 8},
+                    *([{"kind": "summary", "input_tokens": 500, "output_tokens": 11}] if scenario.compaction else []),
+                    {"kind": "final", "input_tokens": 100, "output_tokens": 8},
+                ],
+            },
         },
         "claude_code": {"harness_overrides": {"max_turns": steps}},
         "miniswe_sandboxed": {"harness_overrides": {"harness": {"step_limit": steps}}},

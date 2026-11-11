@@ -407,14 +407,15 @@ def test_rewritten_ids_require_openclaw_and_matching_replayed_call(tmp_path, pro
 
 
 @pytest.mark.parametrize("compaction", [True, False])
-def test_opencode_compaction_is_scripted_independently_of_request_text(tmp_path, compaction):
-    scenario = dataclasses.replace(SCENARIO["context_compaction"], compaction=compaction, tool_steps=2)
-    settings = _compaction_settings("opencode", scenario)
-    probe = Probe(scenario, tmp_path, harness="opencode", **settings.probe_overrides)
+@pytest.mark.parametrize("harness,tool_steps,low_usage", [("opencode", 2, 500), ("hermes", 14, 1000)])
+def test_compaction_is_scripted_independently_of_request_text(tmp_path, compaction, harness, tool_steps, low_usage):
+    scenario = dataclasses.replace(SCENARIO["context_compaction"], compaction=compaction, tool_steps=tool_steps)
+    settings = _compaction_settings(harness, scenario)
+    probe = Probe(scenario, tmp_path, harness=harness, **settings.probe_overrides)
     messages = [{"role": "user", "content": "Any task wording"}]
     body = {"model": "conformance-model", "messages": messages, "tools": [TOOL]}
     with TestClient(probe.model_app()) as client:
-        for expected_usage in (500, 27000):
+        for expected_usage in [low_usage] * (tool_steps - 1) + [27000]:
             response = client.post("/v1/chat/completions", json=body).json()
             assert response["usage"]["prompt_tokens"] == expected_usage
             message = response["choices"][0]["message"]
@@ -432,7 +433,7 @@ def test_opencode_compaction_is_scripted_independently_of_request_text(tmp_path,
             messages.append({"role": "user", "content": probe.compaction_summary})
         final = client.post("/v1/chat/completions", json=body).json()
     assert final["choices"][0]["message"]["content"] == "CONFORMANCE_DONE"
-    assert len(probe.attempts) == 3 + int(compaction)
+    assert len(probe.attempts) == tool_steps + 1 + int(compaction)
     assert len(probe.compaction_response_ids) == int(compaction)
     assert probe.finished and not probe.violations
 
