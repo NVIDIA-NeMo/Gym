@@ -80,10 +80,13 @@ RUN --mount=type=cache,target=/root/.mamba/pkgs,sharing=locked,id=mamba-cache-${
     micromamba run -p "${KERNEL_ENV_PATH}" python -m ipykernel install --name python3 --display-name "Python 3 (ipykernel)" && \
     micromamba run -p "${KERNEL_ENV_PATH}" R -e 'IRkernel::installspec(user = FALSE, name = "ir", displayname = "R")'
 
-## Install the standalone BBH MCP server package.
+## Keep the locked MCP server separate from the conda-locked scientific kernels.
+## Retain its source: uv installs this project editably by default.
+COPY pkgs/bbh-mcp /opt/bbh-mcp
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked,id=uv-cache-${TARGETARCH} \
-    --mount=type=bind,source=pkgs/bbh-mcp,target=/pkgs/bbh-mcp,rw \
-    uv pip install -p "${KERNEL_ENV_PATH}/bin/python" /pkgs/bbh-mcp
+    UV_PROJECT_ENVIRONMENT=/opt/envs/bbh-mcp uv sync --locked \
+        --project /opt/bbh-mcp --python "${KERNEL_ENV_PATH}/bin/python" --no-dev
+ENV BBH_MCP_PYTHON=/opt/envs/bbh-mcp/bin/python
 
 ## Setup PATH to environment bin
 ENV PATH="${KERNEL_ENV_PATH}/bin:${PATH}" LD_LIBRARY_PATH="${KERNEL_ENV_PATH}/lib:${LD_LIBRARY_PATH}"

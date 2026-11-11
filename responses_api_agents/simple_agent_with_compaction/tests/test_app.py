@@ -21,17 +21,17 @@ from fastapi import Response
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
 )
-from nemo_gym.rollout_collection import _attach_trajectory_record
-from nemo_gym.rollout_observability import TrajectoryRecord
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
+from nemo_gym.trajectory import TrajectoryRecord
 from responses_api_agents.simple_agent_with_compaction.app import (
     _CONTEXT_COMPACTION_ROLLOUT_ID_COOKIE,
     ContextCompactionResponseCreateParams,
@@ -1182,7 +1182,7 @@ class TestApp:
         actual_usage_dict = actual_responses_dict["usage"]
         expected_usage_dict = {
             "input_tokens": 101,
-            "input_tokens_details": {"cached_tokens": 0},
+            "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": None},
             "output_tokens": 202,
             "output_tokens_details": {"reasoning_tokens": 0},
             "total_tokens": 303,

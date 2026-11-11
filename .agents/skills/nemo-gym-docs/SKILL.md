@@ -140,6 +140,10 @@ NeMo Gym uses **Fern-native MDX components directly**. Do not use GitHub `> [!NO
 
 Images live in `fern/assets/` (shared) or under a version's `pages/` (version-scoped). Reference with root-relative paths.
 
+### Product Name
+
+Call the product NeMo Gym in prose, not Gym. Commands, package names and other identifiers, such as `gym eval run` or `nemo_gym`, stay as written.
+
 ### Cards and Badges
 
 Index pages use a `<Cards>` grid. Each `<Card>` can carry one or more `<Badge>` tags to indicate scope, status, or read-time.

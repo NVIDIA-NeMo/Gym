@@ -10,7 +10,7 @@ import json
 
 from pydantic import JsonValue
 
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core import NeMoGymResponse
 from resources_servers.partner_if.app import is_complete, output_cap_cutoff
 from resources_servers.partner_if.evidence import Artifact, EvidenceBundle
 from resources_servers.partner_if.grading_contract import StrictModel
