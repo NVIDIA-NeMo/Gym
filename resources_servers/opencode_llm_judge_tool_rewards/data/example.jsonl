@@ -1,0 +1,5 @@
+{"task_id": "synthetic-capital", "responses_create_params": {"input": [{"role": "user", "content": "What is the capital of France?"}]}, "expected_answer": "Paris"}
+{"task_id": "synthetic-oxygen", "responses_create_params": {"input": [{"role": "user", "content": "What is the chemical symbol for oxygen?"}]}, "expected_answer": "O"}
+{"task_id": "synthetic-week", "responses_create_params": {"input": [{"role": "user", "content": "How many days are in a week?"}]}, "expected_answer": "7"}
+{"task_id": "synthetic-japan", "responses_create_params": {"input": [{"role": "user", "content": "What is the capital of Japan?"}]}, "expected_answer": "Tokyo"}
+{"task_id": "synthetic-opposite", "responses_create_params": {"input": [{"role": "user", "content": "What is the opposite of cold?"}]}, "expected_answer": "hot"}

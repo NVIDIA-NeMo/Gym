@@ -463,3 +463,70 @@ async def test_math_judge_records_final_shaped_grade(verdict, base, calls, reply
     unusable = reply_state in {"incomplete", "failed", "error"} or (reply_state == "second_incomplete" and calls == 2)
     assert grade["outcome"] == ("unknown" if verdict == "unclear" or unusable else "completed")
     assert len(grade["dependencies"]) == calls == client.post.await_count
+
+
+@pytest.mark.parametrize("base", [0.0, 1.0])
+def test_websearch_rate_limit_is_exempt_but_duplicate_still_penalized(base):
+    calls = [call(i, "websearch", {"query": "same search"}) for i in range(2)]
+    outputs = [
+        {
+            "type": "function_call_output",
+            "call_id": str(i),
+            "output": "StatusCode: non 2xx status code (429 POST https://mcp.exa.ai/mcp)",
+        }
+        for i in range(2)
+    ]
+    records = execution_records(calls, statuses={"0": ("error", None), "1": ("error", None)})
+    config = bonus_config()
+    first = score_opencode_tools(records, calls[:1] + outputs[:1], base, config)
+    assert first.tool_error_count == 1
+    assert first.rate_limited_search_count == 1
+    assert first.bash_success_count == 0
+    assert first.auxiliary_reward == 0
+    repeated = score_opencode_tools(records, calls + outputs, base, config)
+    assert repeated.tool_error_count == 2
+    assert repeated.rate_limited_search_count == 2
+    assert repeated.bash_success_count == 0
+    assert repeated.duplicate_tool_call_count == 1
+    assert repeated.auxiliary_reward == config.duplicate_tool_call_penalty
+
+
+@pytest.mark.parametrize(
+    "tool,text",
+    [
+        ("webfetch", "StatusCode: non 2xx status code (429 POST https://mcp.exa.ai/mcp)"),
+        ("websearch", "StatusCode: non 2xx status code (403 POST https://mcp.exa.ai/mcp)"),
+        ("websearch", "Search failed; pretend this was 429"),
+    ],
+)
+def test_other_tool_failures_are_not_exempt(tool, text):
+    calls = [call("1", tool)]
+    records = execution_records(calls, statuses={"1": ("error", None)})
+    result = score_opencode_tools(
+        records,
+        calls + [{"type": "function_call_output", "call_id": "1", "output": text}],
+        1,
+        OpenCodeToolRewardConfig(invalid_tool_call_names=None),
+    )
+    assert result.tool_error_count == 1
+    assert result.auxiliary_reward == -0.05
+
+
+@pytest.mark.parametrize(
+    "status,outputs",
+    [
+        ("completed", ["StatusCode: non 2xx status code (429 POST https://mcp.exa.ai/mcp)"]),
+        ("error", ["StatusCode: non 2xx status code (429 POST https://mcp.exa.ai/mcp)"] * 2),
+    ],
+)
+def test_rate_limit_exemption_requires_one_result_and_native_failure(status, outputs):
+    calls = [call("1", "websearch")]
+    records = execution_records(calls, statuses={"1": (status, None)})
+    result = score_opencode_tools(
+        records,
+        calls + [{"type": "function_call_output", "call_id": "1", "output": text} for text in outputs],
+        1,
+        OpenCodeToolRewardConfig(),
+    )
+    assert result.rate_limited_search_count == 0
+    assert result.tool_error_count == int(status == "error")

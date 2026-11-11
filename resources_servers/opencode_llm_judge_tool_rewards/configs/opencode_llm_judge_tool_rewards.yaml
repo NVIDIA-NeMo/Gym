@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+llm_judge_with_tools:
+  resources_servers:
+    opencode_llm_judge_tool_rewards:
+      entrypoint: app.py
+      domain: knowledge
+      verified: false
+      description: Generic LLM answer judging with optional OpenCode tool rewards
+      judge_model_server:
+        type: responses_api_models
+        name: training_judge
+      judge_responses_create_params:
+        input: []
+        max_output_tokens: 4096
+      tool_rewards: {}

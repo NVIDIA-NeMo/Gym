@@ -102,3 +102,32 @@ for runtime requirements and configurable limits.
 
 See the shared [grading, deadlines and recovery contract](../README.md#grading-and-recovery)
 for observed judging, failure outcomes and resumable-run requirements.
+
+
+## Training
+
+Compose [`training.yaml`](training.yaml) with the deployment's policy model and
+sandbox configuration. It selects the separate `agentx_tool_rewards.py` training
+wrapper over the independent evaluator, defaults to `gpt-4o-mini`, enables token capture and tool rewards, and
+sets `forward_agent_evidence: true` on `single_agent_turn`. Routed NVIDIA
+deployments use `azure/openai/gpt-4o-mini` for `judge_model`. The evaluation recipe
+keeps token capture and tool rewards disabled and defaults to `gpt-5.5`.
+
+Reward components retain the independent verifier score and the tool adjustment
+separately. The shared defaults apply penalties only to answers scoring at least
+1.0: no positive bonuses, failed bash calls cost 0.05, consecutive duplicate calls
+cost 0.02, and three or more bash attempts incur a capped usage penalty. A failed native WebSearch HTTP 429 remains a failed call but is exempt
+from unsuccessful-call penalties. Consecutive duplicate calls remain penalized.
+Judge failures remain masked; tool rewards do not replace a missing grade.
+Reverification of tool rewards separately requires `forward_agent_evidence: true`.
+
+The `agentx.py` evaluation entrypoint rejects tool-reward settings and returns
+only correctness. The training wrapper records correctness, auxiliary rewards,
+and total reward separately. With the default `correct_only: true`, incorrect and
+partially correct samples receive no tool adjustment. Setting `correct_only: false`
+allows the configured exploration rewards and tool penalties on those samples.
+
+When collecting with the Agent-X training preset, benchmark accuracy and modality
+reports use the verifier's correctness component. Generic `mean/reward` statistics
+and saved training rewards retain tool adjustments. This reporting behavior is
+local to the Agent-X training wrapper; other tool-reward wrappers are unchanged.

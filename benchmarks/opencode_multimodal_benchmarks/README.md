@@ -90,11 +90,11 @@ reply, the score is retained but the grading operation remains `unknown`: an
 invalid reply is not falsely marked as a parsed verdict. Inspect these outcomes
 before claiming complete grading evidence.
 
-Headline completeness compares valid measurements with the resolved materialized
-attempt inventory, including runtime repeat overrides. An absent repeat remains
-in that inventory even when its failures are stored in a separate artifact.
-Without an inventory, aggregation reports partial scores rather than asserting
-that the surviving rows form a complete run.
+Headline completeness checks the expected task count and the attempts received by
+aggregation. It does not yet account for the full planned repeat inventory: a
+repeat missing for every task can go undetected when failures are saved separately.
+For repeated runs, check collection coverage and failure artifacts before treating
+a headline score as complete. Planned-repeat accounting is a separate follow-up.
 
 Catalog pairings have no whole-episode deadline by default. To set one, configure
 `visual_environment.environment_servers.single_agent_turn.default_episode_timeout_seconds`.
@@ -197,12 +197,12 @@ incur a 0.02 penalty. Other tools do not incur failure penalties. Override indiv
 Scoring reads tool execution outcomes from the shared trajectory
 or observation bundle; it never interprets model-visible output as an exit status.
 
-For existing math, MCQA, and string-match training tasks, use the
-`opencode_math_tool_rewards`, `opencode_mcqa_tool_rewards`, or
-`opencode_string_match_tool_rewards` Resources component, respectively, each with
-`entrypoint: app.py`. Each component owns its inherited grader's dataset schema,
-so strict dataset collation accepts native training rows without visual benchmark
-metadata. These thin adapters import the
+For existing math, MCQA, string-match, and generic LLM-judge training tasks, use the
+`opencode_math_tool_rewards`, `opencode_mcqa_tool_rewards`,
+`opencode_string_match_tool_rewards`, or `opencode_llm_judge_tool_rewards` Resources component,
+respectively, each with `entrypoint: app.py`. Each component owns its inherited
+grader's dataset schema, so strict dataset collation accepts native training rows
+without visual benchmark metadata. These thin adapters import the
 existing graders and retain their task schemas. For example:
 
 ```yaml
@@ -229,3 +229,24 @@ stock-agent follow-ups; the default benchmark profile does not enable web tools.
 Training configurations previously selecting `*_tool_rewards.py` under
 `opencode_multimodal_benchmarks` must use the corresponding component above with
 `entrypoint: app.py`. Keep the instance name and environment bindings unchanged.
+
+The [generic LLM-judge overlay](../../resources_servers/opencode_llm_judge_tool_rewards/configs/opencode_llm_judge_tool_rewards.yaml)
+declares `llm_judge_with_tools`, backed by the existing `equivalence_llm_judge`
+grader. Configure a separate `training_judge` model server (for example,
+GPT-4o-mini), bind the chosen Environment Server's `resources_server` to
+`llm_judge_with_tools`, and set its `forward_agent_evidence: true`. Tool rewards
+are optional (`tool_rewards: null` disables them). The adapter preserves the
+original policy response and binds the final combined grade inside the judge's
+existing observation, including rescue and swap passes. It needs no Agent-X rows
+or Agent-X evaluator. It reuses the generic grader's verdict labels, rescue, and
+swap logic, while rejecting unusable judge replies before applying tool rewards.
+
+A recorded failed WebSearch with the native HTTP 429 envelope is exempt only
+from unsuccessful-call penalties. Failure and rate-limit counts remain visible;
+consecutive duplicates still receive their duplicate penalty. This does not
+reward the failed search as successful.
+
+The default `correct_only: true` suppresses tool adjustments on incorrect answers.
+Setting it to `false` allows the configured exploration rewards and tool penalties. Missing, conflicting, or truncated
+generic judge verdicts raise a judge failure before reward shaping and are masked
+by the shared verification boundary. They do not become ordinary incorrect answers.

@@ -17,7 +17,9 @@ from resources_servers.opencode_multimodal_benchmarks.tests.test_app import requ
 
 
 @pytest.fixture
-def server():
+def server(monkeypatch):
+    # Mocked judge completions still pass through the endpoint credential check.
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-test-key")
     return AgentXServer(
         config=AgentXConfig(
             host="127.0.0.1",
@@ -263,3 +265,92 @@ def test_opencode_pairing_uses_stock_agent_and_effective_web_permissions(monkeyp
     environment = config["visual_environment"]["environment_servers"]
     assert list(environment) == ["single_agent_turn"]
     assert environment["single_agent_turn"]["agent_server"]["name"] == "visual_agent"
+
+
+@pytest.mark.parametrize(
+    "query_type,reply,base", [("objective", '{"verdict":"equivalent"}', 1.0), ("subjective", '{"score":0.65}', 0.65)]
+)
+@pytest.mark.parametrize("status", ["completed", "failed"])
+async def test_agentx_training_shapes_independent_grade_and_preserves_answer(server, query_type, reply, base, status):
+    from resources_servers.opencode_multimodal_benchmarks.agentx_tool_rewards import (
+        AgentXToolRewardConfig,
+        AgentXToolRewardServer,
+    )
+    from resources_servers.opencode_multimodal_benchmarks.tests.test_rewards import tool_response, trajectory
+
+    server = AgentXToolRewardServer(
+        config=AgentXToolRewardConfig(**(server.config.model_dump() | {"tool_rewards": {}})),
+        server_client=server.server_client,
+    )
+    server._judge_completion = AsyncMock(return_value=reply)
+    body = request("AgentX", "red")
+    body.verifier_metadata["query_type"] = query_type
+    body.response = tool_response("red")
+    body.ng_trajectory = trajectory(status)
+    result = await server.verify(body)
+    bonus = -0.05 if status == "failed" and base == 1 else 0.0
+    assert result.reward == pytest.approx(base + bonus)
+    assert result.reward_components == {"verifier": base, "opencode_tool_reward": bonus}
+    assert result.response == body.response
+    assert server.compute_metrics([[result.model_dump()]])["accuracy"] == base
+
+
+def test_training_recipe_enables_capture_rewards_and_evidence_without_changing_eval(monkeypatch):
+    from pathlib import Path
+
+    from omegaconf import OmegaConf
+
+    from nemo_gym.config import GlobalConfigDictParser
+
+    monkeypatch.chdir(Path(__file__).resolve().parents[3])
+    for mode in ("opencode", "training"):
+        _, configs = GlobalConfigDictParser().load_extra_config_paths(
+            [f"benchmarks/opencode_multimodal_benchmarks/agentx/{mode}.yaml"]
+        )
+        merged = OmegaConf.merge(*configs)
+        GlobalConfigDictParser()._recursively_swap_keys(merged)
+        config = OmegaConf.to_container(merged, resolve=False)
+        training = mode == "training"
+        agent = config["visual_agent"]["responses_api_agents"]["opencode_agent"]
+        environment = config["visual_environment"]["environment_servers"]["single_agent_turn"]
+        resources = config["opencode_multimodal_benchmarks"]["resources_servers"]["opencode_multimodal_benchmarks"]
+        assert agent["token_id_capture"] is training
+        assert environment.get("forward_agent_evidence", False) is training
+        assert resources.get("tool_rewards") == ({} if training else None)
+        assert resources["judge_model"] == ("gpt-4o-mini" if training else "gpt-5.5")
+        assert resources["judge_max_tokens"] == 4096
+        assert resources["entrypoint"] == ("agentx_tool_rewards.py" if training else "agentx.py")
+
+
+def test_evaluation_rejects_training_reward_settings():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        AgentXConfig(host="localhost", port=1, name="eval", entrypoint="agentx.py", tool_rewards={})
+
+
+@pytest.mark.parametrize("mode", ["evaluation", "training"])
+async def test_zero_correctness_has_no_tool_bonus(server, mode):
+    from resources_servers.opencode_multimodal_benchmarks.agentx_tool_rewards import (
+        AgentXToolRewardConfig,
+        AgentXToolRewardServer,
+    )
+    from resources_servers.opencode_multimodal_benchmarks.tests.test_rewards import tool_response, trajectory
+
+    if mode == "training":
+        server = AgentXToolRewardServer(
+            config=AgentXToolRewardConfig(**(server.config.model_dump() | {"tool_rewards": {}})),
+            server_client=server.server_client,
+        )
+    server._judge_completion = AsyncMock(return_value='{"verdict":"different"}')
+    body = request("AgentX", "blue")
+    body.response = tool_response("blue")
+    body.ng_trajectory = trajectory()
+    result = await server.verify(body)
+    assert result.reward == 0
+    if mode == "training":
+        assert result.reward_components == {"verifier": 0.0, "opencode_tool_reward": 0.0}
+    else:
+        assert "reward_components" not in result.model_dump()
+        assert "opencode_tool_reward" not in result.model_dump()
+    assert result.response == body.response

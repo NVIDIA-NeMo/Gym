@@ -115,14 +115,7 @@ class AgentXServer(VisualBenchmarksServer):
         prediction = final_answer(body.response.model_dump()["output"], strip_reasoning=True)
 
         def response(score: float, raw: str) -> AgentXVerifyResponse:
-            return AgentXVerifyResponse(
-                **body.model_dump(),
-                reward=score,
-                extracted=prediction,
-                scorer=AGENTX_SCORER,
-                judge_model=self.config.judge_model,
-                judge_raw=raw,
-            )
+            return self._make_response(body, prediction, score, raw)
 
         if not prediction:
             return observe_programmatic_grading(lambda: response(0, "Score: 0; no final answer."))
@@ -132,6 +125,16 @@ class AgentXServer(VisualBenchmarksServer):
             return response(score, raw)
 
         return await observe_llm_judge_grading(judge_answer)
+
+    def _make_response(self, body, prediction: str, score: float, raw: str) -> AgentXVerifyResponse:
+        return AgentXVerifyResponse(
+            **body.model_dump(),
+            reward=score,
+            extracted=prediction,
+            scorer=AGENTX_SCORER,
+            judge_model=self.config.judge_model,
+            judge_raw=raw,
+        )
 
     async def _judge_answer(self, task: dict[str, Any], prediction: str) -> tuple[float, str]:
         self._judge_credentials()

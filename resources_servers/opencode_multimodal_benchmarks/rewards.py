@@ -61,6 +61,7 @@ class OpenCodeToolReward(BaseModel):
     tool_error_count: int
     duplicate_tool_call_count: int
     bash_call_count: int = 0
+    rate_limited_search_count: int = 0
 
     def for_answer(self, base_reward: float, config: OpenCodeToolRewardConfig) -> "OpenCodeToolReward":
         """Apply the verifier result to the recorded tool evidence."""
@@ -102,17 +103,23 @@ def score_opencode_tools(
 
     A completed bash tool can still have a nonzero process exit code. Use the
     native state/exit metadata, never model-visible output text, to distinguish
-    success from failure. Missing or unfinished execution records are errors so
+    success from failure. Failed native websearch HTTP 429 results retain failure
+    counts but are exempt from unsuccessful-call penalties; duplicate penalties
+    still apply. Missing or unfinished execution records are errors so
     the caller can mask the rollout instead of inventing a reward.
     """
     calls = [item for item in output if item.get("type") == "function_call"]
+    tool_outputs: dict[str, list[Any]] = {}
+    for item in output:
+        if item.get("type") == "function_call_output":
+            tool_outputs.setdefault(item["call_id"], []).append(item.get("output"))
     previous = None
     records = execution_records
     if len({item["call_id"] for item in calls}) != len(calls):
         raise ValueError("Repeated call ID in the live OpenCode trajectory")
 
     exploration = penalties = 0.0
-    successes = errors = duplicates = 0
+    successes = errors = duplicates = rate_limits = 0
     for item in calls:
         identity = _identity(item)
         duplicate = identity == previous
@@ -126,8 +133,22 @@ def score_opencode_tools(
             failed = True
         else:
             failed = status == "error" or (tool == "bash" and exit_code != 0)
+        results = tool_outputs.get(item["call_id"], [])
+        # This is OpenCode's native error envelope, matched only for a recorded failed websearch.
+        # Neither prose mentioning 429 nor a successful tool result supplies an exemption.
+        rate_limited_search = (
+            tool == "websearch"
+            and status == "error"
+            and len(results) == 1
+            and isinstance(results[0], str)
+            and re.fullmatch(r"StatusCode: non 2xx status code \(429 POST https?://[^\s()]+\)", results[0].strip())
+            is not None
+        )
         if failed:
             errors += 1
+        if rate_limited_search:
+            rate_limits += 1
+        if failed and not rate_limited_search:
             if config.invalid_tool_call_names is None or tool in config.invalid_tool_call_names:
                 penalties += config.invalid_tool_call_penalty
                 exploration += config.invalid_tool_call_penalty
@@ -144,6 +165,7 @@ def score_opencode_tools(
         exploration_reward=exploration,
         penalty_reward=penalties,
         bash_success_count=successes,
+        rate_limited_search_count=rate_limits,
         tool_call_count=len(calls),
         tool_error_count=errors,
         duplicate_tool_call_count=duplicates,

@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+- resources_servers/opencode_llm_judge_tool_rewards/configs/opencode_llm_judge_tool_rewards.yaml
+llm_judge_with_tools:
+  resources_servers:
+    opencode_llm_judge_tool_rewards:
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/opencode_llm_judge_tool_rewards/data/example.jsonl
+      verified: false
+# Dataset validation needs only the reference; configure this model for live judging.
+training_judge:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py

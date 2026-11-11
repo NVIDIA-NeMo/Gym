@@ -169,6 +169,7 @@ async def test_minimal_agentx_wire_task_runs_verification_and_reporting(server, 
 
     from resources_servers.opencode_multimodal_benchmarks.agentx import AgentXConfig, AgentXServer
 
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-test-key")
     agentx = AgentXServer(
         config=AgentXConfig(**(server.config.model_dump() | {"entrypoint": "agentx.py"})),
         server_client=server.server_client,

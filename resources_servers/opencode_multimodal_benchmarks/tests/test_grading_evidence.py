@@ -7,12 +7,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from nemo_gym.core import rollout_context
-from nemo_gym.server_runtime import observe_verifier
 from nemo_gym.trajectory import grading_result_binding
-from nemo_gym.verification import judge_failsafe
 from resources_servers.opencode_multimodal_benchmarks.agentx import AgentXConfig, AgentXServer
-from resources_servers.opencode_multimodal_benchmarks.app import VisualBenchmarksServer
+from resources_servers.opencode_multimodal_benchmarks.tests.response_fixtures import observed
 from resources_servers.opencode_multimodal_benchmarks.tests.test_app import request, server  # noqa: F401
 
 
@@ -30,17 +27,6 @@ def judge_reply(text: str, identifier: str = "verdict") -> MagicMock:
     http.__aenter__ = AsyncMock(return_value=http)
     http.__aexit__ = AsyncMock(return_value=None)
     return http
-
-
-async def observed(server: VisualBenchmarksServer, body: object) -> dict:
-    with rollout_context("grading-evidence"):
-        result = await observe_verifier(
-            judge_failsafe(server.verify),
-            enabled=True,
-            verifier_name=server.config.name,
-            uninstrumented_models=server.grading_may_use_uninstrumented_model,
-        )(body)
-    return json.loads(result.body) if hasattr(result, "body") else result.model_dump(mode="json")
 
 
 @pytest.mark.asyncio

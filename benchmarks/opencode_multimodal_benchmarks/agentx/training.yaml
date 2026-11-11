@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Training keeps the stock session path, opts into evidence, and selects the cheaper judge.
+config_paths:
+- benchmarks/opencode_multimodal_benchmarks/agentx/opencode.yaml
+opencode_multimodal_benchmarks:
+  resources_servers:
+    opencode_multimodal_benchmarks:
+      entrypoint: agentx_tool_rewards.py
+      judge_model: gpt-4o-mini
+      tool_rewards: {}
+visual_agent:
+  responses_api_agents:
+    opencode_agent:
+      token_id_capture: true
+visual_environment:
+  environment_servers:
+    single_agent_turn:
+      forward_agent_evidence: true
+policy_model:
+  responses_api_models:
+    vllm_model:
+      return_token_id_information: true
