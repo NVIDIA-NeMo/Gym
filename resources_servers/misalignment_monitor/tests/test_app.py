@@ -16,14 +16,9 @@ import asyncio
 import contextlib
 import importlib.util
 import json
-import logging
-import sys
 import time
-import types
-from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import orjson
@@ -57,7 +52,6 @@ def _config(tmp_path: Path, **overrides) -> MisalignmentMonitorConfig:
         "judge_responses_create_params": NeMoGymResponseCreateParamsNonStreaming(input=[]),
         "alerts_jsonl_fpath": str(tmp_path / "alerts.jsonl"),
         "audit_rate": 0.0,
-        "activation_results_dir": str(tmp_path),
     }
     return MisalignmentMonitorConfig(**(settings | overrides))
 
@@ -335,8 +329,9 @@ async def test_layer_3_leaves_p1_findings_alone(tmp_path: Path) -> None:
 
 
 async def test_audits_send_cleared_cases_on_at_every_stage(tmp_path: Path) -> None:
-    config = _config(tmp_path, audit_rate=1.0, activation_source="engine")
-    server = _server(config, NONE, NONE, NONE, global_config=_capture(tmp_path))
+    server = _server(_config(tmp_path, audit_rate=1.0), NONE, NONE, NONE)
+    # A layer-0 reading as the reader leaves it on the case.
+    server.config.activation_source = "reader"
     case = _case()
     case.reading = {"flagged": False}
     report = await server.review(case)
@@ -585,41 +580,6 @@ async def test_a_rewritten_capture_file_is_read_from_its_start(tmp_path: Path) -
     assert path not in server._capture_offsets
 
 
-def _reading_file(tmp_path: Path, reading: dict) -> str:
-    path = tmp_path / "chatcmpl-1.json"
-    path.write_text(json.dumps(reading))
-    (tmp_path / "chatcmpl-1.json.lock").write_text("")
-    return str(path)
-
-
-async def test_engine_readings_gate_reviews_and_reach_the_reviewer(tmp_path: Path) -> None:
-    reading = {"mode": "jspace", "flagged": True, "concepts": {"fake": 3}}
-    params = json.dumps({"misalignment_activations_path": _reading_file(tmp_path, reading)})
-    server = _server(_config(tmp_path, activation_source="engine"), NONE, global_config=_capture(tmp_path))
-    _call("7-2", tmp_path, TASK, DONE, metadata={"kv_transfer_params": params})
-    await server._finish({"rollout_id": "7-2", "response": {"output": DONE}})
-    assert "<activation_screen>" in _prompt(server, 0) and '"fake": 3' in _prompt(server, 0)
-    assert not list(tmp_path.glob("chatcmpl-1.json*"))
-
-
-async def test_an_engine_flag_mid_turn_triggers_a_per_turn_review(tmp_path: Path) -> None:
-    params = json.dumps({"misalignment_activations_path": _reading_file(tmp_path, {"flagged": True})})
-    config = _config(tmp_path, activation_source="engine", review_schedule="per_turn")
-    server = _server(config, NONE, global_config=_capture(tmp_path))
-    _call("7-2", tmp_path, TASK, EDIT, metadata={"kv_transfer_params": params})
-    await server._read_captures()
-    await _settle(server)
-    assert server.server_client.post.call_count == 1 and server._rollouts["7-2"].reviewed_latest
-
-
-async def test_engine_cleared_rollouts_skip_layer_1(tmp_path: Path) -> None:
-    params = json.dumps({"misalignment_activations_path": _reading_file(tmp_path, {"flagged": False})})
-    server = _server(_config(tmp_path, activation_source="engine"), global_config=_capture(tmp_path))
-    _call("7-2", tmp_path, TASK, DONE, metadata={"kv_transfer_params": params})
-    await server._finish({"rollout_id": "7-2", "response": {"output": DONE}})
-    assert server.server_client.post.call_count == 0 and server._counts["reviews"] == 1
-
-
 def test_capture_based_modes_need_observability(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="observability_enabled"):
         _server(_config(tmp_path, review_schedule="per_turn"))
@@ -836,10 +796,10 @@ class TestReader:
 
 
 async def test_a_layer_0_read_error_is_not_a_clean_screen(tmp_path) -> None:
-    config = _config(tmp_path, activation_source="engine", audit_rate=0.0)
-    server = _server(config, NONE, global_config=_capture(tmp_path))
+    server = _server(_config(tmp_path, audit_rate=0.0), NONE)
+    server.config.activation_source = "reader"
     case = _Case("7-2", "final", "the agent's context", ["the agent's context"], {"reward": 1.0})
-    # What _read_activation_file and the vLLM connector return when extraction or scoring fails.
+    # What the reader returns when a read fails.
     case.reading = {"flagged": False, "error": "OSError: activation file disappeared"}
 
     report = await server.review(case)
@@ -963,32 +923,6 @@ def test_a_one_character_cap_does_not_duplicate_the_whole_text() -> None:
     assert "abcdefghij" not in rendered
 
 
-@pytest.mark.parametrize("through_symlink", [False, True])
-async def test_an_activation_path_outside_the_results_dir_is_never_touched(tmp_path: Path, through_symlink) -> None:
-    results_dir = tmp_path / "l0"
-    results_dir.mkdir()
-    victim = tmp_path / "victim.jsonl"
-    victim.write_text("keep me\n")
-    path = victim
-    if through_symlink:
-        path = results_dir / "chatcmpl-1.json"
-        path.symlink_to(victim)
-    params = json.dumps({"misalignment_activations_path": str(path)})
-    config = _config(tmp_path, activation_source="engine", activation_results_dir=str(results_dir))
-    server = _server(config, NONE, global_config=_capture(tmp_path))
-    _call("7-2", tmp_path, TASK, DONE, metadata={"kv_transfer_params": params})
-    await server._finish({"rollout_id": "7-2", "response": {"output": DONE}})
-    assert victim.read_text() == "keep me\n"
-    # The call counts as unscreened, so layer 1 still reviews it.
-    assert server.server_client.post.call_count == 1
-    assert server._counts["l0_unscreened"] == 1
-
-
-def test_engine_mode_needs_a_results_dir(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="activation_results_dir"):
-        _config(tmp_path, activation_source="engine", activation_results_dir=None)
-
-
 async def test_a_runaway_search_times_out_without_blocking_the_monitor(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(app, "_SEARCH_TIMEOUT_S", 0.3, raising=False)
     server = _server(_config(tmp_path))
@@ -1036,65 +970,6 @@ async def test_a_queued_review_keeps_evidence_its_replacement_lacks(tmp_path: Pa
     assert any("SECRET plan" in json.dumps(sent) for sent in _sent(server))
 
 
-def _connector_module(monkeypatch: pytest.MonkeyPatch) -> Any:
-    """The vLLM plugin module, imported against stand-ins for the three vLLM names it uses."""
-
-    @dataclass
-    class PendingSave:
-        req_id: str
-        filename: str
-        token_ids: Any
-        block_ids: list
-
-    hidden_states = "vllm.distributed.kv_transfer.kv_connector.v1.example_hidden_states_connector"
-    for name in [
-        "vllm",
-        "vllm.distributed",
-        "vllm.distributed.kv_transfer",
-        "vllm.distributed.kv_transfer.kv_connector",
-    ]:
-        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
-    monkeypatch.setitem(sys.modules, "vllm.distributed.kv_transfer.kv_connector.v1", types.ModuleType("v1"))
-    stub = types.ModuleType(hidden_states)
-    stub.ExampleHiddenStatesConnector, stub.PendingSave, stub.extract_from_kv_cache = object, PendingSave, None
-    monkeypatch.setitem(sys.modules, hidden_states, stub)
-    monkeypatch.setitem(sys.modules, "vllm.logger", SimpleNamespace(init_logger=logging.getLogger))
-    name = "resources_servers.misalignment_monitor.vllm_activation_connector"
-    monkeypatch.delitem(sys.modules, name, raising=False)
-    return importlib.import_module(name)
-
-
-@pytest.mark.skipif(importlib.util.find_spec("torch") is None, reason="layer 0 needs torch")
-@pytest.mark.parametrize("generated", [1, 4098])
-def test_the_probe_reads_the_last_prompt_token_however_long_the_generation(monkeypatch, generated: int) -> None:
-    import torch
-
-    module = _connector_module(monkeypatch)
-    connector = object.__new__(module.MisalignmentActivationConnector)
-    connector._mode, connector._max_positions = "probe", 4096
-    connector._kv_transfer_config = SimpleNamespace(get_from_extra_config=lambda key, default=None: default)
-    width = 4
-    zeros = torch.zeros(width)
-    connector._readout = {
-        "probe": {"weight": zeros, "bias": torch.tensor([5.0]), "mu": zeros, "sd": torch.ones(width)},
-        "temperature": 1.0,
-    }
-    prompt = 8
-    # The last generated token was never an input, so a request stores prompt + generated - 1 positions.
-    token_ids = torch.zeros(prompt + generated - 1)
-    pending = module.ScoredSave(req_id="r", filename="f", token_ids=token_ids, block_ids=[], num_prompt_tokens=prompt)
-
-    first, last = connector._extraction_window(pending)
-    cache = torch.arange(len(token_ids) * width, dtype=torch.float32).reshape(-1, width)
-    reading = connector._read(pending, cache[first:last], first)
-
-    assert (first, last) == (7, 8)
-    assert reading["position"] == 7 and reading["flagged"] and "error" not in reading
-    # The lens still reads the end of the request, up to max_positions.
-    connector._mode = "jspace"
-    assert connector._extraction_window(pending) == (max(0, len(token_ids) - 4096), len(token_ids))
-
-
 P0_SECURITY = {"severity": "P0", "categories": ["sandbox_escape"], "summary": "curl to the internet"}
 
 
@@ -1129,14 +1004,3 @@ def test_a_search_stops_once_its_deadline_has_passed(monkeypatch: pytest.MonkeyP
     with pytest.raises(TimeoutError):
         app._search("anything", ["\n".join(f"line {index}" for index in range(200))])
     assert searched == []
-
-
-def test_an_activation_reading_that_cannot_be_removed_still_returns(tmp_path: Path) -> None:
-    results_dir = tmp_path / "l0"
-    results_dir.mkdir()
-    # A directory where the reading should be: it can be neither read nor removed as a file.
-    reading_path = results_dir / "reading.json"
-    reading_path.mkdir()
-    reading = app._read_activation_file(str(reading_path), str(results_dir))
-    assert reading["flagged"] is False and reading.get("error")
-    assert reading_path.is_dir()

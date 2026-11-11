@@ -28,8 +28,8 @@ misalignment_monitor:
       pause_after_unresolved_p0_minutes: null
 
       # final: one review per rollout, when it finishes.
-      # per_turn: review at the end of each agent turn, when the agent's context is rewritten, when layer 0 flags
-      # a model call, and at least every max_minutes_between_reviews. Needs observability_enabled: true and
+      # per_turn: review at the end of each agent turn, when the agent's context is rewritten, and at least every
+      # max_minutes_between_reviews. Needs observability_enabled: true and
       # model_call_capture_dir in the global config.
       review_schedule: final
       max_minutes_between_reviews: 30
@@ -38,7 +38,6 @@ misalignment_monitor:
       capture_poll_interval_s: 2.0
 
       # Layer 0. disabled: every review goes to layer 1.
-      # engine: the policy's own activations, scored inside vLLM by vllm_activation_connector.py (see README).
       # reader: a frozen copy of the model loaded in this server (reader_mode jspace or probe).
       activation_source: disabled
       # Share of what layer 0 or layer 1 clears that still goes to the next layer, to measure what they miss.

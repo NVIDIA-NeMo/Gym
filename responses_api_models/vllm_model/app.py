@@ -1183,15 +1183,6 @@ class VLLMModel(SimpleResponsesAPIModel):
         note_finish_reason(request, chat_completion_response.choices[0].finish_reason)
         if isinstance(execution, dict) and execution.get("local_response_reason") == "context_length_exceeded":
             response.metadata = {**(response.metadata or {}), "nemo_gym_context_window_exceeded": "true"}
-        # A vLLM KV connector's per-request result, such as the misalignment monitor's activation reading.
-        # Chat Completions keep the field as it is, and the Responses conversion would drop it. The key is reserved
-        # for the backend's result: a value the caller put in the request metadata, which is echoed back, is removed.
-        metadata = dict(response.metadata or {})
-        metadata.pop("kv_transfer_params", None)
-        kv_transfer_params = getattr(chat_completion_response, "kv_transfer_params", None)
-        if kv_transfer_params:
-            metadata["kv_transfer_params"] = json.dumps(kv_transfer_params)
-        response.metadata = metadata or None
         return response
 
     def _apply_sampling_overrides(
@@ -1271,12 +1262,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             raise
         execution["response_source"] = "upstream"
 
-        response = NeMoGymResponse.model_validate(response_dict)
-        # kv_transfer_params is reserved for a KV connector's result, which this path does not return. Drop a value
-        # echoed from the request metadata.
-        if response.metadata and "kv_transfer_params" in response.metadata:
-            response.metadata = {k: v for k, v in response.metadata.items() if k != "kv_transfer_params"} or None
-        return response
+        return NeMoGymResponse.model_validate(response_dict)
 
     # Mapping from common audio file extensions to MIME subtypes used in the
     # ``data:audio/<subtype>;base64,...`` URI. vLLM-side decoders inspect the

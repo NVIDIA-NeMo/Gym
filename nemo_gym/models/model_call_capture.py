@@ -510,7 +510,6 @@ def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, An
     response_id: Optional[str] = None
     role = "assistant"
     finish_reason: Optional[str] = None
-    kv_transfer_params: Any = None
     saw_choice = False
     for chunk in events:
         model = chunk.get("model") or model
@@ -518,8 +517,6 @@ def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, An
             response_id = chunk["id"]
         if chunk.get("usage"):
             usage = chunk["usage"]
-        if chunk.get("kv_transfer_params") is not None:
-            kv_transfer_params = chunk["kv_transfer_params"]
         for choice in chunk.get("choices") or []:
             if not isinstance(choice, dict):
                 continue
@@ -564,9 +561,6 @@ def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, An
         result["id"] = response_id
     if usage:
         result["usage"] = usage
-    # A KV connector's result (see chat_streaming._chunk) survives into the capture.
-    if kv_transfer_params is not None:
-        result["kv_transfer_params"] = kv_transfer_params
     return result
 
 

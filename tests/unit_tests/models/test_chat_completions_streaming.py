@@ -180,20 +180,6 @@ class TestSynthesizeChatSSE:
         # every chunk shares the completion identity
         assert {e["id"] for e in events} == {completion["id"]}
 
-    def test_kv_transfer_params_survive_the_stream_into_capture(self) -> None:
-        params = {"misalignment_activations_path": "/dev/shm/l0/chatcmpl-1.json"}
-        completion = _completion(content="hi").model_dump(mode="json") | {"kv_transfer_params": params}
-        events = _parse_sse_events("".join(synthesize_chat_completion_sse(completion)).encode())
-        assert _reconstruct_chat_sse(events)["kv_transfer_params"] == params
-        # A later chunk without a value does not erase it.
-        assert (
-            _reconstruct_chat_sse([*events, {"choices": [], "kv_transfer_params": None}])["kv_transfer_params"]
-            == params
-        )
-        # A stream that never carried it rebuilds without it.
-        plain = "".join(synthesize_chat_completion_sse(_completion(content="hi").model_dump(mode="json")))
-        assert "kv_transfer_params" not in _reconstruct_chat_sse(_parse_sse_events(plain.encode()))
-
     def test_content_roundtrips_via_capture_reconstructor(self) -> None:
         completion = _completion(content="hello world", usage=_USAGE).model_dump(mode="json")
         text = "".join(synthesize_chat_completion_sse(completion))
