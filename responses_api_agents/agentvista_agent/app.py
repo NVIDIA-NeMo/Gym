@@ -41,6 +41,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
+from responses_api_agents.agentvista_agent.runtime.paths import output_path
 
 
 class AgentVistaConfig(BaseResponsesAPIAgentConfig):
@@ -129,7 +130,7 @@ class AgentVistaAgent(SimpleResponsesAPIAgent):
                 sort_keys=True,
             ).encode()
         ).hexdigest()
-        output = Path(self.config.output_root).resolve() / identity
+        output = output_path(self.config.output_root) / identity
         if identity in self._fingerprints and self._fingerprints[identity] != fingerprint:
             raise HTTPException(409, "Rollout ID reused with different request")
         if identity not in self._inflight:
@@ -261,6 +262,7 @@ class AgentVistaAgent(SimpleResponsesAPIAgent):
                     "model_protocol_error",
                     "timeout",
                     "native_error",
+                    "output_budget_exhausted",
                 }
                 else "completed",
                 "output": items,
@@ -312,6 +314,9 @@ class AgentVistaAgent(SimpleResponsesAPIAgent):
                 h["termination"] in {"malformed_tool_call", "model_protocol_error"} for h in health
             )
             metrics["agentvista/incomplete_tasks"] = sum(h.get("task_success") is False for h in health)
+            metrics["agentvista/output_budget_exhausted"] = sum(
+                h["termination"] == "output_budget_exhausted" for h in health
+            )
         if valid:
             metrics["agentvista/mean_score"] = sum(r["reward"] for r in valid) / len(valid)
             metrics["agentvista/pass_rate"] = sum(r["verify_status"] == "PASS" for r in valid) / len(valid)

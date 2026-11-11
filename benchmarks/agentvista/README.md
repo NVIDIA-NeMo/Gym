@@ -101,7 +101,11 @@ process receives neither judge credentials nor reference answers.
 
 Rewards use the original binary answer-judge prompt and extraction. They are
 **LLM-judged**, not deterministic verification. A completed wrong answer remains
-an unmasked zero. Provider/capture/judge failures remain masked and unscored;
+an unmasked zero. Clean output-token exhaustion is reported as
+`execution_health.termination=output_budget_exhausted` and sent to the original
+judge, including an empty prediction when no answer was produced. Timeouts,
+process/native errors and capture/judge failures retain distinct failure kinds
+and remain masked and unscored;
 the adapter makes the original judge's otherwise swallowed errors visible.
 
 ## Run evaluation
@@ -152,3 +156,8 @@ uses at most eight turns/steps per episode and does not retry failed episodes.
 The existing NeMo RL adapters retain OpenCode-only sampling/token-capture
 compatibility. The default harness is evaluation-only. No training, GPU optimizer
 qualification, certified score or completed live smoke is claimed by this PR.
+
+Episode outputs preserve the launcher-mounted path instead of resolving filesystem
+aliases. Slurm exports `NEMO_GYM_BENCH_DIR` as the actual bound benchmark directory
+for native and custom-command runs, so inputs, episode logs and result files survive
+container exit.

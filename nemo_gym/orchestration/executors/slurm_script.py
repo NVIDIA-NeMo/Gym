@@ -1174,6 +1174,8 @@ def build_sbatch_script(
         # as a calling convention it would have to parse.
         gym_cmd = ""
         driver_env |= _command_env(benchmark, remote_bench_dir)
+    # Host PWD can resolve to an alias that is absent from the container bind mounts.
+    driver_env["NEMO_GYM_BENCH_DIR"] = str(remote_bench_dir)
     exports = effective_exports(config, benchmark_name)
     export_tail = (
         render_export_tail(

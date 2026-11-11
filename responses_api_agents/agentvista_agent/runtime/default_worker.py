@@ -14,6 +14,7 @@ import yaml
 
 from responses_api_agents.agentvista_agent.runtime import HARNESS_VERSION
 from responses_api_agents.agentvista_agent.runtime.data import inventory
+from responses_api_agents.agentvista_agent.runtime.paths import output_path
 from responses_api_agents.agentvista_agent.runtime.scoring import score
 
 
@@ -32,7 +33,7 @@ def _gym_messages(messages: list[dict]) -> list[dict]:
 
 def run(config: dict) -> dict:
     """Execute one original-harness episode and preserve its original trajectory."""
-    output = Path(config["output"]).resolve()
+    output = output_path(config["output"])
     output.mkdir(parents=True, exist_ok=True)
     result = {
         "artifacts": str(output),

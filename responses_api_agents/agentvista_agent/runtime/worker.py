@@ -19,6 +19,7 @@ from utils.context_utils import pil_to_base64_data_uri
 
 from responses_api_agents.agentvista_agent.runtime import HARNESS_VERSION, OPENCODE_VERSION
 from responses_api_agents.agentvista_agent.runtime.data import inventory
+from responses_api_agents.agentvista_agent.runtime.paths import output_path
 from responses_api_agents.agentvista_agent.runtime.scoring import score
 
 
@@ -122,8 +123,38 @@ def actor_environment(workspace: Path) -> dict[str, str]:
     return env
 
 
+def _execution_health(events: list[dict], returncode: int, timed_out: bool, output_tokens: int) -> dict:
+    finishes = [event["part"] for event in events if event.get("type") == "step_finish"]
+    finish = finishes[-1] if finishes else {}
+    errors = [event for event in events if event.get("type") == "error"]
+    tools = [event.get("part", {}) for event in events if event.get("type") == "tool_use"]
+    termination = "completed"
+    if timed_out:
+        termination = "timeout"
+    elif returncode:
+        termination = "process_exit"
+    elif errors:
+        termination = "native_error"
+    elif finish.get("reason") == "length":
+        termination = "output_budget_exhausted"
+    elif not any(event.get("type") == "text" for event in events):
+        termination = "missing_final_answer"
+    return {
+        "termination": termination,
+        "finish_reason": finish.get("reason"),
+        "output_tokens_limit": output_tokens,
+        "last_step_output_tokens": (finish.get("tokens") or {}).get("output"),
+        "returncode": returncode,
+        "timed_out": timed_out,
+        "native_errors": len(errors),
+        "tool_calls": len(tools),
+        "tool_errors": sum((tool.get("state") or {}).get("status") == "error" for tool in tools),
+        "execution_healthy": not timed_out and returncode == 0 and not errors,
+    }
+
+
 def run(config: dict) -> dict:
-    output = Path(config["output"]).resolve()
+    output = output_path(config["output"])
     output.mkdir(parents=True, exist_ok=True)
     result = {
         "artifacts": str(output),
@@ -150,6 +181,7 @@ def run(config: dict) -> dict:
 
     previous = {sig: signal.signal(sig, stop) for sig in (signal.SIGTERM, signal.SIGINT)}
     try:
+        result["failure_kind"] = "agentvista:setup"
         tasks = inventory(config["dataset"], config["image_folder"], config.get("task_selector", "all"))
         task = tasks[config["task_id"]]
         if task["source_sha256"] != config["source_sha256"]:
@@ -203,6 +235,7 @@ def run(config: dict) -> dict:
             (output / "events.jsonl").open("w") as stdout,
             (output / "opencode.stderr").open("w") as stderr,
         ):
+            result["failure_kind"] = "agentvista:execution"
             process = subprocess.Popen(
                 [
                     command,
@@ -231,18 +264,26 @@ def run(config: dict) -> dict:
                 timed_out = True
             finally:
                 stop()
+        result["failure_kind"] = "agentvista:capture"
         events = [json.loads(line) for line in (output / "events.jsonl").read_text().splitlines() if line.strip()]
         texts = [e["part"]["text"] for e in events if e.get("type") == "text"]
+        health = _execution_health(events, process.returncode, timed_out, config["output_tokens"])
         result.update(
             trajectory=events,
             native_trajectory=events,
             agent_output=texts[-1] if texts else "",
             returncode=process.returncode,
             timed_out=timed_out,
+            execution_health=health,
         )
-        if process.returncode or timed_out or any(e.get("type") == "error" for e in events) or not texts:
-            raise RuntimeError("OpenCode episode did not complete cleanly; inspect native artifacts")
+        if health["termination"] not in {"completed", "output_budget_exhausted"}:
+            result["failure_kind"] = "agentvista:" + health["termination"]
+            raise RuntimeError(f"OpenCode termination: {health['termination']}; inspect native artifacts")
+        # A clean token-limit termination is a model outcome, including an empty prediction.
+        result["failure_kind"] = "agentvista:verifier"
         verdict = score(task["question"], task["record"].get("solution"), texts)
+        health["task_success"] = verdict["reward"] == 1
+        result.pop("failure_kind", None)
         result.update(
             verify=verdict,
             reward=verdict["reward"],
@@ -252,7 +293,8 @@ def run(config: dict) -> dict:
             deterministically_verified=False,
         )
     except Exception as exc:
-        result.update(failure_kind="agentvista:episode", error=f"{type(exc).__name__}: {exc}")
+        result.setdefault("failure_kind", "agentvista:episode")
+        result["error"] = f"{type(exc).__name__}: {exc}"
     finally:
         stop()
         for sig, handler in previous.items():

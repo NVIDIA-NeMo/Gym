@@ -2032,6 +2032,14 @@ def test_a_command_keeps_the_driver_env_the_config_declared(tmp_path):
     assert "NEMO_GYM_BENCH_DIR=" in script
 
 
+@pytest.mark.parametrize("command", [None, "harness"])
+def test_driver_bench_dir_uses_bound_path_instead_of_host_pwd(tmp_path, command):
+    script = _render_command(tmp_path, command, env={"NEMO_GYM_BENCH_DIR": "runtime:PWD"})
+    bench_dir = tmp_path / "jobs" / "x" / "osworld"
+    assert f"NEMO_GYM_BENCH_DIR={bench_dir}" in script
+    assert "NEMO_GYM_BENCH_DIR=${PWD}" not in script
+
+
 def test_a_command_still_runs_prepare_first(tmp_path):
     config = SubmitConfig.model_validate(
         {

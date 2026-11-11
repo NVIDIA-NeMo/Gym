@@ -20,6 +20,7 @@ if not os.environ.get("AGENTVISTA_ROOT"):
     pytest.skip("Set AGENTVISTA_ROOT to run the external benchmark integration contracts", allow_module_level=True)
 ROOT = Path(os.environ["AGENTVISTA_ROOT"]).resolve()
 sys.path.insert(0, str(ROOT))
+from nemo_gym.base_resources_server import AggregateMetricsRequest
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.agentvista_agent.app import (
@@ -96,6 +97,27 @@ def test_real_gym_tool_transcript_and_measured_zero(agent):
 
 
 @pytest.mark.asyncio
+async def test_budget_exhaustion_keeps_judged_zero_and_explicit_metrics(agent):
+    value = result()
+    value["native_trajectory"] = []
+    value["execution_health"] = {
+        "termination": "output_budget_exhausted",
+        "finish_reason": "length",
+        "tool_calls": 0,
+        "tool_errors": 0,
+        "execution_healthy": True,
+        "task_success": False,
+    }
+    response = agent._response(request(), value)
+    assert not response.mask_sample and response.reward == 0
+    assert response.response.status == "incomplete"
+    metrics = await agent.aggregate_metrics(AggregateMetricsRequest(verify_responses=[response.model_dump()]))
+    assert metrics.agent_metrics["agentvista/num_scored"] == 1
+    assert metrics.agent_metrics["agentvista/num_masked"] == 0
+    assert metrics.agent_metrics["agentvista/output_budget_exhausted"] == 1
+
+
+@pytest.mark.asyncio
 async def test_cached_rollout_retry_does_not_rerun_actor(agent):
     body = request()
     output = Path(agent.config.output_root) / hashlib.sha256(b"repeat-0").hexdigest()
@@ -122,6 +144,24 @@ async def test_cached_rollout_retry_does_not_rerun_actor(agent):
 async def test_missing_rollout_identity_rejected(agent):
     with pytest.raises(Exception, match="_ng_rollout_id"):
         await agent.run(request().model_copy(update={"capture_rollout_id": None}))
+
+
+@pytest.mark.asyncio
+async def test_episode_output_stays_in_mounted_path(agent, monkeypatch, tmp_path):
+    persistent = tmp_path / "persistent"
+    persistent.mkdir()
+    mounted = tmp_path / "mounted"
+    mounted.symlink_to(persistent, target_is_directory=True)
+    agent.config.output_root = str(mounted / "episodes")
+    observed = []
+
+    async def episode(self, body, output, fingerprint, rollout_id):
+        observed.append(output)
+        return self._response(body, result())
+
+    monkeypatch.setattr(AgentVistaAgent, "_episode", episode)
+    await agent.run(request())
+    assert observed == [mounted / "episodes" / hashlib.sha256(b"repeat-0").hexdigest()]
 
 
 def test_training_terminal_is_witnessed_and_absence_masks(agent, tmp_path):

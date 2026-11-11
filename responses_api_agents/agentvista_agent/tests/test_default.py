@@ -90,8 +90,12 @@ def test_original_loop_tool_feedback_and_judge_status(tmp_path: Path, monkeypatc
         monkeypatch.setenv(key, "fixture")
     monkeypatch.setenv("SERPAPI_KEY", "fixture")
     monkeypatch.setenv("REASONING_API_KEY_2", "must-be-removed")
+    persistent = tmp_path / "persistent"
+    persistent.mkdir()
+    mounted = tmp_path / "mounted"
+    mounted.symlink_to(persistent, target_is_directory=True)
     config = {
-        "output": str(tmp_path / "episode"),
+        "output": str(mounted / "episode"),
         "source_root": source,
         "dataset": str(dataset),
         "image_folder": str(tmp_path),
@@ -102,6 +106,8 @@ def test_original_loop_tool_feedback_and_judge_status(tmp_path: Path, monkeypatc
         "default_max_turns": 4,
     }
     result = run(config)
+    assert result["artifacts"] == str(mounted / "episode")
+    assert (persistent / "episode/result.json").is_file()
     assert len(calls) == 2, result
     assert result["native_trajectory"] and result["harness"] == "default"
     assert result["agent_output"] == "42"

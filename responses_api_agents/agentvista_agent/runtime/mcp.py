@@ -16,11 +16,13 @@ from pathlib import Path
 from PIL import Image
 from utils.context_utils import pil_to_base64_data_uri
 
+from responses_api_agents.agentvista_agent.runtime.paths import output_path
+
 
 class ToolSession:
     def __init__(self, config: dict) -> None:
         self.config = config
-        self.output = Path(config["output"]).resolve()
+        self.output = output_path(config["output"])
         self.output.mkdir(parents=True, exist_ok=True)
         self.image_map = {}
         for index, path in enumerate(config["images"]):
@@ -69,8 +71,8 @@ class ToolSession:
                     path = self.output / (key + ".jpg")
                     self.image_map[key].save(path, quality=95)
                 else:
-                    path = self.image_aliases.get(reference) or (self.output / reference).resolve(strict=True)
-                    if not path.is_relative_to(self.output):
+                    path = self.image_aliases.get(reference) or output_path(self.output / reference)
+                    if not path.resolve(strict=True).is_relative_to(self.output.resolve(strict=True)):
                         raise ValueError("Image reference outside episode")
                 params["image_url"] = str(path)
         kwargs = {"image_map": self.image_map.copy()} if name == "code_interpreter" else {"save_dir": str(self.output)}
@@ -89,7 +91,7 @@ class ToolSession:
                 if not re.fullmatch(r"tool_image_\d+|observation_\d+", key):
                     key = f"tool_image_{1 + sum(k.startswith('tool_image_') for k in self.image_map)}"
                 self.image_map[key] = image
-                self.image_aliases[path.name] = path.resolve()
+                self.image_aliases[path.name] = output_path(path)
                 uri = pil_to_base64_data_uri(image)
                 content.append({"type": "image", "mimeType": "image/jpeg", "data": uri.split(",", 1)[1]})
                 processed = processed.replace(f"![{label}]({reference})", f"[Image: {key}, file: {path.name}]")

@@ -22,6 +22,20 @@ from responses_api_agents.agentvista_agent.runtime.data import dataset_rows, inv
 from responses_api_agents.agentvista_agent.runtime.mcp import ToolSession
 from responses_api_agents.agentvista_agent.runtime.scoring import score
 from responses_api_agents.agentvista_agent.runtime.training import terminal_response_id
+from responses_api_agents.agentvista_agent.runtime.worker import _execution_health
+
+
+@pytest.mark.parametrize(
+    "returncode,timed_out,native_error,termination",
+    [(1, False, False, "process_exit"), (-15, True, False, "timeout"), (0, False, True, "native_error")],
+)
+def test_budget_finish_does_not_hide_execution_failures(returncode, timed_out, native_error, termination):
+    events = [{"type": "step_finish", "part": {"reason": "length", "tokens": {"output": 100}}}]
+    if native_error:
+        events.append({"type": "error", "error": {"name": "APIError"}})
+    health = _execution_health(events, returncode, timed_out, 100)
+    assert health["termination"] == termination
+    assert not health["execution_healthy"]
 
 
 @pytest.fixture
@@ -62,7 +76,12 @@ def test_original_tool_schemas_and_text_search_outputs(monkeypatch, tmp_path, ep
 
     monkeypatch.setenv("SERPAPI_KEY", "fixture-key")
     dataset, image = episode
-    session = ToolSession({"output": str(tmp_path / "tools"), "images": [str(image)], "web_search_max_calls": 1})
+    target = tmp_path / "persistent"
+    target.mkdir()
+    mounted = tmp_path / "mounted"
+    mounted.symlink_to(target, target_is_directory=True)
+    session = ToolSession({"output": str(mounted), "images": [str(image)], "web_search_max_calls": 1})
+    assert session.output == mounted
     for schema in session.schema():
         assert schema == get_tool_info(schema["name"])
     sent = []
@@ -101,6 +120,12 @@ def test_original_tool_schemas_and_text_search_outputs(monkeypatch, tmp_path, ep
     assert uploads and all(item["type"] == "text" for item in reverse)
     assert sent[-1][0].endswith("/lens")
     assert json.loads(sent[-1][1]["data"])["url"] == "https://example.com/upload.jpg"
+    Image.new("RGB", (10, 10), "red").save(mounted / "saved.jpg")
+    session.execute("image_search", {"search_type": "reverse", "image_url": "saved.jpg"})
+    assert uploads[-1] == str(mounted / "saved.jpg")
+    (mounted / "escape.jpg").symlink_to(image)
+    with pytest.raises(ValueError, match="outside episode"):
+        session.execute("image_search", {"search_type": "reverse", "image_url": "escape.jpg"})
 
 
 def test_visit_preserves_auxiliary_summarizer(monkeypatch, tmp_path):
