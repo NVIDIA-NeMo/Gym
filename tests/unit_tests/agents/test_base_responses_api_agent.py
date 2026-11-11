@@ -394,6 +394,15 @@ class TestRolloutTokenCapture:
             ("/ng-rollout/3-1/v1/responses", "http://model-host:8000/ng-rollout/3-1/v1"),
             # A call that names no rollout keeps the agent's own setting.
             ("/v1/responses", "http://model-host:8000/ng-rollout/3-1/training-token-capture/v1"),
+            # The rollout's sampling values ride along either way; only the training tag follows the path.
+            (
+                f"/ng-rollout/3-1/ng-sampling/{TestModelSampling.SEGMENT}/v1/responses",
+                f"http://model-host:8000/ng-rollout/3-1/ng-sampling/{TestModelSampling.SEGMENT}/v1",
+            ),
+            (
+                f"/ng-rollout/3-1/training-token-capture/ng-sampling/{TestModelSampling.SEGMENT}/v1/responses",
+                f"http://model-host:8000/ng-rollout/3-1/training-token-capture/ng-sampling/{TestModelSampling.SEGMENT}/v1",
+            ),
         ],
     )
     def test_an_activation_follows_the_training_tag_of_its_path(
