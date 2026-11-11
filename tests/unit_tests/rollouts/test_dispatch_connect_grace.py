@@ -17,12 +17,13 @@
 import asyncio
 import json
 import socket
+import sys
 import time
 from pathlib import Path
 
 import httpx
 import pytest
-from aiohttp import ClientSession
+from aiohttp import ClientSession, ClientTimeout
 from omegaconf import OmegaConf
 
 import nemo_gym.client.http_client as transport
@@ -121,6 +122,43 @@ async def test_a_run_refused_past_the_grace_period_is_saved_as_never_sent(tmp_pa
             await asyncio.wait_for(RolloutCollectionHelper().run_from_config(config), timeout=30)
         elapsed = time.monotonic() - started
 
+    assert 1.5 <= elapsed < 10
+    failures = config.output_jsonl_fpath.replace(".jsonl", "_failures.jsonl")
+    [row] = [json.loads(line) for line in open(failures) if line.strip()]
+    assert row["_ng_failure_record"]["delivery"] == "not_sent"
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux", reason="relies on Linux dropping connection attempts to a full accept queue"
+)
+async def test_a_run_whose_handshake_times_out_is_resent_within_the_grace_and_saved_as_never_sent(
+    tmp_path, monkeypatch
+):
+    """A connect that times out, like one that is refused, never delivered /run."""
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(0)
+    port = listener.getsockname()[1]
+    # Never accepted, so the accept queue is full and the Linux kernel drops further handshakes.
+    fillers = []
+    for _ in range(4):
+        filler = socket.socket()
+        filler.setblocking(False)
+        filler.connect_ex(("127.0.0.1", port))
+        fillers.append(filler)
+    config = _config(tmp_path, monkeypatch, port, route_failures_to_sidecar=True, dispatch_connect_grace_s=1.5)
+    try:
+        async with ClientSession(timeout=ClientTimeout(sock_connect=0.3)) as session:
+            monkeypatch.setattr(transport, "get_global_aiohttp_client", lambda: session)
+            started = time.monotonic()
+            with pytest.raises(IncompleteEvaluationError):
+                await asyncio.wait_for(RolloutCollectionHelper().run_from_config(config), timeout=30)
+            elapsed = time.monotonic() - started
+    finally:
+        for sock in (listener, *fillers):
+            sock.close()
+
+    # Each handshake gave up after 0.3 s, and collection kept resending until the grace period ended.
     assert 1.5 <= elapsed < 10
     failures = config.output_jsonl_fpath.replace(".jsonl", "_failures.jsonl")
     [row] = [json.loads(line) for line in open(failures) if line.strip()]
