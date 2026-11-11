@@ -1,0 +1,65 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "environments/scrabble/data/example.jsonl",
+    "num_repeats": 1,
+    "source": null,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": "Apache 2.0",
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 656.0,
+        "Min": 656.0,
+        "Max": 656.0,
+        "Standard deviation": 0.0
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "position_id": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "board": {
+        "unique_count": 44,
+        "total_count": 75
+    },
+    "rack": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "best_score": {
+        "Total # non-null values": 5,
+        "Average": 26.4,
+        "Min": 16.0,
+        "Max": 42.0,
+        "Standard deviation": 9.81
+    },
+    "max_attempts": {
+        "Total # non-null values": 5,
+        "Average": 3.0,
+        "Min": 3.0,
+        "Max": 3.0,
+        "Standard deviation": 0.0
+    }
+}
