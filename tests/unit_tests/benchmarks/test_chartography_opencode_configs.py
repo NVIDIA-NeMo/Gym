@@ -13,15 +13,25 @@ from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDi
 
 ROOT = Path(__file__).resolve().parents[3]
 BENCHMARK = "benchmarks/chartography_opencode/config.yaml"
+# The setting with the judge its header names, as `gym env start` and a training launch load it.
+JUDGE_PAIRING = (
+    "resources_servers/chartography/configs/chartography_opencode.yaml",
+    "resources_servers/chartography/configs/judge_model_openai.yaml",
+)
+# The no-tools setting, whose grading the OpenCode setting repeats.
+PLAIN = (
+    "resources_servers/chartography/configs/chartography.yaml",
+    "resources_servers/chartography/configs/judge_model_openai.yaml",
+)
 
 
-def resolve(config_path: str, **overrides: object) -> tuple[GlobalConfigDictParser, dict]:
+def resolve(*config_paths: str, **overrides: object) -> tuple[GlobalConfigDictParser, dict]:
     parser = GlobalConfigDictParser()
     config = parser.parse(
         GlobalConfigDictParserConfig(
             initial_global_config_dict=OmegaConf.merge(
                 GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
-                {"config_paths": [str(ROOT / config_path)], **overrides},
+                {"config_paths": [str(ROOT / path) for path in config_paths], **overrides},
             ),
             skip_load_from_cli=True,
             skip_load_from_dotenv=True,
@@ -37,9 +47,6 @@ def test_benchmark_config_routes_the_rows_through_an_agent_session():
     assert started == {
         "policy_model",
         "judge_model",
-        "chartography",
-        "chartography_simple_agent",
-        "chartography_environment_server",
         "chartography_opencode",
         "chartography_opencode_agent",
         "chartography_opencode_environment_server",
@@ -55,9 +62,10 @@ def test_benchmark_config_routes_the_rows_through_an_agent_session():
     # The resources server grades as in the simple_agent setting, and lends each episode a sandbox that reaches
     # only the policy model.
     resources = config["chartography_opencode"]["resources_servers"]["chartography"]
-    plain = config["chartography"]["resources_servers"]["chartography"]
-    for field in ("judge_model_server", "judge_chat_create_params", "judge_prompt_template_fpath"):
-        assert resources[field] == plain[field]
+    _, plain_config = resolve(*PLAIN)
+    plain = plain_config["chartography"]["resources_servers"]["chartography"]
+    for field in plain.keys() - {"description", "value", "host"}:
+        assert resources[field] == plain[field], field
     assert "sandbox_provider" not in plain
     assert resources["sandbox_provider"] in config
     assert resources["sandbox_network_access"] == "model_only"
@@ -96,13 +104,16 @@ def test_only_the_policy_model_takes_a_launcher_s_host_address():
         for instance in parser.filter_for_server_instance_configs(config)
     }
     assert hosts["policy_model"] == "10.1.2.3"
-    for name in (
-        "judge_model",
-        "chartography_opencode",
-        "chartography_opencode_agent",
-        "chartography_opencode_environment_server",
-    ):
-        assert hosts[name] == "127.0.0.1", name
+    assert {name: host for name, host in hosts.items() if name != "policy_model"} == dict.fromkeys(
+        hosts.keys() - {"policy_model"}, "127.0.0.1"
+    )
+
+
+def test_the_judge_stays_on_loopback_with_the_setting_s_judge_config():
+    """The judge spends its key for any caller, so it stays off the address the lent sandbox may reach."""
+    parser, config = resolve(*JUDGE_PAIRING, default_host="10.1.2.3")
+    judge = next(i for i in parser.filter_for_server_instance_configs(config) if i.name == "judge_model")
+    assert judge.get_inner_run_server_config_dict()["host"] == "127.0.0.1"
 
 
 def test_episodes_are_admitted_at_the_agent_s_rate_and_end_before_the_sandbox_expires():
@@ -146,5 +157,6 @@ def test_the_agent_pins_the_opencode_build_of_the_shared_sandbox_image():
 
 def test_only_the_opencode_setting_scores_unfinished_runs_zero():
     _, ours = resolve(BENCHMARK)
+    _, plain = resolve(*PLAIN)
     assert ours["chartography_opencode"]["resources_servers"]["chartography"]["score_unfinished_as_zero"] is True
-    assert "score_unfinished_as_zero" not in ours["chartography"]["resources_servers"]["chartography"]
+    assert "score_unfinished_as_zero" not in plain["chartography"]["resources_servers"]["chartography"]

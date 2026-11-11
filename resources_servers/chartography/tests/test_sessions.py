@@ -186,6 +186,35 @@ def test_a_verify_retried_after_a_judge_failure_is_graded(root, stopped) -> None
     assert len(stopped) == 1
 
 
+@pytest.mark.parametrize("failed_stops", [1, 2])
+def test_a_failed_stop_before_the_judge_keeps_the_grade_and_is_retried(
+    root, stopped, monkeypatch, failed_stops
+) -> None:
+    """verifying() stops the sandbox again on exit, and a stop that fails there too is left for the close."""
+    server = _server(root)
+    client = TestClient(server.setup_webserver())
+    assert client.post("/seed_session", json=_seed().model_dump(mode="json")).status_code == 200
+    _mock_judge(server, _judge_content(1))
+    attempts: list[AsyncSandbox] = []
+    recording_stop = AsyncSandbox.stop
+
+    async def stop(self: AsyncSandbox) -> None:
+        attempts.append(self)
+        if len(attempts) <= failed_stops:
+            raise RuntimeError("the provider refused the stop")
+        await recording_stop(self)
+
+    monkeypatch.setattr(AsyncSandbox, "stop", stop)
+
+    verified = client.post("/verify", json=_verify_body())
+
+    assert verified.status_code == 200, verified.text
+    assert verified.json()["reward"] == 1.0 and not verified.json().get("mask_sample")
+    assert client.post("/close_session", json=_close()).status_code == 200
+    assert len(attempts) == failed_stops + 1 and len(stopped) == 1
+    assert server._lent_sandboxes.get("session") is None
+
+
 def test_a_verify_after_the_close_is_masked_as_lost(root, stopped) -> None:
     server = _server(root)
     client = TestClient(server.setup_webserver())
@@ -217,7 +246,11 @@ def test_model_only_lends_a_sandbox_that_reaches_only_the_policy_model(root, mon
     monkeypatch.setattr(
         "nemo_gym.server_runtime.sandbox_lending.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
     )
-    monkeypatch.setattr("nemo_gym.server_runtime.sandbox_lending.get_server_url", lambda name: "http://10.1.2.3:9000")
+    # Only the policy model resolves to the address the egress rule should allow.
+    monkeypatch.setattr(
+        "nemo_gym.server_runtime.sandbox_lending.get_server_url",
+        lambda name: {"policy_model": "http://10.1.2.3:9000", "judge": "http://10.9.9.9:9001"}[name],
+    )
     specs = []
 
     async def start(self: AsyncSandbox, spec) -> None:
@@ -330,20 +363,21 @@ def test_only_the_no_tools_setting_runs_with_several_workers(root) -> None:
 
 
 @pytest.mark.parametrize(
-    ("score_unfinished_as_zero", "status", "reward", "judge_calls"),
+    ("fields", "status", "reward", "judge_calls"),
     [
-        (True, "incomplete", 0.0, 0),
-        (True, "failed", 0.0, 0),
-        (True, "completed", 1.0, 1),
-        (False, "incomplete", 1.0, 1),
-        (False, "failed", 1.0, 1),
+        ({"score_unfinished_as_zero": True}, "incomplete", 0.0, 0),
+        ({"score_unfinished_as_zero": True}, "failed", 0.0, 0),
+        ({"score_unfinished_as_zero": True}, "completed", 1.0, 1),
+        # The default (the field unset) keeps upstream's behavior.
+        ({}, "incomplete", 1.0, 1),
+        ({}, "failed", 1.0, 1),
     ],
     ids=["opencode_incomplete", "opencode_failed", "opencode_completed", "default_incomplete", "default_failed"],
 )
-def test_an_unfinished_run_scores_zero_only_when_configured(score_unfinished_as_zero, status, reward, judge_calls):
+def test_an_unfinished_run_scores_zero_only_when_configured(fields, status, reward, judge_calls):
     """A run whose last message is the right answer. One that did not complete (a timeout, an output cap, a context
     limit, or a failed run that the outcome policy sends to verify) scores 0 only when configured."""
-    config = _config(score_unfinished_as_zero=score_unfinished_as_zero)
+    config = _config(**fields)
     server = ChartographyResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
     client = TestClient(server.setup_webserver())
     judge = _mock_judge(server, _judge_content(1))

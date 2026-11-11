@@ -7,25 +7,34 @@
 # Needs: CHARTOGRAPHY_OPENCODE_SANDBOX_IMAGE, an image built from resources_servers/visual_coding_opencode/sandbox_image
 # (OpenCode, its plugin dependencies and a Python image toolkit; the agent below pins the same OpenCode build),
 # OPENSANDBOX_DOMAIN and OPENSANDBOX_API_KEY, a host the sandbox can reach (use_absolute_ip), and a judge
-# (judge_model_openai.yaml or your own judge_model).
+# (judge_model_openai.yaml, or your own judge_model with host: 127.0.0.1).
 config_paths:
   - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
-  - resources_servers/chartography/configs/chartography.yaml
 
 use_absolute_ip: true
 absolute_ip_server_types: [responses_api_models]
 
 chartography_opencode:
-  # A copy of the simple_agent setting's server (chartography.yaml), plus the lent sandbox.
-  _copy: chartography
+  # The simple_agent setting's server (chartography.yaml), plus the lent sandbox. It is not chained: the lent sandbox
+  # may reach the policy model's host, so no no-tools server may listen there. The config test checks that the two
+  # settings grade the same way.
   resources_servers:
     chartography:
+      entrypoint: app.py
       host: 127.0.0.1
       domain: other
       verified: false
       description: 'Professional chart reading with tools: OpenCode answers one chart question in a sandbox session
         with a Python image toolkit; graded against a golden answer by the Chartography benchmark''s own LLM judge'
       value: Train and measure tool-assisted, precise reading of specialized charts
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      judge_chat_create_params:
+        messages: []
+      judge_prompt_template_fpath: prompt_templates/judge.txt
+      judge_max_attempts: 5
+      judge_endpoint_max_concurrency: 64
       # A run that does not complete (OpenCode's timeout, an output cap, a context limit or a failed run) scores 0,
       # as in visual_coding_opencode, instead of being graded on whatever it last wrote.
       score_unfinished_as_zero: true

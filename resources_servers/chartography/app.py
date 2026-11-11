@@ -70,8 +70,7 @@ from nemo_gym.core import (
     NeMoGymResponse,
 )
 from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
-from nemo_gym.sandbox import SandboxConfig
-from nemo_gym.sandbox.access import SandboxAccess
+from nemo_gym.sandbox import SandboxAccess, SandboxConfig
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
@@ -201,8 +200,8 @@ class ChartographyResourcesServer(SimpleResourcesServer):
     _lent_sandboxes: Optional[LentSandboxes] = PrivateAttr(default=None)
 
     def multiple_workers_unsupported_reason(self) -> Optional[str]:
-        # A worker's ownership of a session lapses while OpenCode runs, so a late verify or close could reach a
-        # worker that holds no sandbox for it. The no-tools setting keeps nothing per worker.
+        # Like visual_coding_opencode, a lending server runs with one worker: several workers are not tested
+        # with lent sandboxes. The no-tools setting keeps nothing per worker.
         if self.config.sandbox_provider is None:
             return None
         return "lent sandboxes live in one worker's memory"
