@@ -54,8 +54,9 @@ SCORE_NAMES = (
     "objectives_passed",
     "objectives_total",
 )
-# A row without tools is one prepared before this server existed: the model could not touch the world, so the seed
-# refuses it before any model call instead of scoring a zero that is no grade of the model.
+# A row without tools is one prepared before this server existed: the model could not touch the world, so its zero
+# would be no grade of the model. The seed refuses it before any model call when the seed carries the task's params;
+# /verify masks it for a caller whose seed does not.
 NO_TOOLS_REASON = (
     "The row's responses_create_params carries no tools, so the model could not act on the task's world. Rows "
     "prepared before the automationbench resources server lack them: re-run `gym eval prepare --benchmark "
@@ -203,12 +204,17 @@ class AutomationBenchResourcesServer(SimpleResourcesServer):
             if verification.is_live:
                 state = self._episodes[session_id].state
                 task_name = state["info"]["task_name"]
-                try:
-                    scores = score(state, export_assertion_results=self.config.export_assertion_results)
-                except Exception as error:
-                    # verifiers would score the raising function 0.0; that zero is no grade of the answer.
-                    LOG.exception("Scoring AutomationBench task %s failed", body.task_id)
-                    scores = {"failure_reason": f"AutomationBench rubric raised: {type(error).__name__}: {error}"}
+                if not body.responses_create_params.tools:
+                    # Only a caller whose seed carried no params gets here; the seed refuses the rest.
+                    LOG.error("AutomationBench task %s: %s", body.task_id, NO_TOOLS_REASON)
+                    scores = {"failure_reason": NO_TOOLS_REASON}
+                else:
+                    try:
+                        scores = score(state, export_assertion_results=self.config.export_assertion_results)
+                    except Exception as error:
+                        # verifiers would score the raising function 0.0; that zero is no grade of the answer.
+                        LOG.exception("Scoring AutomationBench task %s failed", body.task_id)
+                        scores = {"failure_reason": f"AutomationBench rubric raised: {type(error).__name__}: {error}"}
                 verification.retain({"task_name": task_name, **scores})
             result = dict(verification.retained)
         task_name = result.pop("task_name")

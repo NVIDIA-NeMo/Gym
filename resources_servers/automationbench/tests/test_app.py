@@ -219,12 +219,16 @@ def test_a_row_prepared_without_tools_is_refused_at_seed(client):
     assert client.post("/api_search", json={"query": "gmail"}).status_code == 404
 
 
-def test_a_seed_without_the_params_is_served(client):
-    # A caller that sends only task_data cannot be checked for tools; the session is seeded as before.
+def test_a_seed_without_the_params_is_served_and_a_toolless_row_is_masked_at_verify(client):
+    # A caller that sends only task_data cannot be checked at seed; /verify still masks a row without tools.
     seed = _seed().model_copy(update={"responses_create_params": None})
 
     assert _post_seed(client, seed).status_code == 200
-    assert _verify(client)["reward"] == 0.0
+    result = client.post("/verify", json=_verify_body(tools=[])).json()
+
+    assert (result["mask_sample"], result["failure_kind"], result["reward"]) == (True, "verifier_error", 0.0)
+    assert "gym eval prepare --benchmark automationbench" in result["failure_reason"]
+    assert result["task_name"] == "sales.multi_hop_lookup"
 
 
 def test_a_task_counted_as_zero_before_verify_stays_in_its_domain():
