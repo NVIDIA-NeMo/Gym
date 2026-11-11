@@ -69,6 +69,7 @@ class WebVoyagerStandardVerifyResponse(BaseVerifyResponse):
     task_success: bool = False
     mask_sample: bool = False
     failure_kind: str | None = None
+    verifier_result: WebVerifierResult | None = None
     judge_text: str = ""
     verifier_metadata: dict[str, Any] = Field(default_factory=dict)
     verifier_version: str = "webvoyager-llm-judge-v1"

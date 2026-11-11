@@ -255,6 +255,7 @@ class WebVoyagerJudgeResourcesServer(SimpleResourcesServer):
                 "task_success": result.task_success,
                 "mask_sample": not result.valid_sample,
                 "failure_kind": result.failure_kind,
+                "verifier_result": result,
                 "judge_text": judged.judge_text,
                 "verifier_metadata": result.metadata,
                 "verifier_version": result.verifier_version,

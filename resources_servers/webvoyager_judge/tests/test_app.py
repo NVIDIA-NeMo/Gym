@@ -435,3 +435,60 @@ async def test_judge_caller_cancellation_propagates():
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verdict,reward", [("SUCCESS", 1.0), ("FAILURE", 0.0)])
+async def test_public_rejudgment_persists_consistent_nested_grade(tmp_path, verdict, reward):
+    import httpx
+
+    from nemo_gym.rollouts import RolloutStore, RunManifest
+
+    request = _standard_request()
+    inputs = [{"_ng_task_index": 0, "_ng_rollout_index": 0, "agent_ref": {"name": "agent"}}]
+    source = tmp_path / "input.jsonl"
+    source.write_text(json.dumps(inputs[0]) + "\n")
+    manifest = RunManifest.create(source, inputs, {}, {"agent": {"responses_api_agents": {}}})
+    output = tmp_path / "rollouts.jsonl"
+    with RolloutStore.start_or_resume(output, lambda: (inputs, manifest), resume=False) as store:
+        row = store.pending()[0]
+        store.record_dispatch(row)
+        failure = (
+            row
+            | request.model_dump(mode="json")
+            | {
+                "_ng_failure_class": "judge_failed",
+                "_ng_failure_id": "saved-judge",
+                "reward": 0.0,
+                "mask_sample": True,
+                "verifier_result": {"reward": 0.0, "valid_sample": False, "failure_kind": "judge_unparseable"},
+            }
+        )
+        store.record_outcome(failure)
+    server = _server()
+    server.server_client.post = AsyncMock(
+        return_value=_FakeHttpResponse(_model_response(json.dumps({"verdict": verdict})))
+    )
+    transport = httpx.ASGITransport(app=server.setup_webserver(), raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/verify", json=failure)
+    assert response.status_code == 200, response.text
+    with RolloutStore.open_for_rejudgment(output) as store:
+        pending = store.admit_rejudgment(failure)
+        result = response.json() | {
+            key: failure[key]
+            for key in ("_ng_task_index", "_ng_rollout_index", "agent_ref", "_ng_run_id", "_ng_attempt_index")
+        }
+        result.update(
+            _ng_rejudged_failure_id="saved-judge",
+            _ng_rejudge_operation_id=pending.operation_id,
+            _ng_rejudge_admitted_at=pending.admitted_at,
+        )
+        assert store.record_rejudgment(failure, result)
+    (saved,) = RolloutStore.read(output).selected("success")
+    assert saved["reward"] == saved["verifier_result"]["reward"] == reward
+    assert saved["mask_sample"] is False and saved["verifier_result"]["valid_sample"] is True
+    assert saved["verifier_result"]["failure_kind"] is None
+    assert saved["task_success"] == saved["verifier_result"]["task_success"] == (reward == 1)
+    assert saved["verifier_metadata"] == saved["verifier_result"]["metadata"]
+    assert saved["response"] == failure["response"]
