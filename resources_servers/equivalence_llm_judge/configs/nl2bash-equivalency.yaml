@@ -160,5 +160,3 @@ equivalence_llm_judge_environment_server:
       agent_server:
         type: responses_api_agents
         name: equivalence_llm_judge_simple_agent
-      resources_tool_transports:
-      - direct_http
