@@ -802,11 +802,13 @@ def _harbor_benchmark(args: argparse.Namespace):
     """The Harbor-backed benchmark `--benchmark` selects, if any (refused with a usage error when it cannot run)."""
     if not getattr(args, "benchmark", None):
         return None
+    from yaml import YAMLError
+
     from nemo_gym.cli.eval import harbor_benchmark_from_args
 
     try:
         return harbor_benchmark_from_args(args)
-    except (ValueError, OSError) as exc:
+    except (ValueError, OSError, YAMLError) as exc:
         args._parser.error(str(exc))
 
 

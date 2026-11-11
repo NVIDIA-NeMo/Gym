@@ -122,9 +122,10 @@ gym eval run \
     --model-type vllm_model
 ```
 
-Available on `gym env start`, `gym env validate`, `gym env prefetch`, and `gym eval run`. Like the other
-selectors it is pure shorthand, so `--agent-type terminus_2_sandboxed_agent` and `--config <that file>`
-behave identically.
+Available on `gym env start`, `gym env validate`, `gym env prefetch`, and `gym eval run`. For benchmarks that
+compose their own servers, the selectors are pure shorthand, so `--agent-type terminus_2_sandboxed_agent` and
+`--config <that file>` behave identically. For a Harbor-backed benchmark, use `--agent-type` to swap the harness;
+loading an agent config with `--config` does not select it.
 
 Run `gym list agents` to see the harnesses you can pass.
 

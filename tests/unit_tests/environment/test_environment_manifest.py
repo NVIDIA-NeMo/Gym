@@ -459,7 +459,7 @@ def _harbor_manifest() -> dict:
     raw.update(
         harbor_target="terminal_bench_4",
         resources_server=None,
-        agent_server="miniswe_sandboxed_agent",
+        agent_server="mini_swe_agent",
         datasets=[],
         prompt_source="agent",
     )

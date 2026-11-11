@@ -227,14 +227,35 @@ def _resolve_config_wiring(
     parser: GlobalConfigDictParser | None = None,
 ) -> _ConfigWiring:
     """Resolve which servers a workload config wires, without probing or materializing runtime services."""
-    from nemo_gym.data.tasks.harbor.prepare import HARBOR_TARGET_KEY, harbor_benchmark
+    from nemo_gym.data.tasks.harbor.prepare import AGENT_OVERRIDES, HARBOR_TARGET_KEY, harbor_benchmark
 
-    initial = OmegaConf.merge(
-        GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
-        {"config_paths": [str(config_path.resolve())]},
-    )
+    config_paths = [str(config_path.resolve())]
     parser = parser or GlobalConfigDictParser()
-    with _with_component_root(config_path):
+    with _with_component_root(config_path), tempfile.TemporaryDirectory() as scratch:
+        try:
+            benchmark = harbor_benchmark(config_path)
+        except ValueError as error:
+            raise EnvironmentValidationError(str(error)) from error
+        except (OSError, YAMLError):
+            benchmark = None  # The parser below reports a file it cannot read.
+        if benchmark is not None and benchmark.agent.impl_name in AGENT_OVERRIDES:
+            # Resolve the agent as the generated Harbor run binds it (``build_run``): a shipped template may leave a
+            # setting such as ``resources_server.name`` for benchmark composition, which the Harbor run clears.
+            normalized = Path(scratch) / "harbor_agent.yaml"
+            agent = benchmark.agent
+            normalized.write_text(
+                json.dumps(
+                    {
+                        agent.instance_name: {
+                            "responses_api_agents": {agent.impl_name: AGENT_OVERRIDES[agent.impl_name]}
+                        }
+                    }
+                )
+            )
+            config_paths.append(str(normalized))
+        initial = OmegaConf.merge(
+            GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT, {"config_paths": config_paths}
+        )
         try:
             resolved = parser.parse(
                 GlobalConfigDictParserConfig(
@@ -252,10 +273,6 @@ def _resolve_config_wiring(
     harbor_target = None
     if resolved.get(HARBOR_TARGET_KEY) is not None:
         # Harbor-backed: the config's one agent instance runs the target's tasks, the rows prepare writes.
-        try:
-            benchmark = harbor_benchmark(config_path)
-        except (ValueError, OSError, YAMLError) as error:
-            raise EnvironmentValidationError(str(error)) from error
         if benchmark is None or benchmark.agent.instance_name not in by_instance:
             raise EnvironmentValidationError(
                 f"{config_path} must set {HARBOR_TARGET_KEY} and its agent instance in the file itself."
@@ -396,6 +413,9 @@ def _resolve_manifest_composition(config_path: Path, *, dataset_owner: str | Non
 
 def _catalog_resources_server(wiring: _ConfigWiring) -> str | None:
     """The resources binding selected by all dataset routes, or unknown when they do not identify one instance."""
+    if wiring.harbor_target is not None:
+        # The generated Harbor environment server grades the target's tasks; no resources server is bound.
+        return None
     if wiring.dataset_rs is not None:
         return _implementation_name(wiring.dataset_rs)
 
@@ -741,10 +761,16 @@ def _validate_harbor_target(target: str) -> None:
     Nothing is fetched: a reference is checked by its shape, and its tasks are validated by ``gym dataset validate``.
     """
     from nemo_gym.data.tasks.harbor.entries import entry_target
-    from nemo_gym.data.tasks.harbor.hub import is_hub_ref
+    from nemo_gym.data.tasks.harbor.hub import HubError, HubRef, is_hub_ref
     from nemo_gym.data.tasks.harbor.prepare import HARBOR_TARGET_KEY
 
-    if is_hub_ref(target) or entry_target(target) is not None or Path(target).expanduser().exists():
+    if is_hub_ref(target):
+        try:
+            HubRef.parse(target)
+        except HubError as error:
+            raise EnvironmentValidationError(str(error)) from error
+        return
+    if entry_target(target) is not None or Path(target).expanduser().is_dir():
         return
     raise EnvironmentValidationError(
         f"{HARBOR_TARGET_KEY} {target!r} is not an entry under environments/harbor/, an existing task folder "
