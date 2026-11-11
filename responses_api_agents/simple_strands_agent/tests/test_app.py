@@ -109,7 +109,16 @@ async def test_run_skips_verification() -> None:
             "created_at": 1,
             "model": "model",
             "object": "response",
-            "output": [],
+            "status": "incomplete",
+            "output": [
+                {
+                    "id": "msg",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "", "annotations": []}],
+                }
+            ],
             "parallel_tool_calls": True,
             "tool_choice": "auto",
             "tools": [],
@@ -124,6 +133,8 @@ async def test_run_skips_verification() -> None:
     )
 
     assert result.reward == 0.25
+    # An iteration-limited run ends with an empty message but did not finish naturally.
+    assert result.finished_naturally is False
     assert result.model_extra["verification_skipped"] is True
     assert [call.kwargs["url_path"] for call in client.post.call_args_list] == [
         "/seed_session",

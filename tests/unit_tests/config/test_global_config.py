@@ -3492,7 +3492,9 @@ class TestComposeUnboundAgent:
         }
         return config
 
-    @mark.parametrize("harness_type", ["opencode_sandboxed_agent", "non_executing_simple_agent"])
+    @mark.parametrize(
+        "harness_type", ["opencode_sandboxed_agent", "non_executing_simple_agent", "simple_strands_agent"]
+    )
     def test_swap_to_agent_without_sessions_falls_back_to_legacy_relay(self, harness_type: str) -> None:
         config = self._session_environment_config(harness_type)
 

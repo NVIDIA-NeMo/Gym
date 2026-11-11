@@ -457,11 +457,14 @@ class SimpleStrandsAgent(SimpleResponsesAPIAgent):
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         if not isinstance(state, SimpleStrandsSession):
             raise TypeError("Expected SimpleStrandsSession")
+        task = state.task
+        # A runner stopped mid-run (cancelled, timed out or failed) can leave a tool command running in a borrowed
+        # sandbox, and disconnect does not stop it. Only a runner that returned ran every command to its exit.
+        interrupted = task is not None and (not task.done() or task.cancelled() or task.exception() is not None)
         await self._release(state)
         return AgentCloseSessionResponse(
             agent_session_id=state.request.agent_session_id,
-            # The runner process group is reaped before release; tool commands are bounded by shell_timeout.
-            cleanup_confirmed=True,
+            cleanup_confirmed=state.owns_sandbox or not interrupted,
             agent_observations=state.observations
             or AgentObservationBundle(
                 source="simple_strands", gaps=[ObservationGap(code="observation_capture_failed")]
@@ -591,7 +594,7 @@ class SimpleStrandsAgent(SimpleResponsesAPIAgent):
                 result
                 | {
                     "turns_used": turns,
-                    "finished_naturally": getattr(last, "type", None) == "message",
+                    "finished_naturally": response.status == "completed" and getattr(last, "type", None) == "message",
                 }
             )
 

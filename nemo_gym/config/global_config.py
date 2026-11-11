@@ -247,6 +247,9 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
         "terminus_2_sandboxed_agent",
     }
 )
+# Session agents whose swap-source template (`resources_server.name: ???`) runs on the host through /run.
+# Their sessions need an explicitly bound sandbox template, so a swap keeps the legacy_agent relay.
+HOST_RUN_SWAP_AGENT_TYPES = frozenset({"simple_strands_agent"})
 # An environment server type that drives its agent through agent sessions, and keeps the agent's /run as a
 # fallback through a legacy_agent relay.
 SINGLE_AGENT_TURN_LEGACY_SERVER_TYPE = "single_agent_turn_legacy"
@@ -991,7 +994,7 @@ Duplicate config paths:
                 global_config_dict[renames[target.name]] = instance
 
             self._retarget_environment_servers(global_config_dict, renames, agent_type=source.agent_type)
-            if source.agent_type not in AGENT_SESSION_AGENT_TYPES:
+            if source.agent_type not in AGENT_SESSION_AGENT_TYPES or source.agent_type in HOST_RUN_SWAP_AGENT_TYPES:
                 self._relay_agents_without_sessions(global_config_dict, set(renames.values()))
             self._raise_on_outdated_routing(global_config_dict, renames)
             self._route_rows_stamped_before_the_swap(global_config_dict, renames)

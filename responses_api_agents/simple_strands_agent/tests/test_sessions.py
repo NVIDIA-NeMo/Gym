@@ -179,3 +179,41 @@ def test_iteration_limit_is_an_incomplete_graded_response():
     finished = agent()._response(body, {"messages": messages, "stop_reason": None}, "policy")
     assert (limited.status, finished.status) == ("incomplete", "completed")
     assert limited.output[0].type == "function_call"
+
+
+@pytest.mark.parametrize(
+    "exec_mock",
+    [
+        AsyncMock(side_effect=ConnectionError("backend unavailable")),
+        AsyncMock(return_value=SandboxExecResult(None, "backend unavailable", 125, error_type="sandbox")),
+    ],
+)
+def test_runner_sandbox_outage_fails_the_run_instead_of_an_exit_code(exec_mock):
+    runner = pytest.importorskip("responses_api_agents.simple_strands_agent.ssa_runner")
+    sandbox = MagicMock(exec=exec_mock, disconnect=AsyncMock())
+    with (
+        patch("nemo_gym.sandbox.AsyncSandbox.connect", AsyncMock(return_value=sandbox)),
+        patch("nemo_gym.sandbox.create_provider", MagicMock()),
+        runner.SandboxEnvironment({"provider": {}, "descriptor": {}}, "/repo", 30) as environment,
+    ):
+        with pytest.raises(Exception, match="backend unavailable"):
+            environment.dir_exists("/repo")
+        assert "backend unavailable" in environment.infra_error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("owns_sandbox", "confirmed"), [(False, False), (True, True)])
+async def test_close_during_a_run_confirms_cleanup_only_for_an_owned_sandbox(owns_sandbox, confirmed):
+    sandbox = MagicMock(sandbox_id="task", stop=AsyncMock(), disconnect=AsyncMock())
+    state = SimpleStrandsSession(
+        request=seed(),
+        sandbox=sandbox,
+        owns_sandbox=owns_sandbox,
+        provider_name="opensandbox",
+        provider_config={},
+        workdir="/repo",
+    )
+    state.task = asyncio.create_task(asyncio.sleep(60))
+    close = await agent()._close_agent_session_state(state)
+    # A borrowed sandbox may still run the interrupted tool command, which disconnect does not stop.
+    assert close.cleanup_confirmed is confirmed and state.task.cancelled()

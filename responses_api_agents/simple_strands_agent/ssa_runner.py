@@ -95,6 +95,9 @@ class SandboxEnvironment(Environment):
         self._default_timeout = default_timeout
         # The environment the task's owner resolved for harness commands, over the sandbox's own.
         self._env = spec.get("env") or None
+        # A provider failure, which has no command exit code. SSA turns tool exceptions into tool results, so _run
+        # checks this after SSA returns and fails the run.
+        self.infra_error: str | None = None
         self._loop = asyncio.new_event_loop()
         threading.Thread(target=self._loop.run_forever, daemon=True).start()
         provider = create_provider(spec["provider"])
@@ -131,8 +134,12 @@ class SandboxEnvironment(Environment):
                 )
             )
         except Exception as error:
-            return {"command": command, "status": "error", "exit_code": 1, "output": str(error), "error": str(error)}
-        exit_code = 124 if result.error_type == "timeout" else 1 if result.error_type else result.return_code
+            self.infra_error = f"Sandbox exec failed: {error}"
+            raise
+        if result.error_type and result.error_type != "timeout":
+            self.infra_error = f"Sandbox exec failed ({result.error_type}): {result.stderr or result.stdout}"
+            raise RuntimeError(self.infra_error)
+        exit_code = 124 if result.error_type == "timeout" else result.return_code
         output = (result.stdout or "") + (result.stderr or "")
         return {
             "command": command,
@@ -281,6 +288,8 @@ def _run(payload: dict[str, Any], sandbox: dict[str, Any] | None = None) -> dict
         finally:
             env.collect_submission(agent=agent, result=result)
             metrics_collector.dump(agent)
+    if sandbox is not None and environment.infra_error:
+        raise RuntimeError(environment.infra_error)
 
     usage = dict(agent.event_loop_metrics.accumulated_usage or {})
     return {
