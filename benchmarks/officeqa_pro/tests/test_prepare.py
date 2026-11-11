@@ -133,7 +133,9 @@ def test_example_configuration_prepares_and_collates_five_single_attempt_tasks(a
     assert taskset_environment_server_name(config, "officeqa_pro_examples") == "officeqa_pro_environment_server"
     settings.datasets[0].jsonl_fpath = str(output)
     instances = [c for c in GlobalConfigDictParser().filter_for_server_instance_configs(config) if c.datasets]
-    paths = TrainDataProcessor()._collate_samples_single_type("example", instances, task_data_validation="error")
+    paths = TrainDataProcessor()._collate_samples_single_type(
+        "example", instances, output_dir=output.parent / "collated", task_data_validation="error"
+    )
     rows = [json.loads(line) for line in paths[0].read_text().splitlines()]
     assert len(rows) == 5
     assert all(row["task_id"]["taskset"] == "officeqa_pro_examples" for row in rows)
@@ -307,7 +309,9 @@ def test_prepared_source_collates_through_stock_gym_with_stable_task_identity(ar
         for instance in GlobalConfigDictParser().filter_for_server_instance_configs(config)
         if instance.datasets
     ]
-    paths = TrainDataProcessor()._collate_samples_single_type("benchmark", instances, task_data_validation="error")
+    paths = TrainDataProcessor()._collate_samples_single_type(
+        "benchmark", instances, output_dir=output.parent / "collated", task_data_validation="error"
+    )
     assert len(paths) == 1
     tasks = [json.loads(line) for line in paths[0].read_text().splitlines()]
     assert len(tasks) == 5
