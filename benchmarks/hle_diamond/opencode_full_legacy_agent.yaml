@@ -1,5 +1,5 @@
 # Deprecated: opencode_sandboxed_agent and its legacy_agent relay will be removed after the Environment Server
-# migration. Agent sessions take text input only, so no session preset covers the image questions yet;
+# migration. Agent sessions accept prompt images, but no session preset covers the image questions yet;
 # opencode.yaml runs opencode_agent on the 728 text-only questions.
 # OpenCode sandboxed preset on all 1000 HLE-Diamond questions, the 272 image questions included, over the full set
 # materialized by prepare_opencode.py with prompts/opencode.yaml. Each row's single user turn carries the question

@@ -3,6 +3,8 @@
 # agent's sandbox reaches only the model and that server.
 config_paths:
 - benchmarks/hle_diamond/pi.yaml
+# The sandbox reaches the Tavily server's MCP tools by address, so the Resources servers leave loopback too.
+absolute_ip_server_types: [responses_api_models, resources_servers]
 tavily:
   resources_servers:
     tavily_search:
