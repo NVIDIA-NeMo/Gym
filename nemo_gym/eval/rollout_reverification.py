@@ -1215,12 +1215,68 @@ async def _guard_atif_preflight(payloads: List[Dict[str, Any]]) -> None:
 # Very similar to the rollout collection code, but we need to send the request to
 # resources servers instead of the agent server, since the second one might not be started
 # ---------------------------------------------------------------------------
+def _reverification_repeat_inventory(materialized_fpaths, identity_sources, results, agent_to_rs, config):
+    """Group the full attempt plan using the same original identities as saved results.
+
+    Source stamps include failed attempts. A missing repeat may use another repeat's
+    task stamp, but never an arbitrary environment sharing its agent. For an entirely
+    missing task, only the verified source configuration can establish an environment.
+    """
+    stamps, _ = _source_identity_stamps(identity_sources)
+    by_task = defaultdict(set)
+    for (task, _), values in stamps.items():
+        if (name := values.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)) is not None:
+            by_task[task].add(name)
+    for result in results:
+        if (name := result.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)) is not None:
+            by_task[result.get(TASK_INDEX_KEY_NAME)].add(name)
+
+    inventory = {}
+    for path in materialized_fpaths:
+        source = _replay_source(_store_for_materialized_inputs(path))
+
+        def group(row):
+            task = row.get(TASK_INDEX_KEY_NAME)
+            key = (task, row.get(ROLLOUT_INDEX_KEY_NAME))
+            routed = dict(row)
+            if ENVIRONMENT_SERVER_STAMP_KEY_NAME not in routed:
+                name = stamps.get(key, {}).get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)
+                candidates = by_task.get(task, set())
+                if name is None and len(candidates) == 1:
+                    name = next(iter(candidates))
+                if name is None and by_task:
+                    candidates = [
+                        name
+                        for name, block in (source.servers or {}).items()
+                        if _saved_environments(InputRolloutPair(input=row, rollout={}), {name: block})
+                    ]
+                    if len(candidates) != 1:
+                        raise ConfigError(
+                            f"Cannot establish original environment for planned task {task}; restore source "
+                            "rollouts/configuration or provide stamped materialized inputs before aggregating."
+                        )
+                    name = candidates[0]
+                if name is not None:
+                    routed[ENVIRONMENT_SERVER_STAMP_KEY_NAME] = name
+            return rollout_run_key(routed), _rs_for_row(routed, agent_to_rs, config)
+
+        planned = _planned_repeat_inventory([path], group)
+        if planned is None:
+            return None
+        for key, tasks in planned.items():
+            target = inventory.setdefault(key, {})
+            for task, repeats in tasks.items():
+                target[task] = sorted(set(target.get(task, [])) | set(repeats))
+    return inventory if materialized_fpaths else None
+
+
 async def _call_aggregate_metrics(
     results: List[Dict],
     rows: List[Dict],
     output_fpath: Path,
     *,
     materialized_fpaths: Optional[List[Path]] = None,
+    identity_sources: Tuple[Path, ...] = (),
 ) -> Optional[Path]:
     """Call /aggregate_metrics on each resource server after rollouts complete.
 
@@ -1239,9 +1295,12 @@ async def _call_aggregate_metrics(
     agent_results: Dict[Tuple[str, str], List[Dict]] = {}
     labels = rollout_run_labels(rows)
     inventory = await asyncio.to_thread(
-        _planned_repeat_inventory,
+        _reverification_repeat_inventory,
         materialized_fpaths or [],
-        lambda row: (rollout_run_key(row), _rs_for_row(row, agent_to_rs, server_client.global_config_dict)),
+        identity_sources,
+        results,
+        agent_to_rs,
+        server_client.global_config_dict,
     )
     for row, result in zip(rows, results):
         key = rollout_run_key(row)
@@ -2275,6 +2334,7 @@ class RolloutReverificationHelper(BaseModel):
                 agg_rows,
                 output_fpaths.output,
                 materialized_fpaths=[Path(config.materialized_inputs_jsonl_fpath)],
+                identity_sources=identity_sources,
             )
 
         expected_rollouts = len(results) + sum(failure_counts.values())

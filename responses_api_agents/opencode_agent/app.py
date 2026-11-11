@@ -314,6 +314,8 @@ def _dump_with_serialized_member(value: dict[str, Any], member: str, serialized:
 
 def _serialize_replacement_config(config: dict[str, Any]) -> str:
     """Keep only the replacement prompt literal through OpenCode's pre-JSON substitutions."""
+    if "prompt" not in config.get("agent", {}).get("build", {}):
+        return json.dumps(config)
     agent = config["agent"]
     build = agent["build"]
     prompt = json.dumps(build["prompt"]).replace("{", "\\u007b")

@@ -130,3 +130,22 @@ async def test_malformed_reply_before_valid_verdict_is_not_falsely_certified(ser
     (operation,) = result["ng_verifier_invocations"][0]["grading_operations"]
     assert operation["outcome"] == "unknown"
     assert {ref["response_id"] for ref in operation["dependencies"]} == {"invalid", "valid"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("benchmark", ["VStarBench", "HRBench8K"])
+async def test_api_failure_option_text_is_not_a_parsed_judge_verdict(server, benchmark):
+    from resources_servers.opencode_multimodal_benchmarks.mcq import infer_option
+
+    choices = {"A": "a small cat", "B": "a very large dog"}
+    failure = "Failed to obtain answer via API. a small cat"
+    assert infer_option(failure, choices) is None
+    server.config.judge_server = "judge"
+    server.config.judge_attempts = 2
+    body = request(benchmark, "the fuzzy feline", options=choices)
+    server.server_client.post = AsyncMock(return_value=judge_reply(failure))
+    result = await observed(server, body)
+    assert result["mask_sample"] is True and result["failure_kind"] == "judge_failed"
+    assert server.server_client.post.await_count == 2
+    operations = result["ng_verifier_invocations"][0]["grading_operations"]
+    assert operations and all(op["outcome"] != "completed" for op in operations)
