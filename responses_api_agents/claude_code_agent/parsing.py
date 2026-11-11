@@ -14,10 +14,12 @@
 # limitations under the License.
 
 import json
+import re
 from typing import Any, Optional
 from uuid import uuid4
 
 from nemo_gym.core import (
+    MODEL_REQUEST_ERROR,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
@@ -81,6 +83,7 @@ def parse_stream_json(stdout: str, *, fold_thinking: bool = True) -> tuple[list[
     compacting_sessions: set[str] = set()
     compaction_attempts: list[dict[str, str]] = []
     terminal_response_id: Optional[str] = None
+    terminal_api_error: str | None = None
 
     for event in raw_events:
         etype = event.get("type")
@@ -127,8 +130,17 @@ def parse_stream_json(stdout: str, *, fold_thinking: bool = True) -> tuple[list[
                 content = []
 
             served_id = message.get("id")
-            if not event.get("parent_tool_use_id") and isinstance(served_id, str) and served_id:
-                terminal_response_id = served_id
+            if not event.get("parent_tool_use_id"):
+                # r3/WLK creates local error messages with random IDs; Od8 keeps
+                # their <synthetic> model and error enum in stream-json output.
+                synthetic = message.get("model") == "<synthetic>"
+                if synthetic:
+                    terminal_response_id = None
+                elif isinstance(served_id, str) and served_id:
+                    terminal_response_id = served_id
+                terminal_api_error = (
+                    _extract_text(content) if synthetic and isinstance(event.get("error"), str) else None
+                )
 
             think = _extract_thinking(content)
             if think and fold_thinking:
@@ -236,6 +248,13 @@ def parse_stream_json(stdout: str, *, fold_thinking: bool = True) -> tuple[list[
     if compaction_attempts:
         metadata["compaction_attempts"] = compaction_attempts
     metadata.update(result_metadata)
+    if (
+        terminal_api_error is not None
+        and metadata.get("is_error") is True
+        and metadata.get("error_message") == terminal_api_error[:2000]
+        and (match := re.match(r"^API Error: ([45]\d{2})(?:\s|$)", terminal_api_error))
+    ):
+        metadata["model_request_error_status"] = int(match[1])
     return output_items, metadata
 
 
@@ -246,6 +265,8 @@ def _invocation_outcome(metadata: dict[str, Any], returncode: int | None) -> tup
     if isinstance(subtype, str) and subtype.startswith("error_"):
         return "failed", subtype
     if metadata.get("is_error") is True:
+        if metadata.get("model_request_error_status") is not None:
+            return "failed", MODEL_REQUEST_ERROR
         return "failed", "refusal" if USAGE_POLICY_REFUSAL in metadata.get("error_message", "") else "agent_error"
     if returncode not in (0, None):
         return "failed", f"process_exit_{returncode}"

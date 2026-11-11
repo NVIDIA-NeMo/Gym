@@ -1199,7 +1199,8 @@ def test_responses_lifecycle_events_do_not_count_toward_time_to_first_token(tmp_
     assert call.latency_ttft_ms >= 200
 
 
-def test_capture_reassembles_streamed_anthropic_sse(tmp_path):
+@pytest.mark.parametrize("signature_parts", [[], [""], ["signed-", "thinking"]])
+def test_capture_reassembles_streamed_anthropic_sse(tmp_path, signature_parts):
     """Streamed (SSE) /v1/messages calls are forwarded unchanged AND reassembled into the final
     response, so token stats / tool calls / reasoning are captured like a non-streamed call."""
     from fastapi.responses import StreamingResponse
@@ -1240,6 +1241,15 @@ def test_capture_reassembles_streamed_anthropic_sse(tmp_path):
                     "delta": {"type": "thinking_delta", "thinking": "let me think"},
                 },
             )
+            for part in signature_parts:
+                yield _sse(
+                    "content_block_delta",
+                    {
+                        "type": "content_block_delta",
+                        "index": 0,
+                        "delta": {"type": "signature_delta", "signature": part},
+                    },
+                )
             yield _sse(
                 "content_block_start",
                 {"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": ""}},
@@ -1283,6 +1293,11 @@ def test_capture_reassembles_streamed_anthropic_sse(tmp_path):
     records = CaptureStore(tmp_path).read("3-0")
     assert len(records) == 1 and records[0]["response"] is not None  # reassembled, not dropped
     assert records[0]["response_raw"] == r.text  # lossless SSE evidence is retained alongside the projection
+    thinking = records[0]["response"]["content"][0]
+    if signature_parts:
+        assert thinking["signature"] == "".join(signature_parts)
+    else:
+        assert "signature" not in thinking
 
     calls = read_model_call_records(CaptureStore(tmp_path), "3-0")
     assert len(calls) == 1

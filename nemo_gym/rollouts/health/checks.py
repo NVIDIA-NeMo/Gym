@@ -9,6 +9,8 @@ from collections import defaultdict
 from collections.abc import Callable, Sequence
 from typing import Any
 
+from pydantic import ValidationError
+
 from nemo_gym.rollouts.health.types import (
     ROLLOUT_INDEX_KEY,
     TASK_INDEX_KEY,
@@ -20,7 +22,7 @@ from nemo_gym.rollouts.health.types import (
     _AgentStep,
     _CallBindings,
 )
-from nemo_gym.trajectory.trajectory_record import TrajectoryRecord
+from nemo_gym.trajectory.trajectory_record import SessionTitleObservation, TrajectoryRecord
 
 
 CHECK_REGISTRY: tuple[CheckSpec, ...] = (
@@ -882,6 +884,81 @@ def _rollout_ended_on_failed_model_call(trajectory: dict[str, Any], subject: dic
             )
         )
     return findings
+
+
+def _response_usage_calls(
+    record: dict[str, Any], trajectory: dict[str, Any], bindings: _CallBindings
+) -> tuple[dict[str, Any], ...] | None:
+    """Select only calls explicitly covered by the harness's returned usage report.
+
+    Title generation can be billed to an invocation without appearing in its CLI usage report.
+    Unknown scope or conflicting evidence cannot establish a matching total. All-call accounting
+    and per-call coverage checks continue to use the original bindings.
+    """
+    bundle = record.get("ng_agent_observations", {})
+    if not isinstance(bundle, dict):
+        return None
+    records = bundle.get("records", [])
+    gaps = bundle.get("gaps", [])
+    if any(
+        not isinstance(items, list) or any(not isinstance(item, dict) for item in items) for items in (records, gaps)
+    ):
+        return None
+    gaps = [*gaps, *(trajectory.get("gaps") or [])]
+    if any(isinstance(gap, dict) and gap.get("code") == "session_title_model_call_join_failed" for gap in gaps):
+        return None
+    titles = [item for item in records if item.get("kind") == "session_title"]
+    if not titles:
+        return bindings.matched_calls
+
+    def matches(reference: dict[str, Any], call: dict[str, Any]) -> bool:
+        return bool(
+            reference.get("model_call_id") or (reference.get("model_ref") and reference.get("response_id"))
+        ) and all(
+            reference.get(key) is None or reference[key] == call.get(key)
+            for key in ("model_call_id", "model_ref", "response_id")
+        )
+
+    other_helpers = [item for item in records if item.get("kind") == "context_compaction"]
+    if any(
+        not isinstance(item.get("model_calls", []), list)
+        or any(not isinstance(ref, dict) for ref in item.get("model_calls", []))
+        for item in other_helpers
+    ):
+        return None
+    owners = [*(trajectory.get("invocations") or []), *(trajectory.get("verifier_invocations") or [])]
+    seen: set[int] = set()
+    excluded: set[int] = set()
+    for raw in titles:
+        try:
+            title = SessionTitleObservation.model_validate(raw)
+        except ValidationError:
+            return None
+        if title.included_in_response_usage is None:
+            return None
+        for reference in title.model_calls:
+            ref = reference.model_dump()
+            candidates = [call for call in bindings.matched_calls if matches(ref, call)]
+            if len(candidates) != 1:
+                return None
+            call = candidates[0]
+            identity = id(call)
+            call_owners = [
+                owner.get("invocation_id")
+                for owner in owners
+                if any(matches(item, call) for _, item in _item_model_call_references([owner]))
+            ]
+            if identity in seen or call_owners != [title.invocation_id]:
+                return None
+            if any(
+                matches(item, call)
+                for _, item in _item_model_call_references([*(trajectory.get("turns") or []), *other_helpers])
+            ):
+                return None
+            seen.add(identity)
+            if not title.included_in_response_usage:
+                excluded.add(identity)
+    return tuple(call for call in bindings.matched_calls if id(call) not in excluded)
 
 
 def _rollout_token_count_mismatch(
