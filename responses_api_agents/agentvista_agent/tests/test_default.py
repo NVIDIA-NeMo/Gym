@@ -59,13 +59,19 @@ def test_original_loop_tool_feedback_and_judge_status(tmp_path: Path, monkeypatc
                     {
                         "id": "search-1",
                         "type": "function",
+                        "index": 0,
                         "function": {
+                            "index": 0,
                             "name": "web_search",
                             "arguments": json.dumps({"query": "42"}),
                         },
                     }
                 ],
             }
+        for message in messages:
+            for call in message.get("tool_calls") or []:
+                assert "index" not in call
+                assert "index" not in call["function"]
         assert any(row.get("role") == "tool" and "Evidence: 42" in str(row.get("content")) for row in messages)
         return "<answer>42</answer>"
 

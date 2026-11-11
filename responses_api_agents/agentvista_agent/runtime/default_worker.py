@@ -7,6 +7,7 @@ import json
 import os
 import signal
 import sys
+from copy import deepcopy
 from pathlib import Path
 
 import yaml
@@ -14,6 +15,19 @@ import yaml
 from responses_api_agents.agentvista_agent.runtime import HARNESS_VERSION
 from responses_api_agents.agentvista_agent.runtime.data import inventory
 from responses_api_agents.agentvista_agent.runtime.scoring import score
+
+
+def _gym_messages(messages: list[dict]) -> list[dict]:
+    """Copy history for Gym, omitting provider-only tool-call stream indices."""
+    copied = deepcopy(messages)
+    for message in copied:
+        if message.get("role") == "assistant":
+            for call in message.get("tool_calls") or []:
+                if isinstance(call, dict):
+                    call.pop("index", None)
+                    if isinstance(call.get("function"), dict):
+                        call["function"].pop("index", None)
+    return copied
 
 
 def run(config: dict) -> dict:
@@ -57,6 +71,13 @@ def run(config: dict) -> dict:
         # Load the original prompt initializer and exact single-sample algorithm.
         import infer
         from engine.api import api_model_caller, api_processors
+
+        original_policy = api_model_caller.call_vision_api
+
+        def gym_policy(model_name, messages, *args, **kwargs):
+            return original_policy(model_name, _gym_messages(messages), *args, **kwargs)
+
+        api_model_caller.call_vision_api = gym_policy
 
         tool_config = yaml.safe_load((source / "configs/tool_configs.yaml").read_text())
         for key in ("api_key", "api_endpoint", "model_name"):

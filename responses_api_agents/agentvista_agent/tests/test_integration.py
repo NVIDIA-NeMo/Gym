@@ -260,3 +260,34 @@ def test_actual_gym_http_model_route_and_sampling_capture(tmp_path, monkeypatch,
         capture = json.loads(journal.with_name(journal.name.replace(".request.json", ".jsonl")).read_text())
         assert capture["rollout_id"] == identity and capture["response"]["id"] == "served-fixture"
     assert list((tmp_path / "captures").rglob("*.json*"))
+
+
+@pytest.mark.parametrize("stream_indices", [False, True])
+def test_default_tool_history_replays_through_gym_without_changing_capture(stream_indices):
+    from pydantic import ValidationError
+
+    from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
+    from responses_api_agents.agentvista_agent.runtime.default_worker import _gym_messages
+
+    call = {"id": "call-fixture", "type": "function", "function": {"name": "index_tool", "arguments": '{"index":7}'}}
+    if stream_indices:
+        call["index"] = 0
+        call["function"]["index"] = 0
+    messages = [
+        {"role": "assistant", "content": "Original explanation", "tool_calls": [call]},
+        {"role": "tool", "tool_call_id": "call-fixture", "content": "Original result"},
+    ]
+    original = json.loads(json.dumps(messages))
+    if stream_indices:
+        with pytest.raises(ValidationError):
+            NeMoGymChatCompletionCreateParamsNonStreaming.model_validate({"model": "fixture", "messages": messages})
+    normalized = _gym_messages(messages)
+    parsed = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate({"model": "fixture", "messages": normalized})
+    assert parsed.messages and messages == original
+    assert normalized[0]["tool_calls"][0] == {
+        "id": "call-fixture",
+        "type": "function",
+        "function": {"name": "index_tool", "arguments": '{"index":7}'},
+    }
+    assert normalized[0]["content"] == "Original explanation"
+    assert normalized[1] == original[1]
