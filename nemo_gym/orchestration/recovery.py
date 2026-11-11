@@ -4575,8 +4575,21 @@ def _verifier_recorded(verifier: Any, row: Mapping[str, Any], resources_server: 
     record = verifier.get("grading_record") if isinstance(verifier, dict) else None
     binding, reward = _grading_source(row)
     final_binding, final_reward = row.get("_ng_collected_grading_binding"), row.get("reward")
+    try:
+        finite_scores = (
+            isinstance(record, dict)
+            and type(record.get("score")) in (int, float)
+            and math.isfinite(record["score"])
+            and type(reward) in (int, float)
+            and math.isfinite(reward)
+            and type(final_reward) in (int, float)
+            and math.isfinite(final_reward)
+        )
+    except OverflowError:
+        # Persisted JSON integers may exceed the float range accepted by math.isfinite.
+        return False
     return (
-        isinstance(record, dict)
+        finite_scores
         and verifier.get("status") == "completed"
         and verifier.get("failure_kind") is None
         and verifier.get("grading_operations") is None
@@ -4585,12 +4598,6 @@ def _verifier_recorded(verifier: Any, row: Mapping[str, Any], resources_server: 
         and bool(resources_server)
         and record.get("verifier") == resources_server
         and record.get("verdict") == "scored"
-        and type(record.get("score")) in (int, float)
-        and math.isfinite(record["score"])
-        and type(reward) in (int, float)
-        and math.isfinite(reward)
-        and type(final_reward) in (int, float)
-        and math.isfinite(final_reward)
         and isinstance(binding, str)
         and len(binding) == 64
         and isinstance(final_binding, str)

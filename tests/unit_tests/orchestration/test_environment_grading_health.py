@@ -470,6 +470,8 @@ async def test_semantically_invalid_projection_stays_unobserved_after_rebinding(
         "source_inf",
         "record_nan",
         "record_inf",
+        "record_oversized",
+        "source_oversized",
         "boolean_score",
         "mixed_score",
         "mixed_binding",
@@ -492,6 +494,10 @@ async def test_transformed_grading_requires_intact_descriptor_and_one_owned_pair
         descriptor["input_reward"] = float("nan" if change == "source_nan" else "inf")
     elif change in {"record_nan", "record_inf"}:
         record["score"] = float("nan" if change == "record_nan" else "inf")
+    elif change == "record_oversized":
+        record["score"] = 10**400
+    elif change == "source_oversized":
+        descriptor["input_reward"] = 10**400
     elif change == "boolean_score":
         record.update(score=True, result_binding_sha256=descriptor["input_binding_sha256"])
     elif change == "mixed_score":
