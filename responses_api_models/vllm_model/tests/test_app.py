@@ -75,16 +75,14 @@ from nemo_gym.core import (
 )
 from nemo_gym.models import (
     PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
+    CaptureStore,
     ChatCompletionsConverter,
+    ModelCallCaptureConfig,
     PolicyModelParticipant,
     VLLMWorkerCaptureHandler,
     generation_cut_requester,
-    start_model_execution,
-)
-from nemo_gym.models.model_call_capture import (
-    CaptureStore,
-    ModelCallCaptureConfig,
     install_model_call_capture,
+    start_model_execution,
 )
 from nemo_gym.models.token_capture import (
     CaptureContext,
@@ -96,10 +94,8 @@ from nemo_gym.models.token_capture import (
     set_token_sink,
 )
 from nemo_gym.models.token_capture.staging import CaptureAdmission
-from nemo_gym.rollouts import is_terminal_failure
-from nemo_gym.rollouts.model_calls import read_model_call_records
+from nemo_gym.rollouts import is_terminal_failure, read_model_call_records, run_health_checks
 from nemo_gym.rollouts.rollout_collection import _agent_request_failure_row
-from nemo_gym.rollouts.rollout_health import run_health_checks
 from nemo_gym.rollouts.trajectory_builder import _build_trajectory_record
 from nemo_gym.server_runtime import (
     CheckpointRequest,
@@ -107,7 +103,7 @@ from nemo_gym.server_runtime import (
     GenerationCutPrefixAck,
     GenerationCutReceipt,
 )
-from nemo_gym.trajectory.model_call_record import ModelCallRecord
+from nemo_gym.trajectory import ModelCallRecord
 from responses_api_agents.simple_agent.app import (
     ModelServerRef,
     ResourcesServerRef,
