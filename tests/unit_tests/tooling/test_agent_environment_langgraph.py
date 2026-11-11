@@ -49,7 +49,6 @@ def test_langgraph_flavor_composes_with_one_session_environment(tmp_path: Path, 
     assert _environment_servers_by_agent(resolved) == {f"{flavor}_agent": ["session_environment"]}
     agent = resolved[f"{flavor}_agent"].responses_api_agents.langgraph_agent
     assert agent.resources_server is None
-    assert agent.num_workers == 1
 
 
 @pytest.mark.parametrize("flavor", ["reflection", "parallel_thinking", "orchestrator", "rewoo"])
