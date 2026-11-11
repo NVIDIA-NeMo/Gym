@@ -47,6 +47,7 @@ from nemo_gym.server_runtime import (
     lost_session_verification,
     reject_partial_typed_seed,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import JudgeError
 from resources_servers.newton_bench.newton_bench_utils.sandbox import (
     SessionHandle,
@@ -736,3 +737,6 @@ class NewtonBenchResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     NewtonBenchResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = NewtonBenchResourcesServer.run_webserver()  # noqa: F401

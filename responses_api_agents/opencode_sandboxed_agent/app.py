@@ -92,8 +92,8 @@ from nemo_gym.sandbox import (
     create_provider,
     resolve_provider_config,
     resolve_provider_metadata,
+    sandbox_failure,
 )
-from nemo_gym.sandbox.failures import sandbox_failure
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from nemo_gym.trajectory import (
     NG_AGENT_SANDBOX_OBSERVATION_KEY,
@@ -126,9 +126,10 @@ DEPRECATION_WARNING = (
     "DEPRECATED: opencode_sandboxed_agent runs each episode through its own legacy /run path and will be removed "
     "after the environment-server migration. Where the resources server returns sandbox_access, switch to a session "
     "harness in its allowed_agents under an environment server: opencode_agent where listed (Terminal Bench 2.1), "
-    "otherwise another such as pi_agent or codex_agent (SWE-bench Pro). Setups with no session path yet keep "
-    "working here: SWE resources servers that return only a sandbox_handle (swebench, swe_gym, r2e_gym and others), "
-    "the HLE search presets (tool_servers) and vibench_agent. "
+    "otherwise another such as pi_agent or codex_agent (SWE-bench Pro); for vibench_agent, that is "
+    "resources_servers/vibench/configs/vibench.yaml. Setups with no session path yet keep working here: SWE "
+    "resources servers that return only a sandbox_handle (swebench, swe_gym, r2e_gym and others) and the HLE search "
+    "presets (tool_servers). "
     "See responses_api_agents/opencode_agent/README.md#environmentserver-sessions."
 )
 
