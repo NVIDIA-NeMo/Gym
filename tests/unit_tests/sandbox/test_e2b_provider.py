@@ -1925,6 +1925,76 @@ class TestSnapshots:
         assert kwargs["timeout"] == 300 and kwargs["metadata"] == {"run": "1"}
         assert kwargs["lifecycle"] == {"on_timeout": "kill", "auto_resume": False}
 
+    async def test_create_from_snapshot_keeps_the_guest_clock_when_configured(self) -> None:
+        provider = E2BProvider(
+            create={"template": "base", "custom_extension_params": {"sandbank": "all"}},
+            snapshots={"keep_guest_clock": True},
+        )
+
+        handle = await provider.create_from_snapshot("tmpl7:default", _spec(ttl_s=300))
+
+        [call] = FakeApiClient.calls
+        assert call["json"]["templateID"] == "tmpl7:default"
+        # A create's parameters replace the snapshot's, so the configured ones go along.
+        assert call["json"]["customExtensionParams"] == {"sandbank": "all", "keepGuestClock": True}
+        assert handle.sandbox_id == "sbx-rest"
+
+    async def test_keeping_the_guest_clock_needs_no_other_extension_params(self) -> None:
+        provider = E2BProvider(create={"template": "base"}, snapshots={"keep_guest_clock": True})
+
+        await provider.create_from_snapshot("tmpl7:default", _spec())
+
+        [call] = FakeApiClient.calls
+        assert call["json"]["customExtensionParams"] == {"keepGuestClock": True}
+
+    async def test_a_template_never_starts_with_the_guest_clock_kept(self) -> None:
+        # A template started with keepGuestClock would run on its build-time clock.
+        plain = E2BProvider(create={"template": "base"}, snapshots={"keep_guest_clock": True})
+        await plain.create(_spec())
+        assert FakeApiClient.calls == []
+
+        with_params = E2BProvider(
+            create={"template": "base", "custom_extension_params": {"sandbank": "all"}},
+            snapshots={"keep_guest_clock": True},
+        )
+        await with_params.create(_spec())
+        [call] = FakeApiClient.calls
+        assert call["json"]["customExtensionParams"] == {"sandbank": "all"}
+
+    async def test_create_from_snapshot_sends_no_clock_parameter_by_default(self) -> None:
+        provider = E2BProvider(create={"template": "base"})
+
+        handle = await provider.create_from_snapshot("tmpl7:default", _spec())
+
+        assert FakeApiClient.calls == [], "created through the SDK"
+        assert handle.raw.create_kwargs["template"] == "tmpl7:default"
+
+    @pytest.mark.parametrize(
+        ("status", "body"), [(404, "template tmpl9 not found"), (400, "template 'tmpl9' not found")]
+    )
+    async def test_a_missing_snapshot_is_named_when_the_guest_clock_is_kept(
+        self, monkeypatch: pytest.MonkeyPatch, status: int, body: str
+    ) -> None:
+        monkeypatch.setattr(FakeApiClient, "response", FakeHttpResponse(status, body))
+        provider = E2BProvider(create={"template": "base"}, snapshots={"keep_guest_clock": True})
+
+        with pytest.raises(SandboxSnapshotNotFoundError, match="tmpl9:default"):
+            await provider.create_from_snapshot("tmpl9:default", _spec())
+
+    async def test_another_refusal_is_not_a_missing_snapshot_when_the_guest_clock_is_kept(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(FakeApiClient, "response", FakeHttpResponse(400, "invalid metadata"))
+        provider = E2BProvider(create={"template": "base"}, snapshots={"keep_guest_clock": True})
+
+        with pytest.raises(E2BCreateError, match="invalid metadata") as raised:
+            await provider.create_from_snapshot("tmpl7:default", _spec())
+        assert not isinstance(raised.value, SandboxSnapshotNotFoundError)
+
+    def test_keep_guest_clock_must_be_a_boolean(self) -> None:
+        with pytest.raises(ValueError, match="snapshots.keep_guest_clock must be a boolean"):
+            E2BProvider(snapshots={"keep_guest_clock": "yes"})
+
     @pytest.mark.parametrize(
         "snapshot_id", ["missing-typed:default", "missing-plain-text:default", "missing-bad-request:default"]
     )

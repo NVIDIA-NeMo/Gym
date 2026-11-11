@@ -53,6 +53,9 @@ sandbox:
       reconnect_attempts: 2
     snapshots:
       send_names: false
+      # A sandbox created from a snapshot keeps the wall clock the snapshot was taken at, so a harness that
+      # continues in it sees no jump in time.
+      keep_guest_clock: true
     operations:
       retries: 2
       retry_delay_s: 0.5

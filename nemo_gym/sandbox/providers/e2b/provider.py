@@ -462,6 +462,19 @@ class E2BSnapshotConfig:
     # (an alias visible to the whole team), so names are off by default: snapshots are then unnamed, and the
     # checkpointer releases them by the ids in its index; ``list_snapshots`` finds none by name.
     send_names: bool = False
+    # Create a sandbox from a snapshot with AgentENV's ``keepGuestClock`` extension parameter: the guest then keeps
+    # the wall clock it had when the snapshot was taken, where the service otherwise sets it to the current time. A
+    # harness that continues in the sandbox so never sees the clock jump over the time the snapshot sat unused. The
+    # sandbox's clock lags real time by that much from then on, which a TLS check or a request signed with the time
+    # can notice after a long gap. Sent only by ``create_from_snapshot``, with ``create.custom_extension_params``;
+    # a template started with it would get its build-time clock. Off by default: only AgentENV knows the parameter.
+    keep_guest_clock: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.send_names, bool):
+            raise ValueError("snapshots.send_names must be a boolean")
+        if not isinstance(self.keep_guest_clock, bool):
+            raise ValueError("snapshots.keep_guest_clock must be a boolean")
 
 
 @dataclass
@@ -673,17 +686,21 @@ class E2BProvider:
             )
         template = self._resolve_template(spec)
         self._check_resources(spec, template)
-        return await self._create_sandbox(spec, template)
+        return await self._create_sandbox(spec, template, self._create.custom_extension_params)
 
     async def create_from_snapshot(self, snapshot_id: str, spec: SandboxSpec) -> SandboxHandle:
         """Create a sandbox from a snapshot: E2B starts it from the snapshot's template id.
 
-        The sandbox resumes the snapshot's memory and processes. Raises ``SandboxSnapshotNotFoundError`` when the
-        service has no such snapshot.
+        The sandbox resumes the snapshot's memory and processes, and with ``snapshots.keep_guest_clock`` its wall
+        clock too. Raises ``SandboxSnapshotNotFoundError`` when the service has no such snapshot.
         """
         self._provider_options(spec)
+        extension_params = self._create.custom_extension_params
+        if self._snapshots.keep_guest_clock:
+            # The parameters of a create replace the snapshot's, so the configured ones are sent along.
+            extension_params = {**(extension_params or {}), "keepGuestClock": True}
         try:
-            return await self._create_sandbox(spec, snapshot_id)
+            return await self._create_sandbox(spec, snapshot_id, extension_params)
         except E2BCreateError as error:
             if _is_not_found(error.__cause__, _require_e2b_sdk()) or _is_missing_template(error.__cause__):
                 raise SandboxSnapshotNotFoundError(
@@ -691,7 +708,9 @@ class E2BProvider:
                 ) from error
             raise
 
-    async def _create_sandbox(self, spec: SandboxSpec, template: str) -> SandboxHandle:
+    async def _create_sandbox(
+        self, spec: SandboxSpec, template: str, extension_params: Mapping[str, Any] | None = None
+    ) -> SandboxHandle:
         lifetime_s = spec.ttl_s if spec.ttl_s is not None else self._create.timeout_s
         if lifetime_s is not None and (not _is_finite_number(lifetime_s) or lifetime_s <= 0):
             raise E2BCreateError("E2B sandbox ttl_s must be > 0")
@@ -737,10 +756,10 @@ class E2BProvider:
         try:
             # Creating a sandbox is not idempotent. Retrying an ambiguous
             # transport failure can leak the first, billable sandbox.
-            if self._create.custom_extension_params is None:
+            if extension_params is None:
                 sandbox = await e2b.AsyncSandbox.create(**kwargs)
             else:
-                sandbox = await self._create_with_extension_params(e2b, kwargs)
+                sandbox = await self._create_with_extension_params(e2b, kwargs, extension_params)
         except Exception as exc:
             raise E2BCreateError(f"Failed to create e2b sandbox from template {template!r}: {exc}") from exc
 
@@ -789,7 +808,9 @@ class E2BProvider:
         except Exception as kill_error:  # noqa: BLE001 - the lease or timeout still ends it
             LOGGER.warning("could not kill e2b sandbox %s (%s): %r", sandbox.sandbox_id, reason, kill_error)
 
-    async def _create_with_extension_params(self, e2b: Any, kwargs: dict[str, Any]) -> Any:
+    async def _create_with_extension_params(
+        self, e2b: Any, kwargs: dict[str, Any], extension_params: Mapping[str, Any]
+    ) -> Any:
         """Create through ``POST /sandboxes``, adding ``customExtensionParams``.
 
         The POST goes through the SDK's own API client, so it gets the URL, auth
@@ -805,7 +826,7 @@ class E2BProvider:
             "allow_internet_access": kwargs["allow_internet_access"],
             "envVars": kwargs.get("envs", {}),
             "metadata": kwargs.get("metadata", {}),
-            "customExtensionParams": self._create.custom_extension_params,
+            "customExtensionParams": dict(extension_params),
         }
         if "network" in kwargs:
             body["network"] = {_NETWORK_API_KEYS[key]: rules for key, rules in kwargs["network"].items()}
@@ -816,7 +837,10 @@ class E2BProvider:
         client = e2b.api.client_async.get_api_client(config).get_async_httpx_client()
         response = await client.post("/sandboxes", json=body)
         if response.status_code >= 300:
-            raise E2BCreateError(f"POST /sandboxes returned HTTP {response.status_code}: {response.text[:500]}")
+            error = E2BCreateError(f"POST /sandboxes returned HTTP {response.status_code}: {response.text[:500]}")
+            # Read by ``create_from_snapshot`` to tell a missing snapshot from another refusal.
+            error.status_code = response.status_code
+            raise error
         sandbox_id = response.json()["sandboxID"]
         try:
             # Pass the create timeout: connect otherwise applies the SDK default.
