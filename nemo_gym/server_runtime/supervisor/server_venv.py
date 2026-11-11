@@ -192,7 +192,9 @@ def _is_complete_venv(venv_path: Path) -> bool:
     if (venv_path / SETUP_COMPLETE_MARKER).is_file():
         return True
     print(
-        f"WARNING: {venv_path} has no {SETUP_COMPLETE_MARKER}, so it may be incomplete. Reinstalling.", file=sys.stderr
+        f"WARNING: {venv_path} has no {SETUP_COMPLETE_MARKER}, so it may be incomplete. Reinstalling. "
+        f"To reuse a known-good prebuilt venv, run `touch {venv_path / SETUP_COMPLETE_MARKER}` or rebuild the image.",
+        file=sys.stderr,
     )
     return False
 

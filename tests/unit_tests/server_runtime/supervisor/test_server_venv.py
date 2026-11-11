@@ -662,7 +662,9 @@ class TestLegacySetupContract:
             assert after == f"cd {server_dir} && source {server_dir}/.venv/bin/activate"
         else:
             assert after == before
-            assert f"{server_dir}/.venv has no {SETUP_COMPLETE_MARKER}" in capsys.readouterr().err
+            err = capsys.readouterr().err
+            assert f"{server_dir}/.venv has no {SETUP_COMPLETE_MARKER}" in err
+            assert f"touch {server_dir}/.venv/{SETUP_COMPLETE_MARKER}" in err
         assert "--skip-if-ready" in shlex.split(before)
         assert "uv pip install" in self._installation_command(before)
 
