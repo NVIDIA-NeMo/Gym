@@ -71,6 +71,118 @@ def check_runtime(harness: str, *, use_agent_sessions: bool = False) -> dict:
     return {"executable": shutil.which(harness), "version": version.stdout.strip()}
 
 
+def _nooa_overrides(defaults: dict) -> dict:
+    from .nooa import observer_module_name
+
+    return {
+        "nooa": {
+            **defaults["nooa"],
+            "execution_mode": "sandboxed",
+            "invocation_adapter": f"{observer_module_name()}:invoke_with_witness",
+        }
+    }
+
+
+def _harness_config(harness: str, directory: Path, timeout: float) -> dict:
+    """Describe probe overrides and setup requirements without applying them."""
+    workspace = str(directory / "workspace")
+    opencode = {"permission": {"bash": "allow"}}
+    settings = {
+        "simple": {
+            "overrides": {"max_steps": 6},
+            "session": {"agent_overrides": {}, "tool_transports": ["direct_http"], "sandbox_backend": None},
+        },
+        "opencode": {
+            "overrides": {"timeout": timeout, "opencode_config": opencode},
+            "legacy": {
+                "agent_overrides": {
+                    "workspace_root": workspace,
+                    # Auxiliary requests would consume the scripted policy replies.
+                    "opencode_config": {
+                        **opencode,
+                        "agent": {"title": {"disable": True}, "summary": {"disable": True}},
+                    },
+                },
+            },
+        },
+        "pi": {
+            "overrides": {"timeout": timeout},
+            "legacy": {"agent_overrides": {"workspace_root": workspace}},
+        },
+        "copilot": {
+            "overrides": {"timeout": timeout},
+            "legacy": {"agent_overrides": {"workspace_root": workspace}},
+        },
+        "crewai": {"overrides": {"timeout": timeout}},
+        "openclaw": {
+            "overrides": {"timeout": math.ceil(timeout)},
+            "legacy": {"agent_overrides": {"workspace_root": workspace}},
+        },
+        "codex": {
+            "legacy": {
+                "requires_workspace": True,
+                "agent_overrides": {
+                    "cwd": workspace,
+                    "timeout": timeout,
+                    "sandbox_mode": "danger-full-access",
+                    "extra_config": {"features": {"shell_snapshot": False}, "web_search": "disabled"},
+                },
+            },
+        },
+        "nooa": {
+            "overrides": {"sandbox_runner_timeout_seconds": timeout},
+            "pop_fields": ["model", "concurrency"],
+            "extra_overrides": _nooa_overrides,
+            "session": {"agent_overrides": {}, "sandbox_backend": "conformance_local"},
+        },
+        "claude_code": {
+            "overrides": {
+                "claude_code_version": "2.1.108",
+                "timeout": int(timeout),
+                "max_turns": 6,
+                "allowed_tools": "Bash",
+                "thinking": "disabled",
+            },
+        },
+        "miniswe_sandboxed": {
+            "overrides": {
+                "harness": {"step_limit": 6, "step_timeout_sec": 10},
+                "agent_timeout_sec": timeout,
+                "setup_timeout_sec": timeout,
+                "artifacts_dir": str(directory / "native"),
+            },
+        },
+        "terminus_2_sandboxed": {
+            "inherit_adapter_defaults": True,
+            "overrides": {
+                "max_turns": 6,
+                "enable_summarize": False,
+                "llm_request_timeout": int(timeout),
+                "sandbox_timeout": timeout,
+            },
+        },
+        "hermes": {
+            "overrides": {
+                "max_turns": 6,
+                "enabled_toolsets": ["terminal"],
+                "terminal_backend": "local",
+                "terminal_timeout": 10,
+                "compression_enabled": False,
+                "checkpoints_enabled": False,
+                "api_key": "conformance",
+            },
+        },
+    }.get(harness, {})
+    settings["session"] = {
+        # Most agents own the sandbox; the verifier only reads retained output.
+        "agent_overrides": {"sandbox_provider": "probe_sandbox", "sandbox_config": {"workdir": workspace}},
+        "tool_transports": [],
+        "sandbox_backend": "local",
+        **settings.get("session", {}),
+    }
+    return settings
+
+
 def _config(
     harness: str, directory: Path, ports: dict[str, int], timeout: float, *, use_agent_sessions: bool = False
 ) -> dict:
@@ -83,86 +195,29 @@ def _config(
     defaults = yaml.safe_load(defaults_path.read_text())[f"{harness}_agent"]["responses_api_agents"][
         f"{harness}_agent"
     ]
-    workspace = directory / "workspace"
-    overrides = {
-        "simple": {"max_steps": 6},
-        "opencode": {"timeout": timeout, "opencode_config": {"permission": {"bash": "allow"}}},
-        "pi": {"timeout": timeout},
-        "copilot": {"timeout": timeout},
-        "crewai": {"timeout": timeout},
-        "openclaw": {"timeout": math.ceil(timeout)},
-        "nooa": {"sandbox_runner_timeout_seconds": timeout},
-        "claude_code": {
-            "claude_code_version": "2.1.108",
-            "timeout": int(timeout),
-            "max_turns": 6,
-            "allowed_tools": "Bash",
-            "thinking": "disabled",
-        },
-        "miniswe_sandboxed": {
-            "harness": {"step_limit": 6, "step_timeout_sec": 10},
-            "agent_timeout_sec": timeout,
-            "setup_timeout_sec": timeout,
-            "artifacts_dir": str(directory / "native"),
-        },
-        "terminus_2_sandboxed": {
-            "max_turns": 6,
-            "enable_summarize": False,
-            "llm_request_timeout": int(timeout),
-            "sandbox_timeout": timeout,
-        },
-        "hermes": {
-            "max_turns": 6,
-            "enabled_toolsets": ["terminal"],
-            "terminal_backend": "local",
-            "terminal_timeout": 10,
-            "compression_enabled": False,
-            "checkpoints_enabled": False,
-            "api_key": "conformance",
-        },
-    }
-    # Terminus also needs its adapter defaults; other probes inherit only runtime pins.
+    settings = _harness_config(harness, directory, timeout)
+    mode = settings.get("session" if use_agent_sessions else "legacy", {})
+    extra_overrides = settings.get("extra_overrides")
     agent = {
-        **(defaults if harness == "terminus_2_sandboxed" else {}),
+        **(defaults if settings.get("inherit_adapter_defaults") else {}),
         **server(ports["probe_agent"]),
         "name": "probe_agent",
         "concurrency": 1,
         "model": "conformance-model",
         "model_server": {"type": "responses_api_models", "name": "policy_model"},
         **{key: value for key, value in defaults.items() if key.endswith("_version")},
-        **overrides.get(harness, {}),
+        **settings.get("overrides", {}),
+        **(extra_overrides(defaults) if extra_overrides else {}),
+        **mode.get("agent_overrides", {}),
     }
-    if harness == "nooa":
-        from .nooa import observer_module_name
-
-        agent.pop("model")
-        agent.pop("concurrency")
-        agent["nooa"] = {
-            **defaults["nooa"],
-            "execution_mode": "sandboxed",
-            "invocation_adapter": f"{observer_module_name()}:invoke_with_witness",
-        }
-
+    for field in settings.get("pop_fields", []):
+        agent.pop(field, None)
+    if mode.get("requires_workspace"):
+        (directory / "workspace").mkdir()
     if use_agent_sessions:
         agent.pop("resources_server", None)
-        if harness not in ("simple", "nooa"):
-            # The verifier only reads retained output, so the agent can own this local sandbox.
-            agent.update(sandbox_provider="probe_sandbox", sandbox_config={"workdir": str(workspace)})
     else:
         agent["resources_server"] = {"type": "resources_servers", "name": "probe_resources"}
-        if harness in ("opencode", "pi", "openclaw", "copilot"):
-            agent["workspace_root"] = str(workspace)
-        if harness == "opencode":
-            # Auxiliary title/summary requests would consume the scripted policy replies.
-            agent["opencode_config"]["agent"] = {"title": {"disable": True}, "summary": {"disable": True}}
-        if harness == "codex":
-            workspace.mkdir()
-            agent.update(
-                cwd=str(workspace),
-                timeout=timeout,
-                sandbox_mode="danger-full-access",
-                extra_config={"features": {"shell_snapshot": False}, "web_search": "disabled"},
-            )
     environment_type = "single_agent_turn_legacy" if use_agent_sessions else "legacy_agent"
     environment = {
         **server(ports["probe_environment"]),
@@ -172,7 +227,7 @@ def _config(
     if use_agent_sessions:
         environment.update(
             resources_server={"type": "resources_servers", "name": "probe_resources"},
-            resources_tool_transports=["direct_http"] if harness == "simple" else [],
+            resources_tool_transports=mode["tool_transports"],
             default_episode_timeout_seconds=timeout,
             cleanup_timeout_seconds=10,
         )
@@ -191,8 +246,8 @@ def _config(
         config["judge_model"] = {
             "responses_api_models": {"probe": {**server(ports["judge_model"]), "name": "judge_model"}}
         }
-    if use_agent_sessions and harness != "simple":
-        config["probe_sandbox"] = {("conformance_local" if harness == "nooa" else "local"): {"concurrency": 1}}
+    if use_agent_sessions and mode["sandbox_backend"]:
+        config["probe_sandbox"] = {mode["sandbox_backend"]: {"concurrency": 1}}
     return config
 
 
