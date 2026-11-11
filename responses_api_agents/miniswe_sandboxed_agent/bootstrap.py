@@ -33,7 +33,7 @@ PYTHON_SHA256 = {
 }
 
 
-async def cached_download(url: str, *, sha256: str | None = None) -> Path:
+async def cached_download(url: str, *, sha256: str | None = None, timeout: float = 120) -> Path:
     """Download once per cache, serializing concurrent first-task requests."""
     async with _DOWNLOAD_LOCK:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -44,7 +44,7 @@ async def cached_download(url: str, *, sha256: str | None = None) -> Path:
         try:
             # Allow larger response lines/fields only for release downloads and their redirects.
             async with await request(
-                "GET", url, timeout=ClientTimeout(total=120), max_line_size=65536, max_field_size=65536
+                "GET", url, timeout=ClientTimeout(total=timeout), max_line_size=65536, max_field_size=65536
             ) as response:
                 response.raise_for_status()
                 data = await response.read()
