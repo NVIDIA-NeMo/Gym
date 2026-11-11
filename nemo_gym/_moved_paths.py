@@ -854,7 +854,7 @@ for _module, _renamed in _RENAMED_TOKEN_CAPTURE_NAMES.items():
 
 # The local-requirement pattern now matches any direct nemo-gym requirement, so it was renamed with that meaning.
 # The server_venv entry also serves its old module path, nemo_gym.cli.setup_command.
-_SERVER_VENV = "nemo_gym.orchestration.server_venv"
+_SERVER_VENV = "nemo_gym.server_runtime.supervisor.server_venv"
 _listed = MOVED_NAMES.setdefault(_SERVER_VENV, {})
 assert "_LOCAL_NEMO_GYM_REQUIREMENT_RE" not in _listed
 _listed["_LOCAL_NEMO_GYM_REQUIREMENT_RE"] = MovedPath(new=f"{_SERVER_VENV}:_NEMO_GYM_REQUIREMENT_RE", since="0.8.0")

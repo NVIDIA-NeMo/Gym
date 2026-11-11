@@ -1176,7 +1176,7 @@ class TestIsGymCheckout:
             "-e nemo-gym @ ../../\n-e ../../benchmarks/automationbench\npytest\n"
         )
         monkeypatch.setattr(nemo_gym, "_is_editable_install", False)
-        monkeypatch.setattr(nemo_gym.orchestration.server_venv, "PARENT_DIR", site_packages)
+        monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_venv, "PARENT_DIR", site_packages)
 
         with patch("importlib.metadata.version", return_value="0.8.0"):
             command = self._install_command(server_dir, tmp_path)
@@ -1194,7 +1194,7 @@ class TestIsGymCheckout:
         (server_dir / "requirements.txt").write_text("-e ../..\nnemo-gym==0.7.0\npytest\n")
         (repo / "pyproject.toml").write_text('[project]\nname = "external-repo"\n')
         monkeypatch.setattr(nemo_gym, "_is_editable_install", True)
-        monkeypatch.setattr(nemo_gym.orchestration.server_venv, "PARENT_DIR", gym)
+        monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_venv, "PARENT_DIR", gym)
 
         command = self._install_command(server_dir, tmp_path)
         assert self._piped_requirements(command, server_dir) == [f"-e {gym}", "-e ../..", "pytest"]
@@ -1224,7 +1224,7 @@ class TestIsGymCheckout:
         server_dir.mkdir(parents=True)
         (server_dir / "pyproject.toml").write_text('[project]\nname = "example"\n')
         monkeypatch.setattr(nemo_gym, "_is_editable_install", False)
-        monkeypatch.setattr(nemo_gym.orchestration.server_venv, "PARENT_DIR", site_packages)
+        monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_venv, "PARENT_DIR", site_packages)
 
         with patch("importlib.metadata.version", return_value="0.8.0"):
             command = self._install_command(server_dir, tmp_path)
