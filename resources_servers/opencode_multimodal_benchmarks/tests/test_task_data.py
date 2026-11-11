@@ -121,6 +121,22 @@ def test_wire_boundary_requires_usable_mcq_options(benchmark, options):
         _wire_request(metadata)
 
 
+@pytest.mark.parametrize(
+    "answer,options",
+    [
+        ("cat", {"A": "cat", "B": "CAT"}),
+        ("missing", {"A": "cat", "B": "dog"}),
+        ("C", {"A": "cat", "B": "dog"}),
+        ("A, A", {"A": "cat", "B": "dog"}),
+        ("A", {"A": " "}),
+        ("H", {"H": "cat"}),
+    ],
+)
+def test_vtc_reference_is_validated_before_scoring(answer, options):
+    with pytest.raises(ValidationError, match="VTCBench"):
+        _wire_request(_minimal_metadata("VTCBench") | {"answer": answer, "options": options})
+
+
 @pytest.mark.parametrize("cycle", [None, "", " \n"])
 def test_wire_boundary_requires_hrbench_cycle(cycle):
     metadata = _minimal_metadata("HRBench8K")

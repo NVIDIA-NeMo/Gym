@@ -73,11 +73,11 @@ def server():
     )
 
 
-def request(benchmark, prediction, answer="A"):
+def request(benchmark, prediction, answer="A", **metadata):
     return VisualVerifyRequest(
         responses_create_params={"input": []},
         response=completion(prediction),
-        verifier_metadata=task(benchmark, answer),
+        verifier_metadata=task(benchmark, answer) | metadata,
     )
 
 
@@ -92,6 +92,21 @@ async def test_deterministic_scoring(server, benchmark, prediction, reward, monk
     assert result.evaluation_completed is True
     if prediction:
         judge.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("benchmark", ["VStarBench", "HRBench8K"])
+@pytest.mark.parametrize("answer,reward", [("A", 0), ("B", 1)])
+async def test_corrected_explicit_answer_supersedes_previous_choice(server, monkeypatch, benchmark, answer, reward):
+    judge = AsyncMock()
+    monkeypatch.setattr(VisualBenchmarksServer, "_judge", judge)
+    result = await server.verify(
+        request(benchmark, "The answer is A. After rechecking, the answer is B.", answer=answer)
+    )
+    assert result.reward == reward
+    assert result.extracted == "B"
+    assert result.scorer == "mcq-final-answer-llm-v4"
+    judge.assert_not_awaited()
 
 
 @pytest.mark.asyncio

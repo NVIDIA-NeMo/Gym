@@ -23,7 +23,11 @@ from nemo_gym.orchestration.recovery import (
 )
 from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 from nemo_gym.rollouts.rollout_health import run_health_checks
-from nemo_gym.server_runtime.verifier_observability import observe_llm_judge_grading, observe_verifier
+from nemo_gym.server_runtime.verifier_observability import (
+    observe_llm_judge_grading,
+    observe_programmatic_grading,
+    observe_verifier,
+)
 from nemo_gym.verification.judge import call_judge, record_parsed_judge_verdict
 from tests.helpers.single_agent_turn import _agent_response, _Client, _environment_server, _request, _Response
 from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect_with_score
@@ -151,6 +155,7 @@ class _ObservedDependencies(_Client):
 
     reward: float = 1.0
     judged: bool = False
+    programmatic: bool = False
     capture_dir: Path | None = None
 
     async def post(self, server_name: str, url_path: str, **kwargs) -> _Response:
@@ -197,6 +202,8 @@ class _ObservedDependencies(_Client):
         async def verify():
             if self.judged:
                 return await observe_llm_judge_grading(grade)
+            if self.programmatic:
+                return observe_programmatic_grading(lambda: kwargs["json"] | {"reward": self.reward})
             return kwargs["json"] | {"reward": self.reward}
 
         result = await observe_verifier(verify, enabled=True, verifier_name=server_name)()
@@ -204,17 +211,42 @@ class _ObservedDependencies(_Client):
 
 
 async def _collect_session(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, reward: float, empty=False, judged=False
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, reward: float, empty=False, judged=False, opencode=False
 ):
     environment, dependencies = _environment_server(client_type=_ObservedDependencies)
     dependencies.reward = reward
     dependencies.judged = judged
+    dependencies.programmatic = opencode and not judged
     dependencies.capture_dir = tmp_path / "captures"
     response = _agent_response().model_dump(mode="json")
     if empty:
         response |= {"status": "incomplete", "output": [{"type": "reasoning", "id": "reasoning", "summary": []}]}
     else:
         response["status"] = "completed"
+    if opencode:
+        from environment_servers.single_agent_turn.opencode import OpenCodeEnvironmentServer
+        from responses_api_agents.opencode_multimodal_agent.rewards import (
+            OpenCodeToolRewardConfig,
+            score_opencode_tools,
+        )
+
+        rewards = OpenCodeToolRewardConfig()
+        dependencies.global_config_dict.agent.responses_api_agents.test.tool_rewards = rewards.model_dump()
+        response["output"][0]["content"][0]["text"] = "<think>private reasoning</think>answer"
+        call = {"type": "function_call", "call_id": "bash-1", "name": "bash", "arguments": '{"command":"ls"}'}
+        response["output"] = [
+            call,
+            {"type": "function_call_output", "call_id": "bash-1", "output": "file.txt"},
+            *response["output"],
+        ]
+        response["opencode_evidence"] = {
+            "turns_used": 1,
+            "finished_naturally": True,
+            "tool_reward": score_opencode_tools(
+                {"bash-1": ("bash", "completed", 0)}, [call], 0.0, rewards
+            ).model_dump(),
+        }
+        environment = OpenCodeEnvironmentServer(config=environment.config, server_client=dependencies)
     trajectory = raw_trial()["ng_trajectory"]
     trajectory["task_id"] = "task"
     trajectory["verifier_invocations"] = []
@@ -277,6 +309,44 @@ async def _collect_session(
     collected = select_managed_evidence(collect_with_score(tmp_path, "[]"), tmp_path)
     [saved] = [json.loads(line) for line in output.read_text().splitlines()]
     return saved, collected
+
+
+@pytest.mark.parametrize("judged", [False, True])
+@pytest.mark.parametrize("reward", [0.0, 1.0])
+async def test_opencode_projection_and_shaping_preserve_observed_grading(tmp_path, monkeypatch, judged, reward):
+    from copy import deepcopy
+
+    from nemo_gym.trajectory import grading_result_binding
+    from nemo_gym.trajectory.trajectory_record import grading_transform_source
+
+    saved, collected = await _collect_session(tmp_path, monkeypatch, reward=reward, judged=judged, opencode=True)
+    assert saved["reward"] == pytest.approx(reward + (0.1 if reward else 0.02))
+    transform = saved["ng_grading_transform"]
+    original = transform["input_result"]
+    assert original["reward"] == reward
+    assert original["response"]["output"][0]["content"][0]["text"] == "answer"
+    assert saved["response"]["output"][-1]["content"][0]["text"] == "<think>private reasoning</think>answer"
+    assert saved["response"]["output"][-1]["generation_token_ids"] == [3, 4]
+    [invocation] = saved["ng_trajectory"]["verifier_invocations"]
+    grade = invocation["grading_operations"][0]
+    assert grade["result_binding_sha256"] == grading_result_binding(original)
+    assert grade["result_binding_sha256"] != grading_result_binding(saved)
+    assert grading_transform_source(saved) == collected.results[0]["_ng_collected_grading_transform"]
+    passed, reason, report, counts = _gate(collected)
+    assert passed is True and report["exact"] is True, reason
+    assert counts["observed_healthy"] == 1
+
+    for field in ("response", "reward", "parameters", "input"):
+        changed = deepcopy(saved)
+        if field == "response":
+            changed["response"]["output"][-1]["content"][0]["text"] = "different answer"
+        elif field == "reward":
+            changed["reward"] += 0.2
+        elif field == "parameters":
+            changed["ng_grading_transform"]["parameters"]["strip_reasoning_for_grading"] = False
+        else:
+            changed["ng_grading_transform"]["input_result"]["reward"] = 0.5
+        assert grading_transform_source(changed) is None
 
 
 @pytest.mark.parametrize("reward", [0.0, 1.0])

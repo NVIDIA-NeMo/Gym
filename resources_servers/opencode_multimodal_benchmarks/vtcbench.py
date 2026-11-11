@@ -81,6 +81,20 @@ def final_answer_text(prediction: str) -> str:
     return lines[-1] if lines else ""
 
 
+def reference_options(answer: str, options: dict[str, str]) -> str:
+    """Resolve an MCQ reference to sorted letters without guessing ambiguous option text."""
+    answer = answer.strip()
+    if re.fullmatch(r"[A-Ga-g](?:\s*,\s*[A-Ga-g])*", answer):
+        letters = [letter.strip().upper() for letter in answer.split(",")]
+        if len(set(letters)) != len(letters) or any(letter not in options for letter in letters):
+            raise ValueError("VTCBench reference must select distinct available options")
+        return "".join(sorted(letters))
+    matches = [letter for letter, text in options.items() if text.strip().casefold() == answer.casefold()]
+    if len(matches) != 1:
+        raise ValueError("VTCBench reference text must match exactly one option")
+    return matches[0]
+
+
 def rule_score(task: dict, prediction: str) -> int:
     """Grade the selected final answer; ambiguous prose requires the judge."""
     prediction = final_answer_text(prediction)
@@ -89,11 +103,14 @@ def rule_score(task: dict, prediction: str) -> int:
         raise ValueError("VTCBench requires a nonempty reference answer")
     options = {key: str(value).strip() for key, value in task["options"].items() if key in "ABCDEFG"}
     if options:
+        reference = reference_options(answer, options)
         selected = infer_option(prediction, options)
-        if len(answer) == 1 and answer.upper() in options:
-            return int(selected == answer.upper())
-        if selected in options:
-            return int(options[selected].casefold() == answer.casefold())
+        if len(reference) == 1:
+            return int(selected == reference)
+        if re.fullmatch(r"[A-Ga-g](?:\s*,\s*[A-Ga-g])+", prediction):
+            letters = [letter.strip().upper() for letter in prediction.split(",")]
+            return int("".join(sorted(letters)) == reference)
+        return 0
     return int(" ".join(prediction.casefold().split()) == " ".join(answer.casefold().split()))
 
 
@@ -116,7 +133,7 @@ def judge_score(task: dict, verdict: str) -> int | None:
     if task["options"]:
         if not verdict.isupper() or not verdict.isalpha():
             return None
-        reference = "".join(sorted(str(task["answer"]).lower().split(", ")))
-        return int("".join(sorted(verdict.lower())) == reference)
+        reference = reference_options(str(task["answer"]), task["options"])
+        return int("".join(sorted(verdict)) == reference)
     verdict = verdict.strip().lower()
     return int(verdict == "yes") if verdict in ("yes", "no") else None

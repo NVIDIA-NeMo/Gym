@@ -80,6 +80,16 @@ main's `system_prompt_mode: replace`, with literal prompt braces protected from
 OpenCode configuration substitution. Configure a different `system_prompt` as
 needed; there is no separate prompt-rewriting plugin.
 
+The saved result retains the verifier's original response/reward binding and a
+separate `ng_grading_transform` record for the final-answer projection and reward
+offset. Its binding covers the full saved response, reward components and scoring
+parameters; training token arrays remain intact.
+
+Direct `gym eval reverify` is unsupported for these environment results. It calls
+only the Resources Server and cannot replay the environment's scoring view and
+answer-dependent shaping, so preflight rejects these rows instead of changing
+their reward semantics.
+
 ## Evaluation
 
 The four benchmark `<benchmark>/opencode.yaml` recipes use the same sessions.

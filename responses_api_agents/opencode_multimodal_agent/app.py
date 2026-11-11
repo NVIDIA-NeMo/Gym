@@ -24,12 +24,13 @@ from nemo_gym.core import MediaFile, NeMoGymResponse, NeMoGymResponseCreateParam
 from nemo_gym.models.token_capture import OPENCODE_MAX_STEPS_PROMPT as OPENCODE_1_17_11_MAX_STEPS
 from nemo_gym.sandbox import SandboxProvider, SandboxSpec, read_text, upload_text
 from nemo_gym.trajectory import AgentEpisode, AgentInvocation, ToolCallObservation
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgentConfig, _serialize_replacement_config
 from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession
 from responses_api_agents.opencode_multimodal_agent.media import prepare_image
 from responses_api_agents.opencode_multimodal_agent.rewards import (
     EpisodeEvidence,
-    OpenCodeToolRewardConfig,
+    OpenCodeScoringConfig,
     final_answer,
     score_opencode_tools,
 )
@@ -41,16 +42,14 @@ DEFAULT_TOOL_POLICY = yaml.safe_load((ROOT.parent / "opencode_agent/configs/perm
 ]["responses_api_agents"]["opencode_agent"]["opencode_config"]
 
 
-class OpenCodeMultimodalAgentConfig(OpenCodeAgentConfig):
+class OpenCodeMultimodalAgentConfig(OpenCodeScoringConfig, OpenCodeAgentConfig):
     max_turns: int | None = Field(default=8, gt=0)
     final_answer_reserve: int | None = Field(default=2048, gt=0)
     backend_final_answer_reserve: bool = True
-    strip_reasoning_for_grading: bool = True
     max_source_pixels: int = Field(default=150_000_000, gt=0)
     max_images: int | None = Field(default=33, gt=0)
     command_exec_timeout: int = Field(default=300, gt=0)
     subagents_enabled: bool = True
-    tool_rewards: OpenCodeToolRewardConfig | None = Field(default_factory=OpenCodeToolRewardConfig)
     system_prompt: str | None = (ROOT / "prompts/visual_prefix.txt").read_text().strip()
     compaction_auto: bool = False
     require_finalized_trace: bool = True
@@ -280,3 +279,6 @@ class OpenCodeMultimodalAgent(OpenCodeAgent):
 
 if __name__ == "__main__":
     OpenCodeMultimodalAgent.run_webserver()
+
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = OpenCodeMultimodalAgent.run_webserver()  # noqa: F401

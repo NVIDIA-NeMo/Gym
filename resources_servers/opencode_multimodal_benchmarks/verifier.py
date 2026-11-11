@@ -85,9 +85,9 @@ class VisualVerifier:
             return observe_programmatic_grading(exact_match)
         if benchmark == "VTCBench":
             scorer = (
-                "vtcbench-final-answer-rules-llm-v3"
+                "vtcbench-final-answer-rules-llm-v4"
                 if self.config.vtc_llm_fallback
-                else "vtcbench-final-answer-rules-v3"
+                else "vtcbench-final-answer-rules-v4"
             )
             if not self.config.vtc_llm_fallback or rule_score(task, prediction):
                 return observe_programmatic_grading(

@@ -69,17 +69,27 @@ harness conformance.
 The Resources Server owns grading. Deterministic scores, including incorrect or
 empty-answer zeros, use `observe_programmatic_grading`. Gym-routed judges use
 `observe_llm_judge_grading`, `call_judge`, and a parsed-verdict marker. The recorded
-operation binds the saved policy response and reward to the judge reply. Use
+operation binds the response actually graded and its base reward to the judge
+reply. The OpenCode environment additionally records a bound transformation to
+the full saved transcript and any auxiliary reward. Use
 `judge_server` and model-call capture for qualification. Direct HTTP judging is
 supported for compatibility, but its unobserved judge calls cannot establish a
 fully observed grading record. It is never labeled model-free grading.
 
 An invalid judge reply is not a model mistake. Transport or parsing failures
-preserve the policy response and become masked `judge_failed` outcomes; recover
-by rejudging the saved answer. If a parsing retry succeeds after an unparseable
+preserve the policy response and become masked `judge_failed` outcomes. Direct
+resource-only rows can be rejudged from the saved answer. OpenCode environment
+rows require its scoring projection and reward shaping; direct `gym eval reverify`
+rejects those rows until environment-aware replay is supported. If a parsing retry succeeds after an unparseable
 reply, the score is retained but the grading operation remains `unknown`: an
 invalid reply is not falsely marked as a parsed verdict. Inspect these outcomes
-and rejudge before claiming complete grading evidence.
+before claiming complete grading evidence.
+
+Headline completeness compares valid measurements with the resolved materialized
+attempt inventory, including runtime repeat overrides. An absent repeat remains
+in that inventory even when its failures are stored in a separate artifact.
+Without an inventory, aggregation reports partial scores rather than asserting
+that the surviving rows form a complete run.
 
 Catalog pairings have no whole-episode deadline by default. To set one, configure
 `visual_environment.environment_servers.single_agent_turn.default_episode_timeout_seconds`.

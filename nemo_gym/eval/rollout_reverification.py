@@ -67,6 +67,7 @@ from nemo_gym.rollouts.rollout_collection import (
     NG_RESULT_TYPE_KEY,
     _coverage_report,
     _get_max_rollout_attempts,
+    _planned_repeat_inventory,
     _rollout_request_debug_summary,
     is_omitted_rollout_row,
     is_terminal_failure,
@@ -755,6 +756,12 @@ def _build_verify_payload(pair: InputRolloutPair) -> Dict:
             )
         replay_patch = True
     response = _rollout_response(pair.rollout)
+    if "opencode_evidence" in response or "opencode_tool_reward" in pair.rollout:
+        raise ConfigError(
+            "reverify: OpenCode environment results require replaying their final-answer scoring view and "
+            "answer-dependent tool rewards. Direct resources-server reverification does not support that "
+            "contract; refusing to replace the saved reward with a different scoring calculation."
+        )
     task_input = pair.input.get("task_input")
     if not isinstance(task_input, dict):
         payload = pair.input | {"response": response}
@@ -1088,6 +1095,8 @@ async def _call_aggregate_metrics(
     results: List[Dict],
     rows: List[Dict],
     output_fpath: Path,
+    *,
+    materialized_fpaths: Optional[List[Path]] = None,
 ) -> Optional[Path]:
     """Call /aggregate_metrics on each resource server after rollouts complete.
 
@@ -1105,6 +1114,11 @@ async def _call_aggregate_metrics(
     # remapped row to be verified by one server and aggregated by another.
     agent_results: Dict[Tuple[str, str], List[Dict]] = {}
     labels = rollout_run_labels(rows)
+    inventory = await asyncio.to_thread(
+        _planned_repeat_inventory,
+        materialized_fpaths or [],
+        lambda row: (rollout_run_key(row), _rs_for_row(row, agent_to_rs, server_client.global_config_dict)),
+    )
     for row, result in zip(rows, results):
         key = rollout_run_key(row)
         if not key:
@@ -1131,7 +1145,14 @@ async def _call_aggregate_metrics(
                 entry["response"] = response_metadata
             stripped.append(entry)
 
-        agg_request = AggregateMetricsRequest(verify_responses=stripped)
+        run_keys = {rollout_run_key(row) for row in rows if labels.get(rollout_run_key(row)) == agent_name}
+        expected = None
+        if inventory is not None:
+            expected = {}
+            for run_key in run_keys:
+                for task, indices in inventory.get((run_key, rs_name), {}).items():
+                    expected[task] = sorted(set(expected.get(task, [])) | set(indices))
+        agg_request = AggregateMetricsRequest(verify_responses=stripped, expected_rollout_indices=expected)
         agg_response = await server_client.post(
             server_name=rs_name,
             url_path="/aggregate_metrics",
@@ -2076,7 +2097,12 @@ class RolloutReverificationHelper(BaseModel):
             aggregate_metrics_fpath = None
         else:
             print("Computing aggregate metrics")
-            aggregate_metrics_fpath = await _call_aggregate_metrics(results, agg_rows, output_fpaths.output)
+            aggregate_metrics_fpath = await _call_aggregate_metrics(
+                results,
+                agg_rows,
+                output_fpaths.output,
+                materialized_fpaths=[Path(config.materialized_inputs_jsonl_fpath)],
+            )
 
         expected_rollouts = len(results) + sum(failure_counts.values())
         coverage = _coverage_report(expected_rollouts, len(results), failure_counts, output_fpaths.failures)

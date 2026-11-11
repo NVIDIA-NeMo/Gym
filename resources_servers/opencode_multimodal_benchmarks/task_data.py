@@ -6,6 +6,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from resources_servers.opencode_multimodal_benchmarks.vtcbench import reference_options
+
 
 MetadataString = Annotated[str, Field(json_schema_extra={"legacy_location": "verifier_metadata"})]
 
@@ -51,4 +53,8 @@ class TaskData(BaseModel):
                 raise ValueError("MCQ option text must be nonempty")
         if self.benchmark == "HRBench8K" and not self.cycle_category.strip():
             raise ValueError("HRBench8K requires cycle_category")
+        if self.benchmark == "VTCBench" and self.options:
+            if any(key not in "ABCDEFG" or len(key) != 1 or not value.strip() for key, value in self.options.items()):
+                raise ValueError("VTCBench options require letters A-G and nonempty text")
+            reference_options(self.answer, self.options)
         return self

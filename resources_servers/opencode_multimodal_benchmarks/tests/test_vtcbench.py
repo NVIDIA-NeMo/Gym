@@ -41,7 +41,7 @@ async def test_rule_hit_never_calls_judge(server, monkeypatch, prediction):
     monkeypatch.setattr(VisualBenchmarksServer, "_judge", judge)
     result = await server.verify(request("VTCBench", prediction))
     assert result.reward == 1 and result.extraction_method == "rule"
-    assert result.scorer == "vtcbench-final-answer-rules-llm-v3"
+    assert result.scorer == "vtcbench-final-answer-rules-llm-v4"
     judge.assert_not_awaited()
 
 
@@ -59,12 +59,24 @@ async def test_mcq_fallback(server, monkeypatch, verdict, reward):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("verdict,reward", [("A", 1), ("B", 0)])
+async def test_option_text_reference_agrees_between_rule_and_judge(server, monkeypatch, verdict, reward):
+    judge = AsyncMock(return_value=verdict)
+    monkeypatch.setattr(VisualBenchmarksServer, "_judge", judge)
+    direct = await server.verify(request("VTCBench", "A", answer="cat"))
+    assert direct.reward == 1 and direct.extraction_method == "rule"
+    judge.assert_not_awaited()
+    judged = await server.verify(request("VTCBench", "the feline", answer="cat"))
+    assert judged.reward == reward and judged.extraction_method == "llm"
+    judge.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("verdict,reward", [("yes", 1), ("No", 0)])
 async def test_free_answer_fallback(server, monkeypatch, verdict, reward):
     judge = AsyncMock(return_value=verdict)
     monkeypatch.setattr(VisualBenchmarksServer, "_judge", judge)
-    body = request("VTCBench", "five", answer="5")
-    body.verifier_metadata["options"] = {}
+    body = request("VTCBench", "five", answer="5", options={})
     result = await server.verify(body)
     assert result.reward == reward and result.extraction_method == "llm"
     assert "Ground Truth: 5\nPredicted Answer: five" in judge.call_args.args[0]
@@ -96,7 +108,7 @@ async def test_rule_only_mode(server, monkeypatch):
     monkeypatch.setattr(VisualBenchmarksServer, "_judge", judge)
     result = await server.verify(request("VTCBench", "Answer: A"))
     assert result.reward == 1 and result.extraction_method == "rule"
-    assert result.scorer == "vtcbench-final-answer-rules-v3"
+    assert result.scorer == "vtcbench-final-answer-rules-v4"
     judge.assert_not_awaited()
 
 
@@ -111,6 +123,9 @@ async def test_empty_answer_is_zero_without_judge(server, monkeypatch):
 
 def test_multiselect_and_invalid_mcq_verdicts():
     task = {"options": {"A": "cat", "B": "dog"}, "answer": "B, A"}
+    assert rule_score(task, "A, B") == 1
+    assert rule_score(task, "B") == 0
+    assert rule_score(task, "A, A, B") == 0
     assert judge_score(task, "AB") == 1
     assert judge_score(task, "B") == 0
     assert judge_score(task, "A, B") is None

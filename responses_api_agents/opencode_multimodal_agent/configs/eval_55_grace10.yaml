@@ -6,6 +6,7 @@ visual_agent:
   responses_api_agents:
     opencode_multimodal_agent:
       entrypoint: eval.py
+      tool_rewards: null
       max_turns: 65
       final_answer_reserve: null
       strip_reasoning_for_grading: false

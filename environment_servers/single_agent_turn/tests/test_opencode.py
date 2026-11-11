@@ -151,6 +151,30 @@ async def test_completed_response_still_requires_native_evidence_for_shaping():
         )
 
 
+@pytest.mark.parametrize("explicit_null", [False, True])
+@pytest.mark.parametrize("base_reward", [0.0, 1.0])
+async def test_eval_defaults_disable_shaping_and_preserve_reasoning(explicit_null, base_reward):
+    base, client = _environment_server()
+    config = client.global_config_dict.agent.responses_api_agents.test
+    config.entrypoint = "eval.py"
+    if explicit_null:
+        config.tool_rewards = None
+    response = _agent_response().model_dump(mode="json")
+    response["output"][0]["content"][0]["text"] = "<think>analysis</think>answer"
+    response["opencode_evidence"] = {"turns_used": 1, "finished_naturally": True, "tool_reward": None}
+    client.responses[2] = _Response(response)
+    verified = json.loads(client.responses[4].body)
+    verified["reward"] = base_reward
+    client.responses[4] = _Response(verified)
+    server = OpenCodeEnvironmentServer(config=base.config, server_client=client)
+    result = await server.run_request(_request())
+    assert result.failure is None
+    assert result.result.reward == base_reward
+    assert result.result.model_dump()["opencode_tool_reward"] is None
+    verify = next(body["json"] for _, path, body in client.calls if path == "/verify")
+    assert verify["response"]["output"][0]["content"][0]["text"] == "<think>analysis</think>answer"
+
+
 @pytest.mark.parametrize("tool_rewards", [None, {}])
 async def test_unfinished_trace_rejected_before_verifier_and_resources_closed(tool_rewards):
     base, client = _environment_server(token_capture=True)

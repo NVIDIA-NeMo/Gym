@@ -799,6 +799,18 @@ class TestYieldInputsAndRolloutsPaired:
 
 
 class TestBuildVerifyPayload:
+    @pytest.mark.parametrize("shaped", [False, True])
+    def test_opencode_environment_scores_cannot_be_replaced_by_direct_resource_scores(self, shaped):
+        pair = InputRolloutPair(
+            input={"verifier_metadata": {"answer": "A"}},
+            rollout={
+                "response": {"output": [], "opencode_evidence": {"tool_reward": {} if shaped else None}},
+                "reward": 1.1 if shaped else 1.0,
+            },
+        )
+        with pytest.raises(ConfigError, match="final-answer scoring view"):
+            _build_verify_payload(pair)
+
     def test_keeps_the_environment_server_that_ran_the_rollout(self) -> None:
         """A flat materialized row names no Environment Server; the re-verified row keeps the one the run stamped."""
         pair = InputRolloutPair(

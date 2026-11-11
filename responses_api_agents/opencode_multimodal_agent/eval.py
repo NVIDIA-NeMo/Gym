@@ -11,16 +11,15 @@ from pydantic import Field, model_validator
 from nemo_gym.agents import EvalTurnBudget
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import upload_text
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession
 from responses_api_agents.opencode_multimodal_agent.app import OpenCodeMultimodalAgent, OpenCodeMultimodalAgentConfig
-from responses_api_agents.opencode_multimodal_agent.rewards import OpenCodeToolRewardConfig
+from responses_api_agents.opencode_multimodal_agent.rewards import OpenCodeEvalScoringConfig
 
 
-class OpenCodeMultimodalEvalConfig(OpenCodeMultimodalAgentConfig):
+class OpenCodeMultimodalEvalConfig(OpenCodeEvalScoringConfig, OpenCodeMultimodalAgentConfig):
     require_finalized_trace: bool = False
-    tool_rewards: OpenCodeToolRewardConfig | None = None
     final_answer_reserve: int | None = Field(default=None, gt=0)
-    strip_reasoning_for_grading: bool = False
     max_turns: int | None = Field(default=8, gt=0)
     final_answer_turn_headroom: int = Field(default=2, ge=0)
     turn_budget: EvalTurnBudget | None = None
@@ -85,3 +84,6 @@ class OpenCodeMultimodalEvalAgent(OpenCodeMultimodalAgent):
 
 if __name__ == "__main__":
     OpenCodeMultimodalEvalAgent.run_webserver()
+
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = OpenCodeMultimodalEvalAgent.run_webserver()  # noqa: F401

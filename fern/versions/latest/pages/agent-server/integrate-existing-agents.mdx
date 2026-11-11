@@ -24,7 +24,7 @@ These adapters run a harness inside a sandbox. The `single_agent_turn` Environme
 | Codex (`codex_agent`) | Responses (streaming) | MCP only | Not wired up; evaluation only | Declared | Declared | Yes |
 | Kilo (`kilocode_agent`) | Chat Completions | MCP only | Not wired up; evaluation only | Declared | Not declared | With `--agent kilocode_agent/kilocode_sandboxed` and `++use_absolute_ip=true` |
 | OpenCode (`opencode_agent`) | Chat Completions | MCP only | Off by default; the session path is evaluation only | Not declared | Declared | Yes |
-| OpenCode multimodal (`opencode_multimodal_agent`) | Chat Completions | MCP only | Session path is evaluation only; compatibility path supports training capture | Not declared | Not declared | Not qualified |
+| OpenCode multimodal (`opencode_multimodal_agent`) | Chat Completions | MCP only | Shared session path supports training capture and evaluation | Not declared | Not declared | Not qualified |
 | OpenClaw (`openclaw_agent`) | Chat Completions | MCP only | Not wired up; evaluation only | Not declared | Declared | Yes |
 | Copilot (`copilot_agent`) | Chat Completions | None | Not wired up; evaluation only | Not declared | Not declared | Not validated |
 | mini-SWE (`mini_swe_agent`, `mini_swe_agent_sandboxed.yaml`) | Responses | MCP only, through a task-local CLI that its bash tool calls | Not wired up; evaluation only | Not declared | Not declared | Only when the task runs as root: a task user is refused |
@@ -33,10 +33,11 @@ The [OpenCode multimodal adapter](https://github.com/NVIDIA-NeMo/Gym/tree/main/r
 adds initial image staging and inline tool-image outputs to OpenCode 1.17.11.
 Its [visual benchmark catalog](https://github.com/NVIDIA-NeMo/Gym/tree/main/benchmarks/opencode_multimodal_benchmarks)
 provides a session overlay for VStar, HRBench8K, VTCBench and ZeroBench. These pairings are experimental. It accepts one activation, rejects
-continuations, and requires explicit `temperature` and `top_p`. Session evaluation
-rejects training capture and auxiliary tool rewards; the existing compatibility
-path retains those features. Configure the sandbox provider, model and budgets
-explicitly as described in the adapter README.
+continuations, and uses the shared owned OpenSandbox session path for training
+and evaluation. Sampling can use the configured defaults or request overrides.
+Training supports token capture and answer-dependent tool rewards; the evaluation
+profile disables tool rewards by default. Configure the sandbox provider, model
+and budgets as described in the adapter README.
 
 *Declared* means the benchmark's Resources server lists the agent in `allowed_agents`. Gym rejects any other pairing unless you pass `--allow-unsupported-pairing`. Declared support is not a validation: it says nothing about accuracy or training readiness. Check that a pairing works with a real model and the benchmark's verifier before you rely on it.
 

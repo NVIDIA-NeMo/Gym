@@ -2,10 +2,11 @@
 
 These five color-square questions are generated fixtures, not benchmark samples.
 Their embedded PNGs need no downloads. `example_metrics.json` is produced by
-Gym's dataset validator; `example_rollouts.jsonl` contains real-model responses
-through the OpenCode session adapter, with machine-local capture paths omitted.
-The raw captures remain outside the source tree. These examples check wiring and
-verification, not benchmark accuracy.
+Gym's dataset validator; `example_rollouts.jsonl` contains responses from direct
+hosted-policy calls without OpenCode sessions or tool execution. The saved scorer
+version identifies how those responses were originally graded. These examples
+exercise image input and verification; they do not validate the harness lifecycle
+or establish benchmark accuracy.
 
 Validate the dataset with:
 

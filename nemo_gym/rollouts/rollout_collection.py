@@ -2913,6 +2913,29 @@ def _metrics_group(row: Mapping[str, Any], servers_by_agent: Callable[[], Mappin
     return servers[0] if len(servers) == 1 else agent_name
 
 
+def _planned_repeat_inventory(
+    materialized_fpaths: List[Path], group: Callable[[Mapping[str, Any]], Any]
+) -> Optional[Dict[Any, Dict[int, List[int]]]]:
+    """Read the resolved attempt plan, never reconstructing it from successful outputs."""
+    if not materialized_fpaths or any(not path.is_file() for path in materialized_fpaths):
+        return None
+    inventory: Dict[Any, Dict[int, set[int]]] = {}
+    for path in dict.fromkeys(materialized_fpaths):
+        with path.open("rb") as stream:
+            for line_no, line in enumerate(stream, 1):
+                if not line.strip():
+                    continue
+                row = loads_jsonl_line(line, path, line_no)
+                task, repeat = row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME)
+                if type(task) is not int or type(repeat) is not int or task < 0 or repeat < 0:
+                    return None
+                key = group(row)
+                if key is None:
+                    return None
+                inventory.setdefault(key, {}).setdefault(task, set()).add(repeat)
+    return {key: {task: sorted(repeats) for task, repeats in tasks.items()} for key, tasks in inventory.items()}
+
+
 def _identity_key(row: Mapping[str, Any], group: Callable[[Mapping[str, Any]], Optional[str]]) -> tuple:
     """A rollout's key across runs, which each number their tasks from 0."""
     return (group(row), row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME))
@@ -4833,6 +4856,7 @@ executions → not run again (left to recovery)
                 [metadata_rows[i] for i in order],
                 output_fpath,
                 raise_on_error=False,  # Write batch status before reporting aggregation failures below.
+                materialized_fpaths=[config.materialized_jsonl_fpath],
             )
 
         if batch_tracker is not None and getattr(batch_tracker, "enabled", True):
@@ -4904,6 +4928,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         output_fpath: Path,
         *,
         raise_on_error: bool = True,
+        materialized_fpaths: Optional[List[Path]] = None,
     ) -> Optional[Path]:
         """Call /aggregate_metrics on the environment server each rollout ran through.
 
@@ -4932,6 +4957,11 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         # Group results by the environment server they ran through.
         servers_by_agent = _environment_servers_by_agent(global_config_dict)
+        inventory = await asyncio.to_thread(
+            _planned_repeat_inventory,
+            materialized_fpaths or [],
+            lambda row: _metrics_group(row, lambda: servers_by_agent),
+        )
         server_results: Dict[str, List[Dict]] = {}
         server_agents: Dict[str, Optional[str]] = {}
         for row, result in zip(rows, results):
@@ -4995,7 +5025,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
             agg_response = None
             try:
-                agg_request = AggregateMetricsRequest(verify_responses=stripped)
+                agg_request = AggregateMetricsRequest(
+                    verify_responses=stripped,
+                    expected_rollout_indices=inventory.get(server_name, {}) if inventory is not None else None,
+                )
                 agg_response = await server_client.post(
                     server_name=server_name,
                     url_path="/aggregate_metrics",
@@ -6404,7 +6437,15 @@ class RolloutAggregationHelper(BaseModel):
             print(f"Counting {len(missing)} materialized rollout(s) with no row as scored zeros")
         scored = sorted(results + counted, key=_rollout_order_key)
         aggregate_metrics_fpath = await helper._call_aggregate_metrics(
-            scored, scored, output_fpath, raise_on_error=False
+            scored,
+            scored,
+            output_fpath,
+            raise_on_error=False,
+            materialized_fpaths=(
+                [Path(config.materialized_inputs_jsonl_fpath)]
+                if config.materialized_inputs_jsonl_fpath
+                else [materialized_path_for(Path(path)) for path in input_paths]
+            ),
         )
         if batch_tracker is not None:
             batch_tracker.write_status(

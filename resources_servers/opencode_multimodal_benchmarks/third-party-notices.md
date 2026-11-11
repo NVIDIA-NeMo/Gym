@@ -13,18 +13,23 @@ headers do not replace terms applicable to third-party material.
   Source: https://github.com/zhuzil/VTC-Bench/blob/5e0a5533f597b0c56dae7d9705771498202ab19b/eval/eval/VLMEvalKit/vlmeval/dataset/image_vqa.py
 ## Scoring deviations
 
-The `mcq-final-answer-llm-v3` scorer requires an uppercase, word-bounded option
+The `mcq-final-answer-llm-v4` scorer requires an uppercase, word-bounded option
 letter after prose such as "answer is". Words such as "dog" and the article
-"a" cannot supply option letters. Ambiguous outputs use the reference-blind judge. If its reply cannot be parsed,
+"a" cannot supply option letters. When explicit answer assertions conflict,
+the last assertion supersedes earlier assertions; rejected alternatives do not.
+Ambiguous outputs use the reference-blind judge. If its reply cannot be parsed,
 one additional call clarifies the output format and explicitly forbids solving
 the image question. The clarification contains no reference answer.
 
-The `vtcbench-final-answer-rules[-llm]-v3` scorer selects the last explicit
+The `vtcbench-final-answer-rules[-llm]-v4` scorer selects the last explicit
 `Answer:` line, falling back to the final nonempty line. Free-answer rules require
 normalized exact equality; substring matches in reasoning do not award credit.
 Ambiguous free answers use the configured semantic judge. This deliberately
 changes the pinned evaluator's whole-response substring rule. Results must be
-rebaselined and retain the scorer version and judge identity.
+rebaselined and retain the scorer version and judge identity. Both rule and judge
+paths resolve MCQ references to the same option letters, including uniquely
+matching option text and comma-separated multiselect references. Ambiguous or
+unmappable option-text references are rejected during task validation.
 
 ZeroBench's default metric is pass@5 with five independent attempts. The
 single-attempt exact-match rule is unchanged; mean reward is labeled pass@1.

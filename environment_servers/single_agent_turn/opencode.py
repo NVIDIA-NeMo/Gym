@@ -17,10 +17,12 @@ from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLega
 from nemo_gym.config import get_first_server_config_dict
 from nemo_gym.core import NeMoGymResponse
 from nemo_gym.server_runtime import CleanupContext
-from nemo_gym.trajectory import AgentObservationBundle, TrajectoryRecord
+from nemo_gym.trajectory import AgentObservationBundle, TrajectoryRecord, grading_result_binding
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.opencode_multimodal_agent.rewards import (
     EpisodeEvidence,
+    OpenCodeEvalScoringConfig,
+    OpenCodeScoringConfig,
     OpenCodeToolRewardConfig,
     final_answer,
 )
@@ -53,7 +55,13 @@ class OpenCodeEnvironmentServer(SingleAgentTurnLegacyEnvironmentServer):
 
     def _agent_options(self) -> dict[str, Any]:
         config = get_first_server_config_dict(self.server_client.global_config_dict, self.config.agent_server.name)
-        return OmegaConf.to_container(config, resolve=True) if OmegaConf.is_config(config) else config
+        config = OmegaConf.to_container(config, resolve=True) if OmegaConf.is_config(config) else config
+        config_type = {
+            "app.py": OpenCodeScoringConfig,
+            "combined.py": OpenCodeScoringConfig,
+            "eval.py": OpenCodeEvalScoringConfig,
+        }[config.get("entrypoint", "app.py")]
+        return config | config_type.model_validate(config).model_dump()
 
     def _scoring_response(self, agent_response: NeMoGymResponse) -> NeMoGymResponse:
         # Only the verifier sees the scoring copy. Training keeps the complete response below.
@@ -128,16 +136,40 @@ class OpenCodeEnvironmentServer(SingleAgentTurnLegacyEnvironmentServer):
             if tools is None:
                 raise ValueError("Missing native tool evidence for reward shaping")
             tools = tools.for_answer(base_reward, OpenCodeToolRewardConfig.model_validate(raw_config))
-        return result.model_copy(
+        auxiliary_reward = tools.auxiliary_reward if shape_rewards else 0.0
+        source = result.model_dump(mode="json")
+        source = {key: source[key] for key in ("response", "reward", "reward_components") if key in source}
+        transform = {
+            "kind": "response_projection_reward_offset_v1",
+            "input_result": source,
+            "input_binding_sha256": grading_result_binding(source),
+            "reward_offset": auxiliary_reward,
+            "reward_component": "opencode_tool_reward",
+            "parameters": {
+                "operation": "opencode_final_answer_tool_reward_v1",
+                "strip_reasoning_for_grading": self._agent_options()["strip_reasoning_for_grading"],
+                "tool_rewards": (
+                    OpenCodeToolRewardConfig.model_validate(raw_config).model_dump(mode="json")
+                    if shape_rewards
+                    else None
+                ),
+            },
+        }
+        transformed = result.model_copy(
             update={
                 "response": agent_response,
-                "reward": base_reward + (tools.auxiliary_reward if shape_rewards else 0.0),
+                "reward": base_reward + auxiliary_reward,
+                "reward_components": source.get("reward_components", {"verifier": base_reward})
+                | {"opencode_tool_reward": auxiliary_reward},
+                "ng_grading_transform": transform,
                 "resolved": base_reward == 1.0,
                 "opencode_tool_reward": tools,
                 "turns_used": evidence.turns_used,
                 "finished_naturally": evidence.finished_naturally,
             }
         )
+        transform["output_binding_sha256"] = grading_result_binding(transformed)
+        return transformed
 
 
 if __name__ == "__main__":

@@ -3707,6 +3707,8 @@ def _observed_trial_operations(
             ):
                 return False
             observed = row["ng_trial_observations"]
+            if "_ng_collected_grading_transform" in row and _grading_source(row)[0] is None:
+                return False
             verifiers, calls = observed["verifier_invocations"], observed.get("model_calls")
             judge_calls = None
             single = verifiers[0] if isinstance(verifiers, list) and len(verifiers) == 1 else None
@@ -3785,7 +3787,7 @@ def _observed_trial_operations(
                 return False
             else:
                 grade = grading[0]
-            binding = row.get("_ng_collected_grading_binding")
+            binding, _ = _grading_source(row)
             if grade is not None and (
                 grade.get("kind") != ("programmatic_calculation" if judge_calls is None else "llm_judge")
                 or grade.get("outcome")
@@ -4544,6 +4546,23 @@ def _verification_owner(row: Mapping[str, Any], servers: Mapping[str, Any]) -> s
     return owner if isinstance(resource, dict) and resource.get("kind") == "resources_servers" else None
 
 
+def _grading_source(row: Mapping[str, Any]) -> tuple[Any, Any]:
+    """Resolve a validated environment transformation without rewriting the verifier's own record."""
+    binding = row.get("_ng_collected_grading_binding")
+    if "_ng_collected_grading_transform" not in row:
+        return binding, row.get("reward")
+    transform = row["_ng_collected_grading_transform"]
+    if (
+        not isinstance(transform, dict)
+        or transform.get("output_binding_sha256") != binding
+        or not isinstance(transform.get("input_binding_sha256"), str)
+        or len(transform["input_binding_sha256"]) != 64
+        or type(transform.get("input_reward")) not in (int, float)
+    ):
+        return None, None
+    return transform["input_binding_sha256"], transform["input_reward"]
+
+
 def _verifier_recorded(verifier: Any, row: Mapping[str, Any], resources_server: Any) -> bool:
     """Whether the row's verifier saved its own grading record for it, in place of a recorded grading operation.
 
@@ -4552,7 +4571,7 @@ def _verifier_recorded(verifier: Any, row: Mapping[str, Any], resources_server: 
     score. A verifier that recorded a grading operation or owns a model call is judged by those, never by the record.
     """
     record = verifier.get("grading_record") if isinstance(verifier, dict) else None
-    binding, reward = row.get("_ng_collected_grading_binding"), row.get("reward")
+    binding, reward = _grading_source(row)
     return (
         isinstance(record, dict)
         and verifier.get("status") == "completed"

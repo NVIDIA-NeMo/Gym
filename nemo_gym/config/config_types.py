@@ -1020,6 +1020,13 @@ class AggregateMetricsRequest(BaseModel):
     """
 
     verify_responses: List[Dict[str, Any]]
+    expected_rollout_indices: Dict[int, List[Annotated[int, Field(ge=0)]]] | None = Field(
+        default=None,
+        description=(
+            "Planned rollout indices per task, from resolved materialized inputs including failed or missing attempts. "
+            "None means the planned inventory is unknown; surviving verify responses cannot establish it."
+        ),
+    )
 
 
 class AggregateMetrics(BaseModel):

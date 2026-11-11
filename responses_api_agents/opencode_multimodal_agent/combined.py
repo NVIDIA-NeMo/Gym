@@ -5,6 +5,7 @@
 from pathlib import Path
 from typing import Literal
 
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.opencode_multimodal_agent.app import OpenCodeMultimodalAgent, OpenCodeMultimodalAgentConfig
 
 
@@ -19,3 +20,6 @@ class OpenCodeCombinedPromptAgent(OpenCodeMultimodalAgent):
 
 if __name__ == "__main__":
     OpenCodeCombinedPromptAgent.run_webserver()
+
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = OpenCodeCombinedPromptAgent.run_webserver()  # noqa: F401

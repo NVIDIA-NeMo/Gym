@@ -65,9 +65,11 @@ for adapted evaluation code. No benchmark data is included in this entry.
 | `simple_agent` | This catalog entry, with a vision-capable model | Experimental; no task tools |
 | `opencode_multimodal_agent` | This entry plus [`opencode_sessions.yaml`](../opencode_sessions.yaml) and a sandbox provider | Experimental; OpenCode 1.17.11, initial images and text, one activation |
 
-The OpenCode session path requires explicit sampling, embeds tool-produced images
-before cleanup, and rejects continuation and training-capture requests. The
-Environment Server owns activation, close and verification. See the
+The OpenCode session path uses configured sampling defaults or request overrides
+and supports both evaluation and training capture. Shared media handling embeds
+tool-produced images before cleanup. Each episode permits one activation and
+rejects continuation. The Environment Server owns activation, close, verification
+and optional training tool rewards; the evaluation profile disables those rewards. See the
 [agent README](../../../responses_api_agents/opencode_multimodal_agent/README.md)
 for runtime requirements and configurable limits.
 

@@ -4770,7 +4770,9 @@ class TestRolloutCollection:
                     futures.append(future)
                 return futures
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath, *, raise_on_error: bool = True):
+            async def _call_aggregate_metrics(
+                self, results, rows, output_fpath, *, raise_on_error: bool = True, materialized_fpaths=None
+            ):
                 return None
 
         config = RolloutCollectionConfig(
@@ -4821,7 +4823,9 @@ class TestRolloutCollection:
                 assert examples == []
                 return []
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath, *, raise_on_error: bool = True):
+            async def _call_aggregate_metrics(
+                self, results, rows, output_fpath, *, raise_on_error: bool = True, materialized_fpaths=None
+            ):
                 return None
 
         config = RolloutCollectionConfig(
@@ -4878,7 +4882,9 @@ class TestRolloutCollection:
                 )
                 return [future]
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath, *, raise_on_error: bool = True):
+            async def _call_aggregate_metrics(
+                self, results, rows, output_fpath, *, raise_on_error: bool = True, materialized_fpaths=None
+            ):
                 return None
 
         config = RolloutCollectionConfig(
@@ -6206,7 +6212,9 @@ class TestRolloutCollection:
                 )
                 return [future]
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath, *, raise_on_error: bool = True):
+            async def _call_aggregate_metrics(
+                self, results, rows, output_fpath, *, raise_on_error: bool = True, materialized_fpaths=None
+            ):
                 aggregated["results"] = results
                 aggregated["rows"] = rows
                 return None
@@ -6306,7 +6314,9 @@ class TestRolloutCollection:
                     futures.append(future)
                 return futures
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath, *, raise_on_error: bool = True):
+            async def _call_aggregate_metrics(
+                self, results, rows, output_fpath, *, raise_on_error: bool = True, materialized_fpaths=None
+            ):
                 aggregated["results"] = results
                 return None
 
@@ -6490,7 +6500,9 @@ class TestRolloutCollection:
 
                 return futures
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath, *, raise_on_error: bool = True):
+            async def _call_aggregate_metrics(
+                self, results, rows, output_fpath, *, raise_on_error: bool = True, materialized_fpaths=None
+            ):
                 """Compute aggregate metrics locally (no server needed)."""
                 stripped = [{k: v for k, v in r.items() if k not in ("responses_create_params",)} for r in results]
                 agg = compute_aggregate_metrics(stripped)
@@ -6648,7 +6660,9 @@ class TestRolloutCollection:
                     futures.append(future)
                 return futures
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath, *, raise_on_error: bool = True):
+            async def _call_aggregate_metrics(
+                self, results, rows, output_fpath, *, raise_on_error: bool = True, materialized_fpaths=None
+            ):
                 stripped = [{k: v for k, v in r.items() if k not in ("responses_create_params",)} for r in results]
                 agg = compute_aggregate_metrics(stripped)
                 metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
@@ -6731,7 +6745,9 @@ class TestRolloutCollection:
                     futures.append(future)
                 return futures
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath, *, raise_on_error: bool = True):
+            async def _call_aggregate_metrics(
+                self, results, rows, output_fpath, *, raise_on_error: bool = True, materialized_fpaths=None
+            ):
                 stripped = [{k: v for k, v in r.items() if k not in ("responses_create_params",)} for r in results]
                 agg = compute_aggregate_metrics(stripped)
                 metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
@@ -7007,7 +7023,9 @@ class TestRolloutCollection:
                     futures.append(future)
                 return futures
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath, *, raise_on_error: bool = True):
+            async def _call_aggregate_metrics(
+                self, results, rows, output_fpath, *, raise_on_error: bool = True, materialized_fpaths=None
+            ):
                 metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
                 metrics_fpath.write_bytes(orjson.dumps([]))
                 return metrics_fpath
@@ -7563,7 +7581,9 @@ class TestRolloutCollection:
 
                 return futures
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath, *, raise_on_error: bool = True):
+            async def _call_aggregate_metrics(
+                self, results, rows, output_fpath, *, raise_on_error: bool = True, materialized_fpaths=None
+            ):
                 return None
 
         actual_returned_results = await TestRolloutCollectionHelper().run_from_config(config)
@@ -7657,7 +7677,9 @@ class TestRolloutCollection:
                     futures.append(future)
                 return futures
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath, *, raise_on_error: bool = True):
+            async def _call_aggregate_metrics(
+                self, results, rows, output_fpath, *, raise_on_error: bool = True, materialized_fpaths=None
+            ):
                 captured["results"] = results
                 captured["rows"] = rows
                 metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
@@ -7730,7 +7752,9 @@ class TestRolloutCollection:
                 future.set_result(_CompletedRollout(row=example, result={"case": "new"}, rollout_latency_ms=None))
                 return [future]
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath, *, raise_on_error: bool = True):
+            async def _call_aggregate_metrics(
+                self, results, rows, output_fpath, *, raise_on_error: bool = True, materialized_fpaths=None
+            ):
                 captured["results"] = results
                 captured["rows"] = rows
                 return None
@@ -9622,7 +9646,9 @@ class TestDisableAggregationAndCallerTaskIndex:
                     futures.append(fut)
                 return futures
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath, *, raise_on_error: bool = True):
+            async def _call_aggregate_metrics(
+                self, results, rows, output_fpath, *, raise_on_error: bool = True, materialized_fpaths=None
+            ):
                 raise AssertionError("aggregator must not run when disable_aggregation=True")
 
         await Helper().run_from_config(config)
@@ -9707,7 +9733,9 @@ class TestRolloutAggregationHelper:
 
         captured: dict[str, list] = {}
 
-        async def fake_call(self, results, rows, output_fpath, *, raise_on_error: bool = True):
+        async def fake_call(
+            self, results, rows, output_fpath, *, raise_on_error: bool = True, materialized_fpaths=None
+        ):
             captured["results"] = results
             captured["rows"] = rows
             captured["output_fpath"] = output_fpath
@@ -9767,7 +9795,7 @@ class TestRolloutAggregationHelper:
             )
         )
 
-        async def _noop(self, results, rows, output_fpath, *, raise_on_error: bool = True):
+        async def _noop(self, results, rows, output_fpath, *, raise_on_error: bool = True, materialized_fpaths=None):
             m = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
             m.write_text("[]")
             return m
@@ -9815,7 +9843,7 @@ class TestRolloutAggregationHelper:
         shard.write_text(json.dumps(record) + "\n")
         output_fpath = tmp_path / "rollouts.jsonl"
 
-        async def _noop(self, results, rows, output_fpath, *, raise_on_error: bool = True):
+        async def _noop(self, results, rows, output_fpath, *, raise_on_error: bool = True, materialized_fpaths=None):
             m = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
             m.write_text("[]")
             return m
@@ -9908,7 +9936,9 @@ class TestRolloutAggregationHelper:
         )
         output_fpath = tmp_path / "rollouts.jsonl"
 
-        async def fake_call(self, results, rows, output_fpath, *, raise_on_error: bool = True):
+        async def fake_call(
+            self, results, rows, output_fpath, *, raise_on_error: bool = True, materialized_fpaths=None
+        ):
             metrics_path = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
             metrics_path.write_text("[]")
             return metrics_path

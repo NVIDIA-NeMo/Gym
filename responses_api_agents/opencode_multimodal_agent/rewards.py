@@ -140,6 +140,18 @@ def score_opencode_tools(
     ).for_answer(base_reward, config)
 
 
+class OpenCodeScoringConfig(BaseModel):
+    """Scoring defaults shared by the agent and its environment without importing the agent runtime."""
+
+    tool_rewards: OpenCodeToolRewardConfig | None = Field(default_factory=OpenCodeToolRewardConfig)
+    strip_reasoning_for_grading: bool = True
+
+
+class OpenCodeEvalScoringConfig(OpenCodeScoringConfig):
+    tool_rewards: OpenCodeToolRewardConfig | None = None
+    strip_reasoning_for_grading: bool = False
+
+
 class EpisodeEvidence(BaseModel):
     """Validated native evidence passed explicitly across the responses self-call."""
 

@@ -11,7 +11,7 @@ import aiohttp
 from pydantic import Field, PrivateAttr, model_validator
 
 from nemo_gym.client import request
-from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.core import NeMoGymChatCompletion
 from nemo_gym.metrics import compute_aggregate_metrics
 from nemo_gym.server_runtime import (
@@ -19,7 +19,7 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.utils import error_to_http_status, explicit_causes
+from nemo_gym.utils import error_to_http_status, explicit_causes, is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import JUDGE_FAILURES, JudgeError, call_judge, is_judge_failure
 from resources_servers.opencode_multimodal_benchmarks.metrics import average_repeats, pass_at_k
 from resources_servers.opencode_multimodal_benchmarks.reporting import benchmark_report
@@ -200,12 +200,14 @@ class VisualBenchmarksServer(VisualVerifier, SimpleResourcesServer):
         raise AssertionError("Judge attempts exhausted")
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
-        """Keep received repeat identities before the shared aggregator removes masked rows."""
+        """Compare valid measurements with the resolved attempt plan, including absent repeats."""
         expected_repeats: dict[tuple[str, str], set[int]] = {}
         for row in body.verify_responses:
             metadata = row["verifier_metadata"]
             identity = (metadata["benchmark"], metadata["index"])
-            expected_repeats.setdefault(identity, set()).add(row.get(ROLLOUT_INDEX_KEY_NAME, 0))
+            expected_repeats.setdefault(identity, set()).update(
+                (body.expected_rollout_indices or {}).get(row[TASK_INDEX_KEY_NAME], [])
+            )
         return compute_aggregate_metrics(
             body.verify_responses,
             compute_metrics_fn=lambda tasks: self.compute_metrics(tasks, expected_repeats=expected_repeats),
@@ -287,3 +289,6 @@ class VisualBenchmarksServer(VisualVerifier, SimpleResourcesServer):
 
 if __name__ == "__main__":
     VisualBenchmarksServer.run_webserver()
+
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = VisualBenchmarksServer.run_webserver()  # noqa: F401
