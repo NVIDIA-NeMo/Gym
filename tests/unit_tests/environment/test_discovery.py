@@ -1,0 +1,453 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from textwrap import dedent
+
+import pytest
+from omegaconf import OmegaConf
+from omegaconf.errors import InterpolationResolutionError
+
+from nemo_gym import (
+    NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME,
+    PARENT_DIR,
+    _augment_sys_path,
+    component_search_roots,
+)
+from nemo_gym.environment.discovery import (
+    _UNSET_VALUE_PLACEHOLDER,
+    _parse_no_environment_tolerating_unset_values,
+    merge_by_name,
+    read_config_metadata,
+)
+
+
+class TestComponentSearchRoots:
+    def test_default_includes_cwd_and_install_root(self) -> None:
+        resolved = {root.resolve() for root in component_search_roots()}
+        assert Path.cwd().resolve() in resolved
+        assert PARENT_DIR.resolve() in resolved
+
+    def test_env_var_roots_added_before_builtins(self, tmp_path: Path, monkeypatch) -> None:
+        # NEMO_GYM_EXTRA_ROOTS is the sole source of extra roots (--search-dir is folded into it). Its roots
+        # are searched ahead of cwd/built-ins, in listed order, so they can shadow them.
+        a = tmp_path / "a"
+        b = tmp_path / "b"
+        a.mkdir()
+        b.mkdir()
+        monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, os.pathsep.join([str(a), str(b)]))
+
+        roots = component_search_roots()
+
+        assert roots[0] == a and roots[1] == b  # os.pathsep-separated, order preserved
+        assert PARENT_DIR.resolve() in {root.resolve() for root in roots}  # built-ins still scanned
+
+    def test_dedupes_roots_by_resolved_path(self, monkeypatch) -> None:
+        # An extra root that resolves to the install root must not be scanned twice.
+        monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, str(PARENT_DIR))
+        roots = component_search_roots()
+        resolved = [root.resolve() for root in roots]
+
+        assert resolved.count(PARENT_DIR.resolve()) == 1
+        assert roots[0].resolve() == PARENT_DIR.resolve()  # the extra root still takes precedence
+
+    def test_empty_or_unset_env_var_adds_nothing(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, "")
+        assert component_search_roots()[0].resolve() == Path.cwd().resolve()
+
+    def test_sys_path_woven_after_extra_roots_and_before_cwd(self, tmp_path: Path, monkeypatch) -> None:
+        # The import-precedence use (sys_path given): existing entries slot in AFTER the explicit extra roots
+        # but BEFORE cwd/built-ins, so extra roots shadow site-packages while cwd does not.
+        a = tmp_path / "a"
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+        monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, str(a))
+
+        roots = [str(r) for r in component_search_roots(sys_path=[Path("/some/site-packages")])]
+
+        assert roots == [str(a), "/some/site-packages", str(Path.cwd()), str(PARENT_DIR)]
+
+    def test_sys_path_builtins_entry_moved_last_even_if_already_present(self, tmp_path: Path, monkeypatch) -> None:
+        # Source checkout: if PARENT_DIR is already on sys.path it must be dropped from the woven entries and
+        # appended last, so cwd/built-ins stay last and import order matches file lookup.
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+        monkeypatch.delenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, raising=False)
+
+        resolved = [r.resolve() for r in component_search_roots(sys_path=[Path("/usr/lib/python3.12"), PARENT_DIR])]
+
+        assert resolved.count(PARENT_DIR.resolve()) == 1  # not duplicated
+        assert resolved[-2:] == [Path.cwd().resolve(), PARENT_DIR.resolve()]  # cwd then built-ins, always last
+
+    @pytest.mark.parametrize("dirname", ["site-packages", "dist-packages", "target"])
+    def test_noneditable_install_root_stays_ahead_of_cwd(self, tmp_path: Path, monkeypatch, dirname: str) -> None:
+        # The install root must not be moved behind cwd, or a package in the
+        # working directory (e.g. a checkout of numpy) shadows every installed dependency.
+        import nemo_gym
+
+        site_dir = tmp_path / dirname
+        site_dir.mkdir(parents=True)
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+        monkeypatch.delenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(nemo_gym, "PARENT_DIR", site_dir)
+        monkeypatch.setattr(nemo_gym, "_is_editable_install", False)
+
+        resolved = [r.resolve() for r in component_search_roots(sys_path=[Path("/usr/lib/python3.12"), site_dir])]
+
+        assert resolved == [Path("/usr/lib/python3.12").resolve(), site_dir.resolve(), Path.cwd().resolve()]
+        # File lookup (no sys_path) is unchanged: cwd before the built-ins.
+        assert [r.resolve() for r in component_search_roots()] == [Path.cwd().resolve(), site_dir.resolve()]
+
+
+class TestAugmentSysPath:
+    def test_rebuilds_sys_path_from_component_search_roots(self, tmp_path: Path, monkeypatch) -> None:
+        # Import order follows component_search_roots: extra roots (explicit --search-dir) first so they
+        # shadow everything, then the existing sys.path entries, then cwd and PARENT_DIR (built-ins) last so a
+        # plugin module wins over a same-named Gym module.
+        a = tmp_path / "a"
+        b = tmp_path / "b"
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+        monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, os.pathsep.join([str(a), str(b)]))
+        # Start with PARENT_DIR ahead of where it should land, to prove it gets moved to the end.
+        monkeypatch.setattr(sys, "path", [str(PARENT_DIR), "/some/site-packages"])
+
+        _augment_sys_path()
+
+        cwd_on_path = str(Path.cwd())  # component_search_roots uses Path.cwd(), which may canonicalize symlinks
+        assert sys.path == [str(a), str(b), "/some/site-packages", cwd_on_path, str(PARENT_DIR)]
+
+    def test_idempotent(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.delenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, raising=False)
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+        monkeypatch.setattr(sys, "path", ["/some/site-packages"])
+        cwd_on_path = str(Path.cwd())
+
+        _augment_sys_path()
+        first = list(sys.path)
+        _augment_sys_path()  # re-run (e.g. after --search-dir folds roots into the env) must not pile up entries
+
+        # existing entries preserved, then cwd, then built-ins last.
+        assert sys.path == first == ["/some/site-packages", cwd_on_path, str(PARENT_DIR)]
+
+
+@pytest.fixture(params=["site-packages", "dist-packages", "target"])
+def installed_gym(tmp_path: Path, request) -> Path:
+    # Copy the real package into each non-editable layout without needing pip or third-party dependencies.
+    root = tmp_path / request.param
+    shutil.copytree(PARENT_DIR / "nemo_gym", root / "nemo_gym", ignore=shutil.ignore_patterns("__pycache__"))
+    return root
+
+
+def _run_import_subprocess(args: list[str], *, cwd: Path, pythonpath: list[Path]) -> None:
+    env = os.environ.copy()
+    env.pop(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, None)
+    env["PYTHONPATH"] = os.pathsep.join(map(str, pythonpath))
+    result = subprocess.run(
+        [sys.executable, *args], cwd=cwd, env=env, capture_output=True, text=True, errors="replace", timeout=30
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+class TestImportPrecedence:
+    def test_source_checkout_keeps_cwd_override(self, tmp_path: Path) -> None:
+        source = tmp_path / "source"
+        shutil.copytree(PARENT_DIR / "nemo_gym", source / "nemo_gym", ignore=shutil.ignore_patterns("__pycache__"))
+        (source / "pyproject.toml").touch()
+        cwd = tmp_path / "project"
+        cwd.mkdir()
+        (source / "helper.py").write_text("WHERE = 'source'\n")
+        (cwd / "helper.py").write_text("WHERE = 'cwd'\n")
+        code = dedent(f"""
+            import sys
+            import nemo_gym
+            import helper
+            assert nemo_gym._is_editable_install
+            assert helper.WHERE == 'cwd'
+            assert helper.__file__ == {str(cwd / "helper.py")!r}
+            assert sys.path[-2:] == [{str(cwd)!r}, {str(source)!r}]
+        """)
+        _run_import_subprocess(["-P", "-S", "-c", code], cwd=cwd, pythonpath=[source, cwd])
+
+    def test_isolated_import_keeps_installed_dependency(self, tmp_path: Path, installed_gym: Path) -> None:
+        # A task repository can contain a dependency checkout that is not importable from its source tree.
+        cwd = tmp_path / "task"
+        cwd.mkdir()
+        (cwd / "fakedep.py").write_text("raise ImportError('dependency imported from task checkout')\n")
+        (installed_gym / "fakedep.py").write_text("WHERE = 'installed'\n")
+        code = dedent(f"""
+            import sys
+            sys.path.insert(0, {str(installed_gym)!r})
+            import nemo_gym
+            import fakedep
+            assert fakedep.WHERE == 'installed'
+            assert fakedep.__file__ == {str(installed_gym / "fakedep.py")!r}
+            assert not nemo_gym._is_editable_install
+            first = list(sys.path)
+            nemo_gym._augment_sys_path()
+            assert sys.path == first
+        """)
+        _run_import_subprocess(["-I", "-c", code], cwd=cwd, pythonpath=[])
+
+    def test_server_sibling_keeps_precedence(self, tmp_path: Path, installed_gym: Path) -> None:
+        # setup_command launches app.py with the server directory as cwd and an explicit PYTHONPATH root.
+        server = tmp_path / "server"
+        server.mkdir()
+        (server / "helper.py").write_text("WHERE = 'server'\n")
+        (installed_gym / "helper.py").write_text("WHERE = 'installed'\n")
+        app = server / "app.py"
+        app.write_text(
+            dedent(f"""
+            import nemo_gym
+            import helper
+            assert helper.WHERE == 'server'
+            assert helper.__file__ == {str(server / "helper.py")!r}
+        """)
+        )
+        _run_import_subprocess(["-S", str(app)], cwd=server, pythonpath=[server, installed_gym])
+
+    def test_pythonpath_install_keeps_dependency_precedence(self, tmp_path: Path, installed_gym: Path) -> None:
+        # In particular, pip --target installs need no site-packages name or registration with site.
+        cwd = tmp_path / "task"
+        cwd.mkdir()
+        for root, origin in [(installed_gym, "installed"), (cwd, "cwd")]:
+            package = root / "fakedep"
+            package.mkdir()
+            (package / "__init__.py").write_text(f"WHERE = {origin!r}\n")
+        code = dedent(f"""
+            import nemo_gym
+            import fakedep
+            assert fakedep.WHERE == 'installed'
+            assert fakedep.__file__ == {str(installed_gym / "fakedep/__init__.py")!r}
+        """)
+        _run_import_subprocess(["-P", "-S", "-c", code], cwd=cwd, pythonpath=[installed_gym])
+
+    @pytest.mark.parametrize("explicit_override", [False, True])
+    def test_builtin_override_and_file_lookup(
+        self, tmp_path: Path, installed_gym: Path, explicit_override: bool
+    ) -> None:
+        cwd = tmp_path / "project"
+        for root, origin in [(installed_gym, "installed"), (cwd, "cwd")]:
+            benchmark = root / "benchmarks" / "example"
+            benchmark.mkdir(parents=True)
+            (benchmark / "__init__.py").touch()
+            (benchmark / "prepare.py").write_text(f"WHERE = {origin!r}\n")
+            (benchmark / "config.yaml").write_text(origin)
+        # A new name in cwd stays importable even when installed modules precede cwd.
+        (cwd / "new_plugin.py").write_text("WHERE = 'cwd'\n")
+        code = dedent(f"""
+            import os
+            import nemo_gym
+            if {explicit_override!r}:
+                # The CLI folds --search-dir into this variable after the first import.
+                os.environ[nemo_gym.NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME] = {str(cwd)!r}
+                nemo_gym._augment_sys_path()
+            from benchmarks.example import prepare
+            import new_plugin
+            assert prepare.WHERE == {"cwd" if explicit_override else "installed"!r}
+            assert new_plugin.WHERE == 'cwd'
+            config = nemo_gym._resolve_under_cwd_or_install('benchmarks/example/config.yaml')
+            assert str(config) == {str(cwd / "benchmarks/example/config.yaml")!r}
+            assert config.read_text() == 'cwd'
+        """)
+        _run_import_subprocess(["-P", "-S", "-c", code], cwd=cwd, pythonpath=[installed_gym])
+
+    def test_import_without_site_directory_helpers(self, tmp_path: Path, installed_gym: Path) -> None:
+        code = "import site; del site.getsitepackages; del site.getusersitepackages; import nemo_gym"
+        _run_import_subprocess(["-P", "-S", "-c", code], cwd=tmp_path, pythonpath=[installed_gym])
+
+
+class TestMergeByName:
+    def test_merges_disjoint_roots(self) -> None:
+        assert merge_by_name([{"a": 1}, {"b": 2}]) == {"a": 1, "b": 2}
+
+    def test_earlier_root_shadows_later_on_name_collision(self) -> None:
+        # A component found in an earlier root (e.g. the user's cwd) wins over a same-named one in a
+        # later root (e.g. a built-in) — the collision policy every `gym list` command relies on.
+        merged = merge_by_name([{"dup": "from_first"}, {"dup": "from_second", "other": "kept"}])
+        assert merged == {"dup": "from_first", "other": "kept"}
+
+    def test_preserves_order_within_and_across_roots(self) -> None:
+        assert list(merge_by_name([{"a": 1, "b": 2}, {"c": 3}])) == ["a", "b", "c"]
+
+    def test_empty_input(self) -> None:
+        assert merge_by_name([]) == {}
+
+
+class TestTolerantInterpolationParse:
+    # Unset `???` values and unresolved `${...}` interpolations reference runtime-only values that aren't
+    # needed to identify a component; listing fills them with a placeholder so the config still resolves.
+    def _resolve(self, d: dict):
+        return _parse_no_environment_tolerating_unset_values(OmegaConf.create(d))
+
+    def test_single_interpolation(self) -> None:
+        resolved = self._resolve({"foo": "${bar}"})
+        assert resolved["foo"] == _UNSET_VALUE_PLACEHOLDER
+
+    def test_single_missing_value(self) -> None:
+        resolved = self._resolve({"foo": "???"})
+        assert resolved["foo"] == _UNSET_VALUE_PLACEHOLDER
+
+    def test_mix(self) -> None:
+        # A mix across nested dicts: resolvable literals (incl. nested) pass through untouched, while an
+        # undefined `${...}` interpolation and unset `???` values (incl. nested) are filled with the
+        # placeholder.
+        resolved = self._resolve(
+            {
+                "name": "my_bench",
+                "num_repeats": 3,
+                "api_key": "${some_api_key}",
+                "server": {
+                    "endpoint": "https://example.com",
+                    "nested": {
+                        "enabled": True,
+                        "token": "???",
+                    },
+                },
+            }
+        )
+        # Correct key-value pairs are unmodified.
+        assert resolved["name"] == "my_bench"
+        assert resolved["num_repeats"] == 3
+        assert resolved["server"]["endpoint"] == "https://example.com"
+        assert resolved["server"]["nested"]["enabled"] is True
+        # Undefined `${...}` and unset `???` values are filled.
+        assert resolved["api_key"] == _UNSET_VALUE_PLACEHOLDER
+        assert resolved["server"]["nested"]["token"] == _UNSET_VALUE_PLACEHOLDER
+
+    def test_does_not_mutate_input(self) -> None:
+        cfg = OmegaConf.create({"foo": "???", "bar": "${baz}"})
+        before = OmegaConf.to_container(cfg, resolve=False, throw_on_missing=False)
+        _parse_no_environment_tolerating_unset_values(cfg)
+        after = OmegaConf.to_container(cfg, resolve=False, throw_on_missing=False)
+        assert after == before == {"foo": "???", "bar": "${baz}"}
+
+    def test_included_required_values_are_listing_only(self, tmp_path: Path) -> None:
+        from nemo_gym.config.config_types import ConfigMissingValuesError
+        from nemo_gym.config.global_config import GlobalConfigDictParser
+
+        included = tmp_path / "base.yaml"
+        included.write_text("runtime:\n  harness: ???\n  model: fixed-model\n")
+        config = OmegaConf.create({"config_paths": [str(included)]})
+        resolved = _parse_no_environment_tolerating_unset_values(config)
+        assert resolved.runtime.harness == _UNSET_VALUE_PLACEHOLDER
+        assert resolved.runtime.model == "fixed-model"
+        with pytest.raises(ConfigMissingValuesError, match="runtime.harness"):
+            GlobalConfigDictParser().parse_no_environment(config)
+        assert included.read_text() == "runtime:\n  harness: ???\n  model: fixed-model\n"
+        assert OmegaConf.to_container(config) == {"config_paths": [str(included)]}
+
+    def test_included_environment_values_are_listing_only(self, tmp_path: Path, monkeypatch) -> None:
+        from nemo_gym.config.global_config import GlobalConfigDictParser
+
+        monkeypatch.delenv("GYM_TEST_LISTING_IMAGE", raising=False)
+        monkeypatch.setenv("GYM_TEST_LISTING_MODEL", "configured-model")
+        included = tmp_path / "base.yaml"
+        included.write_text(
+            "agent:\n"
+            "  responses_api_agents:\n"
+            "    harness_agent:\n"
+            "      entrypoint: app.py\n"
+            "      sandbox_image: ${oc.env:GYM_TEST_LISTING_IMAGE}\n"
+            "      model: ${oc.env:GYM_TEST_LISTING_MODEL}\n"
+            "      fallback: ${oc.env:GYM_TEST_LISTING_IMAGE,default-image}\n"
+            "environment:\n"
+            "  environment_servers:\n"
+            "    legacy_agent:\n"
+            "      entrypoint: app.py\n"
+            "      agent_server:\n"
+            "        type: responses_api_agents\n"
+            "        name: agent\n"
+        )
+        config = OmegaConf.create({"config_paths": [str(included)]})
+        resolved = _parse_no_environment_tolerating_unset_values(config)
+        agent = resolved.agent.responses_api_agents.harness_agent
+        assert agent.sandbox_image == _UNSET_VALUE_PLACEHOLDER
+        assert agent.model == "configured-model"
+        assert agent.fallback == "default-image"
+        assert "GYM_TEST_LISTING_IMAGE" not in os.environ
+        with pytest.raises(InterpolationResolutionError, match="GYM_TEST_LISTING_IMAGE"):
+            GlobalConfigDictParser().parse_no_environment(config)
+
+    def test_other_resolver_errors_propagate(self) -> None:
+        with pytest.raises(InterpolationResolutionError):
+            self._resolve({"foo": "${oc.decode:'['}"})
+
+    def test_absolute_ip_configs_list_without_resolving_this_host(self, monkeypatch) -> None:
+        # Debian and Ubuntu map the hostname to 127.0.1.1, which a run with `use_absolute_ip` rejects.
+        # Listing must not look up the host at all, so sandbox benchmarks stay listed on those machines.
+        from unittest.mock import MagicMock
+
+        import nemo_gym.config.global_config as global_config
+
+        resolver = MagicMock(return_value="127.0.1.1")
+        monkeypatch.setattr(global_config, "gethostbyname", resolver)
+        assert self._resolve({"use_absolute_ip": True})["use_absolute_ip"] is True
+        resolver.assert_not_called()
+
+
+class TestReadConfigMetadata:
+    def test_reads_domain_and_description_from_real_benchmark_config(self) -> None:
+        # aime24 inherits both fields from its resources server via `config_paths`/`_inherit_from`, so
+        # this only resolves via the tolerant fallback parse.
+        from nemo_gym.environment.benchmarks import BENCHMARKS_DIR
+
+        domain, description = read_config_metadata(BENCHMARKS_DIR / "aime24" / "config.yaml")
+
+        assert domain == "math"
+        assert description
+
+    def test_reads_domain_defined_on_agent(self, tmp_path: Path) -> None:
+        # `domain` can be declared on the agent (responses_api_agents.<agent>.domain) rather than on a
+        # resources server, as the tau2 config does.
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            """tau2_agent:
+  responses_api_agents:
+    tau2:
+      entrypoint: app.py
+      domain: agent
+"""
+        )
+
+        assert read_config_metadata(config_path)[0] == "agent"
+
+    def test_reads_inline_metadata_without_resolving_external_server_refs(self, tmp_path: Path) -> None:
+        # Environment configs reference model/agent servers defined elsewhere; resolving one in isolation
+        # would raise. Inline domain/description must still be read from the raw config, no resolution.
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "env:\n"
+            "  resources_servers:\n"
+            "    env:\n"
+            "      entrypoint: app.py\n"
+            "      domain: rlhf\n"
+            "      description: inline desc\n"
+            "      judge_model_server:\n"
+            "        type: responses_api_models\n"
+            "        name: some_absent_model\n"
+        )
+
+        assert read_config_metadata(config_path) == ("rlhf", "inline desc")

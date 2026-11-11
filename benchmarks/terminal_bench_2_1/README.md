@@ -2,7 +2,7 @@
 
 Terminal-Bench 2.1 evaluates agents on tasks in isolated containers. The benchmark
 prepares task data and owns sandbox setup, verification, and cleanup. Pi, Codex,
-OpenCode, and OpenClaw can run their model/tool loops in the task sandbox through
+OpenCode, OpenClaw, and Copilot can run their model/tool loops in the task sandbox through
 Gym's Environment Server.
 
 - Integration profile: `custom-gym-verifier`
@@ -66,8 +66,8 @@ The smoke input below wraps the prepared row in `task_id` and `task_input`.
 Its `terminal_bench_2_1` taskset routes directly to `single_agent_turn`.
 Environment Server seeds Resources and the agent, runs the agent, closes it before
 verification, then closes Resources. Resources owns the sandbox throughout.
-Keep one worker for both Resources and the agent because their sessions are
-process-local.
+Both servers accept several workers, because session routing sends each
+session's requests to the worker that holds it.
 
 ### Choose a harness
 
@@ -82,9 +82,11 @@ the harness for this taskset.
 | [Codex](../../responses_api_agents/codex_agent/README.md) | `responses_api_agents/codex_agent/configs/codex_agent.yaml` | `codex_agent` | `model_context_window: 32768`, `model_auto_compact_token_limit: 28672`, `timeout: 600` |
 | [OpenCode](../../responses_api_agents/opencode_agent/README.md) | `responses_api_agents/opencode_agent/configs/opencode_agent.yaml` | `opencode_agent` | `context_window: 32768`, `max_output_tokens: 8192`, `timeout: 600` |
 | [OpenClaw](../../responses_api_agents/openclaw_agent/README.md) | `responses_api_agents/openclaw_agent/configs/openclaw_agent.yaml` | `openclaw_agent` | `context_window: 32768`, `model_timeout_seconds: 600`, `timeout: 600` |
+| [Copilot](../../responses_api_agents/copilot_agent/README.md) | `responses_api_agents/copilot_agent/configs/copilot_agent.yaml` | `copilot_agent` | `context_window: 32768`, `max_output_tokens: 8192`, `timeout: 600` |
 
-All four pairings are allowed by this benchmark. These are single-task smoke
-settings; adjust context windows and budgets for your model and evaluation.
+Pi, Codex, OpenCode, and OpenClaw are allowed by this benchmark. Copilot remains experimental pending
+full qualification; use `--allow-unsupported-pairing` to try its smoke settings. These are single-task
+smoke settings; adjust context windows and budgets for your model and evaluation.
 See each harness's README for runtime prerequisites and model requirements.
 
 ### Model and sandbox provider
@@ -109,8 +111,8 @@ policy_model:
 Gym's vLLM Model Server also adapts Chat Completions to Codex's streaming Responses
 API. Adjust parser settings for your model, or select the OpenAI Model Server for
 a provider that serves the required API directly. Keep sampling and output caps
-on the model server; the Pi/OpenCode agent caps above also limit individual calls.
-Codex/OpenClaw sandbox sessions reject request-level `max_output_tokens`.
+on the model server; the Pi/OpenCode/Copilot agent caps above also limit individual calls.
+Codex/OpenClaw/Copilot sandbox sessions reject request-level `max_output_tokens`.
 
 Put `policy_base_url`, `policy_api_key`, and `policy_model_name` in your private
 `env.yaml`. The task container must reach the Gym Model Server; for Docker on a
@@ -126,7 +128,7 @@ python - <<'PY'
 import json
 from pathlib import Path
 
-from nemo_gym.task_materialization import materialize_task
+from nemo_gym.data import materialize_task
 
 rows = [json.loads(line) for line in Path("benchmarks/terminal_bench_2_1/data/benchmark.jsonl").read_text().splitlines()]
 rows = [row for row in rows if row["task_name"] == "terminal-bench/regex-log"]
@@ -156,24 +158,23 @@ a successful smoke, and one task does not establish a benchmark baseline.
 
 ## Tasks that start services
 
-The supervisor stops live processes in the harness group and reaps its children before
-capture or verification. On timeout or close, it first records its already adopted
-children. It then stops the harness and repeatedly drains newly adopted children,
-including in-flight tools in separate sessions, within the cleanup deadline. Previously
-adopted children outside the harness group remain for Resources to stop after verification
-or episode failure. This includes unfinished background jobs such as `make &` left by an
+The supervisor stops live processes in the harness group before capture or verification.
+On timeout or close, it stops the harness, then kills within the cleanup deadline the group,
+the harness's descendants in other process groups (such as in-flight tools in separate
+sessions) and processes that inherited the harness's `NEMO_GYM_SUPERVISOR` environment
+marker. Processes that left the harness before the stop remain for Resources to stop after verification or episode
+failure. This includes unfinished background jobs such as `make &` left by an
 earlier tool call, as well as services; either can continue writing during verification.
 
-To survive this forced-stop cleanup, a service must be outside the harness group and,
-before the stop, adopted by the supervisor or descended from a process that was. In the
-usual tool-launch path, let the process that launched it exit before the harness deadline
-or stop so that adoption can occur. A service still parented by an in-flight tool is
-adopted when that tool exits or is killed during the stop, and is drained with the
-in-flight tools.
+To survive this forced-stop cleanup, a service must be outside the harness group and no
+longer descend from the harness when the stop begins. In the usual tool-launch path, let the
+process that launched it exit before the harness deadline or stop. A service still parented
+by an in-flight tool descends from the harness at the stop and is killed with the in-flight
+tools.
 
 Natural CLI exit has no such cutoff: unfinished tools in separate sessions cannot be
-distinguished from services and may still change task files. Adoption races, PID reuse,
-and a preserved service orphaning more children during cleanup also limit this rule.
+distinguished from services and may still change task files. PID reuse and a tool
+that starts a new session after the stop is recorded also limit this rule.
 A confirmed receipt is not a guarantee that the sandbox is idle or a security boundary.
 Unconfirmed termination blocks verification; a final failure receipt still lets agent
 close release its connection for owner teardown.
@@ -189,7 +190,7 @@ service. Detach its process group and standard streams, for example with
 in task-owned log files. Check that the service is reachable before finishing.
 A file-producing smoke does not validate this service-dependent behavior.
 
-Resources retains completed close receipts for `session_close_retry_window_seconds`
+The resources server fences each closed session for `session_close_retry_window_seconds`
 (default 300 seconds); retries do not extend the window. Pending setup or failed stops
 retain their handles. Close fences an in-progress setup before waiting for its lock,
 so setup finishing after a close timeout attempts its own bounded teardown. If that

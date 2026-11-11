@@ -43,7 +43,7 @@ want protocol rows as extracted text (including mixed splits); `run.sh` passes
 this for the dedicated protocolqa2 rollout loop.
 
 `pymupdf` (for PDF rendering and text extraction) is only required in the agent's venv
-(`responses_api_agents/labbench2_vlm_agent/requirements.txt`), not in the
+(`responses_api_agents/labbench2_vlm_agent/pyproject.toml`), not in the
 resource server or core `nemo_gym`.
 
 ## Dataset Format

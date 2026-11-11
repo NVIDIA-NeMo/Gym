@@ -68,6 +68,7 @@ jobs:
     needs: [pre-flight]
     runs-on: ubuntu-latest
     outputs:
+      sha: ${{ steps.revision.outputs.sha }}
       docs_only: ${{ steps.changes.outputs.docs_only }}
       # Single source of truth for "is this a periodic/on-demand run" -
       # referenced by container_build/gpu_e2e_tests/provider_e2e_tests and
@@ -77,9 +78,44 @@ jobs:
       # failed) - a skipped job's outputs, including literal ones, are empty.
       is_nightly: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     steps:
+      # Resolve once: PR-mirror pushes must test the merge, not the unmerged head.
+      - name: Resolve tested revision
+        id: revision
+        shell: bash -e -u -o pipefail {0}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          EVENT_SHA: ${{ github.sha }}
+          MERGE_GROUP_SHA: ${{ github.event.merge_group.head_sha }}
+        run: |
+          sha="$EVENT_SHA"
+          if [[ "$EVENT_NAME" == push && "$REF_NAME" =~ ^pull-request/([0-9]+)$ ]]; then
+            pr_info=$(gh api "repos/$GITHUB_REPOSITORY/pulls/${BASH_REMATCH[1]}" \
+              --jq '.head.sha + " " + (.merge_commit_sha // "")')
+            read -r pr_head sha <<< "$pr_info"
+            if [[ "$pr_head" != "$EVENT_SHA" || ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+              echo '::error::PR merge revision is unavailable or the PR mirror is stale.'
+              exit 1
+            fi
+            merge_head=$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$sha" --jq '.parents[1].sha')
+            if [[ "$merge_head" != "$EVENT_SHA" ]]; then
+              echo '::error::PR merge revision does not contain the pushed head.'
+              exit 1
+            fi
+          elif [[ "$EVENT_NAME" == merge_group ]]; then
+            sha="$MERGE_GROUP_SHA"
+          fi
+          if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo '::error::Expected a full tested commit SHA.'
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
       - name: Checkout repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
+          ref: ${{ steps.revision.outputs.sha }}
           fetch-depth: 0
 
       - name: Classify changes
@@ -87,6 +123,14 @@ jobs:
         uses: ./.github/actions/classify-changes
         with:
           base-ref: ${{ needs.pre-flight.outputs.base_ref }}
+          head-sha: ${{ steps.revision.outputs.sha }}
+
+  component_locks:
+    name: Component locks
+    needs: [pre-flight, classify_changes]
+    uses: ./.github/workflows/component-locks.yml
+    with:
+      checkout-ref: ${{ needs.classify_changes.outputs.sha }}
 
   unit_tests:
     name: Unit tests
@@ -94,18 +138,20 @@ jobs:
     if: needs.classify_changes.outputs.docs_only != 'true'
     uses: ./.github/workflows/unit-tests.yml
     with:
+      checkout-ref: ${{ needs.classify_changes.outputs.sha }}
       base-ref: ${{ needs.pre-flight.outputs.base_ref }}
 
   # Conformance is published separately as an optional check.
   harness_conformance:
     name: Harness conformance (non-blocking)
-    needs: [pre-flight]
+    needs: [pre-flight, classify_changes]
     uses: ./.github/workflows/harness-conformance.yml
     permissions:
       contents: read
       actions: read
       checks: write
     with:
+      checkout-ref: ${{ needs.classify_changes.outputs.sha }}
       # Queue groups and main pushes can contain more than one commit.
       # PR mirrors retain the full branch diff against the PR's base branch.
       base-ref: ${{ github.event.merge_group.base_sha || (github.ref == 'refs/heads/main' && github.event.before) || needs.pre-flight.outputs.base_ref }}
@@ -137,6 +183,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ needs.classify_changes.outputs.sha }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
@@ -216,6 +264,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ needs.classify_changes.outputs.sha }}
 
       - name: Run ${{ matrix.name }}
         uses: ./.github/actions/test-template
@@ -267,6 +317,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ needs.classify_changes.outputs.sha }}
 
       - name: Install uv
         run: |
@@ -296,7 +348,7 @@ jobs:
           retention-days: 7
 
   Nemo_CICD_Test:
-    needs: [pre-flight, classify_changes, unit_tests, container_build, gpu_e2e_tests, provider_e2e_tests]
+    needs: [pre-flight, classify_changes, component_locks, unit_tests, container_build, gpu_e2e_tests, provider_e2e_tests]
     if: always() && !cancelled()
     runs-on: ubuntu-latest
     steps:
@@ -308,6 +360,7 @@ jobs:
           CLASSIFY_RESULT: ${{ needs.classify_changes.result }}
           DOCS_ONLY: ${{ needs.classify_changes.outputs.docs_only }}
           PREFLIGHT_RESULT: ${{ needs.pre-flight.result }}
+          COMPONENT_LOCKS_RESULT: ${{ needs.component_locks.result }}
           UNIT_TEST_RESULT: ${{ needs.unit_tests.result }}
           CONTAINER_BUILD_RESULT: ${{ needs.container_build.result }}
           GPU_E2E_TEST_RESULT: ${{ needs.gpu_e2e_tests.result }}
@@ -317,6 +370,7 @@ jobs:
           echo "Pre-flight: $PREFLIGHT_RESULT"
           echo "Classify changes: $CLASSIFY_RESULT"
           echo "Docs only: $DOCS_ONLY"
+          echo "Component locks: $COMPONENT_LOCKS_RESULT"
           echo "Unit tests: $UNIT_TEST_RESULT"
           echo "Container build: $CONTAINER_BUILD_RESULT"
           echo "GPU E2E tests: $GPU_E2E_TEST_RESULT"
@@ -329,6 +383,11 @@ jobs:
 
           if [[ "$CLASSIFY_RESULT" != "success" ]]; then
             echo "Change classification did not succeed."
+            exit 1
+          fi
+
+          if [[ "$COMPONENT_LOCKS_RESULT" != "success" ]]; then
+            echo "Component lock freshness did not succeed."
             exit 1
           fi
 
@@ -377,7 +436,7 @@ jobs:
   notify-failure:
     name: Notify test failure
     runs-on: ubuntu-latest
-    needs: [ephemeral-runner-routing, pre-flight, classify_changes, unit_tests, container_build, gpu_e2e_tests, provider_e2e_tests, Nemo_CICD_Test]
+    needs: [ephemeral-runner-routing, pre-flight, classify_changes, component_locks, unit_tests, container_build, gpu_e2e_tests, provider_e2e_tests, Nemo_CICD_Test]
     environment: main
     permissions: {}
     # Use the event directly: setup outputs are empty when setup fails.

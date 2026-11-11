@@ -29,10 +29,9 @@ import aiohttp
 from pydantic import ConfigDict, Field, ValidationError
 from tenacity import retry, stop_after_attempt, wait_exponential_jitter
 
-from nemo_gym.base_resources_server import BaseRunRequest
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -43,6 +42,8 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
     accumulate_response_usage,
 )
+from nemo_gym.server_runtime import BaseRunRequest
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.toolsandbox.schemas import (
     ToolSandboxNeMoGymResponse,
     ToolSandboxSeedSessionResponse,
@@ -232,3 +233,6 @@ class ToolSandboxAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     ToolSandboxAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ToolSandboxAgent.run_webserver()  # noqa: F401

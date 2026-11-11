@@ -25,13 +25,14 @@ import defusedxml.ElementTree  # noqa: F401
 import regex  # noqa: F401
 from fastapi import FastAPI
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 try:
@@ -205,3 +206,6 @@ class IFBenchResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     IFBenchResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = IFBenchResourcesServer.run_webserver()  # noqa: F401

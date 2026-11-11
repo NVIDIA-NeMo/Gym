@@ -10,13 +10,14 @@ from fastapi import Body, Request
 from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError
 
-from nemo_gym.base_responses_api_model import _orjson_dispatch_response
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.models.base_responses_api_model import _orjson_dispatch_response
+from nemo_gym.models.model_call_capture import note_finish_reason
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_models.vllm_model.app import VLLMModel
 
 
@@ -49,6 +50,12 @@ class VLLMModelWithCompaction(VLLMModel):
 
     non_generating_model_routes: ClassVar[frozenset[tuple[str, str]]] = frozenset({("POST", "/tokenize")})
     _TOKENIZE_CHAT_FIELDS = (*VLLMModel._TOKENIZE_CHAT_FIELDS, "required_prefix_token_ids")
+
+    def model_post_init(self, context):
+        # This server's own dispatch never sets the unlisted effort aside, so the option would do nothing.
+        if self.config.forward_unvalidated_reasoning_effort:
+            raise ValueError("vllm_model_with_compaction does not support forward_unvalidated_reasoning_effort")
+        super().model_post_init(context)
 
     def setup_webserver(self):
         app = super().setup_webserver()
@@ -137,6 +144,7 @@ class VLLMModelWithCompaction(VLLMModel):
         standard_body, chat_params = self._context_compaction_chat_params(body)
         standard_body.model = self.config.model
         chat_completion_response = await self.chat_completions(request, chat_params)
+        note_finish_reason(request, chat_completion_response.choices[0].finish_reason)
         return self._converter.chat_completion_to_response(
             responses_create_params=standard_body,
             chat_completion=chat_completion_response,
