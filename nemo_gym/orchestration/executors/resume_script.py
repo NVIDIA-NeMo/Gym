@@ -93,6 +93,12 @@ REQUEUE_SETTLE_POLL_S = 30
 REQUEUE_SETTLE_BOUND_S = 300
 # The sacct fields of every incarnation of every allocation of a chain (see recovery.chain_accounting).
 CHAIN_ACCOUNTING_FORMAT = "JobIDRaw,State,ElapsedRaw,Restarts"
+# Appended in the job dir: one JSON row per allocation incarnation of the run's jobs (chain segments, follow-ups and
+# sentinels), from sacct, for GPU-hour accounting. Each prologue records every incarnation that has ended, and the job
+# that ends the chain also records its own as of its epilogue (``"ended": false``); see render_resume_prologue.
+JOB_ALLOCATIONS_NAME = "job-allocations.jsonl"
+# Read with SLURM_TIME_FORMAT=%s, so Start and End are Unix seconds.
+JOB_ALLOCATIONS_FORMAT = "JobIDRaw,State,Start,End,ElapsedRaw,NNodes,NodeList,AllocTRES,Restarts"
 # The previous state a sentinel gives the installed continuation reader to reconcile a requeued chain, with the
 # chain's records in CHAIN_ACCOUNTING_ENV; the reader prints the reconciled walltime after ACCOUNTED_WALLTIME_PREFIX.
 REQUEUE_RECONCILE_STATE = "REQUEUED"
@@ -384,6 +390,60 @@ _gym_reconcile_requeue() {{
     rm -f "$OUTPUT_DIR/{resubmit_lock_name}"
     exit 0
 }}
+
+# Every job of the run the job dir names: the chain, each claimed follow-up and each queued sentinel.
+_gym_run_job_ids() {{
+    cat "$OUTPUT_DIR/{job_chain_name}" "$OUTPUT_DIR"/.gym_followup_queued.* "$OUTPUT_DIR"/.gym_followup_sentinel.* 2>/dev/null | \
+        grep -xE '[0-9]{{1,15}}' | sort -u | paste -sd, -
+}}
+# Appends to {job_allocations_name} one row per allocation incarnation (job id, restarts) of those jobs that has ended
+# and has no row yet; with $1, also the running incarnation of that job, once (ended false). Scheduler accounting that
+# stays unavailable records nothing: a later job records what is missing. It never stops the chain.
+_gym_record_allocations() {{
+    local _ids _rows="" _new _sacct_try _file="$OUTPUT_DIR/{job_allocations_name}"
+    _ids=$(_gym_run_job_ids)
+    [[ -n "$_ids" ]] || return 0
+    for _sacct_try in 1 2 3 4 5 6; do
+        _rows=$(SLURM_TIME_FORMAT=%s sacct -D -X -P -n -j "$_ids" --format={job_allocations_format} 2>/dev/null) && \
+            [[ -n "$_rows" ]] && break
+        _rows=""
+        sleep 10
+    done
+    if [[ -z "$_rows" ]]; then
+        echo "WARNING: scheduler accounting of jobs $_ids is unavailable; {job_allocations_name} records none of them now."
+        return 0
+    fi
+    _new=$(awk -F'|' -v want="$_ids" -v self="${{1:-}}" -v file="$_file" -v q='"' \
+        -v at="$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+        function text(s) {{ gsub("[^][A-Za-z0-9_.,=:/+()* -]", "", s); return q s q }}
+        function number(s) {{ return s ~ /^[0-9]+$/ ? s + 0 : "null" }}
+        BEGIN {{
+            n = split(want, ids, ","); for (i = 1; i <= n; i++) wanted[ids[i]] = 1
+            while ((getline line < file) > 0) {{
+                if (!match(line, q "job_id" q ":" q "[0-9]+" q)) continue
+                id = substr(line, RSTART + 10, RLENGTH - 11)
+                if (!match(line, q "restarts" q ":[0-9]+")) continue
+                seen[id, substr(line, RSTART + 11) + 0, index(line, q "ended" q ":true") > 0] = 1
+            }}
+        }}
+        NF != 9 || !($1 in wanted) || $5 !~ /^[0-9]+$/ || $6 !~ /^[0-9]+$/ || $9 !~ /^[0-9]+$/ {{ next }}
+        {{
+            ended = $4 ~ /^[0-9]+$/
+            if ((!ended && $1 != self) || seen[$1, $9 + 0, ended]) next
+            seen[$1, $9 + 0, ended] = 1
+            split($2, words, " "); state = words[1]; sub(/[+]$/, "", state)
+            gpus = "null"; k = split($8, tres, ",")
+            for (i = 1; i <= k; i++) if (tres[i] ~ "^gres/gpu=[0-9]+$") gpus = substr(tres[i], 10) + 0
+            print "{{" q "alloc_tres" q ":" text($8) "," q "elapsed_s" q ":" ($5 + 0) "," q "end_epoch_s" q ":" number($4) \
+                "," q "ended" q ":" (ended ? "true" : "false") "," q "gpus" q ":" gpus "," q "job_id" q ":" q $1 q \
+                "," q "node_list" q ":" text($7) "," q "nodes" q ":" ($6 + 0) "," q "recorded_at" q ":" q at q \
+                "," q "restarts" q ":" ($9 + 0) "," q "source" q ":" q "sacct" q "," q "start_epoch_s" q ":" number($3) \
+                "," q "state" q ":" text(state) "}}"
+        }}' <<< "$_rows") || return 0
+    [[ -z "$_new" ]] || printf '%s\\n' "$_new" >> "$_file" || echo "WARNING: cannot append to {job_allocations_name}."
+    return 0
+}}
+_gym_record_allocations
 
 # The previous job queues a sentinel next to its follow-up F (afterany:F). F records itself in the chain before
 # anything else, so a sentinel only acts when F started and ended unrecorded: F died before its prologue ran.
@@ -923,6 +983,8 @@ _gym_end_own_chain() {{
         fi
         _cancelled+="${{_cancelled:+,}}\\"$_role\\":{{\\"job_id\\":\\"$_id\\",\\"result\\":\\"$_result\\"}}"
     done
+    # Nothing follows this job to record it: it records its own allocation as of now, and any ended one still missing.
+    _gym_record_allocations "$SLURM_JOB_ID"
     printf '{{"at":"%s","cancelled":{{%s}},"ended":"%s","job_id":"%s"}}\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \\
         "$_cancelled" "$_ended" "$SLURM_JOB_ID" >> "$OUTPUT_DIR/{chain_end_journal_name}" || \\
         echo "WARNING: cannot journal the end of the chain in {chain_end_journal_name}."
@@ -1015,6 +1077,8 @@ def render_resume_prologue(resume: ResumeConfig, *, admission_command: str = "fa
         requeue_settle_poll_s=REQUEUE_SETTLE_POLL_S,
         requeue_settle_bound_s=REQUEUE_SETTLE_BOUND_S,
         chain_accounting_format=CHAIN_ACCOUNTING_FORMAT,
+        job_allocations_name=JOB_ALLOCATIONS_NAME,
+        job_allocations_format=JOB_ALLOCATIONS_FORMAT,
         requeue_reconcile_state=REQUEUE_RECONCILE_STATE,
         chain_accounting_env=CHAIN_ACCOUNTING_ENV,
         accounted_walltime_prefix=ACCOUNTED_WALLTIME_PREFIX,
