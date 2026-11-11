@@ -531,10 +531,21 @@ class TestTokenAccounting:
     async def test_usage_sent_to_verifier_sums_all_steps_and_details(self):
         row = await _collect_usage([_usage(100), _usage(300, input_tokens=20)])
         assert row["token_usage_version"] == TOKEN_USAGE_VERSION
-        assert row["response"]["usage"] == _usage(400, input_tokens=30, cached_tokens=4, reasoning_tokens=6)
+        expected_usage = _usage(400, input_tokens=30, cached_tokens=4, reasoning_tokens=6)
+        expected_usage["input_tokens_details"]["cache_write_tokens"] = None
+        assert row["response"]["usage"] == expected_usage
         assert [{k: s[k] for k in ("step_number", "status", "usage")} for s in row["step_usage"]] == [
-            {"step_number": "1.1", "status": "generated", "usage": _usage(100)},
-            {"step_number": "1.2", "status": "generated", "usage": _usage(300, input_tokens=20)},
+            {
+                "step_number": "1.1",
+                "status": "generated",
+                "usage": _usage(100) | {"input_tokens_details": {"cached_tokens": 2, "cache_write_tokens": None}},
+            },
+            {
+                "step_number": "1.2",
+                "status": "generated",
+                "usage": _usage(300, input_tokens=20)
+                | {"input_tokens_details": {"cached_tokens": 2, "cache_write_tokens": None}},
+            },
         ]
         assert row["response"]["output"][0]["content"][0]["text"] == "```python\nx = 1\n```"
 
@@ -574,7 +585,9 @@ class TestTokenAccounting:
         ]
         assert row["response"]["usage"]["output_tokens"] == 100
         for i in (0, 2, 3):
-            assert row["step_usage"][i]["usage"] == _usage(0, input_tokens=0, cached_tokens=0, reasoning_tokens=0)
+            expected_usage = _usage(0, input_tokens=0, cached_tokens=0, reasoning_tokens=0)
+            expected_usage["input_tokens_details"]["cache_write_tokens"] = 0
+            assert row["step_usage"][i]["usage"] == expected_usage
         result = _aggregate([row])
         metrics = result.key_metrics
         assert metrics["mean/output_tokens_per_problem"] == 100

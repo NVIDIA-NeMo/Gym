@@ -852,6 +852,7 @@ def test_eval_run_writes_the_summary_for_a_model_run(tmp_path, monkeypatch, caps
 
     write_task(tmp_path / "ds" / "a")
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(global_config, "gethostbyname", lambda _: "192.0.2.20")
     order = []
     read_rows = RolloutCollectionHelper._preprocess_rows_from_config
 
@@ -900,6 +901,7 @@ def test_eval_run_reads_the_selected_rows_inside_the_summary_guard(tmp_path, mon
 
     write_task(tmp_path / "ds" / "a")
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(global_config, "gethostbyname", lambda _: "192.0.2.20")
     dispatched = []
     monkeypatch.setattr(main_module, "dispatch", lambda *args: dispatched.append(args))
 
@@ -945,6 +947,7 @@ def test_eval_run_fresh_start_that_dies_before_the_collector_clears_its_outputs_
 
     write_task(tmp_path / "ds" / "a")
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(global_config, "gethostbyname", lambda _: "192.0.2.20")
     output_dir = tmp_path / "results" / "harbor" / "ds"
     rollouts = output_dir / "rollouts.jsonl"
     summary_path = output_dir / "rollouts_run_summary.json"
@@ -1053,6 +1056,7 @@ def test_a_resumed_run_summarizes_the_saved_schedule_it_resumed_not_the_current_
 
     write_task(tmp_path / "ds" / "a")
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(global_config, "gethostbyname", lambda _: "192.0.2.20")
     output_dir = tmp_path / "results" / "harbor" / "ds"
     rollouts = output_dir / "rollouts.jsonl"
     argv = [
