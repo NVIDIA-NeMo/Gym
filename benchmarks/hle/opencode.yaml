@@ -1,10 +1,15 @@
+# HLE with OpenCode agent sessions under single_agent_turn_legacy. Each session creates its own sandbox from the
+# offline science image (see responses_api_agents/opencode_agent/configs/profiles/offline_science.yaml), and the HLE
+# judge grades the final answer. opencode_legacy_agent.yaml keeps opencode_sandboxed_agent on the deprecated
+# legacy_agent relay; the two harnesses are configured differently, so do not compare their scores as the same
+# measurement.
 config_paths:
 - benchmarks/hle/config.yaml
-- responses_api_agents/opencode_sandboxed_agent/configs/benchmark.yaml
+- responses_api_agents/opencode_agent/configs/profiles/offline_science.yaml
 hle_opencode_agent:
-  _inherit_from: opencode_benchmark_agent
+  _inherit_from: opencode_agent
   responses_api_agents:
-    opencode_sandboxed_agent:
+    opencode_agent:
       resources_server:
         type: resources_servers
         name: hle_equivalence_llm_judge_resources_server
@@ -18,14 +23,16 @@ hle_opencode_agent:
 equivalence_llm_judge_simple_agent: null
 hle_equivalence_llm_judge_simple_agent: null
 
-# Keep the benchmark's routing name, replacing its inherited server with this harness's /run relay.
+# Keep the benchmark's routing name and its single_agent_turn_legacy server, with this harness as the agent.
 equivalence_llm_judge_environment_server: null
 hle_equivalence_llm_judge_environment_server:
   _delete_key: _inherit_from
   environment_servers:
-    _delete_key: single_agent_turn_legacy
-    legacy_agent:
+    single_agent_turn_legacy:
       entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: hle_equivalence_llm_judge_resources_server
       agent_server:
         type: responses_api_agents
         name: hle_opencode_agent
