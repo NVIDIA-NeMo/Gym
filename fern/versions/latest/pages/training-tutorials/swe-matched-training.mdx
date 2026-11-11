@@ -1,0 +1,154 @@
+---
+title: Matched SWE-Next training
+---
+
+These recipes bind SWE-Next tasks to the original `/run` adapters, SingleAgentTurn,
+or Harbor. They support the reported small-task comparisons and larger experiments.
+The recipe helpers prepare configurations and inputs; the launcher uses NeMo RL's
+existing controller and `ray.sub`.
+
+## Prepare from a resolved recipe
+
+Use the original resolved configuration and provenance for the intended model and
+route. The reference YAML `examples/training/swe_single_agent_turn.yaml` is an overlay
+on RL's controller defaults, not a standalone resolved configuration. Preserve the
+model checkpoint, sampling, context limit, optimizer and runtime settings from the
+experiment being reproduced. There is no model download, parser clone or source/image
+inventory in the preparation path.
+
+```bash
+python -m scripts.prepare_swe_single_agent_turn_recipe retarget \
+  --prepared "$TEMPLATE_PREPARATION" --output "$NEW_PREPARATION" \
+  --task-rows "$SELECTED_SWE_NEXT_ROWS" --dataset-manifest "$DATASET_MANIFEST" \
+  --wandb-project "$WANDB_PROJECT" --wandb-entity "$WANDB_ENTITY"
+```
+
+This preserves selected task prompts and hidden verification fields. It replaces task
+bindings and physical output paths, then materializes tasks in task-major, harness-minor
+order. A single harness produces one row per task; the original five-harness mixture
+produces five. With eight tasks and four generations, the corresponding update batches
+are 32 and 160 episodes. The update target comes from the template. `--harness` composes
+a different single harness from a single-harness template on the same route; Codex
+also needs `--harness-assets-from` pointing to its prepared catalog.
+
+For the Harbor route, additionally pass `--harbor-tasks "$EXISTING_HARBOR_TASKS"`.
+This directory must already contain the selected tasks in Harbor format, including
+instructions, task configuration, environment files and verification files. Each
+selection row must carry its original `instance_id` and an explicit `harbor_task_id`
+matching the task ID loaded from that directory. The selected IDs must be unique and
+match the directory's loadable task IDs exactly; skipped tasks are rejected.
+
+The recipe uses NeMo Gym's existing Harbor preparation and materialization APIs to
+load those tasks and bind them to harnesses. It does not convert SWE-Next rows, write
+task folders or generate graders. Harbor instructions and verification behavior come
+from the supplied tasks, not from the selection rows. Keep that directory and its
+recorded image metadata available at the referenced paths. Raw SWE-Next row conversion
+is intentionally outside this stack; `/run` and SingleAgentTurn still consume the
+original SWE-Next rows directly.
+
+### Harness controls and prepared files
+
+Every arm keeps the RL/vLLM context limit at 32,768, the per-call output limit at 1,024, temperature and top-p at 1, and thinking enabled with prior reasoning retained. The framework sampling settings also govern retry calls. Preserve the masked-reward `include` policy and complete batches when comparing arms.
+
+| Harness | Paired runtime and automatic compaction control |
+| --- | --- |
+| OpenCode | 1.17.11; `compaction.auto=false` and `compaction.prune=false`. Per-adapter concurrency is 8 on both paths. Both enable `report_agent_sandbox_oom`; `/run` then separates setup from the 480-second invocation budget. Both routes bound setup commands at 480 seconds and retain explicit agent OOM observations. |
+| Claude Code | 2.1.108; both routes bind `model_server` to `policy_model` and use CLI alias `claude-sonnet-4-6`. Preparation writes `claude-settings.json` with environment values `DISABLE_COMPACT=1`, `CLAUDE_CODE_MAX_CONTEXT_TOKENS=32768` and `CLAUDE_CODE_MAX_OUTPUT_TOKENS=1024`. The adapter stages this file in the sandbox through its `settings` option. Bare mode, thinking and 30 turns are explicit. |
+| Hermes | Both routes use the pinned `hermes_agent` runtime; `/run` selects it with `runtime_python=null`. Compression is disabled, with 30 turns and a 60-second terminal timeout on both paths. |
+| Pi | 0.80.2; `auto_compaction=false`, fixed 1,024-token output. The sandboxed adapter is configured directly, without importing a benchmark's settings. |
+| Codex | 0.144.4; both routes use CLI alias `gym-policy-model` and the exported catalog described below. `multi_agent`, `code_mode` and `token_budget` remain disabled. |
+| Atom (`nooa`) | Sandboxed `AtomHarness` with `handle_batch`, a 32,768-token context window and a 480-second worker budget. The shared sampling transport supplies the 1,024-token per-call limit. Preparation writes `atom-settings.yaml` with `atom.summarization.policy=none` and `atom.context_error_policy=raise`; `settings_file` stages it in each sandbox. |
+
+Codex requires an existing export from [source revision `8c68d4c87dc54d38861f5114e920c3de2efa5876`](https://github.com/openai/codex/tree/8c68d4c87dc54d38861f5114e920c3de2efa5876), with adjacent `models.json`, `fallback.json` and `provenance.json` from Gym's pinned exporter. Preparation checks the source/version/exporter receipt, both content hashes, the exact alias, unique model records and unchanged fallback fields except the three context fields. It copies all three files into the output's `codex/` directory and hashes them in the recipe provenance. No catalog blob is checked into this recipe.
+
+The catalog deliberately omits `context_window`, `max_context_window` and `auto_compact_token_limit` for that alias. Both adapter context overrides remain null. This removes Codex's automatic context threshold; the real 32,768-token boundary remains in RL/vLLM. The stable CLI alias is mapped to the configured policy model by Gym and need not equal the checkpoint pathname. Passing catalog checks alone does not qualify native CLI behavior or prove engine enforcement. Use a stack containing the catalog-support adapter change, and inspect real boundary and failure controls before training.
+
+Atom requires the reviewed NOOA SDK change that supports `context_error_policy=raise`, together with the adapter’s `settings_file` transport. This stops context-error recovery from archiving history; `summarization.policy=none` separately disables automatic summarization. Keep the shared RL setting `token_capture.forest_training=false`. Recipe and schema checks alone do not establish runtime enforcement, capture correctness or training success.
+
+Keep prepared Claude settings, Codex files and Atom settings on the shared mount at the recorded paths. Treat each running snapshot as fixed. Experimental launches do not repeat preparation inventories or conformance probes.
+
+## Launch a fixed source snapshot
+
+Record the RL and Gym revisions/diffs, resolved configuration, frozen task input and
+compiled image path/build identity for each run. The original reported executions
+used Gym `6b4cdc921d995f2061ff3e657025f846ebecbfe3` and RL
+`ca10ee19d2856f299bf4b6217999d20b87be5ea4` plus recorded fixes. Those executions do not
+qualify a later complete PR head. Use a compatible image built through RL's supported
+Dockerfile; Python-only source changes do not require rebuilding compiled dependencies.
+
+The source-mount route expects the image's editable paths `/opt/nemo-rl`,
+`/opt/nemo_rl_venv`, `/opt/ray_venvs` and `/opt/gym_venvs`. Mount a fixed RL source tree
+including its Gym submodule; keep results and caches outside it. Other image layouts
+need their supported launcher configuration. Do not modify source used by active jobs.
+
+```bash
+export SLURM_ACCOUNT SLURM_PARTITION SHARED_ROOT
+export NEMO_RL_ROOT CONTAINER CONFIG_PATH
+export OPENSANDBOX_DOMAIN OPENSANDBOX_API_KEY
+bash scripts/launch_swe_single_agent_turn_training.sh --source-mount --dry-run
+bash scripts/launch_swe_single_agent_turn_training.sh --source-mount
+```
+
+The launcher starts the real program without extra preflight inventories. It reads
+`cluster.gpus_per_node` unless `GPUS_PER_NODE` is supplied, requests one exclusive node
+and node memory, and accepts `--walltime`, `--exclude` and optional `SLURM_QOS`.
+Four-GPU ARM Blackwell and eight-GPU x86 H100 configurations require compatible
+model parallelism and compiled images; changing allocation alone does not adapt a recipe.
+The baked-source route remains available by omitting `--source-mount`.
+
+For the original compiled image, `--reuse-swe-rebench-venv` aliases its compatible
+resource-server environment to SWE-Next inside the disposable container. This reuses
+dependencies, not the SWE-rebench benchmark or grader. W&B credentials can be supplied
+through `scripts/with_wandb_auth.py`; they must remain outside source and configuration.
+
+## Continue the same logical run
+
+```bash
+python -m scripts.prepare_swe_single_agent_turn_recipe continue \
+  --prepared "$ORIGINAL_PREPARATION" --output-dir "$NEW_ATTEMPT" \
+  --wandb-id "$ORIGINAL_WANDB_ID" --prior-job-id "$PRIOR_JOB_ID"
+```
+
+Use the original checkpoint-producing preparation, not a failed continuation directory.
+The helper preserves the complete data and checkpoint blocks and original input paths,
+sets W&B `resume=must`, and relocates physical output paths. Keep the original inputs
+available. Launch without W&B overrides that would clear this identity. The owner must
+identify a published checkpoint; this command neither inspects nor selects one.
+Continuation is not a fresh baseline, and discarded updates must not be counted twice.
+The RL companion includes the guarded optimizer restore fix used by the continuation.
+
+## Larger training runs use the same controller
+
+Retarget the resolved preparation to the selected frozen training rows, then set the
+existing NeMo RL configuration fields for the approved experiment. Larger task sets
+and longer budgets do not need a separate training implementation or preparation CLI.
+
+| Setting | Existing configuration field |
+| --- | --- |
+| Frozen training input | `data.train.data_path` |
+| Optimizer update target | `grpo.max_num_steps` |
+| Epoch budget sufficient to reach that target | `grpo.max_num_epochs` |
+| Distinct tasks per update | `grpo.num_prompts_per_step` |
+| Generations per task | `grpo.num_generations_per_prompt` |
+| Update batch size | `policy.train_global_batch_size` |
+| Checkpoint interval and retention | `checkpointing.save_period`, `checkpointing.keep_top_k` |
+| GPUs per node | `cluster.gpus_per_node` |
+
+For example, 16 tasks per update and four generations give 64 episodes per update.
+A 100-update budget requires 6,400 episodes. Set the epoch budget to cover the selected
+task count and keep model parallelism compatible with the allocation. These are
+configuration examples, not a change to an existing experiment's scientific settings.
+Keep the resolved model, optimizer, sampling and context settings from the intended
+comparison, and use fresh output/checkpoint paths and W&B identity for a fresh run.
+Use the continuation command above when resuming the same logical run.
+
+For a matched 50:50 mixture, use the same task order as the single-harness arm and
+assign alternate rows to OpenCode and Pi. The materializer accepts
+`task_harnesses=["opencode", "pi"] * (len(rows) // 2)` together with
+`harnesses=["opencode", "pi"]`. It emits one row per task; generation siblings stay on
+that task's assigned harness. Without `task_harnesses`, it repeats every task across
+every requested harness. This is an input-assignment choice, not another trainer.
+
+The Harbor bare-shell startup repair applies at every dataset size. The RL optimizer
+restore fix applies to checkpoint continuation at every training budget. Neither fix
+changes the learning algorithm or chooses scientific settings.
