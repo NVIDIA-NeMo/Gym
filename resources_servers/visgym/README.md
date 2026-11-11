@@ -1,8 +1,7 @@
 # VisGym integration
 
-> Current upstream draft: see [the qualification benchmark](../../benchmarks/visgym_maze_smoke/README.md).
+> Qualification scope: see [the qualification benchmark](../../benchmarks/visgym_maze_smoke/README.md).
 > Current Gym installs this component using `pyproject.toml` and `uv.lock`.
-> The retained `requirements-historical.txt` is the historical training-install interface.
 > Binary evaluation is opt-in with `reward_mode: task_success`; native accumulated
 > training reward remains the default. Missing reward sessions are masked.
 
@@ -24,9 +23,10 @@ stateful episode:
 6. NeMo-Gym verifies the episode and returns its accumulated training reward.
 
 The initial validated integration targets `maze_2d/easy`. The resource server
-is parameterized by `env_id`, so the other 16 namespaced VisGym task families
-can be added through configuration and task data without creating another
-server implementation. Arbitrary environments from the forked Gymnasium
+is parameterized by `env_id`; additional native-rendered families can be
+qualified through task data without another server implementation. Maze3D and
+Fetch are explicitly rejected pending separately qualified renderer support.
+The experimental corridor/state-diagram renderers are not included. Arbitrary environments from the forked Gymnasium
 registry are not automatically valid training tasks.
 
 ## Session and failure contract (current main)
@@ -62,7 +62,7 @@ or caller recovery must start a new attempt. Cancellation still propagates.
 
 | Component | Location | Responsibility |
 | --- | --- | --- |
-| Environment bundle | `environments/visgym` | Provides the canonical config and data-preparation entry point. |
+| Environment bundle | `environments/visgym` | Provides the canonical config and a committed example dataset. |
 | Resource server | `resources_servers/visgym` | Owns environment instances, renders observations, applies actions, and accumulates reward. |
 | Rollout agent | `responses_api_agents/visgym_agent` | Alternates model calls with environment steps and extracts actions from model text. |
 | Model server | `responses_api_models/vllm_model` | Generates policy responses and preserves token information needed for on-policy training. |
@@ -123,7 +123,7 @@ exceptions instead follow the masked failure contract above. A configured
 the response metadata as `training_reward`, and returns it to NeMo-Gym. Reward
 is accumulated across all turns rather than inferred from the final text.
 It separately emits binary `task_success` only when an audited VisGym family
-terminates with raw reward `1.0`; positive nonterminal or shaped rewards do not
+terminates with raw reward `1.0`; positive nonterminal rewards do not
 count as success. Strict mode rejects registry IDs outside the 34 audited
 `{easy,hard}` task IDs. Disabling it is for reward-only diagnostics and returns
 `task_success=null` for those unsupported IDs.
@@ -197,7 +197,7 @@ Important agent options include:
 | `no_boxed_truncation_retry_factor` | Increases the output-token budget on each truncation retry. |
 | `re_emit_rules_each_turn` | Prepends a concise action-format reminder on later turns. |
 | `rules_summary_template` | Per-environment reminder text. |
-| `return_transitions` | Returns transition records instead of the compact training history. |
+| `return_transitions` | Must remain `false`; complete accepted history is returned as flat output. |
 
 ## Task-row format
 
@@ -237,99 +237,33 @@ Additional optional fields are:
 Task rows may be preloaded with `task_jsonl_fpaths` or passed inline to
 `/seed_session`.
 
-## Maze-size curriculum dataset
+## Configuration and compaction
 
-The generated curriculum increases maze size in four ordered stages:
+The neutral example config is `environments/visgym/config.yaml`; it uses the
+committed five-row Maze2D dataset and requires no data generation. Start it with
+`gym env start --environment visgym --model-type vllm_model`. Set the model
+endpoint and sampling settings for your chosen policy.
 
-| Stage | Maze size | Rows | Seed range | Horizon cap |
-| --- | --- | ---: | --- | ---: |
-| 1 | 5x5 | 1280 | 1234-2513 | 10 |
-| 2 | 7x7 | 1280 | 11234-12513 | 20 |
-| 3 | 9x9 | 1280 | 21234-22513 | 34 |
-| 4 | 11x11 | 1280 | 31234-32513 | 52 |
+Merge `responses_api_agents/visgym_agent/configs/first_last_two.yaml` to enable
+compaction through Gym #3368. It keeps the first and latest two reasoning/image
+groups, retains all actions and feedback, and requires capture-owned model
+routes and measured context admission. See [the agent contract](../../responses_api_agents/visgym_agent/README.md).
 
-Each cap covers the longest possible shortest path in a perfect maze of that
-size, the required terminal `stop`, and three recovery turns. This matters even
-for an optimal policy: the old size-linear caps made some generated 7x7, 9x9,
-and 11x11 seeds impossible to finish. The provider tests now solve all 5120
-generated mazes against the pinned VisGym runtime and enforce the recovery
-cushion. Seed ranges are disjoint so the curriculum tasks are unique.
-
-The full curriculum is ~8 MB across five files, so it is generated rather than
-committed. Build it (deterministically) before training:
-
-```bash
-python environments/visgym/prepare.py maze
-```
-
-Then use the combined manifest for ordered curriculum training:
-
-```text
-data/maze_2d_easy_curriculum_5x5_7x7_9x9_11x11_1280each_t1024.jsonl
-```
-
-Generated curriculum files are gitignored. The minimal
-`maze_2d_easy_example.jsonl` and `maze_2d_easy_smoke.jsonl` fixtures remain
-committed so clean clones can validate the environment without preparing the
-training set.
-
-Rows 0-1279 are 5x5, rows 1280-2559 are 7x7, rows 2560-3839 are 9x9, and rows
-3840-5119 are 11x11. NeMo-RL must use `data.shuffle=false`; shuffling the
-combined file turns it into a mixed-size dataset rather than a curriculum. With
-the recipe's default 64 prompts per step, each 1280-row stage supplies 20
-prompt batches before the collector advances to the next size.
-
-Separate stage manifests are included for experiments that need to hold,
-repeat, or evaluate one stage independently. The manifest index records stage
-paths, row counts, seed ranges, and horizon caps:
-
-```text
-data/maze_2d_easy_curriculum_5x5_7x7_9x9_11x11_manifest_index_t1024.json
-```
-
-Each row includes `curriculum_name`, `curriculum_stage`, `maze_size`, and
-`curriculum_stage_index` in `task_metadata`, so metrics can be grouped by stage
-without parsing task IDs.
-
-Regenerate the dataset deterministically from the Gym repository root:
-
-```bash
-python environments/visgym/prepare.py maze
-```
-
-The generator accepts `--sizes`, `--samples-per-stage`, `--seed-base`,
-`--seed-stride`, `--temperature`, and `--max-output-tokens`. Sizes must be
-unique, odd, and strictly increasing. For example:
-
-```bash
-python environments/visgym/prepare.py maze \
-  --sizes 5,7,9,11 \
-  --samples-per-stage 1280
-```
-
-## Configuration
-
-`environments/visgym/config.yaml` is the canonical runnable environment config.
-The configs under `resources_servers/visgym/configs` are specialized training
-variants. A model-server config must be loaded alongside them. For NeMo-RL
-training, the effective NeMo-Gym configuration contains:
-
-```yaml
-config_paths:
-  - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
-  - resources_servers/visgym/configs/visgym_maze2d_thinking_agent.yaml
-```
-
-The maze config uses a short system prompt, re-emits compact rules on every
-turn, caps the agent at 64 turns (above every default curriculum horizon), and
-validates exact maze action strings.
+Task rows accept native environment kwargs, seeds, assets and initial states.
+The server returns native accumulated reward. Requests containing
+`task_metadata.reward_shaping` are rejected with HTTP 400, including permissive
+reward-only mode. Curriculum generation, HF reset conversion, synthetic assets,
+model-specific thinking prompts and custom reward shaping belong in separately
+reviewed experiments, not this adapter.
 
 ## Dependency isolation and headless rendering
 
 VisGym ships as a Gymnasium fork. Current Gym installs this component from
 `pyproject.toml` and `uv.lock` into its own venv, so it does not replace the
-Gymnasium version used by other servers. `requirements-historical.txt` retains
-the older installer interface with the same exact source pin.
+Gymnasium version used by other servers. All four agent/resource components
+inherit the shared resolver policy. VisGym explicitly enables OpenCV for native
+image processing and gprof2dot for provider imports through the existing
+`scripts/component-lock-policy.json` exception mechanism.
 
 The dependency points to
 [the packaging fork](https://github.com/aroshanghias-nvd/VisGym/commit/33f996cda320db5f127b1e2a858c5653bebc90fc),
@@ -357,19 +291,11 @@ and the original Gymnasium v1.1.1 MIT notice remains in
 Once upstream accepts the packaging repair, a separately validated update can
 point the pin back to upstream. Do not substitute the PyPI Gymnasium release.
 
-The `fetch_*` tasks need the Gymnasium-Robotics fork from the VisGym source
-checkout, while `counting` needs the pinned public `lvis` release. They live in
-`requirements-robotics.txt` and are built or downloaded by
-`scripts/build_vendor_wheels.sh`, which takes a VisGym checkout as its first
-argument for the robotics source:
-
-```bash
-resources_servers/visgym/scripts/build_vendor_wheels.sh /path/to/VIsGym
-```
-
-The checked-in real-runtime smoke currently covers only `maze_2d/easy`; the
-other environments still need their declared assets/dependencies and bounded
-reset/step validation before they are treated as supported.
+The checked-in real-runtime smoke covers `maze_2d/easy`. Other native-rendered
+families require their assets, provider dependencies and reset/step validation;
+they are candidates, not qualified support claims. Optional robotics/counting
+wheel builders are not shipped. Fetch and Maze3D are rejected before any native
+session is created, rather than silently substituting different observations.
 
 For source-checkout development, set `VISGYM_REPO_ROOT` before importing the
 server. The path is inserted before importing `gymnasium`.
@@ -410,23 +336,6 @@ reward accumulation, invalid-action recovery, action extraction, truncation
 retries, rule re-emission, and cleanup. The real-environment smoke test runs
 when the pinned VisGym dependency is installed and otherwise reports a skip.
 
-## NeMo-RL training
-
-Training is launched from the companion NeMo-RL checkout, not from this Gym
-package. The combined local integration provides this one-update smoke recipe:
-
-```text
-examples/configs/recipes/vlm/vlm_grpo-nemotron-omni-30ba3b-visual-games-suite-2n8g-train-smoke.v1.yaml
-```
-
-Its workflow is documented at
-`examples/nemo_gym/visual_games_suite/README.md` in that checkout. It places one
-Gym-V prompt group and one VisGym prompt group into the same GRPO learner
-update while NeMo-Gym starts distinct agent/resource-server pairs and distinct
-dependency environments. No standalone cluster launcher is supplied here;
-allocation, container, checkpoint, cache, and output locations must come from
-the selected cluster's reviewed workflow.
-
 ## Adding another VisGym environment
 
 1. Confirm the pinned VisGym package registers the desired `env_id`.
@@ -444,8 +353,8 @@ the selected cluster's reviewed workflow.
 - Real VisGym execution has been validated for `maze_2d/easy`; the remaining
   rendered environments are configuration candidates, not runtime-validated
   support claims.
-- Robotics and RefCOCO+ tasks require the optional forked dependencies and
-  their data/assets.
+- Asset-backed tasks require their provider dependencies and data. No alternate
+  renderer or shaping protocol is enabled implicitly.
 - The manifest workload passes its verifier/publication checks. Legacy server CI
   still requests five saved rollout rows; CONTRIBUTING documents this routing
   mismatch and asks contributors not to duplicate artifacts just for that check.

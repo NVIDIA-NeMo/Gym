@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import threading
 import time
 from pathlib import Path
@@ -70,74 +69,6 @@ class StubVisGymEnv:
 
     def close(self) -> None:
         self.closed = True
-
-
-class DistanceStubVisGymEnv(StubVisGymEnv):
-    def reset(self, *, seed: int | None = None, init_state: dict[str, Any] | None = None):
-        observation, info = super().reset(seed=seed, init_state=init_state)
-        info["distance"] = 3.0
-        return observation, info
-
-    def step(self, action: str):
-        self.actions.append(action)
-        self.step_count += 1
-        return (
-            np.full((4, 4, 3), 128, dtype=np.uint8),
-            0.0,
-            False,
-            False,
-            {"distance": 2.0, "env_feedback": "Action executed successfully."},
-        )
-
-
-class ClosingDistanceStubVisGymEnv(StubVisGymEnv):
-    """Distance closes from 8 to 0 over four moves, then a stop action solves it."""
-
-    def reset(self, *, seed: int | None = None, init_state: dict[str, Any] | None = None):
-        observation, info = super().reset(seed=seed, init_state=init_state)
-        self._distance = 8.0
-        info["distance"] = self._distance
-        return observation, info
-
-    def step(self, action: str):
-        self.actions.append(action)
-        self.step_count += 1
-        if action == "('stop', 'stop')":
-            return (
-                np.full((4, 4, 3), 255, dtype=np.uint8),
-                1.0,
-                True,
-                False,
-                {"distance": self._distance, "env_feedback": "Solved."},
-            )
-        self._distance = max(0.0, self._distance - 2.0)
-        return (
-            np.full((4, 4, 3), 128, dtype=np.uint8),
-            0.0,
-            False,
-            False,
-            {"distance": self._distance, "env_feedback": "Moved closer."},
-        )
-
-
-class RetreatingStubVisGymEnv(StubVisGymEnv):
-    """Distance starts at 4 and grows to 10 on the first step -- the agent moved away."""
-
-    def reset(self, *, seed: int | None = None, init_state: dict[str, Any] | None = None):
-        observation, info = super().reset(seed=seed, init_state=init_state)
-        info["distance"] = 4.0
-        return observation, info
-
-    def step(self, action: str):
-        self.actions.append(action)
-        self.step_count += 1
-        return (
-            np.full((4, 4, 3), 128, dtype=np.uint8),
-            0.0,
-            False,
-            False,
-            {"distance": 10.0, "env_feedback": "Moved away."},
-        )
 
 
 class StubGym:
@@ -221,7 +152,6 @@ def _assert_no_session_state(server: visgym_app.VisGymResourcesServer) -> None:
     assert server.env_id_to_task_row == {}
     assert server.env_id_to_total_reward == {}
     assert server.env_id_to_turn_count == {}
-    assert server.env_id_to_reward_state == {}
     assert server.env_id_to_task_success == {}
     assert server.env_id_to_operation == {}
     assert server.background_close_tasks == set()
@@ -311,61 +241,6 @@ def test_base_matplotlib_canvas_supports_print_to_buffer() -> None:
     assert len(buffer) == 20 * 10 * 4
 
 
-def test_fetch_state_renderer_is_deterministic_and_headless() -> None:
-    env = MagicMock()
-    env.has_object = True
-    env.goal = np.array([1.45, 0.85, 0.65])
-    obs = {
-        "observation": np.array([1.25, 0.7, 0.55, 1.35, 0.75, 0.42]),
-        "achieved_goal": np.array([1.35, 0.75, 0.42]),
-        "desired_goal": env.goal,
-    }
-
-    first = visgym_app._render_fetch_state(env, obs)
-    second = visgym_app._render_fetch_state(env, obs)
-
-    assert first.shape == (128, 128, 3)
-    assert first.dtype == np.uint8
-    assert first.flags.writeable
-    assert np.array_equal(first, second)
-    assert np.unique(first.reshape(-1, 3), axis=0).shape[0] >= 8
-
-
-def test_fetch_pick_info_rewards_approach_and_goal_progress() -> None:
-    env = MagicMock()
-    env.unwrapped.data.site.return_value.xpos = np.array([1.0, 2.0, 3.0])
-    info = visgym_app.VisGymResourcesServer._augment_info(
-        env,
-        {
-            "achieved_goal": np.array([1.0, 2.0, 4.0]),
-            "desired_goal": np.array([1.0, 5.0, 4.0]),
-        },
-        "fetch_pick_and_place/easy",
-    )
-
-    assert info["fetch_pick_distance"] == pytest.approx(4.0)
-
-
-def test_sliding_block_info_includes_total_block_distance() -> None:
-    env = MagicMock()
-    env.unwrapped.blocks = {
-        1: {"position": (1, 4)},
-        2: {"position": (3, 2)},
-    }
-    env.unwrapped.target_blocks = {
-        1: {"position": (2, 1)},
-        2: {"position": (3, 5)},
-    }
-
-    info = visgym_app.VisGymResourcesServer._augment_info(
-        env,
-        {"env_feedback": None},
-        "sliding_block/easy",
-    )
-
-    assert info["sliding_distance"] == 7.0
-
-
 @pytest.mark.asyncio
 async def test_seed_session_uses_task_idx_and_emits_image(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     env = StubVisGymEnv()
@@ -401,101 +276,6 @@ async def test_seed_uses_client_generated_env_id_and_rejects_collision(
         await server.seed_session(_request(), body)
     assert exc_info.value.status_code == 409
     assert len(stub_gym.make_calls) == 1
-
-
-@pytest.mark.asyncio
-async def test_fetch_construction_serializes_process_environment_mutation(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    class ConcurrentGym:
-        def __init__(self) -> None:
-            self.active = 0
-            self.overlap = False
-            self.lock = threading.Lock()
-
-        def make(self, _env_id: str, **_kwargs: Any) -> StubVisGymEnv:
-            with self.lock:
-                self.active += 1
-                self.overlap = self.overlap or self.active > 1
-            time.sleep(0.03)
-            with self.lock:
-                self.active -= 1
-            return StubVisGymEnv()
-
-    stub_gym = ConcurrentGym()
-    monkeypatch.setattr(visgym_app, "gym", stub_gym)
-    monkeypatch.setattr(visgym_app, "_ensure_visgym_importable", lambda: stub_gym)
-    monkeypatch.setattr(visgym_app, "_install_fetch_headless_renderer", lambda: None)
-    server = _server(tmp_path, [_row(env_id="fetch_reach/easy")])
-
-    await asyncio.gather(
-        server.seed_session(_request(), VisGymSeedSessionRequest(env_id="fetch-a", task_idx=0)),
-        server.seed_session(_request(), VisGymSeedSessionRequest(env_id="fetch-b", task_idx=0)),
-    )
-
-    assert stub_gym.overlap is False
-
-
-@pytest.mark.asyncio
-async def test_fetch_gl_environment_is_hidden_from_non_fetch_construction(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    class BlockingFetchGym:
-        def __init__(self) -> None:
-            self.fetch_started = threading.Event()
-            self.release_fetch = threading.Event()
-            self.maze_started = threading.Event()
-            self.maze_gl_environment: tuple[str | None, str | None] | None = None
-
-        def make(self, env_id: str, **_kwargs: Any) -> StubVisGymEnv:
-            if env_id.startswith("fetch_"):
-                assert visgym_app.os.environ.get("MUJOCO_GL") == "glfw"
-                assert visgym_app.os.environ.get("PYOPENGL_PLATFORM") is None
-                self.fetch_started.set()
-                assert self.release_fetch.wait(timeout=2), "test did not release Fetch construction"
-            else:
-                self.maze_gl_environment = (
-                    visgym_app.os.environ.get("MUJOCO_GL"),
-                    visgym_app.os.environ.get("PYOPENGL_PLATFORM"),
-                )
-                self.maze_started.set()
-            return StubVisGymEnv()
-
-    stub_gym = BlockingFetchGym()
-    monkeypatch.setenv("MUJOCO_GL", "egl")
-    monkeypatch.setenv("PYOPENGL_PLATFORM", "egl")
-    monkeypatch.setattr(visgym_app, "gym", stub_gym)
-    monkeypatch.setattr(visgym_app, "_ensure_visgym_importable", lambda: stub_gym)
-    monkeypatch.setattr(visgym_app, "_install_fetch_headless_renderer", lambda: None)
-    server = _server(
-        tmp_path,
-        [
-            _row(env_id="fetch_reach/easy"),
-            _row(env_id="maze_2d/easy"),
-        ],
-    )
-
-    fetch_seed = asyncio.create_task(
-        server.seed_session(
-            _request(),
-            VisGymSeedSessionRequest(env_id="fetch-session", task_idx=0),
-        )
-    )
-    assert await asyncio.to_thread(stub_gym.fetch_started.wait, 2)
-    maze_seed = asyncio.create_task(
-        server.seed_session(
-            _request(),
-            VisGymSeedSessionRequest(env_id="maze-session", task_idx=1),
-        )
-    )
-    await asyncio.sleep(0)
-    assert stub_gym.maze_started.is_set() is False
-
-    stub_gym.release_fetch.set()
-    await asyncio.wait_for(asyncio.gather(fetch_seed, maze_seed), timeout=2)
-
-    assert stub_gym.maze_gl_environment == ("egl", "egl")
 
 
 @pytest.mark.asyncio
@@ -1163,16 +943,7 @@ async def test_unknown_registry_id_is_rejected_or_reward_only(
     stub_gym = StubGym(env)
     monkeypatch.setattr(visgym_app, "gym", stub_gym)
     monkeypatch.setattr(visgym_app, "_ensure_visgym_importable", lambda: stub_gym)
-    row = _row(
-        env_id="InvertedPendulum-v5-vlm",
-        task_metadata={
-            "reward_shaping": {
-                "type": "distance_delta",
-                "info_key": "distance",
-                "weight": 0.3,
-            }
-        },
-    )
+    row = _row(env_id="InvertedPendulum-v5-vlm")
 
     strict_server = _server(tmp_path, [row])
     with pytest.raises(HTTPException, match="outside VisGym's audited") as exc_info:
@@ -1224,178 +995,6 @@ async def test_audited_env_rejects_nonbinary_terminal_reward_drift(
     assert failed.failure_kind == "visgym:simulator_failed"
     assert "success contract has drifted" in failed.failure_reason
     _assert_no_session_state(server)
-
-
-@pytest.mark.asyncio
-async def test_distance_delta_reward_shaping_normalizes_progress(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Shaping is a fraction of the episode's own starting distance.
-
-    initial=3.0, current=2.0 -> progress = (3-2)/3 = 1/3. With weight=0.3 the
-    shaped delta is 0.3 * 1/3 = 0.1 -- the same number the old raw-units
-    "scale" design produced here by coincidence, but this design also caps
-    the episode total at 1.0 regardless of the environment's distance units
-    (see test_distance_delta_full_episode_reward_stays_within_unit_interval).
-    """
-    env = DistanceStubVisGymEnv()
-    stub_gym = StubGym(env)
-    monkeypatch.setattr(visgym_app, "gym", stub_gym)
-    monkeypatch.setattr(visgym_app, "_ensure_visgym_importable", lambda: stub_gym)
-    row = _row(
-        task_metadata={
-            "reward_shaping": {
-                "type": "distance_delta",
-                "info_key": "distance",
-                "weight": 0.3,
-            }
-        }
-    )
-    server = _server(tmp_path, [row])
-    seeded = await server.seed_session(_request(), VisGymSeedSessionRequest(task_idx=0))
-
-    stepped = await server.step(
-        _request(),
-        VisGymStepRequest(env_id=seeded.env_id, action_string="('move', 0)"),
-    )
-    await server.close(_request(), VisGymCloseRequest(env_id=seeded.env_id))
-    verified = await server.verify(_request(), _verify_request(seeded.env_id))
-
-    assert stepped.reward == pytest.approx(0.1)
-    assert stepped.obs[0].env_info["raw_env_reward"] == 0.0
-    assert stepped.obs[0].env_info["training_step_reward"] == pytest.approx(0.1)
-    assert verified.reward == pytest.approx(0.1)
-    assert verified.task_success is False
-    _assert_no_session_state(server)
-
-
-@pytest.mark.asyncio
-async def test_distance_delta_full_episode_reward_stays_within_unit_interval(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """A solved episode's total must be exactly 1.0, never the old design's 1.8.
-
-    The old "raw_reward + scale * (previous - current)" design added shaping
-    on top of the terminal reward with no shared ceiling, so an environment
-    like maze_2d (scale=0.1, typical initial distance 8) could total 1.8. This
-    normalizes progress to the episode's own starting distance and mixes it
-    with the terminal reward as a convex combination, so a fully-closed,
-    successfully-stopped episode telescopes to exactly
-    (1 - weight) * 1.0 + weight * 1.0 == 1.0.
-    """
-    env = ClosingDistanceStubVisGymEnv()
-    stub_gym = StubGym(env)
-    monkeypatch.setattr(visgym_app, "gym", stub_gym)
-    monkeypatch.setattr(visgym_app, "_ensure_visgym_importable", lambda: stub_gym)
-    row = _row(
-        task_metadata={
-            "reward_shaping": {
-                "type": "distance_delta",
-                "info_key": "distance",
-                "weight": 0.3,
-            }
-        }
-    )
-    server = _server(tmp_path, [row])
-    seeded = await server.seed_session(_request(), VisGymSeedSessionRequest(task_idx=0))
-
-    rewards = []
-    for action in ("('move', 0)", "('move', 0)", "('move', 0)", "('move', 0)", "('stop', 'stop')"):
-        stepped = await server.step(_request(), VisGymStepRequest(env_id=seeded.env_id, action_string=action))
-        rewards.append(stepped.reward)
-
-    assert stepped.done is True
-    assert sum(rewards) == pytest.approx(1.0)
-    assert max(rewards) < 1.0, "no single step should pay the full terminal reward plus shaping on top"
-
-
-@pytest.mark.asyncio
-async def test_distance_delta_moving_away_from_goal_does_not_go_negative(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """An unsolved episode that ends farther from the goal than it started must floor at 0.
-
-    The old design summed scale * (initial - final) with no floor, so ending
-    farther away than the start (final > initial) produced a negative
-    episode total. Progress is clipped to [0, 1] at every step here, so it
-    cannot happen.
-    """
-    env = RetreatingStubVisGymEnv()
-    stub_gym = StubGym(env)
-    monkeypatch.setattr(visgym_app, "gym", stub_gym)
-    monkeypatch.setattr(visgym_app, "_ensure_visgym_importable", lambda: stub_gym)
-    row = _row(
-        horizon_cap=1,
-        task_metadata={
-            "reward_shaping": {
-                "type": "distance_delta",
-                "info_key": "distance",
-                "weight": 0.3,
-            }
-        },
-    )
-    server = _server(tmp_path, [row])
-    seeded = await server.seed_session(_request(), VisGymSeedSessionRequest(task_idx=0))
-
-    stepped = await server.step(
-        _request(),
-        VisGymStepRequest(env_id=seeded.env_id, action_string="('move', 0)"),
-    )
-
-    assert stepped.reward == pytest.approx(0.0)
-
-
-@pytest.mark.asyncio
-async def test_shaping_weight_above_ceiling_is_clamped_and_warns_once(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    env = DistanceStubVisGymEnv()
-    stub_gym = StubGym(env)
-    monkeypatch.setattr(visgym_app, "gym", stub_gym)
-    monkeypatch.setattr(visgym_app, "_ensure_visgym_importable", lambda: stub_gym)
-    row = _row(
-        task_metadata={
-            "reward_shaping": {
-                "type": "distance_delta",
-                "info_key": "distance",
-                "weight": 0.9,
-            }
-        }
-    )
-    server = _server(tmp_path, [row])
-    seeded = await server.seed_session(_request(), VisGymSeedSessionRequest(task_idx=0))
-
-    with caplog.at_level(logging.WARNING):
-        first = await server.step(
-            _request(),
-            VisGymStepRequest(env_id=seeded.env_id, action_string="('move', 0)"),
-        )
-        second = await server.step(
-            _request(),
-            VisGymStepRequest(env_id=seeded.env_id, action_string="('move', 0)"),
-        )
-
-    # initial=3.0, current=2.0 (the stub env's distance is fixed, not
-    # cumulative) -> progress=1/3 on every step; weight clamped from 0.9 to
-    # the 0.5 ceiling, so shaped_delta = 0.5 * 1/3 on the first step and 0.0
-    # once progress stops changing.
-    assert first.reward == pytest.approx(0.5 / 3)
-    assert second.reward == pytest.approx(0.0)
-    warned = [r for r in caplog.records if "clamped" in r.getMessage()]
-    assert len(warned) == 1, "expected exactly one clamp warning across repeated steps"
-
-
-def test_matchstick_info_exposes_binary_solution_distance() -> None:
-    incorrect = visgym_app.VisGymResourcesServer._augment_info(None, {"is_correct": False}, "matchstick_equation/easy")
-    correct = visgym_app.VisGymResourcesServer._augment_info(None, {"is_correct": True}, "matchstick_equation/easy")
-
-    assert incorrect["matchstick_distance"] == 1.0
-    assert correct["matchstick_distance"] == 0.0
 
 
 @pytest.mark.asyncio
@@ -1509,47 +1108,6 @@ async def test_relative_asset_paths_resolve_against_search_roots(
     _, kwargs = stub_gym.make_calls[0]
     assert Path(kwargs["sample_dir"]).is_absolute()
     assert kwargs["sample_dir"].endswith(relative)
-
-
-@pytest.mark.asyncio
-async def test_shaping_with_unknown_info_key_warns_once(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """Shaping that names a key the environment never reports must say so.
-
-    It is otherwise indistinguishable from no shaping at all: every step pays
-    the raw reward, the run merely learns slowly, and nothing in the logs
-    points at the inert shaped term.
-    """
-    env = StubVisGymEnv()
-    stub_gym = StubGym(env)
-    monkeypatch.setattr(visgym_app, "gym", stub_gym)
-    monkeypatch.setattr(visgym_app, "_ensure_visgym_importable", lambda: stub_gym)
-    server = _server(
-        tmp_path,
-        [
-            _row(
-                task_metadata={
-                    "reward_shaping": {
-                        "type": "distance_delta",
-                        "info_key": "not_a_real_key",
-                        "weight": 0.5,
-                    }
-                }
-            )
-        ],
-    )
-    seeded = await server.seed_session(_request(), VisGymSeedSessionRequest(task_idx=0))
-
-    with caplog.at_level(logging.WARNING):
-        first = await server.step(_request(), VisGymStepRequest(env_id=seeded.env_id, action_string="a"))
-        second = await server.step(_request(), VisGymStepRequest(env_id=seeded.env_id, action_string="b"))
-
-    warned = [r for r in caplog.records if "reward_shaping is configured" in r.getMessage()]
-    assert len(warned) == 1, "expected exactly one warning across repeated steps"
-    assert "not_a_real_key" in warned[0].getMessage()
-    # The raw environment reward still flows through untouched.
-    assert (first.reward, second.reward) == (0.0, 1.0)
 
 
 def test_mental_rotation_3d_render_and_close_are_serialized(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1742,4 +1300,28 @@ async def test_simulator_fault_masks_whole_episode_without_restepping(monkeypatc
     assert failed.task_success is None
     assert failed.failure_kind == "visgym:simulator_failed"
     assert ("provider failed" if isinstance(fault, type) else "nonfinite") in failed.failure_reason
+    _assert_no_session_state(server)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("env_id", ["maze_3d/easy", "fetch_reach/easy", "fetch_pick_and_place/hard"])
+async def test_experimental_renderers_rejected_before_native_construction(monkeypatch, tmp_path, env_id):
+    def unexpected_import():
+        raise AssertionError("Unsupported rendering must fail before provider construction")
+
+    monkeypatch.setattr(visgym_app, "_ensure_visgym_importable", unexpected_import)
+    server = _server(tmp_path, [_row(env_id=env_id)])
+    with pytest.raises(HTTPException, match="separately qualified rendering") as exc:
+        await server.seed_session(_request(), VisGymSeedSessionRequest(task_idx=0))
+    assert exc.value.status_code == 400
+    _assert_no_session_state(server)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shaping", [{}, {"type": "distance_delta", "weight": 0.3}, None])
+async def test_experimental_shaping_rejected_instead_of_ignored(tmp_path, shaping):
+    server = _server(tmp_path, [_row(task_metadata={"reward_shaping": shaping})])
+    with pytest.raises(HTTPException, match="reward_shaping is not supported") as exc:
+        await server.seed_session(_request(), VisGymSeedSessionRequest(task_idx=0))
+    assert exc.value.status_code == 400
     _assert_no_session_state(server)

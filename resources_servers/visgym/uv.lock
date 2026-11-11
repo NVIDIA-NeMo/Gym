@@ -13,6 +13,45 @@ resolution-markers = [
     "python_full_version < '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 
+[manifest]
+constraints = [
+    { name = "certifi", specifier = ">=2026.10.19" },
+    { name = "grpcio", specifier = ">=1.84.1,!=1.85.0rc1" },
+    { name = "msgpack", specifier = ">=1.2.1" },
+    { name = "pyarrow", specifier = ">=25.0.1" },
+    { name = "transformers", specifier = ">=5.17.0" },
+]
+overrides = [
+    { name = "gprof2dot", specifier = ">=2025.4.14" },
+    { name = "opencv-python-headless", specifier = ">=4.11" },
+    { name = "pathspec", marker = "sys_platform == 'never'" },
+    { name = "pycountry", marker = "sys_platform == 'never'" },
+    { name = "pynvvideocodec", marker = "sys_platform == 'never'" },
+    { name = "spacy", specifier = ">=3.8.13" },
+    { name = "torchaudio", marker = "sys_platform == 'never'" },
+    { name = "torchcodec", marker = "sys_platform == 'never'" },
+    { name = "torchvision", marker = "sys_platform == 'never'" },
+    { name = "wcwidth", marker = "sys_platform == 'never'" },
+]
+excludes = [
+    "alembic",
+    "blinker",
+    "diskcache",
+    "fasttext-wheel",
+    "flask",
+    "flask-cors",
+    "graphene",
+    "graphql-core",
+    "graphql-relay",
+    "gunicorn",
+    "huey",
+    "prettytable",
+    "skops",
+    "sqlalchemy",
+    "waitress",
+    "werkzeug",
+]
+
 [[package]]
 name = "absl-py"
 version = "2.5.1"
@@ -2002,7 +2041,7 @@ dependencies = [
     { name = "ast-serialize" },
     { name = "librt", marker = "platform_python_implementation != 'PyPy'" },
     { name = "mypy-extensions" },
-    { name = "pathspec" },
+    { name = "pathspec", marker = "sys_platform == 'never'" },
     { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/4a/3c/78ecece71ee4b5445389a4ccd11627cfb9c69e4de554d11060171f376305/mypy-2.4.1.tar.gz", hash = "sha256:63b590965691e540a335fa74dadf31a7069142f6b72e234689bbd244edf55623", size = 4066728, upload-time = "2026-10-28T19:23:13.286Z" }

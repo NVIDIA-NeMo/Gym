@@ -78,8 +78,8 @@ class TaskData(BaseModel):
     task_metadata: dict[str, Any] = Field(
         default_factory=dict,
         description=(
-            "Open task-generation metadata. The optional reward_shaping block controls server-side "
-            "distance-delta shaping; other values are retained for metrics and provenance."
+            "Open task-generation metadata retained for metrics and provenance. "
+            "Experimental reward_shaping requests are rejected by the server."
         ),
         json_schema_extra={"consumed_by": ["verify", "metrics", "provenance"]},
     )

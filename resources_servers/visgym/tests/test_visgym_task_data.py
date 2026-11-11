@@ -14,10 +14,8 @@ from resources_servers.visgym.task_data import TaskData
 VISGYM_ROOT = Path(__file__).resolve().parents[1]
 SHIPPED_DATASETS = (
     "example.jsonl",
-    "matchstick_rotation_easy_starter_scale64_t1024.jsonl",
     "maze_2d_easy_example.jsonl",
     "maze_2d_easy_smoke.jsonl",
-    "patch_reassembly_easy_4x4_3patch_scale64_t1024.jsonl",
 )
 
 
@@ -66,7 +64,7 @@ def test_all_optional_task_row_fields_validate() -> None:
             "task_id": "maze_2d_easy_seed1234",
             "act_grammar_regex": r"^\('move', [0-3]\)$",
             "horizon_cap": 8,
-            "task_metadata": {"reward_shaping": {"type": "distance_delta", "weight": 0.3}},
+            "task_metadata": {"suite": "visgym", "difficulty": "easy"},
             "init_state": {"agent": [1, 1]},
             "seed_key": "seed",
             "prompt_kwargs": {"concise": True},

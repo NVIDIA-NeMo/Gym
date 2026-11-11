@@ -27,8 +27,6 @@ visgym_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      # The generated 11x11 curriculum has a worst-case-safe horizon of 52.
-      # Keep this independent agent backstop above every default task cap.
       max_steps: 64
       done_if_no_boxed_answer: true
       unboxed_action_regex: "^\\('(?:move|stop)',\\s*(?:[0-3]|'stop')\\)$"

@@ -11,32 +11,17 @@ environment config is `environments/visgym/config.yaml`; the implementation is
 split between `resources_servers/visgym` and
 `responses_api_agents/visgym_agent`.
 
-## Prepare data
+## Task data
 
-Generated training manifests and rendered assets are intentionally excluded
-from Git. They are seeded and reproducible under the locked Gym toolchain, and
-can be recreated through one entry point:
+The canonical config uses the committed five-row Maze2D example; no preparation
+command or external data download is required. Supply inline rows or JSONL files
+for other tasks using `resources_servers/visgym/task_data.py`. Rows specify the
+provider environment ID, seed, native kwargs, assets and a finite horizon.
 
-```bash
-# Ordered 5x5, 7x7, 9x9, and 11x11 maze curriculum
-python environments/visgym/prepare.py maze --samples-per-stage 1280
-
-# Multi-environment manifests and their small seeded fixture assets
-python environments/visgym/prepare.py multienv \
-  --combine-envs maze_2d_7x7,maze_3d,jigsaw
-
-# Experimental seed-only manifests derived from the public VisGym HF dataset.
-# These do not reconstruct source init_args/extra_state; validate every local
-# reset/solve contract before use.
-python environments/visgym/prepare.py hf \
-  --acknowledge-seed-only-reset \
-  --output-dir resources_servers/visgym/data/hf_manifests
-```
-
-Use `python environments/visgym/prepare.py <dataset> --help` for all generator
-options. Minimal example and smoke fixtures remain committed so a clean clone
-can validate the config and run focused tests without downloading training
-data.
+Curriculum builders, synthetic assets and HF reset conversion are separate
+experiments. The reusable adapter uses native rewards and rejects experimental
+reward shaping. Maze3D and Fetch require separate renderer qualification and
+are not enabled by this integration.
 
 ## Run
 
@@ -45,7 +30,7 @@ gym env start --environment visgym --model-type vllm_model
 ```
 
 See `resources_servers/visgym/README.md` for the lifecycle, action schemas,
-reward shaping, optional dependencies, and larger multi-environment recipes.
+native rewards, pinned dependencies and qualification limits.
 
 ## Why VisGym has a specialized server and agent
 

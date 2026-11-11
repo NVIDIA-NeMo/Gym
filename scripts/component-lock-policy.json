@@ -65,6 +65,12 @@
       "pycountry"
     ]
   },
+  "resources_servers/visgym": {
+    "override-dependencies": [
+      "opencv-python-headless>=4.11",
+      "gprof2dot>=2025.4.14"
+    ]
+  },
   "resources_servers/vlm_eval_kit": {
     "override-dependencies": [
       "opencv-python>=4.7.0.72",
