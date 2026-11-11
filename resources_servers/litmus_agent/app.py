@@ -104,6 +104,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import judge_failsafe
 
 
@@ -840,3 +841,6 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     LitmusAgentResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = LitmusAgentResourcesServer.run_webserver()  # noqa: F401

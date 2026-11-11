@@ -548,7 +548,7 @@ def test_iteration_limit_summary_reaches_the_model_server(
                     },
                 ),
             )
-            monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *_args: model_server.base_url)
+            monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *_args, **_kwargs: model_server.base_url)
             observations = []
             output = asyncio.run(
                 agent._create_response(
@@ -734,3 +734,14 @@ def test_compression_auxiliary_uses_episode_model_route(tmp_path, restore_proces
     config = yaml.safe_load((tmp_path / "hermes-home/config.yaml").read_text())
     assert config["auxiliary"]["compression"]["base_url"] == server.base_url
     assert config["auxiliary"]["compression"]["model"] == "policy_model"
+
+
+def test_compression_auxiliary_uses_its_own_route_when_the_payload_has_one(tmp_path, restore_process_globals):
+    """The agent gives compression a URL that keeps its own sampling; the runner points Hermes at it."""
+    import yaml
+
+    compression_url = "http://model:8000/ng-rollout/episode-a1/ng-sampling/null/v1"
+    with _ModelServer([_completion({"content": "done"})]) as server:
+        _run(_payload(server.base_url, compression_model_base_url=compression_url), tmp_path)
+    config = yaml.safe_load((tmp_path / "hermes-home/config.yaml").read_text())
+    assert config["auxiliary"]["compression"]["base_url"] == compression_url

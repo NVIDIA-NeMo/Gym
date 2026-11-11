@@ -33,7 +33,7 @@ override-dependencies = [
     "pycountry; sys_platform == 'never'",
     "gprof2dot; sys_platform == 'never'",
     "pathspec; sys_platform == 'never'",
-    "openai==2.44.0",
+    "openai==2.45.0",
 ]
 exclude-dependencies = [
     "fasttext-wheel",
