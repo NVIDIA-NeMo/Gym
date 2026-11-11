@@ -7,6 +7,14 @@ The extracted builder completed on an HSG ARM64 Gym runtime image, followed by
 scorer and real-model smoke checks. Other platforms need their own lock and
 validation.
 
+This is the companion provisioning change for the
+[VS-Bench Gym adapter (draft PR #5977)](https://github.com/NVIDIA-NeMo/Gym/pull/5977).
+The provisioning branch is `vs-bench-runtime-provisioning-20261110` and is
+not yet published. Apply both changes to the same Gym checkout before using
+the source-preparation commands below; this change alone does not provide
+`benchmarks.vs_bench.prepare_patched_source`. The
+[adapter instructions](../README.md) are supplied by the adapter change.
+
 Inside a disposable build allocation with network access, install `uv`, a
 C++17 compiler, `git`, `pkg-config`, SDL2 and zlib development headers. Choose
 an absolute, persistent Python 3.10 executable and an unused absolute venv path:
@@ -28,7 +36,7 @@ container identity, build logs, `installed.txt`, and lock digest with releases.
 
 The Python interpreter and venv paths must be visible inside the evaluation and
 Bubblewrap environments. Separately prepare the pinned author source, dataset,
-and KAZ scorer variant as described in the parent README. Perception also
+and KAZ scorer variant as described in the adapter instructions above. Perception also
 requires a working Bubblewrap executable and user namespaces on the deployment.
 Run real gameplay, scorer, and containment checks on the target image before
 using this runtime for a reported result.
