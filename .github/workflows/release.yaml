@@ -89,7 +89,13 @@ jobs:
       publish-docs: false
       run-on-version-tag-only: ${{ github.ref_name != 'main' }}
       gh-release-use-changelog-builder: true
-      gh-release-from-tag: ${{ inputs.gh-release-from-tag || '' }}
+      # A PR rehearsal compares its changes with main; release invocations retain the full tag-based changelog.
+      # Repository-wide notes can exceed the shared template's environment limit (FW-CI-templates#619).
+      gh-release-from-tag: >-
+        ${{ inputs.gh-release-from-tag
+            || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/pull-request/')
+                && github.event.repository.default_branch)
+            || '' }}
       restrict-to-admins: true
     secrets: inherit  # pragma: allowlist secret
 
