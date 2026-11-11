@@ -120,3 +120,11 @@ receive the longer timeout and one transient retry. Native verifier scripts,
 criteria, weights and payloads remain unchanged; app requests keep their original
 timeouts, and exhausted judge errors remain masked. The opted-in verifier process
 budget is 600 seconds. With the option absent, the native launch path is unchanged.
+
+SQLCMD exec additionally enters the target PID namespace and root filesystem so
+its `/proc/self/exe`-relative resources can load. The ordinary namespace recipe
+is retained for other executables. Explicit native `context load failed` and
+`FATAL` diagnostics invalidate grading even if the task script emits zero-point
+checks afterwards; they are not model-quality zeros. Native stderr is preserved
+for diagnosis. Missing expected objects without a grader exception remain valid
+failures with their original scores and weights.
