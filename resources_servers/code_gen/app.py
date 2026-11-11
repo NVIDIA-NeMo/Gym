@@ -19,9 +19,8 @@ import logging
 import zlib
 from asyncio import Semaphore
 from time import time
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
 
-from lcb_integration.compute_code_generation_metrics import check_correctness_remote
 from lcb_integration.extraction_utils import LMStyle, extract_code
 from pydantic import BaseModel, Field, model_validator
 from sandbox_execution import check_correctness_in_sandbox
@@ -39,9 +38,11 @@ from nemo_gym.server_runtime import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
     observe_programmatic_grading,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import SandboxVerificationConfig, SandboxVerificationError
 
 
@@ -52,20 +53,22 @@ LOG = logging.getLogger(__name__)
 # Config
 # ----------------------------
 class CompCodingResourcesServerConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
+
     num_processes: int
     unit_test_timeout_secs: int
     debug: bool
     reasoning_format_penalty: float = 0.0
-    # Run unit tests in a fresh provider sandbox per verification instead of on a Ray worker.
+    # Run unit tests in a fresh provider sandbox per verification.
     # Names a top-level sandbox block, such as `sandbox` from
     # nemo_gym/sandbox/providers/<provider>/configs/<provider>.yaml, or is an inline provider mapping.
-    sandbox_provider: Optional[Union[str, Dict[str, Any]]] = None
+    sandbox_provider: Union[str, Dict[str, Any]]
     sandbox_config: SandboxVerificationConfig = Field(default_factory=SandboxVerificationConfig)
 
     @model_validator(mode="after")
     def _require_sandbox_image(self) -> "CompCodingResourcesServerConfig":
-        if self.sandbox_provider is not None and not self.sandbox_config.image:
-            raise ValueError("sandbox_config.image is required when sandbox_provider is set")
+        if not self.sandbox_config.image:
+            raise ValueError("sandbox_config.image is required for code verification")
         return self
 
 
@@ -107,7 +110,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
     # and a checkpoint can re-run a verification after a crash instead of waiting for it.
     checkpoint_mode = "stateless"
     checkpoint_verify = "replay"
-    ray_enabled = True
+    ray_enabled = False
     config: CompCodingResourcesServerConfig
 
     def model_post_init(self, context):
@@ -226,7 +229,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                 )
             )
 
-        # 4) run on a Ray worker, or in a sandbox when sandbox_provider is set
+        # 4) run in a fresh provider sandbox
         async with self._semaphore:
             """
             Sample looks like this:
@@ -261,32 +264,28 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                 self.config.debug,  # debug
             )
 
-            if self.config.sandbox_provider is None:
-                future = check_correctness_remote.remote(*task_args)
-                result, metadata = await future
-            else:
-                provider, sandbox_metadata = self._resolve_sandbox_target()
-                try:
-                    result, metadata = await check_correctness_in_sandbox(
-                        *task_args,
-                        num_tests=len(tests.inputs),
-                        provider=provider,
-                        config=self.config.sandbox_config,
-                        metadata=sandbox_metadata,
-                    )
-                except SandboxVerificationError as e:
-                    # The environment failed, not the policy: exclude the sample rather than score it.
-                    LOG.warning("code_gen sandbox verification failed (%s): %s", e.failure_kind, e)
-                    return CompCodingVerifyResponse(
-                        **body.model_dump(),
-                        reward=0.0,
-                        mask_sample=True,
-                        failure_kind=e.failure_kind,
-                        failure_reason=str(e),
-                        extracted_model_output=model_out,
-                        extracted_model_code=code,
-                        difficulty=difficulty,
-                    )
+            provider, sandbox_metadata = self._resolve_sandbox_target()
+            try:
+                result, metadata = await check_correctness_in_sandbox(
+                    *task_args,
+                    num_tests=len(tests.inputs),
+                    provider=provider,
+                    config=self.config.sandbox_config,
+                    metadata=sandbox_metadata,
+                )
+            except SandboxVerificationError as e:
+                # The environment failed, not the policy: exclude the sample rather than score it.
+                LOG.warning("code_gen sandbox verification failed (%s): %s", e.failure_kind, e)
+                return CompCodingVerifyResponse(
+                    **body.model_dump(),
+                    reward=0.0,
+                    mask_sample=True,
+                    failure_kind=e.failure_kind,
+                    failure_reason=str(e),
+                    extracted_model_output=model_out,
+                    extracted_model_code=code,
+                    difficulty=difficulty,
+                )
 
             unit_tests_time_taken = time() - start_time
 
@@ -313,3 +312,6 @@ class CompCodingResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     CompCodingResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = CompCodingResourcesServer.run_webserver()  # noqa: F401

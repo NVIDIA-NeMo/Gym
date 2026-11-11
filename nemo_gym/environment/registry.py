@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Literal, Optional
 
 import yaml
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, ListConfig, OmegaConf
 
 from nemo_gym import PARENT_DIR, component_search_roots
 from nemo_gym.config.config_types import ConfigError
@@ -69,6 +69,10 @@ class EnvironmentCatalogEntry:
     licensing: Optional[str] = None
     lifecycle: Optional[str] = None
     resources_server_selector: Optional[str] = None
+    # Set from the manifest. Entries without one leave these unset, because resolving every legacy config would
+    # slow discovery; the catalog views read them from the config when needed.
+    resources_server: Optional[str] = None
+    agent_server: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -130,6 +134,8 @@ def _manifest_entry(
         "modality": manifest.modality,
         "licensing": manifest.licensing,
         "lifecycle": _enum_value(manifest.lifecycle),
+        "resources_server": manifest.resources_server,
+        "agent_server": manifest.agent_server,
     }
     if expected_kind == "environment":
         return EnvironmentEntry(**values)
@@ -150,6 +156,14 @@ def _legacy_entry(name: str, config_path: Path, kind: CatalogKind) -> Environmen
     return EnvironmentCatalogEntry(kind="benchmark", **values)
 
 
+def _dataset_blocks(server_config: DictConfig | dict) -> List[DictConfig | dict]:
+    """The dataset mappings a server block declares; none when ``datasets`` is not a list, as in a malformed config."""
+    datasets = server_config.get("datasets")
+    if not isinstance(datasets, (list, ListConfig)):
+        return []
+    return [dataset for dataset in datasets if isinstance(dataset, (dict, DictConfig))]
+
+
 def _runnable_resource_config(
     config_path: Path,
 ) -> tuple[CatalogKind, Optional[str], Optional[str]] | None:
@@ -166,8 +180,7 @@ def _runnable_resource_config(
         dataset
         for group, _name, config in servers
         if group == "responses_api_agents"
-        for dataset in (config.get("datasets") or [])
-        if isinstance(dataset, (dict, DictConfig))
+        for dataset in _dataset_blocks(config)
     ]
     if not datasets:
         return None
@@ -356,8 +369,9 @@ def read_environment_details(config_path: Path) -> Dict[str, object]:
     """Deep-parse an environment config for the ``gym list environments <name>`` inspect view.
 
     Returns ``domain``, ``description`` (via :func:`~nemo_gym.environment.discovery.read_config_metadata`), plus
-    ``value``, ``resources_servers`` (names), ``agent`` (the agent type), and dataset ``names`` read from
-    the config's server blocks. Never raises: an unreadable config yields empty/None fields.
+    ``value``, ``resources_servers`` and ``agents`` (the server names written in this file), and dataset
+    ``names`` read from the config's server blocks. Files the config loads or inherits from are not read.
+    Never raises: an unreadable config yields empty/None fields.
     """
     domain, description = read_config_metadata(config_path)
     try:
@@ -367,7 +381,7 @@ def read_environment_details(config_path: Path) -> Dict[str, object]:
 
     value: Optional[str] = None
     resources_servers: List[str] = []
-    agent: Optional[str] = None
+    agents: List[str] = []
     datasets: List[str] = []
     for group_key, server_name, server_config in iter_server_configs(raw):
         if group_key == "resources_servers":
@@ -375,10 +389,9 @@ def read_environment_details(config_path: Path) -> Dict[str, object]:
             if value is None and server_config.get("value"):
                 value = str(server_config["value"])
         elif group_key == "responses_api_agents":
-            if agent is None:
-                agent = server_name
-            for dataset in server_config.get("datasets") or []:
-                if isinstance(dataset, (dict, DictConfig)) and dataset.get("name"):
+            agents.append(server_name)
+            for dataset in _dataset_blocks(server_config):
+                if dataset.get("name"):
                     datasets.append(str(dataset["name"]))
 
     return {
@@ -386,6 +399,6 @@ def read_environment_details(config_path: Path) -> Dict[str, object]:
         "description": description,
         "value": value,
         "resources_servers": resources_servers,
-        "agent": agent,
+        "agents": agents,
         "datasets": datasets,
     }

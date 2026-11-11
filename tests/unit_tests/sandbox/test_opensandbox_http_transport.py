@@ -45,7 +45,7 @@ async def shared_server(monkeypatch):
         return web.Response(body=gzip.compress(b"response body"), headers={"Content-Encoding": "gzip"})
 
     app = web.Application()
-    app.router.add_route("*", "/{path}", echo)
+    app.router.add_route("*", "/{path:.*}", echo)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", 0)
@@ -292,3 +292,59 @@ async def test_cancelling_rate_limit_sleep_closes_response_without_retrying(monk
         with pytest.raises(asyncio.CancelledError):
             await client.post("https://sandbox.example/sandboxes", content=b"create sandbox")
     send.assert_awaited_once()
+
+
+async def test_opensandbox_runtime_policy_sees_rate_limit_without_hidden_retries(shared_server):
+    shared_server.replies.append((429, {"Retry-After": "27"}))
+    provider = OpenSandboxProvider()
+    async with httpx.AsyncClient(transport=provider._get_transport()) as client:
+        with pytest.raises(httpx.HTTPStatusError) as caught:
+            await client.post(shared_server.url + "/command", content=b"increment-counter")
+        response = caught.value.response
+        assert response.status_code == 429
+        assert response.headers["Retry-After"] == "27"
+        assert response.content == b"rejected"
+        assert response.is_closed
+        # The rejected response released the single pool slot.
+        assert (await client.get(shared_server.url + "/echo")).status_code == 200
+    assert len(shared_server.calls) == 2
+
+
+@pytest.mark.parametrize("create", [False, True])
+@pytest.mark.parametrize("action,attempts", [("retry", 2), ("fail", 1)])
+async def test_sdk_rate_limit_retains_header_and_obeys_provider_policy(
+    shared_server, monkeypatch, create, action, attempts
+):
+    from opensandbox.adapters.factory import AdapterFactory
+
+    from nemo_gym.core.failure_transport import RequestFailureLog
+    from nemo_gym.core.typed_exceptions import NgFailureEvent
+    from nemo_gym.sandbox.providers.opensandbox import provider as module
+
+    shared_server.replies.extend([(429, {"Retry-After": "27"})] * attempts)
+    config = {"retries": 1, "outcome_policy": {"by_status_code": {429: action}}}
+    provider = OpenSandboxProvider(
+        connection={"domain": shared_server.url}, **{"create" if create else "operations": config}
+    )
+    service = AdapterFactory(provider._connection_config()).create_sandbox_service()
+    sleep = AsyncMock()
+    retrying, predicate, stop, wait = module._require_tenacity()
+    monkeypatch.setattr(
+        module, "_require_tenacity", lambda: (lambda **kwargs: retrying(sleep=sleep, **kwargs), predicate, stop, wait)
+    )
+
+    async def request(*args):
+        return await service.get_sandbox_info("sb")
+
+    with RequestFailureLog.capture() as log:
+        with pytest.raises(NgFailureEvent) as caught:
+            if create:
+                await provider.create(module.SandboxSpec(image="test"))
+            else:
+                await provider._await_sdk_operation(request, operation="get_info", sandbox_id="sb", timeout_s=1)
+        report = log.reply_report(caught.value)
+    assert caught.value.http_status == 429
+    assert len(shared_server.calls) == attempts
+    assert len([event for event in report.events.values() if event.boundary.value == "sandbox"]) == attempts
+    assert sleep.await_args_list == ([call(27.0 if create else 15.0)] if action == "retry" else [])
+    await provider.aclose()

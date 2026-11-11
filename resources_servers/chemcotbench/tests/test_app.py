@@ -85,7 +85,8 @@ async def server(monkeypatch, tmp_path):
 async def test_empty_output(server, text):
     result = await server.verify(request(text))
     assert result.reward == 0 and result.parse_ok is False and result.scoring_error is None
-    assert not result.mask_sample
+    # An empty answer is a valid wrong answer, not a failure.
+    assert not result.mask_sample and result.failure_kind is None
 
 
 async def test_subprocess_protocol(server, monkeypatch):
@@ -102,6 +103,7 @@ async def test_subprocess_protocol(server, monkeypatch):
     before = body.model_dump()
     result = await server.verify(body)
     assert result.reward == 1.0 and result.layer2_state_score == 0.5
+    assert result.failure_kind is None and not result.mask_sample
     command, payload = score.call_args.args
     assert payload["generation"] == "Answer: CCO"
     assert payload["metadata"] == body.verifier_metadata.model_dump()
@@ -124,6 +126,7 @@ async def test_worker_failure(server, monkeypatch, failure, error):
     result = await server.verify(request("Answer: invalid"))
     assert result.reward == 0 and result.scoring_error == error and result.failure_reason
     assert result.mask_sample
+    assert result.model_dump()["failure_kind"] == "verifier_error"
 
 
 async def test_invalid_worker_response(server, monkeypatch):
@@ -131,6 +134,7 @@ async def test_invalid_worker_response(server, monkeypatch):
     result = await server.verify(request("Answer: invalid"))
     assert result.scoring_error == "invalid_result"
     assert result.mask_sample and result.failure_reason
+    assert result.model_dump()["failure_kind"] == "verifier_error"
 
 
 async def test_disabled_optimization_is_masked(server):
@@ -141,6 +145,8 @@ async def test_disabled_optimization_is_masked(server):
     result = await server.verify(body)
     assert result.reward == 0 and result.mask_sample
     assert result.scoring_error == "molopt_disabled" and result.failure_reason
+    # Disabled scoring is named as such, not as a failed scorer.
+    assert result.model_dump()["failure_kind"] == "chemcotbench:scoring_disabled"
 
 
 async def test_aggregation_excludes_failures_but_keeps_wrong_answers(server, monkeypatch):

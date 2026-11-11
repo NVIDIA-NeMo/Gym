@@ -22,8 +22,11 @@ from omegaconf import OmegaConf
 from pydantic import ValidationError
 
 from nemo_gym.agents import (
+    HARNESS_RUNNER_FILE,
+    HARNESS_RUNNER_SCRIPT,
     AgentCloseSessionRequest,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     RolloutStopRequest,
     is_harness_termination_failure,
     parse_cleanup_receipt,
@@ -33,7 +36,13 @@ from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent, TaskId
 from nemo_gym.data.tasks.harbor import load_task, materialize_task
 from nemo_gym.sandbox import SandboxStatus
-from responses_api_agents.codex_agent.app import CodexAgent, CodexAgentConfig, _model_endpoint_error
+from responses_api_agents.codex_agent.app import (
+    _SANDBOX_SESSION_KEY,
+    CodexAgent,
+    CodexAgentConfig,
+    _model_endpoint_error,
+)
+from responses_api_agents.codex_agent.sandbox import LAUNCHER_FILE
 
 
 def seed() -> AgentSeedSessionRequest:
@@ -160,7 +169,7 @@ class Sandbox:
         payload = json.loads(self.files[payload_path])
         assert payload["cwd"] == getattr(self, "expected_workdir", "/app")
         assert kwargs["cwd"] == getattr(self, "expected_workdir", "/app")
-        assert "/sandbox_runner " in kwargs["command"] and "/bin/gym-runner" in kwargs["command"]
+        assert "/harness_runner.sh " in kwargs["command"] and "/params.sh" in kwargs["command"]
         if self.result["timed_out"] and self.result["return_code"] is None:
             self.files[f"{payload['directory']}/cleanup.json"] = json.dumps(
                 {key: value for key, value in self.result.items() if key not in ("hostname", "pid")}
@@ -222,9 +231,12 @@ def test_http_agent_session_flow_runs_codex_in_borrowed_sandbox(setup):
             assert f"{directory}/process_supervisor.sh" not in sandbox.files
             installer = f"{directory}/install_codex_runtime.sh"
             assert installer in sandbox.files
-            staged = {"sandbox_runner": "sandbox_runner.py", "sandbox_transport.py": "sandbox_transport.py"}
+            staged = {
+                "harness_runner.sh": HARNESS_RUNNER_SCRIPT,
+                LAUNCHER_FILE: Path(__file__).parents[1] / LAUNCHER_FILE,
+            }
             for name, source in staged.items():
-                assert sandbox.files[f"{directory}/{name}"] == (Path(__file__).parents[1] / source).read_text()
+                assert sandbox.files[f"{directory}/{name}"] == source.read_text()
             assert agent.config.resources_server is None
             assert not sandbox.launch.called
             assert not any(path.startswith("/app/") for path in sandbox.files)
@@ -699,6 +711,38 @@ def test_cookie_identity_and_single_activation(setup):
     sandbox.launch.assert_awaited_once()
 
 
+@pytest.mark.parametrize("separator", ["\u0085", "\u2028", "\u2029"])
+def test_unicode_line_separators_inside_events_keep_the_message(setup, separator):
+    agent, sandbox = setup
+    records = [json.loads(line) for line in events().split("\n")]
+    message = next(event for _, event in records if event.get("item", {}).get("type") == "agent_message")
+    message["item"]["text"] = f"A{separator}B \u00e9"
+    # The runner copies each CLI line verbatim; Codex leaves these characters unescaped.
+    sandbox.events = "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records) + "[1.0, {bad\n"
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == 200, result.text
+        body = result.json()
+        assert body["status"] == "completed"
+        texts = [part["text"] for item in body["output"] if item["type"] == "message" for part in item["content"]]
+        assert texts == [f"A{separator}B \u00e9"]
+        assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
+
+
+def test_event_record_nested_too_deeply_to_parse_is_skipped(setup):
+    agent, sandbox = setup
+    # The runner copies any stdout line that starts with "{"; only the host parses it.
+    nested = '[1.0, {"a": ' + '{"a": ' * 100_000 + "1" + "}" * 100_001 + "]\n"
+    sandbox.events = nested + events()
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == 200, result.text
+        assert result.json()["status"] == "completed"
+        assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
+
+
 @pytest.mark.parametrize("reason,expected", [("error", "failed"), ("aborted", "failed")])
 def test_failed_or_partial_codex_output_is_preserved(setup, reason, expected):
     agent, sandbox = setup
@@ -719,8 +763,7 @@ def test_failed_or_partial_codex_output_is_preserved(setup, reason, expected):
     "case",
     [
         # Graded, as Harbor grades after any agent exit:
-        "codex-killed",  # e.g. the kernel's OOM kill picked Codex: the runner exits 128+9
-        "runner-killed",  # e.g. the agent's `pkill python3` hit the runner: a negative status
+        "process-killed",  # Codex or its runner was killed: the receipt reports the shell status 128+9
         "failed-turn",
         "timed-out",  # an error event in a run that hit its time limit: graded as a timeout
         # Retried as before:
@@ -740,14 +783,14 @@ def test_failed_codex_run_is_graded_only_while_its_sandbox_still_runs(setup, cas
     if case == "failed-turn":
         records = [json.loads(line) for line in events(stop_reason="error").splitlines()]
     elif case == "timed-out":
-        sandbox.result.update(timed_out=True, return_code=-15)
+        sandbox.result.update(timed_out=True, return_code=128 + signal.SIGTERM)
         records[-1] = [9.0, {"type": "item.completed", "item": {"type": "error", "message": "tool call failed"}}]
     elif case == "not-started":
         sandbox.result["return_code"] = 1
         records = []
     else:
         # Codex died mid-turn: no turn.completed.
-        sandbox.result["return_code"] = -9 if case == "runner-killed" else 247
+        sandbox.result["return_code"] = 128 + signal.SIGKILL
         records = records[:-1]
     if case != "not-started":
         records.insert(0, [-1.0, {"type": "turn.started"}])
@@ -771,7 +814,7 @@ def test_failed_codex_run_is_graded_only_while_its_sandbox_still_runs(setup, cas
         return await execute(command, **kwargs)
 
     sandbox.exec.side_effect = probe_or_execute
-    graded = case in ("codex-killed", "runner-killed", "failed-turn", "timed-out")
+    graded = case in ("process-killed", "failed-turn", "timed-out")
     with TestClient(agent.setup_webserver()) as client:
         session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
         result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
@@ -916,7 +959,7 @@ def test_codex_0154_endpoint_outage_is_retried_not_graded(setup, case, ending) -
     if ending == "retries-spent":
         sandbox.result["return_code"] = 1
     else:
-        sandbox.result["return_code"] = -9
+        sandbox.result["return_code"] = 128 + signal.SIGKILL
         transcript.pop()  # killed after the error event, before turn.failed
     result, closed, probed = run_codex_transcript(agent, sandbox, transcript)
     # The sandbox was never probed for grading, and the episode is rerun.
@@ -952,7 +995,7 @@ def test_native_endpoint_failures_are_retried_not_graded(setup, case, ending) ->
     message = CODEX_NATIVE_ENDPOINT_FAILURES[case]
     assert _model_endpoint_error([(9.0, event) for event in codex_error(message)]) is not None
     # Codex exits 1 on the reported failure, or its runner is killed right after it reports it.
-    sandbox.result["return_code"] = 1 if ending == "reported" else -9
+    sandbox.result["return_code"] = 1 if ending == "reported" else 128 + signal.SIGKILL
     result, closed, probed = run_codex_transcript(agent, sandbox, [{"type": "turn.started"}, *codex_error(message)])
     assert not probed
     assert closed["agent_observations"]["records"][0]["status"] == "failed"
@@ -1002,7 +1045,7 @@ def test_recovered_codex_0154_retries_keep_the_run_gradable(setup, ending) -> No
         *(json.loads(line)[1] for line in events().splitlines()),
     ]
     if ending == "timed-out":
-        sandbox.result.update(timed_out=True, return_code=-15)
+        sandbox.result.update(timed_out=True, return_code=128 + signal.SIGTERM)
         transcript.pop()  # stopped in its turn: no turn.completed
     result, closed, probed = run_codex_transcript(agent, sandbox, transcript)
     assert result.status_code == 200, result.text
@@ -1015,8 +1058,7 @@ def test_recovered_codex_0154_retries_keep_the_run_gradable(setup, ending) -> No
     assert "Fixed" in json.dumps(body["output"])
 
 
-@pytest.mark.parametrize("ending", ["oom-kill", "runner-killed"])
-def test_recovered_codex_0154_retries_then_an_agent_error_is_graded(setup, ending) -> None:
+def test_recovered_codex_0154_retries_then_an_agent_error_is_graded(setup) -> None:
     # Endpoint retries early in the run, recovered; the run then ends on an unrelated agent error.
     agent, sandbox = setup
     transcript = [
@@ -1026,8 +1068,8 @@ def test_recovered_codex_0154_retries_then_an_agent_error_is_graded(setup, endin
         WAITING,
         *[json.loads(line)[1] for line in events().splitlines()][:-1],  # model output, no turn.completed
     ]
-    # The kernel's OOM kill picked Codex, or the agent's `pkill python3` hit the runner.
-    sandbox.result["return_code"] = 247 if ending == "oom-kill" else -9
+    # Codex or its runner was killed after the model requests recovered.
+    sandbox.result["return_code"] = 128 + signal.SIGKILL
     result, closed, probed = run_codex_transcript(agent, sandbox, transcript)
     # Graded as a nonzero agent exit, as the reference runs grade it.
     assert result.status_code == 200, result.text
@@ -1040,7 +1082,7 @@ def test_recovered_codex_0154_retries_then_an_agent_error_is_graded(setup, endin
 
 def test_codex_0154_killed_while_waiting_for_the_network_is_rerun(setup) -> None:
     agent, sandbox = setup
-    sandbox.result["return_code"] = 247
+    sandbox.result["return_code"] = 128 + signal.SIGKILL
     transcript = [
         {"type": "turn.started"},
         *[json.loads(line)[1] for line in events().splitlines()][:-1],
@@ -1312,6 +1354,39 @@ async def activate(agent, sandbox):
     return request, seeded.agent_session_id, task
 
 
+async def test_close_stops_config_staging_before_releasing_the_sandbox(setup):
+    agent, sandbox = setup
+    events = []
+    started = asyncio.Event()
+    upload = sandbox.upload
+
+    async def stall_config(source, destination):
+        if not destination.endswith("/home/.codex/config.toml"):
+            return await upload(source, destination)
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            events.append("upload cancelled")
+            raise
+
+    sandbox.upload = stall_config
+    sandbox.disconnect.side_effect = lambda: events.append("sandbox released")
+    request = Request({"type": "http", "headers": [], "session": {}, "path_params": {"rollout_id": "codex-smoke-a2"}})
+    # The configuration carries the grant's headers.
+    body = AgentSeedSessionRequest.model_validate({**seed().model_dump(mode="json"), "tool_accesses": [mcp_grant()]})
+    seeded = await agent.seed_agent_session(request, body)
+    task = asyncio.create_task(agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task")))
+    await asyncio.wait_for(started.wait(), 5)
+    await asyncio.wait_for(
+        agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(seeded.agent_session_id))), 10
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 5)
+    assert events == ["upload cancelled", "sandbox released"]
+    sandbox.launch.assert_not_awaited()
+
+
 async def test_rollout_stop_ends_codex_as_a_timeout(setup):
     agent, sandbox = setup
     sandbox.blocked = True
@@ -1449,7 +1524,7 @@ async def test_close_during_the_startup_stderr_read_keeps_the_observations(setup
 async def test_close_during_the_grading_probe_keeps_the_observations(setup):
     agent, sandbox = setup
     agent.config.verify_after_agent_error = True
-    sandbox.result["return_code"] = -9  # killed mid-turn, after a tool call and a message
+    sandbox.result["return_code"] = 128 + signal.SIGKILL  # killed mid-turn, after a tool call and a message
     records = [json.loads(line) for line in events().splitlines()][:-1]
     records.insert(0, [-1.0, {"type": "turn.started"}])
     sandbox.events = "\n".join(json.dumps(record) for record in records)
@@ -1668,7 +1743,7 @@ def test_http_close_retry_survives_other_session_closes(setup, monkeypatch):
     assert sandbox.disconnect.await_count == 66
 
 
-async def test_close_receipt_expires_without_extending_on_retry(setup, monkeypatch):
+async def test_fence_expires_without_extending_on_retry(setup, monkeypatch):
     agent, sandbox = setup
     clock = [100.0]
     monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
@@ -1683,7 +1758,7 @@ async def test_close_receipt_expires_without_extending_on_retry(setup, monkeypat
     with pytest.raises(HTTPException) as error:
         await agent.close_agent_session(request, close)
     assert error.value.status_code == 409
-    assert not agent._closed_session_records
+    assert not agent._fenced_session_records
     with pytest.raises(HTTPException) as stale_seed:
         await agent.seed_agent_session(request, seed())
     assert stale_seed.value.status_code == 409
@@ -1713,7 +1788,7 @@ async def test_close_retry_window_starts_after_cleanup(setup, monkeypatch):
     sandbox.disconnect.assert_awaited_once()
 
 
-async def test_concurrent_closes_share_receipt(setup):
+async def test_concurrent_closes_share_the_saved_reply(setup):
     agent, sandbox = setup
     request = Request({"type": "http", "session": {}})
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
@@ -1735,7 +1810,7 @@ async def test_concurrent_closes_share_receipt(setup):
     sandbox.disconnect.assert_awaited_once()
 
 
-async def test_seed_prunes_expired_close_receipts(setup, monkeypatch):
+async def test_seed_prunes_expired_fences(setup, monkeypatch):
     agent, _ = setup
     clock = [100.0]
     monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
@@ -1745,7 +1820,7 @@ async def test_seed_prunes_expired_close_receipts(setup, monkeypatch):
     clock[0] += agent.config.session_close_retry_window_seconds
     request.session.clear()
     await agent.seed_agent_session(request, seed().model_copy(update={"agent_session_id": "fresh-session"}))
-    assert not agent._closed_session_records
+    assert not agent._fenced_session_records
 
 
 @pytest.mark.parametrize("window", [0, -1, float("inf")])
@@ -1775,7 +1850,7 @@ async def test_lost_execution_is_never_graded(setup):
     agent, sandbox = setup
     agent.config.verify_after_agent_error = True
     sandbox.status = AsyncMock(return_value=SandboxStatus.RUNNING)
-    sandbox.result["return_code"] = 247
+    sandbox.result["return_code"] = 128 + signal.SIGKILL
     create = sandbox.launch.side_effect
 
     async def lost(**kwargs):
@@ -1858,7 +1933,7 @@ async def test_provider_error_type_blocks_success_even_with_zero_exit(setup, sta
 
 async def test_timeout_preserves_partial_tools_and_close_observations(setup):
     agent, sandbox = setup
-    sandbox.result.update(timed_out=True, return_code=-9)
+    sandbox.result.update(timed_out=True, return_code=128 + signal.SIGKILL)
     sandbox.events = "\n".join(sandbox.events.splitlines()[:-1])
     request, session_id, task = await activate(agent, sandbox)
     response = await task
@@ -1988,7 +2063,7 @@ def test_sandbox_prepare_rejects_symlink_overlap_before_writing(tmp_path, alias)
         runtime.symlink_to(repository, target_is_directory=True)
     directory = sessions / "session-1"
     result = subprocess.run(
-        ["bash", "-c", _sandbox_prepare_command(str(workdir), str(directory), str(runtime))],
+        ["sh", "-c", _sandbox_prepare_command(str(workdir), str(directory), str(runtime))],
         capture_output=True,
         text=True,
         errors="replace",
@@ -1999,6 +2074,22 @@ def test_sandbox_prepare_rejects_symlink_overlap_before_writing(tmp_path, alias)
     assert not directory.exists()
 
 
+def test_sandbox_prepare_rejects_a_missing_workdir(tmp_path):
+    from responses_api_agents.codex_agent.app import _sandbox_prepare_command
+
+    directory = tmp_path / "sessions/session-1"
+    result = subprocess.run(
+        ["sh", "-c", _sandbox_prepare_command(str(tmp_path / "missing"), str(directory), str(tmp_path / "runtime"))],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=10,
+    )
+    assert result.returncode != 0
+    assert "must be an existing directory" in result.stderr
+    assert not directory.exists()
+
+
 def test_sandbox_prepare_accepts_disjoint_quoted_paths(tmp_path):
     from responses_api_agents.codex_agent.app import _sandbox_prepare_command
 
@@ -2006,7 +2097,7 @@ def test_sandbox_prepare_accepts_disjoint_quoted_paths(tmp_path):
     repository.mkdir()
     directory = tmp_path / "session with 'quote"
     result = subprocess.run(
-        ["bash", "-c", _sandbox_prepare_command(str(repository), str(directory), str(tmp_path / "runtime"))],
+        ["sh", "-c", _sandbox_prepare_command(str(repository), str(directory), str(tmp_path / "runtime"))],
         capture_output=True,
         text=True,
         errors="replace",
@@ -2115,7 +2206,7 @@ def test_sandbox_prepare_accepts_root_workdir(tmp_path):
 
     directory = tmp_path / "sessions" / "session-1"
     result = subprocess.run(
-        ["bash", "-c", _sandbox_prepare_command("/", str(directory), str(tmp_path / "runtime"))],
+        ["sh", "-c", _sandbox_prepare_command("/", str(directory), str(tmp_path / "runtime"))],
         capture_output=True,
         text=True,
         errors="replace",
@@ -2130,7 +2221,7 @@ def test_sandbox_prepare_rejects_other_workdir_holding_session_files(tmp_path):
 
     directory = tmp_path / "sessions" / "session-1"
     result = subprocess.run(
-        ["bash", "-c", _sandbox_prepare_command(str(tmp_path), str(directory), str(tmp_path / "runtime"))],
+        ["sh", "-c", _sandbox_prepare_command(str(tmp_path), str(directory), str(tmp_path / "runtime"))],
         capture_output=True,
         text=True,
         errors="replace",
@@ -2203,7 +2294,7 @@ async def test_cookie_less_close_cleans_lost_seed_response(setup):
     sandbox.disconnect.assert_awaited_once()
 
 
-async def test_close_before_seed_leaves_bounded_tombstone(setup, monkeypatch):
+async def test_close_before_seed_leaves_a_fence_that_expires(setup, monkeypatch):
     agent, sandbox = setup
     clock = [100.0]
     monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
@@ -2216,11 +2307,24 @@ async def test_close_before_seed_leaves_bounded_tombstone(setup, monkeypatch):
         await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
     sandbox.exec.assert_not_awaited()
     clock[0] = 110.0
-    with pytest.raises(HTTPException, match="expired"):
+    with pytest.raises(HTTPException, match="no longer available"):
         await agent.close_agent_session(stale, close)
-    with pytest.raises(HTTPException, match="expired"):
+    with pytest.raises(HTTPException, match="no longer available"):
         await agent.seed_agent_session(stale, body)
-    assert not agent._closed_session_records
+    assert not agent._fenced_session_records
+
+
+async def test_a_sandbox_cookie_without_an_agent_session_is_refused_instead_of_running_on_the_host(setup):
+    agent, sandbox = setup
+    # A cookie from the sandbox session adapter that names no agent session the agent still holds.
+    stale = Request({"type": "http", "session": {_SANDBOX_SESSION_KEY: "gone"}, "path_params": {}})
+    with pytest.raises(
+        AgentSessionConflictError, match="^409: Codex session cookie names a session that is no longer"
+    ):
+        await agent.responses(stale, NeMoGymResponseCreateParamsNonStreaming(input="hi"))
+    with pytest.raises(AgentSessionConflictError, match="Codex session cookie"):
+        await agent.run(stale, MagicMock())
+    sandbox.exec.assert_not_awaited()
 
 
 async def test_close_waits_for_racing_seed_and_removes_completed_setup(setup):
@@ -2332,7 +2436,7 @@ async def test_independent_configs_collect_flat_rows_through_environment_run(set
         server_client=transport,
     )
     calls = []
-    close_receipts = []
+    close_replies = []
     cookies = {}
 
     class Response:
@@ -2382,7 +2486,7 @@ async def test_independent_configs_collect_flat_rows_through_environment_run(set
             assert result.agent_session_id == body["agent_session_id"]
         elif url_path == "/v1/agent_sessions/close":
             result = await agent.close_agent_session(request, AgentCloseSessionRequest.model_validate(body))
-            close_receipts.append(result)
+            close_replies.append(result)
         else:
             assert url_path.endswith("/v1/responses")
             request.scope["path_params"] = {"rollout_id": url_path.split("/")[2]}
@@ -2415,8 +2519,8 @@ async def test_independent_configs_collect_flat_rows_through_environment_run(set
         else:
             assert result["response"]["usage"] is None
         assert result["ng_agent_observations"]["source"] == "codex"
-    assert close_receipts[-1].agent_observations.source == "codex"
-    assert close_receipts[-1].agent_observations.records[0].status == (
+    assert close_replies[-1].agent_observations.source == "codex"
+    assert close_replies[-1].agent_observations.records[0].status == (
         "completed" if outcome == "completed" else "failed"
     )
     expected = [
@@ -2493,9 +2597,12 @@ async def local_session(setup, tmp_path):
     directory = tmp_path / "session"
     directory.mkdir()
     state.session.session_dir = str(directory)
-    from responses_api_agents.codex_agent import sandbox_runner
-
-    shutil.copyfile(sandbox_runner.__file__, directory / "sandbox_runner")
+    shutil.copyfile(HARNESS_RUNNER_SCRIPT, directory / HARNESS_RUNNER_FILE)
+    shutil.copyfile(Path(__file__).parents[1] / LAUNCHER_FILE, directory / LAUNCHER_FILE)
+    if shutil.which("node") is not None:
+        (tmp_path / "runtime/node/bin").mkdir(parents=True)
+        (tmp_path / "runtime/node/bin/node").symlink_to(shutil.which("node"))
+    state.runtime = str(tmp_path / "runtime")
     sandbox.upload = AsyncMock(side_effect=shutil.copyfile)
     sandbox.download = AsyncMock(side_effect=shutil.copyfile)
 
@@ -2543,7 +2650,7 @@ async def test_close_fences_delayed_launch_before_and_after_removing_session(loc
         return await execute(command, **kwargs)
 
     state.session.sandbox.exec.side_effect = queued_exec
-    state.task = asyncio.create_task(state.execute({}, timeout=5, close_timeout=2))
+    state.task = asyncio.create_task(state.execute({"prompt": ""}, timeout=5, close_timeout=2))
     await asyncio.wait_for(waiting.wait(), 2)
     if failure == "cancel":
         state.task.cancel()
@@ -2573,7 +2680,7 @@ async def test_launch_claim_without_receipt_blocks_close(local_session):
     assert state.session.cleanup is None
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="Linux sandbox contract")
+@pytest.mark.skipif(sys.platform != "linux" or shutil.which("node") is None, reason="Linux sandbox contract, Node")
 async def test_adapter_uses_shared_supervisor_and_captures_real_events(local_session):
     state, _ = local_session
     payload = {
@@ -2593,7 +2700,7 @@ async def test_adapter_uses_shared_supervisor_and_captures_real_events(local_ses
     state.session.sandbox.stop.assert_not_awaited()
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="Linux sandbox contract")
+@pytest.mark.skipif(sys.platform != "linux" or shutil.which("node") is None, reason="Linux sandbox contract, Node")
 async def test_close_confirms_cleanup_before_provider_cancellation(local_session):
     state, _ = local_session
     processes_path = Path(state.session.session_dir).parent / "children.json"
@@ -2696,7 +2803,7 @@ async def test_execution_outcomes_preserve_evidence_and_only_limits_are_gradable
         )
         sandbox.events = "\n".join(json.dumps(row) for row in rows)
     elif outcome == "wall-time":
-        sandbox.result.update(timed_out=True, return_code=-9)
+        sandbox.result.update(timed_out=True, return_code=128 + signal.SIGKILL)
         sandbox.events = "\n".join(events().splitlines()[:-1])
     request, session_id, task = await activate(agent, sandbox)
     if outcome in ("provider", "runtime"):
@@ -2798,6 +2905,200 @@ def test_sandbox_source_controls_ownership_and_session_routing(setup, owned):
             client.post(f"/ng-rollout/{body.episode_id.capture_key}/v1/responses", json={"input": "task"}).status_code
             == 409
         )
+
+
+def owned_seed_with_search_grant() -> dict:
+    body = seed().model_dump(mode="json")
+    body["sandbox_access"] = None
+    body["tool_accesses"] = [mcp_grant("search", required=False, url="http://resources.example:7000/mcp")]
+    return body
+
+
+def seed_owned(agent, sandbox, body: dict):
+    """Seed an agent-owned session; return the spec it started the sandbox with and the seed response."""
+    sandbox.start = AsyncMock()
+    module = "responses_api_agents.codex_agent.app"
+    with (
+        patch(f"{module}.AsyncSandbox", return_value=sandbox),
+        patch(f"{module}.create_provider", return_value=SimpleNamespace(name="opensandbox", aclose=AsyncMock())),
+        TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client,
+    ):
+        created = client.post("/v1/agent_sessions", json=body)
+    return (sandbox.start.await_args.args[0] if sandbox.start.await_args else None), created
+
+
+def owned_seed_with_several_grants(*, required: bool = True) -> dict:
+    """A required and an optional MCP grant on different hosts, plus an optional direct HTTP grant Codex skips."""
+    body = owned_seed_with_search_grant()
+    body["tool_accesses"] = [
+        mcp_grant("search", required=required, url="http://resources.example:7000/mcp"),
+        mcp_grant("docs", required=False, url="http://docs.example:9000/mcp"),
+        {"kind": "direct_http", "name": "direct", "base_url": "http://direct.example", "required": False},
+    ]
+    return body
+
+
+@pytest.mark.parametrize(
+    ("network_access", "required", "allowed"),
+    [
+        ("inherit", True, None),
+        # A required grant under model_only is refused (see the required-grant test), so this case grants optional ones.
+        ("model_only", False, ["model.example"]),
+        ("model_and_tools", True, ["docs.example", "model.example", "resources.example"]),
+    ],
+)
+def test_owned_sandbox_egress_allows_only_model_and_granted_tool_hosts(setup, network_access, required, allowed):
+    agent, sandbox = setup
+    agent.config.sandbox_provider = "agent-provider"
+    agent.config.sandbox_config = {"image": "test-image", "workdir": "/workspace"}
+    agent.config.network_access = network_access
+    sandbox.expected_workdir = "/workspace"
+
+    spec, created = seed_owned(agent, sandbox, owned_seed_with_several_grants(required=required))
+
+    assert created.status_code == 200, created.text
+    policy = spec.provider_options.get("network_policy")
+    if allowed is None:
+        assert policy is None
+    else:
+        assert policy == {"defaultAction": "deny", "egress": [{"action": "allow", "target": host} for host in allowed]}
+
+
+def test_tool_egress_leaves_out_the_mcp_grants_codex_skips(setup):
+    agent, sandbox = setup
+    agent.config.sandbox_provider = "agent-provider"
+    agent.config.sandbox_config = {"image": "test-image", "workdir": "/workspace"}
+    agent.config.network_access = "model_and_tools"
+    sandbox.expected_workdir = "/workspace"
+    body = owned_seed_with_search_grant()
+    # Codex leaves out an optional grant whose name config.toml cannot hold; its host must stay closed too.
+    body["tool_accesses"].append(mcp_grant("bad.name", required=False, url="http://skipped.example:7000/mcp"))
+
+    spec, created = seed_owned(agent, sandbox, body)
+
+    assert created.status_code == 200, created.text
+    assert spec.provider_options["network_policy"] == {
+        "defaultAction": "deny",
+        "egress": [{"action": "allow", "target": host} for host in ["model.example", "resources.example"]],
+    }
+
+
+@pytest.mark.parametrize("network_access", ["model_only", "model_and_tools"])
+def test_network_access_with_borrowed_sandbox_is_rejected_before_connecting(setup, network_access):
+    agent, sandbox = setup
+    agent.config.network_access = network_access
+    module = "responses_api_agents.codex_agent.app"
+    with (
+        patch(f"{module}.AsyncSandbox") as factory,
+        TestClient(agent.setup_webserver()) as client,
+    ):
+        factory.connect = AsyncMock(return_value=sandbox)
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 422
+        assert "borrowed" in created.text
+        factory.connect.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("provider_name", "provider_options", "required", "reason"),
+    [
+        ("opensandbox", {"network_policy": {}}, False, "not both"),
+        ("docker", {}, False, "requires the OpenSandbox network-policy provider"),
+        # model_only blocks a required grant's host, so the session would fail only after the sandbox exists.
+        ("opensandbox", {}, True, "model_and_tools"),
+    ],
+    ids=["explicit_policy", "provider_without_policies", "required_grant"],
+)
+def test_unenforceable_network_access_is_a_terminal_seed_refusal(
+    setup, provider_name, provider_options, required, reason
+):
+    agent, sandbox = setup
+    agent.config.sandbox_provider = "agent-provider"
+    agent.config.sandbox_config = {
+        "image": "test-image",
+        "workdir": "/workspace",
+        "provider_options": provider_options,
+    }
+    agent.config.network_access = "model_only"
+    provider = SimpleNamespace(name=provider_name, aclose=AsyncMock())
+    body = owned_seed_with_several_grants(required=required)
+    module = "responses_api_agents.codex_agent.app"
+    with (
+        patch(f"{module}.AsyncSandbox") as factory,
+        patch(f"{module}.create_provider", return_value=provider),
+        TestClient(agent.setup_webserver()) as client,
+    ):
+        refused = client.post("/v1/agent_sessions", json=body)
+    # A configuration another attempt cannot fix: HTTP 422 fails the episode once instead of a retried 500.
+    assert refused.status_code == 422, refused.text
+    assert reason in refused.json()["detail"]
+    factory.assert_not_called()
+    provider.aclose.assert_awaited_once()
+    assert body["agent_session_id"] not in agent._session_records
+
+
+@pytest.mark.parametrize(
+    ("reported", "return_code", "error_type", "outcome"),
+    [
+        ("codex-cli 0.144.4", 0, None, "accepted"),
+        ("codex-cli 0.143.0", 0, None, "refused"),
+        # The check is exact: a version that only starts with the pinned one is another version.
+        ("codex-cli 0.144.40", 0, None, "refused"),
+        ("codex-cli 0.144.4", 1, None, "refused"),
+        # A transport failure or timeout may pass on another attempt, so it stays retryable.
+        ("", None, "timeout", "retried"),
+    ],
+    ids=["pinned", "other_version", "version_prefix", "failed_run", "timeout"],
+)
+def test_preinstalled_runtime_is_checked_instead_of_installed(setup, reported, return_code, error_type, outcome):
+    agent, sandbox = setup
+    agent.config.sandbox_provider = "agent-provider"
+    agent.config.sandbox_config = {"image": "test-image", "workdir": "/workspace"}
+    agent.config.sandbox_runtime_dir = "/opt/codex-runtime"
+    sandbox.expected_workdir = "/workspace"
+    execute = sandbox.execute
+
+    async def report_version(command, **kwargs):
+        if command.endswith("codex.js --version"):
+            return SimpleNamespace(error_type=error_type, return_code=return_code, stdout=reported + "\n", stderr="")
+        return await execute(command, **kwargs)
+
+    sandbox.exec.side_effect = report_version
+    sandbox.start = AsyncMock()
+    body = owned_seed_with_search_grant()
+    module = "responses_api_agents.codex_agent.app"
+    with (
+        patch(f"{module}.AsyncSandbox", return_value=sandbox),
+        patch(f"{module}.create_provider", return_value=SimpleNamespace(name="opensandbox", aclose=AsyncMock())),
+        TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client,
+    ):
+        created = client.post("/v1/agent_sessions", json=body)
+        record = agent._session_records.get(body["agent_session_id"])
+        runtime = record.state.runtime if record is not None and record.state is not None else None
+
+    commands = [call.args[0] for call in sandbox.exec.await_args_list]
+    (check,) = [command for command in commands if command.endswith("codex.js --version")]
+    # The check uses private Node, with no task Python and CODEX_HOME under the session directory.
+    assert "python" not in check
+    assert "CODEX_HOME=/tmp/nemo-gym-codex-sessions/" in check
+    assert check.endswith(
+        "/opt/codex-runtime/node/bin/node /opt/codex-runtime/codex/node_modules/@openai/codex/bin/codex.js --version"
+    )
+    assert not any("install_codex_runtime.sh" in command for command in commands)
+    assert not any(path.endswith("/install_codex_runtime.sh") for path in sandbox.files)
+    if outcome == "accepted":
+        assert created.status_code == 200, created.text
+        # Activation runs Codex from the preinstalled runtime, not from the default path.
+        assert runtime == "/opt/codex-runtime"
+    else:
+        assert created.status_code == (422 if outcome == "refused" else 500), created.text
+        sandbox.stop.assert_awaited_once()
+
+
+def test_runtime_dir_must_be_absolute(setup):
+    agent, _ = setup
+    with pytest.raises(ValidationError):
+        CodexAgentConfig.model_validate({**agent.config.model_dump(), "sandbox_runtime_dir": "opt/codex"})
 
 
 def test_owned_stop_failure_blocks_close_until_retry(setup):
@@ -3308,7 +3609,7 @@ def test_later_rejection_preserves_real_tool_output_and_available_usage(setup, u
                 "input_tokens": 20,
                 "output_tokens": 8,
                 "total_tokens": 28,
-                "input_tokens_details": {"cached_tokens": 3},
+                "input_tokens_details": {"cached_tokens": 3, "cache_write_tokens": None},
                 "output_tokens_details": {"reasoning_tokens": 2},
             }
         elif usage_source == "cli":
@@ -3331,7 +3632,7 @@ def test_graded_failure_reports_native_usage_or_none(setup, usage_source):
     agent, sandbox = setup
     agent.config.verify_after_agent_error = True
     sandbox.status = AsyncMock(return_value=SandboxStatus.RUNNING)
-    sandbox.result["return_code"] = -9  # killed after a completed tool call, before turn.completed
+    sandbox.result["return_code"] = 128 + signal.SIGKILL  # killed after a completed tool call, before turn.completed
     tool = {"id": "item_1", "type": "command_execution", "command": "printf retained", "status": "in_progress"}
     records = [
         {"type": "turn.started"},
@@ -3375,14 +3676,14 @@ def test_graded_failure_reports_native_usage_or_none(setup, usage_source):
     assert response.status_code == 200, response.text
     body = response.json()
     assert (body["status"], body["error"]) == ("failed", None)
-    assert body["metadata"]["graded_agent_error"].startswith("exit -9: ")
+    assert body["metadata"]["graded_agent_error"].startswith("exit 137: ")
     assert "ng_agent_outcome" not in body["metadata"]
     if usage_source == "native":
         assert body["usage"] == {
             "input_tokens": 20,
             "output_tokens": 8,
             "total_tokens": 28,
-            "input_tokens_details": {"cached_tokens": 3},
+            "input_tokens_details": {"cached_tokens": 3, "cache_write_tokens": None},
             "output_tokens_details": {"reasoning_tokens": 2},
         }
     else:

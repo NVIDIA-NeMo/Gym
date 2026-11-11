@@ -42,6 +42,7 @@ from pydantic import BaseModel, ConfigDict
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
+from nemo_gym.core import SESSION_LOST
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxResources,
@@ -56,7 +57,10 @@ from nemo_gym.server_runtime import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    SimpleResourcesServer,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
+    lost_session_verification,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.swe_gym.swebench_specs import spec_for
@@ -78,6 +82,7 @@ from resources_servers.swebench.patch_capture import (
     capture_model_patch,
     prepare_git_for_commits,
 )
+from resources_servers.swebench.sandbox_sessions import SandboxSessionResourcesServer
 
 
 # The image's default PATH points at the conda *base* interpreter (Python 3.11 without the repo's
@@ -162,7 +167,7 @@ class SWEGymVerifyResponse(BaseVerifyResponse):
     model_patch_sha256: str = ""
 
 
-class SWEGymResourcesServer(SimpleResourcesServer):
+class SWEGymResourcesServer(SandboxSessionResourcesServer):
     config: SWEGymResourcesServerConfig
 
     def model_post_init(self, context: Any, /) -> None:
@@ -182,7 +187,14 @@ class SWEGymResourcesServer(SimpleResourcesServer):
             pass_to_pass=as_list(body.PASS_TO_PASS),
         )
 
-    async def _create_sandbox(self, body: SWEGymInstanceRequest, files: dict[str, str] | None = None) -> AsyncSandbox:
+    async def _create_sandbox(
+        self,
+        body: SWEGymInstanceRequest,
+        files: dict[str, str] | None = None,
+        *,
+        session_id: str | None = None,
+        verifier_session_id: str | None = None,
+    ) -> AsyncSandbox:
         global_config_dict = get_global_config_dict()
         provider_config = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
         provider_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
@@ -214,16 +226,13 @@ class SWEGymResourcesServer(SimpleResourcesServer):
             provider_options=self.config.sandbox_config.get("provider_options", {}),
         )
         sandbox = AsyncSandbox(provider_config)
+        if session_id is not None:
+            # Keep ownership even if start raises after the provider has allocated a sandbox.
+            self._session_id_to_sandbox[session_id] = sandbox
+        if verifier_session_id is not None:
+            self._verifier_sandboxes[verifier_session_id] = sandbox
         await sandbox.start(spec)
         return sandbox
-
-    async def _stop_sandbox(self, sandbox: AsyncSandbox | None) -> None:
-        if sandbox is None:
-            return
-        try:
-            await sandbox.stop()
-        except Exception:
-            print("Failed to stop SWE-Gym sandbox", format_exc(), file=sys.stderr)
 
     async def _pristine_untracked_files(self, sandbox: AsyncSandbox, workdir: str) -> frozenset[str]:
         """Files ``workdir`` holds untracked before the agent touches it (excluded from its patch)."""
@@ -238,32 +247,51 @@ class SWEGymResourcesServer(SimpleResourcesServer):
             return frozenset()
 
     async def _extract_model_patch(self, session_id: str, workdir: str, base_commit: str) -> PatchCapture:
-        """Capture the agent's patch per ``config.patch_capture_mode``, then stop its sandbox."""
-        original_sandbox = self._session_id_to_sandbox.pop(session_id)
-        pristine_untracked = self._session_id_to_pristine_untracked.pop(session_id, frozenset())
-        try:
-            return await capture_model_patch(
-                original_sandbox,
-                workdir,
-                base_commit,
-                mode=self.config.patch_capture_mode,
-                pristine_untracked=pristine_untracked,
-                drop_sections=drop_patch_sections,
-            )
-        finally:
-            await self._stop_sandbox(original_sandbox)
+        """Capture the patch while retaining ownership until the shared lifecycle stops the sandbox."""
+        return await capture_model_patch(
+            self._session_id_to_sandbox[session_id],
+            workdir,
+            base_commit,
+            mode=self.config.patch_capture_mode,
+            pristine_untracked=self._session_id_to_pristine_untracked.get(session_id, frozenset()),
+            drop_sections=drop_patch_sections,
+        )
 
-    async def seed_session(self, request: Request, body: SWEGymSeedSessionRequest) -> SWEGymSeedSessionResponse:
+    async def seed_session(
+        self, request: Request, body: SWEGymSeedSessionRequest | ResourcesSeedSessionRequest
+    ) -> SWEGymSeedSessionResponse | ResourcesSeedSessionResponse:
         """Start the instance's image so an agent can work in it.
+
+        An Environment Server seeds an episode session and gets the sandbox back as ``sandbox_access``; an
+        agent's ``/run`` seeds with the row and gets the sandbox handle.
+        """
+        if isinstance(body, ResourcesSeedSessionRequest):
+            return await self.seed_task_sandbox_session(request, body, SWEGymInstanceRequest)
+        session_id = request.session[SESSION_ID_KEY]
+        async with self._locked_task_session(session_id) as record:
+            if record.seed is not None or self._task_session_fences.get(session_id) is not None:
+                raise ResourcesSessionConflictError("An agent-run seed cannot replace an episode session")
+            await self._stop_task_sandbox(session_id)
+            try:
+                await self._start_task_sandbox(session_id, body)
+            except BaseException:
+                await self._stop_failed_seed_sandbox(session_id)
+                raise
+            return SWEGymSeedSessionResponse(
+                sandbox_handle=str(self._session_id_to_sandbox[session_id]._handle.sandbox_id), workdir=REPO_DIRECTORY
+            )
+
+    async def _start_task_sandbox(self, session_id: str, body: SWEGymInstanceRequest) -> str:
+        """Start the task sandbox for ``session_id`` and return the directory the agent works in.
 
         The sandbox gets no files from the row. The git scrub drops every ref but HEAD and prunes the
         objects behind them: SWE-bench images clone the whole upstream history, so without it the fix
         commit and every later release tag sit in ``.git`` within a ``git log --all`` of the agent.
         """
-        session_id = request.session[SESSION_ID_KEY]
-        await self._stop_sandbox(self._session_id_to_sandbox.pop(session_id, None))
-        self._session_id_to_pristine_untracked.pop(session_id, None)
-        sandbox = await self._create_sandbox(body)
+        self._forget_task_sandbox_state(session_id)
+        sandbox = await self._create_sandbox(body, session_id=session_id)
+        # Own the sandbox before preparing it, so a failed seed can still stop it.
+        self._session_id_to_sandbox[session_id] = sandbox
         if self.config.apply_anti_cheating:
             await apply_anti_cheat_setup(sandbox, REPO_DIRECTORY, body.instance_id, "swe_gym")
         # The anti-cheat scrub leaves no committer identity, so the agent's `git commit` would fail.
@@ -271,8 +299,10 @@ class SWEGymResourcesServer(SimpleResourcesServer):
         self._session_id_to_pristine_untracked[session_id] = await self._pristine_untracked_files(
             sandbox, REPO_DIRECTORY
         )
-        self._session_id_to_sandbox[session_id] = sandbox
-        return SWEGymSeedSessionResponse(sandbox_handle=str(sandbox._handle.sandbox_id), workdir=REPO_DIRECTORY)
+        return REPO_DIRECTORY
+
+    def _forget_task_sandbox_state(self, session_id: str) -> None:
+        self._session_id_to_pristine_untracked.pop(session_id, None)
 
     def _response(self, body: SWEGymVerifyRequest, **fields: Any) -> SWEGymVerifyResponse:
         # Spread the request: BaseVerifyResponse extends BaseVerifyRequest, so responses_create_params
@@ -289,17 +319,50 @@ class SWEGymResourcesServer(SimpleResourcesServer):
         )
 
     async def verify(self, request: Request, body: SWEGymVerifyRequest) -> SWEGymVerifyResponse:
+        """Serialize task ownership and replay the verdict for an identical episode session retry."""
+        return await self.verify_task_sandbox_session(
+            request,
+            body,
+            verify=lambda: self._verify(request, body),
+            lost_response=lambda reason, failure_kind: self._lost_session_response(
+                body, reason, failure_kind=failure_kind
+            ),
+            allow_seedless=self.config.is_verifying_golden_patch,
+        )
+
+    def _lost_session_response(
+        self, body: SWEGymVerifyRequest, reason: str, *, failure_kind: str = SESSION_LOST
+    ) -> SWEGymVerifyResponse:
+        return self._response(
+            body,
+            **lost_session_verification(reason, failure_kind=failure_kind),
+            evaluation_completed=False,
+            resolved=False,
+            patch_applied=False,
+            test_results=None,
+            test_output="",
+            error=reason,
+            eval_sandbox_start_time_taken=0.0,
+            patch_verification_time_taken=0.0,
+        )
+
+    async def _verify(self, request: Request, body: SWEGymVerifyRequest) -> SWEGymVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
         extraction_error = None
         mode = self.config.patch_capture_mode
         if self.config.is_verifying_golden_patch:
             capture = PatchCapture.static(body.patch, mode, "golden")
         else:
-            try:
-                capture = await self._extract_model_patch(session_id, REPO_DIRECTORY, body.base_commit)
-            except Exception as exc:
-                capture = PatchCapture.static("", mode, "none")
-                extraction_error = f"Failed to extract model patch: {exc}"
+
+            async def capture_or_fallback() -> tuple[PatchCapture, str | None]:
+                try:
+                    return await self._extract_model_patch(session_id, REPO_DIRECTORY, body.base_commit), None
+                except Exception as exc:
+                    return PatchCapture.static("", mode, "none"), f"Failed to extract model patch: {exc}"
+
+            # The fallback is saved with the session too, so a retry after the task sandbox stopped grades it again.
+            capture, extraction_error = await self.capture_task_sandbox_patch(session_id, capture_or_fallback)
+            await self.stop_task_sandbox_after_capture(session_id)
         patch = capture.patch
 
         # Resolve the spec before spending a sandbox: a (repo, version) without one can never be graded.
@@ -331,7 +394,7 @@ class SWEGymResourcesServer(SimpleResourcesServer):
             sandbox: AsyncSandbox | None = None
             started = time()
             try:
-                sandbox = await self._create_sandbox(body, files=files)
+                sandbox = await self._create_sandbox(body, files=files, verifier_session_id=session_id)
                 start_time_taken = time() - started
                 verification_started = time()
                 result = await run_verification(
@@ -343,7 +406,6 @@ class SWEGymResourcesServer(SimpleResourcesServer):
                 # surfaced from inside the sandbox client -- a long test run tripping an inner timeout -- is
                 # an infrastructure verdict about this attempt, not a reason to drop the whole request.
                 if asyncio.current_task().cancelling():
-                    await self._stop_sandbox(sandbox)
                     raise
                 start_time_taken = time() - started
                 verification_time_taken = 0.0
@@ -355,7 +417,9 @@ class SWEGymResourcesServer(SimpleResourcesServer):
                 verification_time_taken = 0.0
                 result = VerificationResult(False, False, False, None, "", f"Verification failed: {exc}")
             finally:
-                await self._stop_sandbox(sandbox)
+                # A retry needs a clean sandbox; final cleanup follows the cached verdict in the shared wrapper.
+                if not result.completed and attempt < attempts:
+                    await self._stop_verifier_sandbox(session_id)
             if result.completed:
                 break
             if attempt < attempts:
