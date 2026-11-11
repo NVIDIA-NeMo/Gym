@@ -36,6 +36,7 @@ from nemo_gym import component_search_roots
 from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.data.tasks.harbor.build_options import (
     BuildOptions,
+    _block_from_overrides,
 )
 from nemo_gym.data.tasks.harbor.build_plan import (
     DEFAULT_PLATFORM,
@@ -963,9 +964,17 @@ def _has_override(overrides: list[str], key: str) -> bool:
 
 
 def output_root_from_overrides(overrides: list[str]) -> Path:
-    """Where a task TARGET's output goes: ``+harbor_output_root=...`` when the command sets it, else ``results/harbor``."""
-    value = _override_value(overrides, HARBOR_OUTPUT_ROOT_KEY)
-    return Path(value) if value else DEFAULT_OUTPUT_ROOT
+    """Where a task TARGET's output goes: ``+harbor_output_root=...`` when the command sets it, else ``results/harbor``.
+
+    Read as the other settings the command names are (:func:`_block_from_overrides`), so a Hydra-quoted value
+    (``'/tmp/prepared rows'``) is the path it spells and not a name that includes its quotes.
+    """
+    value = _block_from_overrides(overrides, HARBOR_OUTPUT_ROOT_KEY)
+    if value is None or value == "":
+        return DEFAULT_OUTPUT_ROOT
+    if not isinstance(value, str):
+        raise ValueError(f"`{HARBOR_OUTPUT_ROOT_KEY}` must be a path string")
+    return Path(value)
 
 
 def _override_value(overrides: list[str], key: str) -> str | None:

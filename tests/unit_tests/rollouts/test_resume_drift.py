@@ -197,6 +197,13 @@ def test_an_identity_that_is_not_the_digested_one_is_not_trusted(tmp_path: Path)
         ("servers.a.responses_api_agents.osworld_agent.exact_trace_transport_version", False),
         ("servers.p.responses_api_models.vllm_model.port", False),
         ("servers.p.responses_api_models.vllm_model.canary_cells", False),
+        # Where a taskset's folder sits is operational; what pins its content is not.
+        ("servers.e.environment_servers.harbor.tasksets.ds.folder", False),
+        ("servers.e.environment_servers.harbor.tasksets.ds.tasks.t1", True),
+        ("servers.e.environment_servers.harbor.tasksets.ds.paths.t1", True),
+        ("servers.e.environment_servers.harbor.tasksets.ds.dataset_digest", True),
+        ("servers.e.environment_servers.harbor.tasksets.ds.dataset_toml_digest", True),
+        ("servers.e.resources_servers.g.folder", True),
     ],
 )
 def test_the_classification_of_a_key(key: str, semantic: bool) -> None:
@@ -355,3 +362,52 @@ def test_a_null_that_is_the_setting_default_is_still_the_same_as_absent(tmp_path
 
     assert current.config_digest == json.loads(path.read_text())["config_digest"]
     assert validate_resume(path, current, materialized) is not None
+
+
+HARBOR_SERVER = {
+    "harbor_ds_environment": {
+        "environment_servers": {
+            "harbor": {
+                "tasksets": {
+                    "ds": {
+                        "folder": "/tmp/gym-install-a/gym/tasks/ds",
+                        "tasks": {"t1": "digest-1", "t2": "digest-2"},
+                        "dataset_digest": "dataset-digest",
+                    }
+                }
+            }
+        }
+    }
+}
+TASKSET = "harbor_ds_environment.environment_servers.harbor.tasksets.ds"
+
+
+def test_a_task_folder_in_another_checkout_resumes_and_is_recorded(tmp_path: Path) -> None:
+    """A repository-relative or fetched target resolves under whatever checkout an allocation starts in; the digests
+    beside the folder pin the tasks, so the same tasks at another location are the same run."""
+    base = {**BASE, **HARBOR_SERVER}
+    path, materialized = saved_run(tmp_path, base)
+    moved = merged(base, {f"{TASKSET}.folder": "/tmp/gym-install-b/gym/tasks/ds"})
+
+    assert validate_resume(path, current_manifest(tmp_path, moved), materialized) is not None
+    assert f"{TASKSET}.folder" in resume_drift_path_for(path).read_text()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {f"{TASKSET}.tasks.t1": "changed-digest"},  # a task's content
+        {f"{TASKSET}.tasks.t3": "digest-3"},  # a task added
+        {f"{TASKSET}.dataset_digest": "another-dataset"},
+        {f"{TASKSET}.paths": {"t1": "nested/t1"}},  # a task found elsewhere in the dataset
+    ],
+)
+def test_a_changed_task_still_refuses_beside_a_moved_folder(tmp_path: Path, change: dict) -> None:
+    base = {**BASE, **HARBOR_SERVER}
+    path, materialized = saved_run(tmp_path, base)
+    current = current_manifest(
+        tmp_path, merged(base, {f"{TASKSET}.folder": "/tmp/gym-install-b/gym/tasks/ds", **change})
+    )
+
+    with pytest.raises(ConfigError, match="tasksets"):
+        validate_resume(path, current, materialized)

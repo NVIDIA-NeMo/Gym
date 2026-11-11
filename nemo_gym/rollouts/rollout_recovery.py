@@ -1204,6 +1204,11 @@ def _is_semantic(key: str) -> bool:
     # A credential is redacted, so only its presence can differ; the key used does not change what is measured.
     if any(_is_credential_name(segment) for segment in segments):
         return False
+    # Where a taskset's task folders sit is not what a run measures: a repository-relative or fetched target resolves
+    # under whatever checkout the run starts in. The digests under `tasks` pin the content, and they, the `paths` map
+    # and the dataset digest stay semantic, so a moved folder resumes and a changed task does not.
+    if len(segments) >= 3 and segments[-1] == "folder" and segments[-3] == "tasksets":
+        return False
     # Task data (task_parameters and the like) is part of the experiment whatever its keys are called.
     if any(segment in _SEMANTIC_KEYS or segment.startswith("task") for segment in segments):
         return True

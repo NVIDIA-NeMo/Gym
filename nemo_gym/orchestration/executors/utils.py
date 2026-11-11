@@ -54,7 +54,7 @@ def render_target_args(target: str | None, agent: str | None, sandbox: str | Non
         args += ["--agent", shlex.quote(agent)]
     if sandbox is not None:
         args += ["--sandbox", shlex.quote(sandbox)]
-    args.append(shlex.quote(f"+{HARBOR_OUTPUT_ROOT_KEY}={output_root}"))
+    args.append(shlex.quote(f"+{HARBOR_OUTPUT_ROOT_KEY}={hydra_literal(output_root)}"))
     return args
 
 

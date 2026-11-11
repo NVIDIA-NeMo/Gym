@@ -3370,6 +3370,19 @@ def test_a_task_target_is_shell_quoted():
     assert render_target_args(None, None, None, "/jobs") == []
 
 
+@pytest.mark.parametrize(
+    "root", ["/jobs/a/artifacts/harbor", "/jobs/a b/artifacts/harbor", "/jobs/(x) 'y'/harbor", "/jobs/a=b,c/harbor"]
+)
+def test_a_rendered_output_root_is_the_same_path_after_the_shell_and_hydra(root):
+    from nemo_gym.data.tasks.harbor.prepare import output_root_from_overrides
+    from nemo_gym.orchestration.executors.utils import render_target_args
+
+    words = shlex.split(" ".join(render_target_args("/data/t", "opencode_agent", None, root)))
+    token = next(word for word in words if word.startswith("+harbor_output_root="))
+
+    assert str(output_root_from_overrides([token])) == root
+
+
 def test_a_benchmark_without_a_target_renders_no_target_arguments(tmp_path):
     script = _render_target(tmp_path)
 

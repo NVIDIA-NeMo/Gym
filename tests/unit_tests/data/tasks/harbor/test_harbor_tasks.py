@@ -4112,6 +4112,29 @@ class TestComposeVolumeSourcesAtPrepare:
         assert configs[0] == configs[1]
         assert str(root / "ds") in configs[0]
 
+    @pytest.mark.parametrize("quoted", ["'{root}'", "{root}"])
+    def test_a_hydra_quoted_output_root_is_the_path_it_spells(self, tmp_path, monkeypatch, quoted):
+        """`+harbor_output_root='/tmp/prepared rows'` is the folder `/tmp/prepared rows`, not a name with quotes in
+        it that lands beneath the working directory."""
+        from nemo_gym.data.tasks.harbor.prepare import output_root_from_overrides
+
+        root = tmp_path / "prepared rows"
+        overrides = ["+harbor_output_root=" + quoted.format(root=root)]
+        assert output_root_from_overrides(overrides) == root
+        monkeypatch.chdir(tmp_path)
+        args = self._target_args(tmp_path)
+        prepared, config_path, _ = cli_eval._prepare_target_run(args, overrides, resolve_agent("hermes_agent"), None)
+        assert config_path.parent == root / "ds" and prepared.rows_path.is_relative_to(root)
+        assert not any(path.name.startswith("'") for path in tmp_path.iterdir())
+
+    def test_an_empty_output_root_is_the_default_and_a_non_path_is_refused(self):
+        from nemo_gym.data.tasks.harbor.prepare import DEFAULT_OUTPUT_ROOT, output_root_from_overrides
+
+        assert output_root_from_overrides([]) == DEFAULT_OUTPUT_ROOT
+        assert output_root_from_overrides(["+harbor_output_root=''"]) == DEFAULT_OUTPUT_ROOT
+        with pytest.raises(ValueError, match="path string"):
+            output_root_from_overrides(["+harbor_output_root=3"])
+
     def test_prepare_for_the_oracle_is_refused_toward_dataset_validate(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         with pytest.raises(SystemExit, match="gym dataset validate"):
