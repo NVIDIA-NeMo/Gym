@@ -541,7 +541,8 @@ class GymInstallConfig(_StrictModel):
 
 
 class DriverConfig(_HostEnvRefs, _StrictModel):
-    container: str = "python:3.12"
+    # A null image explicitly selects a trusted host driver on Slurm (e.g. an Enroot controller).
+    container: str | None = "python:3.12"
     gym_install: GymInstallConfig | None = None
     # Name of a service in `services:` to use as the policy model. When set, injects
     # policy_base_url/policy_model_name/policy_api_key into each benchmark's run config.

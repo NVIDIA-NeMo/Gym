@@ -1,0 +1,38 @@
+wildclaw_dataset_path: ${oc.env:WILDCLAW_DATASET_PATH,benchmarks/wildclawbench/data/benchmark.jsonl}
+wildclaw_output_root: ${oc.env:WILDCLAW_OUTPUT_ROOT}
+
+wildclaw_agent:
+  responses_api_agents:
+    wildclawbench_agent:
+      entrypoint: app.py
+      domain: agent
+      description: WildClawBench original OpenClaw task execution and grading
+      value: Evaluate end-to-end multimodal, coding, productivity, search, social and safety tasks.
+      source_root: ${oc.env:WILDCLAW_ROOT}
+      worker_python: ${oc.env:WILDCLAW_PYTHON}
+      output_root: ${wildclaw_output_root}
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model_name: ${policy_model_name}
+      context_window: ${oc.select:wildclaw_context_window,131072}
+      max_tokens: ${oc.select:wildclaw_max_tokens,8192}
+      thinking: ${oc.select:wildclaw_thinking,high}
+      sandbox_runtime: ${oc.env:WILDCLAW_SANDBOX_RUNTIME,enroot}
+      datasets:
+        - name: wildclawbench
+          type: benchmark
+          jsonl_fpath: ${wildclaw_dataset_path}
+          prompt_config: null
+          prepare_script: benchmarks/wildclawbench/prepare.py
+          num_repeats: 1
+          license: MIT
+
+wildclaw_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: wildclaw_agent
+      default_episode_timeout_seconds: 2160
