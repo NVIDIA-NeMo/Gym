@@ -49,7 +49,7 @@ When one `gym eval run` collects rollouts for several agents with aggregation en
 | `completed_rollouts` | Rollouts with a scored success |
 | `failed_rollouts` | Rollouts settled by a failure no resume retries, or by an intentional omission |
 | `completed_at` | UTC time the file was written, in ISO 8601 |
-| `aggregation_status` | `complete`, or `error` when `/aggregate_metrics` failed; the entry then carries the error |
+| `aggregation_status` | `complete`, or `error` when `/aggregate_metrics` failed or gave no answer within 30 minutes; the entry then carries the error |
 | `aggregate` | The entry `<output>_aggregate_metrics.json` gives the agent, apart from `_ng_run_health_metrics`, a run-level health summary added to the first run-wide entry after the run |
 
 When an agent is complete:
@@ -62,7 +62,7 @@ When an agent is complete:
 What changes the files:
 
 - A fresh run deletes `<output>_agent_complete/`.
-- A resumed run rewrites the file of an agent an earlier job finished before it dispatches, so that file's `completed_at` is the resuming job's time.
+- A resumed run rewrites the file of an agent an earlier job finished before it dispatches, so that file's `completed_at` is the resuming job's time. It deletes the file of an agent it still has rollouts to run for, which the agent writes again once they settle.
 - `<output>_aggregate_metrics.json` is still written once, after every agent is done. Once it exists it is authoritative: a later `gym eval aggregate` repair rewrites it but not the completion files, so a completion file that recorded an aggregation error can be stale, and the run-wide entry wins.
 - If a job is killed before the run-wide file is written, the completion files are what it leaves. `gym eval aggregate` with `+merge_shards=false` can compute metrics from the saved rollouts afterwards; it needs the environment servers running again, scores unfinished agents from the rollouts they have, and is a manual step.
 

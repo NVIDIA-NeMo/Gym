@@ -1522,6 +1522,119 @@ class TestRolloutCollection:
         }
         assert alpha["aggregate"] == run_aggregate["alpha"]
 
+    async def test_a_resume_removes_the_completion_file_of_an_agent_it_reruns(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        """A completion file an earlier job left for an agent the resume still runs is gone during that rerun."""
+        complete_dir = tmp_path / "rollouts_agent_complete"
+        output_fpath = tmp_path / "rollouts.jsonl"
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(self._write_agent_inputs(tmp_path, ("alpha", "beta"))),
+            output_jsonl_fpath=str(output_fpath),
+            disable_health_check=True,
+            resume_from_cache=True,
+            allow_unsafe_resume=True,
+        )
+        materialized_rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        config.materialized_jsonl_fpath.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in materialized_rows))
+        output_fpath.write_bytes(
+            b"".join(
+                orjson.dumps({**row, "reward": 0.0}) + b"\n"
+                for row in materialized_rows
+                if row[AGENT_REF_KEY_NAME]["name"] == "beta"
+            )
+        )
+        complete_dir.mkdir()
+        (complete_dir / "alpha.json").write_text('{"aggregation_status": "complete"}')
+        alpha_file_during_rerun: list[bool] = []
+
+        async def post(server_name: str, url_path: str, json, **kwargs) -> FakeResponse:
+            if url_path == "/aggregate_metrics":
+                return FakeResponse(
+                    200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump()
+                )
+            alpha_file_during_rerun.append((complete_dir / "alpha.json").exists())
+            return FakeResponse(200, {"response": {}, "reward": 1.0})
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post), agent_names=("alpha", "beta"))
+
+        await RolloutCollectionHelper().run_from_config(config)
+
+        assert alpha_file_during_rerun == [False]
+        alpha = orjson.loads((complete_dir / "alpha.json").read_bytes())
+        assert (alpha["expected_rollouts"], alpha["completed_rollouts"]) == (1, 1)
+
+    async def test_an_early_aggregation_that_never_answers_is_recorded_as_an_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        """A hung /aggregate_metrics cannot hold the run: the completion file records the timeout."""
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "AGENT_COMPLETE_AGGREGATION_TIMEOUT_S", 0.05)
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(self._write_agent_inputs(tmp_path, ("alpha", "beta"))),
+            output_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
+            disable_health_check=True,
+        )
+        alpha_aggregations: list[str] = []
+
+        async def post(server_name: str, url_path: str, json, **kwargs) -> FakeResponse:
+            if url_path == "/aggregate_metrics":
+                if server_name == "alpha_environment_server":
+                    alpha_aggregations.append(server_name)
+                    if len(alpha_aggregations) == 1:
+                        await asyncio.Event().wait()
+                return FakeResponse(
+                    200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump()
+                )
+            return FakeResponse(200, {"response": {}, "reward": 1.0})
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post), agent_names=("alpha", "beta"))
+
+        await asyncio.wait_for(RolloutCollectionHelper().run_from_config(config), timeout=30)
+
+        alpha = orjson.loads((tmp_path / "rollouts_agent_complete" / "alpha.json").read_bytes())
+        assert alpha["aggregation_status"] == "error"
+        assert alpha["aggregate"][AGGREGATION_ERROR_KEY]["type"] == "TimeoutError"
+        # The run-wide aggregate is not bounded, and its own call answers.
+        run_aggregate = {
+            entry[AGENT_REF_KEY_NAME]["name"]: entry
+            for entry in orjson.loads((tmp_path / "rollouts_aggregate_metrics.json").read_bytes())
+        }
+        assert run_aggregate["alpha"]["key_metrics"]["mean/reward"] == 1.0
+
+    async def test_a_cancelled_run_stops_its_completion_tasks_before_it_returns(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        """No completion task outlives a cancelled run, so none writes a file after the run has stopped."""
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(self._write_agent_inputs(tmp_path, ("alpha", "beta"))),
+            output_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
+            disable_health_check=True,
+        )
+        aggregation_started = asyncio.Event()
+        aggregation_stopped: list[bool] = []
+
+        async def post(server_name: str, url_path: str, json, **kwargs) -> FakeResponse:
+            if url_path == "/aggregate_metrics":
+                aggregation_started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    aggregation_stopped.append(True)
+                    raise
+            if server_name == "beta_environment_server":
+                await asyncio.Event().wait()
+            return FakeResponse(200, {"response": {}, "reward": 1.0})
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post), agent_names=("alpha", "beta"))
+
+        run = asyncio.create_task(RolloutCollectionHelper().run_from_config(config))
+        await asyncio.wait_for(aggregation_started.wait(), timeout=30)
+        run.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(run, timeout=30)
+
+        assert aggregation_stopped == [True]
+
     @pytest.mark.parametrize("count_failures_as_zero", [False, True], ids=["failure-left-out", "failure-counted"])
     async def test_a_final_failure_settles_its_rollout_so_the_agent_completes_during_the_job(
         self,

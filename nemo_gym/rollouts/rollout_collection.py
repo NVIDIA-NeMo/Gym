@@ -2871,6 +2871,15 @@ def _iter_jsonl(path: Path) -> Iterator[Dict]:
 
 
 AGENT_COMPLETE_SCHEMA_VERSION = "1"
+# An early /aggregate_metrics call past this is recorded as an aggregation error: the run waits for it.
+AGENT_COMPLETE_AGGREGATION_TIMEOUT_S = 1800.0
+
+
+async def _cancel_and_join(tasks: List[asyncio.Task]) -> None:
+    """Cancel the tasks still running and wait for all of them, so none outlives the caller that started them."""
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def _agent_complete_fpath(output_fpath: Path, label: str) -> Path:
@@ -4120,6 +4129,10 @@ executions → not run again (left to recovery)
                     for row in store.inputs_for([{ROLLOUT_ID_KEY_NAME: identity} for identity in settled_identities])
                 }
                 agent_pending_keys = {name: keys - settled_keys for name, keys in agent_expected_keys.items()}
+                # A resume can reopen an agent an earlier job completed (e.g. a failure it now retries): its file goes.
+                pending_labels = self._agent_complete_labels(agent_samples)
+                for name in (name for name, keys in agent_pending_keys.items() if keys):
+                    _agent_complete_fpath(output_fpath, pending_labels[name]).unlink(missing_ok=True)
 
         def completion_group(row: Mapping[str, Any]) -> str:
             return _metrics_group(row, lambda: completion_servers_by_agent) or self._dispatch_name(row)
@@ -4210,7 +4223,7 @@ executions → not run again (left to recovery)
             if owned_token_source is not None:
                 output_files.push_async_callback(owned_token_source.close)
             output_files.enter_context(store)
-            output_files.callback(lambda: [task.cancel() for task in agent_complete_tasks])
+            output_files.push_async_callback(_cancel_and_join, agent_complete_tasks)
 
             def write_final_status() -> None:
                 # A run that stops before its final status write, during collection or in a step after it, would
@@ -4767,6 +4780,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         rows: List[Dict],
         *,
         labels: Optional[Mapping[str, str]] = None,
+        timeout_s: Optional[float] = None,
     ) -> Tuple[List[Dict], Optional[Exception]]:
         """Call /aggregate_metrics on the environment server each rollout ran through.
 
@@ -4779,7 +4793,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         ``labels`` maps each environment server to its entry's label. Without it the labels come from
         the servers present in ``results``, so a caller aggregating a subset of a run passes the run's
-        labels to keep an entry named as the full aggregation names it.
+        labels to keep an entry named as the full aggregation names it. ``timeout_s`` bounds each server's
+        call; one past it gets an error entry like a failed request.
         """
         if not results:
             return [], None
@@ -4855,13 +4870,14 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             agg_response = None
             try:
                 agg_request = AggregateMetricsRequest(verify_responses=stripped)
-                agg_response = await server_client.post(
-                    server_name=server_name,
-                    url_path="/aggregate_metrics",
-                    json=agg_request,
-                )
-                await raise_for_status(agg_response)
-                agg_result = AggregateMetrics.model_validate(await get_response_json(agg_response))
+                async with asyncio.timeout(timeout_s):
+                    agg_response = await server_client.post(
+                        server_name=server_name,
+                        url_path="/aggregate_metrics",
+                        json=agg_request,
+                    )
+                    await raise_for_status(agg_response)
+                    agg_result = AggregateMetrics.model_validate(await get_response_json(agg_response))
             except Exception as exc:
                 if first_error is None:
                     first_error = exc
@@ -4888,22 +4904,26 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         all_agent_metrics: List[Dict] = []
         tasks = [
-            _fetch_agent_metrics(server_name, labels[server_name], results_list)
+            asyncio.create_task(_fetch_agent_metrics(server_name, labels[server_name], results_list))
             for server_name, results_list in server_results.items()
         ]
-        for coro in asyncio.as_completed(tasks):
-            agent_entry = await coro
-            all_agent_metrics.append(agent_entry)
+        try:
+            for coro in asyncio.as_completed(tasks):
+                agent_entry = await coro
+                all_agent_metrics.append(agent_entry)
 
-            agent_name = agent_entry[AGENT_REF_KEY_NAME]["name"]
-            if AGGREGATION_ERROR_KEY in agent_entry:
-                print(
-                    f"\nAggregate metrics failed for {agent_name}:\n"
-                    + json.dumps(agent_entry[AGGREGATION_ERROR_KEY], indent=4)
-                )
-                continue
-            key_metrics = agent_entry.get("key_metrics", {})
-            print(f"\nKey metrics for {agent_name}:\n" + json.dumps(key_metrics, indent=4))
+                agent_name = agent_entry[AGENT_REF_KEY_NAME]["name"]
+                if AGGREGATION_ERROR_KEY in agent_entry:
+                    print(
+                        f"\nAggregate metrics failed for {agent_name}:\n"
+                        + json.dumps(agent_entry[AGGREGATION_ERROR_KEY], indent=4)
+                    )
+                    continue
+                key_metrics = agent_entry.get("key_metrics", {})
+                print(f"\nKey metrics for {agent_name}:\n" + json.dumps(key_metrics, indent=4))
+        finally:
+            # A cancelled caller takes its in-flight requests down with it.
+            await _cancel_and_join(tasks)
 
         all_agent_metrics.sort(key=lambda entry: entry[AGENT_REF_KEY_NAME]["name"])
         return all_agent_metrics, first_error
@@ -5078,7 +5098,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             # depend on that order. Sort the same way here, so this entry never rests on the order of the store.
             rows.sort(key=_rollout_order_key)
 
-            entries, _ = await self._aggregate_entries(rows, rows, labels=self._agent_complete_labels(samples))
+            entries, _ = await self._aggregate_entries(
+                rows, rows, labels=self._agent_complete_labels(samples), timeout_s=AGENT_COMPLETE_AGGREGATION_TIMEOUT_S
+            )
             if len(entries) != 1:
                 raise RuntimeError(
                     f"Agent '{agent_name}' aggregated into {len(entries)} environment servers, expected one."
