@@ -72,8 +72,7 @@ from nemo_gym.trajectory import (
     TrajectoryRecord,
     TrajectoryTurn,
 )
-from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
-from nemo_gym.utils.install_lock import async_install_lock, install_lock
+from nemo_gym.utils import async_install_lock, install_lock, is_nemo_gym_fastapi_entrypoint
 
 
 _DEFAULT_HARVEST_GLOBS = ["rtl/**/*.sv", "rtl/**/*.v", "rtl/**/*.vhd", "verif/**/*.sv", "verif/**/*.v"]

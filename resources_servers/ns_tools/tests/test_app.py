@@ -48,8 +48,8 @@ from nemo_gym.server_runtime import (
     ResourcesSeedSessionRequest,
     SimpleResourcesServer,
     check_resources_session_contract,
+    refuse_unsupported_num_workers,
 )
-from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
 
 
 class TestApp:

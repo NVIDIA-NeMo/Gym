@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.utils import install_lock as install_lock_module
-from nemo_gym.utils.install_lock import (
+from nemo_gym.utils import local_install as local_install_module
+from nemo_gym.utils.local_install import (
     adopt_recorded_install,
     async_install_lock,
     install_lock,
@@ -114,7 +114,7 @@ async def test_both_locks_run_the_install_unlocked_where_the_filesystem_refuses_
     def refuse(fd: int, operation: int) -> None:
         raise OSError(errno.ENOLCK, "No locks available")
 
-    monkeypatch.setattr(install_lock_module.fcntl, "flock", refuse)
+    monkeypatch.setattr(local_install_module.fcntl, "flock", refuse)
     ran = []
     with install_lock(tmp_path / "sync.lock"):
         ran.append("sync")

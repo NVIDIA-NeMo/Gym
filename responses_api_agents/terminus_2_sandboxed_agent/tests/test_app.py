@@ -32,7 +32,7 @@ from nemo_gym.core import (
     agent_route_failure,
     failure_report_for,
 )
-from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
+from nemo_gym.server_runtime import refuse_unsupported_num_workers
 from nemo_gym.trajectory import TrajectoryRecord, TrajectoryTurn
 from nemo_gym.utils import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
 from responses_api_agents.terminus_2_sandboxed_agent import app as app_module

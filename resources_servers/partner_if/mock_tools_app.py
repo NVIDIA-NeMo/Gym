@@ -36,8 +36,8 @@ from nemo_gym.server_runtime import (
     ResourcesSessionFences,
     ReverifyMode,
     SimpleResourcesServer,
+    refuse_unsupported_num_workers,
 )
-from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import VerifierFixture
 from resources_servers.partner_if.app import (

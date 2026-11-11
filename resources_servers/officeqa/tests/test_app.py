@@ -29,8 +29,8 @@ from nemo_gym.server_runtime import (
     ResourcesSeedRejectedError,
     ResourcesSeedSessionRequest,
     check_resources_session_contract,
+    refuse_unsupported_num_workers,
 )
-from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
 from resources_servers.officeqa import app as officeqa_app
 from resources_servers.officeqa.app import (
     VERIFIER_FIXTURE,

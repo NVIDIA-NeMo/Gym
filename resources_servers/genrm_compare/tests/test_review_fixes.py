@@ -35,7 +35,7 @@ from nemo_gym.core import (
 )
 from nemo_gym.data import TaskDataValidator, load_task_data_schema
 from nemo_gym.metrics import RewardProfiler
-from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
+from nemo_gym.server_runtime import refuse_unsupported_num_workers
 from nemo_gym.verification import judge_failsafe
 from resources_servers.genrm_compare.tests.support import request_with_session
 from resources_servers.genrm_compare.tests.test_cohort_lifecycle import collected_comparisons, member

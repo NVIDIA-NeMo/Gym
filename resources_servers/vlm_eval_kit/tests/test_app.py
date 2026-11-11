@@ -17,7 +17,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from nemo_gym.client import ServerClient
-from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
+from nemo_gym.server_runtime import refuse_unsupported_num_workers
 from resources_servers.vlm_eval_kit.app import VlmEvalKitResourcesServer, VlmEvalKitResourcesServerConfig
 
 

@@ -73,8 +73,8 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
     lost_session_verification,
+    refuse_unsupported_num_workers,
 )
-from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
 from nemo_gym.verification.judge import judge_call_failed
 from resources_servers.gdpval import persisted_layout
 from resources_servers.gdpval.judge_panel import (

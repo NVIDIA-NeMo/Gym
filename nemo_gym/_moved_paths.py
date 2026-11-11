@@ -170,7 +170,7 @@ MOVED_MODULES: dict[str, MovedPath] = {
     "nemo_gym.server_metadata": MovedPath(new="nemo_gym.config.server_metadata", since="0.8.0"),
     "nemo_gym.decorators": MovedPath(new="nemo_gym.utils.decorators", since="0.8.0"),
     "nemo_gym.path_utils": MovedPath(new="nemo_gym.utils.path_utils", since="0.8.0"),
-    "nemo_gym.install_lock": MovedPath(new="nemo_gym.utils.install_lock", since="0.8.0"),
+    "nemo_gym.install_lock": MovedPath(new="nemo_gym.utils.local_install", since="0.8.0"),
     "nemo_gym.cli._compat": MovedPath(new="nemo_gym.utils.compat", since="0.8.0"),
     "nemo_gym.cli._venv_setup": MovedPath(new="nemo_gym.utils.venv_setup", since="0.8.0"),
 }

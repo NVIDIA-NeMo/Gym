@@ -33,7 +33,7 @@ from app import (
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponse
-from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
+from nemo_gym.server_runtime import refuse_unsupported_num_workers
 
 
 def _make_response(text: str) -> NeMoGymResponse:
