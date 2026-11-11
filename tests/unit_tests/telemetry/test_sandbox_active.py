@@ -24,6 +24,7 @@ import pytest
 
 from nemo_gym.sandbox import api as sandbox_api
 from nemo_gym.sandbox.api import AsyncSandbox, SandboxSpec
+from nemo_gym.telemetry import _fallbacks as telemetry_fallbacks
 from nemo_gym.telemetry import gym_metrics as telemetry_metrics
 from nemo_gym.telemetry import setup as telemetry_setup
 from tests.unit_tests.sandbox.test_sandbox import FakeSandboxProvider
@@ -40,9 +41,16 @@ def _active_by_provider(points) -> dict[str, int]:
     return {p.attributes[PROVIDER_ATTR]: p.value for p in points}
 
 
+def set_sandbox_gates(monkeypatch, *, group: bool, exporter: bool) -> None:
+    """Set the `sandbox` span group and the metrics exporter where the sandbox sites read them."""
+    monkeypatch.setattr(telemetry_fallbacks, "is_span_group_enabled", lambda _: group)
+    monkeypatch.setattr(sandbox_api, "is_span_group_enabled", lambda _: group)
+    monkeypatch.setattr(telemetry_setup, "_METRICS_EXPORTING", exporter)
+
+
 @pytest.fixture
 def sandbox_group_on(monkeypatch):
-    monkeypatch.setattr(sandbox_api, "is_span_group_enabled", lambda group: True)
+    set_sandbox_gates(monkeypatch, group=True, exporter=False)
 
 
 def test_recording_without_telemetry_is_a_no_op(monkeypatch):
@@ -152,8 +160,8 @@ async def test_failed_close_keeps_the_sandbox_counted_until_a_retry_releases_it(
 
 
 @pytest.mark.asyncio
-async def test_sandbox_group_off_records_nothing(collected_metrics, monkeypatch):
-    monkeypatch.setattr(sandbox_api, "is_span_group_enabled", lambda group: False)
+async def test_sandbox_records_nothing_without_the_group_or_a_metrics_exporter(collected_metrics, monkeypatch):
+    set_sandbox_gates(monkeypatch, group=False, exporter=False)
     sandbox = AsyncSandbox(FakeSandboxProvider(), SandboxSpec(image="img"))
     await sandbox.start()
     await sandbox.stop()

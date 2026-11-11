@@ -14,13 +14,22 @@
 # limitations under the License.
 import json
 from copy import deepcopy
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiohttp import ClientResponseError
 from pydantic import ValidationError
 
 from nemo_gym.client import ServerClient
-from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import (
+    FailureBoundary,
+    FailureHeader,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
+    RequestFailureLog,
+    failure_report_for,
+)
 from responses_api_agents.critpt_agent.app import (
     CritPtAgent,
     CritPtAgentConfig,
@@ -230,7 +239,10 @@ class TestApp:
                 "input_tokens": 450,
                 "output_tokens": 220,
                 "total_tokens": 670,
-                "input_tokens_details": {"cached_tokens": None if detail_tokens is None else 2 * detail_tokens},
+                "input_tokens_details": {
+                    "cached_tokens": None if detail_tokens is None else 2 * detail_tokens,
+                    "cache_write_tokens": None,
+                },
                 "output_tokens_details": {"reasoning_tokens": None if detail_tokens is None else 2 * detail_tokens},
             }
             assert verify_data["response"]["usage"] == expected_usage
@@ -356,3 +368,45 @@ class TestApp:
         assert {field: payload.get(field) for field in _EXTRA_TASK_FIELDS} == _EXTRA_TASK_FIELDS
         assert payload["problem_id"] == "5"
         assert payload["code_template"] == "def solve():\n    return ???"
+
+
+def _failed_verify_reply() -> MagicMock:
+    """A 500 /verify reply whose failure report names the resources server's verifier error, as on the wire."""
+    failure = NgFailureEvent(
+        boundary=FailureBoundary.RESOURCES_SERVER,
+        failure_kind="verifier_error",
+        failure_reason="Verification failed: CritPtRateLimitExceeded",
+        operation="verify",
+        stage="verification",
+        http_status=500,
+    )
+    request_info = SimpleNamespace(url="http://server", method="POST", headers={}, real_url="http://server")
+    error = ClientResponseError(
+        request_info,
+        (),
+        status=500,
+        message="Internal Server Error",
+        headers=FailureHeader.encode(failure_report_for(failure)),
+    )
+    reply = MagicMock(status=500, ok=False, cookies={})
+    reply.content.read = AsyncMock(return_value=b"Internal Server Error")
+    reply.raise_for_status = MagicMock(side_effect=error)
+    return reply
+
+
+@pytest.mark.asyncio
+async def test_run_masks_the_row_when_verify_fails_and_keeps_the_answer():
+    server = _make_server()
+    server.server_client.post.side_effect = [
+        _mock_post_response({}),
+        _mock_post_response(_MODEL_RESPONSE),
+        _mock_post_response(_MODEL_RESPONSE),
+        _failed_verify_reply(),
+    ]
+
+    with RequestFailureLog.capture() as log:
+        result = await server.run(MagicMock(cookies={}), _make_run_body())
+
+    assert (result.reward, result.mask_sample, result.failure_kind) == (0.0, True, "agent_route_failed")
+    assert result.response.output  # the generated answer survives for a later grade
+    assert {"agent_route_failed", "verifier_error"} <= {event.failure_kind for event in log.report.events.values()}
