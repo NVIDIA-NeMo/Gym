@@ -387,9 +387,11 @@ def configure_wandb_labels(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("retarget", "continue"))
+    parser.add_argument("command", choices=("retarget", "experiment", "continue"))
     args, remaining = parser.parse_known_args()
-    if args.command == "continue":
+    if args.command == "experiment":
+        from scripts.prepare_swe_experiment import main as command
+    elif args.command == "continue":
         from scripts.swe_training_continuation import main as command
     else:
         from scripts.retarget_swe_training_recipe import main as command
