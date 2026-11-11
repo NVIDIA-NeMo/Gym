@@ -11,6 +11,7 @@ from nemo_gym.core import rollout_context
 from nemo_gym.server_runtime import observe_verifier
 from nemo_gym.trajectory import grading_result_binding
 from nemo_gym.verification import judge_failsafe
+from resources_servers.opencode_multimodal_benchmarks.agentx import AgentXConfig, AgentXServer
 from resources_servers.opencode_multimodal_benchmarks.app import VisualBenchmarksServer
 from resources_servers.opencode_multimodal_benchmarks.tests.test_app import request, server  # noqa: F401
 
@@ -149,3 +150,19 @@ async def test_api_failure_option_text_is_not_a_parsed_judge_verdict(server, ben
     assert server.server_client.post.await_count == 2
     operations = result["ng_verifier_invocations"][0]["grading_operations"]
     assert operations and all(op["outcome"] != "completed" for op in operations)
+
+
+@pytest.mark.asyncio
+async def test_agentx_fractional_verdict_is_bound_to_the_saved_answer(server):
+    agentx = AgentXServer(
+        config=AgentXConfig(**(server.config.model_dump() | {"judge_server": "judge"})),
+        server_client=server.server_client,
+    )
+    agentx.server_client.post = AsyncMock(return_value=judge_reply('{"score": 0.65}'))
+    body = request("AgentX", "mostly red")
+    body.verifier_metadata.update(GT_json="red", query_type="subjective", query_type_raw="Subjective")
+    result = await observed(agentx, body)
+    assert result["reward"] == 0.65 and not result["mask_sample"]
+    (grade,) = result["ng_verifier_invocations"][0]["grading_operations"]
+    assert grade["kind"] == "llm_judge" and grade["outcome"] == "completed"
+    assert grade["result_binding_sha256"] == grading_result_binding(result)

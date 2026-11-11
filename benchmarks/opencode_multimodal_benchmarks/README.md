@@ -6,6 +6,7 @@ used independently of OpenCode:
 - [VStar](vstar/README.md)
 - [HRBench8K](hrbench8k/README.md)
 - [VTCBench](vtcbench/README.md)
+- [Agent-X reference-answer evaluation](agentx/README.md)
 - [ZeroBench](zerobench/README.md)
 
 Each entry documents its dataset and measurement contract. The catalog defaults
@@ -20,6 +21,7 @@ sandbox through Gym's shared agent-session lifecycle.
 | [VStar](vstar/opencode.yaml) | `model_only` | Disabled |
 | [HRBench8K](hrbench8k/opencode.yaml) | `model_only` | Disabled |
 | [VTCBench](vtcbench/opencode.yaml) | `model_only` | Disabled |
+| [Agent-X](agentx/opencode.yaml) | `inherit` | Enabled |
 | [ZeroBench](zerobench/opencode.yaml) | `model_only` | Disabled |
 
 This uses the same provider execution boundary as BrowseComp's OpenCode pairing.
@@ -56,7 +58,7 @@ set `judge_endpoint` and `judge_api_key_env` for direct HTTP judging. The catalo
 does not select a hosted model or endpoint. ZeroBench requires no judge.
 
 The shared verifier defaults to a 120-second timeout and three transport attempts
-per judge request. VTCBench additionally
+per judge request. Agent-X uses 300 seconds and ten attempts. VTCBench additionally
 uses the public five-verdict parsing schedule. Judge failures need resolution
 before a complete score is reported.
 
@@ -147,7 +149,7 @@ the submitted run's health and recovery gates.
 
 ## Dataset identity
 
-VStar/HRBench8K and ZeroBench are checked against the pinned manifests or
+VStar/HRBench8K, Agent-X and ZeroBench are checked against the pinned manifests or
 source checksum. VTCBench TSV releases are caller-supplied: pass
 `prepare_script_args.sha256` for qualification and retain the preparation's
 `dataset.json` with its source and prepared-task hashes. Use a separate output

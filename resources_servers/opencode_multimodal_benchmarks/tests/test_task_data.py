@@ -31,6 +31,10 @@ def _minimal_metadata(benchmark):
         metadata.update(answer="A", options={"A": "cat", "B": "dog"})
     if benchmark == "HRBench8K":
         metadata["cycle_category"] = "1"
+    if benchmark == "AgentX":
+        metadata.update(
+            GT_json='{"value":"cat"}', query_type="objective", query_type_raw="Objective", modality="Image"
+        )
     return metadata
 
 
@@ -69,6 +73,7 @@ def _assert_declared_task_reads(source, names, *, derived=()):
         ("verifier.py", {"task"}, ()),
         ("mcq.py", {"task"}, ()),
         ("vtcbench.py", {"task"}, ()),
+        ("agentx.py", {"task"}, ()),
         ("metrics.py", {"metadata"}, ()),
         # These rows also carry explicitly derived scoring/report fields.
         ("reporting.py", {"row"}, ("hit", "type", "accuracy")),
@@ -92,7 +97,7 @@ def test_consumer_guard_detects_a_removed_schema_field(monkeypatch):
         _assert_declared_task_reads(source, {"task"})
 
 
-@pytest.mark.parametrize("benchmark", BENCHMARKS)
+@pytest.mark.parametrize("benchmark", [*BENCHMARKS, "AgentX"])
 @pytest.mark.parametrize("field", ["index", "question", "answer", "expected_samples"])
 def test_wire_boundary_requires_shared_consumer_fields(benchmark, field):
     metadata = _minimal_metadata(benchmark)
@@ -101,7 +106,7 @@ def test_wire_boundary_requires_shared_consumer_fields(benchmark, field):
         _wire_request(metadata)
 
 
-@pytest.mark.parametrize("benchmark", BENCHMARKS)
+@pytest.mark.parametrize("benchmark", [*BENCHMARKS, "AgentX"])
 @pytest.mark.parametrize(
     "field,value", [("answer", ""), ("answer", " \n"), ("expected_samples", 0), ("expected_samples", -1)]
 )
@@ -147,6 +152,36 @@ def test_wire_boundary_requires_hrbench_cycle(cycle):
         _wire_request(metadata)
 
 
+@pytest.mark.parametrize("field", ["query_type", "modality"])
+@pytest.mark.parametrize("value", [None, "", " \n"])
+def test_agentx_wire_boundary_requires_judge_and_reporting_metadata(field, value):
+    metadata = _minimal_metadata("AgentX")
+    metadata.pop(field)
+    if value is not None:
+        metadata[field] = value
+    with pytest.raises(ValidationError):
+        _wire_request(metadata)
+
+
+@pytest.mark.asyncio
+async def test_minimal_agentx_wire_task_runs_verification_and_reporting(server, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from resources_servers.opencode_multimodal_benchmarks.agentx import AgentXConfig, AgentXServer
+
+    agentx = AgentXServer(
+        config=AgentXConfig(**(server.config.model_dump() | {"entrypoint": "agentx.py"})),
+        server_client=server.server_client,
+    )
+    monkeypatch.setattr(agentx, "_judge_completion", AsyncMock(return_value='{"verdict": "equivalent"}'))
+    body = _wire_request(_minimal_metadata("AgentX"))
+    result = await agentx.verify(body)
+    assert result.reward == 1
+    metrics = agentx.compute_metrics([[result.model_dump()]])
+    assert metrics["AgentX/complete"] is True
+    assert metrics["AgentX/Image/completed"] == 1
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("benchmark", BENCHMARKS)
 async def test_minimal_wire_task_runs_verification_and_reporting(server, benchmark):
@@ -183,7 +218,7 @@ def test_aggregation_does_not_infer_completeness_from_landed_rows(server, benchm
     assert metrics[f"{benchmark}/complete"] is False
 
 
-@pytest.mark.parametrize("benchmark", ["VStarBench", "HRBench8K", "VTCBench", "ZeroBench"])
+@pytest.mark.parametrize("benchmark", ["VStarBench", "HRBench8K", "VTCBench", "ZeroBench", "AgentX"])
 def test_flat_legacy_and_materialized_tasks(benchmark, tmp_path):
     image = tmp_path / "input-0.png"
     image.write_bytes(b"image bytes")
@@ -195,6 +230,10 @@ def test_flat_legacy_and_materialized_tasks(benchmark, tmp_path):
         "options": {"A": "cat"},
         "expected_samples": 1,
         "cycle_category": "1",
+        "GT_json": '{"value":"a"}',
+        "query_type": "objective",
+        "query_type_raw": "Objective",
+        "modality": "Image",
     }
     row = task_row(metadata | {"prompt": "Visible question", "images": [str(image)]})
     adapter = TypeAdapter(TaskData)
@@ -208,6 +247,25 @@ def test_flat_legacy_and_materialized_tasks(benchmark, tmp_path):
         adapter.validate_python(metadata | {"benchmark": "not-a-benchmark"})
     with pytest.raises(ValidationError):
         adapter.validate_python({key: value for key, value in metadata.items() if key != "answer"})
+
+
+def test_task_schema_retains_unknown_fields_and_json_encoded_references():
+    task = TaskData.model_validate(
+        {
+            "benchmark": "AgentX",
+            "index": "1",
+            "question": "q",
+            "answer": "a",
+            "GT_json": '{"value":"a"}',
+            "expected_samples": 1,
+            "query_type": "objective",
+            "query_type_raw": "Objective",
+            "modality": "Image",
+            "custom_provenance": "fixture",
+        }
+    )
+    assert task.GT_json == '{"value":"a"}'
+    assert task.model_dump()["custom_provenance"] == "fixture"
 
 
 def test_optional_categories_do_not_block_overall_reporting():

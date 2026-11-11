@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[3]
 CATALOG = "benchmarks/opencode_multimodal_benchmarks"
 
 
-@pytest.mark.parametrize("benchmark", ["vstar", "hrbench8k", "vtcbench", "zerobench"])
+@pytest.mark.parametrize("benchmark", ["vstar", "hrbench8k", "vtcbench", "zerobench", "agentx"])
 @pytest.mark.parametrize("mode", ["simple", "openai", "vllm", "training"])
 def test_catalog_pairings_validate_with_selected_model(benchmark, mode, monkeypatch):
     monkeypatch.setenv("OPENSANDBOX_API_KEY", "test-only")
