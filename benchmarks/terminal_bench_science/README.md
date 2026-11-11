@@ -301,7 +301,7 @@ The defaults follow Harbor's built-in `mini-swe-agent`:
 - No cost limit.
 - The package's `mini.yaml` prompts.
 - mini-SWE's 30-second `LocalEnvironment` command timeout.
-- The task's own 8-hour budget as the only wall-clock limit.
+- An 8-hour wall-clock limit, every task's own budget.
 
 You can override these with `++tbsci_max_steps=...`, `++tbsci_step_timeout_sec=...` and
 `++tbsci_agent_max_timeout_sec=...`, as with Terminal-Bench 4's `tb4_*` settings. Terminal-Bench
@@ -320,6 +320,10 @@ How the profile runs:
 - **Runtime.** The agent server uploads mini-SWE's pinned runtime into the task sandbox at seed,
   so the sandbox needs no PyPI access for it. It needs glibc 2.28 or newer and about 450 MB
   under `/tmp`; every v0.1 agent image is Debian or Ubuntu based, and none sets `[agent].user`.
+- **Run budget.** `++tbsci_agent_max_timeout_sec` is the run's wall-clock limit itself, as
+  `++tbsci_agent_timeout_sec` is for Codex: the session seed carries no task budget to cap it.
+  Its default, 28800 seconds, is every v0.1 task's budget. A larger value runs past the official
+  budget, unlike the `/run` profile, which takes the smaller of the two.
 - **Episode bound.** 46800 seconds (`++tbsci_episode_timeout_sec`), as for Codex: the runtime
   installation, the 8-hour agent budget and the slowest verifier (12000 seconds).
 - **Model address.** mini-SWE calls the model server from inside the sandbox at the address the

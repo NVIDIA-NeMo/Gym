@@ -37,7 +37,8 @@ terminal_bench_science_miniswe_agent:
         type: resources_servers
         name: terminal_bench_science_miniswe_resources_server
       # Harbor's built-in mini-swe-agent defaults, as the relay profile: no step limit and the 30-second
-      # LocalEnvironment command timeout. Each task's own 8-hour agent budget bounds the run.
+      # LocalEnvironment command timeout. The session seed carries no task budget, so this cap is the run's
+      # wall-clock limit; its default is every v0.1 task's 8-hour budget (as Codex's timeout in codex.yaml).
       step_limit: ${oc.select:tbsci_max_steps,0}
       step_timeout: ${oc.select:tbsci_step_timeout_sec,30}
       sandbox_runner_timeout_seconds: ${oc.select:tbsci_agent_max_timeout_sec,28800}
