@@ -383,3 +383,45 @@ async def test_rescore_limit_does_not_interpret_unrequested_completion(prepared_
             await reverify.RolloutReverificationHelper().run_from_config(config)
         assert seen == []
     assert snapshot(output) == before
+
+
+def _replay_servers() -> dict:
+    return {
+        "agent": {"responses_api_agents": {"fixture": {"resources_server": {"name": "resources"}}}},
+        "resources": {"resources_servers": {"fixture": {}}},
+        **{
+            name: {
+                "environment_servers": {
+                    "single_agent_turn": {
+                        "entrypoint": entrypoint,
+                        "agent_server": {"name": "agent", "type": "responses_api_agents"},
+                        "resources_server": {"name": "resources", "type": "resources_servers"},
+                    }
+                }
+            }
+            for name, entrypoint in (("plain", "app.py"), ("other", "app.py"))
+        },
+    }
+
+
+def test_repeat_plan_uses_verified_source_route_for_a_task_without_any_outcome(tmp_path):
+    rows = [{"_ng_task_index": task, "_ng_rollout_index": 0, "agent_ref": {"name": "agent"}} for task in range(2)]
+    source = tmp_path / "inputs.jsonl"
+    source.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+    output = tmp_path / "rollouts.jsonl"
+    servers = _replay_servers()
+    del servers["other"]
+    with RolloutStore.start_or_resume(
+        output, lambda: (rows, RunManifest.create(source, rows, {}, servers)), resume=False
+    ) as store:
+        first = store.pending()[0]
+        store.record_dispatch(first)
+        store.record_outcome(first | {"_ng_environment_server": "plain", "reward": 1})
+    plan = reverify._reverification_repeat_inventory(
+        [materialized_path_for(output)],
+        (output,),
+        [],
+        {"agent": "resources"},
+        {"resources": {"resources_servers": {"fixture": {}}}},
+    )
+    assert plan == {("plain", "resources"): {0: [0], 1: [0]}}

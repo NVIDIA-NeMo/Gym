@@ -23,6 +23,7 @@ import uuid
 import warnings
 from asyncio import Future, Semaphore
 from collections import Counter, defaultdict
+from collections.abc import Mapping
 from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass
 from math import isfinite
@@ -67,6 +68,7 @@ from nemo_gym.rollouts.rollout_collection import (
     NG_RESULT_TYPE_KEY,
     _coverage_report,
     _get_max_rollout_attempts,
+    _planned_repeat_inventory,
     _rollout_request_debug_summary,
     is_omitted_rollout_row,
     is_terminal_failure,
@@ -84,7 +86,13 @@ from nemo_gym.rollouts.rollout_records import (
     resolve_rollout_owner,
     resolve_rollout_path,
 )
-from nemo_gym.rollouts.rollout_recovery import RunManifest, manifest_path_for, run_lock
+from nemo_gym.rollouts.rollout_recovery import (
+    RunManifest,
+    _digest,
+    config_identity_path_for,
+    manifest_path_for,
+    run_lock,
+)
 from nemo_gym.rollouts.rollout_store import RolloutStore, raw_outcomes_are_selected
 from nemo_gym.server_runtime.base_resources_server import AggregateMetrics, AggregateMetricsRequest, ReverifyMode
 from nemo_gym.trajectory.atif_json import strict_json_loads
@@ -303,6 +311,64 @@ class CacheKeysByStatus:
     successful_keys: set[tuple[int, int]]
     terminal_keys: set[tuple[int, int]]
     maxed_out_keys: set[tuple[int, int]]
+
+
+@dataclass(frozen=True)
+class _ReplaySource:
+    store: RolloutStore | None
+    servers: Mapping[str, Any] | None
+
+
+def _replay_source(store: RolloutStore | None) -> _ReplaySource:
+    """Trust original server settings only while their identity matches the saved manifest."""
+    servers = None
+    if store is not None and not store.manifest.identity_overridden:
+        try:
+            identity = json.loads(config_identity_path_for(manifest_path_for(store.output)).read_bytes())
+            if isinstance(identity, dict) and _digest(identity) == store.manifest.config_digest:
+                candidate = identity.get("servers")
+                if isinstance(candidate, dict):
+                    servers = candidate
+        except (OSError, ValueError, TypeError):
+            pass
+    return _ReplaySource(store, servers)
+
+
+def _store_for_materialized_inputs(path: Path) -> RolloutStore | None:
+    """Use the normal companion filename only to locate a manifest-validated source."""
+    path = path.resolve()
+    suffix = "_materialized_inputs.jsonl"
+    if not path.name.endswith(suffix):
+        return None
+    output = path.with_name(path.name.removesuffix(suffix) + ".jsonl")
+    if not manifest_path_for(output).is_file():
+        return None
+    store = RolloutStore.read(output, import_legacy=False)
+    if store is None or materialized_path_for(store.output).resolve() != path:
+        return None
+    return store
+
+
+def _saved_environments(pair: InputRolloutPair, servers: Mapping[str, Any]) -> list[tuple[str, Mapping]]:
+    stamp = pair.rollout.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME, pair.input.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME))
+    reference = pair.input.get(AGENT_REF_KEY_NAME) or pair.rollout.get(AGENT_REF_KEY_NAME)
+    agent = reference.get("name") if isinstance(reference, Mapping) else None
+    environments = []
+    for name, block in servers.items():
+        if stamp is not None and name != stamp:
+            continue
+        implementations = block.get("environment_servers") if isinstance(block, Mapping) else None
+        if not isinstance(implementations, Mapping):
+            continue
+        for implementation, settings in implementations.items():
+            if not isinstance(settings, Mapping):
+                continue
+            if stamp is None:
+                bound = settings.get("agent_server")
+                if not isinstance(agent, str) or not isinstance(bound, Mapping) or bound.get("name") != agent:
+                    continue
+            environments.append((implementation, settings))
+    return environments
 
 
 # ---------------------------------------------------------------------------
@@ -1093,10 +1159,68 @@ async def _guard_atif_preflight(payloads: List[Dict[str, Any]]) -> None:
 # Very similar to the rollout collection code, but we need to send the request to
 # resources servers instead of the agent server, since the second one might not be started
 # ---------------------------------------------------------------------------
+def _reverification_repeat_inventory(materialized_fpaths, identity_sources, results, agent_to_rs, config):
+    """Group the full attempt plan using the same original identities as saved results.
+
+    Source stamps include failed attempts. A missing repeat may use another repeat's
+    task stamp, but never an arbitrary environment sharing its agent. For an entirely
+    missing task, only the verified source configuration can establish an environment.
+    """
+    stamps, _ = _source_identity_stamps(identity_sources)
+    by_task = defaultdict(set)
+    for (task, _), values in stamps.items():
+        if (name := values.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)) is not None:
+            by_task[task].add(name)
+    for result in results:
+        if (name := result.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)) is not None:
+            by_task[result.get(TASK_INDEX_KEY_NAME)].add(name)
+
+    inventory = {}
+    for path in materialized_fpaths:
+        source = _replay_source(_store_for_materialized_inputs(path))
+
+        def group(row):
+            task = row.get(TASK_INDEX_KEY_NAME)
+            key = (task, row.get(ROLLOUT_INDEX_KEY_NAME))
+            routed = dict(row)
+            if ENVIRONMENT_SERVER_STAMP_KEY_NAME not in routed:
+                name = stamps.get(key, {}).get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)
+                candidates = by_task.get(task, set())
+                if name is None and len(candidates) == 1:
+                    name = next(iter(candidates))
+                if name is None and by_task:
+                    candidates = [
+                        name
+                        for name, block in (source.servers or {}).items()
+                        if _saved_environments(InputRolloutPair(input=row, rollout={}), {name: block})
+                    ]
+                    if len(candidates) != 1:
+                        raise ConfigError(
+                            f"Cannot establish original environment for planned task {task}; restore source "
+                            "rollouts/configuration or provide stamped materialized inputs before aggregating."
+                        )
+                    name = candidates[0]
+                if name is not None:
+                    routed[ENVIRONMENT_SERVER_STAMP_KEY_NAME] = name
+            return rollout_run_key(routed), _rs_for_row(routed, agent_to_rs, config)
+
+        planned = _planned_repeat_inventory([path], group)
+        if planned is None:
+            return None
+        for key, tasks in planned.items():
+            target = inventory.setdefault(key, {})
+            for task, repeats in tasks.items():
+                target[task] = sorted(set(target.get(task, [])) | set(repeats))
+    return inventory if materialized_fpaths else None
+
+
 async def _call_aggregate_metrics(
     results: List[Dict],
     rows: List[Dict],
     output_fpath: Path,
+    *,
+    materialized_fpaths: Optional[List[Path]] = None,
+    identity_sources: Tuple[Path, ...] = (),
 ) -> Optional[Path]:
     """Call /aggregate_metrics on each resource server after rollouts complete.
 
@@ -1114,6 +1238,14 @@ async def _call_aggregate_metrics(
     # remapped row to be verified by one server and aggregated by another.
     agent_results: Dict[Tuple[str, str], List[Dict]] = {}
     labels = rollout_run_labels(rows)
+    inventory = await asyncio.to_thread(
+        _reverification_repeat_inventory,
+        materialized_fpaths or [],
+        identity_sources,
+        results,
+        agent_to_rs,
+        server_client.global_config_dict,
+    )
     for row, result in zip(rows, results):
         key = rollout_run_key(row)
         if not key:
@@ -1140,7 +1272,14 @@ async def _call_aggregate_metrics(
                 entry["response"] = response_metadata
             stripped.append(entry)
 
-        agg_request = AggregateMetricsRequest(verify_responses=stripped)
+        run_keys = {rollout_run_key(row) for row in rows if labels.get(rollout_run_key(row)) == agent_name}
+        expected = None
+        if inventory is not None:
+            expected = {}
+            for run_key in run_keys:
+                for task, indices in inventory.get((run_key, rs_name), {}).items():
+                    expected[task] = sorted(set(expected.get(task, [])) | set(indices))
+        agg_request = AggregateMetricsRequest(verify_responses=stripped, expected_rollout_indices=expected)
         agg_response = await server_client.post(
             server_name=rs_name,
             url_path="/aggregate_metrics",
@@ -2087,7 +2226,13 @@ class RolloutReverificationHelper(BaseModel):
             aggregate_metrics_fpath = None
         else:
             print("Computing aggregate metrics")
-            aggregate_metrics_fpath = await _call_aggregate_metrics(results, agg_rows, output_fpaths.output)
+            aggregate_metrics_fpath = await _call_aggregate_metrics(
+                results,
+                agg_rows,
+                output_fpaths.output,
+                materialized_fpaths=[Path(config.materialized_inputs_jsonl_fpath)],
+                identity_sources=identity_sources,
+            )
 
         expected_rollouts = len(results) + sum(failure_counts.values())
         coverage = _coverage_report(expected_rollouts, len(results), failure_counts, output_fpaths.failures)

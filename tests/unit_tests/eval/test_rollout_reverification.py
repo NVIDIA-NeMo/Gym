@@ -3355,6 +3355,74 @@ class TestResumeOfOutputCachedWithoutIdentityStamps:
         assert posted == [[0, 1, 2, 3]]
         assert not any("_ng_environment_server" in r for r in returned)
 
+    @pytest.mark.parametrize("resume", [False, True])
+    @pytest.mark.parametrize("missing", [False, True])
+    async def test_stamped_source_plan_keeps_all_repeats_with_resource_only_reverification(
+        self, tmp_path, monkeypatch, resume, missing
+    ):
+        async def aggregate(request):
+            return {"agent_metrics": {}, "key_metrics": {}, "group_level_metrics": []}
+
+        await self._stamped_source_plan(tmp_path, monkeypatch, resume, missing, aggregate)
+
+    async def _stamped_source_plan(self, tmp_path, monkeypatch, resume, missing, aggregate):
+        inputs = [
+            {
+                TASK_INDEX_KEY_NAME: task,
+                ROLLOUT_INDEX_KEY_NAME: repeat,
+                AGENT_REF_KEY_NAME: {"name": "agent_a"},
+                TASK_SOURCE_KEY_NAME: "rs_a",
+                "verifier_metadata": {
+                    "benchmark": "VStarBench",
+                    "index": str(task),
+                    "expected_samples": 2,
+                },
+            }
+            for task in range(2)
+            for repeat in range(2)
+        ]
+        self._write(tmp_path / "inputs.jsonl", inputs)
+        self._write(tmp_path / "rollouts.jsonl", [r | self._STAMP | {"response": {}, "reward": 1.0} for r in inputs])
+        if resume:
+            self._write(tmp_path / "output.jsonl", [inputs[0] | {"reward": 1.0}])
+        self._patch(monkeypatch, [], [])
+        client = MagicMock(global_config_dict={"rs_a": {"resources_servers": {"visual": {}}}})
+        requests, metrics = [], []
+
+        async def post(server_name, url_path, json):
+            assert server_name == "rs_a" and url_path == "/aggregate_metrics"
+            requests.append(json)
+            value = await aggregate(json)
+            metrics.append(value)
+            return value
+
+        async def response_json(value):
+            return value
+
+        def run(payloads, semaphore=None):
+            async def grade(row):
+                failed = missing and row[TASK_INDEX_KEY_NAME] == 1 and row[ROLLOUT_INDEX_KEY_NAME] == 1
+                result = row | {"reward": 1.0}
+                if failed:
+                    result |= {
+                        "mask_sample": True,
+                        "failure_kind": "judge_failed",
+                        "_ng_failure_class": "judge_failed",
+                    }
+                return row, result
+
+            return [grade(row) for row in payloads]
+
+        client.post = post
+        monkeypatch.setattr("nemo_gym.eval.rollout_reverification.setup_server_client", lambda: client)
+        monkeypatch.setattr("nemo_gym.eval.rollout_reverification.get_response_json", response_json)
+        monkeypatch.setattr("nemo_gym.eval.rollout_reverification._run_verification_payloads", run)
+        await RolloutReverificationHelper().run_from_config(self._config(tmp_path, resume=resume))
+        assert len(requests) == 1
+        assert requests[0].expected_rollout_indices == {0: [0, 1], 1: [0, 1]}
+        assert len(requests[0].verify_responses) == (3 if missing else 4)
+        return metrics[0]
+
 
 class TestRunFromConfigJudgeFailedOnly:
     """Smoke test: the whole `gym eval reverify --judge-failed-only` recovery path end to end.
@@ -3432,6 +3500,9 @@ class TestRunFromConfigJudgeFailedOnly:
         """Stub the dispatch/guard/aggregate delegates; result_fn(payload) chooses each row's /verify
         result (so a test can make some rows re-fail on a first pass)."""
         monkeypatch.setattr("nemo_gym.eval.rollout_reverification._resolve_under_cwd_or_install", lambda p: Path(p))
+        monkeypatch.setattr(
+            "nemo_gym.eval.rollout_reverification.setup_server_client", lambda: MagicMock(global_config_dict={})
+        )
 
         def fake_run(payloads, semaphore=None):
             dispatched.extend(payloads)
@@ -3945,3 +4016,66 @@ class TestVerifyAggregationRoutingConsistency:
         await _call_aggregate_metrics(results, rows, tmp_path / "out.jsonl")
 
         assert posted == ["math_rs"]
+
+
+@pytest.mark.parametrize("stamped_inputs", [False, True])
+def test_repeat_inventory_keeps_shared_agent_environments_and_authoritative_resources(tmp_path, stamped_inputs):
+    from nemo_gym.eval.rollout_reverification import _reverification_repeat_inventory
+
+    inputs = [
+        {
+            TASK_INDEX_KEY_NAME: task,
+            ROLLOUT_INDEX_KEY_NAME: repeat,
+            AGENT_REF_KEY_NAME: {"name": "shared"},
+            TASK_SOURCE_KEY_NAME: "remapped",
+            **({"_ng_environment_server": f"env_{task}"} if stamped_inputs else {}),
+        }
+        for task in range(2)
+        for repeat in range(2)
+    ]
+    materialized = tmp_path / "inputs.jsonl"
+    materialized.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in inputs))
+    # Repeat 1 is absent: the plan must retain it under the same task's original environment.
+    source = tmp_path / "source.jsonl"
+    source.write_bytes(
+        b"".join(
+            orjson.dumps(row | {"_ng_environment_server": f"env_{row[TASK_INDEX_KEY_NAME]}"}) + b"\n"
+            for row in inputs
+            if row[ROLLOUT_INDEX_KEY_NAME] == 0
+        )
+    )
+    inventory = _reverification_repeat_inventory(
+        [materialized],
+        (source,),
+        [],
+        {"shared": "old_resources"},
+        {"remapped": {"resources_servers": {"fixture": {}}}},
+    )
+    assert inventory == {("env_0", "remapped"): {0: [0, 1]}, ("env_1", "remapped"): {1: [0, 1]}}
+
+
+def test_unresolved_planned_task_does_not_guess_between_environments(tmp_path):
+    from nemo_gym.eval.rollout_reverification import _reverification_repeat_inventory
+
+    materialized = tmp_path / "inputs.jsonl"
+    materialized.write_bytes(
+        orjson.dumps(
+            {
+                TASK_INDEX_KEY_NAME: 2,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                AGENT_REF_KEY_NAME: {"name": "shared"},
+            }
+        )
+        + b"\n"
+    )
+    with pytest.raises(ConfigError, match="Cannot establish original environment"):
+        _reverification_repeat_inventory(
+            [materialized],
+            (),
+            [
+                {TASK_INDEX_KEY_NAME: 0, "_ng_environment_server": "env_a"},
+                {TASK_INDEX_KEY_NAME: 1, "_ng_environment_server": "env_b"},
+            ],
+            {"shared": "resources"},
+            {},
+        )
