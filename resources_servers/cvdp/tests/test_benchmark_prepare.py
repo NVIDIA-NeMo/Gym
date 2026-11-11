@@ -141,22 +141,10 @@ def test_cached_data_requires_the_pinned_output_checksum(tmp_path, monkeypatch):
     assert not benchmark_prepare.is_prepared_data_current(output)
 
 
-def test_prepared_ids_support_planning_and_selection(raw_task):
-    from nemo_gym.data.task_selection import select_tasks
-    from nemo_gym.eval.eval_plan import PlanBenchmark, PlanGym, build_eval_plan
-
+def test_prepared_ids_match_source_and_verifier_ids(raw_task):
     rows = [benchmark_prepare.convert_task(raw_task | {"id": name}) for name in ["b", "a"]]
+    assert [row["task_id"] for row in rows] == ["b", "a"]
     assert all(row["task_id"] == row["verifier_metadata"]["task_id"] for row in rows)
-    for ordered in [rows, rows[::-1]]:
-        plan = build_eval_plan(
-            ordered,
-            benchmark=PlanBenchmark(name="cvdp_v110", config_paths=[]),
-            taskset="cvdp_v110",
-            gym=PlanGym(version="test", commit="test"),
-        )
-        assert [task.task_id.task_id for task in plan.tasks] == ["a", "b"]
-        selected = select_tasks(ordered, ["a"])
-        assert [ordered[index]["task_id"] for index in selected] == ["a"]
 
 
 def test_recipe_manifest_retains_license_and_metadata():

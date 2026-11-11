@@ -361,7 +361,7 @@ class TestbenchRunner:
                     print(f"Failed to write file: {filepath}")
 
             if compose_content is None:
-                return 1, "No docker-compose.yml found in harness_files", []
+                raise CVDPInfrastructureError("No docker-compose.yml found in harness_files")
 
             # Write companion files from input.context — mirrors
             # repository.restore_files(self.context). Preserves the full
@@ -396,7 +396,7 @@ class TestbenchRunner:
             compose_data = yaml.safe_load(compose_content)
             services = list((compose_data.get("services") or {}).keys())
             if not services:
-                return 1, "No services found in docker-compose.yml", []
+                raise CVDPInfrastructureError("No services found in docker-compose.yml")
 
             # Preserve shared workspace state across services.
             archive_path = workdir_path.parent / f"{workdir_path.name}.tar.gz"
@@ -464,27 +464,30 @@ class TestbenchRunner:
         )
         if not image:
             if build_key:
-                return (
-                    1,
+                raise CVDPInfrastructureError(
                     f"No prepared image for service '{service}' (build key {build_key}). "
                     "Run resources_servers/cvdp/prepare.py for this dataset",
                 )
-            return 1, f"No image defined for service '{service}'"
+            raise CVDPInfrastructureError(f"No image defined for service '{service}'")
 
         cmd_parts = _build_command(svc["entrypoint"], svc["command"])
         if not cmd_parts:
-            return 1, f"Service '{service}' has no explicit command. Image-default commands are not portable"
+            raise CVDPInfrastructureError(
+                f"Service '{service}' has no explicit command. Image-default commands are not portable"
+            )
 
         workspace = posixpath.normpath(self.config.container_workspace)
         transfer_dir = posixpath.normpath(self.config.container_transfer_dir)
         if not workspace.startswith("/") or workspace == "/":
-            return 1, f"container_workspace must be an absolute non-root path: {workspace!r}"
+            raise CVDPInfrastructureError(f"container_workspace must be an absolute non-root path: {workspace!r}")
         if not transfer_dir.startswith("/") or transfer_dir == "/":
-            return 1, f"container_transfer_dir must be an absolute non-root path: {transfer_dir!r}"
+            raise CVDPInfrastructureError(
+                f"container_transfer_dir must be an absolute non-root path: {transfer_dir!r}"
+            )
         try:
             links = _compose_workspace_links(svc["volumes"], workspace)
         except ValueError as exc:
-            return 1, str(exc)
+            raise CVDPInfrastructureError(str(exc)) from exc
 
         dot_env: Dict[str, str] = {}
         for path, content in (harness_files or {}).items():

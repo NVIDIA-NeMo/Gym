@@ -411,7 +411,7 @@ class TestCVDPServerVerify:
         assert result.mask_sample is True
 
     @pytest.mark.asyncio
-    async def test_verify_missing_compose_returns_zero_reward(self):
+    async def test_verify_missing_compose_is_inconclusive(self):
         harness_no_compose = {"src/.env": "SIM=icarus\n"}
         body_dict = _make_body(
             output_text=f"```systemverilog\n{SAMPLE_RTL}\n```",
@@ -419,6 +419,8 @@ class TestCVDPServerVerify:
         )
         result = await self.server.verify(_make_request(body_dict))
         assert result.reward == 0.0
+        assert result.mask_sample and not result.evaluation_completed
+        assert "No docker-compose.yml" in result.failure_reason
 
     @pytest.mark.asyncio
     async def test_verify_multi_file_json_response(self):
@@ -615,13 +617,13 @@ class TestApptainerHarness:
         self.server = _make_server()
 
     @pytest.mark.asyncio
-    async def test_missing_compose_returns_error_exit_code(self):
-        exit_code, stderr, services = await self.server._harness.run(
-            rtl_files={"rtl/foo.sv": SAMPLE_RTL},
-            harness_files={},  # no compose file
-            task_id="test",
-        )
-        assert exit_code != 0
+    async def test_missing_compose_is_inconclusive(self):
+        with pytest.raises(CVDPInfrastructureError, match="No docker-compose.yml"):
+            await self.server._harness.run(
+                rtl_files={"rtl/foo.sv": SAMPLE_RTL},
+                harness_files={},
+                task_id="test",
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -874,9 +876,8 @@ class TestRunServiceProvider:
     @pytest.mark.asyncio
     async def test_no_command_returns_portability_error(self, tmp_path):
         fake = _FakeProvider(SandboxExecResult(stdout="", stderr="", return_code=0))
-        exit_code, output = await self._run(tmp_path, fake, _COMPOSE_NO_CMD)
-        assert exit_code == 1
-        assert "no explicit command" in output
+        with pytest.raises(CVDPInfrastructureError, match="no explicit command"):
+            await self._run(tmp_path, fake, _COMPOSE_NO_CMD)
         assert fake.created == []
 
     @pytest.mark.asyncio
@@ -1005,15 +1006,43 @@ class TestDefinitiveFailure:
 
     @pytest.mark.asyncio
     async def test_failed_service_stops_before_later_infrastructure_error(self):
-        body = _make_body(output_text=f"```systemverilog\n{SAMPLE_RTL}\n```")
-        body["verifier_metadata"]["harness_files"]["docker-compose.yml"] = (
-            "services:\n  first:\n    image: example\n  second:\n    image: example\n"
+        body = _make_body(
+            output_text=f"```systemverilog\n{SAMPLE_RTL}\n```",
+            harness_files={
+                "docker-compose.yml": "services:\n  first:\n    image: example\n  second:\n    image: example\n"
+            },
         )
         with patch.object(self.server._harness, "_run_service", new_callable=AsyncMock) as run:
             run.side_effect = [(1, "assertion failed"), CVDPInfrastructureError("later outage")]
             result = await self.server.verify(_make_request(body))
         assert result.reward == 0 and result.evaluation_completed and not result.mask_sample
         assert run.await_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["missing_prepared_image", "workspace", "transfer"])
+async def test_configuration_failure_is_inconclusive(failure):
+    server = _make_server()
+    fake = _FakeProvider(SandboxExecResult(stdout="", stderr="", return_code=0))
+    server._harness._sandbox_provider = fake
+    compose = _COMPOSE_WITH_CMD
+    if failure == "missing_prepared_image":
+        compose = "services:\n  direct:\n    build: .\n    command: echo test\n"
+        expected = "No prepared image"
+    elif failure == "workspace":
+        server.config.container_workspace = "/"
+        expected = "container_workspace"
+    else:
+        server.config.container_transfer_dir = "/"
+        expected = "container_transfer_dir"
+    body = _make_body(
+        output_text=f"```systemverilog\n{SAMPLE_RTL}\n```",
+        harness_files={"docker-compose.yml": compose, "Dockerfile": "FROM example\n"},
+    )
+    result = await server.verify(_make_request(body))
+    assert result.mask_sample and not result.evaluation_completed
+    assert result.container_exit_code is None and expected in result.failure_reason
+    assert not fake.created
 
 
 @pytest.mark.asyncio
