@@ -139,17 +139,33 @@ def test_verify_of_another_task_is_refused_and_keeps_the_session(task: InlineTas
         assert client.post("/verify", json=verify_body(task)).json()["reward"] == 1.0
 
 
-def test_failed_agent_cleanup_masks_the_sample_and_close_retries_the_stop(task: InlineTask) -> None:
+def test_transient_agent_cleanup_failure_retries_and_proceeds_with_verification(task: InlineTask) -> None:
     server, sandboxes, phases = make_server()
     with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
         assert client.post("/seed_session", json=seed(task).model_dump(mode="json")).status_code == 200
         sandboxes[0].stop.side_effect = [RuntimeError("delete unavailable"), None]
         result = client.post("/verify", json=verify_body(task)).json()
+        assert result["reward"] == 1.0 and result["evaluation_completed"] and not result["mask_sample"]
+        assert result["cleanup_errors"] == []
+        assert phases == ["agent", "verifier"]
+        assert sandboxes[0].stop.await_count == 2
+        assert not server._session_id_to_sandbox
+        assert client.post("/verify", json=verify_body(task)).json() == result
+        assert server._run_verifier.await_count == 1
+        assert client.post("/close_session", json=CLOSE).status_code == 200
+
+
+def test_failed_agent_cleanup_masks_the_sample_and_close_retries_the_stop(task: InlineTask) -> None:
+    server, sandboxes, phases = make_server()
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        assert client.post("/seed_session", json=seed(task).model_dump(mode="json")).status_code == 200
+        sandboxes[0].stop.side_effect = [RuntimeError("delete unavailable")] * 2 + [None]
+        result = client.post("/verify", json=verify_body(task)).json()
         assert result["mask_sample"] and not result["evaluation_completed"]
         assert result["failure_stage"] == "agent_cleanup" and result["cleanup_errors"] == ["agent"]
         assert phases == ["agent"], "no verifier starts while the agent sandbox is still held"
         assert client.post("/close_session", json=CLOSE).status_code == 200
-    assert sandboxes[0].stop.await_count == 2 and not server._session_id_to_sandbox
+    assert sandboxes[0].stop.await_count == 3 and not server._session_id_to_sandbox
 
 
 def _fail_verifier_stops(server: DeepsweExternal1ResourcesServer, outcomes: list) -> None:

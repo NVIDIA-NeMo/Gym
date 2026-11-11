@@ -525,12 +525,15 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer, SandboxSessionReso
                     agent_id, model_patch = await self.capture_task_sandbox_patch(session_id, capture)
                     collect_time = monotonic() - started
                 finally:
-                    try:
-                        await self._stop_task_sandbox(session_id)
-                    except Exception:
-                        # The sandbox stays registered, so close, expiry or shutdown retries the stop.
-                        logger.exception("Could not release agent sandbox for %s", task_id)
-                        cleanup_errors.append("agent")
+                    for attempt in range(2):
+                        try:
+                            await self._stop_task_sandbox(session_id)
+                            break
+                        except Exception:
+                            logger.exception("Could not release agent sandbox for %s", task_id)
+                            if attempt == 1:
+                                # Keep ownership so close, expiry or shutdown can retry.
+                                cleanup_errors.append("agent")
                 log_dir.mkdir(parents=True, exist_ok=True)
                 (log_dir / "model.patch").write_bytes(model_patch)
             else:
