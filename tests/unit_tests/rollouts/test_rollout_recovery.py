@@ -1008,6 +1008,8 @@ async def test_runner_reserves_before_request_and_resumes_only_failed_work(
         "retries/rollouts_retried": 0,
         "retries/at_cap": 0,
         "retries/max_attempts": 3,
+        "transport/resends": 0,
+        "transport/attempts_counted": 3,
         "coverage/measured": 0,
         "coverage/masked": 1,
         "coverage/unscored": 0,
@@ -2610,3 +2612,109 @@ async def test_a_connection_that_dropped_is_reported_as_possibly_delivered_and_n
     assert len(calls) == 1
     assert (outcome.source, outcome.delivery) == ("collector", "possibly_delivered")
     assert outcome.exception_type == "ServerDisconnectedError"
+
+
+async def test_each_saved_row_and_failure_row_carries_the_transport_resends_of_its_dispatch(
+    runner_config, monkeypatch
+):
+    from nemo_gym.core.failure_transport import observe_transport_resend
+
+    output = Path(runner_config.output_jsonl_fpath)
+
+    async def post(**kwargs):
+        task = kwargs["json"]["task"]
+        # Retries started while the dispatch is in flight count toward it, whichever server made them.
+        for _ in range({0: 2, 1: 0, 2: 1}[task]):
+            observe_transport_resend()
+        await asyncio.sleep(0)
+        if task == 2:
+            raise http_error(503)
+        return FakeResponse(200, {"reward": 1.0, "response": {}})
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    await RolloutCollectionHelper().run_from_config(runner_config)
+
+    saved = {row["_ng_task_index"]: row for row in read_records(output)}
+    assert {task: row[collection.NG_TRANSPORT_RESENDS_KEY] for task, row in saved.items()} == {0: 2, 1: 0}
+    [failure] = read_records(collection.failures_path_for(output))
+    assert failure[collection.NG_TRANSPORT_RESENDS_KEY] == 1
+    # The run total covers every saved attempt, the failed one included.
+    metrics = RolloutStore.read(output).failure_export_metrics()
+    assert (metrics["transport/resends"], metrics["transport/attempts_counted"]) == (3, 3)
+
+
+async def test_a_resend_after_refused_connections_counts_as_a_transport_resend(runner_config, monkeypatch):
+    from unittest.mock import MagicMock
+
+    from aiohttp import ClientConnectorError
+
+    runner_config.dispatch_connect_grace_s = 30
+    monkeypatch.setattr(collection.asyncio, "sleep", AsyncMock())
+    refusals = {0: 2, 1: 0, 2: 0}
+
+    async def post(**kwargs):
+        task = kwargs["json"]["task"]
+        if refusals[task]:
+            refusals[task] -= 1
+            error = ClientConnectorError(MagicMock(), ConnectionRefusedError("refused"))
+            kwargs["_on_transport_failure"](error, None)
+            raise error
+        return FakeResponse(200, {"reward": 1.0, "response": {}})
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    await RolloutCollectionHelper().run_from_config(runner_config)
+
+    saved = {row["_ng_task_index"]: row for row in read_records(Path(runner_config.output_jsonl_fpath))}
+    assert {task: row[collection.NG_TRANSPORT_RESENDS_KEY] for task, row in saved.items()} == {0: 2, 1: 0, 2: 0}
+
+
+async def test_an_intentional_omission_keeps_the_transport_resends_of_its_dispatch(runner_config, monkeypatch):
+    from nemo_gym.core.failure_transport import observe_transport_resend
+
+    async def post(**kwargs):
+        if kwargs["json"]["task"] == 0:
+            observe_transport_resend()
+            return FakeResponse(200, {collection.NG_NO_PERSIST_KEY: True, "error": "nothing to score"})
+        return FakeResponse(200, {"reward": 1.0, "response": {}})
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    await RolloutCollectionHelper().run_from_config(runner_config)
+
+    [omitted] = read_records(collection.failures_path_for(Path(runner_config.output_jsonl_fpath)))
+    assert omitted["_ng_omitted"] is True and omitted[collection.NG_TRANSPORT_RESENDS_KEY] == 1
+    assert RolloutStore.read(Path(runner_config.output_jsonl_fpath)).failure_export_metrics()["transport/resends"] == 1
+
+
+async def test_a_run_whose_rows_carry_no_resend_count_reports_no_resend_total(runner_config, monkeypatch):
+    install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(200, {"reward": 1.0, "response": {}})))
+    await RolloutCollectionHelper().run_from_config(runner_config)
+    output = Path(runner_config.output_jsonl_fpath)
+    rows = [
+        {key: value for key, value in row.items() if key != collection.NG_TRANSPORT_RESENDS_KEY}
+        for row in read_records(output)
+    ]
+    output.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    metrics = RolloutStore.read(output).failure_export_metrics()
+    assert "transport/resends" not in metrics and "transport/attempts_counted" not in metrics
+
+
+async def test_a_failed_dispatch_saved_as_evidence_still_counts_toward_the_resend_total(runner_config, monkeypatch):
+    from nemo_gym.core.failure_transport import observe_transport_resend
+
+    runner_config.route_failures_to_sidecar = False
+
+    async def post(**kwargs):
+        if kwargs["json"]["task"] == 0:
+            return FakeResponse(200, {"reward": 1.0, "response": {}})
+        for _ in range(4):
+            observe_transport_resend()
+        raise http_error(503)
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    with pytest.raises(Exception):
+        await RolloutCollectionHelper().run_from_config(runner_config)
+
+    # Reloaded from disk: the failed dispatch is evidence, not an outcome, and its resends still count.
+    metrics = RolloutStore.read(Path(runner_config.output_jsonl_fpath)).failure_export_metrics()
+    assert (metrics["transport/resends"], metrics["transport/attempts_counted"]) == (4, 2)
