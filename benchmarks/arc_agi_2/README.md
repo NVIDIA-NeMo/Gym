@@ -37,8 +37,9 @@ reports pass@1 and the unbiased pass@2, plus the mean number of output tokens pe
 
 ## Reference: Nemotron 3.5 Super
 
-`nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16` (revision `a1ccf94`), served with the sdg-pipelines
-`super3.5-release` flags (vLLM 0.32.0, TP4, MTP3, `--limit-mm-per-prompt '{"image":64,"video":1}'` for the grid images),
+`nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16` (revision `a1ccf94`), served with vLLM 0.32.0 (TP4, MTP3 speculative
+decoding, float32 Mamba SSM cache, `qwen3_coder` tool parser, `nemotron_v3` reasoning parser, 262,144-token context,
+`--limit-mm-per-prompt '{"image":64,"video":1}'` for the grid images),
 thinking on, temperature 1, top-p 1; ARC Prize 2026 evaluation files, 4 samples per test input.
 
 | Config | pass@1 | pass@2 | Mean output tokens |
