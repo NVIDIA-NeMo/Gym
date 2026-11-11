@@ -88,7 +88,11 @@ def model_reply(
 
 
 def tool_reply(
-    calls: List[tuple], text: str = "", reasoning: Optional[str] = "thinking", out_tokens: int = 100, in_tokens: int = 3000
+    calls: List[tuple],
+    text: str = "",
+    reasoning: Optional[str] = "thinking",
+    out_tokens: int = 100,
+    in_tokens: int = 3000,
 ) -> dict:
     """A reply with native function calls: ``calls`` is a list of (call_id, name, arguments JSON string)."""
     reply = model_reply(text, reasoning, out_tokens, in_tokens)
@@ -393,7 +397,11 @@ async def test_native_tool_call_then_answer(make) -> None:
     assert "calling the `python` tool" in system and "<code>" not in system and "</code>" not in system
     # The second request replays reasoning and the call, then the function result with the same call id.
     second = h.model_calls[1]
-    assert [getattr(i, "type", None) for i in second.input[2:]] == ["reasoning", "function_call", "function_call_output"]
+    assert [getattr(i, "type", None) for i in second.input[2:]] == [
+        "reasoning",
+        "function_call",
+        "function_call_output",
+    ]
     out = second.input[-1]
     assert out.call_id == "call_1" and out.output == "(2, 2)\n" and "tool_response" not in out.output
     # The returned history holds everything for export.
@@ -524,7 +532,9 @@ async def test_native_cut_turn_with_a_call_answers_it(make) -> None:
     )
     result = await h.run()
     assert result.cuts == 1 and result.code_runs == 0 and result.reward == 1.0
-    assert "not run" in outputs(h.model_calls[1])[0].output and h.model_calls[1].input[-1].content == arc_prompt.CUT_NUDGE
+    assert (
+        "not run" in outputs(h.model_calls[1])[0].output and h.model_calls[1].input[-1].content == arc_prompt.CUT_NUDGE
+    )
 
 
 def test_native_system_prompt_differs_only_in_the_run_sentence() -> None:

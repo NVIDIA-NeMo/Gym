@@ -144,7 +144,11 @@ class _Server:
                 await self.start()
             except Exception as exc:
                 await self.close()
-                return {"output": "", "timed_out": False, "error": f"sandbox unavailable ({type(exc).__name__}: {exc})"}
+                return {
+                    "output": "",
+                    "timed_out": False,
+                    "error": f"sandbox unavailable ({type(exc).__name__}: {exc})",
+                }
         assert self.proc is not None and self.proc.stdin is not None and self.proc.stdout is not None
         try:
             self.proc.stdin.write((json.dumps(req) + "\n").encode())
