@@ -91,6 +91,62 @@ def test_canonical_counts_cannot_be_swapped_between_calls(behavior_episode):
     assert failed_model_checks(record, witness["attempts"]) == {"model.token_counts"}
 
 
+@pytest.mark.parametrize("usage", [True, False])
+@pytest.mark.parametrize("mutation", [None, "prompt_tokens", "cached_tokens", "total_tokens", "finish_reason"])
+def test_messages_usage_and_stop_reason_are_checked_independently(usage, mutation):
+    request = {"messages": [{"role": "user", "content": "hello"}], "max_tokens": 100}
+    response = {"id": "r", "type": "message", "stop_reason": "end_turn", "content": []}
+    stats = {}
+    if usage:
+        response["usage"] = {
+            "input_tokens": 20,
+            "output_tokens": 8,
+            "cache_read_input_tokens": 3,
+            "cache_creation_input_tokens": 2,
+        }
+        stats = {"prompt_tokens": 25, "completion_tokens": 8, "total_tokens": 33, "cached_tokens": 3}
+    metadata = {"status_code": 200, "response_id": "r", "finish_reason": "end_turn"}
+    call = {"request": request, "response": response, "response_metadata": metadata, "token_stats": stats}
+    record = {"ng_trajectory": {"model_calls": [call]}}
+    attempts = [{"request": request, "response": response, "status_code": 200}]
+    if mutation == "finish_reason":
+        metadata[mutation] = "stop"
+    elif mutation:
+        stats[mutation] = 0
+    assert failed_model_checks(record, attempts) == (
+        {"model.response_metadata"} if mutation == "finish_reason" else {"model.token_counts"} if mutation else set()
+    )
+
+
+def test_responses_incomplete_reason_matches_the_witness():
+    request = {"input": []}
+    response = {"id": "r", "status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}
+    metadata = {
+        "status_code": 200,
+        "response_id": "r",
+        "response_status": "incomplete",
+        "finish_reason": "max_output_tokens",
+    }
+    call = {"request": request, "response": response, "response_metadata": metadata}
+    record = {"ng_trajectory": {"model_calls": [call]}}
+    attempts = [{"request": request, "response": response, "status_code": 200}]
+    assert not failed_model_checks(record, attempts)
+    metadata["finish_reason"] = None
+    assert failed_model_checks(record, attempts) == {"model.response_metadata"}
+
+
+def test_auxiliary_calls_are_required_in_canonical_exchange_comparison(behavior_episode):
+    record, witness = behavior_episode
+    auxiliary = copy.deepcopy(witness["attempts"][0])
+    witness["auxiliary_calls"] = [auxiliary]
+    options = dict(http_errors=(), terminal_error=False, tool_steps=2, expected_reward=0.0, fingerprint=fingerprint)
+    checks = {c["id"]: c for c in inspect_behavior(witness, record, **options)}
+    assert checks["model.saved_exchanges"]["status"] == "fail"
+    record["ng_trajectory"]["model_calls"].append(copy.deepcopy(record["ng_trajectory"]["model_calls"][0]))
+    checks = {c["id"]: c for c in inspect_behavior(witness, record, **options)}
+    assert checks["model.saved_exchanges"]["status"] == "pass"
+
+
 def test_missing_tool_request_blocks_only_request_comparison(behavior_episode):
     record, witness = behavior_episode
     inv = record["ng_trajectory"]["invocations"][0]
@@ -100,6 +156,17 @@ def test_missing_tool_request_blocks_only_request_comparison(behavior_episode):
     assert checks["tools.witness_request"]["status"] == "fail"
     assert checks["tools.witness_status"]["status"] == "pass"
     assert checks["tools.witness_output"]["status"] == "pass"
+
+
+def test_matching_requests_do_not_replace_required_tool_ids(behavior_episode):
+    record, witness = behavior_episode
+    record["ng_trajectory"]["tool_calls"].pop()
+    witness["tool_calls"].pop()
+    for index, expected in enumerate(witness["tool_calls"]):
+        expected["wire_id"] = False
+        expected["id"] = f"independent-command-{index}"
+    checks = {c["id"]: c for c in tool_checks(record, witness["tool_calls"])}
+    assert checks["tools.witness_ids"]["status"] == "fail"
 
 
 def test_the_scripted_finish_call_is_not_compared_with_the_shell_witness(behavior_episode):
