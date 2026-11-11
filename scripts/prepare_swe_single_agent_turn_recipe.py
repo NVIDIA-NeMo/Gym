@@ -3,7 +3,7 @@
 # ruff: noqa: E402
 """Shared SWE-Next recipe bindings and entrypoints for prepared training inputs.
 
-Retarget an existing resolved recipe, prepare a larger experiment, or continue an
+Retarget an existing resolved recipe or continue an
 interrupted run. These commands do not submit jobs or inspect model/image inventories.
 """
 
