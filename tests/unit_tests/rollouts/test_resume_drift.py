@@ -364,50 +364,63 @@ def test_a_null_that_is_the_setting_default_is_still_the_same_as_absent(tmp_path
     assert validate_resume(path, current, materialized) is not None
 
 
-HARBOR_SERVER = {
-    "harbor_ds_environment": {
-        "environment_servers": {
-            "harbor": {
-                "tasksets": {
-                    "ds": {
-                        "folder": "/tmp/gym-install-a/gym/tasks/ds",
-                        "tasks": {"t1": "digest-1", "t2": "digest-2"},
-                        "dataset_digest": "dataset-digest",
-                    }
-                }
-            }
-        }
+def harbor_server(taskset: str, folder: str, **changes: object) -> dict:
+    """A Harbor environment server's identity, built directly: ``merged`` splits its keys on dots, and a taskset name
+    can contain them (``ds-1.0``)."""
+    mapping = {
+        "folder": folder,
+        "tasks": {"t1": "digest-1", "t2": "digest-2", "folder": "digest-of-a-task-named-folder"},
+        "dataset_digest": "dataset-digest",
+        **changes,
     }
-}
-TASKSET = "harbor_ds_environment.environment_servers.harbor.tasksets.ds"
+    return {"harbor_ds_environment": {"environment_servers": {"harbor": {"tasksets": {taskset: mapping}}}}}
 
 
-def test_a_task_folder_in_another_checkout_resumes_and_is_recorded(tmp_path: Path) -> None:
+TASKSETS = ["ds", "ds-1.0", "ds.part.1", "tasksets"]
+
+
+@pytest.mark.parametrize("taskset", TASKSETS)
+def test_a_task_folder_in_another_checkout_resumes_and_is_recorded(tmp_path: Path, taskset: str) -> None:
     """A repository-relative or fetched target resolves under whatever checkout an allocation starts in; the digests
     beside the folder pin the tasks, so the same tasks at another location are the same run."""
-    base = {**BASE, **HARBOR_SERVER}
-    path, materialized = saved_run(tmp_path, base)
-    moved = merged(base, {f"{TASKSET}.folder": "/tmp/gym-install-b/gym/tasks/ds"})
+    path, materialized = saved_run(tmp_path, {**BASE, **harbor_server(taskset, "/tmp/gym-install-a/gym/tasks/ds")})
+    moved = {**BASE, **harbor_server(taskset, "/tmp/gym-install-b/gym/tasks/ds")}
 
     assert validate_resume(path, current_manifest(tmp_path, moved), materialized) is not None
-    assert f"{TASKSET}.folder" in resume_drift_path_for(path).read_text()
+    assert f"tasksets.{taskset}.folder" in resume_drift_path_for(path).read_text()
+
+
+@pytest.mark.parametrize("taskset", TASKSETS)
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"tasks": {"t1": "changed-digest", "t2": "digest-2", "folder": "digest-of-a-task-named-folder"}},
+        {"tasks": {"t1": "digest-1", "t2": "digest-2", "folder": "changed-digest"}},  # a task whose ID is `folder`
+        {"tasks": {"t1": "digest-1", "t2": "digest-2", "folder": "digest-of-a-task-named-folder", "t3": "d"}},
+        {"dataset_digest": "another-dataset"},
+        {"paths": {"t1": "nested/t1"}},  # a task found elsewhere in the dataset
+    ],
+)
+def test_a_changed_task_still_refuses_beside_a_moved_folder(tmp_path: Path, taskset: str, changes: dict) -> None:
+    path, materialized = saved_run(tmp_path, {**BASE, **harbor_server(taskset, "/tmp/gym-install-a/gym/tasks/ds")})
+    current = {**BASE, **harbor_server(taskset, "/tmp/gym-install-b/gym/tasks/ds", **changes)}
+
+    with pytest.raises(ConfigError, match="tasksets"):
+        validate_resume(path, current_manifest(tmp_path, current), materialized)
 
 
 @pytest.mark.parametrize(
-    "change",
+    ("key", "semantic"),
     [
-        {f"{TASKSET}.tasks.t1": "changed-digest"},  # a task's content
-        {f"{TASKSET}.tasks.t3": "digest-3"},  # a task added
-        {f"{TASKSET}.dataset_digest": "another-dataset"},
-        {f"{TASKSET}.paths": {"t1": "nested/t1"}},  # a task found elsewhere in the dataset
+        (("s", "environment_servers", "harbor", "tasksets", "ds", "folder"), False),
+        (("s", "environment_servers", "harbor", "tasksets", "ds-1.0", "folder"), False),
+        (("s", "environment_servers", "harbor", "tasksets", "ds.part.1", "folder"), False),
+        # A task whose ID is `folder`, a taskset named `tasksets`, and a folder elsewhere are not the mapping's folder.
+        (("s", "environment_servers", "harbor", "tasksets", "ds", "tasks", "folder"), True),
+        (("s", "environment_servers", "harbor", "tasksets", "tasksets", "tasks", "folder"), True),
+        (("s", "resources_servers", "g", "tasksets", "ds", "folder"), True),
+        (("s", "environment_servers", "harbor", "tasksets", "ds", "paths", "t1"), True),
     ],
 )
-def test_a_changed_task_still_refuses_beside_a_moved_folder(tmp_path: Path, change: dict) -> None:
-    base = {**BASE, **HARBOR_SERVER}
-    path, materialized = saved_run(tmp_path, base)
-    current = current_manifest(
-        tmp_path, merged(base, {f"{TASKSET}.folder": "/tmp/gym-install-b/gym/tasks/ds", **change})
-    )
-
-    with pytest.raises(ConfigError, match="tasksets"):
-        validate_resume(path, current, materialized)
+def test_the_folder_of_a_taskset_mapping_is_found_by_its_key_path(key: tuple[str, ...], semantic: bool) -> None:
+    assert _is_semantic(key) is semantic
