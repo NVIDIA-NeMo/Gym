@@ -12,7 +12,7 @@ from pathlib import Path
 
 from scripts.check_suites.github_actions import annotation_data, download_artifacts, read_ci_result
 
-from .checks import ARTIFACT_PREFIX, RESULT_FILE
+from .checks import ARTIFACT_PREFIX, JOB_NAMES, RESULT_FILE
 from .documentation import atomic_write
 from .registry import HARNESSES
 from .rendering import render_table, validate_row
@@ -71,6 +71,7 @@ def main(argv: list[str] | None = None) -> int:
         download_artifacts(
             list(HARNESSES),
             artifact_prefix=ARTIFACT_PREFIX,
+            job_names=JOB_NAMES,
             repo=args.repo,
             run_id=args.run_id,
             attempt=args.run_attempt,
