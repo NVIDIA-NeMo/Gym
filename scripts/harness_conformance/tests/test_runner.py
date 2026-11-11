@@ -15,7 +15,6 @@ import pytest
 from fastapi.testclient import TestClient
 from scripts.harness_conformance.episode import HARNESSES, _config
 from scripts.harness_conformance.provider import SUMMARY_PROMPTS, OpenClawProbe, Probe, is_compaction_request
-from scripts.harness_conformance.registry import CONFIG_CLASSES
 from scripts.harness_conformance.runner import _fingerprint, inspect_episode, main, run_process, run_suite
 from scripts.harness_conformance.scenarios import SCENARIOS, Scenario
 
@@ -110,7 +109,7 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_
         import importlib
 
         module = importlib.import_module(f"responses_api_agents.{harness}_agent.app")
-        getattr(module, CONFIG_CLASSES.get(harness, HARNESSES[harness] + "Config")).model_validate(agent)
+        getattr(module, HARNESSES[harness]).model_fields["config"].annotation.model_validate(agent)
 
 
 def test_session_runtime_does_not_require_host_cli(monkeypatch):

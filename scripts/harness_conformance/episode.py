@@ -26,7 +26,7 @@ from nemo_gym.core import NeMoGymResponse
 from nemo_gym.rollouts.harness_capabilities import digest_file
 
 from .provider import OpenClawProbe, Probe
-from .registry import BORROWED_SANDBOX_HARNESSES, CONFIG_CLASSES, HARNESSES
+from .registry import BORROWED_SANDBOX_HARNESSES, HARNESSES
 from .scenarios import SCENARIOS
 
 
@@ -255,7 +255,7 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
     """Start fresh servers and let Gym write the rollout without modifying the harness."""
     module = importlib.import_module(f"responses_api_agents.{harness}_agent.app")
     agent_cls = getattr(module, HARNESSES[harness])
-    config_cls = getattr(module, CONFIG_CLASSES.get(harness, HARNESSES[harness] + "Config"))
+    config_cls = agent_cls.model_fields["config"].annotation
     use_agent_sessions = agent_cls.supports_agent_sessions()
     if use_agent_sessions and harness != "simple" and sys.platform != "linux":
         raise RuntimeError(
