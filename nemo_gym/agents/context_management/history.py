@@ -109,6 +109,8 @@ class SemanticPart:
     part_id: str
     kind: SemanticPartKind
     content_index: int | None
+    # Compute once when appended; lineage includes even images omitted from later views.
+    digest: str
     observation_group_id: str | None = None
 
 
@@ -409,6 +411,7 @@ class SemanticHistory:
                             part_id=part_id,
                             kind=kind,
                             content_index=content_index,
+                            digest=_part_digest(kind, content_part, observation_group_id),
                             observation_group_id=observation_group_id,
                         )
                     )
@@ -430,6 +433,7 @@ class SemanticHistory:
                         part_id=part_id,
                         kind=kind,
                         content_index=None,
+                        digest=_part_digest(kind, semantic_item, None),
                     )
                 )
 
@@ -451,21 +455,12 @@ def _config_digest(value: Mapping[str, Any]) -> str:
     return canonical_digest(value)
 
 
+def _part_digest(kind: str, payload: Any, observation_group_id: str | None) -> str:
+    return canonical_digest({"kind": kind, "payload": payload, "observation_group_id": observation_group_id})
+
+
 def _semantic_part_digest(event: SemanticEvent, part: SemanticPart) -> str:
-    content = event.item.get("content")
-    if isinstance(content, list):
-        if part.content_index is None:
-            raise ValueError(f"Semantic part {part.part_id!r} has no content index")
-        payload = content[part.content_index]
-    else:
-        payload = event.item
-    return canonical_digest(
-        {
-            "kind": part.kind,
-            "payload": payload,
-            "observation_group_id": part.observation_group_id,
-        }
-    )
+    return part.digest
 
 
 def _lineage_record(
@@ -544,7 +539,3 @@ def _view_digest(view: MaterializedHistoryView) -> str:
         "image_part_ids": view.image_part_ids,
     }
     return _config_digest(payload)
-
-
-# Compatibility alias retained for existing callers.
-CanonicalHistory = SemanticHistory

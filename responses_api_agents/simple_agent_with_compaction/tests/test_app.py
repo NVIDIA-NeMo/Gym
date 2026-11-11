@@ -29,7 +29,10 @@ def tool_call(arguments='{"action":"move"}'):
 
 
 def make_agent(*, responses=None, agent_type=SimpleAgentWithCompaction, config=None, tool_status=200, failure=None):
-    server = MagicMock(spec=ServerClient, global_config_dict={"token_id_capture": {"enabled": True}})
+    server = MagicMock(
+        spec=ServerClient,
+        global_config_dict={"token_id_capture": {"enabled": True, "parent_resolution": "source_history"}},
+    )
     queue = list(responses or [answer(1, output=[tool_call()]), answer(2)])
     calls = []
 
@@ -40,6 +43,8 @@ def make_agent(*, responses=None, agent_type=SimpleAgentWithCompaction, config=N
             raise ConnectionError(f"lost acknowledgement from {path}")
         if path == "/seed_session":
             return http_response({"image": "seed"}, cookies={"resource_session": "seeded"})
+        if path.endswith("/context/measure"):
+            return http_response({"prompt_token_count": 10})
         if path.endswith("/v1/responses"):
             return http_response(queue.pop(0).model_dump(mode="json"), cookies={"model_session": "model"})
         if path == "/step":
@@ -278,3 +283,57 @@ def test_registered_http_run_returns_ordinary_result_without_cc_contract(monkeyp
     assert "context_compaction_result" not in payload["response"]
     assert payload["response"]["id"] == "response-1"
     assert all(call["_resend_after_disconnect"] is False for call in calls)
+
+
+@pytest.mark.parametrize(
+    "history,resolution,refused",
+    [
+        ({"enabled": True, "policy": {"type": "recency", "config": {"images": {"enabled": True}}}}, None, True),
+        (
+            {"enabled": True, "policy": {"type": "recency", "config": {"images": {"enabled": True}}}},
+            "fingerprint",
+            True,
+        ),
+        ({"guards": {"max_total_tokens": 100}}, "fingerprint", True),
+        ({"guards": {"max_total_tokens": 100}}, "source_history", False),
+        ({"enabled": True}, "fingerprint", False),
+        (
+            {"enabled": False, "policy": {"type": "recency", "config": {"images": {"enabled": True}}}},
+            "fingerprint",
+            False,
+        ),
+        (
+            {"enabled": True, "policy": {"type": "recency", "config": {"images": {"enabled": True}}}},
+            "source_history",
+            False,
+        ),
+    ],
+)
+async def test_rewriting_policy_or_token_guard_requires_source_history(history, resolution, refused):
+    agent, calls = make_agent(config={"context_history": history})
+    capture = {"enabled": True} | ({"parent_resolution": resolution} if resolution else {})
+    agent.server_client.global_config_dict = {"token_id_capture": capture}
+    if refused:
+        with pytest.raises(ValueError, match="parent_resolution=source_history"):
+            await run_agent(agent)
+        assert calls == []
+    else:
+        assert (await run_agent(agent)).reward == 0.75
+
+
+def test_agent_rejects_a_model_call_budget_shorter_than_its_step_limit():
+    with pytest.raises(ValueError, match="max_steps.*max_model_calls"):
+        make_agent(config={"max_steps": 3, "context_history": {"max_model_calls": 2}})
+
+
+async def test_equal_step_and_call_budgets_finish_and_verify():
+    agent, calls = make_agent(
+        responses=[
+            answer(1, output=[tool_call()]),
+            answer(2, output=[tool_call() | {"id": "function-2", "call_id": "tool-2"}]),
+        ],
+        config={"max_steps": 2, "context_history": {"max_model_calls": 2}},
+    )
+    assert (await run_agent(agent)).reward == 0.75
+    assert sum(call["url_path"].endswith("/v1/responses") for call in calls) == 2
+    assert calls[-1]["url_path"] == "/verify"

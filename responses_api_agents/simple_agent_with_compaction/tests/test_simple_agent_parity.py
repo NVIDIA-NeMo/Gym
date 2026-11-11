@@ -27,7 +27,10 @@ async def exercise(
 ):
     calls = []
     queue = [response.model_copy(deep=True) for response in responses]
-    server = MagicMock(spec=ServerClient, global_config_dict={"token_id_capture": {"enabled": True}})
+    server = MagicMock(
+        spec=ServerClient,
+        global_config_dict={"token_id_capture": {"enabled": True, "parent_resolution": "source_history"}},
+    )
     config_type = SimpleAgentWithCompactionConfig if compaction_agent else SimpleAgentConfig
     agent_type = SimpleAgentWithCompaction if compaction_agent else SimpleAgent
     agent = agent_type(
@@ -139,7 +142,6 @@ async def test_identity_policy_matches_simple_agent_task_tool_and_verifier_behav
     elif case == "skip_verification":
         options["skip_verification"] = True
     elif case == "usage":
-        responses.insert(0, answer(0, output=[reasoning(0)]))
         for response in (responses[0], responses[-1]):
             response.usage = NeMoGymResponse.model_validate(
                 response.model_dump()
@@ -160,7 +162,7 @@ async def test_identity_policy_matches_simple_agent_task_tool_and_verifier_behav
     assert managed.model_dump() == ordinary.model_dump()
     assert "context_compaction_result" not in managed.model_dump()
     if case == "usage":
-        assert managed.response.usage.total_tokens == 13
+        assert managed.response.usage.total_tokens == 26
 
 
 async def test_compaction_changes_model_view_not_verifier_history():

@@ -12,7 +12,13 @@ from pydantic import ConfigDict, Field, ValidationError
 from nemo_gym.agents import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.agents.context_management import ContextHistoryConfig, ContextManagedResponsesClient
 from nemo_gym.client import get_response_json, raise_for_status
-from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef, ResourcesServerRef
+from nemo_gym.config import (
+    TOKEN_CAPTURE_BLOCK,
+    AggregateMetrics,
+    AggregateMetricsRequest,
+    ModelServerRef,
+    ResourcesServerRef,
+)
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -31,6 +37,10 @@ class SimpleAgentWithCompactionConfig(BaseResponsesAPIAgentConfig):
     max_steps: int = Field(default=256, ge=1)
     token_id_capture: bool = True
     context_history: ContextHistoryConfig = Field(default_factory=ContextHistoryConfig)
+
+    def model_post_init(self, context: Any) -> None:
+        if self.max_steps > self.context_history.max_model_calls:
+            raise ValueError("max_steps must not exceed context_history.max_model_calls")
 
 
 class SimpleAgentWithCompactionRunRequest(BaseRunRequest):
@@ -142,6 +152,16 @@ class SimpleAgentWithCompaction(SimpleResponsesAPIAgent):
     def _require_capture(self, logical_rollout_id: str | None) -> str:
         if not self._token_id_capture_enabled() or not logical_rollout_id or "/" in logical_rollout_id:
             raise ValueError("This agent requires training token capture and a framework logical rollout ID")
+        history = self.config.context_history
+        rewrites = history.enabled and history.policy.type != "identity"
+        capture = self.server_client.global_config_dict.get(TOKEN_CAPTURE_BLOCK) or {}
+        if (rewrites or history.guards.max_total_tokens is not None) and capture.get(
+            "parent_resolution"
+        ) != "source_history":
+            raise ValueError(
+                "A rewriting context_history policy or a token guard requires "
+                "token_id_capture.parent_resolution=source_history"
+            )
         return logical_rollout_id
 
     async def responses(
