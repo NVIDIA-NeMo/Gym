@@ -733,9 +733,11 @@ class OpenCodeSandboxSession(AgentSessionState):
         if not self.opencode2:
             return database
         try:
-            labels = message_labels(
-                await read_text(self.session.sandbox, path=f"{self.persistent_directory}/{OPENCODE2_LABEL_FILE}")
-            )
+            async with asyncio.timeout(30):
+                text = await read_text(
+                    self.session.sandbox, path=f"{self.persistent_directory}/{OPENCODE2_LABEL_FILE}"
+                )
+            labels = message_labels(text)
         except Exception:
             # Without capture there is no label file; unlabeled messages keep their OpenCode IDs.
             labels = {}
