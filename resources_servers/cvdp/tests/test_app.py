@@ -169,6 +169,14 @@ class TestParseModelResponse:
         assert "module a" in result["rtl/a.sv"]
         assert "module b" in result["rtl/b.sv"]
 
+    def test_valid_multi_file_json_preserves_systemverilog_labels(self):
+        files = {
+            "rtl/a.sv": "module a; initial begin case (state) IDLE, WAIT: state = RUN; endcase end endmodule",
+            "rtl/b.sv": "module b; initial begin case (state) WAIT: state = IDLE; endcase end endmodule",
+        }
+        text = json.dumps({"code": [{name: code} for name, code in files.items()]})
+        assert _parse_model_response(text, list(files)) == files
+
 
 # ---------------------------------------------------------------------------
 # Unit tests: _apply_substitutions

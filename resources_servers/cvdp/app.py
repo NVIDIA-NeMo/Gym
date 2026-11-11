@@ -29,6 +29,7 @@ lets this file stay focused on the contract and scoring.
 """
 
 import asyncio
+import json
 import logging
 import time
 from typing import Any, Dict, List, Optional
@@ -142,9 +143,12 @@ def _parse_model_response(res: str, target_files: List[str]) -> Optional[Dict[st
     # Match CVDP's openai_llm.py: strip response before parsing
     res = res.strip()
 
-    # Match CVDP's openai_llm.py: fix JSON formatting for multi-file responses
+    # Repair malformed multi-file JSON only; regex repair can alter valid RTL string contents.
     if not no_schema and res.startswith("{") and res.endswith("}"):
-        res = _helpers.fix_json_formatting(res)
+        try:
+            json.loads(res)
+        except json.JSONDecodeError:
+            res = _helpers.fix_json_formatting(res)
 
     output, success = _helpers.parse_model_response(res, files=target_files, no_schema=no_schema)
 
