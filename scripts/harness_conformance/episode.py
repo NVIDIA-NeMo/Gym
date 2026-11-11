@@ -25,7 +25,6 @@ from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY
 from nemo_gym.core import NeMoGymResponse
 from nemo_gym.rollouts.harness_capabilities import digest_file
 
-from .provider import OpenClawProbe, Probe
 from .registry import BORROWED_SANDBOX_HARNESSES, HARNESSES
 from .scenarios import SCENARIOS
 
@@ -254,7 +253,7 @@ def _config(
 async def run_episode(*, harness: str, scenario_name: str, directory: Path, timeout: float) -> None:
     """Start fresh servers and let Gym write the rollout without modifying the harness."""
     module = importlib.import_module(f"responses_api_agents.{harness}_agent.app")
-    agent_cls = getattr(module, HARNESSES[harness])
+    agent_cls = getattr(module, HARNESSES[harness]["agent"])
     config_cls = agent_cls.model_fields["config"].annotation
     use_agent_sessions = agent_cls.supports_agent_sessions()
     if use_agent_sessions and harness != "simple" and sys.platform != "linux":
@@ -268,13 +267,9 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
     )
     (directory / "runtime.json").write_text(json.dumps(runtime, indent=2) + "\n")
     scenario = next(s for s in SCENARIOS if s.name == scenario_name)
-    if harness == "nooa":
-        from .nooa import BorrowedSandboxProbe
-
-        probe = BorrowedSandboxProbe(scenario, directory)
-    else:
-        probe_cls = {"openclaw": OpenClawProbe}.get(harness, Probe)
-        probe = probe_cls(scenario, directory, harness=harness)
+    probe_module, probe_name = HARNESSES[harness]["probe"].split(":")
+    probe_cls = getattr(importlib.import_module(probe_module, package=__package__), probe_name)
+    probe = probe_cls(scenario, directory, harness=harness)
     probe.save()
     tasks = []
     servers = []

@@ -67,7 +67,7 @@ class BorrowableLocalProvider(LocalProvider):
 
 
 @dataclass
-class BorrowedSandboxProbe(Probe):
+class NOOAProbe(Probe):
     """Seed and close the sandbox through Resources; NOOA runs its ordinary borrower path."""
 
     sandbox: AsyncSandbox | None = field(default=None, init=False)

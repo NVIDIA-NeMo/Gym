@@ -177,7 +177,7 @@ async def run_case(case: str, output: Path) -> None:
 
     with (
         patch.object(episode, "SCENARIOS", (scenario,)),
-        patch.object(episode, "OpenClawProbe", ErrorProbe),
+        patch("scripts.harness_conformance.provider.OpenClawProbe", ErrorProbe),
         patch.object(episode, "_config", config),
         patch.object(Scenario, "task", task),
         patch.object(OpenClawAgent, "_collect_sandbox_response", collect),

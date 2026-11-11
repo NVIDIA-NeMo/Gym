@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi.testclient import TestClient
 from scripts.harness_conformance.episode import _config, check_runtime
-from scripts.harness_conformance.nooa import BorrowedSandboxProbe, observer_module_name
+from scripts.harness_conformance.nooa import NOOAProbe, observer_module_name
 from scripts.harness_conformance.provider import ANSWER, Probe
 from scripts.harness_conformance.scenarios import SCENARIOS
 
@@ -70,7 +70,7 @@ def test_nooa_config_selects_production_borrower_and_bench_agent(tmp_path, probe
 
 async def test_resources_seed_supports_real_borrowed_execution_and_owner_cleanup(tmp_path, monkeypatch, probe_ports):
     monkeypatch.setattr("scripts.harness_conformance.nooa.install_observer", AsyncMock())
-    probe = BorrowedSandboxProbe(SCENARIO["tool_success"], tmp_path)
+    probe = NOOAProbe(SCENARIO["tool_success"], tmp_path)
     config = _config("nooa", tmp_path, probe_ports, 23, use_agent_sessions=True)
     session = {
         "resources_session_id": "resources-session",
@@ -209,7 +209,7 @@ async def test_observer_wraps_production_adapter_once_and_keeps_other_hooks(tmp_
 
 
 def test_native_witness_requires_execution_observation_separate_from_model_history(tmp_path):
-    probe = BorrowedSandboxProbe(SCENARIO["tool_success"], tmp_path)
+    probe = NOOAProbe(SCENARIO["tool_success"], tmp_path)
     content = "<sys>PythonOutput(tool_call_id='prefill-1', stdout='actual feedback')</sys>"
     body = {
         "input": [
