@@ -19,7 +19,7 @@ from contextlib import ExitStack, nullcontext
 from pathlib import Path
 
 import uvicorn
-import yaml
+from omegaconf import DictConfig, OmegaConf
 
 from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY
 from nemo_gym.core import NeMoGymResponse
@@ -70,40 +70,22 @@ def check_runtime(harness: str, *, use_agent_sessions: bool = False) -> dict:
     return {"executable": shutil.which(harness), "version": version.stdout.strip()}
 
 
-def _nooa_overrides(defaults: dict) -> dict:
-    from .nooa import observer_module_name
-
-    return {
-        "nooa": {
-            **defaults["nooa"],
-            "execution_mode": "sandboxed",
-            "invocation_adapter": f"{observer_module_name()}:invoke_with_witness",
-        }
-    }
-
-
-def _harness_config(harness: str, directory: Path, timeout: float, scenario: Scenario | None = None) -> dict:
+def _base_settings(harness: str, directory: Path, timeout: float) -> DictConfig:
     """Describe probe overrides and setup requirements without applying them."""
     workspace = str(directory / "workspace")
     opencode = {"permission": {"bash": "allow"}}
     settings = {
         "simple": {
             "overrides": {"max_steps": 6},
-            "compaction_overrides": lambda scenario: {"max_steps": scenario.tool_steps + 4},
-            "session": {"agent_overrides": {}, "tool_transports": ["direct_http"], "sandbox_backend": None},
+            "session": {"agent_overrides": None, "tool_transports": ["direct_http"], "sandbox_backend": None},
         },
         "opencode": {
             "overrides": {"timeout": timeout, "opencode_config": opencode},
-            "compaction_overrides": lambda scenario: {
-                "context_window": 32768 if scenario.compaction else 65536,
-                "max_output_tokens": 8192,
-            },
             "legacy": {
                 "agent_overrides": {
                     "workspace_root": workspace,
                     # Auxiliary requests would consume the scripted policy replies.
                     "opencode_config": {
-                        **opencode,
                         "agent": {"title": {"disable": True}, "summary": {"disable": True}},
                     },
                 },
@@ -111,10 +93,6 @@ def _harness_config(harness: str, directory: Path, timeout: float, scenario: Sce
         },
         "pi": {
             "overrides": {"timeout": timeout},
-            "compaction_overrides": lambda scenario: {
-                "context_window": 32768 if scenario.compaction else 65536,
-                "max_output_tokens": 8192,
-            },
             "legacy": {"agent_overrides": {"workspace_root": workspace}},
         },
         "copilot": {
@@ -127,10 +105,6 @@ def _harness_config(harness: str, directory: Path, timeout: float, scenario: Sce
             "legacy": {"agent_overrides": {"workspace_root": workspace}},
         },
         "codex": {
-            "compaction_overrides": lambda scenario: {
-                "model_context_window": 32768,
-                "model_auto_compact_token_limit": 24000,
-            },
             "legacy": {
                 "requires_workspace": True,
                 "agent_overrides": {
@@ -142,13 +116,19 @@ def _harness_config(harness: str, directory: Path, timeout: float, scenario: Sce
             },
         },
         "nooa": {
-            "overrides": {"sandbox_runner_timeout_seconds": timeout},
+            "required_imports": ["scripts.harness_conformance.nooa"],
+            "inherit_adapter_fields": ["nooa"],
+            "overrides": {
+                "sandbox_runner_timeout_seconds": timeout,
+                "nooa": {
+                    "execution_mode": "sandboxed",
+                    "invocation_adapter": "${harness_conformance.nooa_observer:}:invoke_with_witness",
+                },
+            },
             "pop_fields": ["model", "concurrency"],
-            "extra_overrides": _nooa_overrides,
-            "session": {"agent_overrides": {}, "sandbox_backend": "conformance_local"},
+            "session": {"agent_overrides": None, "sandbox_backend": "conformance_local"},
         },
         "claude_code": {
-            "compaction_overrides": lambda scenario: {"max_turns": scenario.tool_steps + 4},
             "overrides": {
                 "claude_code_version": "2.1.108",
                 "timeout": int(timeout),
@@ -158,7 +138,6 @@ def _harness_config(harness: str, directory: Path, timeout: float, scenario: Sce
             },
         },
         "miniswe_sandboxed": {
-            "compaction_overrides": lambda scenario: {"harness": {"step_limit": scenario.tool_steps + 4}},
             "overrides": {
                 "harness": {"step_limit": 6, "step_timeout_sec": 10},
                 "agent_timeout_sec": timeout,
@@ -167,11 +146,6 @@ def _harness_config(harness: str, directory: Path, timeout: float, scenario: Sce
             },
         },
         "terminus_2_sandboxed": {
-            "compaction_overrides": lambda scenario: {
-                "max_turns": scenario.tool_steps + 4,
-                "enable_summarize": scenario.compaction,
-                "model_context_limit": 32768,
-            },
             "inherit_adapter_defaults": True,
             "overrides": {
                 "max_turns": 6,
@@ -180,15 +154,7 @@ def _harness_config(harness: str, directory: Path, timeout: float, scenario: Sce
                 "sandbox_timeout": timeout,
             },
         },
-        "stirrup": {
-            "compaction_overrides": lambda scenario: {"context_window_tokens": 32768},
-        },
         "hermes": {
-            "compaction_overrides": lambda scenario: {
-                "compression_enabled": True,
-                "compression_threshold": 0.1,
-                "max_turns": scenario.tool_steps + 4,
-            },
             "overrides": {
                 "max_turns": 6,
                 "enabled_toolsets": ["terminal"],
@@ -200,20 +166,43 @@ def _harness_config(harness: str, directory: Path, timeout: float, scenario: Sce
             },
         },
     }.get(harness, {})
-    settings["session"] = {
-        # Most agents own the sandbox; the verifier only reads retained output.
-        "agent_overrides": {"sandbox_provider": "probe_sandbox", "sandbox_config": {"workdir": workspace}},
-        "tool_transports": [],
-        "sandbox_backend": "local",
-        **settings.get("session", {}),
-    }
-    compaction_overrides = settings.get("compaction_overrides")
-    if scenario is not None and scenario.compaction is not None and compaction_overrides:
-        overrides = settings.setdefault("overrides", {})
-        for key, value in compaction_overrides(scenario).items():
-            # Preserve sibling settings such as Mini-SWE's tool timeout.
-            overrides[key] = {**overrides.get(key, {}), **value} if isinstance(value, dict) else value
-    return settings
+    return OmegaConf.merge(
+        {
+            "session": {
+                # Session sandboxes replace provider settings inherited from adapter YAML.
+                "pop_fields": ["resources_server", "sandbox_config"],
+                "agent_overrides": {"sandbox_provider": "probe_sandbox", "sandbox_config": {"workdir": workspace}},
+                "tool_transports": [],
+                "sandbox_backend": "local",
+            },
+            "legacy": {
+                "agent_overrides": {"resources_server": {"type": "resources_servers", "name": "probe_resources"}},
+            },
+        },
+        settings,
+    )
+
+
+def _compaction_settings(harness: str, scenario: Scenario) -> DictConfig:
+    """Scenario-specific overrides, applied after constructing the base settings."""
+    steps = scenario.tool_steps + 4
+    context = {"context_window": 32768 if scenario.compaction else 65536, "max_output_tokens": 8192}
+    overrides = {
+        "simple": {"max_steps": steps},
+        "opencode": context,
+        "pi": context,
+        "codex": {"model_context_window": 32768, "model_auto_compact_token_limit": 24000},
+        "stirrup": {"context_window_tokens": 32768},
+        "hermes": {"compression_enabled": True, "compression_threshold": 0.1, "max_turns": steps},
+        "claude_code": {"max_turns": steps},
+        "miniswe_sandboxed": {"harness": {"step_limit": steps}},
+        "terminus_2_sandboxed": {
+            "max_turns": steps,
+            "enable_summarize": scenario.compaction,
+            "model_context_limit": 32768,
+        },
+    }.get(harness, {})
+    return OmegaConf.create({"overrides": overrides})
 
 
 def _config(
@@ -231,44 +220,45 @@ def _config(
     defaults_path = (
         Path(__file__).resolve().parents[2] / f"responses_api_agents/{harness}_agent/configs/{harness}_agent.yaml"
     )
-    defaults = yaml.safe_load(defaults_path.read_text())[f"{harness}_agent"]["responses_api_agents"][
-        f"{harness}_agent"
-    ]
-    settings = _harness_config(harness, directory, timeout, scenario)
-    mode = settings.get("session" if use_agent_sessions else "legacy", {})
-    extra_overrides = settings.get("extra_overrides")
-    agent = {
-        **(defaults if settings.get("inherit_adapter_defaults") else {}),
-        **server(ports["probe_agent"]),
-        "name": "probe_agent",
-        "concurrency": 1,
-        "model": "conformance-model",
-        "model_server": {"type": "responses_api_models", "name": "policy_model"},
-        **{key: value for key, value in defaults.items() if key.endswith("_version")},
-        **settings.get("overrides", {}),
-        **(extra_overrides(defaults) if extra_overrides else {}),
-        **mode.get("agent_overrides", {}),
-    }
-    for field in settings.get("pop_fields", []):
+    defaults = OmegaConf.load(defaults_path)[f"{harness}_agent"]["responses_api_agents"][f"{harness}_agent"]
+    settings = _base_settings(harness, directory, timeout)
+    if scenario is not None and scenario.compaction is not None:
+        settings = OmegaConf.merge(settings, _compaction_settings(harness, scenario))
+    for module_name in settings.get("required_imports", []):
+        importlib.import_module(module_name)
+    mode = settings["session" if use_agent_sessions else "legacy"]
+    agent = OmegaConf.merge(
+        defaults if settings.get("inherit_adapter_defaults") else {},
+        {key: defaults[key] for key in settings.get("inherit_adapter_fields", [])},
+        server(ports["probe_agent"]),
+        {
+            "name": "probe_agent",
+            "concurrency": 1,
+            "model": "conformance-model",
+            "model_server": {"type": "responses_api_models", "name": "policy_model"},
+        },
+        {key: defaults[key] for key in defaults if key.endswith("_version")},
+        settings.get("overrides", {}),
+    )
+    for field in [*settings.get("pop_fields", []), *mode.get("pop_fields", [])]:
         agent.pop(field, None)
+    agent = OmegaConf.merge(agent, mode.get("agent_overrides") or {})
     if mode.get("requires_workspace"):
         (directory / "workspace").mkdir()
-    if use_agent_sessions:
-        agent.pop("resources_server", None)
-    else:
-        agent["resources_server"] = {"type": "resources_servers", "name": "probe_resources"}
     environment_type = "single_agent_turn_legacy" if use_agent_sessions else "legacy_agent"
-    environment = {
-        **server(ports["probe_environment"]),
-        "name": "probe_environment",
-        "agent_server": {"type": "responses_api_agents", "name": "probe_agent"},
-    }
+    environment = OmegaConf.merge(
+        server(ports["probe_environment"]),
+        {"name": "probe_environment", "agent_server": {"type": "responses_api_agents", "name": "probe_agent"}},
+    )
     if use_agent_sessions:
-        environment.update(
-            resources_server={"type": "resources_servers", "name": "probe_resources"},
-            resources_tool_transports=mode["tool_transports"],
-            default_episode_timeout_seconds=timeout,
-            cleanup_timeout_seconds=10,
+        environment = OmegaConf.merge(
+            environment,
+            {
+                "resources_server": {"type": "resources_servers", "name": "probe_resources"},
+                "resources_tool_transports": mode["tool_transports"],
+                "default_episode_timeout_seconds": timeout,
+                "cleanup_timeout_seconds": 10,
+            },
         )
     config = {
         "head_server": {"host": "127.0.0.1", "port": ports["policy_model"]},
@@ -287,7 +277,7 @@ def _config(
         }
     if use_agent_sessions and mode["sandbox_backend"]:
         config["probe_sandbox"] = {mode["sandbox_backend"]: {"concurrency": 1}}
-    return config
+    return OmegaConf.to_container(OmegaConf.create(config), resolve=True, throw_on_missing=True)
 
 
 async def run_episode(*, harness: str, scenario_name: str, directory: Path, timeout: float) -> None:

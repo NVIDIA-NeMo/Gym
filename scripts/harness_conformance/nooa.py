@@ -13,6 +13,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
+from omegaconf import OmegaConf
+
 from nemo_gym.sandbox import AsyncSandbox, LocalProvider
 from nemo_gym.sandbox.providers import SandboxHandle, SandboxSpec, register_provider
 
@@ -25,6 +27,9 @@ OBSERVER = Path(__file__).with_name("nooa_observer.py")
 def observer_module_name() -> str:
     """Bind the fixture module import to its exact source bytes."""
     return "nooa_conformance_observer_" + hashlib.sha256(OBSERVER.read_bytes()).hexdigest()[:16]
+
+
+OmegaConf.register_new_resolver("harness_conformance.nooa_observer", observer_module_name, replace=True)
 
 
 async def install_observer(sandbox: AsyncSandbox) -> None:
