@@ -171,7 +171,7 @@ class MockToolsResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, Sim
     # Episodes live in this process and are not exported, so a checkpoint restarts their rollouts.
     checkpoint_mode = "restart_only"
     checkpoint_verify = "wait"
-    # Episodes live in worker memory, so the server runs one worker (see model_post_init) and no Ray.
+    # Episodes live in the memory of the worker that holds their session, and the server uses no Ray.
     ray_enabled = False
 
     config: MockToolsServerConfig
@@ -188,8 +188,6 @@ class MockToolsResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, Sim
 
     def model_post_init(self, context: object) -> None:
         super().model_post_init(context)
-        if self.config.num_workers not in (None, 1):
-            raise ValueError("Mock-tool episodes live in the server's memory, so it requires num_workers=1")
         self._fences = ResourcesSessionFences(self.config.session_close_retry_window_seconds)
         if self.config.backend is not None:
             self._backend = load_backend(self.config.backend)(self.config.fixture_path)
@@ -464,4 +462,4 @@ VERIFIER_FIXTURE = VerifierFixture(
 if __name__ == "__main__":
     MockToolsResourcesServer.run_webserver()
 elif is_nemo_gym_fastapi_entrypoint(__file__):
-    app = MockToolsResourcesServer.run_webserver()
+    app = MockToolsResourcesServer.run_webserver()  # noqa: F401

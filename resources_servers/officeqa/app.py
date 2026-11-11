@@ -42,6 +42,7 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import VerifierFixture
 from resources_servers.officeqa.task_data import TaskData
 from resources_servers.officeqa.verifier_fixture import create_fixture_server, invoke_fixture
@@ -115,8 +116,6 @@ class OfficeQAResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context: object, /) -> None:
         super().model_post_init(context)
-        if self.config.num_workers not in (None, 1):
-            raise ValueError("OfficeQA process-local sandboxes require num_workers=1")
         self._sessions: dict[str, _DocumentSession] = {}
         self._locks = ResourcesSessionLocks()
         self._fences = ResourcesSessionFences(self.config.session_close_retry_window_seconds)
@@ -323,3 +322,5 @@ VERIFIER_FIXTURE = VerifierFixture(
 
 if __name__ == "__main__":
     OfficeQAResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = OfficeQAResourcesServer.run_webserver()  # noqa: F401

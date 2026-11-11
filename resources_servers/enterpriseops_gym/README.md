@@ -76,7 +76,8 @@ The upstream gym images are published only on Docker Hub, for amd64, by a person
 (`shivakrishnareddyma225/enterpriseops-gym-mcp-<domain>`). A deployment that mirrors them keeps the digests and maps
 the names with the provider's image rewrites (`images.rewrites` in the OpenSandbox config).
 
-The server keeps sessions in its process, so it requires `num_workers: 1`.
+Each worker keeps the sessions it seeded in its memory. With `num_workers` above 1, session routing sends every
+request of a session to the worker that holds it.
 
 ## Licensing
 

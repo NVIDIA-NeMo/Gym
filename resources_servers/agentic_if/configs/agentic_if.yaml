@@ -24,7 +24,6 @@ agentic_if_resources:
       value: Measure whether coding agents follow instructions while completing real repository and terminal tasks.
       # Its OpenCode plugins and evidence are built for this harness.
       allowed_agents: [opencode_agent]
-      # Episodes hold sandbox connections in this process.
       num_workers: 1
       # The judge's prompts and model settings ship in if_grading/data/judge.yaml; this model server answers them.
       judge_model_server:

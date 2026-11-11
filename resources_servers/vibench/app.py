@@ -33,8 +33,10 @@ still works: its ``seed_session`` gets the PRD text and asset directories and st
 sandbox of its own, and its ``verify`` names a tarball in the shared ``artifact_dir``, which this server unpacks and
 grades the same way.
 
-Sessions are process-local, so the server runs with one worker. Grading shells into a local
-Docker daemon, so this server needs Docker and ``docker-compose`` on its host.
+Each worker keeps the sessions it seeded; with several workers, session routing sends every request of a
+session to the worker that holds it. A server configured for the legacy relay path (``artifact_dir``) runs with one
+worker, since vibench_agent never closes the session its seed opens. Grading shells into a local Docker daemon,
+so this server needs Docker and ``docker-compose`` on its host.
 
 The verifier is itself an LLM agent driving a browser, so reward is stochastic -- profile
 its variance before using this for training. ``REVERIFY_MODE`` is ``UNSUPPORTED`` because
@@ -89,6 +91,7 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
     lost_session_verification,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 # ViBench's two-phase grading path. run-seed-then-evaluate.py looks like a convenient
@@ -312,14 +315,20 @@ class VibenchResourcesServer(SimpleResourcesServer):
     config: VibenchResourcesServerConfig
 
     def model_post_init(self, context: Any) -> None:
-        if self.config.num_workers not in (None, 1):
-            raise ValueError("ViBench sessions are process-local and require num_workers=1")
         self._sessions: Dict[str, _BuildSession] = {}
         self._locks = ResourcesSessionLocks()
         self._fences: ResourcesSessionFences[EpisodeId] = ResourcesSessionFences(
             self.config.session_close_retry_window_seconds
         )
         super().model_post_init(context)
+
+    def multiple_workers_unsupported_reason(self) -> Optional[str]:
+        # Episode sessions are keyed by resources_session_id, which session routing follows.
+        # A legacy relay seed opens a routed session that vibench_agent never closes, so with several workers each
+        # relay episode that fails before a successful verify would leave its worker owning that session for good.
+        if self.config.artifact_dir is None:
+            return None
+        return "the legacy relay path (artifact_dir) seeds sessions that vibench_agent never closes"
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -1098,3 +1107,5 @@ class VibenchResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     VibenchResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = VibenchResourcesServer.run_webserver()  # noqa: F401
