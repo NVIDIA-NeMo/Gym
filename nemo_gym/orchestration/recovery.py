@@ -4478,7 +4478,7 @@ def _graded(row: Mapping[str, Any]) -> bool:
 
 def _bound_grading(row: Mapping[str, Any], collected: CollectedEvidence) -> bool:
     """Whether the row is ``_graded`` and every grading operation binds its saved answer and score, as the gate
-    requires (``_ng_collected_grading_binding``)."""
+    requires (``_ng_collected_grading_binding``), with a verification owner resolved from run provenance."""
     observed = row.get("ng_trial_observations")
     binding = row.get("_ng_collected_grading_binding")
     provenance = (collected.quality or {}).get("provenance")
@@ -4497,7 +4497,8 @@ def _bound_grading(row: Mapping[str, Any], collected: CollectedEvidence) -> bool
 
 def _bound_artifact(row: Mapping[str, Any], collected: CollectedEvidence) -> bool:
     """Whether a saved grading artifact or the model's own failed answer resolves the row, as the gate requires: an
-    artifact other than the model's failed answer must bind the saved answer and score to its verification owner."""
+    artifact other than the model's failed answer must bind the saved answer and score, and its verification owner
+    must resolve from run provenance."""
     if grading_artifact(row) is None:
         return _model_failure(row)
     provenance = (collected.quality or {}).get("provenance")
@@ -4508,9 +4509,10 @@ def _bound_artifact(row: Mapping[str, Any], collected: CollectedEvidence) -> boo
 def _verification_owner(row: Mapping[str, Any], servers: Mapping[str, Any]) -> str | None:
     """Resolve verification from saved routing bindings, including taskset results without ``agent_ref``.
 
-    The environment owns a session's verification. An agent reference on a compatibility result must agree with
-    a declared primary agent; without one, its explicit reference retains its existing attribution.
-    An agent that grades its own rollouts names itself when neither configuration binds a resources server.
+    The environment's resources binding takes precedence, including for an explicit agent reference. An explicit
+    reference must identify a registered agent and agree with a declared primary agent. Without a reference, only
+    the environment's resources binding resolves ownership. A valid explicit reference can fall back to the agent's
+    resources binding, or the agent itself when it grades its own rollouts.
     """
     environment_name = row.get("_ng_environment_server")
     environment = servers.get(environment_name) if isinstance(environment_name, str) else None
@@ -4522,24 +4524,20 @@ def _verification_owner(row: Mapping[str, Any], servers: Mapping[str, Any]) -> s
     ):
         return None
     reference = row.get("agent_ref")
-    if reference is None:
-        agent_name = environment.get("agent_server")
-    elif isinstance(reference, dict):
+    owner = environment.get("resources_server")
+    if reference is not None:
+        if not isinstance(reference, dict):
+            return None
         agent_name = reference.get("name")
         if environment.get("agent_server") is not None and agent_name != environment["agent_server"]:
             return None
-    else:
-        return None
-    agent = servers.get(agent_name) if isinstance(agent_name, str) and agent_name else None
-    if not isinstance(agent, dict) or agent.get("kind") != "responses_api_agents":
-        return None
-    owner = environment.get("resources_server")
-    if owner is None:
-        if reference is None:
+        agent = servers.get(agent_name) if isinstance(agent_name, str) and agent_name else None
+        if not isinstance(agent, dict) or agent.get("kind") != "responses_api_agents":
             return None
-        owner = agent.get("resources_server")
-    if owner is None:
-        return agent_name
+        if owner is None:
+            owner = agent.get("resources_server")
+        if owner is None:
+            return agent_name
     resource = servers.get(owner) if isinstance(owner, str) and owner else None
     return owner if isinstance(resource, dict) and resource.get("kind") == "resources_servers" else None
 
@@ -4641,7 +4639,8 @@ def trial_counts(decision: RecoveryDecision, collected: CollectedEvidence | None
     gate's observation join covers every other trial, its observed gradings without a valid verdict are unhealthy
     too and nothing is unobserved. Otherwise ``unobserved`` are the other scored trials whose verifier recorded
     neither completed grading operations bound to the saved row nor its own grading record: nothing resolved their
-    grading, so they are unverified, never healthy. ``observed_healthy`` are the rest; ``verifier_recorded`` of them
+    grading, so they are unverified, never healthy. Grading whose verification owner cannot resolve from saved run
+    provenance also stays unobserved. ``observed_healthy`` are the rest; ``verifier_recorded`` of them
     are observed only through the verifier's grading record. None until the run is complete.
     """
     decision = _health_view(decision)
@@ -4669,14 +4668,14 @@ def trial_counts(decision: RecoveryDecision, collected: CollectedEvidence | None
     # The same per-trial evidence the gate validates: a grading bound to the saved row, the verifier's own record, or
     # a bound grading artifact. A mismatched or missing binding stays unobserved, never healthy.
     recorded = sum(1 for row in rows if not _bound_grading(row, collected) and _recorded_by_verifier(row, collected))
-    artifacts = sum(
-        1
+    unobserved_rows = [
+        row
         for row in rows
         if not _bound_grading(row, collected)
         and not _recorded_by_verifier(row, collected)
-        and _bound_artifact(row, collected)
-    )
-    unobserved = sum(1 for row in rows if not _bound_grading(row, collected)) - recorded - artifacts
+        and not _bound_artifact(row, collected)
+    ]
+    unobserved = len(unobserved_rows)
     counts: dict[str, Any] = {
         "observed_healthy": trials - unhealthy - unobserved,
         "unhealthy": unhealthy,
@@ -4684,10 +4683,24 @@ def trial_counts(decision: RecoveryDecision, collected: CollectedEvidence | None
         "verifier_recorded": recorded,
     }
     if unobserved:
-        counts["unobserved_reason"] = (
-            f"no completed grading operation or grading record was recorded by the verifier "
-            f"({_verifying_servers(collected)})"
+        provenance = (collected.quality or {}).get("provenance")
+        servers = provenance.get("servers") if isinstance(provenance, dict) else None
+        unresolved = sum(
+            1 for row in unobserved_rows if not isinstance(servers, dict) or _verification_owner(row, servers) is None
         )
+        reasons = []
+        if unresolved:
+            reasons.append(
+                f"verification owner unresolved from run provenance for {unresolved} of {unobserved} unobserved trials"
+            )
+        unbound = unobserved - unresolved
+        if unbound:
+            reasons.append(
+                f"no completed grading operation or grading record was recorded by the verifier "
+                f"({_verifying_servers(collected)}) with a matching saved-answer and score binding "
+                f"for {unbound} of {unobserved} unobserved trials"
+            )
+        counts["unobserved_reason"] = "; ".join(reasons)
     return counts
 
 
@@ -4792,7 +4805,7 @@ def _recorded_grade(row: Mapping[str, Any], collected: CollectedEvidence | None)
         # operation, its completion alone does not show that an incomplete, text-free answer was judged.
         or (
             collected is not None
-            and not (_incomplete_answer(row) and _empty_answer(row))
+            and not (_incomplete_answer(row) and _empty_answer(row) and _reward(row) == 0)
             and _recorded_by_verifier(row, collected)
         )
         or grading_artifact(row) is not None

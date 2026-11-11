@@ -2701,8 +2701,8 @@ def _quality_naming(server: str, expected: int) -> dict:
     )
 
 
-def test_a_run_whose_verifier_records_no_grading_is_unobserved_with_a_count_and_a_reason(tmp_path) -> None:
-    """Full score and coverage, but nothing observed the grading: unverified, never silent and never healthy."""
+def test_a_run_without_saved_verification_ownership_is_unobserved_with_a_count_and_a_reason(tmp_path) -> None:
+    """Full score and coverage do not resolve a verifier without the saved row environment identity."""
     job = gate_job(tmp_path, expected=6, final_zeros=0)
     d, task = gate_of(job, quality=_quality_naming("demo_verifier", 6))
 
@@ -2712,14 +2712,13 @@ def test_a_run_whose_verifier_records_no_grading_is_unobserved_with_a_count_and_
         "unhealthy": 0,
         "unobserved": 6,
         "verifier_recorded": 0,
-        "unobserved_reason": "no completed grading operation or grading record was recorded by the verifier (demo_verifier)",
+        "unobserved_reason": "verification owner unresolved from run provenance for 6 of 6 unobserved trials",
     }
     [health] = [w for w in task["warnings"] if w.startswith("response/trial health")]
     assert health.startswith("response/trial health unknown")
     assert (
-        "trial: UNOBSERVED 6 of 6 expected trials: no completed grading operation or grading record was recorded "
-        "by the verifier (demo_verifier), so the run is unverified, not healthy; observed healthy 0, unhealthy 0"
-        in health
+        "trial: UNOBSERVED 6 of 6 expected trials: verification owner unresolved from run provenance for 6 of 6 "
+        "unobserved trials, so the run is unverified, not healthy; observed healthy 0, unhealthy 0" in health
     )
     assert task["status"] == "UNVERIFIED"
 
