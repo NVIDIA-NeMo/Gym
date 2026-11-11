@@ -14,7 +14,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from time import time
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
@@ -22,6 +22,7 @@ from pydantic import ConfigDict, Field, JsonValue
 
 from nemo_gym.agents import (
     AgentCloseSessionResponse,
+    AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
@@ -33,6 +34,7 @@ from nemo_gym.agents import (
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.core import (
+    MODEL_REQUEST_ERROR,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -48,6 +50,7 @@ from nemo_gym.core import (
 )
 from nemo_gym.sandbox import (
     AsyncSandbox,
+    ConnectableProvider,
     DirectSandboxConnection,
     SandboxSpec,
     create_provider,
@@ -60,6 +63,23 @@ from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 LOG = logging.getLogger(__name__)
+
+
+class SSARunError(RuntimeError):
+    """The runner's own error result, with the HTTP status of the model request that ended the run, if any."""
+
+    def __init__(self, message: str, status_code: Optional[int] = None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def _saved_messages(path: Path) -> list[dict[str, Any]]:
+    """The transcript SSA's TrajectoryHook saves every few messages, or none if it saved none."""
+    try:
+        messages = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return []
+    return messages if isinstance(messages, list) else []
 
 
 def _content_text(content: Any) -> str:
@@ -197,6 +217,8 @@ class SimpleStrandsSession(AgentSessionState):
     activation_request: Optional[NeMoGymResponseCreateParamsNonStreaming] = None
     observations: Optional[AgentObservationBundle] = None
     released: bool = False
+    # The runner was killed or crashed, so a tool command may still run in the sandbox.
+    interrupted: bool = False
 
 
 class SimpleStrandsAgentRunRequest(BaseRunRequest):
@@ -249,12 +271,13 @@ class SimpleStrandsAgent(SimpleResponsesAPIAgent):
             stdout, stderr = await asyncio.wait_for(asyncio.shield(communication), timeout=self.config.timeout)
         except asyncio.TimeoutError:
             await self._terminate_process(process, communication)
-            raise RuntimeError(f"SSA timed out after {self.config.timeout}s") from None
+            raise TimeoutError(f"SSA timed out after {self.config.timeout}s") from None
         except asyncio.CancelledError:
             await self._terminate_process(process, communication)
             raise
 
-        if process.returncode != 0:
+        # A runner that fails writes its error result first, so the result says why.
+        if process.returncode != 0 and not result_path.is_file():
             detail = stderr.decode(errors="replace")[-1000:]
             if stdout:
                 LOG.debug("SSA stdout: %s", stdout.decode(errors="replace")[-1000:])
@@ -270,7 +293,7 @@ class SimpleStrandsAgent(SimpleResponsesAPIAgent):
         if result.get("error"):
             if stdout:
                 LOG.debug("SSA stdout: %s", stdout.decode(errors="replace")[-1000:])
-            raise RuntimeError(f"SSA failed: {result['error']}")
+            raise SSARunError(f"SSA failed: {result['error']}", result.get("status_code"))
         return result
 
     @staticmethod
@@ -357,8 +380,8 @@ class SimpleStrandsAgent(SimpleResponsesAPIAgent):
             model=model_name,
             object="response",
             output=output_items,
-            # SSA's max_turns ends the run without an answer; the work so far is still graded.
-            status="incomplete" if result.get("stop_reason") == "max_turns" else "completed",
+            # SSA's iteration limit and the deadline end the run without an answer; the work so far is still graded.
+            status="incomplete" if result.get("stop_reason") in ("max_iterations", "deadline") else "completed",
             tool_choice=body.tool_choice,
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,
@@ -370,6 +393,13 @@ class SimpleStrandsAgent(SimpleResponsesAPIAgent):
                 total_tokens=input_tokens + output_tokens,
             ),
         )
+
+    def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
+        """A failed model request's HTTP status, which the runner reads from the exception; anything else unknown."""
+        status_code = native_result.get("status_code")
+        if isinstance(status_code, int) and 400 <= status_code <= 599:
+            return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status_code)
+        return AgentOutcome(failure_kind="unknown")
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> SimpleStrandsSession:
         """Connect to (or start) the task sandbox where SSA's tools will run; nothing is installed in it."""
@@ -400,6 +430,12 @@ class SimpleStrandsAgent(SimpleResponsesAPIAgent):
         provider_config = resolve_provider_config(provider_ref, global_config)
         provider = create_provider(provider_config)
         if owns_sandbox:
+            # The runner reconnects to the sandbox from its own process, which needs a connectable provider.
+            if not isinstance(provider, ConnectableProvider):
+                await provider.aclose()
+                raise AgentSeedRejectedError(
+                    f"Simple Strands Agent needs a connectable sandbox provider, not {provider.name}"
+                )
             sandbox = AsyncSandbox(provider)
         else:
             try:
@@ -460,7 +496,9 @@ class SimpleStrandsAgent(SimpleResponsesAPIAgent):
         task = state.task
         # A runner stopped mid-run (cancelled, timed out or failed) can leave a tool command running in a borrowed
         # sandbox, and disconnect does not stop it. Only a runner that returned ran every command to its exit.
-        interrupted = task is not None and (not task.done() or task.cancelled() or task.exception() is not None)
+        interrupted = state.interrupted or (
+            task is not None and (not task.done() or task.cancelled() or task.exception() is not None)
+        )
         await self._release(state)
         return AgentCloseSessionResponse(
             agent_session_id=state.request.agent_session_id,
@@ -472,7 +510,13 @@ class SimpleStrandsAgent(SimpleResponsesAPIAgent):
         )
 
     def _session_observations(
-        self, state: SimpleStrandsSession, *, status: str, error_type: Optional[str], output: list[Any]
+        self,
+        state: SimpleStrandsSession,
+        *,
+        status: str,
+        error_type: Optional[str],
+        output: list[Any],
+        stop_reason: Optional[str] = None,
     ) -> AgentObservationBundle:
         conversation = []
         if state.activation_request is not None:
@@ -490,6 +534,7 @@ class SimpleStrandsAgent(SimpleResponsesAPIAgent):
                 AgentInvocation(
                     invocation_id=state.request.episode_id.capture_key,
                     status=status,
+                    stop_reason=stop_reason,
                     error_type=error_type,
                     conversation=conversation + output,
                 ),
@@ -497,7 +542,11 @@ class SimpleStrandsAgent(SimpleResponsesAPIAgent):
                     role="agent",
                     provider=state.provider_name,
                     sandbox_id=state.sandbox.sandbox_id,
-                    outcome="failed" if status == "failed" else "completed",
+                    outcome="failed"
+                    if status == "failed"
+                    else "timeout"
+                    if stop_reason == "deadline"
+                    else "completed",
                     error_type=error_type,
                 ),
             ],
@@ -507,29 +556,55 @@ class SimpleStrandsAgent(SimpleResponsesAPIAgent):
     async def _activate_session(
         self, state: SimpleStrandsSession, body: NeMoGymResponseCreateParamsNonStreaming
     ) -> NeMoGymResponse:
-        work_dir = self._workspace()
-        rollout_id = state.request.episode_id.capture_key
-        payload = self._payload(body, rollout_id, state.workdir, work_dir / "output")
-        access = state.request.sandbox_access
-        sandbox = {
-            "provider": state.provider_config,
-            "descriptor": await state.sandbox.serialize(),
-            "env": access.env if access else {},
-        }
+        work_dir, failure = None, None
         try:
-            async with self.sem:
-                result = await self._run_ssa(payload, work_dir, sandbox)
+            work_dir = self._workspace()
+            rollout_id = state.request.episode_id.capture_key
+            payload = self._payload(body, rollout_id, state.workdir, work_dir / "output")
+            access = state.request.sandbox_access
+            sandbox = {
+                "provider": state.provider_config,
+                "descriptor": await state.sandbox.serialize(),
+                "env": access.env if access else {},
+            }
+            try:
+                async with self.sem:
+                    result = await self._run_ssa(payload, work_dir, sandbox)
+            except TimeoutError:
+                state.interrupted = True
+                # The deadline is graded like a timeout, on the transcript SSA saved so far.
+                result = {
+                    "messages": _saved_messages(work_dir / "output" / "trajectory.json"),
+                    "stop_reason": "deadline",
+                }
+            except Exception as error:
+                # A model HTTP error, a sandbox outage or a runner crash: a classified failure, not a bare 500.
+                result, failure = {}, error
+                state.interrupted = not isinstance(error, SSARunError)
         except BaseException as error:
             state.observations = self._session_observations(
                 state, status="failed", error_type=type(error).__name__, output=[]
             )
             raise
         finally:
-            if not self.config.keep_workspaces:
+            if work_dir is not None and not self.config.keep_workspaces:
                 shutil.rmtree(work_dir, ignore_errors=True)
         response = self._response(body, result, payload["model"])
+        if failure is not None:
+            LOG.warning("Simple Strands run failed: %s", failure)
+            response = response.model_copy(
+                update={"status": "failed", "error": {"code": "server_error", "message": str(failure)[-2000:]}}
+            )
+            state.observations = self._session_observations(
+                state, status="failed", error_type=type(failure).__name__, output=[]
+            )
+            return self.report_outcome(response, {"status_code": getattr(failure, "status_code", None)})
         state.observations = self._session_observations(
-            state, status=response.status, error_type=result.get("stop_reason"), output=list(response.output)
+            state,
+            status=response.status,
+            error_type=None,
+            output=list(response.output),
+            stop_reason=result.get("stop_reason"),
         )
         return response
 

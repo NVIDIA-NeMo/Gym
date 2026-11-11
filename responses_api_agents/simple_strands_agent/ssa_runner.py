@@ -28,7 +28,6 @@ from ssa.models import sr_model
 from ssa.prompts.prompt_gen import PromptGenerator
 from ssa.tools import load_tools
 from strands.handlers.callback_handler import CompositeCallbackHandler
-from strands.types.exceptions import EventLoopException
 
 
 importlib.import_module("ssa.utils.monkey_patch")
@@ -161,7 +160,11 @@ class SandboxEnvironment(Environment):
     def write_file(self, content: str, dest_path: str) -> None:
         from nemo_gym.sandbox import upload_text
 
-        self._call(upload_text(self._sandbox, path=dest_path, text=content))
+        try:
+            self._call(upload_text(self._sandbox, path=dest_path, text=content))
+        except Exception as error:
+            self.infra_error = f"Sandbox upload failed: {error}"
+            raise
 
     def retry_feedback(self, *args, **kwargs) -> str | None:
         return None
@@ -275,11 +278,12 @@ def _run(payload: dict[str, Any], sandbox: dict[str, Any] | None = None) -> dict
             while True:
                 try:
                     result = agent(user_prompt, environment=env, show_panel=False, tool_params=tool_params)
-                except EventLoopException as error:
-                    # max_llm_iterations ends the run with this exception; the transcript so far is the result.
+                except Exception as error:
+                    # max_llm_iterations ends the run with this exception, raw or wrapped in EventLoopException
+                    # when it fires in a nested cycle; the transcript so far is the result.
                     if "exceeded the set threshold" not in str(error):
                         raise
-                    stop_reason = "max_turns"
+                    stop_reason = "max_iterations"
                     break
                 retry_feedback = env.retry_feedback(agent, result)
                 if not retry_feedback:
@@ -311,7 +315,13 @@ def main() -> None:
     try:
         result = _run(payload, sandbox)
     except BaseException as error:
-        args.result.write_text(json.dumps({"error": str(error), "traceback": traceback.format_exc()}, default=str))
+        # The HTTP status of a failed model request, from the exception or one it wraps.
+        status_code, cause = None, error
+        while cause is not None and status_code is None:
+            status_code = getattr(cause, "status_code", None)
+            cause = cause.__cause__ or cause.__context__
+        failure = {"error": str(error), "status_code": status_code, "traceback": traceback.format_exc()}
+        args.result.write_text(json.dumps(failure, default=str))
         raise
     args.result.write_text(json.dumps(result, default=str))
 

@@ -1032,7 +1032,8 @@ Duplicate config paths:
     def _relay_agents_without_sessions(global_config_dict: DictConfig, agent_names: set[str]) -> None:
         """Replace each single_agent_turn_legacy server fronting one of `agent_names` with a legacy_agent relay.
 
-        Those agents do not implement agent sessions, so single_agent_turn_legacy would fail every episode.
+        Those agents either do not implement agent sessions or are in HOST_RUN_SWAP_AGENT_TYPES, whose swap template
+        runs on the host through /run, so single_agent_turn_legacy would fail every episode.
         The relay calls the agent's own /run, as the environment did before it moved to agent sessions.
         """
         for instance_name, instance in global_config_dict.items():
@@ -1049,7 +1050,7 @@ Duplicate config paths:
                 continue
             logger.info(
                 f"Environment server '{instance_name}' runs '{agent_name}' through a legacy_agent relay: "
-                f"that agent type does not implement the agent sessions single_agent_turn_legacy needs."
+                f"that agent type has no agent sessions, or its swap template runs on the host through /run."
             )
             servers[LEGACY_AGENT_SERVER_TYPE] = {key: server[key] for key in _LEGACY_RELAY_KEPT_KEYS if key in server}
             servers.pop(SINGLE_AGENT_TURN_LEGACY_SERVER_TYPE)
