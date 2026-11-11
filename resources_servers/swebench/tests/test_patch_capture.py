@@ -212,6 +212,19 @@ async def test_failed_command_error_says_whether_git_or_the_provider_failed(erro
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("return_code", [None, 0, 128])
+async def test_provider_error_never_accepts_stale_success_output(return_code: int | None) -> None:
+    class _Sandbox:
+        async def exec(self, command, **kwargs):
+            return SimpleNamespace(return_code=return_code, stdout=WORKTREE_DIFF, stderr="", error_type="sandbox")
+
+    with pytest.raises(CaptureCommandError) as error:
+        await capture_model_patch(_Sandbox(), "/repo", BASE)
+    assert error.value.error_type == "sandbox"
+    assert error.value.return_code == return_code
+
+
+@pytest.mark.asyncio
 async def test_unknown_mode_is_rejected_before_touching_the_sandbox():
     sb = _FakeSandbox()
     with pytest.raises(ValueError):
