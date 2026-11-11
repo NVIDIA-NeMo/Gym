@@ -582,7 +582,7 @@ def test_resources_session_contract() -> None:
     server = _server()
     server.session_id_to_seed = {}
     server.resources_session_id_to_session_id = {}
-    server.closed_resources_session_ids = {}
+    server.fenced_resources_session_ids = {}
 
     check_resources_session_contract(
         server.setup_webserver(),
@@ -600,7 +600,7 @@ async def test_seed_retried_under_a_new_cookie_moves_the_record_and_close_withou
     server = _server()
     server.session_id_to_seed = {}
     server.resources_session_id_to_session_id = {}
-    server.closed_resources_session_ids = {}
+    server.fenced_resources_session_ids = {}
     body = _seed_body(_resolved_row())
 
     await server.seed_session(_request("lost-reply"), body)
@@ -636,7 +636,7 @@ async def test_expired_session_is_removed_and_verifies_as_masked(monkeypatch: py
     assert (verification.mask_sample, verification.failure_kind) == (True, SESSION_EXPIRED)
     assert "expired" not in server.session_id_to_seed
     assert server.resources_session_id_to_session_id == {}
-    # The expiry record is bounded like the closed record.
+    # The expiry record is bounded like a fence.
     now = 122.0
     verification = await _verify(server, request, _resolved_row())
     assert verification.failure_kind == SESSION_LOST
@@ -648,7 +648,7 @@ async def test_close_finds_the_session_by_id_before_the_cookie() -> None:
     server = _server()
     server.session_id_to_seed = {}
     server.resources_session_id_to_session_id = {}
-    server.closed_resources_session_ids = {}
+    server.fenced_resources_session_ids = {}
     first = _seed_body(_resolved_row())
     second = first.model_copy(update={"resources_session_id": "resources-session-1"})
     await server.seed_session(_request("cookie-a"), first)
@@ -662,7 +662,7 @@ async def test_close_finds_the_session_by_id_before_the_cookie() -> None:
 
     assert set(server.session_id_to_seed) == {"cookie-b"}
     assert server.resources_session_id_to_session_id == {"resources-session-1": "cookie-b"}
-    assert first.resources_session_id in server.closed_resources_session_ids
+    assert first.resources_session_id in server.fenced_resources_session_ids
 
 
 def test_health_scorer_only_applies_to_guarded_rows() -> None:
@@ -678,3 +678,19 @@ def test_resources_server_exposes_no_runtime_or_tool_routes() -> None:
     assert "/verify" in routes
     assert "/close_session" in routes
     assert not any(path.startswith("/runtime") or path.startswith("/tools") for path in routes)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "window"),
+    [
+        ({}, 1980.0),
+        ({"session_ttl_seconds": 3600.0}, 3600.0),
+        ({"session_close_retry_window_seconds": 5000.0}, 5000.0),
+    ],
+)
+def test_the_session_keeps_its_owner_at_least_as_long_as_the_tombstone(overrides: dict, window: float) -> None:
+    """A delayed seed of a closed session reaches the worker that holds its tombstone, which lasts session_ttl_seconds."""
+    server = _server()
+    for name, value in overrides.items():
+        setattr(server.config, name, value)
+    assert server.owned_session_routing()["close_retry_window_seconds"] == window

@@ -36,6 +36,10 @@ from pytest import LogCaptureFixture, MonkeyPatch, fixture, mark, raises
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
+    PROVIDER_IO_TIMEOUT,
+    PROVIDER_OOM_KILLED,
+    PROVIDER_STATUS_UNAVAILABLE,
+    PROVIDER_UNAVAILABLE,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -48,9 +52,13 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
     NeMoGymSummary,
+    NgFailureEvent,
+    RequestFailureLog,
+    SandboxFailureDetails,
 )
 from nemo_gym.sandbox import CPU_CAP_ENV_VARS, SandboxHandle
 from nemo_gym.trajectory import (
+    NG_AGENT_SANDBOX_OBSERVATION_KEY,
     AgentInvocation,
     SandboxObservation,
     ToolCallObservation,
@@ -63,6 +71,27 @@ from responses_api_agents.opencode_sandboxed_agent.app import (
     OpenCodeSandboxedAgentConfig,
     OpenCodeSandboxedAgentRunRequest,
 )
+
+
+def sandbox_io_timeout(reason: str) -> NgFailureEvent:
+    return NgFailureEvent(boundary="sandbox", failure_kind=PROVIDER_IO_TIMEOUT, failure_reason=reason)
+
+
+def sandbox_unavailable(reason: str) -> NgFailureEvent:
+    return NgFailureEvent(boundary="sandbox", failure_kind=PROVIDER_UNAVAILABLE, failure_reason=reason)
+
+
+def sandbox_status_unavailable(reason: str) -> NgFailureEvent:
+    return NgFailureEvent(boundary="sandbox", failure_kind=PROVIDER_STATUS_UNAVAILABLE, failure_reason=reason)
+
+
+def sandbox_oom(reason: str, *, sandbox_id: str = "task-5") -> NgFailureEvent:
+    return NgFailureEvent(
+        boundary="sandbox",
+        failure_kind=PROVIDER_OOM_KILLED,
+        failure_reason=reason,
+        details=SandboxFailureDetails(provider="opensandbox", sandbox_id=sandbox_id),
+    )
 
 
 class TestOpenCodeSandboxedAgent:
@@ -88,7 +117,7 @@ class TestOpenCodeSandboxedAgent:
             opencode_version="",
             sandbox_provider="",
             sandbox_config=dict(),
-            sandbox_timeout=0,
+            sandbox_timeout=60,
             opencode_max_context_window=0,
             token_id_capture=True,
         )
@@ -351,6 +380,7 @@ class TestOpenCodeSandboxedAgent:
         observability_enabled: bool,
     ) -> None:
         config = self._create_config()
+        config.artifacts_dir = str(tmp_path)
         config.output_token_policy = "remaining_context" if remaining_context else "fixed"
         if stage_ripgrep:
             binary = tmp_path / "rg with spaces"
@@ -364,7 +394,7 @@ class TestOpenCodeSandboxedAgent:
         client.global_config_dict = {"observability_enabled": observability_enabled}
         server = OpenCodeSandboxedAgent(config=config, server_client=client)
 
-        sandbox_mock = MagicMock()
+        sandbox_mock = MagicMock(sandbox_id="test-sandbox")
         sandbox_mock.exec = AsyncMock(
             side_effect=[
                 SimpleNamespace(
@@ -376,6 +406,9 @@ class TestOpenCodeSandboxedAgent:
         )
 
         async def download(remote: str, local: Path) -> None:
+            if remote == "/tmp/opencode_export.json":
+                local.write_text(json.dumps(opencode_export_test_data))
+                return
             # Serve the plugin upload read-back from the real file; the export download is a no-op.
             # The sandbox path carries a prefix the repo file does not, so strip it before looking:
             # /tmp/nemo-gym-plugin-<name> lives under plugins/, /tmp/nemo-gym-<name> beside app.py.
@@ -391,19 +424,14 @@ class TestOpenCodeSandboxedAgent:
 
         sandbox_mock.download = AsyncMock(side_effect=download)
         sandbox_mock.upload = AsyncMock()
+        sandbox_mock._handle = SandboxHandle(
+            sandbox_id="responses-sanity-sandbox", provider_name="opensandbox", raw=None
+        )
         monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox_mock})
         monkeypatch.setattr(
             server, "_create_opencode_config", AsyncMock(return_value={"plugin": ["file:///user-plugin.js"]})
         )
 
-        monkeypatch.setattr(
-            "responses_api_agents.opencode_sandboxed_agent.app.Path.exists",
-            lambda self: True,
-        )
-        monkeypatch.setattr(
-            "responses_api_agents.opencode_sandboxed_agent.app.Path.read_text",
-            lambda self: json.dumps(opencode_export_test_data),
-        )
         monkeypatch.setattr(
             "responses_api_agents.opencode_sandboxed_agent.app.uuid4", MagicMock(return_value=MagicMock(hex=""))
         )
@@ -598,7 +626,7 @@ class TestOpenCodeSandboxedAgent:
 
     def _mock_sandbox(self, monkeypatch: MonkeyPatch, server: OpenCodeSandboxedAgent) -> MagicMock:
         """A sandbox whose run, session list and export succeed; the export file is read as empty."""
-        sandbox_mock = MagicMock()
+        sandbox_mock = MagicMock(sandbox_id="test-sandbox")
         sandbox_mock.exec = AsyncMock(
             side_effect=[
                 SimpleNamespace(
@@ -608,7 +636,14 @@ class TestOpenCodeSandboxedAgent:
                 SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
             ]
         )
-        sandbox_mock.download = AsyncMock()
+
+        async def download(remote_path, local_path):
+            if str(remote_path).endswith(".json"):
+                Path(local_path).write_text(json.dumps({"messages": [{"info": {"role": "assistant"}, "parts": []}]}))
+            else:
+                raise FileNotFoundError(remote_path)
+
+        sandbox_mock.download = AsyncMock(side_effect=download)
         sandbox_mock.upload = AsyncMock()
         monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox_mock})
         monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value={}))
@@ -769,9 +804,129 @@ class TestOpenCodeSandboxedAgent:
                 self._create_config().model_dump() | {"local_ripgrep_binary_path": str(tmp_path / "missing-rg")}
             )
 
-    @mark.parametrize("error_type", [PermissionError, FileNotFoundError])
+    @mark.parametrize("error_type", [TimeoutError, sandbox_io_timeout])
+    async def test_ripgrep_upload_timeout_retries_at_new_path_before_agent_execution(
+        self,
+        tmp_path: Path,
+        monkeypatch: MonkeyPatch,
+        opencode_export_test_data: Dict[str, Any],
+        caplog: LogCaptureFixture,
+        error_type: type[Exception],
+    ) -> None:
+        binary = tmp_path / "rg"
+        binary.write_bytes(b"#!/bin/sh\necho ripgrep test\n")
+        config = OpenCodeSandboxedAgentConfig.model_validate(
+            self._create_config().model_dump() | {"local_ripgrep_binary_path": str(binary)}
+        )
+        config.artifacts_dir = str(tmp_path)
+        config.preinstalled_opencode = True
+        config.opencode_version = "test"
+        client = MagicMock(spec=ServerClient)
+        client.global_config_dict = {"observability_enabled": False}
+        server = OpenCodeSandboxedAgent(config=config, server_client=client)
+        timeout = error_type("Timed out during OpenSandbox write_file after 300s")
+
+        async def download_export(remote, local):
+            if remote == "/tmp/opencode_export.json":
+                local.write_text(json.dumps(opencode_export_test_data))
+
+        sandbox = MagicMock(
+            upload=AsyncMock(side_effect=[timeout, None]),
+            exec=AsyncMock(
+                side_effect=[
+                    SimpleNamespace(
+                        stdout="Shell: /bin/bash\nOpenCode run finished", stderr="", return_code=0, error_type=None
+                    ),
+                    SimpleNamespace(stdout='[{"id": "session-id"}]', stderr="", return_code=0, error_type=None),
+                    SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
+                    SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
+                ]
+            ),
+            download=AsyncMock(side_effect=download_export),
+        )
+        sandbox._handle = SandboxHandle(sandbox_id="upload-retry-sandbox", provider_name="opensandbox", raw=None)
+        sandbox.sandbox_id = "upload-retry-sandbox"
+        server._sandbox_id_to_sandbox[""] = sandbox
+        monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value={}))
+        monkeypatch.setattr(app_module, "uniform", lambda *_: 0.0)
+        monkeypatch.setattr(app_module, "_read_opencode_child_messages", lambda *_: [])
+
+        with caplog.at_level("INFO", logger=app_module.__name__):
+            response = await server.responses(
+                request=MagicMock(
+                    session={SESSION_ID_KEY: "upload-retry"},
+                    cookies={"sandbox_id": ""},
+                    path_params={"rollout_id": "direct-call"},
+                ),
+                body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}]),
+            )
+
+        assert response.object == "response"
+        assert response.output
+        assert server._sandbox_id_to_run_result[""]["opencode_failed"] is False
+        assert sandbox.upload.await_count == 2
+        first_path, second_path = [upload.args[1] for upload in sandbox.upload.await_args_list]
+        assert first_path != second_path
+        assert first_path.startswith("/tmp/nemo-gym-ripgrep-")
+        assert second_path.startswith("/tmp/nemo-gym-ripgrep-")
+        command = sandbox.exec.await_args_list[0].kwargs["command"]
+        assert second_path in command
+        assert first_path not in command
+        assert [mock_call[0] for mock_call in sandbox.mock_calls[:3]] == ["upload", "upload", "exec"]
+        assert sandbox.exec.await_count == 4
+        assert f"attempt=1/2 size_bytes={binary.stat().st_size}" in caplog.text
+        assert f"attempt=2/2 size_bytes={binary.stat().st_size}" in caplog.text
+        assert "sandbox_id=upload-retry-sandbox" in caplog.text
+        assert f"remote_path={first_path}" in caplog.text
+        assert f"remote_path={second_path}" in caplog.text
+        assert caplog.text.count("duration_s=") == 2
+
+    async def test_ripgrep_upload_limits_concurrent_staging_per_agent_instance(self, tmp_path: Path) -> None:
+        binary = tmp_path / "rg"
+        binary.write_bytes(b"ripgrep test")
+        server = OpenCodeSandboxedAgent(
+            config=self._create_config(),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        two_uploads_started = asyncio.Event()
+        allow_uploads_to_finish = asyncio.Event()
+        active_uploads = 0
+        peak_uploads = 0
+
+        async def upload(_source_path: Path, _remote_path: str) -> None:
+            nonlocal active_uploads, peak_uploads
+            active_uploads += 1
+            peak_uploads = max(peak_uploads, active_uploads)
+            if active_uploads == 2:
+                two_uploads_started.set()
+            try:
+                await allow_uploads_to_finish.wait()
+            finally:
+                active_uploads -= 1
+
+        sandbox = MagicMock(upload=AsyncMock(side_effect=upload))
+        sandbox._handle = SandboxHandle(sandbox_id="concurrency-test-sandbox", provider_name="opensandbox", raw=None)
+        sandbox.sandbox_id = "concurrency-test-sandbox"
+        tasks = [asyncio.create_task(server._stage_ripgrep(sandbox, binary)) for _ in range(3)]
+        try:
+            await asyncio.wait_for(two_uploads_started.wait(), timeout=1)
+            await asyncio.sleep(0)
+            assert active_uploads == 2
+            assert sandbox.upload.await_count == 2
+        finally:
+            allow_uploads_to_finish.set()
+
+        remote_paths = await asyncio.gather(*tasks)
+        assert peak_uploads == 2
+        assert sandbox.upload.await_count == 3
+        assert len(set(remote_paths)) == 3
+
+    @mark.parametrize(
+        "error_type,expected_attempts",
+        [(TimeoutError, 2), (sandbox_io_timeout, 2), (PermissionError, 1), (FileNotFoundError, 1)],
+    )
     async def test_ripgrep_upload_failure_propagates_without_export_and_cleans_up(
-        self, tmp_path: Path, monkeypatch: MonkeyPatch, error_type: type[OSError]
+        self, tmp_path: Path, monkeypatch: MonkeyPatch, error_type: type[Exception], expected_attempts: int
     ) -> None:
         binary = tmp_path / "rg"
         binary.write_bytes(b"readable upload")
@@ -791,15 +946,27 @@ class TestOpenCodeSandboxedAgent:
         )
         monkeypatch.setattr(server, "_start_sandbox", AsyncMock(return_value=sandbox))
         monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value={}))
+        monkeypatch.setattr(app_module, "uniform", lambda *_: 0.0)
         request = Request({"type": "http", "headers": [], "session": {SESSION_ID_KEY: "upload-failure"}})
         body = OpenCodeSandboxedAgentRunRequest(
             responses_create_params={"input": [{"role": "user", "content": "Solve"}]}
         )
 
-        with raises(error_type) as caught:
+        expected_error_type = NgFailureEvent if error_type is TimeoutError else type(upload_error)
+        with raises(expected_error_type) as caught:
             await server.run(request, body)
 
-        assert caught.value is upload_error
+        if error_type is TimeoutError:
+            assert caught.value.__cause__ is upload_error
+            assert caught.value.boundary == "harness"
+            assert caught.value.failure_kind == "agent_route_failed"
+            assert caught.value.operation == "opencode.setup"
+            assert caught.value.stage == "seed"
+            assert "exhausted its timeout retries" in caught.value.failure_reason
+        else:
+            assert caught.value is upload_error
+        assert sandbox.upload.await_count == expected_attempts
+        assert len({upload.args[1] for upload in sandbox.upload.await_args_list}) == expected_attempts
         sandbox.exec.assert_not_awaited()
         sandbox.download.assert_not_awaited()
         sandbox.stop.assert_awaited_once()
@@ -959,7 +1126,7 @@ class TestOpenCodeSandboxedAgent:
 
     @mark.parametrize("via_stdin", [False, True], ids=("argv", "stdin"))
     async def test_responses_builds_opencode_command(
-        self, opencode_export_test_data: Dict[str, Any], monkeypatch: MonkeyPatch, via_stdin: bool
+        self, opencode_export_test_data: Dict[str, Any], monkeypatch: MonkeyPatch, via_stdin: bool, tmp_path: Path
     ) -> None:
         """The `opencode run` command carries opencode_env, and stdin mode delivers the query verbatim.
 
@@ -969,11 +1136,12 @@ class TestOpenCodeSandboxedAgent:
         """
         question = 'Which "Company A" was founded after 2002? Say "unknown" if unsure.'
         config = self._create_config()
+        config.artifacts_dir = str(tmp_path)
         config.opencode_env = {"OPENCODE_ENABLE_EXA": "true", "EXA_API_KEYS": "k0:k1"}
         config.opencode_query_via_stdin = via_stdin
         server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
-        sandbox_mock = MagicMock()
+        sandbox_mock = MagicMock(sandbox_id="test-sandbox")
 
         # Dispatch on the command rather than a fixed side_effect list. The export path issues
         # several execs (install, session list, export, pwd) and a positional list silently
@@ -981,6 +1149,10 @@ class TestOpenCodeSandboxedAgent:
         # be handed "" and died in json.loads, surfacing as an unrelated assertion about
         # await_args further down.
         async def _exec(command: str = "", **_kwargs: Any) -> SimpleNamespace:
+            if "opencode run" in command:
+                return SimpleNamespace(
+                    stdout="Shell: /bin/bash\nOpenCode run finished", stderr="", return_code=0, error_type=None
+                )
             if "session list" in command:
                 return SimpleNamespace(
                     stdout=json.dumps([{"id": "ses_123"}]), stderr="", return_code=0, error_type=None
@@ -990,7 +1162,13 @@ class TestOpenCodeSandboxedAgent:
             return SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None)
 
         sandbox_mock.exec = AsyncMock(side_effect=_exec)
-        sandbox_mock.download = AsyncMock()
+
+        async def _download(remote: str, local: Path, **_kwargs: Any) -> None:
+            if remote == "/tmp/opencode_export.json":
+                local.parent.mkdir(parents=True, exist_ok=True)
+                local.write_text(json.dumps(opencode_export_test_data))
+
+        sandbox_mock.download = AsyncMock(side_effect=_download)
         # Maps sandbox_id -> sandbox. responses() runs opencode through `sandbox.exec`, so every
         # command -- install, the run itself, `session list`, `export` -- lands on the same mock
         # and is told apart by its text. An earlier version of this test stored a
@@ -1085,6 +1263,72 @@ class TestOpenCodeSandboxedAgent:
             assert argv[-1] == question, argv
 
     @mark.parametrize(
+        "operation,boundary,kind",
+        [
+            ("export", "sandbox", PROVIDER_IO_TIMEOUT),
+            ("download", "sandbox", PROVIDER_IO_TIMEOUT),
+            ("snapshot", "sandbox", PROVIDER_OOM_KILLED),
+            ("snapshot_download", "sandbox", PROVIDER_OOM_KILLED),
+            ("snapshot", "sandbox", "provider_request_failed"),
+            ("snapshot_download", "sandbox", PROVIDER_UNAVAILABLE),
+            ("snapshot", "harness", PROVIDER_IO_TIMEOUT),
+        ],
+    )
+    @mark.parametrize("collect_observations", [False, True])
+    async def test_capture_does_not_hide_primary_or_non_io_snapshot_failures(
+        self, tmp_path, opencode_export_test_data, operation, boundary, kind, collect_observations
+    ):
+        config = self._create_config()
+        config.artifacts_dir = str(tmp_path)
+        config.report_agent_sandbox_oom = True
+        client = MagicMock(spec=ServerClient)
+        client.global_config_dict = {"observability_enabled": collect_observations}
+        client.post = AsyncMock(
+            return_value=SimpleNamespace(ok=True, cookies={}, json=AsyncMock(return_value={"sandbox_handle": "seed"}))
+        )
+        server = OpenCodeSandboxedAgent(config=config, server_client=client)
+        server._create_opencode_config = AsyncMock(return_value={})
+        failure = NgFailureEvent(
+            boundary=boundary, failure_kind=kind, failure_reason="capture failed", operation=operation, stage="agent"
+        )
+
+        async def execute(command, **kwargs):
+            if (operation == "export" and "opencode export" in command) or (
+                operation == "snapshot" and "opencode db" in command
+            ):
+                raise failure
+            stdout = '[{"id":"root"}]' if "session list" in command else "Shell: bash\nOpenCode run finished"
+            return SimpleNamespace(stdout=stdout, stderr="", return_code=0, error_type=None)
+
+        async def download(remote, local):
+            if remote == "/tmp/opencode_export.json":
+                if operation == "download":
+                    raise failure
+                local.write_text(json.dumps(opencode_export_test_data))
+            else:
+                assert operation == "snapshot_download"
+                raise failure
+
+        sandbox = MagicMock(
+            upload=AsyncMock(),
+            exec=AsyncMock(side_effect=execute),
+            download=AsyncMock(side_effect=download),
+            stop=AsyncMock(),
+        )
+        sandbox._handle = SandboxHandle(sandbox_id="capture-sandbox", provider_name="opensandbox", raw=None)
+        server._start_sandbox = AsyncMock(return_value=sandbox)
+        request = Request({"type": "http", "headers": [], "session": {SESSION_ID_KEY: "capture-failure"}})
+        body = OpenCodeSandboxedAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "Solve"}]}
+        )
+        with raises(NgFailureEvent) as caught:
+            await server.run(request, body)
+        assert caught.value is failure
+        assert [entry.kwargs["url_path"] for entry in client.post.await_args_list] == ["/seed_session"]
+        sandbox.stop.assert_awaited_once()
+        assert server._sandbox_id_to_run_result == server._sandbox_id_to_sandbox == {}
+
+    @mark.parametrize(
         "database_name,snapshot_failure",
         [
             ("opencode.db", None),
@@ -1092,6 +1336,8 @@ class TestOpenCodeSandboxedAgent:
             ("custom database.sqlite", None),
             ("opencode.db", "exit"),
             ("opencode.db", "execution"),
+            ("opencode.db", "execute_io_timeout"),
+            ("opencode.db", "download_io_timeout"),
         ],
     )
     @mark.parametrize("collect_observations", [True, False])
@@ -1212,6 +1458,7 @@ class TestOpenCodeSandboxedAgent:
         sandbox = MagicMock()
         sandbox.upload = AsyncMock()
         sandbox._handle = SandboxHandle(sandbox_id="connected-sandbox", provider_name="opensandbox", raw=None)
+        snapshot_timeout = sandbox_io_timeout("optional snapshot request timed out")
         sandbox.exec = AsyncMock(
             side_effect=[
                 SimpleNamespace(
@@ -1219,7 +1466,9 @@ class TestOpenCodeSandboxedAgent:
                 ),
                 SimpleNamespace(stdout='[{"id": "root"}]', stderr="", return_code=0, error_type=None),
                 SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
-                SimpleNamespace(
+                snapshot_timeout
+                if snapshot_failure == "execute_io_timeout"
+                else SimpleNamespace(
                     stdout="",
                     stderr="snapshot failed" if snapshot_failure else "",
                     return_code=1 if snapshot_failure == "exit" else 0,
@@ -1236,6 +1485,9 @@ class TestOpenCodeSandboxedAgent:
                 assert remote_path.endswith("/opencode/nemo-gym-observations.db") or remote_path.startswith(
                     "/tmp/nemo-gym-observations-"
                 )
+                if snapshot_failure == "download_io_timeout":
+                    local_path.write_bytes(b"partial snapshot")
+                    raise snapshot_timeout
                 command = shlex.split(sandbox.exec.await_args_list[-1].kwargs["command"])
                 assert command[:5] == ["export", "PATH=$HOME/.opencode/bin:$PATH", "&&", "opencode", "db"]
                 # Exercise the real SQLite query against committed rows still in the WAL.
@@ -1305,10 +1557,23 @@ class TestOpenCodeSandboxedAgent:
         )
 
         try:
-            result = await server.run(request, body)
+            with RequestFailureLog.capture() as failure_log:
+                result = await server.run(request, body)
         finally:
             connection.close()
 
+        assert result.reward == 1.0
+        assert [item.model_dump(exclude={"id"}) for item in result.response.output] == [
+            item.model_dump(exclude={"id"})
+            for item in server._opencode_export_to_output_items(opencode_export_test_data)[1:]
+        ]
+        assert not (tmp_path / "results" / "session-1" / "opencode.db").exists()
+        if snapshot_failure in {"execute_io_timeout", "download_io_timeout"}:
+            report = failure_log.report
+            assert report.failure_id is None
+            assert report.events[snapshot_timeout.event_id].failure_kind == PROVIDER_IO_TIMEOUT
+            verify_call = server_client.post.await_args_list[-1].kwargs["json"]
+            assert snapshot_timeout.event_id in verify_call["failure_report"]["events"]
         parent_usage = NeMoGymResponseUsage.sum_from_list(server._opencode_export_to_usages(opencode_export_test_data))
         usage = result.response.usage
         assert usage.input_tokens == parent_usage.input_tokens + (0 if snapshot_failure else 30)
@@ -1332,7 +1597,7 @@ class TestOpenCodeSandboxedAgent:
             assert "observation_capture_failed" in {gap.code for gap in result.ng_agent_observations.gaps}
             assert result.opencode_export_found
             assert sandbox.exec.await_count == 4
-            sandbox.download.assert_awaited_once()
+            assert sandbox.download.await_count == (2 if snapshot_failure == "download_io_timeout" else 1)
             return
         [turn] = TrajectoryRecord.model_validate(result.ng_trajectory).turns
         assert (turn.task_id, turn.rollout_id, turn.invocation_id) == ("7", "7-2", "root")
@@ -1548,7 +1813,10 @@ class TestBenchmarkLifecycle:
         with raises(ValueError, match="authenticated MCP"):
             await server._seed_tool_servers(request, body)
 
-    async def test_completed_execution_failure_uses_empty_response_verification(self, monkeypatch):
+    @mark.parametrize("export_found", [False, True])
+    async def test_execution_failure_requires_captured_export_before_zero_verification(
+        self, monkeypatch, export_found
+    ):
         config = self._create_config()
         config.execution_failure_reward_zero = True
         seed = MagicMock(cookies={})
@@ -1580,14 +1848,14 @@ class TestBenchmarkLifecycle:
 
         async def failed_response(*args):
             server._sandbox_id_to_run_result["trial"] = {
-                "opencode_results_fpath": "",
+                "opencode_results_fpath": "/tmp/captured-export.json" if export_found else "",
                 "opencode_run_stdout": "",
                 "opencode_run_stderr": "",
                 "opencode_finished": False,
-                "opencode_export_found": False,
+                "opencode_export_found": export_found,
                 "opencode_failed": True,
-                "opencode_error_type": "TimeoutError",
-                "opencode_exit_code": None,
+                "opencode_error_type": None,
+                "opencode_exit_code": -1,
             }
             return response
 
@@ -1598,38 +1866,444 @@ class TestBenchmarkLifecycle:
         body = OpenCodeSandboxedAgentRunRequest(
             responses_create_params={"input": [{"role": "user", "content": "Solve"}]}
         )
-        result = await server.run(request, body)
-        assert result.reward == 0.0
-        assert result.opencode_failed
-        assert result.opencode_error_type == "TimeoutError"
-        assert client.post.await_count == 2
-        assert client.post.await_args.kwargs["json"]["response"]["output"] == []
-        assert result.model_dump()["library_reward"] == 0.0
+        if export_found:
+            result = await server.run(request, body)
+            assert result.reward == 0.0
+            assert result.opencode_failed
+            assert result.opencode_exit_code == -1
+            assert result.opencode_export_found
+            assert client.post.await_count == 2
+            assert client.post.await_args.kwargs["json"]["response"]["output"] == []
+            assert result.model_dump()["library_reward"] == 0.0
+        else:
+            with raises(NgFailureEvent, match="OpenCode export unavailable"):
+                await server.run(request, body)
+            assert [entry.kwargs["url_path"] for entry in client.post.await_args_list] == ["/seed_session"]
         sandbox.stop.assert_awaited_once()
 
+    @mark.parametrize("verifier_reward", [0.0, 1.0])
+    @mark.parametrize("origin_stage", [None, "agent", "seed", "verification"])
+    async def test_confirmed_agent_sandbox_oom_keeps_verifier_verdict(
+        self, monkeypatch, tmp_path: Path, verifier_reward, origin_stage
+    ):
+        config = self._create_config()
+        config.preinstalled_opencode = True
+        config.report_agent_sandbox_oom = True
+        config.execution_failure_reward_zero = True
+        verify = AsyncMock(wraps=app_module.verify_agent_response)
+        monkeypatch.setattr(app_module, "verify_agent_response", verify)
+        config.opencode_version = "test"
+        ripgrep = tmp_path / "rg"
+        ripgrep.write_text("#!/bin/sh\necho rg test\n")
+        ripgrep.chmod(0o755)
+        config.local_ripgrep_binary_path = ripgrep
+        client = MagicMock(spec=ServerClient)
+        client.global_config_dict = {"observability_enabled": True}
+        seed = MagicMock(cookies={})
+        seed.json = AsyncMock(return_value={})
 
-@mark.parametrize("failure", ["exception", "command", "download", "empty"])
-async def test_export_failure_returns_empty_failed_response(tmp_path, failure):
+        async def post(**kwargs):
+            if kwargs["url_path"] == "/seed_session":
+                return seed
+            assert kwargs["url_path"] == "/verify"
+            payload = kwargs["json"]
+            assert payload["response"]["output"] == []
+            from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
+
+            outcome = AgentOutcome.model_validate_json(payload["response"]["metadata"][AGENT_OUTCOME_METADATA_KEY])
+            assert outcome.failure_kind == PROVIDER_OOM_KILLED
+            assert outcome.status_code is None
+            observation = SandboxObservation.model_validate_json(
+                payload["response"]["metadata"][NG_AGENT_SANDBOX_OBSERVATION_KEY]
+            )
+            assert observation.role == "agent"
+            assert observation.stage == "agent"
+            assert observation.outcome == "oom"
+            assert observation.provider == "opensandbox"
+            assert observation.sandbox_id == "agent-sandbox"
+            assert observation.failure_id == original.event_id
+            assert payload["failure_report"]["events"][observation.failure_id].get("stage") == origin_stage
+            assert "OOM-killed" in payload["failure_report"]["events"][observation.failure_id]["failure_reason"]
+            return SimpleNamespace(
+                ok=True,
+                read=AsyncMock(
+                    return_value=json.dumps(
+                        payload
+                        | {
+                            "reward": verifier_reward,
+                            "mask_sample": False,
+                            "failure_kind": PROVIDER_OOM_KILLED,
+                            "failure_reason": payload["failure_report"]["events"][observation.failure_id][
+                                "failure_reason"
+                            ],
+                        }
+                    ).encode()
+                ),
+                raise_for_status=lambda: None,
+            )
+
+        client.post = AsyncMock(side_effect=post)
+        server = OpenCodeSandboxedAgent(config=config, server_client=client)
+        original = sandbox_oom("Sandbox was OOM-killed. sandbox_id='agent-sandbox'", sandbox_id="agent-sandbox")
+        original.stage = origin_stage
+        sandbox = MagicMock(
+            upload=AsyncMock(),
+            stop=AsyncMock(),
+            exec=AsyncMock(
+                side_effect=[
+                    SimpleNamespace(stdout="Installed OpenCode", stderr="", return_code=0, error_type=None),
+                    original,
+                ]
+            ),
+        )
+        sandbox._handle = SandboxHandle(sandbox_id="agent-sandbox", provider_name="opensandbox", raw=None)
+        server._start_sandbox = AsyncMock(return_value=sandbox)
+        server._create_opencode_config = AsyncMock(return_value={})
+        monkeypatch.setattr(app_module, "raise_for_status", AsyncMock())
+        request = Request({"type": "http", "headers": [], "session": {SESSION_ID_KEY: "trial"}})
+        body = OpenCodeSandboxedAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "Solve"}]},
+            capture_rollout_id="oom-smoke",
+        )
+
+        from nemo_gym.core import RequestFailureLog
+
+        with RequestFailureLog.capture():
+            if origin_stage not in (None, "agent"):
+                with raises(NgFailureEvent, match="OpenCode export unavailable"):
+                    await server.run(request, body)
+                verify.assert_not_awaited()
+                assert original.stage == origin_stage
+                sandbox.stop.assert_awaited_once()
+                return
+            result = await server.run(request, body)
+
+        assert original.stage == origin_stage
+        assert result.reward == verifier_reward
+        verify.assert_awaited_once()
+        assert verify.await_args.kwargs["force_zero_reward"] is False
+        assert result.mask_sample is False
+        assert result.failure_kind == PROVIDER_OOM_KILLED
+        assert "OOM-killed" in (result.failure_reason or "")
+        assert result.response.metadata[NG_AGENT_SANDBOX_OBSERVATION_KEY]
+        assert result.opencode_failed is True
+        assert result.response.output == []
+        assert any(
+            record.kind == "agent_invocation" and record.invocation_id == "oom-smoke"
+            for record in result.ng_agent_observations.records
+        )
+        assert any(gap.code == "observation_capture_failed" for gap in result.ng_agent_observations.gaps)
+        assert "opencode --version" in sandbox.exec.await_args_list[0].kwargs["command"]
+        assert "opencode run" in sandbox.exec.await_args_list[1].kwargs["command"]
+        ripgrep_upload = next(
+            index
+            for index, sandbox_call in enumerate(sandbox.mock_calls)
+            if sandbox_call[0] == "upload" and sandbox_call.args[0] == ripgrep
+        )
+        first_exec = next(index for index, sandbox_call in enumerate(sandbox.mock_calls) if sandbox_call[0] == "exec")
+        assert ripgrep_upload < first_exec
+        staged_ripgrep = sandbox.mock_calls[ripgrep_upload].args[1]
+        agent_home = tmp_path / "agent-home"
+        bin_dir = agent_home / ".opencode/bin"
+        bin_dir.mkdir(parents=True)
+        opencode = bin_dir / "opencode"
+        opencode.write_text(
+            '#!/bin/sh\nif [ "$1" = --version ]; then echo test; else touch "$HOME/agent-started"; fi\n'
+        )
+        opencode.chmod(0o755)
+        environment = {"HOME": str(agent_home), "PATH": f"{bin_dir}{os.pathsep}{os.defpath}"}
+        setup_command = (
+            sandbox.exec.await_args_list[0].kwargs["command"].replace(staged_ripgrep, shlex.quote(str(ripgrep)))
+        )
+        setup_result = subprocess.run(
+            ["sh", "-c", setup_command], env=environment, capture_output=True, text=True, timeout=10
+        )
+        assert setup_result.returncode == 0, setup_result.stderr
+        agent_result = subprocess.run(
+            ["sh", "-c", sandbox.exec.await_args_list[1].kwargs["command"]],
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert agent_result.returncode == 0, agent_result.stderr
+        assert (agent_home / "agent-started").is_file()
+        assert client.post.await_count == 2
+        sandbox.stop.assert_awaited_once()
+
+    @mark.parametrize("failure_phase", ["setup_oom", "agent_transport", "status_timeout", "io_timeout"])
+    async def test_unconfirmed_agent_oom_does_not_produce_a_scored_response(
+        self, monkeypatch, tmp_path, failure_phase
+    ):
+        config = self._create_config()
+        config.preinstalled_opencode = True
+        config.report_agent_sandbox_oom = True
+        config.artifacts_dir = str(tmp_path)
+        server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        preflight = SimpleNamespace(stdout="Installed OpenCode", stderr="", return_code=0, error_type=None)
+        failure = (
+            sandbox_oom("OOM during setup")
+            if failure_phase == "setup_oom"
+            else (
+                sandbox_unavailable("backend disappeared without OOM status")
+                if failure_phase == "agent_transport"
+                else (
+                    sandbox_status_unavailable("status stayed unavailable after recovery window")
+                    if failure_phase == "status_timeout"
+                    else sandbox_io_timeout("SDK request timed out; command outcome unknown")
+                )
+            )
+        )
+        sandbox = MagicMock(
+            upload=AsyncMock(),
+            exec=AsyncMock(side_effect=[failure] if failure_phase == "setup_oom" else [preflight, failure]),
+        )
+        server._sandbox_id_to_sandbox = {"trial": sandbox}
+        server._create_opencode_config = AsyncMock(return_value={})
+        request = SimpleNamespace(
+            cookies={"sandbox_id": "trial"}, session={SESSION_ID_KEY: "trial"}, state=SimpleNamespace()
+        )
+        body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}])
+
+        if failure_phase == "setup_oom":
+            with raises(NgFailureEvent) as caught:
+                await server.responses(request, body)
+            assert caught.value is failure
+            assert caught.value.failure_kind == PROVIDER_OOM_KILLED
+            assert server._sandbox_id_to_run_result == {}
+        else:
+            with raises(type(failure), match=str(failure)):
+                await server.responses(request, body)
+            assert sandbox.exec.await_count == 2
+            assert server._sandbox_id_to_run_result == {}
+
+    @mark.parametrize("error_type", [NgFailureEvent, OSError, RuntimeError])
+    async def test_unknown_agent_exec_failure_fails_run_without_verification(
+        self, monkeypatch: MonkeyPatch, error_type: type[Exception]
+    ) -> None:
+        config = self._create_config()
+        config.preinstalled_opencode = True
+        config.opencode_version = "test"
+        config.report_agent_sandbox_oom = True
+        config.execution_failure_reward_zero = True
+        seed = SimpleNamespace(cookies={}, json=AsyncMock(return_value={}))
+        client = MagicMock(spec=ServerClient)
+        client.post = AsyncMock(return_value=seed)
+        server = OpenCodeSandboxedAgent(config=config, server_client=client)
+        failure = (
+            sandbox_unavailable("agent command outcome unknown")
+            if error_type is NgFailureEvent
+            else error_type("agent command outcome unknown")
+        )
+        sandbox = MagicMock(
+            upload=AsyncMock(),
+            exec=AsyncMock(
+                side_effect=[
+                    SimpleNamespace(stdout="Installed OpenCode", stderr="", return_code=0, error_type=None),
+                    failure,
+                ]
+            ),
+            download=AsyncMock(),
+            stop=AsyncMock(),
+        )
+        monkeypatch.setattr(server, "_start_sandbox", AsyncMock(return_value=sandbox))
+        monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value={}))
+        monkeypatch.setattr(app_module, "raise_for_status", AsyncMock())
+        request = Request({"type": "http", "headers": [], "session": {SESSION_ID_KEY: "unknown-outcome"}})
+        body = OpenCodeSandboxedAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "Solve"}]}
+        )
+
+        with raises(NgFailureEvent) as caught:
+            await server.run(request, body)
+
+        if isinstance(failure, NgFailureEvent):
+            assert caught.value is failure
+        else:
+            assert caught.value.__cause__ is failure
+            assert caught.value.boundary == "harness"
+            assert caught.value.failure_kind == "agent_route_failed"
+            assert caught.value.operation == "opencode.execute"
+        assert sandbox.exec.await_count == 2
+        assert "opencode run" in sandbox.exec.await_args_list[1].kwargs["command"]
+        sandbox.download.assert_not_awaited()
+        sandbox.stop.assert_awaited_once()
+        assert [entry.kwargs["url_path"] for entry in client.post.await_args_list] == ["/seed_session"]
+        assert server._sandbox_id_to_run_result == {}
+
+    @mark.parametrize(
+        ("agent_result", "message"),
+        [
+            (
+                SimpleNamespace(stdout=None, stderr="Command output was deleted", return_code=0, error_type=None),
+                "missing its launch marker",
+            ),
+            (
+                SimpleNamespace(stdout=None, stderr="Command output was deleted", return_code=3, error_type=None),
+                "missing its launch marker",
+            ),
+            (
+                SimpleNamespace(stdout=None, stderr="", return_code=124, error_type="timeout"),
+                "missing its launch marker",
+            ),
+            (
+                SimpleNamespace(stdout="Shell: bash\npartial", stderr="", return_code=0, error_type=None),
+                "without a trustworthy completion marker",
+            ),
+        ],
+    )
+    async def test_ambiguous_agent_exec_result_fails_run_without_verification(
+        self, monkeypatch: MonkeyPatch, agent_result: Any, message: str
+    ) -> None:
+        config = self._create_config()
+        config.preinstalled_opencode = True
+        config.opencode_version = "test"
+        config.report_agent_sandbox_oom = True
+        config.execution_failure_reward_zero = True
+        seed = SimpleNamespace(cookies={}, json=AsyncMock(return_value={}))
+        client = MagicMock(spec=ServerClient)
+        client.post = AsyncMock(return_value=seed)
+        server = OpenCodeSandboxedAgent(config=config, server_client=client)
+        sandbox = MagicMock(
+            upload=AsyncMock(),
+            exec=AsyncMock(
+                side_effect=[
+                    SimpleNamespace(stdout="Installed OpenCode", stderr="", return_code=0, error_type=None),
+                    agent_result,
+                ]
+            ),
+            download=AsyncMock(),
+            stop=AsyncMock(),
+        )
+        monkeypatch.setattr(server, "_start_sandbox", AsyncMock(return_value=sandbox))
+        monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value={}))
+        monkeypatch.setattr(app_module, "raise_for_status", AsyncMock())
+        request = Request({"type": "http", "headers": [], "session": {SESSION_ID_KEY: "ambiguous-result"}})
+        body = OpenCodeSandboxedAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "Solve"}]}
+        )
+
+        with raises(NgFailureEvent, match=message) as caught:
+            await server.run(request, body)
+
+        assert caught.value.boundary == "harness"
+        assert caught.value.failure_kind == "agent_route_failed"
+        assert caught.value.operation == "opencode.capture"
+        assert sandbox.exec.await_count == 2
+        sandbox.download.assert_not_awaited()
+        sandbox.stop.assert_awaited_once()
+        assert [entry.kwargs["url_path"] for entry in client.post.await_args_list] == ["/seed_session"]
+        assert server._sandbox_id_to_run_result == {}
+
+    async def test_explicit_nonzero_agent_result_with_intact_output_keeps_failure_status(self, tmp_path: Path) -> None:
+        config = self._create_config()
+        config.artifacts_dir = str(tmp_path)
+        config.preinstalled_opencode = True
+        config.opencode_version = "test"
+        client = MagicMock(spec=ServerClient)
+        client.global_config_dict = {"observability_enabled": False}
+        server = OpenCodeSandboxedAgent(config=config, server_client=client)
+
+        async def execute(command: str, **_kwargs: Any) -> Any:
+            if "session list" in command:
+                return SimpleNamespace(stdout='[{"id":"session"}]', stderr="", return_code=0, error_type=None)
+            if "opencode export" in command:
+                return SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None)
+            if "opencode db" in command:
+                return SimpleNamespace(stdout="", stderr="snapshot unavailable", return_code=1, error_type=None)
+            return SimpleNamespace(
+                stdout="Shell: bash\npartial", stderr="time limit reached", return_code=124, error_type="timeout"
+            )
+
+        async def download(_remote: str, local: Path) -> None:
+            local.write_bytes((Path(__file__).parent / "opencode_export_test_data.json").read_bytes())
+
+        sandbox = MagicMock(
+            upload=AsyncMock(), exec=AsyncMock(side_effect=execute), download=AsyncMock(side_effect=download)
+        )
+        server._sandbox_id_to_sandbox = {"session": sandbox}
+        server._create_opencode_config = AsyncMock(return_value={})
+        request = SimpleNamespace(
+            cookies={"sandbox_id": "session"}, session={SESSION_ID_KEY: "session"}, state=SimpleNamespace()
+        )
+        body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}])
+
+        response = await server.responses(request, body)
+
+        assert response.output
+        run_result = server._sandbox_id_to_run_result["session"]
+        assert run_result["opencode_failed"] is True
+        assert run_result["opencode_exit_code"] == 124
+        assert run_result["opencode_error_type"] == "timeout"
+        assert run_result["opencode_export_found"] is True
+        assert run_result["opencode_finished"] is False
+        sandbox.download.assert_awaited_once()
+
+
+@mark.parametrize(
+    ("failure", "error"),
+    [
+        ("list_exception", "Failed to list OpenCode sessions"),
+        ("list_command", "Failed to list OpenCode sessions"),
+        ("list_status", "Failed to list OpenCode sessions"),
+        ("list_empty", "OpenCode did not return any sessions"),
+        ("exception", "Failed to export OpenCode session"),
+        ("command", "Failed to export OpenCode session"),
+        ("export_status", "Failed to export OpenCode session"),
+        ("download", "Failed to download OpenCode export"),
+        ("missing", "OpenCode export was not downloaded"),
+        ("empty", "OpenCode export .* had no assistant messages or was invalid"),
+        ("no_messages", "OpenCode export .* had no assistant messages or was invalid"),
+        ("not_dict", "OpenCode export .* had no assistant messages or was invalid"),
+        ("user_only", "OpenCode export .* had no assistant messages or was invalid"),
+        ("invalid_json", "Failed to read OpenCode export"),
+    ],
+)
+async def test_export_failure_raises_without_a_scored_response(tmp_path, failure, error):
     config = TestOpenCodeSandboxedAgent()._create_config()
     config.artifacts_dir = str(tmp_path)
     config.execution_failure_reward_zero = True
     server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
     sandbox = MagicMock()
-    sandbox.exec = AsyncMock(
-        side_effect=[
-            SimpleNamespace(stdout="Shell: bash\nOpenCode run finished", stderr="", return_code=0, error_type=None),
-            SimpleNamespace(stdout='[{"id":"session"}]', stderr="", return_code=0, error_type=None),
-            OSError("export unavailable")
-            if failure == "exception"
-            else SimpleNamespace(stdout="", stderr="", return_code=1 if failure == "command" else 0, error_type=None),
-        ]
-    )
+
+    async def execute(command, **kwargs):
+        if "session list" in command:
+            if failure == "list_exception":
+                raise OSError("session listing unavailable")
+            return SimpleNamespace(
+                stdout="[]" if failure == "list_empty" else '[{"id":"session"}]',
+                stderr="list diagnostic",
+                return_code=1 if failure == "list_command" else 0,
+                error_type="timeout" if failure == "list_status" else None,
+            )
+        if "opencode export" in command:
+            if failure == "exception":
+                raise OSError("export unavailable")
+            return SimpleNamespace(
+                stdout="export output",
+                stderr="export diagnostic",
+                return_code=1 if failure == "command" else 0,
+                error_type="timeout" if failure == "export_status" else None,
+            )
+        return SimpleNamespace(stdout="Shell: bash\nOpenCode run finished", stderr="", return_code=0, error_type=None)
+
+    sandbox.exec = AsyncMock(side_effect=execute)
 
     async def download(remote, local):
         if failure == "download":
             local.write_text('{"messages":[')
             raise OSError("export unavailable")
-        local.write_text("{}")
+        if failure == "missing":
+            return
+        local.write_text(
+            {
+                "empty": "{}",
+                "no_messages": '{"info":{}}',
+                "not_dict": "[]",
+                "user_only": '{"messages":[{"info":{"role":"user"},"parts":[]}]}',
+                "invalid_json": "{",
+            }[failure]
+        )
 
     sandbox.download = AsyncMock(side_effect=download)
     server._sandbox_id_to_sandbox = {"session": sandbox}
@@ -1641,18 +2315,78 @@ async def test_export_failure_returns_empty_failed_response(tmp_path, failure):
     (tmp_path / "session").mkdir()
     (tmp_path / "session" / "export.json").write_text('{"messages":[{"info":{"role":"assistant"}}]}')
     body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}])
-    response = await server.responses(request, body)
-    assert response.output == []
-    assert response.usage is None
-    assert response.incomplete_details is None
-    run_result = server._sandbox_id_to_run_result["session"]
-    assert run_result["opencode_failed"] is True
-    assert run_result["opencode_export_found"] is False
-    assert run_result["opencode_results_fpath"] == ""
-    if failure != "empty":
-        assert not (tmp_path / "session" / "export.json").exists()
-    if failure in ("exception", "command"):
+    with raises(NgFailureEvent, match=error) as caught:
+        await server.responses(request, body)
+    assert caught.value.boundary == "harness"
+    assert caught.value.failure_kind == "agent_route_failed"
+    expected_operation = (
+        "opencode.session_list"
+        if failure.startswith("list_")
+        else "opencode.export"
+        if failure in {"exception", "command", "export_status"}
+        else "opencode.download"
+        if failure in {"download", "missing"}
+        else "opencode.capture"
+    )
+    assert caught.value.operation == expected_operation
+    if failure in {"list_command", "list_status", "command", "export_status"}:
+        reason = caught.value.failure_reason
+        assert f"return_code={1 if failure in {'list_command', 'command'} else 0}" in reason
+        assert f"error_type={'timeout' if failure.endswith('status') else 'None'}" in reason
+        assert ("list diagnostic" if failure.startswith("list_") else "export diagnostic") in reason
+        if not failure.startswith("list_"):
+            assert "export output" in reason
+    if failure in {"list_exception", "exception", "download", "list_empty", "invalid_json"}:
+        assert caught.value.__cause__ is not None
+    assert server._sandbox_id_to_run_result == {}
+    export_path = tmp_path / "session" / "export.json"
+    if export_path.exists():
+        assert export_path.read_text() in (
+            "{}",
+            "{",
+            '{"info":{}}',
+            "[]",
+            '{"messages":[{"info":{"role":"user"},"parts":[]}]}',
+        )
+    if failure == "download":
+        assert not export_path.exists()
+    if failure.startswith("list_") or failure in ("exception", "command", "export_status"):
         sandbox.download.assert_not_awaited()
+
+
+async def test_export_failure_prevents_verification_and_stops_sandbox(tmp_path):
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.artifacts_dir = str(tmp_path)
+    config.execution_failure_reward_zero = True
+    client = MagicMock(spec=ServerClient)
+    client.post = AsyncMock(
+        return_value=SimpleNamespace(ok=True, cookies={}, json=AsyncMock(return_value={"sandbox_handle": "agent"}))
+    )
+    server = OpenCodeSandboxedAgent(config=config, server_client=client)
+    server._create_opencode_config = AsyncMock(return_value={})
+
+    async def execute(command, **kwargs):
+        stdout = '[{"id":"session"}]' if "session list" in command else "Shell: bash\nOpenCode run finished"
+        return SimpleNamespace(stdout=stdout, stderr="", return_code=0, error_type=None)
+
+    async def download(remote, local):
+        local.write_text("{}")
+
+    sandbox = MagicMock(
+        upload=AsyncMock(), exec=AsyncMock(side_effect=execute), download=AsyncMock(side_effect=download)
+    )
+    sandbox.stop = AsyncMock()
+    server._start_sandbox = AsyncMock(return_value=sandbox)
+    request = Request({"type": "http", "headers": [], "session": {SESSION_ID_KEY: "trial"}})
+    body = OpenCodeSandboxedAgentRunRequest(responses_create_params={"input": [{"role": "user", "content": "Solve"}]})
+
+    with raises(NgFailureEvent, match="OpenCode export .* had no assistant messages or was invalid"):
+        await server.run(request, body)
+
+    assert [call.kwargs["url_path"] for call in client.post.await_args_list] == ["/seed_session"]
+    sandbox.stop.assert_awaited_once()
+    assert server._sandbox_id_to_run_result == {}
+    assert server._sandbox_id_to_sandbox == {}
 
 
 async def test_required_mcp_failure_is_not_exported_or_scored(monkeypatch):
@@ -1676,14 +2410,14 @@ async def test_required_mcp_failure_is_not_exported_or_scored(monkeypatch):
         download=AsyncMock(side_effect=download),
         exec=AsyncMock(
             side_effect=[
-                SimpleNamespace(stdout="", stderr="MCP unavailable", return_code=1, error_type=None),
+                SimpleNamespace(stdout="Shell: /bin/bash", stderr="MCP unavailable", return_code=1, error_type=None),
                 SimpleNamespace(stdout="", stderr="", return_code=1, error_type=None),
             ]
         ),
     )
     monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox})
     monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value={}))
-    with raises(RuntimeError, match="Required Gym MCP"):
+    with raises(NgFailureEvent, match="Required Gym MCP"):
         await server.responses(
             request=MagicMock(
                 session={SESSION_ID_KEY: "trial"},
@@ -1984,12 +2718,12 @@ async def test_provider_exec_failure_is_not_substituted_with_a_scored_response(t
 
     with raises(NgFailureEvent) as caught:
         await server.responses(request, body)
-    # Reported at the agent boundary with the provider's error as its cause; the kind is unchanged.
+    # Report the harness operation and retain the provider error as its cause.
     assert caught.value.__cause__ is error
-    assert caught.value.failure_kind == "agent_route_failed" and caught.value.operation == "agent.sandbox_exec"
+    assert caught.value.failure_kind == "agent_route_failed" and caught.value.operation == "opencode.execute"
     assert caught.value.failure_reason == (
         f"[sandbox phase=agent reason={type(error).__name__} command=opencode_run] "
-        f"Agent operation agent.sandbox_exec failed: {type(error).__name__}"
+        f"Harness operation opencode.execute failed: {type(error).__name__}"
     )
     sandbox.exec.assert_awaited_once()
     sandbox.download.assert_not_awaited()
@@ -1997,10 +2731,25 @@ async def test_provider_exec_failure_is_not_substituted_with_a_scored_response(t
     server.server_client.post.assert_not_called()
 
 
-@mark.parametrize("error_type", ["UnknownError", None])
-async def test_unconfirmed_exec_result_does_not_grade_a_partial_workspace(tmp_path, error_type):
-    from nemo_gym.core import NgFailureEvent
-    from nemo_gym.sandbox import SandboxExecResult
+@mark.parametrize(
+    "return_code, error_type",
+    [(-1, None), (-1, "UnknownError"), (125, "sandbox"), (125, "pty"), (125, "user_switch_unavailable")],
+)
+async def test_unconfirmed_exec_result_is_a_typed_provider_failure_and_does_not_grade_a_partial_workspace(
+    tmp_path, return_code, error_type
+):
+    from nemo_gym.agents import AgentOutcomePolicyConfig
+    from nemo_gym.core import (
+        FailureClass,
+        FailureHeader,
+        NgFailureEvent,
+        OutcomeAction,
+        StageOutcomePolicyConfig,
+        choose_stage_outcome,
+        failure_report_for,
+    )
+    from nemo_gym.rollouts.rollout_collection import _reply_failure_kind
+    from nemo_gym.sandbox import SandboxExecResult, SandboxHandle
 
     config = TestOpenCodeSandboxedAgent()._create_config()
     config.artifacts_dir = str(tmp_path)
@@ -2009,11 +2758,12 @@ async def test_unconfirmed_exec_result_does_not_grade_a_partial_workspace(tmp_pa
     sandbox = MagicMock(
         exec=AsyncMock(
             return_value=SandboxExecResult(
-                stdout="", stderr="unknown completion", return_code=-1, error_type=error_type
+                stdout="", stderr="unknown completion", return_code=return_code, error_type=error_type
             )
         ),
         download=AsyncMock(),
     )
+    sandbox._handle = SandboxHandle(sandbox_id="box-1", provider_name="opensandbox", raw=None)
     server._sandbox_id_to_sandbox = {"session": sandbox}
     server._create_opencode_config = AsyncMock(return_value={})
     request = SimpleNamespace(
@@ -2022,12 +2772,44 @@ async def test_unconfirmed_exec_result_does_not_grade_a_partial_workspace(tmp_pa
     body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}])
     with raises(NgFailureEvent) as caught:
         await server.responses(request, body)
-    assert caught.value.failure_kind == "agent_route_failed"
-    assert caught.value.operation == "agent.sandbox_exec"
-    reason = f" reason={error_type}" if error_type else ""
-    assert caught.value.failure_reason == (
-        f"[sandbox phase=agent{reason} exit=-1 command=opencode_run] Sandbox command outcome cannot be classified"
+
+    # The route failure only routes: the reply names the sandbox event, which keeps the provider's evidence.
+    raised = caught.value
+    assert (raised.boundary, raised.failure_kind, raised.operation, raised.stage) == (
+        "agent",
+        "agent_route_failed",
+        "opencode.execute",
+        "agent",
     )
+    cause = raised.__cause__
+    assert isinstance(cause, NgFailureEvent)
+    assert (cause.boundary, cause.failure_kind, cause.operation) == (
+        "sandbox",
+        "provider_command_outcome_unknown",
+        "exec",
+    )
+    reason = f" reason={error_type}" if error_type else ""
+    assert cause.failure_reason == (
+        f"[sandbox phase=agent provider=opensandbox sandbox=box-1{reason} exit={return_code} command=opencode_run] "
+        "Sandbox command outcome cannot be classified"
+    )
+    assert (cause.details.provider, cause.details.sandbox_id) == ("opensandbox", "box-1")
+    assert cause.details.provider_status_reason == error_type
+    assert cause.details.exit_code is None  # neither a sentinel nor an error type is an observed process exit
+
+    # The collector types the failed /run row by that cause, not by the routing kind.
+    report = failure_report_for(raised)
+    assert report.failure_id == raised.event_id and report.events[raised.event_id].cause_id == cause.event_id
+    assert _reply_failure_kind(FailureHeader.encode(report)) == "provider_command_outcome_unknown"
+
+    # An environment fault on the agent stage is never the model's: it is evaluation-side and not counted as zero.
+    decision = choose_stage_outcome(
+        failure_kind=cause.failure_kind, http_status=None, stage="agent", config=StageOutcomePolicyConfig()
+    )
+    assert decision.attribution == FailureClass.EVALUATION
+    assert decision.action != OutcomeAction.COUNT_AS_ZERO
+    assert AgentOutcomePolicyConfig().by_failure_kind["provider_command_outcome_unknown"] == OutcomeAction.RETRY
+
     sandbox.exec.assert_awaited_once()
     sandbox.download.assert_not_awaited()
     server.server_client.post.assert_not_called()
@@ -2065,3 +2847,73 @@ async def test_a_provider_ending_the_agents_sandbox_records_its_code_status_and_
     # The provider's own message still travels beside it, as the event's foreign error.
     own = failure_report_for(caught.value).events[caught.value.event_id]
     assert own.foreign_error.message == "Sandbox ended (OOMKilled)" and own.foreign_error.http_status == 410
+    assert own.failure_kind == "agent_route_failed"
+    assert own.http_status is None
+    assert server._sandbox_id_to_run_result == {}
+
+
+@mark.parametrize("failure", ["exit", "timeout", "foreign"])
+async def test_agent_preflight_failure_is_typed_and_cannot_reach_agent_or_grading(tmp_path, failure):
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.preinstalled_opencode = True
+    config.report_agent_sandbox_oom = True
+    config.artifacts_dir = str(tmp_path)
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    foreign = OSError("setup connection lost")
+    sandbox = MagicMock(upload=AsyncMock(), download=AsyncMock())
+    sandbox.exec = AsyncMock(
+        side_effect=foreign if failure == "foreign" else None,
+        return_value=SimpleNamespace(
+            return_code=1 if failure == "exit" else -1,
+            error_type="timeout" if failure == "timeout" else None,
+            stdout="setup output",
+            stderr="setup diagnostic",
+        ),
+    )
+    server._sandbox_id_to_sandbox = {"session": sandbox}
+    server._create_opencode_config = AsyncMock(return_value={})
+    request = SimpleNamespace(
+        cookies={"sandbox_id": "session"}, session={SESSION_ID_KEY: "session"}, state=SimpleNamespace()
+    )
+    with raises(NgFailureEvent) as caught:
+        await server.responses(
+            request, NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}])
+        )
+    assert caught.value.boundary == "harness"
+    assert caught.value.failure_kind == "agent_route_failed"
+    assert caught.value.operation == "opencode.setup"
+    assert caught.value.__cause__ is (foreign if failure == "foreign" else None)
+    if failure != "foreign":
+        assert f"return_code={1 if failure == 'exit' else -1}" in caught.value.failure_reason
+        assert f"error_type={'timeout' if failure == 'timeout' else 'None'}" in caught.value.failure_reason
+        assert "setup output" in caught.value.failure_reason
+        assert "setup diagnostic" in caught.value.failure_reason
+    sandbox.exec.assert_awaited_once()
+    assert "opencode run" not in sandbox.exec.await_args.kwargs["command"]
+    sandbox.download.assert_not_awaited()
+    server.server_client.post.assert_not_called()
+    assert server._sandbox_id_to_run_result == {}
+
+
+async def test_ripgrep_queue_shares_the_existing_setup_budget(tmp_path, monkeypatch):
+    binary = tmp_path / "rg"
+    binary.write_bytes(b"binary")
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.sandbox_timeout = 60
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    server._ripgrep_upload_sem = asyncio.Semaphore(0)
+    sandbox = SimpleNamespace(sandbox_id="queued-sandbox", upload=AsyncMock())
+    loop = asyncio.get_running_loop()
+    real_time = loop.time
+    elapsed = 0.0
+    with monkeypatch.context() as patch:
+        patch.setattr(loop, "time", lambda: real_time() + elapsed)
+        task = asyncio.create_task(server._stage_ripgrep(sandbox, binary))
+        await asyncio.sleep(0)
+        elapsed = 61.0
+        with raises(NgFailureEvent, match="setup budget") as caught:
+            await asyncio.wait_for(task, timeout=90)
+    assert caught.value.boundary == "harness"
+    assert caught.value.operation == "opencode.setup"
+    assert isinstance(caught.value.__cause__, TimeoutError)
+    sandbox.upload.assert_not_awaited()

@@ -3,6 +3,7 @@
 """Multi-turn continuation uses ordinary Responses requests and per-activation evidence."""
 
 import asyncio
+import hashlib
 import json
 import shlex
 import sqlite3
@@ -11,14 +12,40 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+import yaml
 from fastapi import Request
 from fastapi.testclient import TestClient
 
-from nemo_gym.agents import AGENT_ACTIVATION_HEADER, AgentCloseSessionRequest, AgentContinuationRequirements
-from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.agents import (
+    AGENT_ACTIVATION_HEADER,
+    AgentCloseSessionRequest,
+    AgentContinuationRequirements,
+)
+from nemo_gym.core import (
+    PROVIDER_OOM_KILLED,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
+    SandboxFailureDetails,
+)
+from nemo_gym.trajectory import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
 from responses_api_agents.opencode_agent.continuation import classify_opencode_run
 from responses_api_agents.opencode_agent.snapshot import snapshot
-from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import seed, setup  # noqa: F401
+from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import (  # noqa: F401
+    PNG,
+    PNG_URI,
+    count_media_decodes,
+    seed,
+    setup,
+)
+
+
+def sandbox_oom(reason: str, *, sandbox_id: str = "task-5") -> NgFailureEvent:
+    return NgFailureEvent(
+        boundary="sandbox",
+        failure_kind=PROVIDER_OOM_KILLED,
+        failure_reason=reason,
+        details=SandboxFailureDetails(provider="opensandbox", sandbox_id=sandbox_id),
+    )
 
 
 def install_artifact_runner(sandbox, tmp_path):
@@ -154,6 +181,31 @@ def roots(observations):
     return [
         r for r in observations["records"] if r["kind"] == "agent_invocation" and r["parent_invocation_id"] is None
     ]
+
+
+def test_confirmed_oom_activation_retains_failure_observation(setup):
+    agent, sandbox = setup
+    agent.config.report_agent_sandbox_oom = True
+    error = sandbox_oom("Sandbox was OOM-killed", sandbox_id=sandbox.sandbox_id)
+    sandbox.launch.side_effect = error
+
+    with TestClient(agent.setup_webserver()) as client:
+        request = start(client)
+        response = activate(client, 1)
+        assert response.status_code == 200, response.text
+        result = response.json()
+        assert result["status"] == "failed" and result["output"] == []
+        observation = SandboxObservation.model_validate_json(result["metadata"][NG_AGENT_SANDBOX_OBSERVATION_KEY])
+        assert observation.outcome == "oom" and observation.sandbox_id == sandbox.sandbox_id
+        assert result["_ng_agent_observations"]["schema_version"] == "2.0"
+        [invocation] = roots(result["_ng_agent_observations"])
+        assert invocation["activation_id"] == 1
+        assert invocation["status"] == "failed" and invocation["error_type"] == "server_error"
+
+        receipt = close(client, request)
+        assert roots(receipt["agent_observations"]) == [invocation]
+        assert observation.model_dump() in receipt["agent_observations"]["records"]
+    sandbox.disconnect.assert_awaited_once()
 
 
 @pytest.mark.parametrize("activation_count", [1, 2])
@@ -326,7 +378,13 @@ async def test_close_without_recovered_root_preserves_activation(
     }
     assert observations["gaps"] == [
         *retained["gaps"],
-        {"code": "agent_artifact_unavailable", "invocation_id": None, "detail": None},
+        {
+            "code": "agent_artifact_unavailable",
+            "invocation_id": None,
+            "agent_instance": None,
+            "span_id": None,
+            "detail": None,
+        },
     ]
     assert (receipt.trajectory.model_dump(mode="json") if receipt.trajectory is not None else None) == trajectory
     assert receipt.cleanup_confirmed is True
@@ -763,6 +821,15 @@ def test_ordinary_seed_does_not_add_continuation_capabilities(setup):
         assert "cleanup_confirmed" not in receipt and "trajectory" not in receipt
 
 
+def test_sessions_return_their_own_turns_by_default():
+    # The harness evidence checks join each captured call to the OpenCode step that made it only through these turns.
+    from responses_api_agents.opencode_agent.app import OpenCodeAgentConfig
+
+    assert OpenCodeAgentConfig.model_fields["return_session_trajectory"].default is True
+    defaults = yaml.safe_load((Path(__file__).parents[1] / "configs" / "opencode_agent.yaml").read_text())
+    assert defaults["opencode_agent"]["responses_api_agents"]["opencode_agent"]["return_session_trajectory"] is True
+
+
 @pytest.mark.parametrize("return_session_trajectory", [False, True])
 def test_returned_session_turns_leave_out_the_compaction_call(setup, tmp_path, return_session_trajectory):
     from nemo_gym.rollouts.harness_capabilities import EvidenceScope, inspect_record
@@ -821,7 +888,7 @@ def test_returned_session_turns_leave_out_the_compaction_call(setup, tmp_path, r
         assert response.status_code == 200, response.text
         receipt = close(client, request)
     if not return_session_trajectory:
-        # The default keeps the existing protocol: collection builds the turns from the captured calls.
+        # With false, collection builds the turns from the captured calls.
         assert "trajectory" not in receipt
         return
     trajectory = TrajectoryRecord.model_validate(receipt["trajectory"])
@@ -1113,3 +1180,131 @@ def test_missing_native_step_diagnostics_survive_http_close(setup, tmp_path):
         assert capture["cleanup"] == {"cleanup_confirmed": True, "timed_out": False, "return_code": 0}
         assert "Answer 0" not in gap["detail"]
         assert close(client, request) == receipt
+
+
+def test_media_staging_spends_the_activation_budget(setup, tmp_path):
+    agent, sandbox = setup
+    install_artifact_runner(sandbox, tmp_path)
+    upload = sandbox.upload
+    stalled = SimpleNamespace(cancelled=False)
+
+    async def stall_media(source, destination):
+        if "/nemo-gym-media/" not in destination:
+            return await upload(source, destination)
+        try:
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            stalled.cancelled = True
+            raise
+
+    sandbox.upload = stall_media
+    prompt = [
+        {"type": "input_text", "text": "What is shown?"},
+        {"type": "input_image", "image_url": PNG_URI, "detail": "auto"},
+    ]
+    with TestClient(agent.setup_webserver()) as client:
+        request = start(client)
+        result = client.post(
+            "/v1/responses",
+            headers={AGENT_ACTIVATION_HEADER: "1"},
+            json={"input": [{"role": "user", "content": prompt}], "metadata": {"agent_timeout_sec": "0.5"}},
+        )
+        assert result.status_code == 200 and result.json()["status"] == "incomplete", result.text
+        assert stalled.cancelled
+        sandbox.launch.assert_not_awaited()
+        close(client, request)
+
+
+@pytest.mark.parametrize(
+    "failing, result",
+    [
+        # The provider timed out: an outage, unlike the activation's own deadline, which ends it incomplete.
+        (
+            "mkdir -p -- /tmp/nemo-gym-media",
+            SimpleNamespace(return_code=None, stdout="", stderr="", error_type="timeout"),
+        ),
+        (
+            "{ [ ! -d /tmp/nemo-gym-media/",
+            SimpleNamespace(return_code=1, stdout="", stderr="denied", error_type=None),
+        ),
+    ],
+    ids=["provider-timeout", "rename-refused"],
+)
+def test_media_staging_error_fails_the_activation(setup, tmp_path, failing, result):
+    agent, sandbox = setup
+    install_artifact_runner(sandbox, tmp_path)
+    execute = sandbox.exec.side_effect
+
+    async def fail_staging(command, **kwargs):
+        if command.startswith(failing):
+            return result
+        return await execute(command, **kwargs)
+
+    prompt = [
+        {"type": "input_text", "text": "What is shown?"},
+        {"type": "input_image", "image_url": PNG_URI, "detail": "auto"},
+    ]
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+        request = start(client)
+        sandbox.exec.side_effect = fail_staging
+        response = client.post(
+            "/v1/responses",
+            headers={AGENT_ACTIVATION_HEADER: "1"},
+            json={"input": [{"role": "user", "content": prompt}], "metadata": {"agent_timeout_sec": "30"}},
+        )
+        assert response.status_code == 500, response.text
+        receipt = close(client, request)
+        [root] = roots(receipt["agent_observations"])
+        assert root["status"] == "failed" and root["error_type"] == "server_error"
+    sandbox.launch.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "first, declared",
+    [
+        ("text", [False, False]),
+        # OpenCode resends the first prompt's image with the history, so the next activation keeps the declaration.
+        ("image", [True, True]),
+    ],
+)
+def test_continuation_keeps_declaring_image_input_once_a_prompt_has_images(setup, tmp_path, first, declared):
+    agent, sandbox = setup
+    payloads = install_artifact_runner(sandbox, tmp_path)
+    content = [{"type": "input_text", "text": "What is shown?"}]
+    if first == "image":
+        content.append({"type": "input_image", "image_url": PNG_URI, "detail": "auto"})
+    with TestClient(agent.setup_webserver()) as client:
+        request = start(client)
+        assert activate(client, 1, [{"role": "user", "content": content}]).status_code == 200
+        assert activate(client, 2, "Describe it again").status_code == 200
+        close(client, request)
+    models = [
+        json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])["provider"]["nemo_gym"]["models"]["dummy_model"]
+        for payload in payloads
+    ]
+    assert ["modalities" in model for model in models] == declared
+
+
+def test_continuation_decodes_each_activation_image_once(setup, tmp_path, monkeypatch):
+    agent, sandbox = setup
+    payloads = install_artifact_runner(sandbox, tmp_path)
+    decodes = count_media_decodes(monkeypatch)
+    prompt = [
+        {"type": "input_text", "text": "What is shown?"},
+        {"type": "input_image", "image_url": PNG_URI, "detail": "auto"},
+    ]
+    with TestClient(agent.setup_webserver()) as client:
+        request = start(client)
+        result = client.post(
+            "/v1/responses",
+            headers={AGENT_ACTIVATION_HEADER: "1"},
+            json={"input": [{"role": "user", "content": prompt}], "metadata": {"agent_timeout_sec": "30"}},
+        )
+        assert result.status_code == 200 and result.json()["status"] == "completed", result.text
+        # Validation decodes the image, and the activation reuses that result.
+        assert decodes == [PNG_URI]
+        command = payloads[0]["command"]
+        path = command[command.index("--file") + 1]
+        assert path == f"/tmp/nemo-gym-media/{hashlib.sha256(PNG).hexdigest()}.png"
+        assert sandbox.files[path] == PNG
+        close(client, request)
