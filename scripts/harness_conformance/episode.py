@@ -151,6 +151,7 @@ def _base_settings(harness: str, directory: Path, timeout: float) -> DictConfig:
         "terminus_2_sandboxed": {
             "requires_sandbox": True,
             "requires_tmux": True,
+            "probe_overrides": {"final_responses": 2},
             "inherit_adapter_defaults": True,
             "harness_overrides": {
                 "max_turns": 6,

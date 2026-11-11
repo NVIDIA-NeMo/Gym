@@ -22,7 +22,6 @@ from nemo_gym.models import (
     ModelCallCaptureConfig,
     flatten_namespace_tools,
     install_model_call_capture,
-    message_content_to_text,
     restore_namespace_tool_calls,
     synthesize_chat_completion_sse,
     synthesize_responses_sse,
@@ -55,36 +54,13 @@ FINISH_TOOLS = ("finish", "submit")
 ANSWER = "CONFORMANCE_DONE"
 
 
-# Identify the actual summary instruction, never the availability of tools or a
-# token threshold. These prefixes are exercised against the pinned CLI requests.
-SUMMARY_PROMPTS = (
-    "Create a new anchored summary from the conversation history.",
-    "Update the existing anchored summary using the new conversation history.",
-    "You are performing a CONTEXT CHECKPOINT COMPACTION.",
-    "The context window is approaching its limit. Please create a concise summary",
-)
-# Harbor 0.22.0 summarizes, asks handoff questions, then answers them.
-TERMINUS_SUMMARY_PROMPTS = (
-    "You are about to hand off your work to another AI agent.",
-    "You are picking up work from a previous AI agent on this task:",
-    "The next agent has a few questions for you, please answer each of them one by one in detail:",
-)
-
-
-def is_compaction_request(body: dict, *, prefixes: tuple[str, ...] = SUMMARY_PROMPTS) -> bool:
-    messages = body.get("messages", body.get("input", []))
-    if not isinstance(messages, list) or not messages or not isinstance(messages[-1], dict):
-        return False
-    last = messages[-1]
-    return last.get("role") == "user" and message_content_to_text(last.get("content")).startswith(prefixes)
-
-
 @dataclass
 class Probe:
     scenario: Scenario
     directory: Path
     harness: str = ""
     responses: list[dict] | None = None
+    final_responses: int = 1
     attempts: list[dict] = field(default_factory=list)
     auxiliary_calls: list[dict] = field(default_factory=list)
     tool_calls: list[dict] = field(default_factory=list)
@@ -101,6 +77,10 @@ class Probe:
         default_factory=lambda: f"COMPACTION_SUMMARY_{uuid4().hex}: continue the shell checks."
     )
     compaction_response_ids: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.responses is None:
+            self.responses = self.scenario.default_responses(final_responses=self.final_responses)
 
     def save(self) -> None:
         """Persist independent observations even if collection fails."""
@@ -271,40 +251,10 @@ class Probe:
             marker = Path(call["marker"])
             call["executed"] = marker.is_file() and marker.read_text() == call["token"]
 
-    def _next_reply(self, body: dict, index: int) -> dict:
-        if self.responses is not None:
-            if index >= len(self.responses):
-                raise ValueError("unexpected model request after the scripted replies")
-            return self.responses[index]
-
-        # Compatibility for scenarios not yet expressed as explicit reply schedules.
-        summary_prompts = TERMINUS_SUMMARY_PROMPTS if self.harness == "terminus_2_sandboxed" else SUMMARY_PROMPTS
-        compacting = self.scenario.compaction is not None and is_compaction_request(body, prefixes=summary_prompts)
-        if compacting:
-            helper_count = len(self.compaction_response_ids)
-            expected_summary = (
-                helper_count < len(TERMINUS_SUMMARY_PROMPTS)
-                and is_compaction_request(body, prefixes=(TERMINUS_SUMMARY_PROMPTS[helper_count],))
-                if self.harness == "terminus_2_sandboxed"
-                else helper_count == 0
-            )
-            if self.scenario.compaction is not True or not self.tool_calls or not expected_summary:
-                raise ValueError("unexpected compaction request outside the prescribed summary stage")
-        prompt_tokens = 20 + index
-        if self.scenario.compaction is not None:
-            policy_index = index - len(self.compaction_response_ids)
-            prompt_tokens = (
-                500 if compacting else 27000 + policy_index if not self.compaction_response_ids else 100 + policy_index
-            )
-        return {
-            "kind": "summary"
-            if compacting
-            else "tool"
-            if len(self.tool_calls) < self.scenario.tool_steps
-            else "final",
-            "input_tokens": prompt_tokens,
-            "output_tokens": 11 if compacting else 8,
-        }
+    def _next_reply(self, index: int) -> dict:
+        if index >= len(self.responses):
+            raise ValueError("unexpected model request after the scripted replies")
+        return self.responses[index]
 
     async def model(self, request: Request) -> JSONResponse | StreamingResponse:
         body = await request.json()
@@ -358,7 +308,7 @@ class Probe:
             try:
                 if self.finished:
                     raise ValueError("unexpected model request after the scripted final answer")
-                reply = self._next_reply(body, index)
+                reply = self._next_reply(index - len(self.scenario.http_errors))
                 if reply["kind"] not in ("tool", "summary", "final"):
                     raise ValueError(f"unknown scripted reply kind: {reply['kind']}")
                 compacting = reply["kind"] == "summary"
