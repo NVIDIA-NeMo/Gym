@@ -17,6 +17,7 @@ from nemo_gym.server_runtime import (
     ResourcesSeedSessionRequest,
     check_resources_session_contract,
 )
+from nemo_gym.verification import exercise_verifier_fixture
 from resources_servers.automationbench import app as app_module
 from resources_servers.automationbench.app import (
     AutomationBenchResourcesServer,
@@ -101,6 +102,18 @@ def test_example_rows_are_valid_task_data_and_carry_the_tools() -> None:
             "api_fetch",
             "base64_encode",
         ]
+
+
+async def test_exported_fixture_checks_actual_tool_mutations_and_guardrail_scoring() -> None:
+    results = await exercise_verifier_fixture(
+        app_module.VERIFIER_FIXTURE, reward_range=(0.0, 1.0), determinism="unknown"
+    )
+    assert [(result.name, result.observed_rewards) for result in results] == [
+        ("objective_completed", (1.0,)),
+        ("objective_unfinished", (0.0,)),
+        ("broken_guardrail_zeroes_completed_objective", (0.0,)),
+        ("missing_task_info", ()),
+    ]
 
 
 def test_the_row_tools_are_the_environment_tools() -> None:

@@ -1617,8 +1617,9 @@ class TestOnboardingCommandAdapters:
         assert "None" not in out
 
     @pytest.mark.parametrize("editable_install", [True, False])
+    @pytest.mark.parametrize("reuse_setup_config", [True, False])
     def test_manifest_fixture_runs_in_the_server_environment(
-        self, monkeypatch: MonkeyPatch, tmp_path: Path, editable_install: bool
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, editable_install: bool, reuse_setup_config: bool
     ) -> None:
         install_root = nemo_gym.cli.env.PARENT_DIR if editable_install else tmp_path / "site-packages"
         monkeypatch.setattr(nemo_gym.cli.env, "PARENT_DIR", install_root)
@@ -1629,11 +1630,10 @@ class TestOnboardingCommandAdapters:
         spec.to_dict.return_value = {"name": "alpha"}
         monkeypatch.setattr(nemo_gym.cli.env, "prepare_verifier_run", MagicMock(return_value=spec))
         parser = MagicMock()
-        setup_config = OmegaConf.create({})
+        setup_config = OmegaConf.create({"uv_venv_dir": str(tmp_path / "isolated-envs")})
         parser.parse.return_value = setup_config
         monkeypatch.setattr(nemo_gym.cli.env, "GlobalConfigDictParser", MagicMock(return_value=parser))
         monkeypatch.setattr(nemo_gym.cli.env, "setup_env_command", lambda *args: "setup")
-        monkeypatch.setattr(nemo_gym.cli.env, "get_venv_path", lambda *args: tmp_path / ".venv")
 
         def run_command(command: str, *args, **kwargs):
             result_path = Path(shlex.split(command)[-1])
@@ -1658,10 +1658,17 @@ class TestOnboardingCommandAdapters:
         runner = MagicMock(side_effect=run_command)
         monkeypatch.setattr(nemo_gym.cli.env, "run_command", runner)
 
-        report = nemo_gym.cli.env._run_manifest_verifier(self._ENTRY, update_expected=True)
+        report = nemo_gym.cli.env._run_manifest_verifier(
+            self._ENTRY, update_expected=True, setup_config=setup_config if reuse_setup_config else None
+        )
 
         assert report.name == "alpha"
-        assert parser.parse.call_args.args[0].offline is True
+        if reuse_setup_config:
+            parser.parse.assert_not_called()
+        else:
+            assert parser.parse.call_args.args[0].offline is True
+        python = tmp_path / "isolated-envs/resources_servers/alpha/.venv/bin/python"
+        assert str(python) in runner.call_args.args[0]
         assert "nemo_gym.environment._verifier_runner" in runner.call_args.args[0]
         assert runner.call_args.kwargs["global_config_dict"] is setup_config
         assert runner.call_args.kwargs["stdout_target"] is sys.stderr

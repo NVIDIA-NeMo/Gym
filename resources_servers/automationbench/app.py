@@ -18,11 +18,12 @@ import copy
 import logging
 from dataclasses import dataclass
 from functools import cache
+from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import Body, FastAPI, Request
 from fastapi.responses import PlainTextResponse
-from pydantic import Field, PrivateAttr, ValidationError
+from pydantic import BaseModel, Field, PrivateAttr, ValidationError
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.core import VERIFIER_ERROR, NeMoGymResponseCreateParamsNonStreaming
@@ -38,7 +39,8 @@ from nemo_gym.server_runtime import (
     lost_session_verification,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
-from resources_servers.automationbench.task_data import TaskData
+from nemo_gym.verification import VerifierFixture
+from resources_servers.automationbench.task_data import TaskData, TaskInfo
 
 
 LOG = logging.getLogger(__name__)
@@ -282,6 +284,33 @@ class AutomationBenchResourcesServer(SimpleResourcesServer):
             )
         )
         return key
+
+
+class _FixtureToolCall(BaseModel):
+    name: str
+    arguments: Dict[str, Any]
+
+
+class _FixtureRequest(BaseModel):
+    info: TaskInfo
+    tool_calls: List[_FixtureToolCall] = Field(default_factory=list)
+
+
+class _FixtureVerifier:
+    """Exercise the production tools and rubric on a small world without model or dataset downloads."""
+
+    def verify(self, body: _FixtureRequest) -> float:
+        state = new_world_state(body.info.model_dump())
+        for call in body.tool_calls:
+            run_tool(call.name, call.arguments, state)
+        return score(state, export_assertion_results=False)["aa_headline"]
+
+
+VERIFIER_FIXTURE = VerifierFixture(
+    server_factory=_FixtureVerifier,
+    request_model=_FixtureRequest,
+    cases_path=Path(__file__).parent / "tests" / "verifier_cases.jsonl",
+)
 
 
 if __name__ == "__main__":
