@@ -247,11 +247,14 @@ async def test_training_verifier_preserves_full_response_and_shapes_from_traject
     from unittest.mock import MagicMock
 
     from nemo_gym.client import ServerClient
-    from nemo_gym.trajectory.trajectory_record import grading_transform_source
-    from resources_servers.string_match.tool_rewards import ToolRewardConfig, ToolRewardServer, ToolRewardVerifyRequest
+    from resources_servers.opencode_multimodal_benchmarks.string_match_tool_rewards import (
+        ToolRewardConfig,
+        ToolRewardServer,
+        ToolRewardVerifyRequest,
+    )
 
     server = ToolRewardServer(
-        config=ToolRewardConfig(name="test", host="127.0.0.1", port=1, entrypoint="tool_rewards.py"),
+        config=ToolRewardConfig(name="test", host="127.0.0.1", port=1, entrypoint="string_match_tool_rewards.py"),
         server_client=MagicMock(spec=ServerClient),
     )
     response = tool_response("<think>private</think>A")
@@ -267,7 +270,7 @@ async def test_training_verifier_preserves_full_response_and_shapes_from_traject
     assert saved["reward"] == pytest.approx(base + (0.1 if base else 0.02))
     assert saved["response"] == response.model_dump(mode="json")
     assert saved["opencode_tool_reward"]["bash_success_count"] == 1
-    assert grading_transform_source(saved) is not None
+    assert "ng_grading_transform" not in saved
     assert server.setup_webserver() is not None
 
 
@@ -302,11 +305,15 @@ async def test_masked_base_verifier_result_preserves_original_response_without_s
     from unittest.mock import AsyncMock, MagicMock
 
     from nemo_gym.client import ServerClient
+    from resources_servers.opencode_multimodal_benchmarks.string_match_tool_rewards import (
+        ToolRewardConfig,
+        ToolRewardServer,
+        ToolRewardVerifyRequest,
+    )
     from resources_servers.string_match.app import (
         StringMatchResourcesServer,
         StringMatchVerifyResponse,
     )
-    from resources_servers.string_match.tool_rewards import ToolRewardConfig, ToolRewardServer, ToolRewardVerifyRequest
 
     body = ToolRewardVerifyRequest(
         responses_create_params={"input": []}, response=tool_response(), expected_answer="A"
@@ -314,7 +321,7 @@ async def test_masked_base_verifier_result_preserves_original_response_without_s
     base = StringMatchVerifyResponse(**body.model_dump(), reward=0, extracted_answer=None, mask_sample=True)
     monkeypatch.setattr(StringMatchResourcesServer, "verify", AsyncMock(return_value=base))
     server = ToolRewardServer(
-        config=ToolRewardConfig(name="test", host="127.0.0.1", port=1, entrypoint="tool_rewards.py"),
+        config=ToolRewardConfig(name="test", host="127.0.0.1", port=1, entrypoint="string_match_tool_rewards.py"),
         server_client=MagicMock(spec=ServerClient),
     )
     result = await server.verify(body)
@@ -334,9 +341,9 @@ async def test_existing_training_graders_shape_real_scores_and_preserve_tool_evi
 
     if resource == "math_with_judge":
         pytest.importorskip("math_verify")
-    entrypoint = importlib.import_module(f"resources_servers.{resource}.tool_rewards")
+    entrypoint = importlib.import_module(f"resources_servers.opencode_multimodal_benchmarks.{resource}_tool_rewards")
     request_type = entrypoint.ToolRewardVerifyRequest
-    config = {"name": "test", "host": "127.0.0.1", "port": 1, "entrypoint": "tool_rewards.py"}
+    config = {"name": "test", "host": "127.0.0.1", "port": 1, "entrypoint": f"{resource}_tool_rewards.py"}
     if resource == "math_with_judge":
         config.update(
             should_use_judge=False,
@@ -363,3 +370,60 @@ async def test_existing_training_graders_shape_real_scores_and_preserve_tool_evi
     assert saved["opencode_tool_reward"]["base_reward"] == float(correct)
     assert saved["response"] == response.model_dump(mode="json")
     assert server.setup_webserver() is not None
+
+
+@pytest.mark.parametrize("verdict,base,calls", [("[[A=B]]", 1.0, 2), ("[[A!=B]]", 0.0, 1), ("unclear", 0.0, 1)])
+async def test_math_judge_records_final_shaped_grade(verdict, base, calls, monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock
+
+    from nemo_gym.client import ServerClient
+    from nemo_gym.core import rollout_context
+    from nemo_gym.server_runtime import observe_verifier
+    from nemo_gym.trajectory import grading_result_binding
+    from resources_servers.opencode_multimodal_benchmarks.math_with_judge_tool_rewards import (
+        ToolRewardConfig,
+        ToolRewardServer,
+        ToolRewardVerifyRequest,
+    )
+
+    client = MagicMock(spec=ServerClient)
+    replies = []
+    for i in range(calls):
+        payload = tool_response(verdict).model_dump(mode="json") | {"id": f"judge-{i}"}
+        http = MagicMock(status=200)
+        http.json = AsyncMock(return_value=payload)
+        http.read = AsyncMock(return_value=json.dumps(payload).encode())
+        replies.append(http)
+    client.post = AsyncMock(side_effect=replies)
+    server = ToolRewardServer(
+        config=ToolRewardConfig(
+            name="math",
+            host="127.0.0.1",
+            port=1,
+            entrypoint="math_with_judge_tool_rewards.py",
+            judge_model_server={"type": "responses_api_models", "name": "judge"},
+            judge_responses_create_params={"input": []},
+        ),
+        server_client=client,
+    )
+    # Force the library to defer to the real inherited judge implementation.
+    monkeypatch.setattr(server, "_verify_answer_with_library_async", AsyncMock(return_value=(0.0, "2")))
+    body = ToolRewardVerifyRequest(
+        responses_create_params={"input": []},
+        response=tool_response("\\boxed{2}"),
+        expected_answer="3",
+        question="Solve this task",
+        ng_trajectory=trajectory(),
+    )
+    with rollout_context("math-judge-tool-rewards"):
+        result = await observe_verifier(server.verify, enabled=True, verifier_name="math")(body)
+    saved = result.model_dump(mode="json")
+    assert saved["reward"] == pytest.approx(base + (0.1 if base else 0.02))
+    assert saved["response"] == body.response.model_dump(mode="json")
+    assert "ng_grading_transform" not in saved
+    [invocation] = saved["ng_verifier_invocations"]
+    [grade] = invocation["grading_operations"]
+    assert grade["kind"] == "llm_judge"
+    assert grade["result_binding_sha256"] == grading_result_binding(saved)
+    assert grade["outcome"] == ("unknown" if verdict == "unclear" else "completed")
+    assert len(grade["dependencies"]) == calls == client.post.await_count

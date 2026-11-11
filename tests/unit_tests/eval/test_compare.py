@@ -1840,7 +1840,7 @@ def _snapshot(root: Path) -> dict:
 @pytest.fixture
 def fake_aggregation(monkeypatch):
     # Same destination rule as the real _call_aggregate_metrics: beside the path it is given.
-    async def aggregate(self, results, rows, path, *, raise_on_error=True, materialized_fpaths=None):
+    async def aggregate(self, results, rows, path, *, raise_on_error=True):
         metrics = aggregate_metrics_path_for(path)
         metrics.write_bytes(orjson.dumps([{"agent_ref": {"name": "agent"}, "rows": len(results)}]))
         return metrics

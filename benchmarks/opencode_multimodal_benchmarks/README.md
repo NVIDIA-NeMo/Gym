@@ -178,17 +178,34 @@ passed or replace these values with a guessed license to bypass it.
 
 ## Training rewards and row profiles
 
+Training profiles using tool rewards must also set `forward_agent_evidence: true`
+on their `single_agent_turn` Environment Server so the verifier receives the
+trajectory and tool observations. Answer-only evaluation leaves it disabled.
+
 The benchmark verifier defaults to `tool_rewards: null` for evaluation. Training
 can enable the existing answer-dependent schedule with `tool_rewards: {}` on the
 Resources server. Scoring reads tool execution outcomes from the shared trajectory
 or observation bundle; it never interprets model-visible output as an exit status.
 
-For existing math, MCQA, and string-match training tasks, select `tool_rewards.py`
-as that Resources server's entrypoint. These thin verifier entrypoints share the
-same reward implementation and retain their existing task schemas and graders.
+For existing math, MCQA, and string-match training tasks, use the
+`opencode_multimodal_benchmarks` Resources component with entrypoint
+`math_with_judge_tool_rewards.py`, `mcqa_tool_rewards.py`, or
+`string_match_tool_rewards.py`, respectively. These thin adapters import the
+existing graders and retain their task schemas. For example:
+
+```yaml
+training_string:
+  resources_servers:
+    opencode_multimodal_benchmarks:
+      entrypoint: string_match_tool_rewards.py
+      tool_rewards: {}
+```
+
+Bind the training Environment Server's `resources_server` to `training_string`
+and set `forward_agent_evidence: true` on that Environment Server.
 Set the schedule on the Resources server, not the agent. Original response messages
 and token arrays are preserved; reasoning cleanup affects only the grading view.
-The stock `single_agent_turn` environment forwards the shared execution evidence.
+The stock `single_agent_turn` environment forwards execution evidence when opted in.
 
 Each row can select a different environment through `task_source`. Bind restricted
 rows to an OpenCode profile with `network_access: model_only`; bind web-enabled rows

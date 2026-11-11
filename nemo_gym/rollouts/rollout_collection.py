@@ -222,12 +222,7 @@ from nemo_gym.client.server_client import (
 )
 from nemo_gym.data.task_materialization import TASK_ID_FIELDS
 from nemo_gym.data.task_selection import select_tasks
-from nemo_gym.models.token_capture.config import (
-    TokenCaptureConfig,
-    resolve_lineage_store,
-    token_capture_enabled_for_agent,
-)
-from nemo_gym.models.token_capture.config import token_capture_config as read_token_capture_config
+from nemo_gym.models.token_capture.config import TokenCaptureConfig, token_capture_enabled_for_agent
 from nemo_gym.models.token_capture.consumer import (
     clear_token_captures_for_rollouts,
     mask_incomplete_when_attributed_from_config,
@@ -239,7 +234,7 @@ from nemo_gym.models.token_capture.delivery import (
     finalize_rollout_token_capture,
     retire_rollout_token_capture,
 )
-from nemo_gym.models.token_capture.protocols import CaptureLedger, installed_token_source
+from nemo_gym.models.token_capture.protocols import installed_token_source
 from nemo_gym.models.token_capture.store import TokenCaptureStore
 from nemo_gym.rollouts.health.timeouts import ELAPSED_S_KEY, classify_timeout, export_run_health_timeouts
 
@@ -2547,7 +2542,7 @@ def _reply_failure_kind(headers: Any) -> Optional[str]:
 def _agent_request_failure_row(exc: BaseException, status: Optional[int], headers: Any = None) -> Dict[str, Any]:
     """One sidecar row for a `/run` call that came back without a result.
 
-    No reward and no response: an unverified failed call is not a verifier score of zero, and a
+    No reward and no response: an infrastructure failure is not a verifier score of zero, and a
     placeholder would read as real generation data to token capture, aggregation and trainers.
     The class says whether the rollout ran. A NeMo Gym server answers 500 when its own handler
     raises, so any status it answered with means the rollout ran and broke, which is also how a
@@ -2567,9 +2562,6 @@ def _agent_request_failure_row(exc: BaseException, status: Optional[int], header
         **observations,
         **({"_ng_failure_kind": kind} if kind is not None else {}),
         NG_FAILURE_CLASS_KEY: (AGENT_RUN_ERROR_FAILURE_CLASS if rollout_ran else AGENT_REQUEST_FAILED_FAILURE_CLASS),
-        # A failed episode may have staged a valid partial token history. Trainers
-        # must exclude it rather than learn from an unverified prefix.
-        "instance_config": {"mask_sample": True},
         "_ng_failure_type": type(exc).__name__,
         "_ng_failure_message": str(exc) or repr(exc),
         "_ng_failure_http_status": status,
@@ -2920,36 +2912,6 @@ def _metrics_group(row: Mapping[str, Any], servers_by_agent: Callable[[], Mappin
     agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
     servers = servers_by_agent().get(agent_name, []) if agent_name else []
     return servers[0] if len(servers) == 1 else agent_name
-
-
-def _planned_repeat_inventory(
-    materialized_fpaths: List[Path], group: Callable[[Mapping[str, Any]], Any]
-) -> Optional[Dict[Any, Dict[int, List[int]]]]:
-    """Read the resolved attempt plan, never reconstructing it from successful outputs."""
-    if not materialized_fpaths or any(not path.is_file() for path in materialized_fpaths):
-        return None
-    inventory: Dict[Any, Dict[int, set[int]]] = {}
-    for path in dict.fromkeys(materialized_fpaths):
-        with path.open("rb") as stream:
-            for line_no, line in enumerate(stream, 1):
-                if not line.strip():
-                    continue
-                try:
-                    row = loads_jsonl_line(line, path, line_no)
-                except ConfigError:
-                    if not line.endswith(b"\n"):
-                        # Recorded shards tolerate an interrupted final append. Its unknown
-                        # contents cannot certify a complete repeat inventory.
-                        return None
-                    raise
-                task, repeat = row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME)
-                if type(task) is not int or type(repeat) is not int or task < 0 or repeat < 0:
-                    return None
-                key = group(row)
-                if key is None:
-                    return None
-                inventory.setdefault(key, {}).setdefault(task, set()).add(repeat)
-    return {key: {task: sorted(repeats) for task, repeats in tasks.items()} for key, tasks in inventory.items()}
 
 
 def _identity_key(row: Mapping[str, Any], group: Callable[[Mapping[str, Any]], Optional[str]]) -> tuple:
@@ -4872,7 +4834,6 @@ executions → not run again (left to recovery)
                 [metadata_rows[i] for i in order],
                 output_fpath,
                 raise_on_error=False,  # Write batch status before reporting aggregation failures below.
-                materialized_fpaths=[config.materialized_jsonl_fpath],
             )
 
         if batch_tracker is not None and getattr(batch_tracker, "enabled", True):
@@ -4944,7 +4905,6 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         output_fpath: Path,
         *,
         raise_on_error: bool = True,
-        materialized_fpaths: Optional[List[Path]] = None,
     ) -> Optional[Path]:
         """Call /aggregate_metrics on the environment server each rollout ran through.
 
@@ -4973,11 +4933,6 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         # Group results by the environment server they ran through.
         servers_by_agent = _environment_servers_by_agent(global_config_dict)
-        inventory = await asyncio.to_thread(
-            _planned_repeat_inventory,
-            materialized_fpaths or [],
-            lambda row: _metrics_group(row, lambda: servers_by_agent),
-        )
         server_results: Dict[str, List[Dict]] = {}
         server_agents: Dict[str, Optional[str]] = {}
         for row, result in zip(rows, results):
@@ -5041,10 +4996,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
             agg_response = None
             try:
-                agg_request = AggregateMetricsRequest(
-                    verify_responses=stripped,
-                    expected_rollout_indices=inventory.get(server_name, {}) if inventory is not None else None,
-                )
+                agg_request = AggregateMetricsRequest(verify_responses=stripped)
                 agg_response = await server_client.post(
                     server_name=server_name,
                     url_path="/aggregate_metrics",
@@ -5375,7 +5327,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         examples: List[Dict],
         head_server_config: Optional[BaseServerConfig] = None,
         semaphore: Optional[Semaphore] = None,
-        route_failures_to_sidecar: bool | None = None,
+        route_failures_to_sidecar: bool = False,
         environment_server_name: str | None = None,
         *,
         max_resident_tasks: Optional[int] = None,
@@ -5417,23 +5369,6 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         the order they supplied.
         """
         server_client = self.setup_server_client(head_server_config)
-        if route_failures_to_sidecar is None:
-            route_failures_to_sidecar = server_client.global_config_dict.get("route_failures_to_sidecar", False)
-            if not isinstance(route_failures_to_sidecar, bool):
-                raise ValueError("route_failures_to_sidecar must be a boolean")
-        failure_ledger = None
-        if route_failures_to_sidecar and server_client.global_config_dict.get("token_id_capture", {}).get(
-            "external_staging", False
-        ):
-            capture_config = read_token_capture_config(server_client.global_config_dict)
-            file_root = (
-                capture_config.resolved_dir()
-                if capture_config.enabled and capture_config.token_id_capture.sink is None
-                else None
-            )
-            failure_ledger = resolve_lineage_store(capture_config.build_lineage_store(), file_root=file_root)
-            if not isinstance(failure_ledger, CaptureLedger) or not failure_ledger.is_process_shared():
-                raise ValueError("routing externally staged rollout failures requires a shared CaptureLedger")
         if environment_server_name is not None:
             for row in examples:
                 row[NG_ENVIRONMENT_SERVER_KEY] = environment_server_name
@@ -5637,15 +5572,6 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     # The status comes from the error when it carries one, and from the response
                     # when the body was the part that failed.
                     status = getattr(e, "status", None) or getattr(res, "status", None)
-                    if failure_ledger is not None:
-                        rollout_id = maybe_rollout_id_from_run_body(row)
-                        if rollout_id is None:
-                            raise ValueError(
-                                "cannot record a training rollout failure without a capture identity"
-                            ) from e
-                        # Keep staged-call ownership for cleanup, but invalidate any partial history.
-                        # A loss mask alone does not exclude the row from a trainer's valid-group count.
-                        await failure_ledger.record_failure(rollout_id, "agent-run-failure", "agent_run_failed")
                     failure = _agent_request_failure_row(
                         e, status, getattr(e, "headers", None) or getattr(res, "headers", None)
                     )
@@ -5754,7 +5680,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         examples: List[Dict],
         head_server_config: Optional[BaseServerConfig] = None,
         semaphore: Optional[Semaphore] = None,
-        route_failures_to_sidecar: bool | None = None,
+        route_failures_to_sidecar: bool = False,
         environment_server_name: str | None = None,
         *,
         max_resident_tasks: Optional[int] = None,
@@ -5778,10 +5704,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         ``preprocess_examples`` first if you need them.
 
         ``route_failures_to_sidecar`` makes a failed `/run` a failure row instead of an exception
-        that ends every rollout still in flight. When omitted, it uses the global configuration
-        value, which defaults off because those rollouts then leave the score. An explicit boolean
-        overrides the configuration. Failure rows carry ``instance_config.mask_sample=True`` so
-        training callers exclude any partial captured history from optimization.
+        that ends every rollout still in flight. It defaults off because those rollouts then leave
+        the score.
 
         ``max_resident_tasks`` limits admitted tasks and therefore concurrent requests,
         even when ``semaphore`` allows more. Admission starts when the first returned
@@ -5867,13 +5791,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         enrich_results = enrich_results or record_output_dir is not None
         if delete_model_call_capture and not include_model_call_payloads:
             raise ValueError("delete_model_call_capture would drop the bodies include_model_call_payloads=False keeps")
-        global_config = self.setup_server_client(head_server_config).global_config_dict
-        if route_failures_to_sidecar is None:
-            route_failures_to_sidecar = global_config.get("route_failures_to_sidecar", False)
-        if not isinstance(route_failures_to_sidecar, bool):
-            raise ValueError("route_failures_to_sidecar must be a boolean")
         enrich = None
         if enrich_results:
+            global_config = self.setup_server_client(head_server_config).global_config_dict
             capture_dirs = model_call_capture_dirs_from_config(global_config)
             observability_enabled = observability_enabled_from_config(global_config)
 
@@ -6453,15 +6373,7 @@ class RolloutAggregationHelper(BaseModel):
             print(f"Counting {len(missing)} materialized rollout(s) with no row as scored zeros")
         scored = sorted(results + counted, key=_rollout_order_key)
         aggregate_metrics_fpath = await helper._call_aggregate_metrics(
-            scored,
-            scored,
-            output_fpath,
-            raise_on_error=False,
-            materialized_fpaths=(
-                [Path(config.materialized_inputs_jsonl_fpath)]
-                if config.materialized_inputs_jsonl_fpath
-                else [materialized_path_for(Path(path)) for path in input_paths]
-            ),
+            scored, scored, output_fpath, raise_on_error=False
         )
         if batch_tracker is not None:
             batch_tracker.write_status(

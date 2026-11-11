@@ -23,7 +23,7 @@ These adapters run a harness inside a sandbox. The `single_agent_turn` Environme
 | Pi (`pi_agent`) | Chat Completions | MCP only | Not wired up; evaluation only | Declared | Declared | Yes |
 | Codex (`codex_agent`) | Responses (streaming) | MCP only | Not wired up; evaluation only | Declared | Declared | Yes |
 | Kilo (`kilocode_agent`) | Chat Completions | MCP only | Not wired up; evaluation only | Declared | Not declared | With `--agent kilocode_agent/kilocode_sandboxed` and `++use_absolute_ip=true` |
-| OpenCode (`opencode_agent`) | Chat Completions | MCP only | Off by default; shared sessions support training capture and evaluation | Not declared | Declared | Yes |
+| OpenCode (`opencode_agent`) | Chat Completions | MCP only | Off by default; the session path is evaluation only | Not declared | Declared | Yes |
 | OpenClaw (`openclaw_agent`) | Chat Completions | MCP only | Not wired up; evaluation only | Not declared | Declared | Yes |
 | Copilot (`copilot_agent`) | Chat Completions | None | Not wired up; evaluation only | Not declared | Not declared | Not validated |
 | mini-SWE (`mini_swe_agent`, `mini_swe_agent_sandboxed.yaml`) | Responses | MCP only, through a task-local CLI that its bash tool calls | Not wired up; evaluation only | Not declared | Not declared | Only when the task runs as root: a task user is refused |

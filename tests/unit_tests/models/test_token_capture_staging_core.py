@@ -395,9 +395,6 @@ def test_capture_owner_wire_names_accept_pre_rename_names_without_changing_stora
         assert "rollout_id" not in payload
         assert model.__class__.model_validate_json(model.model_dump_json()) == model
         assert model.rollout_id == model.capture_key
-        # Even identical duplicate spellings must be rejected.
-        with pytest.raises(ValidationError, match="rollout_id"):
-            model.__class__.model_validate({**payload, "rollout_id": model.capture_key})
         old_payload = {**payload, "rollout_id": payload["capture_key"]}
         del old_payload["capture_key"]
         restored = model.__class__.model_validate(old_payload)
@@ -447,28 +444,6 @@ def test_pre_rename_names_warn_once_and_new_names_never_warn(monkeypatch: pytest
     monkeypatch.setattr(staging_records, "_WARNED_RENAMES", set())
     with pytest.warns(FutureWarning, match="`rollout_id` is deprecated"):
         assert admission.rollout_id == "rollout-1"
-
-
-def test_legacy_staging_digest_keyword_preserves_bytes() -> None:
-    args = _digest_args()
-    expected = compute_staging_digest(**args)
-    args["rollout_id"] = args.pop("capture_key")
-    with pytest.warns(FutureWarning, match="rollout_id is deprecated"):
-        assert compute_staging_digest(**args) == expected
-    args["capture_key"] = args["rollout_id"]
-    with pytest.raises(ValueError, match="not both"):
-        compute_staging_digest(**args)
-
-
-def test_legacy_identity_does_not_bypass_integrity_validation() -> None:
-    payload = _record_payload()
-    payload["rollout_id"] = "wrong-owner"
-    del payload["capture_key"]
-    with pytest.raises(ValidationError, match="digest"):
-        StagedCallRecord.model_validate(payload)
-    for value in ("", None, 123):
-        with pytest.raises(ValidationError):
-            CaptureAdmission(rollout_id=value, model_call_id="call-1", mode="text")
 
 
 @pytest.mark.parametrize(

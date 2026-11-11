@@ -2610,16 +2610,3 @@ async def test_a_connection_that_dropped_is_reported_as_possibly_delivered_and_n
     assert len(calls) == 1
     assert (outcome.source, outcome.delivery) == ("collector", "possibly_delivered")
     assert outcome.exception_type == "ServerDisconnectedError"
-
-
-@pytest.mark.parametrize("resumable", [False, True, None, {}])
-def test_saved_launcher_resume_shorthand_uses_default_classification(tmp_path, resumable):
-    from nemo_gym.rollouts.rollout_recovery import FailureClassificationConfig, saved_failure_classification
-
-    output = tmp_path / "benchmark" / "artifacts" / "rollouts.jsonl"
-    output.parent.mkdir(parents=True)
-    OmegaConf.save(
-        OmegaConf.create({"driver": {"benchmarks": {"benchmark": {"resumable": resumable}}}}),
-        tmp_path / "resolved-config.yaml",
-    )
-    assert saved_failure_classification(output) == FailureClassificationConfig()

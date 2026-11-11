@@ -3532,15 +3532,12 @@ class TestComposeUnboundAgent:
         assert OmegaConf.to_container(servers["single_agent_turn_legacy"]) == server_before
 
     def test_agent_session_agent_types_match_the_agent_apps(self) -> None:
-        """Every agent package that seeds agent sessions is listed, including session mixins."""
+        """Every agent app that seeds agent sessions is listed, and nothing else is."""
         agents_root = Path(nemo_gym.config.global_config.__file__).parents[2] / "responses_api_agents"
         implementing = {
             app.parent.name
             for app in agents_root.glob("*/app.py")
-            if any(
-                "def _seed_agent_session_state(" in module.read_text(encoding="utf-8")
-                for module in app.parent.glob("*.py")
-            )
+            if "def _seed_agent_session_state(" in app.read_text(encoding="utf-8")
         }
 
         assert implementing == AGENT_SESSION_AGENT_TYPES

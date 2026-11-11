@@ -968,26 +968,3 @@ def test_generation_chunk_record_computes_staging_digest_once(monkeypatch: pytes
     assert compute.call_count == 1
     # The digest it computed is the one the wire format verifies.
     assert StagedCallRecord.model_validate_json(chunk.model_dump_json()) == chunk
-
-
-@pytest.mark.parametrize("encoded", [False, True])
-def test_prefix_boundary_preserves_the_pinned_nemo_rl_wire_shape(encoded):
-    from nemo_gym.models.token_capture.adapters.vllm import VLLMCaptureAdapter
-    from nemo_gym.models.token_capture.staging.routes import encode_routed_experts
-
-    boundary = [[[1, 2], [3, 4]]]
-    if encoded:
-        boundary = encode_routed_experts(boundary)
-    extras = VLLMCaptureAdapter().extract_extras(
-        {"choices": [{"message": {"routed_experts_prefix_boundary": boundary}}]}
-    )
-    assert extras == {"routed_experts_prefix_boundary": boundary}
-    assert VLLMCaptureAdapter().extract_extras({"choices": [{"message": {}}]}) is None
-
-
-@pytest.mark.parametrize("boundary", [12, 1.5, True, {}, "bad", [], [[[1]], [[2]]]])
-def test_prefix_boundary_rejects_non_route_or_multi_token_payloads(boundary):
-    from nemo_gym.models.token_capture.adapters.vllm import VLLMCaptureAdapter
-
-    with pytest.raises(ValueError):
-        VLLMCaptureAdapter().extract_extras({"choices": [{"message": {"routed_experts_prefix_boundary": boundary}}]})

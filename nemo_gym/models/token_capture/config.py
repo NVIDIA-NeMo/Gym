@@ -374,15 +374,3 @@ from nemo_gym._moved_paths import moved_names_getattr  # noqa: E402
 
 
 __getattr__ = moved_names_getattr(__name__)
-
-
-def resolve_lineage_store(
-    configured: LineageResolver | None, *, file_root: Path | None = None
-) -> LineageResolver | None:
-    """Use the same configured, installed, then file-store precedence for capture and collection."""
-    from nemo_gym.models.token_capture.lineage import FileLineageStore
-
-    resolved = configured or installed_lineage_store()
-    if resolved is None and file_root is not None:
-        resolved = FileLineageStore(file_root)
-    return resolved

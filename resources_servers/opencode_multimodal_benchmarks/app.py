@@ -11,7 +11,7 @@ import aiohttp
 from pydantic import Field, PrivateAttr, model_validator
 
 from nemo_gym.client import request
-from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.core import NeMoGymChatCompletion
 from nemo_gym.metrics import compute_aggregate_metrics
 from nemo_gym.server_runtime import (
@@ -203,14 +203,12 @@ class VisualBenchmarksServer(VisualVerifier, SimpleResourcesServer):
         raise AssertionError("Judge attempts exhausted")
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
-        """Compare valid measurements with the resolved attempt plan, including absent repeats."""
+        """Retain received attempt identities before shared aggregation filters masked rows."""
         expected_repeats: dict[tuple[str, str], set[int]] = {}
         for row in body.verify_responses:
             metadata = row["verifier_metadata"]
             identity = (metadata["benchmark"], metadata["index"])
-            expected_repeats.setdefault(identity, set()).update(
-                (body.expected_rollout_indices or {}).get(row[TASK_INDEX_KEY_NAME], [])
-            )
+            expected_repeats.setdefault(identity, set()).add(row.get(ROLLOUT_INDEX_KEY_NAME, 0))
         return compute_aggregate_metrics(
             body.verify_responses,
             compute_metrics_fn=lambda tasks: self.compute_metrics(tasks, expected_repeats=expected_repeats),

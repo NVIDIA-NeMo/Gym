@@ -29,7 +29,7 @@ from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 class StringMatchResourcesServerConfig(BaseResourcesServerConfig):
-    strip_trailing_eos: bool = False
+    pass
 
 
 class StringMatchRunRequest(BaseRunRequest):
@@ -350,19 +350,6 @@ def _soft_numeric_grade(gt_answer: str, pred_answer: str) -> float:
     return max(0.0, 1.0 - rel_error) ** 2
 
 
-def strip_trailing_eos(text: str) -> str:
-    """Remove trailing end-of-sequence markers in linear time without altering the captured response."""
-    end = len(text)
-    markers = ("<|im_end|>", "<|endoftext|>", "<|eot_id|>")
-    while True:
-        while end and text[end - 1].isspace():
-            end -= 1
-        marker = next((marker for marker in markers if text.endswith(marker, 0, end)), None)
-        if marker is None:
-            return text[:end]
-        end -= len(marker)
-
-
 class StringMatchResourcesServer(SimpleResourcesServer):
     # Each verification compares the extracted answer with the expected one: there is no session state to export,
     # and a checkpoint can re-run a verification after a crash instead of waiting for it.
@@ -374,12 +361,8 @@ class StringMatchResourcesServer(SimpleResourcesServer):
         app = super().setup_webserver()
         return app
 
-    def _grading_text(self, body: StringMatchVerifyRequest) -> str:
-        text = _extract_last_assistant_text(body)
-        return strip_trailing_eos(text) if self.config.strip_trailing_eos else text
-
     async def verify(self, body: StringMatchVerifyRequest) -> StringMatchVerifyResponse:
-        text = self._grading_text(body)
+        text = _extract_last_assistant_text(body)
         extracted = _extract_answer(text, body.extraction_mode)
 
         reward = 0.0

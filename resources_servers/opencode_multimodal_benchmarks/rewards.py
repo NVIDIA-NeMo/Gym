@@ -215,8 +215,6 @@ class ToolRewardVerifier:
     """Apply the existing training schedule at the verifier boundary, preserving capture."""
 
     async def verify(self, body):
-        from nemo_gym.trajectory import grading_result_binding
-
         original = body.response
         scoring = original.model_dump(mode="json")
         scoring["output"] = [
@@ -238,6 +236,11 @@ class ToolRewardVerifier:
             }
         ]
         result = await super().verify(body.model_copy(update={"response": type(original).model_validate(scoring)}))
+        return self._apply_tool_rewards(body, result)
+
+    def _apply_tool_rewards(self, body, result):
+        """Return the final Resources-owned grade before the shared observer records it."""
+        original = body.response
         if result.mask_sample:
             return ToolRewardVerifyResponse.model_validate(result.model_dump(mode="json") | {"response": original})
         base = float(result.reward)
@@ -251,18 +254,6 @@ class ToolRewardVerifier:
         bonus = tools.auxiliary_reward if tools is not None else 0.0
         source = result.model_dump(mode="json")
         source = {key: source[key] for key in ("response", "reward", "reward_components") if key in source}
-        transform = {
-            "kind": "response_projection_reward_offset_v1",
-            "input_result": source,
-            "input_binding_sha256": grading_result_binding(source),
-            "reward_offset": bonus,
-            "reward_component": "opencode_tool_reward",
-            "parameters": {
-                "operation": "opencode_final_answer_tool_reward_v1",
-                "strip_reasoning_for_grading": self.config.strip_reasoning_for_grading,
-                "tool_rewards": self.config.tool_rewards.model_dump(mode="json") if self.config.tool_rewards else None,
-            },
-        }
         result = ToolRewardVerifyResponse.model_validate(
             result.model_dump(mode="json")
             | {
@@ -271,8 +262,6 @@ class ToolRewardVerifier:
                 "opencode_tool_reward": tools,
                 "reward_components": (source.get("reward_components") or {"verifier": base})
                 | {"opencode_tool_reward": bonus},
-                "ng_grading_transform": transform,
             }
         )
-        transform["output_binding_sha256"] = grading_result_binding(result)
         return result

@@ -335,7 +335,7 @@ async def test_the_driver_journals_the_digests_and_names_a_changed_block(
 
             return [done(row) for row in rows]
 
-        async def _call_aggregate_metrics(self, results, rows, output_fpath, *, materialized_fpaths=None):
+        async def _call_aggregate_metrics(self, results, rows, output_fpath):
             return tmp_path / "aggregate.json"
 
     monkeypatch.setattr(rollout_collection_module, "RolloutCollectionHelper", FakeHelper)

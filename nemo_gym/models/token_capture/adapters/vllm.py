@@ -7,13 +7,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from nemo_gym.models.token_capture.staging.routes import decode_routed_experts
-
 
 PREFIX_IDS_FIELD = "required_prefix_token_ids"
 PROMPT_IDS_FIELD = "prompt_token_ids"
 ROUTED_EXPERTS_FIELD = "routed_experts"
-ROUTED_EXPERTS_PREFIX_BOUNDARY_FIELD = "routed_experts_prefix_boundary"
 MEDIA_SPANS_FIELD = "media_spans"
 
 
@@ -70,21 +67,11 @@ class VLLMCaptureAdapter:
 
     def extract_extras(self, response_payload: dict[str, Any]) -> dict[str, Any] | None:
         extras: dict[str, Any] = {}
-        message = _message(_single_choice(response_payload))
-        for field in (ROUTED_EXPERTS_FIELD,):
-            routes = message.get(field)
-            if routes is not None:
-                if not isinstance(routes, (str, dict, list)):
-                    raise ValueError(f"vLLM {field} must use a JSON-compatible envelope")
-                extras[field] = routes
-        boundary = message.get(ROUTED_EXPERTS_PREFIX_BOUNDARY_FIELD)
-        if boundary is not None:
-            # NeMo-RL ad05579e: worker_async emits one [token][layers][topk]
-            # route envelope; route_assembly uses it to repair the previous prefill boundary.
-            fragment = decode_routed_experts(boundary)
-            if len(fragment.values) != 1:
-                raise ValueError("routed_experts_prefix_boundary must contain exactly one token")
-            extras[ROUTED_EXPERTS_PREFIX_BOUNDARY_FIELD] = boundary
+        routed_experts = _message(_single_choice(response_payload)).get(ROUTED_EXPERTS_FIELD)
+        if routed_experts is not None:
+            if not isinstance(routed_experts, (str, dict, list)):
+                raise ValueError("vLLM routed_experts must use a JSON-compatible envelope")
+            extras[ROUTED_EXPERTS_FIELD] = routed_experts
         # Expanded-space prefix replacement needs the original placeholder
         # positions. Pixels travel beside the record as sink attachments.
         if MEDIA_SPANS_FIELD in response_payload:

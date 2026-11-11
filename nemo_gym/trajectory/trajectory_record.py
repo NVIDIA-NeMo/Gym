@@ -266,12 +266,6 @@ def grading_result_binding(result: object) -> str | None:
         ):
             return None
         value["reward_components"] = components
-    if "ng_grading_transform" in result:
-        transform = result["ng_grading_transform"]
-        if not isinstance(transform, dict):
-            return None
-        # Bind the transformation's inputs and parameters too. Its output digest cannot include itself.
-        value["grading_transform"] = {key: item for key, item in transform.items() if key != "output_binding_sha256"}
 
     def canonical(item):
         if item is None or type(item) in (str, bool, int):
@@ -293,52 +287,6 @@ def grading_result_binding(result: object) -> str | None:
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
     except (TypeError, ValueError, UnicodeError, RecursionError):
         return None
-
-
-def grading_transform_source(result: object) -> dict | None:
-    """Validate a recorded projection/reward offset and recover the original verifier binding.
-
-    This function is embedded verbatim in the standalone evidence collector. Keep it dependent only on
-    builtins, math and grading_result_binding; response content must stay on the run host.
-    """
-    if not isinstance(result, dict):
-        return None
-    transform = result.get("ng_grading_transform")
-    if not isinstance(transform, dict) or transform.get("kind") != "response_projection_reward_offset_v1":
-        return None
-    source = transform.get("input_result")
-    if not isinstance(source, dict) or "ng_grading_transform" in source:
-        return None
-    original = grading_result_binding(source)
-    final = grading_result_binding(result)
-    if (
-        original is None
-        or final is None
-        or transform.get("input_binding_sha256") != original
-        or transform.get("output_binding_sha256") != final
-        or not isinstance(transform.get("parameters"), dict)
-    ):
-        return None
-    before, after, offset = source.get("reward"), result.get("reward"), transform.get("reward_offset")
-    if type(offset) not in (int, float):
-        return None
-    try:
-        if not math.isfinite(offset) or not math.isclose(before + offset, after, rel_tol=1e-12, abs_tol=1e-12):
-            return None
-    except OverflowError:
-        return None
-    # A projection changes only output items. Capture, identity and other response fields remain intact.
-    if {key: value for key, value in source["response"].items() if key != "output"} != {
-        key: value for key, value in result["response"].items() if key != "output"
-    }:
-        return None
-    component = transform.get("reward_component")
-    components = source.get("reward_components", {"verifier": before})
-    if not isinstance(component, str) or not component or component in components:
-        return None
-    if result.get("reward_components") != components | {component: offset}:
-        return None
-    return {"input_binding_sha256": original, "input_reward": before, "output_binding_sha256": final}
 
 
 class VerifierInvocation(ObservationModel):

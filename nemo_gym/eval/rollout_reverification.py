@@ -23,7 +23,6 @@ import uuid
 import warnings
 from asyncio import Future, Semaphore
 from collections import Counter, defaultdict
-from collections.abc import Mapping
 from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass
 from math import isfinite
@@ -68,7 +67,6 @@ from nemo_gym.rollouts.rollout_collection import (
     NG_RESULT_TYPE_KEY,
     _coverage_report,
     _get_max_rollout_attempts,
-    _planned_repeat_inventory,
     _rollout_request_debug_summary,
     is_omitted_rollout_row,
     is_terminal_failure,
@@ -86,13 +84,7 @@ from nemo_gym.rollouts.rollout_records import (
     resolve_rollout_owner,
     resolve_rollout_path,
 )
-from nemo_gym.rollouts.rollout_recovery import (
-    RunManifest,
-    _digest,
-    config_identity_path_for,
-    manifest_path_for,
-    run_lock,
-)
+from nemo_gym.rollouts.rollout_recovery import RunManifest, manifest_path_for, run_lock
 from nemo_gym.rollouts.rollout_store import RolloutStore, raw_outcomes_are_selected
 from nemo_gym.server_runtime.base_resources_server import AggregateMetrics, AggregateMetricsRequest, ReverifyMode
 from nemo_gym.trajectory.atif_json import strict_json_loads
@@ -307,98 +299,6 @@ class CacheKeysByStatus:
     successful_keys: set[tuple[int, int]]
     terminal_keys: set[tuple[int, int]]
     maxed_out_keys: set[tuple[int, int]]
-
-
-@dataclass(frozen=True)
-class _ReplaySource:
-    store: RolloutStore | None
-    servers: Mapping[str, Any] | None
-
-
-def _replay_source(store: RolloutStore | None) -> _ReplaySource:
-    """Trust original server settings only while their identity matches the saved manifest."""
-    servers = None
-    if store is not None and not store.manifest.identity_overridden:
-        try:
-            identity = json.loads(config_identity_path_for(manifest_path_for(store.output)).read_bytes())
-            if isinstance(identity, dict) and _digest(identity) == store.manifest.config_digest:
-                candidate = identity.get("servers")
-                if isinstance(candidate, dict):
-                    servers = candidate
-        except (OSError, ValueError, TypeError):
-            pass
-    return _ReplaySource(store, servers)
-
-
-def _store_for_materialized_inputs(path: Path) -> RolloutStore | None:
-    """Use the normal companion filename only to locate a manifest-validated source."""
-    path = path.resolve()
-    suffix = "_materialized_inputs.jsonl"
-    if not path.name.endswith(suffix):
-        return None
-    output = path.with_name(path.name.removesuffix(suffix) + ".jsonl")
-    if not manifest_path_for(output).is_file():
-        return None
-    store = RolloutStore.read(output, import_legacy=False)
-    if store is None or materialized_path_for(store.output).resolve() != path:
-        return None
-    return store
-
-
-def _saved_environments(pair: InputRolloutPair, servers: Mapping[str, Any]) -> list[tuple[str, Mapping]]:
-    stamp = pair.rollout.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME, pair.input.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME))
-    reference = pair.input.get(AGENT_REF_KEY_NAME) or pair.rollout.get(AGENT_REF_KEY_NAME)
-    agent = reference.get("name") if isinstance(reference, Mapping) else None
-    environments = []
-    for name, block in servers.items():
-        if stamp is not None and name != stamp:
-            continue
-        implementations = block.get("environment_servers") if isinstance(block, Mapping) else None
-        if not isinstance(implementations, Mapping):
-            continue
-        for implementation, settings in implementations.items():
-            if not isinstance(settings, Mapping):
-                continue
-            if stamp is None:
-                bound = settings.get("agent_server")
-                if not isinstance(agent, str) or not isinstance(bound, Mapping) or bound.get("name") != agent:
-                    continue
-            environments.append((implementation, settings))
-    return environments
-
-
-def _opencode_environment(environment: tuple[str, Mapping]) -> bool:
-    implementation, settings = environment
-    return implementation == "single_agent_turn" and settings.get("entrypoint") == "opencode.py"
-
-
-def _check_saved_answer_replay(pair: InputRolloutPair, source: _ReplaySource | None = None) -> None:
-    """Authorize native full-response replay from the original plain environment, never current policy."""
-    original = pair
-    if source is not None and source.store is not None:
-        identity = pair.rollout if TASK_INDEX_KEY_NAME in pair.rollout else pair.input
-        original = InputRolloutPair(input=source.store.inputs_for([identity])[0], rollout=pair.rollout)
-    environments = _saved_environments(original, source.servers) if source is not None and source.servers else []
-    special = any(_opencode_environment(environment) for environment in environments)
-    ordinary = len(environments) == 1 and environments[0][0] in {"single_agent_turn", "single_agent_turn_legacy"}
-    ordinary = ordinary and environments[0][1].get("entrypoint", "app.py") == "app.py"
-    response = pair.rollout.get("response", pair.rollout.get("_ng_failure_partial_response"))
-    native = isinstance(response, Mapping) and "opencode_evidence" in response
-    stamp = original.rollout.get(
-        ENVIRONMENT_SERVER_STAMP_KEY_NAME, original.input.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)
-    )
-    if not environments and source is not None and isinstance(stamp, str) and not native:
-        special = any(
-            _opencode_environment(environment)
-            for environment in _saved_environments(original, setup_server_client().global_config_dict)
-        )
-    if special or ((native or "opencode_tool_reward" in pair.rollout) and not ordinary):
-        raise ConfigError(
-            "reverify: OpenCode environment grading cannot be replayed through a direct resources-server /verify. "
-            "Native full-response replay requires a digest-verified original plain SingleAgentTurn environment "
-            "using app.py; current configuration and cached results cannot establish that source contract. "
-            "Keep the saved reward and grading evidence."
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -747,27 +647,6 @@ def _seed_output_with_successes(
     return present
 
 
-def _recovery_keys(
-    source: Path, output: Path, *, retain_output: bool, exclude: frozenset[tuple[int, int]]
-) -> tuple[set[tuple[int, int]], set[tuple[int, int]]]:
-    """Plan recovery's seed/dedup keys without opening any output for writing."""
-    present = set()
-    if retain_output and output.exists():
-        with output.open("rb") as stream:
-            present.update(key for line in stream if (key := _parse_output_line_key(line)) is not None)
-    store = RolloutStore.read(source, import_legacy=False)
-    if store is None:
-        with source.open("rb") as stream:
-            successes = {key for line in stream if (key := _parse_output_line_key(line)) is not None}
-    else:
-        successes = {
-            (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])
-            for record in store.selected_records("success").values()
-            for row in (record.read(),)
-        }
-    return successes - exclude, present
-
-
 # ---------------------------------------------------------------------------
 # Functions used by the main RolloutReverificationHelper in the reverification process:
 # Yielding InputRolloutPair objects to be re-verified
@@ -991,20 +870,17 @@ def _prepare_payloads(
     retry_terminal_timeouts: bool = False,
     *,
     selected_rollouts: Optional[Iterable[Dict]] = None,
-    replay_source: _ReplaySource | None = None,
 ) -> List[Dict]:
-    pairs = list(
-        _yield_inputs_and_rollouts_paired(
+    all_payloads = [
+        _build_verify_payload(pair)
+        for pair in _yield_inputs_and_rollouts_paired(
             materialized_inputs_jsonl_fpath,
             rollouts_jsonl_fpath,
             limit=limit,
             rollout_predicate=rollout_predicate,
             **({"selected_rollouts": selected_rollouts} if selected_rollouts is not None else {}),
         )
-    )
-    for pair in pairs:
-        _check_saved_answer_replay(pair, replay_source)
-    all_payloads = [_build_verify_payload(pair) for pair in pairs]
+    ]
     if resume_from_cache:
         cache = _load_cache_keys_by_status(output_fpaths, retry_terminal_timeouts=retry_terminal_timeouts)
         payloads = list(_drop_cache_from_payloads(all_payloads, cache))
@@ -1021,8 +897,6 @@ def _prepare_atif_payloads(
     materialized_inputs_jsonl_fpath: Path,
     atif_manifest_jsonl_fpath: Path,
     limit: Optional[int] = None,
-    *,
-    replay_source: _ReplaySource | None = None,
 ) -> List[Dict]:
     """Build verifier payloads from an explicit ATIF-to-materialized-task manifest."""
 
@@ -1052,14 +926,9 @@ def _prepare_atif_payloads(
     entries = load_atif_manifest(atif_manifest_jsonl_fpath)
     if limit is not None:
         entries = entries[:limit]
-    indexed = index_materialized_inputs(materialized_rows)
-    for entry in entries:
-        row = indexed.get((entry.task_index, entry.rollout_index))
-        if row is not None:
-            _check_saved_answer_replay(InputRolloutPair(input=dict(row), rollout={}), replay_source)
     projected = project_atif_manifest_entries(
         entries,
-        indexed,
+        index_materialized_inputs(materialized_rows),
         manifest_directory=atif_manifest_jsonl_fpath.parent,
     )
     return [
@@ -1223,68 +1092,10 @@ async def _guard_atif_preflight(payloads: List[Dict[str, Any]]) -> None:
 # Very similar to the rollout collection code, but we need to send the request to
 # resources servers instead of the agent server, since the second one might not be started
 # ---------------------------------------------------------------------------
-def _reverification_repeat_inventory(materialized_fpaths, identity_sources, results, agent_to_rs, config):
-    """Group the full attempt plan using the same original identities as saved results.
-
-    Source stamps include failed attempts. A missing repeat may use another repeat's
-    task stamp, but never an arbitrary environment sharing its agent. For an entirely
-    missing task, only the verified source configuration can establish an environment.
-    """
-    stamps, _ = _source_identity_stamps(identity_sources)
-    by_task = defaultdict(set)
-    for (task, _), values in stamps.items():
-        if (name := values.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)) is not None:
-            by_task[task].add(name)
-    for result in results:
-        if (name := result.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)) is not None:
-            by_task[result.get(TASK_INDEX_KEY_NAME)].add(name)
-
-    inventory = {}
-    for path in materialized_fpaths:
-        source = _replay_source(_store_for_materialized_inputs(path))
-
-        def group(row):
-            task = row.get(TASK_INDEX_KEY_NAME)
-            key = (task, row.get(ROLLOUT_INDEX_KEY_NAME))
-            routed = dict(row)
-            if ENVIRONMENT_SERVER_STAMP_KEY_NAME not in routed:
-                name = stamps.get(key, {}).get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)
-                candidates = by_task.get(task, set())
-                if name is None and len(candidates) == 1:
-                    name = next(iter(candidates))
-                if name is None and by_task:
-                    candidates = [
-                        name
-                        for name, block in (source.servers or {}).items()
-                        if _saved_environments(InputRolloutPair(input=row, rollout={}), {name: block})
-                    ]
-                    if len(candidates) != 1:
-                        raise ConfigError(
-                            f"Cannot establish original environment for planned task {task}; restore source "
-                            "rollouts/configuration or provide stamped materialized inputs before aggregating."
-                        )
-                    name = candidates[0]
-                if name is not None:
-                    routed[ENVIRONMENT_SERVER_STAMP_KEY_NAME] = name
-            return rollout_run_key(routed), _rs_for_row(routed, agent_to_rs, config)
-
-        planned = _planned_repeat_inventory([path], group)
-        if planned is None:
-            return None
-        for key, tasks in planned.items():
-            target = inventory.setdefault(key, {})
-            for task, repeats in tasks.items():
-                target[task] = sorted(set(target.get(task, [])) | set(repeats))
-    return inventory if materialized_fpaths else None
-
-
 async def _call_aggregate_metrics(
     results: List[Dict],
     rows: List[Dict],
     output_fpath: Path,
-    *,
-    materialized_fpaths: Optional[List[Path]] = None,
-    identity_sources: Tuple[Path, ...] = (),
 ) -> Optional[Path]:
     """Call /aggregate_metrics on each resource server after rollouts complete.
 
@@ -1302,14 +1113,6 @@ async def _call_aggregate_metrics(
     # remapped row to be verified by one server and aggregated by another.
     agent_results: Dict[Tuple[str, str], List[Dict]] = {}
     labels = rollout_run_labels(rows)
-    inventory = await asyncio.to_thread(
-        _reverification_repeat_inventory,
-        materialized_fpaths or [],
-        identity_sources,
-        results,
-        agent_to_rs,
-        server_client.global_config_dict,
-    )
     for row, result in zip(rows, results):
         key = rollout_run_key(row)
         if not key:
@@ -1336,14 +1139,7 @@ async def _call_aggregate_metrics(
                 entry["response"] = response_metadata
             stripped.append(entry)
 
-        run_keys = {rollout_run_key(row) for row in rows if labels.get(rollout_run_key(row)) == agent_name}
-        expected = None
-        if inventory is not None:
-            expected = {}
-            for run_key in run_keys:
-                for task, indices in inventory.get((run_key, rs_name), {}).items():
-                    expected[task] = sorted(set(expected.get(task, [])) | set(indices))
-        agg_request = AggregateMetricsRequest(verify_responses=stripped, expected_rollout_indices=expected)
+        agg_request = AggregateMetricsRequest(verify_responses=stripped)
         agg_response = await server_client.post(
             server_name=rs_name,
             url_path="/aggregate_metrics",
@@ -1389,7 +1185,7 @@ async def _call_aggregate_metrics(
 # ---------------------------------------------------------------------------
 
 
-def _validate_output_fpaths(
+def _prepare_output_fpaths(
     output_name_prefix: str,
     output_jsonl_fpath: str,
     resume_from_cache: bool,
@@ -1400,6 +1196,7 @@ def _validate_output_fpaths(
 ) -> OutputPaths:
     output_fpath = Path(output_jsonl_fpath)
     output_fpath = output_fpath.with_name(output_name_prefix + output_fpath.name)
+    output_fpath.parent.mkdir(parents=True, exist_ok=True)
     # Inspect both spellings, but retain the destination for atomic publication:
     # replacing an output symlink must not replace its target.
     for target in {output_fpath, resolve_rollout_owner(output_fpath)}:
@@ -1411,8 +1208,16 @@ def _validate_output_fpaths(
             raise ConfigError(
                 "Manifest-backed reverification is a follow-up for in-place output; choose a separate output."
             )
-    paths = _output_fpaths(output_name_prefix, output_jsonl_fpath, resume_from_cache, overwrite, append)
-    destination, failures_fpath = paths.output, paths.failures
+    # Preserve an unambiguous legacy alias layout on append/resume. New outputs
+    # put companions beside the target; fresh overwrite replaces the alias itself.
+    # Manifest/journal-backed writes remain rejected above, through either spelling.
+    replacing_alias = overwrite and not (append or resume_from_cache) and output_fpath.is_symlink()
+    destination = (
+        output_fpath.absolute()
+        if replacing_alias
+        else resolve_rollout_path(output_fpath, read_only=append or resume_from_cache)
+    )
+    failures_fpath = failures_path_for(destination)
     for written in (output_fpath, failures_fpath, aggregate_metrics_path_for(destination)):
         for source in protected_sources:
             if written.resolve() == source.resolve() or (
@@ -1422,30 +1227,6 @@ def _validate_output_fpaths(
                     "Reverification output must not overwrite source rollout artifacts or its recovery files. "
                     "Choose a separate output path. Saved artifacts were not changed."
                 )
-    return paths
-
-
-def _prepare_output_fpaths(
-    output_name_prefix: str,
-    output_jsonl_fpath: str,
-    resume_from_cache: bool,
-    overwrite: bool,
-    append: bool,
-    *,
-    protected_sources: tuple[Path, ...] = (),
-) -> OutputPaths:
-    paths = _validate_output_fpaths(
-        output_name_prefix,
-        output_jsonl_fpath,
-        resume_from_cache,
-        overwrite,
-        append,
-        protected_sources=protected_sources,
-    )
-    output_fpath = Path(output_jsonl_fpath)
-    output_fpath = output_fpath.with_name(output_name_prefix + output_fpath.name)
-    output_fpath.parent.mkdir(parents=True, exist_ok=True)
-    destination, failures_fpath = paths.output, paths.failures
     if not (append or resume_from_cache):
         # A fresh run must not silently clobber a prior run's rollouts: delete only when the user
         # explicitly opts in via overwrite, otherwise refuse. resume_from_cache and append reuse the file.
@@ -1462,20 +1243,7 @@ def _prepare_output_fpaths(
                 )
         # Nor the shard list of the merged rows it deleted. A run that appends drops it when it starts writing.
         aggregation_sources_path_for(destination).unlink(missing_ok=True)
-    return paths
-
-
-def _output_fpaths(
-    output_name_prefix: str, output_jsonl_fpath: str, resume_from_cache: bool, overwrite: bool, append: bool
-) -> OutputPaths:
-    """Resolve the same alias layout as output preparation without changing any artifacts."""
-    output = Path(output_jsonl_fpath)
-    output = output.with_name(output_name_prefix + output.name)
-    replacing_alias = overwrite and not (append or resume_from_cache) and output.is_symlink()
-    destination = (
-        output.absolute() if replacing_alias else resolve_rollout_path(output, read_only=append or resume_from_cache)
-    )
-    return OutputPaths(output=destination, failures=failures_path_for(destination))
+    return OutputPaths(output=destination, failures=failures_fpath)
 
 
 def _start_over_without_cache(config: RolloutReverificationConfig, output_fpaths: OutputPaths) -> None:
@@ -1608,39 +1376,6 @@ def _reverifiable_saved_result(row: Dict[str, Any]) -> bool:
     return reverification_cause(saved_row_evidence(row)) is not None
 
 
-def _judge_failure_candidates(store: RolloutStore, *, skip_spent: bool = False) -> Dict[str, Any]:
-    """Select recovery answers without closing or withdrawing a pending re-judgment."""
-    cap = store.manifest.max_rollout_attempts
-    if cap is None:
-        raise ConfigError(
-            f"{store.output} has no saved failure cap; judge-only settlement needs one. Nothing was judged."
-        )
-    failures = store.failures()
-    spent = set()
-    for row in failures:
-        identity = logical_rollout_id(row)
-        if row.get("_ng_failure_class") == "judge_failed" and store._state.failure_count(identity) >= cap:
-            if not skip_spent:
-                raise ConfigError(
-                    f"Rollout {identity!r} has spent its {cap} saved failure attempts; nothing was judged."
-                )
-            spent.add(identity)
-    saved_results = {
-        logical_rollout_id(row): row for row in store.selected("success") if _reverifiable_saved_result(row)
-    }
-    return {
-        "manifest": store.manifest.model_dump_json(),
-        "materialized": materialized_path_for(store.output).read_bytes(),
-        "failures": {
-            logical_rollout_id(row): row
-            for row in failures
-            if row.get("_ng_failure_class") == "judge_failed" and logical_rollout_id(row) not in spent
-        }
-        | saved_results,
-        "saved_results": set(saved_results),
-    }
-
-
 def bind_judge_failures(
     source: Path, *, skip_spent: bool = False, withdraw_unresolved: bool = False
 ) -> Dict[str, Any]:
@@ -1667,7 +1402,32 @@ def bind_judge_failures(
                 "whether its judge ran is unknown. Nothing was judged."
             )
         store.close_rejudgment(identity, pending.operation_id)  # its outcome was saved before the close
-    return _judge_failure_candidates(store, skip_spent=skip_spent)
+    cap = store.manifest.max_rollout_attempts
+    if cap is None:
+        raise ConfigError(f"{source} has no saved failure cap; judge-only settlement needs one. Nothing was judged.")
+    spent = set()
+    for row in store.failures():
+        identity = logical_rollout_id(row)
+        if row.get("_ng_failure_class") == "judge_failed" and store._state.failure_count(identity) >= cap:
+            if not skip_spent:
+                raise ConfigError(
+                    f"Rollout {identity!r} has spent its {cap} saved failure attempts; nothing was judged."
+                )
+            spent.add(identity)
+    saved_results = {
+        logical_rollout_id(row): row for row in store.selected("success") if _reverifiable_saved_result(row)
+    }
+    return {
+        "manifest": store.manifest.model_dump_json(),
+        "materialized": materialized_path_for(store.output).read_bytes(),
+        "failures": {
+            logical_rollout_id(row): row
+            for row in store.failures()
+            if row.get("_ng_failure_class") == "judge_failed" and logical_rollout_id(row) not in spent
+        }
+        | saved_results,
+        "saved_results": set(saved_results),
+    }
 
 
 # Settings of the run's own collection that the in-place re-judgment of its judge failures replaces.
@@ -2066,7 +1826,6 @@ class RolloutReverificationHelper(BaseModel):
                 materialized_inputs_jsonl_fpath,
                 atif_manifest_jsonl_fpath,
                 config.limit,
-                replay_source=_replay_source(_store_for_materialized_inputs(materialized_inputs_jsonl_fpath)),
             )
             await _guard_atif_preflight(payloads_to_reverify)
             output_fpaths = _prepare_output_fpaths(
@@ -2100,13 +1859,7 @@ class RolloutReverificationHelper(BaseModel):
                     )
             if config.judge_failed_only:
                 _reject_multistage_recovery_source(rollouts_jsonl_fpath)
-            if config.settle_into_source:
-                settle_lock.enter_context(run_lock(rollouts_jsonl_fpath))
-                if config.settle_source_snapshot_json is not None:
-                    validate_settle_source_snapshot(rollouts_jsonl_fpath, config.settle_source_snapshot_json)
-            source_store = RolloutStore.read(rollouts_jsonl_fpath, import_legacy=False)
-            replay_source = _replay_source(source_store)
-            output_fpaths = _validate_output_fpaths(
+            output_fpaths = _prepare_output_fpaths(
                 output_name_prefix,
                 config.output_jsonl_fpath,
                 config.resume_from_cache,
@@ -2114,49 +1867,48 @@ class RolloutReverificationHelper(BaseModel):
                 config.append,
                 protected_sources=tuple(protected_sources),
             )
+            _start_over_without_cache(config, output_fpaths)
             reverify_source_fpath = rollouts_jsonl_fpath
             rollout_predicate = None
-            if (
-                source_store is not None
-                and not config.judge_failed_only
-                and (config.resume_from_cache or config.append)
-            ):
+            source_store = (
+                RolloutStore.read(rollouts_jsonl_fpath, import_legacy=False) if not config.judge_failed_only else None
+            )
+            if source_store is not None:
                 _validate_rescoring_cache(source_store, output_fpaths)
 
             if config.judge_failed_only:
                 print(_RECOVERY_TWO_SOURCES_WARNING)
                 if config.settle_into_source:
-                    if source_store is None:
-                        raise ConfigError("Judge-only settlement requires a manifest-backed source run.")
-                    settle_binding = _judge_failure_candidates(
-                        source_store, skip_spent=config.skip_spent_judge_failures
+                    settle_lock.enter_context(run_lock(rollouts_jsonl_fpath))
+                    if config.settle_source_snapshot_json is not None:
+                        validate_settle_source_snapshot(rollouts_jsonl_fpath, config.settle_source_snapshot_json)
+                    settle_binding = bind_judge_failures(
+                        rollouts_jsonl_fpath,
+                        skip_spent=config.skip_spent_judge_failures,
+                        withdraw_unresolved=config.withdraw_unresolved_admissions,
                     )
                     await _drop_unsupported_saved_results(settle_binding)
                 reverify_source_fpath = failures_path_for(rollouts_jsonl_fpath)
                 saved_results = settle_binding["saved_results"] if config.settle_into_source else set()
-                exclude = frozenset(
-                    (settle_binding["failures"][identity][TASK_INDEX_KEY_NAME],)
-                    + (settle_binding["failures"][identity][ROLLOUT_INDEX_KEY_NAME],)
-                    for identity in saved_results
-                )
-                carried_keys, cached_keys = _recovery_keys(
+                # Seed the successes and dedup so the re-verification doesn't judge successes again. A saved result
+                # that is re-verified is not seeded: its re-verified row takes its place.
+                skip_keys = _seed_output_with_successes(
                     rollouts_jsonl_fpath,
                     output_fpaths.output,
-                    retain_output=config.append or config.resume_from_cache,
-                    exclude=exclude,
+                    exclude=frozenset(
+                        (settle_binding["failures"][identity][TASK_INDEX_KEY_NAME],)
+                        + (settle_binding["failures"][identity][ROLLOUT_INDEX_KEY_NAME],)
+                        for identity in saved_results
+                    ),
                 )
-                recovery_predicate = _recovery_rollout_predicate(carried_keys)
-                bound_rows = settle_binding["failures"] if config.settle_into_source else None
+                rollout_predicate = _recovery_rollout_predicate(skip_keys)
+                if config.settle_into_source:
+                    # Judge exactly the bound selected failure rows, never a superseded row of the same attempt.
+                    bound_rows = settle_binding["failures"]
+                    recovery_predicate = rollout_predicate
 
-                def rollout_predicate(row: Dict[str, Any]) -> bool:
-                    if bound_rows is not None and bound_rows.get(logical_rollout_id(row)) != row:
-                        return False
-                    if not recovery_predicate(row):
-                        return False
-                    if (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]) in cached_keys:
-                        _check_saved_answer_replay(InputRolloutPair(input={}, rollout=row), replay_source)
-                        return False
-                    return True
+                    def rollout_predicate(row: Dict[str, Any]) -> bool:
+                        return bound_rows.get(logical_rollout_id(row)) == row and recovery_predicate(row)
 
             identity_sources = (rollouts_jsonl_fpath, reverify_source_fpath)
 
@@ -2168,12 +1920,7 @@ class RolloutReverificationHelper(BaseModel):
                 config.limit,
                 rollout_predicate=rollout_predicate,
                 retry_terminal_timeouts=config.retry_terminal_timeouts,
-                replay_source=replay_source,
-                **(
-                    {"selected_rollouts": _selected_rescoring_rows(source_store)}
-                    if source_store is not None and not config.judge_failed_only
-                    else {}
-                ),
+                **({"selected_rollouts": _selected_rescoring_rows(source_store)} if source_store is not None else {}),
             )
             if config.settle_into_source and settle_binding["saved_results"]:
                 # The bound saved results are read from the run's results, exactly as bound.
@@ -2186,31 +1933,7 @@ class RolloutReverificationHelper(BaseModel):
                     output_fpaths,
                     config.resume_from_cache,
                     rollout_predicate=lambda row: bound_results.get(logical_rollout_id(row)) == row,
-                    replay_source=replay_source,
                 )
-
-            output_fpaths = _prepare_output_fpaths(
-                output_name_prefix,
-                config.output_jsonl_fpath,
-                config.resume_from_cache,
-                config.overwrite,
-                config.append,
-                protected_sources=tuple(protected_sources),
-            )
-            _start_over_without_cache(config, output_fpaths)
-            if config.judge_failed_only:
-                if config.settle_into_source:
-                    unsupported = settle_binding["unsupported"]
-                    settle_binding = bind_judge_failures(
-                        rollouts_jsonl_fpath,
-                        skip_spent=config.skip_spent_judge_failures,
-                        withdraw_unresolved=config.withdraw_unresolved_admissions,
-                    )
-                    for identity in unsupported:
-                        settle_binding["saved_results"].discard(identity)
-                        settle_binding["failures"].pop(identity, None)
-                    settle_binding["unsupported"] = unsupported
-                _seed_output_with_successes(rollouts_jsonl_fpath, output_fpaths.output, exclude=exclude)
 
         if config.settle_into_source:
             for row in payloads_to_reverify:
@@ -2361,13 +2084,7 @@ class RolloutReverificationHelper(BaseModel):
             aggregate_metrics_fpath = None
         else:
             print("Computing aggregate metrics")
-            aggregate_metrics_fpath = await _call_aggregate_metrics(
-                results,
-                agg_rows,
-                output_fpaths.output,
-                materialized_fpaths=[Path(config.materialized_inputs_jsonl_fpath)],
-                identity_sources=identity_sources,
-            )
+            aggregate_metrics_fpath = await _call_aggregate_metrics(results, agg_rows, output_fpaths.output)
 
         expected_rollouts = len(results) + sum(failure_counts.values())
         coverage = _coverage_report(expected_rollouts, len(results), failure_counts, output_fpaths.failures)

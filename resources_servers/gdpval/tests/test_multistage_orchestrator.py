@@ -3634,7 +3634,7 @@ class TestCompletionContract:
 
                 return [done(row, position) for position, row in enumerate(rows)]
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath, *, materialized_fpaths=None):
+            async def _call_aggregate_metrics(self, results, rows, output_fpath):
                 return out_dir / "aggregate.json"
 
         monkeypatch.setattr(rollout_collection_module, "RolloutCollectionHelper", FakeHelper)
@@ -3846,7 +3846,7 @@ class TestIntegrationWiring:
 
                 return [done(row) for row in rows]
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath, *, materialized_fpaths=None):
+            async def _call_aggregate_metrics(self, results, rows, output_fpath):
                 return tmp_path / "aggregate.json"
 
         monkeypatch.setattr(rollout_collection_module, "RolloutCollectionHelper", FakeHelper)
@@ -4002,7 +4002,7 @@ class TestIncrementalStageRows:
                     iter([outcome(row, position) for position, row in enumerate(rows)]), total=len(rows)
                 )
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath, *, materialized_fpaths=None):
+            async def _call_aggregate_metrics(self, results, rows, output_fpath):
                 return out_dir / "aggregate.json"
 
         monkeypatch.setattr(rollout_collection_module, "RolloutCollectionHelper", FakeHelper)
@@ -4290,7 +4290,7 @@ class TestCachedDeliverableReuse:
 
                 return SimpleNamespace(post=post, global_config_dict=OmegaConf.create(_ROUTING_CONFIG))
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath, *, materialized_fpaths=None):
+            async def _call_aggregate_metrics(self, results, rows, output_fpath):
                 return tmp_path / "aggregate.json"
 
         monkeypatch.setattr(rollout_collection_module, "RolloutCollectionHelper", FakeHelper)
@@ -4553,7 +4553,7 @@ class TestCachedDeliverableReuse:
 
                 return [done(row) for row in rows]
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath, *, materialized_fpaths=None):
+            async def _call_aggregate_metrics(self, results, rows, output_fpath):
                 return tmp_path / "aggregate.json"
 
         monkeypatch.setattr(rollout_collection_module, "RolloutCollectionHelper", FakeHelper)
@@ -5378,7 +5378,7 @@ async def test_multistage_driver_completion_and_resume_are_bounded(tmp_path, mon
 
             return [done(row) for row in rows]
 
-        async def _call_aggregate_metrics(self, results, rows, output_fpath, *, materialized_fpaths=None):
+        async def _call_aggregate_metrics(self, results, rows, output_fpath):
             return tmp_path / "aggregate.json"
 
     monkeypatch.setattr(rollout_collection_module, "RolloutCollectionHelper", FakeHelper)

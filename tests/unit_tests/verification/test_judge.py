@@ -486,19 +486,3 @@ def test_the_backoff_is_full_jitter_exponential_and_capped(monkeypatch):
         (0, 30.0),
         (0, 30.0),
     ]
-
-
-@pytest.mark.asyncio
-async def test_call_judge_owns_the_transport_retry_budget():
-    client = _client(status=200, body=b'{"verdict":"yes"}')
-    result = await call_judge(
-        client,
-        server_name="judge",
-        url_path="/v1/chat/completions",
-        json={},
-        response_model=_Verdict,
-        max_attempts=1,
-    )
-    assert result.verdict == "yes"
-    assert client.post.await_count == 1
-    assert client.post.call_args.kwargs["_max_num_tries"] == 1

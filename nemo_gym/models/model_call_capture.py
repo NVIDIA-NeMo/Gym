@@ -51,9 +51,9 @@ from nemo_gym.models._checkpoint import (
 from nemo_gym.models.responses_streaming import (
     is_responses_lifecycle_chunk,
 )
-from nemo_gym.models.token_capture.config import resolve_lineage_store, token_capture_config
+from nemo_gym.models.token_capture.config import token_capture_config
 from nemo_gym.models.token_capture.control_routes import install_rollout_control_routes
-from nemo_gym.models.token_capture.lineage import InMemoryLineageStore
+from nemo_gym.models.token_capture.lineage import FileLineageStore, InMemoryLineageStore
 from nemo_gym.models.token_capture.protocols import (
     CaptureLedger,
     LineageResolver,
@@ -1184,8 +1184,11 @@ def install_model_call_capture(
     # Spawned workers do not inherit a launcher-installed sink.
     configured_sink = capture_settings.build_sink() if capture_settings is not None else None
     configured_lineage = capture_settings.build_lineage_store() if capture_settings is not None else None
-    lineage_store = resolve_lineage_store(configured_lineage, file_root=token_store.root if token_store else None)
-    default_lineage = lineage_store if configured_lineage is None and installed_lineage_store() is None else None
+    lineage_store = configured_lineage or installed_lineage_store()
+    default_lineage = None
+    if lineage_store is None and token_store is not None:
+        default_lineage = FileLineageStore(token_store.root)
+        lineage_store = default_lineage
     if capture_settings is not None and capture_settings.enabled and (num_workers or 1) > 1:
         if lineage_store is None or not lineage_store.is_process_shared():
             raise ValueError(

@@ -18,8 +18,6 @@ over the executor's connection (or locally), that reads the job directory and pr
 Decisions live in ``nemo_gym.orchestration.recovery``; this module holds the script and the constants it embeds.
 """
 
-from inspect import getsource
-
 from nemo_gym.core.failure_kinds import (
     ENVIRONMENT_PROTOCOL_VIOLATION,
     JUDGE_SKIPPED,
@@ -34,7 +32,6 @@ from nemo_gym.orchestration.executors.resume_script import (
     FOLLOW_UP_SUBMISSION_REFUSED,
     PROVISIONAL_MARKER_PREFIX,
 )
-from nemo_gym.trajectory.trajectory_record import grading_transform_source
 
 
 # The reason an environment server records when its own episode deadline ends an episode; no kind goes with it.
@@ -369,11 +366,6 @@ def grading_result_binding(result):
         ):
             return None
         value["reward_components"] = components
-    if "ng_grading_transform" in result:
-        transform = result["ng_grading_transform"]
-        if not isinstance(transform, dict):
-            return None
-        value["grading_transform"] = {key: item for key, item in transform.items() if key != "output_binding_sha256"}
 
     def canonical(item):
         if item is None or type(item) in (str, bool, int):
@@ -482,8 +474,6 @@ def rows(name, skip=0):
                 binding = grading_result_binding(r)
                 if binding is not None:
                     selected["_ng_collected_grading_binding"] = binding
-                if "ng_grading_transform" in r:
-                    selected["_ng_collected_grading_transform"] = grading_transform_source(r) or False
                 facts = grading_facts(r)
                 reward_file = session_reward(r)
                 if reward_file is not None:
@@ -1009,9 +999,4 @@ def judge_job_acknowledgements():
 collected["judge_job_acknowledgements"] = judge_job_acknowledgements()
 print(json.dumps(collected))
 """
-)
-
-# Embed the same validator used in-process; only hashes and numeric provenance leave the run host.
-COLLECT_SCRIPT = COLLECT_SCRIPT.replace(
-    "SESSION_ID = re.compile", getsource(grading_transform_source) + "\nSESSION_ID = re.compile"
 )

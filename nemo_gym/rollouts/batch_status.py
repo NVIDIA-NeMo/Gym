@@ -383,12 +383,7 @@ def _read_aggregate_entries(metrics_fpath: Optional[Path]) -> tuple[Dict[str, Di
         if not isinstance(entry, dict):
             return {}, "InvalidAggregateMetricsArtifact"
         agent_name = (entry.get(AGENT_REF_KEY_NAME) or {}).get("name")
-        if not isinstance(agent_name, str) or not agent_name:
-            return {}, "InvalidAggregateMetricsArtifact"
-        environment_name = entry.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)
-        if environment_name is not None and (not isinstance(environment_name, str) or not environment_name):
-            return {}, "InvalidAggregateMetricsArtifact"
-        if agent_name in entries:
+        if not agent_name or agent_name in entries:
             return {}, "InvalidAggregateMetricsArtifact"
         entries[agent_name] = entry
     return entries, None
