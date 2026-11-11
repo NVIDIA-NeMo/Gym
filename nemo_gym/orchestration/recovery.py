@@ -4567,13 +4567,29 @@ def _verifier_recorded(verifier: Any, row: Mapping[str, Any], resources_server: 
     """Whether the row's verifier saved its own grading record for it, in place of a recorded grading operation.
 
     The shared verify path records it only for a verify execution that completed without asking any model. It must
-    name the row's resources server (or the agent, for an agent that verifies its own rollouts), carry the saved score with a ``scored`` verdict and bind the saved response and
-    score. A verifier that recorded a grading operation or owns a model call is judged by those, never by the record.
+    name the row's resources server (or the agent, for an agent that verifies its own rollouts), carry a ``scored``
+    verdict and bind its score/response pair. A verifier-side projection owns the final pair; an environment-side
+    projection may retain the original verifier pair. Both require an intact transformation descriptor. A verifier
+    that recorded a grading operation or owns a model call is judged by those, never by the record.
     """
     record = verifier.get("grading_record") if isinstance(verifier, dict) else None
     binding, reward = _grading_source(row)
+    final_binding, final_reward = row.get("_ng_collected_grading_binding"), row.get("reward")
+    try:
+        finite_scores = (
+            isinstance(record, dict)
+            and type(record.get("score")) in (int, float)
+            and math.isfinite(record["score"])
+            and type(reward) in (int, float)
+            and math.isfinite(reward)
+            and type(final_reward) in (int, float)
+            and math.isfinite(final_reward)
+        )
+    except OverflowError:
+        # Persisted JSON integers may exceed the float range accepted by math.isfinite.
+        return False
     return (
-        isinstance(record, dict)
+        finite_scores
         and verifier.get("status") == "completed"
         and verifier.get("failure_kind") is None
         and verifier.get("grading_operations") is None
@@ -4582,12 +4598,18 @@ def _verifier_recorded(verifier: Any, row: Mapping[str, Any], resources_server: 
         and bool(resources_server)
         and record.get("verifier") == resources_server
         and record.get("verdict") == "scored"
-        and type(record.get("score")) in (int, float)
-        and type(reward) in (int, float)
-        and record["score"] == reward
         and isinstance(binding, str)
         and len(binding) == 64
-        and record.get("result_binding_sha256") == binding
+        and isinstance(final_binding, str)
+        and len(final_binding) == 64
+        and (
+            (record.get("result_binding_sha256") == binding and record["score"] == reward)
+            or (
+                "_ng_collected_grading_transform" in row
+                and record.get("result_binding_sha256") == final_binding
+                and record["score"] == final_reward
+            )
+        )
     )
 
 
