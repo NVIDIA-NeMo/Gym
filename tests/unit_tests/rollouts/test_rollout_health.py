@@ -2623,6 +2623,193 @@ def test_usage_still_reports_incorrect_invocation_total(tmp_path: Path) -> None:
     }
 
 
+def _title_usage_record(scope: bool | None = False) -> tuple[dict, list[dict]]:
+    record = _record(0, 0, usage={"input_tokens": 3, "output_tokens": 2})
+    record["ng_trajectory"]["invocations"] = [
+        {"invocation_id": "root", "model_calls": [{"model_call_id": "c1"}, {"model_call_id": "title"}]}
+    ]
+    record["ng_agent_observations"] = {
+        "records": [
+            {
+                "kind": "session_title",
+                "invocation_id": "root",
+                "model_calls": [{"model_call_id": "title"}],
+                "included_in_response_usage": scope,
+            }
+        ]
+    }
+    return record, [_call(), _call(model_call_id="title", response_id="title-response", tokens_in=5, tokens_out=3)]
+
+
+@pytest.mark.parametrize("scope", [False, True, None])
+@pytest.mark.parametrize("wrong_total", [False, True])
+def test_title_usage_scope_changes_comparison_without_losing_accounting(tmp_path, scope, wrong_total):
+    from nemo_gym.rollouts.rollout_perf import _build_ng_perf
+
+    record, calls = _title_usage_record(scope)
+    record["response"]["usage"] = {
+        "input_tokens": 8 if scope else 3,
+        "output_tokens": (5 if scope else 2) + int(wrong_total),
+    }
+    rollout_path = _write_fixture(tmp_path, [(record, calls)])
+    saved = orjson.loads(rollout_path.read_bytes())
+    before = deepcopy(saved)
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+    assert ("rollout_token_count_mismatch" in digest.unobserved) == (scope is None)
+    assert ("rollout_token_count_mismatch" in {f.check for f in digest.findings}) == (
+        wrong_total and scope is not None
+    )
+    assert (digest.capture_prompt_tokens, digest.capture_completion_tokens, digest.model_calls) == (8, 5, 2)
+    perf = _build_ng_perf(saved, rollout_latency_ms=None)
+    assert (perf["prompt_tokens"], perf["completion_tokens"]) == (8, 5)
+    assert saved == before == orjson.loads(rollout_path.read_bytes())
+
+
+@pytest.mark.parametrize(
+    "conflict",
+    [
+        "undeclared_scope",
+        "invalid_scope",
+        "wrong_response_id",
+        "wrong_model",
+        "missing_call",
+        "missing_owner",
+        "wrong_owner",
+        "second_owner",
+        "verifier_owner",
+        "duplicate_declaration",
+        "duplicate_reference",
+        "policy_turn",
+        "compaction",
+        "join_gap",
+        "canonical_join_gap",
+        "duplicate_capture",
+    ],
+)
+def test_ambiguous_title_usage_scope_remains_unobserved(tmp_path, conflict):
+    record, calls = _title_usage_record()
+    title = record["ng_agent_observations"]["records"][0]
+    ref = title["model_calls"][0]
+    trajectory = record["ng_trajectory"]
+    if conflict == "undeclared_scope":
+        title.pop("included_in_response_usage")
+    elif conflict == "invalid_scope":
+        title["included_in_response_usage"] = "false"
+    elif conflict == "wrong_response_id":
+        ref["response_id"] = "wrong"
+    elif conflict == "wrong_model":
+        ref["model_ref"] = {"type": "responses_api_models", "name": "wrong"}
+    elif conflict == "missing_call":
+        calls.pop()
+    elif conflict == "missing_owner":
+        trajectory["invocations"][0]["model_calls"].pop()
+    elif conflict == "wrong_owner":
+        title["invocation_id"] = "missing"
+    elif conflict in {"second_owner", "verifier_owner"}:
+        field = "invocations" if conflict == "second_owner" else "verifier_invocations"
+        trajectory.setdefault(field, []).append({"invocation_id": "other", "model_calls": [deepcopy(ref)]})
+    elif conflict == "duplicate_declaration":
+        record["ng_agent_observations"]["records"].append(deepcopy(title))
+    elif conflict == "duplicate_reference":
+        title["model_calls"].append(deepcopy(ref))
+    elif conflict == "policy_turn":
+        trajectory["turns"][0]["model_calls"].append(deepcopy(ref))
+    elif conflict == "compaction":
+        record["ng_agent_observations"]["records"].append(
+            {"kind": "context_compaction", "invocation_id": "root", "model_calls": [deepcopy(ref)]}
+        )
+    elif conflict in {"join_gap", "canonical_join_gap"}:
+        owner = record["ng_agent_observations"] if conflict == "join_gap" else trajectory
+        owner["gaps"] = [{"code": "session_title_model_call_join_failed"}]
+    elif conflict == "duplicate_capture":
+        calls.append(deepcopy(calls[-1]))
+    [digest] = run_health_checks(_write_fixture(tmp_path, [(record, calls)]), workers=1).rollouts
+    assert "rollout_token_count_mismatch" in digest.unobserved
+    assert "rollout_token_count_mismatch" not in {f.check for f in digest.findings}
+
+
+def test_title_exclusion_keeps_compaction_and_judge_accounting(tmp_path):
+    record, calls = _title_usage_record()
+    record["response"]["usage"] = {"input_tokens": 10, "output_tokens": 6}
+    record["ng_trajectory"]["invocations"][0]["model_calls"].append({"model_call_id": "compaction"})
+    record["ng_agent_observations"]["records"].append(
+        {"kind": "context_compaction", "invocation_id": "root", "model_calls": [{"model_call_id": "compaction"}]}
+    )
+    calls.extend(
+        [
+            _call(model_call_id="compaction", response_id="compact-response", tokens_in=7, tokens_out=4),
+            _call(model_call_id="judge", response_id="judge-response", tokens_in=11, tokens_out=6),
+        ]
+    )
+    [digest] = run_health_checks(_write_fixture(tmp_path, [(record, calls)]), workers=1).rollouts
+    assert "rollout_token_count_mismatch" not in digest.unobserved
+    assert not digest.findings
+    assert (digest.capture_prompt_tokens, digest.capture_completion_tokens, digest.model_calls) == (26, 15, 4)
+
+
+@pytest.mark.parametrize("field", ["bundle", "records", "gaps", "compaction_refs"])
+@pytest.mark.parametrize("value", [1, {}, "invalid", None, [1]])
+def test_malformed_usage_scope_is_unobserved_without_crashing(tmp_path, field, value):
+    record, calls = _title_usage_record()
+    # An all-call total must not conceal malformed scope evidence as a healthy comparison.
+    record["response"]["usage"] = {"input_tokens": 8, "output_tokens": 5}
+    if field == "bundle":
+        if value == {}:
+            value = {"records": {}}
+        record["ng_agent_observations"] = value
+    elif field == "compaction_refs":
+        record["ng_agent_observations"]["records"].append(
+            {"kind": "context_compaction", "invocation_id": "root", "model_calls": value}
+        )
+    else:
+        record["ng_agent_observations"][field] = value
+    [digest] = run_health_checks(_write_fixture(tmp_path, [(record, calls)]), workers=1).rollouts
+    assert "rollout_token_count_mismatch" in digest.unobserved
+    assert "check_execution_error" not in {f.check for f in digest.findings}
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_unknown_title_usage_is_retained_by_coverage_checks(tmp_path, failed):
+    record, calls = _title_usage_record()
+    calls[-1].update(tokens_in=None, tokens_out=None)
+    if failed:
+        calls[-1].update(status_code=429, finish_reason=None, response=None, started_at=1)
+        calls[0]["started_at"] = 2
+    [digest] = run_health_checks(_write_fixture(tmp_path, [(record, calls)]), workers=1).rollouts
+    assert "rollout_token_count_mismatch" not in digest.unobserved
+    assert "rollout_token_count_mismatch" not in {f.check for f in digest.findings}
+    assert ("model_call_missing_token_counts" in {f.check for f in digest.findings}) == (not failed)
+    assert digest.model_call_errors_usage_unknown == int(failed)
+    assert digest.capture_prompt_tokens == 3
+    assert digest.capture_completion_tokens == 2
+
+
+def test_failed_and_successful_title_attempts_remain_captured_and_owned(tmp_path):
+    record, calls = _title_usage_record()
+    failed_ref = {"model_call_id": "failed-title"}
+    record["ng_trajectory"]["invocations"][0]["model_calls"].append(failed_ref)
+    record["ng_agent_observations"]["records"][0]["model_calls"].append(failed_ref)
+    calls[0]["started_at"] = 3
+    calls[1]["started_at"] = 2
+    calls.append(
+        _call(
+            model_call_id="failed-title",
+            response_id=None,
+            started_at=1,
+            status_code=500,
+            finish_reason=None,
+            tokens_in=None,
+            tokens_out=None,
+            response=None,
+        )
+    )
+    [digest] = run_health_checks(_write_fixture(tmp_path, [(record, calls)]), workers=1).rollouts
+    assert "rollout_token_count_mismatch" not in digest.unobserved
+    assert not digest.findings
+    assert (digest.capture_prompt_tokens, digest.capture_completion_tokens, digest.model_calls) == (8, 5, 3)
+    assert digest.model_call_errors_usage_unknown == 1
+
+
 def test_health_cli_reports_config_error_without_traceback(monkeypatch, capsys):
     from nemo_gym.config.config_types import ConfigError
 

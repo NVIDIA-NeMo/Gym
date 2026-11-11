@@ -11606,7 +11606,8 @@ class TestTurnsFromModelCalls:
         assert [turn.resolved for turn in turns] == [None, True]
 
     @pytest.mark.parametrize("reference_key", ["model_call_id", "response_id", "both"])
-    def test_compaction_helpers_are_retained_and_billed_without_policy_turns(self, reference_key: str) -> None:
+    @pytest.mark.parametrize("helper_kind", ["context_compaction", "session_title"])
+    def test_helpers_are_retained_and_billed_without_policy_turns(self, reference_key: str, helper_kind: str) -> None:
         model_ref = {"type": "responses_api_models", "name": "policy_model"}
         helper_ref = {"model_ref": model_ref}
         if reference_key in ("model_call_id", "both"):
@@ -11624,11 +11625,14 @@ class TestTurnsFromModelCalls:
                         "model_calls": [{"model_call_id": call_id} for call_id in ("first", "summary", "last")],
                     },
                     {
-                        "kind": "context_compaction",
+                        "kind": helper_kind,
                         "invocation_id": "root",
                         "model_calls": [helper_ref],
-                        "outcome": "completed",
-                        "summary": "Continue the task.",
+                        **(
+                            {"outcome": "completed", "summary": "Continue the task."}
+                            if helper_kind == "context_compaction"
+                            else {}
+                        ),
                     },
                 ],
             },
@@ -11724,8 +11728,9 @@ class TestTurnsFromModelCalls:
             assert checks["steps.attempt_accounting"]["status"] == "pass"
 
     @pytest.mark.parametrize("conflict", ["response", "model", "ambiguous"])
-    def test_invalid_compaction_reference_does_not_hide_policy_calls(self, conflict: str) -> None:
-        from nemo_gym.trajectory.trajectory_record import ContextCompactionObservation
+    @pytest.mark.parametrize("helper_kind", ["compactions", "session_titles"])
+    def test_invalid_helper_reference_does_not_hide_policy_calls(self, conflict: str, helper_kind: str) -> None:
+        from nemo_gym.trajectory.trajectory_record import ContextCompactionObservation, SessionTitleObservation
 
         calls = [self._call("policy", {"output": []}, started_at=1.0, response_id="resp-policy")]
         reference = {
@@ -11735,9 +11740,10 @@ class TestTurnsFromModelCalls:
         }
         if conflict == "ambiguous":
             calls.append(calls[0].model_copy(deep=True))
-        compaction = ContextCompactionObservation.model_validate({"invocation_id": "root", "model_calls": [reference]})
+        schema = ContextCompactionObservation if helper_kind == "compactions" else SessionTitleObservation
+        helper = schema.model_validate({"invocation_id": "root", "model_calls": [reference]})
         turns = nemo_gym.rollouts.trajectory_builder._turns_from_model_calls(
-            "task", "rollout", [self._invocation("root", ["policy"])], calls, None, compactions=[compaction]
+            "task", "rollout", [self._invocation("root", ["policy"])], calls, None, **{helper_kind: [helper]}
         )
         assert len(turns) == len(calls)
 

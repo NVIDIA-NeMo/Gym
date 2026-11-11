@@ -490,6 +490,24 @@ class ContextCompactionObservation(ObservationModel):
     )
 
 
+class SessionTitleObservation(ObservationModel):
+    """Invocation-owned calls that generate a session title outside the policy conversation.
+
+    Producers must identify both the title-generation contract and its invocation explicitly.
+    These calls retain capture, ownership and usage, including failed attempts, but are not policy turns.
+    """
+
+    kind: Literal["session_title"] = "session_title"
+    invocation_id: str = Field(min_length=1)
+    model_calls: list[ModelCallRef] = Field(min_length=1)
+    included_in_response_usage: bool | None = Field(
+        default=None,
+        strict=True,
+        description="Whether the harness's returned response usage includes these title calls; None means unknown. "
+        "This does not change their captured usage or invocation ownership.",
+    )
+
+
 class ObservationGap(ObservationModel):
     """A fact that the selected integration could not observe or join exactly."""
 
@@ -510,7 +528,11 @@ class ObservationGap(ObservationModel):
 
 
 AgentObservationRecord = Annotated[
-    AgentInvocation | ToolCallObservation | ContextCompactionObservation | SandboxObservation,
+    AgentInvocation
+    | ToolCallObservation
+    | ContextCompactionObservation
+    | SessionTitleObservation
+    | SandboxObservation,
     Field(discriminator="kind"),
 ]
 
@@ -812,19 +834,23 @@ def join_agent_model_calls(
     bundle: AgentObservationBundle,
     calls: Iterable[ModelCallRecord],
 ) -> AgentObservationBundle:
-    """Join captured calls to agent invocations and their compactions without guessing ownership."""
+    """Join captured calls to invocations and their identified helpers without guessing ownership."""
 
     result = bundle.model_copy()
     result.records = [
         record.model_copy(update={"model_calls": list(record.model_calls)})
         if isinstance(record, AgentInvocation)
         else record.model_copy()
-        if isinstance(record, ContextCompactionObservation)
+        if isinstance(record, (ContextCompactionObservation, SessionTitleObservation))
         else record
         for record in bundle.records
     ]
     invocations = [record for record in result.records if isinstance(record, AgentInvocation)]
-    compactions = [record for record in result.records if isinstance(record, ContextCompactionObservation)]
+    helpers = [
+        record
+        for record in result.records
+        if isinstance(record, (ContextCompactionObservation, SessionTitleObservation))
+    ]
     captured = list(calls)
 
     invocations_by_id = {invocation.invocation_id: invocation for invocation in invocations}
@@ -946,16 +972,16 @@ def join_agent_model_calls(
             resolved.append(canonical(call))
         invocation.model_calls = resolved
 
-    for compaction in compactions:
+    for helper in helpers:
         resolved: list[ModelCallRef] = []
-        for ref in compaction.model_calls:
+        for ref in helper.model_calls:
             candidates = matches(ref)
             detail = ref.model_call_id or ref.response_id
             if len(candidates) != 1:
                 join_gaps.append(
                     ObservationGap(
                         code=("model_call_reference_ambiguous" if candidates else "model_call_reference_unmatched"),
-                        invocation_id=compaction.invocation_id,
+                        invocation_id=helper.invocation_id,
                         detail=f"model_calls:{detail}",
                     )
                 )
@@ -964,7 +990,7 @@ def join_agent_model_calls(
 
             call = candidates[0]
             owner = owner_by_call.get(id(call))
-            if owner != compaction.invocation_id:
+            if owner != helper.invocation_id:
                 join_gaps.append(
                     ObservationGap(
                         code=(
@@ -972,14 +998,18 @@ def join_agent_model_calls(
                             if owner is not None
                             else "model_call_ownership_unavailable"
                         ),
-                        invocation_id=compaction.invocation_id,
+                        invocation_id=helper.invocation_id,
                         detail=f"model_calls:{call.model_call_id or call.response_id}",
                     )
                 )
                 resolved.append(ref)
                 continue
             resolved.append(canonical(call))
-        compaction.model_calls = resolved
+        helper.model_calls = resolved
+
+        if not isinstance(helper, ContextCompactionObservation):
+            continue
+        compaction = helper
 
         for field_name in ("before_model_call", "after_model_call"):
             ref = getattr(compaction, field_name)

@@ -146,6 +146,53 @@ def test_ambiguous_reference_is_a_relationship_failure_not_a_global_schema_failu
     assert result["ownership.call_owner"]["status"] == "fail"
 
 
+@pytest.mark.parametrize("status", [200, 400])
+def test_session_title_retains_call_ownership_and_unknown_usage_outside_policy_steps(status):
+    record = evidence_record()
+    trajectory = record["ng_trajectory"]
+    title = deepcopy(trajectory["model_calls"][0])
+    title["model_call_id"] = "title"
+    title["response_metadata"].update(response_id="title-response", status_code=status)
+    title["token_stats"] = dict.fromkeys(TOKEN_FIELDS)
+    trajectory["model_calls"].append(title)
+    ref = {"model_call_id": "title"}
+    trajectory["invocations"][0]["model_calls"].append(ref)
+    record["ng_agent_observations"]["records"].append(
+        {"kind": "session_title", "invocation_id": "invocation", "model_calls": [ref]}
+    )
+    result = checks(record)
+    assert result["ownership.call_owner"]["status"] == "pass"
+    assert result["steps.session_title_target"]["status"] == "pass"
+    assert result["steps.attempt_accounting"]["status"] == "pass"
+    assert title["token_stats"] == dict.fromkeys(TOKEN_FIELDS)
+    trajectory["turns"][0]["model_calls"].append(ref)
+    assert checks(record)["steps.attempt_accounting"]["status"] == "fail"
+
+
+@pytest.mark.parametrize("defect", ["missing", "wrong_owner", "duplicate", "other_role", "empty", "extra_field"])
+def test_session_title_role_requires_unique_owned_evidence(defect):
+    record = evidence_record()
+    ref = {"model_call_id": "attempt-1"}
+    event = {"kind": "session_title", "invocation_id": "invocation", "model_calls": [ref]}
+    records = record["ng_agent_observations"]["records"]
+    records.append(event)
+    if defect == "missing":
+        ref["model_call_id"] = "missing"
+    elif defect == "wrong_owner":
+        event["invocation_id"] = "other"
+    elif defect == "duplicate":
+        records.append(deepcopy(event))
+    elif defect == "other_role":
+        records.append({"kind": "context_compaction", "model_calls": [ref]})
+    elif defect == "empty":
+        event["model_calls"] = []
+    else:
+        event["untrusted"] = True
+    result = checks(record)
+    assert result["steps.session_title_target"]["status"] == "fail"
+    assert result["steps.attempt_accounting"]["status"] == "fail"
+
+
 @pytest.mark.parametrize("value", [None, False, [], "wrong", [None]])
 def test_malformed_collection_does_not_crash_or_poison_unrelated_checks(value):
     record = evidence_record()

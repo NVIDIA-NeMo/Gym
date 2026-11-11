@@ -548,7 +548,7 @@ async def test_compaction_resolver_failure_preserves_generic_model_call_join(tmp
         "responses_api_agents.claude_code_agent.app.read_available_model_call_records",
         side_effect=RuntimeError,
     ):
-        observations = await _agent(tmp_path)._associate_compaction_calls(_compaction_bundle(), rollout_id="0-0")
+        observations = await _agent(tmp_path)._associate_helper_calls(_compaction_bundle(), rollout_id="0-0")
     record["ng_agent_observations"] = observations.model_dump(mode="json")
     merge_model_call_capture_into_record(record, [tmp_path])
 
@@ -572,7 +572,7 @@ async def test_adapter_requires_its_own_capture(tmp_path: Path, case: str) -> No
         for captured in (_captured_call("call-before", "msg-before"), call, _captured_call("call-after", "msg-after")):
             store.record("other" if case == "other_rollout" else "0-0", captured)
     bundle = _compaction_bundle()
-    associated = await instance._associate_compaction_calls(bundle, rollout_id="0-0")
+    associated = await instance._associate_helper_calls(bundle, rollout_id="0-0")
     assert associated == bundle
 
 
@@ -592,7 +592,7 @@ async def test_adapter_waits_for_claimed_capture_write(tmp_path: Path) -> None:
         store.clear_pending("0-0", "call-compact")
 
     associated, _ = await asyncio.gather(
-        _agent(tmp_path)._associate_compaction_calls(_compaction_bundle(), rollout_id="0-0"), finish_capture()
+        _agent(tmp_path)._associate_helper_calls(_compaction_bundle(), rollout_id="0-0"), finish_capture()
     )
     [compaction] = _records(associated, ContextCompactionObservation)
     assert [reference.model_call_id for reference in compaction.model_calls] == ["call-compact"]
