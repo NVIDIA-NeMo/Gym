@@ -133,3 +133,30 @@ def test_final_quota_policy_stop_is_not_a_future_reset_wait(source, saved_fail, 
     assert result.evidence[0].reason is None
     assert "policy" in result.reason
     assert "After the reset" not in result.reason
+
+
+@pytest.mark.parametrize("source", ["result", "failure"])
+@pytest.mark.parametrize(
+    "reset,waiting", [("2099-01-01 00:00 UTC", True), ("1970-01-01 00:00 UTC", False), (None, False)]
+)
+def test_permitted_quota_regrading_waits_only_for_a_future_reset(source, reset, waiting, monkeypatch):
+    monkeypatch.setattr("nemo_gym.orchestration.recovery._now", lambda: 100)
+    row = saved_row_evidence(_xstest_row(None)) | {
+        "mask_sample": True,
+        "failure_kind": "provider_quota_exhausted",
+        "failure_reason": f"resets at {reset}" if reset else "provider unavailable",
+        "_ng_failure_class": "judge_failed",
+    }
+    result = decide_recovery(
+        materialized=inventory(1),
+        results=[row] if source == "result" else [],
+        failures=[row] if source == "failure" else [],
+        budget=OK_BUDGET,
+        outcome_policy=RecoveryOutcomePolicyConfig(by_failure_kind={"provider_quota_exhausted": "verify"}),
+    )
+    assert result.action.value == ("stop" if waiting else "reverify")
+    if waiting:
+        assert "After the reset" in result.reason
+        assert reset in result.reason
+    else:
+        assert "After the reset" not in result.reason
