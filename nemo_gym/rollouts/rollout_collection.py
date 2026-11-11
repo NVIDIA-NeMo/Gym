@@ -2934,6 +2934,8 @@ def _planned_repeat_inventory(
                         # contents cannot certify a complete repeat inventory.
                         return None
                     raise
+                if not isinstance(row, dict):
+                    return None
                 task, repeat = row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME)
                 if type(task) is not int or type(repeat) is not int or task < 0 or repeat < 0:
                     return None

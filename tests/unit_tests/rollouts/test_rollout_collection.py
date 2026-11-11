@@ -16574,6 +16574,33 @@ def test_repeat_inventory_never_certifies_a_malformed_record(tmp_path: Path, ter
     assert source.read_bytes() == original
 
 
+@pytest.mark.parametrize("record", [[], None, False, 0, "not a task"])
+def test_non_object_planned_rows_leave_the_entire_inventory_unknown(tmp_path: Path, record: object) -> None:
+    from nemo_gym.rollouts.rollout_collection import _planned_repeat_inventory
+
+    source = tmp_path / "materialized.jsonl"
+    source.write_bytes(
+        orjson.dumps({TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}) + b"\n" + orjson.dumps(record) + b"\n"
+    )
+    original = source.read_bytes()
+    assert _planned_repeat_inventory([source], lambda row: "environment") is None
+    assert source.read_bytes() == original
+
+
+def test_valid_planned_rows_keep_every_repeat(tmp_path: Path) -> None:
+    from nemo_gym.rollouts.rollout_collection import _planned_repeat_inventory
+
+    source = tmp_path / "materialized.jsonl"
+    original = b"".join(
+        orjson.dumps({TASK_INDEX_KEY_NAME: task, ROLLOUT_INDEX_KEY_NAME: repeat}) + b"\n"
+        for task in range(2)
+        for repeat in range(2)
+    )
+    source.write_bytes(original)
+    assert _planned_repeat_inventory([source], lambda row: "environment") == {"environment": {0: [0, 1], 1: [0, 1]}}
+    assert source.read_bytes() == original
+
+
 def test_an_episode_request_carries_a_rows_sampling_values_beside_the_unchanged_task() -> None:
     row = {
         "task_id": {"taskset": "math", "task_id": "7"},

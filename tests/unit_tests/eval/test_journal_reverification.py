@@ -417,11 +417,14 @@ def test_repeat_plan_uses_verified_source_route_for_a_task_without_any_outcome(t
         first = store.pending()[0]
         store.record_dispatch(first)
         store.record_outcome(first | {"_ng_environment_server": "plain", "reward": 1})
-    plan = reverify._reverification_repeat_inventory(
+    stamps, _ = reverify._source_identity_stamps((output,))
+    plan = reverify._aggregation_plan(
         [materialized_path_for(output)],
-        (output,),
-        [],
-        {"agent": "resources"},
-        {"resources": {"resources_servers": {"fixture": {}}}},
+        stamps=stamps,
+        replay_source=None,
+        routing_rows=[],
+        agent_to_rs={"agent": "resources"},
+        global_config={"resources": {"resources_servers": {"fixture": {}}}},
     )
-    assert plan == {("plain", "resources"): {0: [0], 1: [0]}}
+    assert plan.inventory == {("plain", "resources"): {0: [0], 1: [0]}}
+    assert not plan.unknown

@@ -290,12 +290,20 @@ def test_http_aggregation_keeps_masked_repeat_identities(repeated_benchmark):
     for row in rows:
         row["mask_sample"] = row[ROLLOUT_INDEX_KEY_NAME] == 1
     with TestClient(server.setup_webserver()) as client:
-        response = client.post("/aggregate_metrics", json={"verify_responses": rows})
+        response = client.post("/aggregate_metrics", json=planned_request(rows).model_dump(mode="json"))
+        for row in rows:
+            row["mask_sample"] = False
+        recovered = client.post("/aggregate_metrics", json=planned_request(rows).model_dump(mode="json"))
     assert response.status_code == 200, response.text
     result = response.json()
     assert result["agent_metrics"][f"{benchmark}/complete"] is False
     assert "accuracy" not in result["agent_metrics"]
     assert f"{benchmark}/accuracy" not in result["key_metrics"]
+    assert recovered.status_code == 200, recovered.text
+    complete = recovered.json()
+    assert complete["agent_metrics"][f"{benchmark}/complete"] is True
+    assert "accuracy" in complete["agent_metrics"]
+    assert f"{benchmark}/accuracy" in complete["key_metrics"]
 
 
 @pytest.mark.parametrize("resume", [False, True])

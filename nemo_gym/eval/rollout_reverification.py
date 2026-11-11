@@ -54,6 +54,7 @@ from nemo_gym.config.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
     ENVIRONMENT_SERVER_STAMP_KEY_NAME,
+    ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
@@ -68,10 +69,10 @@ from nemo_gym.rollouts.rollout_collection import (
     NG_RESULT_TYPE_KEY,
     _coverage_report,
     _get_max_rollout_attempts,
-    _planned_repeat_inventory,
     _rollout_request_debug_summary,
     is_omitted_rollout_row,
     is_terminal_failure,
+    loads_jsonl_line,
     matches_failure_class,
 )
 from nemo_gym.rollouts.rollout_records import (
@@ -1159,59 +1160,120 @@ async def _guard_atif_preflight(payloads: List[Dict[str, Any]]) -> None:
 # Very similar to the rollout collection code, but we need to send the request to
 # resources servers instead of the agent server, since the second one might not be started
 # ---------------------------------------------------------------------------
-def _reverification_repeat_inventory(materialized_fpaths, identity_sources, results, agent_to_rs, config):
-    """Group the full attempt plan using the same original identities as saved results.
+@dataclass(frozen=True)
+class _AggregationPlan:
+    inventory: Dict[Tuple[str, str], Dict[int, List[int]]] | None
+    rows: List[Dict]
+    unknown: set[Tuple[Optional[str], str]]
 
-    Source stamps include failed attempts. A missing repeat may use another repeat's
-    task stamp, but never an arbitrary environment sharing its agent. For an entirely
-    missing task, only the verified source configuration can establish an environment.
-    """
-    stamps, _ = _source_identity_stamps(identity_sources)
-    by_task = defaultdict(set)
-    for (task, _), values in stamps.items():
-        if (name := values.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)) is not None:
-            by_task[task].add(name)
-    for result in results:
-        if (name := result.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)) is not None:
-            by_task[result.get(TASK_INDEX_KEY_NAME)].add(name)
 
-    inventory = {}
-    for path in materialized_fpaths:
+def _canonical_aggregate_row(row: Dict, stamps: Dict, replay_source: _ReplaySource | None) -> Dict:
+    """Bind a planned execution to its original route, never a current configuration guess."""
+    identity = (row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME))
+    canonical = dict(row)
+    for key, value in stamps.get(identity, {}).items():
+        if value is None:
+            continue
+        if canonical.get(key) is not None and canonical[key] != value:
+            raise ConfigError(f"Conflicting original rollout identity {identity!r} for {key}; nothing was aggregated.")
+        canonical[key] = value
+    if (
+        canonical.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME) is None
+        and replay_source is not None
+        and replay_source.servers
+    ):
+        original = canonical
+        if replay_source.store is not None:
+            try:
+                original = replay_source.store.inputs_for([row])[0]
+            except KeyError:
+                return canonical
+        candidates = [
+            name
+            for name, block in replay_source.servers.items()
+            if _saved_environments(InputRolloutPair(input=original, rollout={}), {name: block})
+        ]
+        if len(candidates) > 1:
+            raise ConfigError(
+                f"Cannot establish original environment for planned task {identity[0]}; the digest-verified "
+                "source configuration has ambiguous routes. Nothing was aggregated."
+            )
+        if len(candidates) == 1:
+            canonical[ENVIRONMENT_SERVER_STAMP_KEY_NAME] = candidates[0]
+    return canonical
+
+
+def _aggregation_plan(
+    materialized_fpaths: List[Path],
+    *,
+    stamps: Dict,
+    replay_source: _ReplaySource | None,
+    routing_rows: List[Dict],
+    agent_to_rs: Dict[str, str],
+    global_config: Union[Dict[str, Any], DictConfig],
+) -> _AggregationPlan:
+    if not materialized_fpaths or any(not path.is_file() for path in materialized_fpaths):
+        return _AggregationPlan(None, [], set())
+    planned = []
+    fields = (
+        TASK_INDEX_KEY_NAME,
+        ROLLOUT_INDEX_KEY_NAME,
+        ROLLOUT_ID_KEY_NAME,
+        AGENT_REF_KEY_NAME,
+        TASK_SOURCE_KEY_NAME,
+        *_IDENTITY_KEYS,
+    )
+    for path in dict.fromkeys(materialized_fpaths):
         source = _replay_source(_store_for_materialized_inputs(path))
+        if source.store is None and replay_source is not None:
+            source = replay_source
+        with path.open("rb") as stream:
+            for line_no, line in enumerate(stream, 1):
+                if not line.strip():
+                    continue
+                try:
+                    row = loads_jsonl_line(line, path, line_no)
+                except ConfigError:
+                    if not line.endswith(b"\n"):
+                        return _AggregationPlan(None, [], set())
+                    raise
+                if not isinstance(row, dict):
+                    return _AggregationPlan(None, [], set())
+                task, repeat = row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME)
+                if type(task) is not int or type(repeat) is not int or task < 0 or repeat < 0:
+                    return _AggregationPlan(None, [], set())
+                planned.append(
+                    _canonical_aggregate_row({key: row[key] for key in fields if key in row}, stamps, source)
+                )
 
-        def group(row):
-            task = row.get(TASK_INDEX_KEY_NAME)
-            key = (task, row.get(ROLLOUT_INDEX_KEY_NAME))
-            routed = dict(row)
-            if ENVIRONMENT_SERVER_STAMP_KEY_NAME not in routed:
-                name = stamps.get(key, {}).get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)
-                candidates = by_task.get(task, set())
-                if name is None and len(candidates) == 1:
-                    name = next(iter(candidates))
-                if name is None and by_task:
-                    candidates = [
-                        name
-                        for name, block in (source.servers or {}).items()
-                        if _saved_environments(InputRolloutPair(input=row, rollout={}), {name: block})
-                    ]
-                    if len(candidates) != 1:
-                        raise ConfigError(
-                            f"Cannot establish original environment for planned task {task}; restore source "
-                            "rollouts/configuration or provide stamped materialized inputs before aggregating."
-                        )
-                    name = candidates[0]
-                if name is not None:
-                    routed[ENVIRONMENT_SERVER_STAMP_KEY_NAME] = name
-            return rollout_run_key(routed), _rs_for_row(routed, agent_to_rs, config)
+    def population(row: Dict) -> Tuple[Optional[str], str]:
+        return (row.get(AGENT_REF_KEY_NAME) or {}).get("name"), _rs_for_row(row, agent_to_rs, global_config)
 
-        planned = _planned_repeat_inventory([path], group)
-        if planned is None:
-            return None
-        for key, tasks in planned.items():
-            target = inventory.setdefault(key, {})
-            for task, repeats in tasks.items():
-                target[task] = sorted(set(target.get(task, [])) | set(repeats))
-    return inventory if materialized_fpaths else None
+    stamped = {
+        population(row) for row in planned + routing_rows if row.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME) is not None
+    }
+    unknown = {
+        population(row)
+        for row in planned
+        if row.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME) is None and population(row) in stamped
+    }
+    inventory = {}
+    known_rows = []
+    for row in planned:
+        current = population(row)
+        if row.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME) is None and current in unknown:
+            continue  # Unknown executions are not measurements and cannot complete this population's inventory.
+        key = rollout_run_key(row)
+        if key is None:
+            return _AggregationPlan(None, [], set())
+        group = (key, current[1])
+        inventory.setdefault(group, {}).setdefault(row[TASK_INDEX_KEY_NAME], set()).add(row[ROLLOUT_INDEX_KEY_NAME])
+        known_rows.append(row)
+    return _AggregationPlan(
+        {group: {task: sorted(indices) for task, indices in tasks.items()} for group, tasks in inventory.items()},
+        known_rows,
+        unknown,
+    )
 
 
 async def _call_aggregate_metrics(
@@ -1227,7 +1289,7 @@ async def _call_aggregate_metrics(
     Writes a single _aggregate_metrics.json with one entry per agent (same shape
     as the old _agent_metrics.json). Returns the file path.
     """
-    if not results:
+    if not results and not materialized_fpaths:
         return None
 
     server_client = setup_server_client()
@@ -1236,17 +1298,49 @@ async def _call_aggregate_metrics(
     # for /verify (_rs_for_row: task_source authoritative, agent_ref via config edges as the
     # fallback). Routing aggregation independently by the agent's configured server allowed a
     # remapped row to be verified by one server and aggregated by another.
-    agent_results: Dict[Tuple[str, str], List[Dict]] = {}
-    labels = rollout_run_labels(rows)
-    inventory = await asyncio.to_thread(
-        _reverification_repeat_inventory,
-        materialized_fpaths or [],
-        identity_sources,
-        results,
-        agent_to_rs,
-        server_client.global_config_dict,
+    stamps, _ = _source_identity_stamps(identity_sources)
+    replay_source = (
+        _replay_source(RolloutStore.read(identity_sources[0], import_legacy=False)) if identity_sources else None
     )
-    for row, result in zip(rows, results):
+    routing_rows = [
+        _canonical_aggregate_row(
+            {
+                key: result[key]
+                for key in (TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, ROLLOUT_ID_KEY_NAME)
+                if key in result
+            }
+            | row,
+            stamps,
+            replay_source,
+        )
+        for row, result in zip(rows, results)
+    ]
+    plan = await asyncio.to_thread(
+        _aggregation_plan,
+        materialized_fpaths or [],
+        stamps=stamps,
+        replay_source=replay_source,
+        routing_rows=routing_rows,
+        agent_to_rs=agent_to_rs,
+        global_config=server_client.global_config_dict,
+    )
+    labels = rollout_run_labels(routing_rows + plan.rows)
+    agent_results: Dict[Tuple[str, str], List[Dict]] = {}
+    unknown_groups = set()
+    for row in plan.rows + routing_rows:
+        key = rollout_run_key(row)
+        if key is not None:
+            group = (labels[key], _rs_for_row(row, agent_to_rs, server_client.global_config_dict))
+            if ((row.get(AGENT_REF_KEY_NAME) or {}).get("name"), group[1]) in plan.unknown:
+                unknown_groups.add(group)
+    inventory = (
+        {(labels[key], rs): tasks for (key, rs), tasks in plan.inventory.items()}
+        if plan.inventory is not None
+        else None
+    )
+    if inventory is not None:
+        agent_results.update({group: [] for group in inventory})
+    for row, result in zip(routing_rows, results):
         key = rollout_run_key(row)
         if not key:
             continue
@@ -1272,13 +1366,9 @@ async def _call_aggregate_metrics(
                 entry["response"] = response_metadata
             stripped.append(entry)
 
-        run_keys = {rollout_run_key(row) for row in rows if labels.get(rollout_run_key(row)) == agent_name}
         expected = None
-        if inventory is not None:
-            expected = {}
-            for run_key in run_keys:
-                for task, indices in inventory.get((run_key, rs_name), {}).items():
-                    expected[task] = sorted(set(expected.get(task, [])) | set(indices))
+        if inventory is not None and (agent_name, rs_name) not in unknown_groups:
+            expected = inventory.get((agent_name, rs_name), {})
         agg_request = AggregateMetricsRequest(verify_responses=stripped, expected_rollout_indices=expected)
         agg_response = await server_client.post(
             server_name=rs_name,
@@ -2230,7 +2320,7 @@ class RolloutReverificationHelper(BaseModel):
                 results,
                 agg_rows,
                 output_fpaths.output,
-                materialized_fpaths=[Path(config.materialized_inputs_jsonl_fpath)],
+                materialized_fpaths=[materialized_inputs_jsonl_fpath],
                 identity_sources=identity_sources,
             )
 
