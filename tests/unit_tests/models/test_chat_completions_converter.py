@@ -145,7 +145,7 @@ def test_chat_completion_usage_to_response_usage():
     # The provider total is kept as reported, not recomputed from prompt + completion.
     assert usage.model_dump() == {
         "input_tokens": 300,
-        "input_tokens_details": {"cached_tokens": 100},
+        "input_tokens_details": {"cached_tokens": 100, "cache_write_tokens": None},
         "output_tokens": 1400,
         "output_tokens_details": {"reasoning_tokens": 1200},
         "total_tokens": 1701,
@@ -159,6 +159,17 @@ def test_usage_detail_prefers_nested_details_in_mappings():
     }
 
     assert _usage_detail(usage, "prompt_tokens_details", "cached_tokens", "cached_input_tokens") == 5
+
+
+@pytest.mark.parametrize("count", [None, 0, 7])
+def test_chat_cache_write_usage_preserves_reported_counts(count: int | None) -> None:
+    details = {} if count is None else {"cache_write_tokens": count}
+    usage = CompletionUsage(prompt_tokens=11, completion_tokens=3, total_tokens=99, prompt_tokens_details=details)
+
+    converted = chat_completion_usage_to_response_usage(usage)
+
+    assert converted.input_tokens_details.cache_write_tokens == count
+    assert (converted.input_tokens, converted.output_tokens, converted.total_tokens) == (11, 3, 99)
 
 
 # ===========================================================================
