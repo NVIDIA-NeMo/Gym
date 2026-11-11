@@ -45,8 +45,12 @@ def mock_listing(monkeypatch, jobs, files):
 
 
 def test_partial_retry_retains_successful_job_evidence_and_uses_rerun_failure(tmp_path, monkeypatch):
-    files = [evidence("pi", 1), evidence("hermes", 1), evidence("hermes", 2, minute=35)]
-    mock_listing(monkeypatch, [job("pi"), job("hermes", start=30, end=40)], files)
+    files = [evidence("pi", 1), evidence("hermes", 1), evidence("hermes", 2, minute=35), evidence("codex", 1)]
+    mock_listing(monkeypatch, [job("pi"), job("hermes", start=30, end=40), job("codex", start=30, end=40)], files)
+    # Codex reran without an upload; neither its old artifact nor local result is valid.
+    stale = tmp_path / "codex" / checks.RESULT_FILE
+    stale.parent.mkdir(parents=True)
+    stale.write_text(json.dumps({"harness": "codex", "sha": "sha", "status": "passed"}))
     downloaded = []
 
     def download(command, **kwargs):
@@ -54,19 +58,12 @@ def test_partial_retry_retains_successful_job_evidence_and_uses_rerun_failure(tm
         downloaded.append(name)
         path = tmp_path / ("pi" if "-pi-" in name else "hermes") / "probes" / "ci-result.json"
         path.parent.mkdir(parents=True)
-        path.write_text(
-            json.dumps(
-                {
-                    "harness": path.parent.parent.name,
-                    "sha": "sha",
-                    "status": "passed" if name.endswith("-1") else "failed",
-                }
-            )
-        )
+        status = "passed" if name.endswith("-1") else "failed"
+        path.write_text(json.dumps({"harness": path.parent.parent.name, "sha": "sha", "status": status}))
 
     monkeypatch.setattr(artifacts.subprocess, "run", download)
     artifacts.download_artifacts(
-        ["pi", "hermes"],
+        ["pi", "hermes", "codex"],
         artifact_prefix=checks.ARTIFACT_PREFIX,
         job_names=checks.JOB_NAMES,
         repo="example/Gym",
@@ -76,8 +73,9 @@ def test_partial_retry_retains_successful_job_evidence_and_uses_rerun_failure(tm
         result_file=checks.RESULT_FILE,
     )
     assert downloaded == [files[0]["name"], files[2]["name"]]
-    result = checks.p0_check(["pi", "hermes"], artifacts=tmp_path, sha="sha")
-    assert result["output"]["title"] == "1 passed, 1 failed, 0 unavailable"
+    assert not stale.exists()
+    result = checks.p0_check(["pi", "hermes", "codex"], artifacts=tmp_path, sha="sha")
+    assert result["output"]["title"] == "1 passed, 1 failed, 1 unavailable"
 
 
 def test_failed_download_invalidates_partial_result_and_continues(tmp_path, monkeypatch):
@@ -110,7 +108,6 @@ def test_failed_download_invalidates_partial_result_and_continues(tmp_path, monk
 @pytest.mark.parametrize(
     "jobs,files",
     [
-        ([job("pi", start=30, end=40)], [evidence("pi", 1)]),  # Rerun lost its upload.
         ([job("pi")], [evidence("pi", 3)]),  # A newer attempt must not affect this report.
         ([job("pi")], [evidence("pi", 1, expired=True)]),
         ([job("pi", status="in_progress")], [evidence("pi", 2)]),
@@ -118,26 +115,16 @@ def test_failed_download_invalidates_partial_result_and_continues(tmp_path, monk
         ([], [evidence("pi", 1)]),
     ],
 )
-def test_unmatched_evidence_never_reuses_an_older_local_result(tmp_path, monkeypatch, jobs, files):
-    mock_listing(monkeypatch, jobs, files)
-    stale = tmp_path / "pi" / "probes" / "ci-result.json"
-    stale.parent.mkdir(parents=True)
-    stale.write_text(json.dumps({"harness": "pi", "sha": "sha", "status": "passed"}))
-    monkeypatch.setattr(artifacts.subprocess, "run", lambda *a, **kw: pytest.fail("must not download stale evidence"))
+def test_job_artifact_rejects_ineligible_evidence(jobs, files):
     assert (
-        artifacts.download_artifacts(
-            ["pi"],
+        artifacts._job_artifact(
+            "pi",
+            "pi conformance probes",
+            jobs,
+            files,
             artifact_prefix=checks.ARTIFACT_PREFIX,
-            job_names=checks.JOB_NAMES,
-            repo="example/Gym",
             run_id="12",
             attempt="2",
-            output=tmp_path,
-            result_file=checks.RESULT_FILE,
         )
-        == {}
-    )
-    assert (
-        checks.p0_check(["pi"], artifacts=tmp_path, sha="sha")["output"]["title"]
-        == "0 passed, 0 failed, 1 unavailable"
+        is None
     )
