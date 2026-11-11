@@ -10,12 +10,20 @@ owned sandbox; this does not qualify a remote sandbox provider.
 
 import os
 import pwd
-from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Iterator, Mapping
+from contextlib import ExitStack, asynccontextmanager, contextmanager
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
-from nemo_gym.sandbox import LocalProvider, SandboxHandle, get_provider_class, register_provider
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    LocalProvider,
+    SandboxHandle,
+    SandboxSpec,
+    get_provider_class,
+    register_provider,
+)
 
 
 class ProbeLocalProvider(LocalProvider):
@@ -57,3 +65,38 @@ def borrowable_local_provider() -> Iterator[None]:
         yield
     finally:
         register_provider("local", previous, override=True)
+
+
+@asynccontextmanager
+async def prepare_sandbox(directory: Path, settings: Mapping[str, Any]) -> AsyncIterator[dict | None]:
+    """Prepare a borrowable workspace when requested, and own its complete lifetime."""
+    if not settings["requires_sandbox"]:
+        yield None
+        return
+    with ExitStack() as stack:
+        stack.enter_context(borrowable_local_provider())
+        env = {}
+        if settings["requires_tmux"]:
+            # tmux socket paths must be short and unique across episodes.
+            env["TMUX_TMPDIR"] = stack.enter_context(TemporaryDirectory(prefix="gym-probe-tmux-"))
+        sandbox = AsyncSandbox(ProbeLocalProvider(concurrency=1))
+        workspace = str(directory / "workspace")
+        await sandbox.start(SandboxSpec(workdir=workspace, env=env))
+        try:
+            yield {
+                "connection": {
+                    "kind": "direct",
+                    "provider_config_ref": "probe_sandbox",
+                    "descriptor": await sandbox.serialize(),
+                },
+                "workdir": workspace,
+            }
+        finally:
+            try:
+                if settings["requires_tmux"]:
+                    result = await sandbox.exec("tmux kill-server", timeout_s=5)
+                    # Exit 1 also means setup never started this episode's server.
+                    if result.error_type is not None or result.return_code not in (0, 1):
+                        raise RuntimeError(f"Could not close conformance terminal: {result.stderr}")
+            finally:
+                await sandbox.stop()
