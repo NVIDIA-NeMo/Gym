@@ -2576,6 +2576,15 @@ def test_assistant_message_plugin_hooks() -> None:
     )
 
 
+@mark.skipif(shutil.which("node") is None, reason="Node.js is needed to exercise the OpenCode plugin tools")
+def test_web_guard_bash_tool() -> None:
+    subprocess.run(
+        [shutil.which("node"), "--test", str(Path(__file__).with_name("web_guard_bash.test.mjs"))],
+        check=True,
+        timeout=60,
+    )
+
+
 def test_an_unreadable_part_leaves_tool_timing_unknown(tmp_path: Path) -> None:
     """The part may have been a tool call, so the tool history read is not complete."""
     from responses_api_agents.opencode_sandboxed_agent.app import parse_opencode_observations

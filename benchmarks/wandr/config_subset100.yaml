@@ -1,0 +1,16 @@
+# WANDR on a fixed 100-task subset (benchmarks/wandr/subset100.txt), for cheaper regular evaluations.
+# Grading costs GPT-5.4 calls for every cited page, so the full 500 tasks are for selected checkpoints only.
+# prepare_subset100.py runs the full prepare (which writes both files) and returns the subset file, as Gym requires;
+# the subset rows are the full rows of these tasks, in benchmark order.
+config_paths:
+- benchmarks/wandr/config.yaml
+
+wandr_resources_server:
+  resources_servers:
+    wandr:
+      datasets:
+      - name: wandr
+        type: benchmark
+        jsonl_fpath: benchmarks/wandr/data/wandr_benchmark_subset100.jsonl
+        prepare_script: benchmarks/wandr/prepare_subset100.py
+        num_repeats: 1

@@ -1,0 +1,58 @@
+wandr_resources_server:
+  resources_servers:
+    wandr:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: WANDR wide-and-deep web research, scored by WANDR's evidence-checking verifier
+      value: Evaluate high-volume web research whose records are verified against their cited pages
+      # The verifier's GPT-5.4 judge on the NVIDIA inference API (and the agent's search with search_backend perplexity).
+      inference_api_key: ${oc.select:inference_api_key,null}
+      reward_metric: soft_f1_full
+      # Each takes exa or perplexity (the verifier also takes direct); exa needs exa_api_key, the verifier's
+      # perplexity fetch needs perplexity_api_key on a Perplexity org with zero data retention off.
+      search_backend: exa
+      verifier_fetch_backend: exa
+      exa_api_key: ${oc.select:exa_api_key,null}
+      perplexity_api_key: ${oc.select:perplexity_api_key,null}
+      # Upstream configs/wandr.yaml verifier settings at ccb0baeb96f1c77a48e47f92122c57479ee99700.
+      verifier_env:
+        WANDR_HEAL_RETRIES: "9"
+        WANDR_HEAL_MIN_COVERAGE: "0.90"
+        WANDR_SUBMISSION_CONCURRENCY: "8"
+        WANDR_DNS_CONCURRENCY: "16"
+        WANDR_FETCH_CONCURRENCY: "16"
+        WANDR_FETCH_BATCH_SIZE: "16"
+        WANDR_FETCH_CLIENT_LOAD: "16"
+        WANDR_TRIAGE_CONCURRENCY: "16"
+        WANDR_TRIAGE_CLIENT_LOAD: "8"
+        WANDR_CANON_CONCURRENCY: "8"
+        WANDR_CANON_CLIENT_LOAD: "8"
+        WANDR_DEDUP_CONCURRENCY: "3"
+        WANDR_DEDUP_CLIENT_LOAD: "3"
+        WANDR_JUDGE_CONCURRENCY: "16"
+        WANDR_JUDGE_CLIENT_LOAD: "8"
+
+wandr_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 400
+      resources_server:
+        type: resources_servers
+        name: wandr_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/wandr/data/example.jsonl
+
+wandr_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: wandr_simple_agent

@@ -1,0 +1,39 @@
+name: wandr
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: agent
+description: WANDR (Wide ANd Deep Research), 500 high-volume web research tasks whose records WANDR's own verifier
+  checks against the cited pages with a GPT-5.4 judge; reward is soft F1 under the full verdict.
+modality: text
+licensing: Apache-2.0
+authors:
+- Vitaliy Polshkov
+- Marcin Pitera
+- Jeremy Yang
+- Kirill Priemko
+- Maksim Gaiduk
+- Aleksandr Nikolenko
+- Denis Bykov
+- Clare Southern
+- Denis Yarats
+- Jerry Ma
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: wandr
+agent_server: simple_agent
+datasets:
+- name: wandr
+  type: benchmark
+  jsonl_fpath: benchmarks/wandr/data/wandr_benchmark.jsonl
+  prepare_script: benchmarks/wandr/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: test
+prompt_source: prepared
+lifecycle: active

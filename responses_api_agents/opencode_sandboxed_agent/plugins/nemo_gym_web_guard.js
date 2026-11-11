@@ -26,6 +26,9 @@
 // Unset OPENCODE_WEBSEARCH_EXCLUDE_DOMAINS makes concern 2 a no-op. The contamination guard is
 // on unless NEMO_GYM_CONTAMINATION_GUARD=0, so that "off" is always a deliberate, logged arm.
 
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+
 const PLUGIN = "[nemo-gym-plugin]";
 const EMPTY_RESULT = "No results returned"; // neutral: never says why something was dropped
 
@@ -417,13 +420,75 @@ async function exaRestSearch(query, numResults, maxCharacters, type, livecrawl, 
 // output on disk -- a guard that looks like it works and does not. A plugin tool is truncated
 // AFTER our execute returns, so filtering here happens pre-truncation and there is no second copy.
 //
-// Execution goes through the plugin API's BunShell ($), which is why this is possible at all
-// without touching the binary.
+// The command runs in bash ($SHELL, else /bin/bash, else /bin/sh) like stock, not in `sh`, which is
+// dash on Debian images. It gets its own process group, so the timeout and an abort kill the whole
+// pipeline, background children included.
 const BASH_DEFAULT_TIMEOUT_MS = 60_000;
 const BASH_MAX_TIMEOUT_MS = 10 * 60 * 1_000; // stock MAX_TIMEOUT_MS
 const BASH_MAX_CAPTURE = 1024 * 1024; // stock MAX_CAPTURE_BYTES
 
-export default async function nemoGymWebGuard({ $ }) {
+function bashShell() {
+  const shell = (process.env.SHELL || "").trim();
+  if (shell && !/(^|\/)(fish|nu)$/.test(shell) && existsSync(shell)) return shell;
+  return existsSync("/bin/bash") ? "/bin/bash" : "/bin/sh";
+}
+
+function runBash(cmd, { cwd, timeoutMs, abort }) {
+  return new Promise((resolve) => {
+    let out = "";
+    let ended = "";
+    let child;
+    const finish = (text) => {
+      clearTimeout(timer);
+      if (abort) abort.removeEventListener("abort", onAbort);
+      resolve(text);
+    };
+    const stop = (reason) => {
+      if (ended) return;
+      ended = reason;
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch {
+        // The group already exited.
+      }
+      // Resolve now: a process that left the group could hold the pipes open forever.
+      child.stdout.destroy();
+      child.stderr.destroy();
+      finish(out + "\n\n(" + reason + ")");
+    };
+    const onAbort = () => stop("Command aborted and killed");
+    const timer = setTimeout(() => stop("Command timed out after " + timeoutMs + " ms and was killed"), timeoutMs);
+    try {
+      child = spawn(bashShell(), ["-c", cmd], { cwd, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (e) {
+      finish("Command failed: " + (e && e.message ? e.message : String(e)));
+      return;
+    }
+    const collect = (chunk) => {
+      if (out.length < BASH_MAX_CAPTURE) out = (out + chunk).slice(0, BASH_MAX_CAPTURE);
+    };
+    child.stdout.setEncoding("utf8").on("data", collect);
+    child.stderr.setEncoding("utf8").on("data", collect);
+    child.on("error", (e) => {
+      if (!ended) {
+        ended = "error";
+        finish("Command failed: " + (e && e.message ? e.message : String(e)));
+      }
+    });
+    child.on("close", () => {
+      if (!ended) {
+        ended = "close";
+        finish(out);
+      }
+    });
+    if (abort) {
+      if (abort.aborted) onAbort();
+      else abort.addEventListener("abort", onAbort);
+    }
+  });
+}
+
+export default async function nemoGymWebGuard() {
   process.stderr.write(
     PLUGIN +
       " web_guard version=2 contamination=" +
@@ -574,18 +639,13 @@ export default async function nemoGymWebGuard({ $ }) {
                 }
 
                 const timeout = Math.min(Number(args.timeout) || BASH_DEFAULT_TIMEOUT_MS, BASH_MAX_TIMEOUT_MS);
-                let out = "";
-                try {
-                  // `.nothrow()` so a non-zero exit returns its output rather than raising: a
-                  // failing command's stderr is exactly what the model needs to see.
-                  let sh = $`sh -c ${cmd}`.nothrow().quiet();
-                  if (args.workdir) sh = sh.cwd(String(args.workdir));
-                  const res = await sh;
-                  out = (res.stdout ? res.stdout.toString() : "") + (res.stderr ? res.stderr.toString() : "");
-                } catch (e) {
-                  return "Command failed: " + (e && e.message ? e.message : String(e));
-                }
-                if (out.length > BASH_MAX_CAPTURE) out = out.slice(0, BASH_MAX_CAPTURE);
+                // A non-zero exit still returns its output: a failing command's stderr is exactly
+                // what the model needs to see.
+                const out = await runBash(cmd, {
+                  cwd: args.workdir ? String(args.workdir) : undefined,
+                  timeoutMs: timeout,
+                  abort: ctx && ctx.abort,
+                });
 
                 // Whole-output contamination check, as webfetch gets. Not per-record: bash output
                 // has no record structure to split on, so a single marker blanks the result.

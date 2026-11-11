@@ -254,6 +254,14 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
             "items when echoed back across tool-use turns."
         ),
     )
+    drop_max_tokens: bool = Field(
+        default=False,
+        description=(
+            "Remove max_tokens and max_completion_tokens from Chat Completions requests before the upstream "
+            "call, so the provider applies its own output limit. For harnesses that always send a limit above "
+            "the provider's maximum (e.g. OpenCode sends its context window), which the provider rejects."
+        ),
+    )
 
 
 class SimpleModelServer(SimpleResponsesAPIModel):
@@ -419,6 +427,9 @@ class SimpleModelServer(SimpleResponsesAPIModel):
     ) -> NeMoGymChatCompletion:
         body_dict = self.config.extra_body | body.model_dump(exclude_unset=True)
         body_dict["model"] = self.config.openai_model
+        if self.config.drop_max_tokens:
+            body_dict.pop("max_tokens", None)
+            body_dict.pop("max_completion_tokens", None)
 
         async def create_and_validate() -> NeMoGymChatCompletion:
             response_dict = await self._client.create_chat_completion(**body_dict)

@@ -1,0 +1,15 @@
+# WANDR with the OpenCode harness on the fixed 100-task subset (benchmarks/wandr/subset100.txt).
+# Everything else is wandr_opencode.yaml; only the task file differs.
+config_paths:
+- benchmarks/wandr/configs/wandr_opencode.yaml
+
+wandr_resources_server:
+  resources_servers:
+    wandr:
+      datasets:
+      - name: wandr
+        type: benchmark
+        jsonl_fpath: benchmarks/wandr/data/wandr_benchmark_subset100.jsonl
+        prepare_script: benchmarks/wandr/prepare_subset100.py
+        num_repeats: 1
+        agent: opencode_sandboxed_search_agent

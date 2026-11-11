@@ -1,0 +1,13 @@
+-e nemo-gym[dev] @ ../..
+# Agent page reading and the verifier's direct page fetch.
+trafilatura>=2.0.0
+pypdf>=5.0.0
+# Runtime of the pinned upstream verifier (wandr_core/pyproject.toml at ccb0baeb96f1c77a48e47f92122c57479ee99700),
+# without camoufox: its browser fallback stays off and run_verifier.py stubs the import.
+jinja2>=3.1.0
+openai>=1.90.0
+orjson>=3.10.0
+perplexityai>=0.40.0,<0.41
+pydantic>=2.10.0
+rapidfuzz>=3.9.0
+tqdm>=4.66.0

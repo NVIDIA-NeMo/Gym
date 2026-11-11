@@ -27,7 +27,7 @@ from asyncio import Semaphore
 from contextlib import nullcontext
 from copy import deepcopy
 from functools import cache
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from random import uniform
 from shlex import quote
 from tempfile import TemporaryDirectory
@@ -570,6 +570,9 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     execution_failure_reward_zero: bool = False
     # Opt-in mode gives setup and agent execution separate sandbox_timeout budgets.
     report_agent_sandbox_oom: bool = False
+    # For file-output tasks (e.g. WANDR): before verify, read the row's `required_output_files` from
+    # sandbox_config.workdir and send them to /verify as `output_files` (file name -> text).
+    collect_output_files: bool = False
     output_token_policy: Literal["fixed", "remaining_context"] = "fixed"
     network_access: Literal["inherit", "model_only", "model_and_tools"] = "inherit"
     tool_servers: List[ResourcesServerRef] = Field(default_factory=list)
@@ -625,6 +628,28 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
 class OpenCodeSandboxedAgentRunRequest(BaseRunRequest):
     # Allow for benchmark params to propagate properly
     model_config = ConfigDict(extra="allow")
+
+
+async def collect_output_files(sandbox: AsyncSandbox, workdir: str, names: List[str]) -> Dict[str, str]:
+    """Read the named files from the sandbox workdir. A file the run did not write is left out.
+
+    A name outside the workdir is skipped. A download of an existing file that fails raises, so an
+    infrastructure error is not scored as a missing file.
+    """
+    files: Dict[str, str] = {}
+    with TemporaryDirectory() as tmp:
+        for index, name in enumerate(names):
+            relative = PurePosixPath(name)
+            if relative.is_absolute() or ".." in relative.parts:
+                continue
+            remote = str(PurePosixPath(workdir) / relative)
+            exists = await sandbox.exec(f"test -f {quote(remote)}", timeout_s=60)
+            if exists.return_code != 0:
+                continue
+            local = Path(tmp) / str(index)
+            await sandbox.download(remote, local)
+            files[name] = local.read_text(encoding="utf-8", errors="replace")
+    return files
 
 
 def _build_remote_opencode_install_command(
@@ -1931,6 +1956,13 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     operation="opencode.capture",
                     failure_reason="OpenCode export unavailable; refusing to verify an uncaptured agent response",
                 )
+            if self.config.collect_output_files:
+                output_files = await collect_output_files(
+                    sandbox,
+                    self.config.sandbox_config["workdir"],
+                    list((body.model_extra or {}).get("required_output_files", [])),
+                )
+                verify_body = verify_body.model_copy(update={"output_files": output_files})
             response_dict = await verify_agent_response(
                 self.server_client,
                 self.config.resources_server,

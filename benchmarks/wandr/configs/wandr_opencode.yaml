@@ -1,0 +1,80 @@
+# WANDR with the OpenCode harness (opencode_sandboxed_agent with the search settings of
+# opencode_sandboxed_search_agent.yaml) in OpenSandbox. Any policy model; add its model-server config.
+#
+# The model works in a sandbox: OpenCode's own Exa websearch and webfetch, bash and file tools, and OpenCode's
+# default compaction. It writes the task's JSONL files into /workspace with code, as the vendor systems in the
+# paper do. Before verify, the agent reads the row's required_output_files from /workspace and sends them as
+# output_files; the WANDR verifier scores them as written.
+#
+# OpenSandbox enforces the pod's resources and lifetime: a task that runs out of memory fails alone, and at the
+# task time limit the agent still collects and scores the files written so far.
+#   gym eval run --config benchmarks/wandr/configs/wandr_opencode.yaml --split benchmark \
+#       --config <model-server config> ...
+# For the 100-task subset, use configs/wandr_opencode_subset100.yaml instead.
+config_paths:
+- responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_search_agent.yaml
+- nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+- benchmarks/wandr/config.yaml
+
+# The benchmark config's simple_agent is not used here.
+wandr_simple_agent: null
+wandr_environment_server: null
+
+# The sandboxes call Gym's model server and resources server from outside this node.
+use_absolute_ip: true
+
+# Worst-case score: a rollout whose agent broke, or that left no row at all, counts as 0. Compute the
+# completed-only score from the rollouts JSONL and report both.
+route_failures_to_sidecar: true
+count_failure_classes_as_zero: [agent_run_error]
+count_missing_rollouts_as_zero: true
+
+opencode_sandboxed_search_agent:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      resources_server:
+        type: resources_servers
+        name: wandr_resources_server
+      collect_output_files: true
+      # Upstream gives each task 16 h.
+      sandbox_timeout: 57600
+      # The upstream task image is python:3.12 with /workspace as the work directory.
+      sandbox_config:
+        # TODO: use an image with requests, beautifulsoup4, lxml, pypdf, openpyxl, pdftotext, rg and a
+        # pre-installed OpenCode binary, so a task does not spend its time installing them.
+        image: python:3.12
+        workdir: /workspace
+        files:
+          /workspace/.keep: ""
+        # The pod must outlive the 16 h task limit and the file collection after it.
+        ttl_s: 61200
+        resources:
+          cpu: 2
+          memory_mib: 8192
+          disk_gib: 30
+        metadata:
+          benchmark: wandr
+          harness: opencode
+      opencode_env:
+        EXA_API_KEY: ${oc.select:exa_api_key,null}
+        # OpenCode's own bash, not the web guard's replacement: WANDR tasks fetch and process files with code.
+        NEMO_GYM_BASH_GUARD: "0"
+
+wandr_opencode_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: opencode_sandboxed_search_agent
+
+wandr_resources_server:
+  resources_servers:
+    wandr:
+      datasets:
+      - name: wandr
+        type: benchmark
+        jsonl_fpath: benchmarks/wandr/data/wandr_benchmark.jsonl
+        prepare_script: benchmarks/wandr/prepare.py
+        num_repeats: 1
+        agent: opencode_sandboxed_search_agent

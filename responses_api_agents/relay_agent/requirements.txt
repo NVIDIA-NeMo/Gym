@@ -1,0 +1,4 @@
+-e nemo-gym[dev] @ ../../
+# Relay, WANDR's harness for hosted endpoints, at the commit that the WANDR benchmark pins (Apache-2.0).
+relay @ git+https://github.com/perplexityai/wandr@ccb0baeb96f1c77a48e47f92122c57479ee99700#subdirectory=agents/relay
+openai>=2.0
