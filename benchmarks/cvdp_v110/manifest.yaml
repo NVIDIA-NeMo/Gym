@@ -6,7 +6,7 @@ integration_profile: custom-gym-verifier
 domain: coding
 description: CVDP v1.1.0 non-agentic RTL generation with sandbox verification
 modality: text
-licensing: other
+licensing: LicenseRef-CVDP-Upstream
 authors: [igitman]
 reward:
   range: [0.0, 1.0]

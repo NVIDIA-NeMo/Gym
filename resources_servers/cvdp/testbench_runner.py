@@ -29,8 +29,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import yaml
 
-from nemo_gym.core.failure_kinds import PROVIDER_OOM_KILLED, PROVIDER_UNAVAILABLE, VERIFIER_ERROR
-from nemo_gym.core.typed_exceptions import NgFailureEvent
+from nemo_gym.core import PROVIDER_OOM_KILLED, PROVIDER_UNAVAILABLE, VERIFIER_ERROR, NgFailureEvent
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxCreateError,
@@ -413,6 +412,8 @@ class TestbenchRunner:
                         harness_files,
                     )
                     service_results.append({"service": service, "exit_code": exit_code, "stderr": output})
+                    if exit_code != 0:
+                        break
             finally:
                 archive_path.unlink(missing_ok=True)
                 archive_path.with_name(f"{archive_path.name}.next").unlink(missing_ok=True)
@@ -573,6 +574,9 @@ class TestbenchRunner:
                     raise CVDPInfrastructureError(
                         f"sandbox exec failed for service '{service}' ({result.error_type}): {result.stderr or ''}"
                     )
+
+                if result.return_code != 0:
+                    return result.return_code, (result.stderr or "") + (result.stdout or "")
 
                 snapshot = await sandbox.exec(
                     f"tar -czf {shlex.quote(output_archive)} -C {shlex.quote(workspace)} .",

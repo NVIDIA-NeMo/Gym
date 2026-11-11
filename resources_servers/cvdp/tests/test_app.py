@@ -22,8 +22,7 @@ import pytest
 import yaml
 
 from nemo_gym.client import ServerClient
-from nemo_gym.core.failure_kinds import PROVIDER_OOM_KILLED, PROVIDER_UNAVAILABLE, VERIFIER_ERROR
-from nemo_gym.core.typed_exceptions import NgFailureEvent
+from nemo_gym.core import PROVIDER_OOM_KILLED, PROVIDER_UNAVAILABLE, VERIFIER_ERROR, NgFailureEvent
 from nemo_gym.sandbox import SandboxCreateError, SandboxExecResult
 from resources_servers.cvdp.app import (
     CVDPResourcesServer,
@@ -987,3 +986,68 @@ class TestRunServiceProvider:
         exit_code, _ = await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
         assert exit_code == 0
         assert fake.created[0].provider_options == {}
+
+
+class TestDefinitiveFailure:
+    setup_method = TestRunServiceProvider.setup_method
+    _run = TestRunServiceProvider._run
+
+    @pytest.mark.asyncio
+    async def test_failed_execution_never_snapshots(self, tmp_path):
+        fake = _FakeProvider(
+            SandboxExecResult(stdout="failed test", stderr="assertion", return_code=1),
+            snapshot_result=SandboxExecResult(stdout="", stderr="disk full", return_code=1),
+        )
+        code, output = await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
+        assert code == 1 and output == "assertionfailed test"
+        assert len(fake.execs) == 2 and not fake.downloads
+        assert len(fake.closed) == 1
+
+    @pytest.mark.asyncio
+    async def test_failed_service_stops_before_later_infrastructure_error(self):
+        body = _make_body(output_text=f"```systemverilog\n{SAMPLE_RTL}\n```")
+        body["verifier_metadata"]["harness_files"]["docker-compose.yml"] = (
+            "services:\n  first:\n    image: example\n  second:\n    image: example\n"
+        )
+        with patch.object(self.server._harness, "_run_service", new_callable=AsyncMock) as run:
+            run.side_effect = [(1, "assertion failed"), CVDPInfrastructureError("later outage")]
+            result = await self.server.verify(_make_request(body))
+        assert result.reward == 0 and result.evaluation_completed and not result.mask_sample
+        assert run.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_successful_services_transfer_updated_workspace(tmp_path):
+    import tarfile
+
+    class UpdatingProvider(_FakeProvider):
+        async def upload_file(self, handle, source_path, target_path):
+            if self.uploads:
+                with tarfile.open(source_path) as archive:
+                    assert archive.extractfile("./first-service.txt").read() == b"saved state"
+            await super().upload_file(handle, source_path, target_path)
+
+        async def download_file(self, handle, source_path, target_path):
+            import io
+
+            await super().download_file(handle, source_path, target_path)
+            with tarfile.open(self._uploaded_archive) as original, tarfile.open(target_path, "w:gz") as updated:
+                for member in original.getmembers():
+                    updated.addfile(member, original.extractfile(member) if member.isfile() else None)
+                if not any(member.name == "./first-service.txt" for member in original.getmembers()):
+                    marker = tarfile.TarInfo("./first-service.txt")
+                    marker.size = len(b"saved state")
+                    updated.addfile(marker, io.BytesIO(b"saved state"))
+
+    server = _make_server()
+    fake = UpdatingProvider(SandboxExecResult(stdout="passed", stderr="", return_code=0))
+    server._harness._sandbox_provider = fake
+    code, _, services = await server._harness.run(
+        rtl_files={"rtl/design.sv": SAMPLE_RTL},
+        harness_files={
+            "docker-compose.yml": "services:\n  first:\n    image: example\n    command: echo first\n  second:\n    image: example\n    command: echo second\n"
+        },
+        task_id="workspace-transfer",
+    )
+    assert code == 0 and [service["exit_code"] for service in services] == [0, 0]
+    assert len(fake.uploads) == len(fake.downloads) == len(fake.closed) == 2

@@ -139,3 +139,31 @@ def test_cached_data_requires_the_pinned_output_checksum(tmp_path, monkeypatch):
     assert benchmark_prepare.is_prepared_data_current(output)
     output.write_bytes(b"changed dataset")
     assert not benchmark_prepare.is_prepared_data_current(output)
+
+
+def test_prepared_ids_support_planning_and_selection(raw_task):
+    from nemo_gym.data.task_selection import select_tasks
+    from nemo_gym.eval.eval_plan import PlanBenchmark, PlanGym, build_eval_plan
+
+    rows = [benchmark_prepare.convert_task(raw_task | {"id": name}) for name in ["b", "a"]]
+    assert all(row["task_id"] == row["verifier_metadata"]["task_id"] for row in rows)
+    for ordered in [rows, rows[::-1]]:
+        plan = build_eval_plan(
+            ordered,
+            benchmark=PlanBenchmark(name="cvdp_v110", config_paths=[]),
+            taskset="cvdp_v110",
+            gym=PlanGym(version="test", commit="test"),
+        )
+        assert [task.task_id.task_id for task in plan.tasks] == ["a", "b"]
+        selected = select_tasks(ordered, ["a"])
+        assert [ordered[index]["task_id"] for index in selected] == ["a"]
+
+
+def test_recipe_manifest_retains_license_and_metadata():
+    from pathlib import Path
+
+    from nemo_gym.environment import load_manifest
+
+    manifest = load_manifest(Path(benchmark_prepare.__file__).with_name("manifest.yaml"))
+    assert manifest.licensing == "LicenseRef-CVDP-Upstream"
+    assert manifest.version == "0.1.0" and manifest.experimental

@@ -278,6 +278,10 @@ At the end of this step, you should have rollouts.jsonl, rollouts_agent_metrics.
 
 ### Step 3 — Generate report
 
+The report requires measured rollouts and rejects masked or explicitly incomplete
+verifications. Resolve inconclusive tasks before reporting; dropping them alone
+would let the composite reporter count missing samples as failures.
+
 ```bash
 python resources_servers/cvdp/scripts/cvdp_pass_at_k_report.py \
     --rollouts  results/rollouts.jsonl \

@@ -17,7 +17,7 @@ from resources_servers.cvdp.cvdp_lib.model_helpers import ModelHelpers
 DATASET_REVISION = "5b807d945f6a99aa645f7e43a64a2115e281b4bf"  # pragma: allowlist secret
 RAW_FILE = "cvdp_v1.1.0_nonagentic_code_generation_no_commercial.jsonl"
 RAW_SHA256 = "cbcd81295561ebb16e4d857e096f4d9908d042c33aff3b58abf236e868411857"  # pragma: allowlist secret
-OUTPUT_SHA256 = "e3fd80a5ce62ed66bc44e4e25adcf734ebb4c83c83eb512a7e360c6c9e70a175"  # pragma: allowlist secret
+OUTPUT_SHA256 = "3fa9800ad8696277abd7338be225a9388d35b9aa3e1b9e42b21989299735b36d"  # pragma: allowlist secret
 TASK_COUNT = 302
 _SUPPORTED_CATEGORIES = frozenset({"cid002", "cid003", "cid004", "cid007", "cid016"})
 _LINT_RULE = re.compile(r"\s*lint_off\s+-rule\s+(\w+)")
@@ -106,6 +106,7 @@ def convert_task(task: RawTask) -> dict[str, object]:
     if supplied_files:
         metadata["context_files"] = supplied_files
     return {
+        "task_id": task["id"],
         "responses_create_params": {
             "input": [
                 {"role": "system", "content": instructions},

@@ -26,7 +26,7 @@ sha256sum benchmarks/cvdp_v110/data/cvdp_v110.jsonl
 ```
 
 Expected output: 302 JSONL rows with SHA-256
-`e3fd80a5ce62ed66bc44e4e25adcf734ebb4c83c83eb512a7e360c6c9e70a175`.
+`3fa9800ad8696277abd7338be225a9388d35b9aa3e1b9e42b21989299735b36d`.
 The input is
 [`nvidia/cvdp-benchmark-dataset@5b807d94`](https://huggingface.co/datasets/nvidia/cvdp-benchmark-dataset/tree/5b807d945f6a99aa645f7e43a64a2115e281b4bf),
 file `cvdp_v1.1.0_nonagentic_code_generation_no_commercial.jsonl`, with SHA-256
@@ -42,7 +42,11 @@ python -m benchmarks.cvdp_v110.prepare --raw /path/to/cvdp_v1.1.0_nonagentic_cod
 `--output-dir /path/to/output` selects the destination. Set `HF_HOME` to control
 Hugging Face download/cache storage. The default output path is consumed by
 `gym eval prepare --benchmark cvdp_v110` and the benchmark configuration.
-The dataset repeat count is 32; set the rollout repeat count to 1.
+The dataset default is 32 samples per task. For end-to-end `gym eval run`, omit
+`--num-repeats` to retain that default, or set `--num-repeats 32` explicitly.
+Use `--num-repeats 1` for a one-sample-per-task smoke run. With `--no-serve`,
+use 32 collection repeats for the unexpanded preparation output, or one repeat
+for an input file that already contains 32 copies per task.
 
 ## Verification runtime
 
@@ -55,6 +59,15 @@ Configure `cvdp_sim_image`, `oss_pnr_image`, the prepared-image manifest and a
 supported sandbox provider. Publish prepared images to a registry reachable by
 that provider. See `resources_servers/cvdp/README.md` and
 `resources_servers/cvdp/prepare.py` for sandbox configuration and image preparation.
+Use the same simulator base images at preparation and runtime:
+
+```bash
+python -m resources_servers.cvdp.prepare benchmarks/cvdp_v110/data/cvdp_v110.jsonl \
+  --image-prefix <registry/repository> --manifest <prepared-images.json> \
+  --oss-sim-image <cvdp_sim_image> --oss-pnr-image <oss_pnr_image> \
+  --cocotb-bus-version 1.9.2 --push
+```
+
 Model serving, sampling and output budgets are operator-configured.
 
 The verifier retries an inconclusive infrastructure failure once on a fresh
