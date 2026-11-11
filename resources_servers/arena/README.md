@@ -7,8 +7,16 @@ Evaluate a model's chat capabilities on diverse conversational prompts. An LLM j
 | Benchmark | Prompts | Main differences |
 |---|---:|---|
 | `lmarena_v3` | 3,713 | Recommended. Exact human-battle opponents, equal verdict weights, `both bad` as a tie, reference-length style control. |
+| ↳ Subset of Super3.5's difficulty level | 2,328 | `config_super35_gemini38flash_judge.yaml`; Gemini 3.8 Flash judge. |
+| ↳ Subset of Nano3.5's difficulty level | 1,371 | `config_nano35_gemini38flash_judge.yaml`; Gemini 3.8 Flash judge. |
 | `lmarena_v2` | 1,475 | Legacy/deprecated. Synthetic baselines, strong verdict weight 3, `both bad` excluded, Bradley-Terry style control. |
 | `vision_arena_v1` | 486 | Fixed subset of 500 upstream prompts; 14 lack usable baseline answers. Multimodal judge, no style control. |
+
+Subset configs live in `benchmarks/lmarena_v3/`; use
+`config_super35_glm53_judge.yaml` or `config_nano35_glm53_judge.yaml` for GLM-5.3.
+
+Note, you can override the judge in your config or on the CLI with
+`++judge_model.responses_api_models.vllm_model.model=<judge-model-id>`.
 
 ## Setup
 
@@ -32,6 +40,8 @@ gym eval prepare --config benchmarks/lmarena_v3/config.yaml
 ```
 
 This creates `benchmarks/lmarena_v3/data/lmarena_v3_validation.jsonl` with 3,713 rows.
+
+For a subset, replace `config.yaml` with its config in both preparation and evaluation commands.
 
 ## Run the benchmark
 
@@ -79,7 +89,7 @@ Each JSONL row contains:
 
 | Metric | Meaning |
 |---|---|
-| `mean/reward` | Arithmetic mean of rewards returned by Arena verification; empty responses receive zero; a failed judge call returns a masked `judge_failed` response containing the existing answer, rather than a zero-valued game. `[[BB]]` is assigned a 0.5 reward. No bootstrap is applied. |
+| `mean/reward` | Arithmetic mean of rewards returned by Arena verification; empty responses receive zero; a failed judge call, or a judge game with no verdict (output cut at its token cap, filtered, empty or without a label), returns a masked `judge_failed` response containing the existing answer, rather than a zero-valued game. `[[BB]]` is assigned a 0.5 reward. No bootstrap is applied. |
 | `win_rate_no_SC` | Raw judge score computed from valid judgments, excluding failures. |
 | `win_rate` | Style-controlled win rate. |
 | `*_ci95_lower`, `*_ci95_upper` | Bootstrap 95% confidence interval, resampling individual judge games. |

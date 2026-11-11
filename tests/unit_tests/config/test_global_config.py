@@ -17,6 +17,7 @@ import importlib.metadata
 import sys
 from contextlib import nullcontext as does_not_raise
 from pathlib import Path
+from typing import Optional
 from unittest.mock import MagicMock, PropertyMock
 
 from omegaconf import DictConfig, OmegaConf
@@ -52,6 +53,7 @@ from nemo_gym.config.global_config import (
     DEFAULT_HEAD_SERVER_PORT,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     USE_ABSOLUTE_IP,
+    UV_CACHE_DIR_KEY_NAME,
     UV_LOCK_TIMEOUT_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
@@ -63,6 +65,13 @@ from nemo_gym.config.global_config import (
 )
 from nemo_gym.config.secret_utils import hide_secrets_in_overrides, recursively_hide_secrets
 from nemo_gym.rollouts.rollout_collection import _environment_servers_by_agent
+
+
+@fixture(autouse=True)
+def _no_exported_uv_cache_dir(monkeypatch: MonkeyPatch) -> None:
+    # An exported UV_CACHE_DIR (CI runners set one) takes precedence over the default
+    # cache_dir/uv, so the default-config expectations only hold without it.
+    monkeypatch.delenv("UV_CACHE_DIR", raising=False)
 
 
 class TestGlobalConfig:
@@ -199,6 +208,28 @@ class TestGlobalConfig:
 
         assert config[UV_LOCK_TIMEOUT_KEY_NAME] == expected
         assert nemo_gym.config.global_config.environ["UV_LOCK_TIMEOUT"] == str(expected)
+
+    @mark.parametrize(
+        ("exported", "configured", "expected"),
+        [
+            ("/warm/uv", {"uv_cache_dir": "/configured/uv"}, "/configured/uv"),  # the config key wins over the export
+            ("/warm/uv", {}, "/warm/uv"),  # an exported cache directory survives
+            (None, {}, str(Path("/local/cache") / "uv")),  # otherwise the default under the cache root
+        ],
+    )
+    def test_uv_cache_dir_precedence(
+        self, monkeypatch: MonkeyPatch, exported: Optional[str], configured: dict, expected: str
+    ) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+        monkeypatch.setattr(
+            nemo_gym.config.global_config, "environ", {} if exported is None else {"UV_CACHE_DIR": exported}
+        )
+        self._mock_parse_environment(monkeypatch, DictConfig({"cache_dir": "/local/cache", **configured}))
+
+        config = get_global_config_dict()
+
+        assert config[UV_CACHE_DIR_KEY_NAME] == expected
+        assert nemo_gym.config.global_config.environ["UV_CACHE_DIR"] == expected
 
     def test_null_uv_lock_timeout_leaves_the_environment_alone(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_versions_for_testing(monkeypatch)
@@ -3474,6 +3505,18 @@ class TestComposeUnboundAgent:
             "agent_server": {"type": "responses_api_agents", "name": f"gpqa_mcqa_{harness_type}"},
         }
 
+    def test_legacy_relay_keeps_the_servers_own_worker_settings(self) -> None:
+        config = self._session_environment_config("opencode_sandboxed_agent")
+        server = config["gpqa_mcqa_environment_server"]["environment_servers"]["single_agent_turn_legacy"]
+        server["num_workers"] = 4
+        server["uvicorn_reuse_port"] = True
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        relay = config["gpqa_mcqa_environment_server"]["environment_servers"]["legacy_agent"]
+        assert relay["num_workers"] == 4
+        assert relay["uvicorn_reuse_port"] is True
+
     @mark.parametrize("harness_type", ["hermes_agent", "opencode_agent", "pool_agent"])
     def test_swap_to_agent_with_sessions_keeps_single_agent_turn_legacy(self, harness_type: str) -> None:
         config = self._session_environment_config(harness_type)
@@ -3498,6 +3541,30 @@ class TestComposeUnboundAgent:
         }
 
         assert implementing == AGENT_SESSION_AGENT_TYPES
+
+    def test_langgraph_swap_keeps_unrelated_session_tool_grants(self) -> None:
+        config = self._session_environment_config("langgraph_agent")
+        config.langgraph_agent.responses_api_agents.langgraph_agent.resources_server = None
+        config["independent_agent"] = {
+            "responses_api_agents": {"hermes_agent": {"entrypoint": "app.py", "resources_server": None}}
+        }
+        config["independent_environment"] = {
+            "environment_servers": {
+                "single_agent_turn_legacy": {
+                    "agent_server": {"type": "responses_api_agents", "name": "independent_agent"},
+                    "resources_tool_transports": ["mcp"],
+                }
+            }
+        }
+        independent_before = OmegaConf.to_container(config.independent_environment)
+
+        GlobalConfigDictParser().compose_unbound_agent(config, selected_agent="langgraph_agent")
+
+        environment = config.gpqa_mcqa_environment_server.environment_servers.single_agent_turn_legacy
+        assert environment.agent_server.name == "gpqa_mcqa_langgraph_agent"
+        assert environment.resources_tool_transports == []
+        assert OmegaConf.to_container(config.independent_environment) == independent_before
+        assert config.independent_agent.responses_api_agents.hermes_agent.resources_server is None
 
     def _cli_dict(self, config: dict) -> DictConfig:
         """A command line dict as Hydra hands it over: struct, so an undeclared key is an error."""

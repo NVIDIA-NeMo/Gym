@@ -19,7 +19,7 @@ import asyncio
 import json
 import multiprocessing
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from omegaconf import OmegaConf
@@ -967,6 +967,8 @@ async def test_runner_reserves_before_request_and_resumes_only_failed_work(
     monkeypatch.setattr(RolloutCollectionHelper, "_call_aggregate_metrics", AsyncMock(return_value=None))
     monkeypatch.setattr(collection, "get_exporters", lambda: True)
     monkeypatch.setattr(collection, "export_metrics", lambda metrics, **kwargs: exported.append(metrics))
+    recorded = []
+    monkeypatch.setattr(collection, "record_run_summary", lambda summary, run_id: recorded.append((summary, run_id)))
 
     async def post(**kwargs):
         row = kwargs["json"]
@@ -1010,11 +1012,14 @@ async def test_runner_reserves_before_request_and_resumes_only_failed_work(
         "coverage/masked": 1,
         "coverage/unscored": 0,
         "coverage/failed": 1,
+        "coverage/failed_masked": 0,
         "coverage/omitted": 1,
         "coverage/not_started": 0,
         "coverage/missing_outcomes": 0,
+        "coverage/open": 2,
         "coverage/failure_budget_exhausted": 0,
     }
+    assert recorded == [(exported[-1], report["run_id"])]  # The same run summary goes to OTel.
     progress = [metrics for metrics in exported if "progress/total/rollouts_per_min" in metrics][-1]
     assert progress["progress/my_agent/masked_pct"] == 100.0
     assert progress["progress/my_agent/failed"] == 1
@@ -1049,6 +1054,53 @@ async def test_runner_reserves_before_request_and_resumes_only_failed_work(
     assert len(list(read_records(collection.failures_path_for(output)))) == 2
 
 
+async def test_run_summary_reaches_otel_without_an_experiment_tracker(runner_config, monkeypatch):
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+    from nemo_gym.telemetry import gym_metrics
+    from nemo_gym.telemetry import setup as telemetry_setup
+
+    reader = InMemoryMetricReader()
+    provider = MeterProvider(metric_readers=[reader])
+
+    class _Handle:
+        is_exporting = True
+        meter = provider.get_meter("run-summary-collection-test")
+
+    monkeypatch.setattr(telemetry_setup, "_TELEMETRY_HANDLE", _Handle())
+    monkeypatch.setattr(telemetry_setup, "_METRICS_EXPORTING", True)
+    gym_metrics._reset_for_testing()
+    runner_config.disable_aggregation = False
+    runner_config.upload_rollouts = False
+    monkeypatch.setattr(RolloutCollectionHelper, "_call_aggregate_metrics", AsyncMock(return_value=None))
+    monkeypatch.setattr(collection, "get_exporters", lambda: [])
+    export_metrics = MagicMock()
+    monkeypatch.setattr(collection, "export_metrics", export_metrics)
+    install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(200, {"reward": 1.0, "response": {}})))
+    try:
+        await RolloutCollectionHelper().run_from_config(runner_config)
+        data = reader.get_metrics_data()
+        metrics = {
+            metric.name: {frozenset(point.attributes.items()): point.value for point in metric.data.data_points}
+            for resource_metric in data.resource_metrics
+            for scope_metric in resource_metric.scope_metrics
+            for metric in scope_metric.metrics
+            if metric.name.startswith("gym.run.")
+        }
+    finally:
+        provider.shutdown()
+        gym_metrics._reset_for_testing()
+
+    report = json.loads(coverage_path_for(Path(runner_config.output_jsonl_fpath)).read_text())
+    run = frozenset({(gym_metrics.RUN_ID_ATTRIBUTE, report["run_id"])})
+    export_metrics.assert_not_called()
+    assert metrics["gym.run.info"] == {run: 1}
+    assert metrics["gym.run.coverage.scored"] == {run: report["scored"]}
+    assert metrics["gym.run.coverage.failed"] == {run: 0}
+    assert report["scored"] > 0
+
+
 @pytest.mark.parametrize("failure_type", ["typed", "legacy", "kill_shaped", "skipped", "suppressed"])
 async def test_progress_masking_matches_persisted_outcomes(runner_config, monkeypatch, failure_type):
     source = Path(runner_config.input_jsonl_fpath)
@@ -1056,6 +1108,8 @@ async def test_progress_masking_matches_persisted_outcomes(runner_config, monkey
     rows[2]["agent_ref"]["name"] = "dropped_agent"
     source.write_text("".join(json.dumps(row) + "\n" for row in rows))
     runner_config.upload_rollouts = False
+    # The typed reply is an invalid reply from the one-task dropped agent; this test is about masking, not the stop.
+    runner_config.environment_protocol_violation_stop_after = 0
     exported = []
     monkeypatch.setattr(collection, "get_exporters", lambda: True)
     monkeypatch.setattr(collection, "export_metrics", lambda metrics, **kwargs: exported.append(metrics))
@@ -1166,6 +1220,7 @@ async def test_runner_accepts_explicit_failures_independently_of_exception_polic
         "anthropic_api_key",
         "sandbox_model_base_url",
         "num_workers",
+        "uvicorn_reuse_port",
         "switchyard_api_key",
         "switchyard_base_url",
     ],
@@ -2376,6 +2431,95 @@ async def test_rejected_sandbox_credentials_end_the_run_without_a_retry(runner_c
     assert "gym eval resubmit --recover" in str(raised.value)
 
 
+@pytest.mark.parametrize(
+    ("kind", "stop_text"),
+    [
+        ("provider_quota_exhausted", "the grading provider's quota is exhausted"),
+        ("provider_credentials_rejected", "refused the credentials"),
+    ],
+)
+@pytest.mark.parametrize("succeeded", [0, 1], ids=["all-stopped", "one-scored"])
+async def test_a_grading_provider_stop_ends_the_run_without_a_retry(
+    runner_config, monkeypatch, kind, stop_text, succeeded
+):
+    """Modelled on the rejected sandbox credentials test above, for a grading provider's judge-class failure rows."""
+    from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
+
+    runner_config.require_complete = True
+    calls = []
+
+    async def post(**kwargs):
+        calls.append(kwargs["json"])
+        if len(calls) <= succeeded:
+            return FakeResponse(200, {"reward": 1.0, "response": {}})
+        return FakeResponse(
+            200,
+            {
+                "_ng_failure_class": "judge_failed",
+                "failure_kind": kind,
+                "failure_reason": "AA quota exhausted, resets at 2026-11-07 21:33 UTC; grade with replay or resubmit",
+                "mask_sample": True,
+                "reward": 0,
+                "response": {},
+            },
+        )
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    with pytest.raises(IncompleteEvaluationError, match=stop_text) as raised:
+        await RolloutCollectionHelper().run_from_config(runner_config)
+
+    assert raised.value.exit_code == 76 and raised.value.failure_kind == kind
+    assert "gym eval resubmit --recover" in str(raised.value)
+    if kind == "provider_quota_exhausted":
+        assert "resets at 2026-11-07 21:33 UTC" in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("failure_class", "kind"),
+    [
+        ("infrastructure_error", "provider_credentials_rejected"),
+        ("judge_failed", "provider_credentials_rejected"),
+        ("judge_failed", "provider_quota_exhausted"),
+    ],
+)
+async def test_a_credentials_or_quota_stop_writes_no_aggregate(runner_config, monkeypatch, failure_class, kind):
+    """The stop is a rejection like an incomplete run: one rollout scored, yet no score is computed or left behind."""
+    from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
+    from nemo_gym.utils.path_utils import aggregate_metrics_path_for
+
+    runner_config.require_complete = True
+    runner_config.disable_aggregation = False
+    aggregate = aggregate_metrics_path_for(Path(runner_config.output_jsonl_fpath))
+    aggregate.write_text("[]")  # an earlier segment's aggregate describes other rows
+    urls = []
+    calls = []
+
+    async def post(**kwargs):
+        urls.append(kwargs["url_path"])
+        calls.append(kwargs["json"])
+        if len(calls) == 1:
+            return FakeResponse(200, {"reward": 1.0, "response": {}})
+        return FakeResponse(
+            200,
+            {
+                "_ng_failure_class": failure_class,
+                "failure_kind": kind,
+                "failure_reason": "provider stop",
+                "mask_sample": True,
+                "reward": 0,
+                "response": {},
+            },
+        )
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    with pytest.raises(IncompleteEvaluationError) as raised:
+        await RolloutCollectionHelper().run_from_config(runner_config)
+
+    assert raised.value.failure_kind == kind
+    assert "/aggregate_metrics" not in urls
+    assert not aggregate.exists()
+
+
 async def test_a_resume_after_the_credentials_are_fixed_retries_the_rejected_rollouts(runner_config, monkeypatch):
     from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
 
@@ -2400,3 +2544,69 @@ async def test_a_resume_after_the_credentials_are_fixed_retries_the_rejected_rol
     runner_config.resume_from_cache = True
     await RolloutCollectionHelper().run_from_config(runner_config)
     assert RolloutStore.read(Path(runner_config.output_jsonl_fpath)).coverage()["complete"]
+
+
+def test_run_outcomes_forwards_the_connection_bounds_and_is_unbounded_without_them(monkeypatch):
+    seen = []
+
+    def fake(self, examples, **kwargs):
+        seen.append(kwargs)
+        return iter(())
+
+    monkeypatch.setattr(RolloutCollectionHelper, "_run_examples_with_metadata", fake)
+    row = failing_row()
+
+    RolloutCollectionHelper().run_outcomes([row])
+    RolloutCollectionHelper().run_outcomes([row], max_num_tries=2, connect_grace_s=60.0)
+
+    assert (seen[0]["_max_num_tries"], seen[0]["_connect_grace_s"]) == (None, None)
+    assert (seen[1]["_max_num_tries"], seen[1]["_connect_grace_s"]) == (2, 60.0)
+
+
+def _refused_connection():
+    from aiohttp import ClientConnectorError
+    from aiohttp.client_reqrep import ConnectionKey
+
+    return ClientConnectorError(ConnectionKey("127.0.0.1", 1, False, True, None, None, None), OSError(111, "refused"))
+
+
+async def test_a_refused_connection_is_resent_within_the_grace_and_then_reported_as_not_sent(monkeypatch):
+    calls = []
+
+    async def post(*, _on_transport_failure=None, **kwargs):
+        calls.append(kwargs)
+        error = _refused_connection()
+        _on_transport_failure(error, False)
+        raise error
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+
+    _, outcome = await next(
+        RolloutCollectionHelper().run_outcomes([failing_row()], max_num_tries=2, connect_grace_s=0.3)
+    )
+
+    assert len(calls) > 1
+    assert (outcome.source, outcome.delivery) == ("collector", "not_sent")
+    assert outcome.exception_type == "ClientConnectorError"
+
+
+async def test_a_connection_that_dropped_is_reported_as_possibly_delivered_and_not_resent_by_the_grace(monkeypatch):
+    from aiohttp import ServerDisconnectedError
+
+    calls = []
+
+    async def post(*, _on_transport_failure=None, **kwargs):
+        calls.append(kwargs)
+        error = ServerDisconnectedError()
+        _on_transport_failure(error, False)
+        raise error
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+
+    _, outcome = await next(
+        RolloutCollectionHelper().run_outcomes([failing_row()], max_num_tries=2, connect_grace_s=0.3)
+    )
+
+    assert len(calls) == 1
+    assert (outcome.source, outcome.delivery) == ("collector", "possibly_delivered")
+    assert outcome.exception_type == "ServerDisconnectedError"

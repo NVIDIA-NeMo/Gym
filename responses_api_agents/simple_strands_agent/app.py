@@ -56,6 +56,7 @@ from nemo_gym.sandbox import (
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap, SandboxObservation
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 LOG = logging.getLogger(__name__)
@@ -597,3 +598,6 @@ class SimpleStrandsAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     SimpleStrandsAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = SimpleStrandsAgent.run_webserver()  # noqa: F401
