@@ -383,7 +383,9 @@ def read_instruction(path: Path) -> str:
     tracking. It is not part of the task, so it is removed the way Gym's Terminal Bench servers
     always did; everything after it is kept byte for byte.
     """
-    lines = path.read_text().split("\n")
+    # Text mode translates CRLF and bare CR. The prompt after a canary must keep
+    # the author's exact line endings, including those in converted datasets.
+    lines = path.read_bytes().decode("utf-8").split("\n")
     removed_canary = False
     while lines and _CANARY_LINE.match(lines[0].strip()):
         lines.pop(0)
