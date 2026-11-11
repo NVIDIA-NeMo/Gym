@@ -32,8 +32,10 @@ copies the files to a separate staging directory, applies the checked-in patch,
 verifies all resulting file hashes, and writes a provenance record. It does
 not fetch source or modify the input. The resulting export needs an explicitly
 provisioned Python 3.10 environment with the benchmark dependencies.
-Dependency building and ROM installation are deployment concerns and are
-maintained separately from this adapter. Provision that runtime before
+Dependency building and ROM installation are supplied by the companion
+`vs-bench-runtime-provisioning-20261110` change (currently a local branch,
+not yet published). After applying both changes to the same checkout, follow
+the [runtime instructions](runtime/README.md). Provision that runtime before
 starting Gym; the adapter does not install packages or download game assets.
 
 ## Isolation and configuration
@@ -84,7 +86,8 @@ completed suite records can be reused by Gym's verified resume path. The exact
 paper leaderboard normalization anchors have not been recovered.
 
 Gameplay's `response` is an explicit suite summary, with usage summed over
-completed policy calls, rather than one arbitrary episode's final response.
+completed policy calls. If any completed call omits usage, aggregate usage is
+unknown (`null`), rather than a misleading partial total.
 Use Gym's model-call capture for individual prompts and completions. Transport
 errors recovered by the author's retry loop do not invalidate a completed
 suite; a transport error that contributes to an exhausted-retry fallback does.

@@ -234,9 +234,10 @@ class VSBenchGameplayAgent(SimpleResponsesAPIAgent):
             writer_lock = asyncio.Lock()
             completed_calls = 0
             total_usage = None
+            usage_complete = True
 
             async def route(frame):
-                nonlocal completed_calls, total_usage
+                nonlocal completed_calls, total_usage, usage_complete
                 author_call = frame["request"]
                 params = dict(payload)
                 params["input"] = author_chat_to_gym(author_call["messages"])
@@ -263,6 +264,7 @@ class VSBenchGameplayAgent(SimpleResponsesAPIAgent):
                         raise ValueError("Unexpected policy response status")
                     completed_calls += 1
                     usage = response.usage
+                    usage_complete = usage_complete and usage is not None
                     total_usage = accumulate_response_usage(total_usage, usage)
                     result = {
                         "type": "model_response",
@@ -325,7 +327,7 @@ class VSBenchGameplayAgent(SimpleResponsesAPIAgent):
                             "parallel_tool_calls": False,
                             "tool_choice": "auto",
                             "tools": [],
-                            "usage": total_usage.model_dump() if total_usage is not None else None,
+                            "usage": total_usage.model_dump() if usage_complete and total_usage is not None else None,
                         }
                     ),
                     reward=reward,

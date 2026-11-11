@@ -66,6 +66,10 @@ async def run(author_root, task, incoming, outgoing):
     def record_step(step_info):
         nonlocal transport_fallbacks
         for info in step_info.agent_infos:
+            # The author model returns {} for missing usage, but its logger
+            # accepts only a complete token record or None. Preserve unknown.
+            if info and info.get("token_info") == {}:
+                info["token_info"] = None
             if (
                 info
                 and "reasoning" not in info
