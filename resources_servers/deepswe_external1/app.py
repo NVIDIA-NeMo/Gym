@@ -196,8 +196,7 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer, SandboxSessionReso
     config: DeepsweExternal1ResourcesServerConfig
 
     def model_post_init(self, context: Any, /) -> None:
-        # DeepSWE comes first in the MRO, so the base's super() call skips DeepSWE's initialization, which loads its
-        # filesystem task store: these rows carry their whole task.
+        # Skip DeepSWE's initialization, which loads its filesystem task store: these rows carry their whole task.
         SandboxSessionResourcesServer.model_post_init(self, context)
         self._seeded_agent_sandboxes: dict[str, SeededAgentSandbox] = {}
 

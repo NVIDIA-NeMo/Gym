@@ -70,6 +70,7 @@ from nemo_gym.server_runtime import (
     BaseRunRequest,
     BaseVerifyResponse,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.vcqa_agent.judge import extract_must_have_items
 from responses_api_agents.vcqa_agent.judge import grade as judge_grade
 from responses_api_agents.vcqa_agent.materialize import (
@@ -839,3 +840,6 @@ def _empty_response(params: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymR
 
 if __name__ == "__main__":
     VcqaAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = VcqaAgent.run_webserver()  # noqa: F401

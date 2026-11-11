@@ -35,7 +35,8 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
     observe_llm_judge_grading,
 )
-from nemo_gym.verification import call_judge, record_parsed_judge_verdict
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import JudgeError, call_judge, record_parsed_judge_verdict
 from resources_servers.arena.arena import (
     _extract_thinking_content,
     _extract_verdict,
@@ -278,6 +279,16 @@ class ArenaResourcesServer(SimpleResourcesServer):
                 await asyncio.gather(*orderings, return_exceptions=True)
                 raise
 
+            # A game without a verdict is a judge fault (output cut at its token cap, filtered, empty or without
+            # a label), not a policy loss: fail the row so judge_failsafe types it judge_failed, masks it and
+            # leaves its saved answer to be judged again.
+            if missing := [
+                f"game {index} ({self._describe_missing_verdict(game.response)})"
+                for index, game in enumerate((game1, game2), start=1)
+                if game.verdict is None
+            ]:
+                raise JudgeError("The judge gave no verdict for " + " and ".join(missing))
+
             # Game 1: policy is A. Game 2: policy is B.
             # Strong verdicts (>>) are counted `verdict_weight` times.
             weight = self.config.verdict_weight
@@ -293,6 +304,17 @@ class ArenaResourcesServer(SimpleResourcesServer):
             )
 
         return await observe_llm_judge_grading(grade)
+
+    @staticmethod
+    def _describe_missing_verdict(response: NeMoGymResponse) -> str:
+        """Why a judge reply holds no verdict, for the failure reason."""
+        if response.incomplete_details and response.incomplete_details.reason:
+            return f"judge output incomplete: {response.incomplete_details.reason}"
+        if response.status not in (None, "completed"):
+            return f"judge response status {response.status}"
+        if not response.output:
+            return "judge output empty"
+        return "no verdict label in the judge output"
 
     def _is_self_comparison(self, body: ArenaVerifyRequest) -> bool:
         if not body.baseline_model:
@@ -411,3 +433,6 @@ class ArenaResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     ArenaResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ArenaResourcesServer.run_webserver()  # noqa: F401

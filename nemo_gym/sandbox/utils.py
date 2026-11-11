@@ -14,10 +14,21 @@
 
 """Sandbox utility helpers."""
 
+import hashlib
+import logging
 import tempfile
+import uuid
+from collections.abc import Iterable
 from pathlib import Path
+from shlex import quote
 
+import anyio
+
+from nemo_gym.core.media import MediaFile
 from nemo_gym.sandbox.api import AsyncSandbox
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 # Parallelism caps for CPU-limited sandboxes, each set by cpu_cap_env() to the
@@ -53,20 +64,129 @@ CPU_CAP_ENV_VARS: tuple[str, ...] = (
 )
 
 
-async def upload_text(sandbox: AsyncSandbox, *, path: str, text: str) -> None:
-    """Upload UTF-8 text through file transfer without shell interpolation."""
+async def upload_bytes(sandbox: AsyncSandbox, *, path: str, data: bytes) -> None:
+    """Upload bytes unchanged through file transfer without shell interpolation."""
+    await _upload(sandbox, path=path, data=data, readable_by_all=False)
+
+
+async def _upload(sandbox: AsyncSandbox, *, path: str, data: bytes, readable_by_all: bool) -> None:
     with tempfile.TemporaryDirectory(prefix="sandbox-upload-") as directory:
         source = Path(directory) / "payload"
-        source.write_text(text, encoding="utf-8")
+        source.write_bytes(data)
+        if readable_by_all:
+            # Providers that copy the file keep its mode, which the host's umask may have made private.
+            source.chmod(0o644)
         await sandbox.upload(source, path)
 
 
-async def read_text(sandbox: AsyncSandbox, *, path: str) -> str:
-    """Download UTF-8 text, replacing invalid bytes in partial process output."""
+async def upload_text(sandbox: AsyncSandbox, *, path: str, text: str) -> None:
+    """Upload UTF-8 text through file transfer without shell interpolation."""
+    await upload_bytes(sandbox, path=path, data=text.encode("utf-8"))
+
+
+async def download_bytes(sandbox: AsyncSandbox, *, path: str) -> bytes:
+    """Download a file's bytes unchanged through file transfer."""
     with tempfile.TemporaryDirectory(prefix="sandbox-download-") as directory:
         destination = Path(directory) / "payload"
         await sandbox.download(path, destination)
-        return destination.read_text(encoding="utf-8", errors="replace")
+        return destination.read_bytes()
+
+
+async def read_text(sandbox: AsyncSandbox, *, path: str) -> str:
+    """Download UTF-8 text, replacing invalid bytes in partial process output.
+
+    Line endings become ``\\n``, as when reading a file in text mode.
+    """
+    text = (await download_bytes(sandbox, path=path)).decode("utf-8", errors="replace")
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+# Prompt media live in one directory per sandbox, named by content, so every rollout of a task gets the same paths.
+# Sessions never delete these files, because a session sharing a borrowed sandbox may be reading them. A sandbox that
+# isolates its /tmp drops them when it is destroyed; the local provider, and Apptainer without --contain, share the
+# host's /tmp, where they stay until the host clears it.
+MEDIA_DIRECTORY = "/tmp/nemo-gym-media"
+# Bounds removing partial uploads after a failure, so a cancelled caller is not held by an unresponsive sandbox.
+_CLEANUP_TIMEOUT_S = 30
+
+
+def media_path(file: MediaFile) -> str:
+    """Return the sandbox path ``stage_media`` writes ``file`` to, which depends only on its content and type."""
+    return f"{MEDIA_DIRECTORY}/{hashlib.sha256(file.data).hexdigest()}.{file.extension}"
+
+
+async def stage_media(sandbox: AsyncSandbox, files: Iterable[MediaFile]) -> list[str]:
+    """Write each media file to its ``media_path`` and return the paths, in order.
+
+    Harness CLIs read media from files, so an agent decodes prompt media with ``nemo_gym.core.split_text_and_media``,
+    stages it here and passes the paths to the harness.
+    The sandbox's default user creates the media directory, so it can rename files there even when uploads run as
+    another user. Each file is uploaded under a unique name, readable by every user, and then renamed onto its path in
+    the same directory. The rename is atomic, so a session sharing the sandbox never reads a partly written file, and
+    replacing an existing file swaps in identical bytes. When staging fails, the partial uploads are removed.
+
+    Raises:
+        SandboxUnavailableError: The provider could not run a staging command, for example because it timed out.
+        SandboxTransferError: A staging command failed inside the sandbox, for example on a permission error.
+    """
+    media = list(files)
+    paths = [media_path(file) for file in media]
+    if not media:
+        return paths
+    await _run_media_command(sandbox, f"mkdir -p -- {quote(MEDIA_DIRECTORY)}", action="create the media directory")
+    partials: dict[str, str] = {}
+    try:
+        for path, file in zip(paths, media):
+            if path not in partials:
+                partials[path] = f"{MEDIA_DIRECTORY}/.{uuid.uuid4().hex}.partial"
+                await _upload(sandbox, path=partials[path], data=file.data, readable_by_all=True)
+        renames = " && ".join(_rename_command(partial, path) for path, partial in partials.items())
+        await _run_media_command(sandbox, renames, action="rename the staged media files")
+    except BaseException:
+        # Shielded because an anyio cancel scope, such as the one that cancels a request on client disconnect, stays
+        # cancelled and would cancel the cleanup at once. The deadline keeps an unresponsive sandbox from holding a
+        # cancelled caller.
+        with anyio.move_on_after(_CLEANUP_TIMEOUT_S, shield=True) as cleanup:
+            await _remove_partial_media(sandbox, partials.values())
+        if cleanup.cancelled_caught:
+            LOGGER.warning("Gave up removing partial media uploads from the sandbox after %s s", _CLEANUP_TIMEOUT_S)
+        raise
+    return paths
+
+
+def _rename_command(partial: str, path: str) -> str:
+    # mv would move the file into a directory at the target path. GNU mv -T refuses that, but BSD mv, as on macOS,
+    # has no -T, so test for the directory first. Only something creating a directory at a content-hash path between
+    # the test and the rename could get past it.
+    return (
+        f"{{ [ ! -d {quote(path)} ] || {{ echo {quote(path + ' is a directory')} >&2; false; }}; }}"
+        f" && mv -f -- {quote(partial)} {quote(path)}"
+    )
+
+
+async def _run_media_command(sandbox: AsyncSandbox, command: str, *, action: str) -> None:
+    # Imported here so that importing nemo_gym.sandbox, which loads this module eagerly, does not load transfer.
+    from nemo_gym.sandbox.transfer import SandboxTransferError, SandboxUnavailableError
+
+    result = await sandbox.exec(command, cwd="/")
+    if result.error_type:
+        raise SandboxUnavailableError(
+            f"The sandbox could not {action}: {result.error_type}: {result.stderr or result.stdout or ''}"
+        )
+    if result.return_code:
+        raise SandboxTransferError(f"Cannot {action} in {MEDIA_DIRECTORY}: {result.stderr or result.stdout or ''}")
+
+
+async def _remove_partial_media(sandbox: AsyncSandbox, partials: Iterable[str]) -> None:
+    """Remove partial uploads after a failure, so a borrowed sandbox does not keep them."""
+    command = "rm -f -- " + " ".join(quote(partial) for partial in partials)
+    try:
+        result = await sandbox.exec(command, cwd="/", timeout_s=_CLEANUP_TIMEOUT_S)
+    except Exception:
+        LOGGER.warning("Cannot remove partial media uploads from the sandbox", exc_info=True)
+        return
+    if result.error_type or result.return_code:
+        LOGGER.warning("Cannot remove partial media uploads from the sandbox: %s", result.stderr or result.error_type)
 
 
 def cpu_cap_env(cpu: float | int | None) -> dict[str, str]:
