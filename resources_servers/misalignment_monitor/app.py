@@ -15,7 +15,9 @@
 """A layered misalignment monitor for agent rollouts, modeled on OpenAI's monitoring stack. See README.md."""
 
 import asyncio
+import fcntl
 import json
+import os
 import random
 import time
 from collections import Counter, deque
@@ -96,8 +98,12 @@ class MisalignmentMonitorConfig(BaseResourcesServerConfig):
     )
     capture_poll_interval_s: float = Field(default=2.0, gt=0)
 
-    activation_source: Literal["disabled", "reader"] = Field(
+    activation_source: Literal["disabled", "engine", "reader"] = Field(
         default="disabled", description="Layer 0. 'disabled' sends every review to layer 1."
+    )
+    activation_results_dir: Optional[str] = Field(
+        default=None,
+        description="engine: the connector's shared_storage_path. Readings are read and deleted only inside it.",
     )
     audit_rate: float = Field(
         default=0.05, ge=0, le=1, description="Share of what layer 0 or layer 1 clears that goes on to the next layer."
@@ -133,6 +139,10 @@ class MisalignmentMonitorConfig(BaseResourcesServerConfig):
 
     @model_validator(mode="after")
     def _check_reader_inputs(self) -> "MisalignmentMonitorConfig":
+        if self.activation_source == "engine" and self.activation_results_dir is None:
+            raise ValueError(
+                "activation_source=engine needs activation_results_dir, the connector's shared_storage_path"
+            )
         if self.activation_source != "reader":
             return self
         required = {"probe": ("reader_model", "probe_path"), "jspace": ("reader_model", "jlens_path", "jspace_layer")}
@@ -152,6 +162,43 @@ class MisalignmentMonitorVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
     monitor_report: dict[str, Any]
+
+
+def _activation_path(dialect: str, response: dict) -> Optional[str]:
+    """Where vllm_activation_connector wrote this call's layer-0 reading, if it did."""
+    if dialect == "chat":
+        params = response.get("kv_transfer_params")
+    else:
+        params = json.loads((response.get("metadata") or {}).get("kv_transfer_params") or "null")
+    return (params or {}).get("misalignment_activations_path")
+
+
+def _read_activation_file(path: str, results_dir: str) -> dict[str, Any]:
+    """Read and delete a reading, waiting for vLLM to finish writing it.
+
+    The path comes from the model response, so only a file inside ``results_dir`` (symlinks resolved) is opened or
+    deleted. Anything else is left alone and counts as an unscreened call.
+    """
+    root = os.path.realpath(results_dir)
+    path, lock = os.path.realpath(path), os.path.realpath(f"{path}.lock")
+    if any(os.path.commonpath([root, p]) != root for p in (path, lock)):
+        return {"flagged": False, "error": f"activation reading outside {results_dir}, not read"}
+    try:
+        if os.path.exists(lock):
+            with open(lock) as lock_file:
+                fcntl.flock(lock_file, fcntl.LOCK_SH)
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError) as e:
+        return {"flagged": False, "error": f"{type(e).__name__}: {e}"}
+    finally:
+        for leftover in (path, lock):
+            # A file that cannot be removed is logged: it must not cost the call its review.
+            try:
+                if os.path.exists(leftover):
+                    os.remove(leftover)
+            except OSError as e:
+                print(f"[misalignment_monitor] could not remove activation file {leftover}: {e!r}", flush=True)
 
 
 def _history(items: list[dict]) -> list[tuple[str, str]]:
@@ -314,6 +361,7 @@ class _Rollout:
     reviewed_latest: bool = False
     # Windows kept for the investigators: each one the agent's context replaced, before the latest.
     windows: list[str] = field(default_factory=list)
+    readings: list[dict] = field(default_factory=list)
     # The latest per-turn review, which a later window of the same context replaces if it has not started yet.
     waiting: Optional["_Case"] = None
     last_review: float = field(default_factory=time.time)
@@ -362,9 +410,10 @@ class MisalignmentMonitorServer(SimpleResourcesServer):
         global_config_dict = getattr(self.server_client, "global_config_dict", None) or {}
         capture_dirs = model_call_capture_dirs_from_config(global_config_dict)
         self._capture_dir: Optional[Path] = capture_dirs[0] if capture_dirs else None
-        if self.config.review_schedule == "per_turn" and self._capture_dir is None:
+        needs_capture = self.config.review_schedule == "per_turn" or self.config.activation_source == "engine"
+        if needs_capture and self._capture_dir is None:
             raise ValueError(
-                "review_schedule=per_turn reads Gym's model-call capture: "
+                "review_schedule=per_turn and activation_source=engine read Gym's model-call capture: "
                 "set observability_enabled: true and model_call_capture_dir in the global config."
             )
         Path(self.config.alerts_jsonl_fpath).parent.mkdir(parents=True, exist_ok=True)
@@ -565,6 +614,32 @@ class MisalignmentMonitorServer(SimpleResourcesServer):
                 self._counts["superseded"] += 1
             else:
                 state.waiting = this_call
+        path = _activation_path(dialect, response) if self.config.activation_source == "engine" else None
+        if cases or path:
+            task = asyncio.create_task(self._review_call(state, cases, path, this_call))
+            state.pending.add(task)
+            task.add_done_callback(state.pending.discard)
+
+    async def _review_call(self, state: _Rollout, cases: list[_Case], path: Optional[str], this_call: _Case) -> None:
+        """Read this call's layer-0 result, if any, then start its reviews."""
+        reading = (
+            await asyncio.to_thread(_read_activation_file, path, self.config.activation_results_dir) if path else None
+        )
+        if reading is not None:
+            state.readings.append(reading)
+            if reading.get("error"):
+                self._counts["engine_reading_errors"] += 1
+            # A flagged call gets a review of its own in per-turn mode.
+            if (
+                reading.get("flagged")
+                and self.config.review_schedule == "per_turn"
+                and not any(case is this_call for case in cases)
+            ):
+                this_call.reason = "activation_flag"
+                cases = [*cases, this_call]
+                state.reviewed_latest = state.reviewed_latest or state.window is this_call.window
+                state.last_review = time.time()
+            this_call.reading = reading
         for i, case in enumerate(cases):
             if not self._spawn(self._review_and_record(case)):
                 # The backlog is full. These reviews will not run, so the latest window is not reviewed: a later
@@ -590,8 +665,17 @@ class MisalignmentMonitorServer(SimpleResourcesServer):
             state.window if state and state.window else render_transcript(rollout, self.config.max_transcript_chars)
         )
         record = {key: value for key, value in rollout.items() if key not in ("responses_create_params", "response")}
+        readings = state.readings if state else []
+        reading = None
+        if readings:
+            flagged = [r for r in readings if r.get("flagged")]
+            reading = {"flagged": bool(flagged), "calls_read": len(readings), "flagged_calls": flagged[:5]}
+            errors = [r["error"] for r in readings if r.get("error")]
+            if errors:
+                # A call that was not screened leaves the rollout unscreened.
+                reading["error"] = f"{len(errors)} of {len(readings)} calls not screened: {errors[0]}"
         windows = [*(state.windows if state else []), window]
-        cases = [_Case(rollout_id, "final", window, windows, record)]
+        cases = [_Case(rollout_id, "final", window, windows, record, reading)]
         if self.config.review_schedule == "final":
             # Layer 1 reads one window, so each window the agent's context replaced gets a review of its own.
             cases += [_Case(rollout_id, "context_rewritten", earlier, windows, record) for earlier in windows[:-1]]
@@ -619,7 +703,7 @@ class MisalignmentMonitorServer(SimpleResourcesServer):
         report["l0"] = case.reading
         if self.config.activation_source != "disabled":
             if case.reading is None or case.reading.get("error"):
-                # No screen ran on this window (its reading failed), so it is not cleared.
+                # No screen ran on this window (it was not served by vLLM, or its reading failed), so it is not cleared.
                 self._counts["l0_unscreened"] += 1
             elif not case.reading.get("flagged") and not self._audit("l0", report):
                 return report

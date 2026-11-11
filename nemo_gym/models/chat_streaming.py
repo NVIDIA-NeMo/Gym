@@ -105,6 +105,9 @@ def _chunk(completion: dict[str, Any], choices: list[dict[str, Any]], usage: Any
         chunk["system_fingerprint"] = system_fingerprint
     if usage is not None:
         chunk["usage"] = usage
+    # A vLLM KV connector's per-request result, such as the misalignment monitor's activation reading.
+    if completion.get("kv_transfer_params") is not None:
+        chunk["kv_transfer_params"] = completion["kv_transfer_params"]
     return chunk
 
 

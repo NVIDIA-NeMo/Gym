@@ -12,7 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Layer-0 readouts of a residual stream, used by the monitor's frozen reader. Imports only torch."""
+"""Layer-0 readouts of a residual stream, shared by the monitor's frozen reader and the vLLM plugin.
+
+Imports only torch, so the plugin can load it inside a vLLM process that has no Gym installed.
+"""
 
 from collections import Counter
 from typing import Any, Callable
