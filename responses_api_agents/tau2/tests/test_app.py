@@ -25,6 +25,7 @@ from fastapi.testclient import TestClient
 from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY, NG_NO_GENERATION_METADATA, NG_NO_PERSIST_KEY
 from nemo_gym.client import ServerClient
 from nemo_gym.config import AggregateMetricsRequest
+from nemo_gym.core import ModelCallSampling, encode_model_sampling
 from nemo_gym.rollouts import NG_TERMINAL_KEY
 from nemo_gym.rollouts.rollout_recovery import has_saved_generation
 
@@ -420,6 +421,32 @@ class TestApp:
         assert response.result.max_agent_steps == 3
         assert response.result.termination_reason == TerminationReason.MAX_AGENT_STEPS
 
+    @pytest.mark.parametrize("sampling", [None, ModelCallSampling(temperature=0.6, top_p=0.95, max_output_tokens=64)])
+    async def test_the_simulated_user_keeps_its_own_sampling(self, sampling: Optional[ModelCallSampling]) -> None:
+        _, server = self._dummy_server()
+        body = self._example_run_request().model_copy(update={"model_sampling": sampling})
+        captured_kwargs = {}
+
+        async def fake_run_single_task(**kwargs):
+            captured_kwargs.update(kwargs)
+            return self._fake_simulation_run()
+
+        with (
+            patch("responses_api_agents.tau2.app.get_server_url", return_value="http://model-host:8000"),
+            patch("responses_api_agents.tau2.app.run_single_task", side_effect=fake_run_single_task),
+        ):
+            await server.run(body)
+
+        config = captured_kwargs["config"]
+        if sampling is None:
+            # Gym-only evaluation: neither URL changes.
+            assert config.llm_args_agent["api_base"] == "http://model-host:8000/v1"
+            assert config.llm_args_user["api_base"] == "http://model-host:8000/v1"
+        else:
+            values = encode_model_sampling(sampling)
+            assert config.llm_args_agent["api_base"] == f"http://model-host:8000/ng-sampling/{values}/v1"
+            assert config.llm_args_user["api_base"] == "http://model-host:8000/ng-sampling/null/v1"
+
     async def test_run_uses_agent_visible_messages_for_responses_conversion(self) -> None:
         _, server = self._dummy_server(max_agent_steps=3)
         body = self._example_run_request()
@@ -634,7 +661,7 @@ class TestApp:
         assert result["num_agent_calls"] == 3  # the canned greeting plus two kept agent messages
         assert result["response"]["usage"] == {
             "input_tokens": 3200,
-            "input_tokens_details": {"cached_tokens": 2048},
+            "input_tokens_details": {"cached_tokens": 2048, "cache_write_tokens": None},
             "output_tokens": 390,
             "output_tokens_details": {"reasoning_tokens": 335},
             "total_tokens": 3590,

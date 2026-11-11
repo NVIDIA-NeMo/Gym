@@ -3,582 +3,355 @@
 import base64
 import io
 import json
-from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import (
-    capture_observations,
-    close_body,
-    seed,
-)
+from nemo_gym.core import MediaFile, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.sandbox import media_path
+from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import capture_observations, close_body
+from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import seed as base_seed
 from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import setup as opencode_setup  # noqa: F401
 from responses_api_agents.opencode_multimodal_agent.app import OpenCodeMultimodalAgent, OpenCodeMultimodalAgentConfig
-from responses_api_agents.opencode_multimodal_agent.eval import (
-    OpenCodeMultimodalEvalAgent,
-    OpenCodeMultimodalEvalConfig,
-)
+from responses_api_agents.opencode_multimodal_agent.rewards import OpenCodeToolRewardConfig
+from responses_api_agents.opencode_multimodal_agent.tests.test_app import body, image_url
 
 
-def image_url():
-    stream = io.BytesIO()
-    Image.new("RGB", (3, 2), "red").save(stream, format="PNG")
-    return "data:image/png;base64," + base64.b64encode(stream.getvalue()).decode()
-
-
-def request_body():
-    return {
-        "input": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "input_text", "text": "Count red objects"},
-                    {"type": "input_image", "image_url": image_url(), "detail": "auto"},
-                ],
-            }
-        ],
-        "temperature": 0.6,
-        "top_p": 0.95,
-        "max_output_tokens": 2048,
-    }
+def seed():
+    return base_seed().model_copy(update={"sandbox_access": None})
 
 
 @pytest.fixture
 def visual_setup(opencode_setup, tmp_path, monkeypatch):
-    from unittest.mock import AsyncMock
+    from responses_api_agents.opencode_agent import app as base
 
-    from responses_api_agents.opencode_agent import app as base_app
-    from responses_api_agents.opencode_multimodal_agent.sessions import _NETWORK_RUNTIME
-
-    monkeypatch.setattr(type(_NETWORK_RUNTIME), "is_installed", AsyncMock(return_value=True))
-    # Owned cases use local-provider setup semantics; OpenSandbox's offline
-    # contract is exercised explicitly below.
-    base_app.create_provider.return_value.name = "local"
     original, sandbox = opencode_setup
-    sandbox.provider_name = "local"
-    config = OpenCodeMultimodalAgentConfig(
-        **(
-            original.config.model_dump()
-            | {
-                "model": "vision-model",
-                # This fixture supplies a borrowed fake sandbox, with no namespace support.
-                "network_access": "inherit",
-                "system_prompt": "Inspect carefully.",
-                "tool_rewards": None,
-            }
-        )
+    sandbox.provider_name = "opensandbox"
+    sandbox.start = AsyncMock()
+    base.create_provider.return_value.name = "opensandbox"
+    base.create_provider.return_value.aclose = AsyncMock()
+    monkeypatch.setattr(base, "AsyncSandbox", lambda provider: sandbox)
+    cfg = OpenCodeMultimodalAgentConfig.model_validate(
+        original.config.model_dump()
+        | {
+            "model": "vision",
+            "tool_rewards": None,
+            "system_prompt": "Inspect carefully.",
+            "network_access": "inherit",
+            "sandbox_config": {"image": "test-image", "workdir": "/app"},
+        }
     )
-    agent = OpenCodeMultimodalAgent(config=config, server_client=original.server_client)
-    original_upload = sandbox.upload
-
-    async def upload(source, destination):
-        if str(source).endswith(".png"):
-            sandbox.files[destination] = Path(source).read_bytes()
-        else:
-            await original_upload(source, destination)
-
-    sandbox.upload = upload
+    agent = OpenCodeMultimodalAgent(config=cfg, server_client=original.server_client)
     export = json.loads(sandbox.events)
     export["session_id"] = "root"
     export["messages"][0]["parts"].append({"type": "file", "mime": "image/png", "url": image_url()})
-    tool = export["messages"][1]["parts"][1]
-    tool["state"].update(status="completed", attachments=[{"mime": "image/png", "url": image_url()}])
+    export["messages"][1]["parts"][1]["state"].update(status="completed", metadata={"exit": 0})
     sandbox.events = json.dumps(export)
     capture_observations(sandbox, tmp_path)
+    original_launch = sandbox.launch.side_effect
+
+    async def launch_with_receipt(*args, **kwargs):
+        result = await original_launch(*args, **kwargs)
+        params = sandbox.params()
+        config = json.loads(params["env"]["OPENCODE_CONFIG_CONTENT"])
+        if any(path.endswith("/visual-final-answer.mjs") for path in config.get("plugin", [])):
+            sandbox.files[sandbox.directory + "/visual-final-answer.ready"] = "ready\n"
+        return result
+
+    sandbox.launch.side_effect = launch_with_receipt
+
     return agent, sandbox
 
 
-def test_restricted_opensandbox_missing_bundle_refuses_before_allocation(visual_setup):
-    from unittest.mock import AsyncMock, patch
-
-    from responses_api_agents.opencode_agent import app as base_app
-
+def test_session_stages_original_image_replays_and_closes(visual_setup):
     agent, sandbox = visual_setup
-    base_app.create_provider.return_value.name = "opensandbox"
-    base_app.create_provider.return_value.aclose = AsyncMock()
-    agent.config.network_access = "model_only"
-    agent.config.sandbox_config = {"image": "test-image", "workdir": "/app"}
-    sandbox.start = AsyncMock()
-    body = seed()
-    body.sandbox_access = None
-    body.tool_accesses = []
-    with patch("responses_api_agents.opencode_agent.app.AsyncSandbox", return_value=sandbox):
-        with TestClient(agent.setup_webserver()) as client:
-            result = client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
-    assert result.status_code == 422, result.text
-    assert "pinned offline runtime bundle" in result.text
-    sandbox.start.assert_not_awaited()
-    sandbox.exec.assert_not_awaited()
-    sandbox.launch.assert_not_awaited()
-
-
-@pytest.mark.parametrize("asset", ["executable", "plugin_dependencies", "ripgrep"])
-@pytest.mark.parametrize("field", ["path", "sha256"])
-def test_restricted_opensandbox_requires_each_offline_pin(visual_setup, asset, field):
-    from types import SimpleNamespace
-
-    from nemo_gym.agents import AgentSeedRejectedError
-    from nemo_gym.sandbox import SandboxSpec
-
-    agent, _ = visual_setup
-    agent.config.network_access = "model_only"
-    for item in ("executable", "plugin_dependencies", "ripgrep"):
-        setattr(agent.config, f"sandbox_{item}_path", f"/opt/runtime/{item}")
-        setattr(agent.config, f"sandbox_{item}_sha256", "a" * 64)
-    missing = f"sandbox_{asset}_{field}"
-    setattr(agent.config, missing, None)
-    with pytest.raises(AgentSeedRejectedError, match=missing):
-        agent._restrict_owned_sandbox_network(SandboxSpec(image="test"), SimpleNamespace(name="opensandbox"), seed())
-
-
-def test_offline_bundle_preserves_opensandbox_model_only_policy(visual_setup):
-    from types import SimpleNamespace
-
-    from nemo_gym.sandbox import SandboxSpec
-
-    agent, _ = visual_setup
-    agent.config.network_access = "model_only"
-    for item in ("executable", "plugin_dependencies", "ripgrep"):
-        setattr(agent.config, f"sandbox_{item}_path", f"/opt/runtime/{item}")
-        setattr(agent.config, f"sandbox_{item}_sha256", "a" * 64)
-    body = seed()
-    body.tool_accesses = []
-    spec = agent._restrict_owned_sandbox_network(SandboxSpec(image="test"), SimpleNamespace(name="opensandbox"), body)
-    assert spec.provider_options["network_policy"] == {
-        "defaultAction": "deny",
-        "egress": [{"action": "allow", "target": "model.example"}],
-    }
-
-
-@pytest.mark.parametrize("mode", ["model_only", "model_and_tools", "inherit"])
-@pytest.mark.parametrize("narrow_request", [False, True])
-def test_owned_opensandbox_uses_creation_policy_without_nested_wrapper(
-    visual_setup, monkeypatch, mode, narrow_request
-):
-    from unittest.mock import AsyncMock, patch
-
-    from responses_api_agents.opencode_agent import app as base_app
-    from responses_api_agents.opencode_multimodal_agent.sessions import _NETWORK_RUNTIME
-
-    if narrow_request and mode == "model_only":
-        pytest.skip("No narrower network mode")
-    agent, sandbox = visual_setup
-    base_app.create_provider.return_value.name = "opensandbox"
-    sandbox.provider_name = "opensandbox"
-    sandbox.start = AsyncMock()
-    agent.config.network_access = mode
-    agent.config.sandbox_config = {"image": "offline-image", "workdir": "/app"}
-    for asset in ("executable", "plugin_dependencies", "ripgrep"):
-        setattr(agent.config, f"sandbox_{asset}_path", f"/opt/runtime/{asset}")
-        setattr(agent.config, f"sandbox_{asset}_sha256", "a" * 64)
-    install = AsyncMock(side_effect=AssertionError("OpenSandbox needs no nested namespace runtime"))
-    monkeypatch.setattr(type(_NETWORK_RUNTIME), "install", install)
-    monkeypatch.setattr(type(_NETWORK_RUNTIME), "is_installed", AsyncMock(return_value=False))
-    body = seed()
-    body.sandbox_access = None
-    body.tool_accesses = []
-    with (
-        patch("responses_api_agents.opencode_agent.app.AsyncSandbox", return_value=sandbox),
-        patch.object(type(agent), "_stage_archive", AsyncMock()),
-        TestClient(agent.setup_webserver()) as client,
-    ):
-        created = client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
         assert created.status_code == 200, created.text
-        request = request_body()
-        if narrow_request:
-            request["metadata"] = {"network_access": "model_only"}
-        response = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json=request)
-        if narrow_request:
-            assert response.status_code == 422, response.text
-            assert "fixed at sandbox creation" in response.text
-            sandbox.launch.assert_not_awaited()
-        else:
-            assert response.status_code == 200, response.text
-            assert not any("network_runner.py" in arg for arg in sandbox.params()["command"])
-        assert not any(path.endswith("network_runner.py") for path in sandbox.files)
-        install.assert_not_awaited()
-        assert not any("--model-url" in call.args[0] for call in sandbox.exec.call_args_list)
+        url = "/ng-rollout/opencode-smoke-a2/v1/responses"
+        first = client.post(url, json=body().model_dump(mode="json"))
+        assert first.status_code == 200, first.text
+        retry = client.post(url, json=body().model_dump(mode="json"))
+        assert retry.json() == first.json()
+        sandbox.launch.assert_awaited_once()
+        params = sandbox.params()
+        policy = json.loads(params["env"]["OPENCODE_CONFIG_CONTENT"])
+        assert policy["enabled_providers"] == ["nemo_gym"]
+        assert set(policy["provider"]) == {"nemo_gym"}
+        image = MediaFile.from_data_uri(image_url())
+        assert sandbox.files[media_path(image)] == image.data
+        assert media_path(image) in params["command"]
+        assert policy["agent"]["build"]["temperature"] == 0.6
+        assert policy["attachment"]["image"]["max_width"] == 2**31 - 1
+        assert not any("network_runner.py" in path for path in sandbox.files)
         closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
         assert closed.status_code == 200, closed.text
-        sandbox.stop.assert_awaited()
+    sandbox.stop.assert_awaited()
 
 
-@pytest.mark.parametrize("error_type", [None, "timeout"])
-@pytest.mark.parametrize("cleanup_fails", [False, True])
-def test_namespace_preflight_failure_closes_before_activation(visual_setup, error_type, cleanup_fails):
-    from types import SimpleNamespace
-    from unittest.mock import AsyncMock, patch
-
+@pytest.mark.parametrize("capture", [False, True])
+@pytest.mark.parametrize("exit_code", [0, 1, None])
+def test_capture_routing_and_native_reward_evidence(visual_setup, capture, exit_code):
     agent, sandbox = visual_setup
-    agent.config.network_access = "model_only"
-    agent.config.sandbox_config = {"image": "test-image", "workdir": "/app"}
-    sandbox.start = AsyncMock()
-    original_exec = sandbox.run_exec
-
-    async def execute(command, **kwargs):
-        if "network_runner.py" in command and "--model-url" in command:
-            return SimpleNamespace(
-                return_code=1 if error_type is None else 0,
-                error_type=error_type,
-                stdout="",
-                stderr="unshare unavailable or forbidden",
-            )
-        return await original_exec(command, **kwargs)
-
-    sandbox.exec.side_effect = execute
-    if cleanup_fails:
-        sandbox.stop = AsyncMock(side_effect=[RuntimeError("cleanup failed"), None])
-    body = seed()
-    body.sandbox_access = None
-    body.tool_accesses = []
-    with patch("responses_api_agents.opencode_agent.app.AsyncSandbox", return_value=sandbox):
-        with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
-            result = client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
-            assert result.status_code >= 400
-            sandbox.launch.assert_not_awaited()
-            sandbox.stop.assert_awaited()
-    if cleanup_fails:
-        assert sandbox.stop.await_count >= 2
-
-
-def test_session_stages_images_preserves_outputs_and_replays_once(visual_setup):
-    agent, sandbox = visual_setup
-    with TestClient(agent.setup_webserver()) as client:
-        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
-        assert created.status_code == 200, created.text
-        path = "/ng-rollout/opencode-smoke-a2/v1/responses"
-        first = client.post(path, json=request_body())
-        assert first.status_code == 200, first.text
-        retry = client.post(path, json=request_body())
-        assert retry.status_code == 200 and retry.json() == first.json()
-        sandbox.launch.assert_awaited_once()
-        response = first.json()
-        assert response["status"] == "completed"
-        assert response["output"][0]["type"] == "reasoning"
-        output = next(item for item in response["output"] if item["type"] == "function_call_output")
-        assert output["output"][-1]["image_url"] == image_url()
-        assert response["opencode_evidence"]["turns_used"] == 1
-        payload = sandbox.params()
-        assert payload["env"]["OPENCODE_ENABLE_EXA"] == "0"
-        assert "Inspect carefully.\n\nCount red objects" in payload["prompt"]
-        config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
-        assert config["agent"]["build"]["temperature"] == 0.6
-        assert config["agent"]["build"]["top_p"] == 0.95
-        provider = config["provider"]["nemo"]
-        assert "/ng-rollout/opencode-smoke-a2/" in provider["options"]["baseURL"]
-        assert provider["models"]["vision-model"]["limit"]["output"] == 2048
-        assert any(path.endswith(".visual-final-answer.mjs") for path in sandbox.files)
-        image_path = next(path for path in sandbox.files if path.endswith("input-0.png"))
-        assert image_path.startswith(sandbox.directory + "/")
-        assert not any(path.startswith("/app/") for path in sandbox.files)
-        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
-        assert closed.status_code == 200 and closed.json()["agent_observations"] is not None
-        assert client.post(path, json=request_body()).status_code == 409
-    sandbox.stop.assert_not_awaited()
-    sandbox.disconnect.assert_awaited_once()
-
-
-@pytest.mark.parametrize("webfetch", [False, True])
-@pytest.mark.parametrize("websearch", [False, True])
-def test_session_web_tool_policy_reaches_runtime(visual_setup, webfetch, websearch):
-    original, sandbox = visual_setup
-    tools = {"webfetch": webfetch, "websearch": websearch}
-    config = OpenCodeMultimodalEvalConfig.model_validate(
-        original.config.model_dump()
-        | {
-            "entrypoint": "eval.py",
-            "final_answer_reserve": None,
-            "opencode_config": original.config.opencode_config | {"tools": tools},
-        }
-    )
-    agent = OpenCodeMultimodalEvalAgent(config=config, server_client=original.server_client)
-    with TestClient(agent.setup_webserver()) as client:
-        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
-        assert created.status_code == 200, created.text
-        response = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json=request_body())
-        assert response.status_code == 200, response.text
-        payload = sandbox.params()
-        assert payload["env"]["OPENCODE_ENABLE_EXA"] == ("1" if websearch else "0")
-        policy = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
-        for tool, enabled in tools.items():
-            assert policy["tools"][tool] is enabled
-            assert policy["permission"][tool] == ("allow" if enabled else "deny")
-        assert policy["permission"]["bash"]["*pkill*"] == "deny"
-        assert "*" not in policy["permission"]
-        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
-        assert closed.status_code == 200
-
-
-@pytest.mark.parametrize(
-    "field,value",
-    [
-        ("temperature", None),
-        ("max_output_tokens", 999999),
-        ("tools", [{"type": "function", "name": "extra", "parameters": {}, "strict": False}]),
-    ],
-)
-def test_invalid_request_does_not_launch(visual_setup, field, value):
-    agent, sandbox = visual_setup
-    with TestClient(agent.setup_webserver()) as client:
-        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
-        assert created.status_code == 200
-        response = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json=request_body() | {field: value})
-        assert response.status_code == 422, response.text
-        sandbox.launch.assert_not_awaited()
-        assert (
-            client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).status_code
-            == 200
-        )
-
-
-@pytest.mark.parametrize("field,value", [("tool_rewards", {}), ("token_id_capture", True)])
-def test_session_rejects_training_controls_before_allocation(visual_setup, field, value):
-    agent, sandbox = visual_setup
-    setattr(agent.config, field, value)
-    with TestClient(agent.setup_webserver()) as client:
-        response = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
-        assert response.status_code == 422, response.text
-        assert "evaluation-only" in response.text
-        sandbox.launch.assert_not_awaited()
-        sandbox.exec.assert_not_awaited()
-
-
-def test_upload_failure_is_not_relaunched_and_session_can_close(visual_setup):
-    from unittest.mock import AsyncMock
-
-    agent, sandbox = visual_setup
-    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
-        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
-        assert created.status_code == 200
-        original_upload = sandbox.upload
-        sandbox.upload = AsyncMock(side_effect=OSError("sandbox transfer failed"))
-        path = "/ng-rollout/opencode-smoke-a2/v1/responses"
-        assert client.post(path, json=request_body()).status_code == 500
-        assert client.post(path, json=request_body()).status_code == 500
-        sandbox.upload.assert_awaited_once()
-        sandbox.launch.assert_not_awaited()
-        sandbox.upload = original_upload
-        assert (
-            client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).status_code
-            == 200
-        )
-    sandbox.disconnect.assert_awaited_once()
-
-
-def test_missing_initial_image_cannot_produce_success(visual_setup):
-    agent, sandbox = visual_setup
+    agent.config.token_id_capture = capture
+    agent.server_client.global_config_dict.token_id_capture = {"enabled": capture}
+    agent.config.tool_rewards = OpenCodeToolRewardConfig()
     export = json.loads(sandbox.events)
-    export["messages"][0]["parts"] = [part for part in export["messages"][0]["parts"] if part["type"] != "file"]
+    export["messages"][1]["parts"][1]["state"]["metadata"] = {"exit": exit_code}
     sandbox.events = json.dumps(export)
     with TestClient(agent.setup_webserver()) as client:
         created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
-        response = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json=request_body())
-        assert response.status_code == 502, response.text
-        assert "dropped initial images" in response.text
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json=body().model_dump(mode="json"))
+        assert result.status_code == 200, result.text
+        assert "opencode_evidence" in result.json(), result.text
+        evidence = result.json()["opencode_evidence"]["tool_reward"]
+        assert evidence["bash_success_count"] == int(exit_code == 0)
+        assert evidence["tool_error_count"] == int(exit_code != 0)
+        config = json.loads(sandbox.params()["env"]["OPENCODE_CONFIG_CONTENT"])
+        assert ("training-token-capture" in config["provider"]["nemo_gym"]["options"]["baseURL"]) is capture
         assert (
             client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).status_code
             == 200
         )
 
 
-@pytest.mark.parametrize("owned", [False, True])
-def test_visual_session_releases_only_its_owned_sandbox(visual_setup, owned):
-    from unittest.mock import AsyncMock, patch
+@pytest.mark.parametrize("provider", ["local", "enroot"])
+def test_non_opensandbox_provider_is_rejected_before_allocation(visual_setup, provider):
+    from responses_api_agents.opencode_agent import app as base
 
     agent, sandbox = visual_setup
-    agent.config.sandbox_provider = "agent-provider"
-    agent.config.sandbox_config = {"image": "test-image", "workdir": "/agent-workspace"}
-    sandbox.expected_workdir = "/agent-workspace" if owned else "/app"
-    body = seed()
-    if owned:
-        body.sandbox_access = None
-    sandbox.start = AsyncMock()
-    with (
-        patch("responses_api_agents.opencode_agent.app.AsyncSandbox", return_value=sandbox) as factory,
-        patch("responses_api_agents.opencode_agent.app.resolve_provider_config"),
-        TestClient(agent.setup_webserver()) as client,
-    ):
-        factory.connect = AsyncMock(return_value=sandbox)
-        created = client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
-        assert created.status_code == 200, created.text
-        response = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json=request_body())
-        assert response.status_code == 200, response.text
-        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
-        assert closed.status_code == 200, closed.text
-        again = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
-        assert again.json() == closed.json()
-    (sandbox.stop if owned else sandbox.disconnect).assert_awaited_once()
-    (sandbox.disconnect if owned else sandbox.stop).assert_not_awaited()
+    base.create_provider.return_value.name = provider
+    with TestClient(agent.setup_webserver()) as client:
+        result = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+    assert result.status_code == 422
+    sandbox.start.assert_not_awaited()
 
 
-@pytest.mark.parametrize("mode", ["model_only", "model_and_tools", "inherit"])
-@pytest.mark.parametrize("websearch", [False, True])
-def test_owned_session_network_and_websearch_policy(visual_setup, monkeypatch, mode, websearch):
-    from unittest.mock import AsyncMock, patch
+def test_borrowed_session_is_rejected(visual_setup):
+    agent, sandbox = visual_setup
+    with TestClient(agent.setup_webserver()) as client:
+        result = client.post("/v1/agent_sessions", json=base_seed().model_dump(mode="json"))
+    assert result.status_code == 422
+    sandbox.start.assert_not_awaited()
 
-    from responses_api_agents.opencode_multimodal_agent.sessions import _NETWORK_RUNTIME
 
-    installed = AsyncMock(return_value=False)
-    install = AsyncMock()
-    monkeypatch.setattr(type(_NETWORK_RUNTIME), "is_installed", installed)
-    monkeypatch.setattr(type(_NETWORK_RUNTIME), "install", install)
-    original, sandbox = visual_setup
-    agent = OpenCodeMultimodalEvalAgent(
-        config=OpenCodeMultimodalEvalConfig.model_validate(
-            original.config.model_dump() | {"entrypoint": "eval.py", "final_answer_reserve": None}
-        ),
-        server_client=original.server_client,
+@pytest.mark.parametrize(
+    "url", ["https://example.com/a.png", "file:///tmp/a.png", "data:image/png;base64,aW52YWxpZA=="]
+)
+def test_unsupported_images_are_rejected(visual_setup, url):
+    agent, _ = visual_setup
+    params = body().model_dump()
+    params["input"][0]["content"][1]["image_url"] = url
+    with pytest.raises(HTTPException) as error:
+        agent._session_input(NeMoGymResponseCreateParamsNonStreaming.model_validate(params))
+    assert error.value.status_code == 422
+
+
+def test_large_image_is_decoded_once_and_preserved(visual_setup, monkeypatch):
+    agent, _ = visual_setup
+    stream = io.BytesIO()
+    Image.new("RGB", (9001, 2), "red").save(stream, format="PNG")
+    params = body().model_dump()
+    params["input"][0]["content"][1]["image_url"] = (
+        "data:image/jpeg;base64," + base64.b64encode(stream.getvalue()).decode()
     )
-    agent.config.network_access = mode
-    agent.config.opencode_config["tools"] = {"websearch": websearch, "webfetch": False}
-    agent.config.sandbox_provider = "agent-provider"
-    agent.config.sandbox_config = {"image": "test-image", "workdir": "/agent-workspace"}
-    sandbox.expected_workdir = "/agent-workspace"
-    sandbox.start = AsyncMock()
-    request = seed()
-    request.sandbox_access = None
-    request.tool_accesses = []
-    with (
-        patch("responses_api_agents.opencode_agent.app.AsyncSandbox", return_value=sandbox),
-        patch("responses_api_agents.opencode_agent.app.resolve_provider_config"),
-        TestClient(agent.setup_webserver()) as client,
-    ):
-        created = client.post("/v1/agent_sessions", json=request.model_dump(mode="json"))
+    from unittest.mock import patch
+
+    with patch.object(MediaFile, "from_data_uri", wraps=MediaFile.from_data_uri) as decode:
+        _, _, media = agent._session_input(NeMoGymResponseCreateParamsNonStreaming.model_validate(params))
+    assert decode.call_count == 1
+    assert media[0].data == stream.getvalue()
+
+
+def test_truncated_image_returns_422(visual_setup):
+    agent, _ = visual_setup
+    params = body().model_dump()
+    params["input"][0]["content"][1]["image_url"] = (
+        "data:image/png;base64," + base64.b64encode(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR").decode()
+    )
+    with pytest.raises(HTTPException) as error:
+        agent._session_input(NeMoGymResponseCreateParamsNonStreaming.model_validate(params))
+    assert error.value.status_code == 422
+
+
+@pytest.mark.parametrize("key", ["network_access", "allowed_tools"])
+def test_request_cannot_change_creation_time_profiles(visual_setup, key):
+    agent, _ = visual_setup
+    with pytest.raises(HTTPException):
+        agent._session_input(body(metadata={key: "inherit"}))
+
+
+def test_staged_final_answer_plugin_loads_and_blocks_tools(visual_setup, tmp_path):
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is required to execute the staged plugin")
+    agent, sandbox = visual_setup
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
         assert created.status_code == 200, created.text
-        response = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json=request_body())
-        assert response.status_code == 200, response.text
-        payload = sandbox.params()
-        enabled = websearch and mode == "inherit"
-        assert payload["env"]["OPENCODE_ENABLE_EXA"] == ("1" if enabled else "0")
-        policy = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
-        assert policy["tools"]["websearch"] is enabled
-        assert policy["permission"]["websearch"] == ("allow" if enabled else "deny")
-        install.assert_awaited_once()
-        assert payload["command"][:2] == [_NETWORK_RUNTIME.python, "-I"]
-        assert payload["command"][3:5] == ["--mode", mode]
-        assert "--protect-url" in payload["command"]
-        probes = [c for c in sandbox.exec.call_args_list if "--model-url" in c.args[0]]
-        assert len(probes) == 1
-        assert probes[0].kwargs["timeout_s"] == 30
+        reply = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json=body().model_dump(mode="json"))
+        assert reply.status_code == 200, reply.text
+        plugin_source = next(data for path, data in sandbox.files.items() if path.endswith("/visual-final-answer.mjs"))
+        assert (
+            client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).status_code
+            == 200
+        )
+    plugin = tmp_path / "plugin.mjs"
+    plugin.write_text(plugin_source)
+    script = """
+const module = await import(process.argv[1]);
+const hooks = await module.default();
+await hooks["experimental.chat.messages.transform"]({}, {messages: [
+ {info: {role: "user", sessionID: "s"}},
+ ...Array.from({length: 8}, () => ({info: {role: "assistant", sessionID: "s", time: {completed: 1}, tokens: {total: 100}}}))
+]});
+try { await hooks["tool.execute.before"]({sessionID: "s"}); process.exit(3); }
+catch (error) { if (!error.message.includes("No tools")) throw error; }
+"""
+    result = subprocess.run(
+        [node, "--input-type=module", "-e", script, plugin.as_uri()], capture_output=True, text=True, timeout=20
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_missing_final_answer_policy_receipt_cannot_return_a_success(visual_setup):
+    agent, sandbox = visual_setup
+    original_launch = sandbox.launch.side_effect
+
+    async def launch_without_receipt(*args, **kwargs):
+        result = await original_launch(*args, **kwargs)
+        sandbox.files.pop(sandbox.directory + "/visual-final-answer.ready", None)
+        return result
+
+    sandbox.launch.side_effect = launch_without_receipt
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        reply = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json=body().model_dump(mode="json"))
+        assert reply.status_code >= 400
         assert (
             client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).status_code
             == 200
         )
 
 
-@pytest.mark.parametrize("cleanup_fails", [False, True])
-@pytest.mark.parametrize("mode", ["model_only", "inherit"])
-def test_private_runtime_setup_failure_never_activates(visual_setup, monkeypatch, cleanup_fails, mode):
-    from unittest.mock import AsyncMock, patch
-
-    from responses_api_agents.opencode_multimodal_agent.sessions import _NETWORK_RUNTIME
+@pytest.mark.parametrize(
+    "network,permission,enabled", [("inherit", "allow", "1"), ("inherit", "deny", "0"), ("model_only", "allow", "0")]
+)
+async def test_native_search_requires_explicit_permission_and_network(visual_setup, network, permission, enabled):
+    from types import SimpleNamespace
 
     agent, sandbox = visual_setup
-    agent.config.network_access = mode
-    agent.config.sandbox_provider = "agent-provider"
-    agent.config.sandbox_config = {"image": "test-image", "workdir": "/agent-workspace"}
-    sandbox.expected_workdir = "/agent-workspace"
-    sandbox.start = AsyncMock()
-    monkeypatch.setattr(type(_NETWORK_RUNTIME), "is_installed", AsyncMock(return_value=False))
-    install = AsyncMock(side_effect=RuntimeError("scripted runtime install failure"))
-    monkeypatch.setattr(type(_NETWORK_RUNTIME), "install", install)
-    if cleanup_fails:
-        sandbox.stop = AsyncMock(side_effect=[RuntimeError("scripted cleanup failure"), None])
-    body = seed()
-    body.sandbox_access = None
-    body.tool_accesses = []
-    with (
-        patch("responses_api_agents.opencode_agent.app.AsyncSandbox", return_value=sandbox),
-        patch("responses_api_agents.opencode_agent.app.resolve_provider_config"),
-        TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client,
-    ):
-        created = client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
-        assert created.status_code >= 400
-        install.assert_awaited_once()
-        sandbox.launch.assert_not_awaited()
-        sandbox.stop.assert_awaited()
-    if cleanup_fails:
-        assert sandbox.stop.await_count >= 2
+    agent.config.network_access = network
+    agent.config.final_answer_reserve = None
+    state = SimpleNamespace(session=SimpleNamespace(session_dir="/session", sandbox=sandbox))
+    payload = {
+        "env": {
+            "OPENCODE_CONFIG_CONTENT": json.dumps(
+                {
+                    "model": "nemo_gym/dummy",
+                    "provider": {"nemo_gym": {"models": {agent.config.sandbox_model_id: {"limit": {}}}}},
+                    "permission": {"websearch": permission},
+                }
+            )
+        }
+    }
+    await agent._prepare_session_launch(state, body(), payload)
+    assert payload["env"]["OPENCODE_ENABLE_EXA"] == enabled
 
 
-@pytest.mark.parametrize("mode", ["model_only", "model_and_tools"])
-def test_session_wrapper_uses_only_effective_mcp_grants(visual_setup, monkeypatch, mode):
-    from unittest.mock import AsyncMock, patch
-
-    from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import owned_seed_with_several_grants
-    from responses_api_agents.opencode_multimodal_agent.sessions import _NETWORK_RUNTIME
-
-    monkeypatch.setattr(type(_NETWORK_RUNTIME), "is_installed", AsyncMock(return_value=False))
-    install = AsyncMock()
-    monkeypatch.setattr(type(_NETWORK_RUNTIME), "install", install)
+@pytest.mark.parametrize("image_input", [False, True])
+@pytest.mark.parametrize("string_input", [False, True])
+def test_text_prompt_uses_shared_conditional_image_declaration(visual_setup, image_input, string_input):
     agent, sandbox = visual_setup
-    agent.config.sandbox_provider = "agent-provider"
-    agent.config.sandbox_config = {"image": "test-image", "workdir": "/agent-workspace"}
-    sandbox.expected_workdir = "/agent-workspace"
-    sandbox.start = AsyncMock()
-    request = owned_seed_with_several_grants(required=False)
-    with (
-        patch("responses_api_agents.opencode_agent.app.AsyncSandbox", return_value=sandbox),
-        patch("responses_api_agents.opencode_agent.app.resolve_provider_config"),
-        TestClient(agent.setup_webserver()) as client,
-    ):
-        created = client.post("/v1/agent_sessions", json=request)
+    agent.config.image_input = image_input
+    export = json.loads(sandbox.events)
+    # No initial image; a tool can attach one later without being mistaken for a dropped prompt image.
+    export["messages"][0]["parts"] = [p for p in export["messages"][0]["parts"] if p.get("type") != "file"]
+    if image_input:
+        export["messages"][1]["parts"][1]["state"]["attachments"] = [
+            {"type": "file", "mime": "image/png", "url": image_url()}
+        ]
+    sandbox.events = json.dumps(export)
+    request = body(input="Inspect the task" if string_input else [{"role": "user", "content": "Inspect the task"}])
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
         assert created.status_code == 200, created.text
-        install.assert_awaited_once()
-        body = request_body() | {"metadata": {"network_access": mode}}
-        response = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json=body)
-        assert response.status_code == 200, response.text
-        install.assert_awaited_once()
-        command = sandbox.params()["command"]
-        assert sum("--model-url" in c.args[0] for c in sandbox.exec.call_args_list) == 1
-        urls = [command[index + 1] for index, arg in enumerate(command) if arg == "--tool-url"]
-        assert urls == (
-            ["http://resources.example:8000/search/mcp", "http://docs.example:9000/mcp"]
-            if mode == "model_and_tools"
-            else []
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json=request.model_dump(mode="json"))
+        assert result.status_code == 200, result.text
+        launch = sandbox.params()
+        model_config = json.loads(launch["env"]["OPENCODE_CONFIG_CONTENT"])
+        model = model_config["provider"]["nemo_gym"]["models"][agent.config.sandbox_model_id]
+        assert ("modalities" in model) is image_input
+        if image_input:
+            assert "image" in model["modalities"]["input"]
+            assert model_config["attachment"]["image"]["max_width"] == 2**31 - 1
+        else:
+            assert "attachment" not in model_config
+        assert "--file" not in launch["command"]
+        assert not any(path.startswith("/tmp/nemo-gym-media/") for path in sandbox.files)
+        retry = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json=request.model_dump(mode="json"))
+        assert retry.json() == result.json()
+        sandbox.launch.assert_awaited_once()
+        assert (
+            client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).status_code
+            == 200
         )
+
+
+@pytest.mark.parametrize("problem", ["unfinished", "model_error", "too_many_turns"])
+def test_training_trace_eligibility_uses_native_messages(visual_setup, problem):
+    agent, sandbox = visual_setup
+    export = json.loads(sandbox.events)
+    if problem == "unfinished":
+        export["messages"][1]["info"]["time"] = {}
+        expected = "Unfinished OpenCode assistant turn"
+    elif problem == "model_error":
+        export["messages"][1]["info"]["error"] = {"name": "APIError", "data": {"message": "failed"}}
+        expected = "model/runtime error"
+    else:
+        agent.config.max_turns = 1
+        export["messages"].append(export["messages"][1])
+        expected = "exceeded max_turns"
+    sandbox.events = json.dumps(export)
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json=body().model_dump(mode="json"))
+        if problem == "too_many_turns":
+            assert result.status_code == 200, result.text
+            assert expected in result.json()["opencode_evidence"]["verification_error"]
+            assert result.json()["opencode_evidence"]["tool_reward"] is None
+        else:
+            # Shared main parsing already rejects these before response construction.
+            assert result.status_code == 502
+            assert ("terminal assistant" if problem == "unfinished" else "APIError") in result.text
         client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
 
 
-@pytest.mark.parametrize("qualified", [False, True])
-def test_tool_images_follow_call_identity_without_crossing_invocations(visual_setup, qualified):
-    from nemo_gym.core import NeMoGymFunctionCallOutput
-    from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ToolCallObservation
-
+def test_native_length_finish_retains_finalized_tool_evidence(visual_setup):
     agent, sandbox = visual_setup
-    parent_id = "normalized-parent" if qualified else "tool-1"
-    child_id = "normalized-child"
-    parent = AgentInvocation(
-        invocation_id="root",
-        conversation=[NeMoGymFunctionCallOutput(call_id=parent_id, output="parent result")],
-    )
-    child = AgentInvocation(
-        invocation_id="child",
-        conversation=[NeMoGymFunctionCallOutput(call_id=child_id, output="child result")],
-    )
-    observations = AgentObservationBundle(
-        source="opencode",
-        schema_version="2.0" if qualified else "1.0",
-        records=[
-            parent,
-            child,
-            ToolCallObservation(
-                invocation_id="root",
-                tool_call_id=parent_id,
-                native_tool_call_id="tool-1" if qualified else None,
-            ),
-            # Deliberately reuse the native ID after the parent record.
-            ToolCallObservation(invocation_id="child", tool_call_id=child_id, native_tool_call_id="tool-1"),
-        ],
-    )
-    output = agent._session_output(json.loads(sandbox.events), observations)
-    assert len(output) == 1
-    assert output[0].call_id == parent_id
-    assert output[0].output == [
-        {"type": "input_text", "text": "parent result"},
-        {"type": "input_image", "image_url": image_url(), "detail": "auto"},
-    ]
-    assert parent.conversation[0].output == "parent result"
-    assert child.conversation[0].output == "child result"
+    agent.config.tool_rewards = OpenCodeToolRewardConfig()
+    export = json.loads(sandbox.events)
+    export["messages"][1]["info"]["finish"] = "length"
+    sandbox.events = json.dumps(export)
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json=body().model_dump(mode="json"))
+        assert result.status_code == 200, result.text
+        response = result.json()
+        assert response["status"] == "incomplete"
+        evidence = response["opencode_evidence"]
+        assert evidence["verification_error"] is None
+        assert evidence["tool_reward"]["bash_success_count"] == 1
+        assert evidence["tool_reward"]["auxiliary_reward"] == pytest.approx(0.02)
+        assert evidence["finished_naturally"] is False
+        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))

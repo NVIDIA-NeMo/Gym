@@ -6,12 +6,12 @@
 HARNESSES = {
     "simple": "SimpleAgent",
     "opencode": "OpenCodeAgent",
-    "opencode_multimodal": "OpenCodeMultimodalEvalAgent",
     "pi": "PiAgent",
     "codex": "CodexAgent",
     "hermes": "HermesAgent",
     "kilocode": "KiloCodeAgent",
     "stirrup": "StirrupAgentWrapper",
+    "copilot": "CopilotAgent",
     "openclaw": "OpenClawAgent",
     "nooa": "NOOAAgent",
 }

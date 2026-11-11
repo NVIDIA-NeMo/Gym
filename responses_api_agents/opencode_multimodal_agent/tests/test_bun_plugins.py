@@ -10,7 +10,7 @@ import pytest
 
 
 @pytest.mark.skipif(shutil.which("bun") is None, reason="Bun is required for OpenCode plugin tests")
-@pytest.mark.parametrize("suite", ["test_final_answer.mjs", "test_eval_correlation.mjs"])
+@pytest.mark.parametrize("suite", ["test_final_answer.mjs"])
 def test_bun_plugin_suite(suite):
     directory = Path(__file__).resolve().parent
     result = subprocess.run(

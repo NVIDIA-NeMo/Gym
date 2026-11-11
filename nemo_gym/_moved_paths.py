@@ -207,7 +207,7 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             "nemo_gym.client.server_client",
             "0.8.0",
             """
-            _connectable_client_host _TRACEPARENT_PATTERN apply_rollout_prefix ConfigDict ConnectionError
+            _connectable_client_host apply_rollout_prefix ConfigDict ConnectionError
             get_server_url NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME
             rollout_path_prefix ServerStatus SESSION_ID_KEY setup_server_client trace_context_path_segment
             """,
@@ -300,8 +300,7 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             "nemo_gym.server_runtime.request_handling.trace_context",
             "0.8.0",
             """
-            _restore_trace_segment_on_redirect _ROLLOUT_PREFIX_PATTERN _ROLLOUT_PREFIX_RE _TRACE_CONTEXT_PATH_RE
-            TraceContextPathMiddleware
+            _restore_trace_segment_on_redirect TraceContextPathMiddleware
             """,
         ),
         **_names("nemo_gym.telemetry._fallbacks", "0.8.0", "safe_set_span_attributes"),
@@ -582,7 +581,7 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             "0.8.0",
             """
             CaptureStore ModelExecutionOutcome _CLIENT_SESSION_HEADER _CaptureMiddleware _OBSERVED_PATHS
-            _PENDING_SUFFIX _ROLLOUT_PATH_RE _TERMINAL_SSE_LINES _classify_exception _classify_status
+            _PENDING_SUFFIX _TERMINAL_SSE_LINES _classify_exception _classify_status
             _consume_terminal_sse_event _exception_http_details _fail_uncommitted_external_call
             _headers_content_type _parse_sse_events _pending_token _preserve_capture_prefix_on_redirect
             _reconstruct_anthropic_sse _reconstruct_chat_sse _reconstruct_responses_sse

@@ -1,502 +1,76 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-
-import base64
-import io
 import json
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from aiohttp import ClientResponseError
-from fastapi import HTTPException
-from PIL import Image
-from pydantic import ValidationError
+from fastapi.testclient import TestClient
 
-from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
-from nemo_gym.client import ServerClient
-from responses_api_agents.opencode_agent.tests.test_app import _session_db
-from responses_api_agents.opencode_multimodal_agent.app import (
-    OpenCodeMultimodalAgent,
-    OpenCodeMultimodalRunRequest,
-)
 from responses_api_agents.opencode_multimodal_agent.eval import (
     OpenCodeMultimodalEvalAgent,
     OpenCodeMultimodalEvalConfig,
 )
-from responses_api_agents.opencode_multimodal_agent.eval_failures import terminal_model_result
-from responses_api_agents.opencode_multimodal_agent.media import stage_inputs
-from responses_api_agents.opencode_multimodal_agent.tests.test_app import agent, body, config
+from responses_api_agents.opencode_multimodal_agent.tests.test_sessions import (  # noqa: F401
+    body,
+    close_body,
+    opencode_setup,
+    seed,
+    visual_setup,
+)
 
 
-def evaluation(monkeypatch, tmp_path, prompt="Exact combined prompt\n"):
-    native = agent(monkeypatch, max_turns=20, context_window=131072, tool_rewards=None)
+@pytest.mark.parametrize("headroom,steps", [(0, 8), (2, 6)])
+def test_eval_uses_shared_session_with_advisory_steps(visual_setup, headroom, steps):
+    native, sandbox = visual_setup
+    cfg = OpenCodeMultimodalEvalConfig.model_validate(
+        native.config.model_dump()
+        | {"final_answer_reserve": None, "final_answer_turn_headroom": headroom, "tool_rewards": None}
+    )
+    agent = OpenCodeMultimodalEvalAgent(config=cfg, server_client=native.server_client)
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json=body().model_dump(mode="json"))
+        assert result.status_code == 200, result.text
+        config = json.loads(sandbox.params()["env"]["OPENCODE_CONFIG_CONTENT"])
+        assert config["agent"]["build"]["steps"] == steps
+        assert config["enabled_providers"] == ["nemo_gym"]
+        assert not any("visual-final-answer" in p for p in config["plugin"])
+        assert (
+            client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).status_code
+            == 200
+        )
+
+
+async def test_enforced_budget_stages_session_header_and_removes_stock_steps(visual_setup, monkeypatch):
+    from types import SimpleNamespace
+
+    native, sandbox = visual_setup
     cfg = OpenCodeMultimodalEvalConfig.model_validate(
         native.config.model_dump()
         | {
-            "system_prompt": None,
             "final_answer_reserve": None,
-            "strip_reasoning_for_grading": False,
-            "build_system_prompt": prompt,
-            "entrypoint": "eval.py",
-            "preserve_image_format": True,
-            "sandbox": {"bwrap_command": ["bwrap"], "python_env": str(tmp_path), "plugin_dependencies": str(tmp_path)},
+            "max_turns": 8,
+            "turn_budget": {"regular_turns": 6, "grace_turns": 2, "grace_tool_turns": 1},
+            "tool_rewards": None,
         }
     )
-    return OpenCodeMultimodalEvalAgent(config=cfg, server_client=native.server_client)
-
-
-def test_eval_keeps_budget_and_matches_original_prompt_image_tools(monkeypatch, tmp_path):
-    prompt = "  Exact combined prompt\nwith trailing newline.\n"
-    evaluation_agent = evaluation(monkeypatch, tmp_path, prompt)
-    cfg = evaluation_agent._build_opencode_config("test")
-    assert cfg["agent"]["build"]["prompt"] == prompt
-    assert cfg["agent"]["build"]["steps"] == 18
-    assert "permission" not in cfg["agent"]["build"]
-    assert cfg["attachment"]["image"] == {
-        "auto_resize": True,
-        "max_width": 8000,
-        "max_height": 8000,
-        "max_base64_bytes": 1024**3,
-    }
-    assert cfg["compaction"] == {"auto": False, "prune": False}
-    assert cfg["tools"]["task"] is True
-    assert "*" not in cfg["permission"]
-    assert cfg["permission"]["webfetch"] == cfg["permission"]["websearch"] == "deny"
-    evaluation_agent._write_opencode_config(tmp_path)
-    plugin = (tmp_path / ".eval-system-prompt.mjs").read_text()
-    assert '"experimental.chat.system.transform"' in plugin
-    assert "output.system.splice(0, output.system.length, prompt)" in plugin
-    assert evaluation_agent.config.system_prompt is None
-
-
-@pytest.mark.parametrize("prefix", ["input-", "image_"])
-@pytest.mark.parametrize("absolute_command", [False, True])
-def test_sandbox_command_stages_image_in_cwd(monkeypatch, tmp_path, prefix, absolute_command):
-    evaluation_agent = evaluation(monkeypatch, tmp_path)
-    evaluation_agent.config.input_image_prefix = prefix
-    source = tmp_path / "staging/input-0.jpg"
-    source.parent.mkdir()
-    source.write_bytes(b"exact JPEG bytes")
-    second_source = source.with_name("input-1.png")
-    second_source.write_bytes(b"exact PNG bytes")
-    workspace = tmp_path / "episode"
-    workspace.mkdir()
-    (workspace / "opencode.json").write_text(
-        json.dumps({"provider": {"nemo": {"options": {"baseURL": "http://policy:9000/v1"}}}})
-    )
-    captured = {}
-
-    def sandbox(cfg, wd, binary, env, cmd):
-        captured.update(workspace=wd, binary=binary, command=cmd)
-        return cmd
-
-    monkeypatch.setattr("responses_api_agents.opencode_multimodal_agent.app.sandbox_command", sandbox)
-    binary = tmp_path / "bin/opencode"
-    binary.parent.mkdir()
-    binary.write_text("#!/bin/sh\nexit 0\n")
-    binary.chmod(0o755)
-    cmd = [
-        str(binary) if absolute_command else "opencode",
-        "run",
-        "--dir",
-        str(workspace),
-        "--file",
-        str(source),
-        str(second_source),
-        "--",
-        "question",
-    ]
-    result = evaluation_agent._prepare_command(cmd, workspace, {"PATH": str(binary.parent)})
-    assert captured["binary"] == binary.resolve()
-    assert (workspace / f"{prefix}0.jpg").read_bytes() == source.read_bytes()
-    assert (workspace / f"{prefix}1.png").read_bytes() == second_source.read_bytes()
-    assert sorted(path.name for path in workspace.iterdir() if path.suffix in {".jpg", ".png"}) == [
-        f"{prefix}0.jpg",
-        f"{prefix}1.png",
-    ]
-    assert result[result.index("--") + 1 :] == [
-        "/agent-bin/opencode",
-        "run",
-        "--dir",
-        "/testbed",
-        "--file",
-        f"/testbed/{prefix}0.jpg",
-        f"/testbed/{prefix}1.png",
-        "--",
-        "question",
-    ]
-    assert str(source) not in result
-
-
-def test_image_naming_is_opt_in_and_eval_only(monkeypatch, tmp_path):
-    cfg = evaluation(monkeypatch, tmp_path).config
-    assert cfg.input_image_prefix == "input-"
-    assert OpenCodeMultimodalEvalConfig.model_validate(cfg.model_dump() | {"input_image_prefix": "image_"})
-    with pytest.raises(ValidationError):
-        OpenCodeMultimodalEvalConfig.model_validate(cfg.model_dump() | {"input_image_prefix": "../"})
-    assert "input_image_prefix" not in config(input_image_prefix="image_").model_dump()
-
-
-def test_eval_compaction_and_native_image_resize_are_independent(monkeypatch, tmp_path):
-    runner = evaluation(monkeypatch, tmp_path)
-    runner.config.compaction_auto = True
-    compact = runner._build_opencode_config("test")
-    assert compact["compaction"] == {"auto": True, "prune": False}
-    assert compact["attachment"]["image"]["max_width"] == 8000
-    runner.config.use_default_image_resize = True
-    resized = runner._build_opencode_config("test")
-    assert "attachment" not in resized
-    assert resized["compaction"] == compact["compaction"]
-    native = config(compaction_auto=True, use_default_image_resize=True).model_dump()
-    assert "compaction_auto" not in native
-    assert "use_default_image_resize" not in native
-
-
-def test_unlimited_eval_omits_runtime_turn_cap_and_keeps_training_bounded(monkeypatch, tmp_path):
-    bounded = evaluation(monkeypatch, tmp_path)
-    cfg = OpenCodeMultimodalEvalConfig.model_validate(bounded.config.model_dump() | {"max_turns": None})
-    unlimited = OpenCodeMultimodalEvalAgent(config=cfg, server_client=MagicMock(spec=ServerClient))
-    expected = bounded._build_opencode_config("test")
-    del expected["agent"]["build"]["steps"]
-    assert unlimited._build_opencode_config("test") == expected
-    with pytest.raises(ValidationError):
-        config(max_turns=None)
-    assert config().max_turns == 8
-
-
-@pytest.mark.parametrize("budget,threshold", [(55, 53), (20, 18), (8, 6), (3, 1), (2, 1), (1, 1)])
-def test_eval_reserves_final_turns_without_lowering_parser_budget(monkeypatch, tmp_path, budget, threshold):
-    runner = evaluation(monkeypatch, tmp_path)
-    runner.config.max_turns = budget
-    runtime = runner._build_opencode_config("budget-check")
-    assert runtime["agent"]["build"]["steps"] == threshold
-    assert runner.config.max_turns == budget
-    # The training agent's policy remains unchanged.
-    native = agent(monkeypatch, max_turns=budget)
-    assert native._build_opencode_config("training-check")["agent"]["build"]["steps"] == budget
-
-
-def test_enforced_grace_budget_uses_gateway_instead_of_stock_steps(monkeypatch, tmp_path):
-    runner = evaluation(monkeypatch, tmp_path)
-    values = runner.config.model_dump() | {"turn_budget": {"regular_turns": 55, "grace_turns": 10}}
-    with pytest.raises(ValidationError, match="max_turns must equal"):
-        OpenCodeMultimodalEvalConfig.model_validate(values)
-    runner.config = OpenCodeMultimodalEvalConfig.model_validate(values | {"max_turns": 65})
-    assert "steps" not in runner._build_opencode_config("enforced")["agent"]["build"]
-    assert runner.config.max_turns == 65
-
-
-def test_preserve_source_jpeg_bytes_and_dimensions(tmp_path):
-    stream = io.BytesIO()
-    Image.new("RGB", (4755, 1500), (20, 60, 100)).save(stream, format="JPEG")
-    raw = stream.getvalue()
-    request = body(
-        input=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "input_text", "text": "Question"},
-                    {
-                        "type": "input_image",
-                        "image_url": "data:image/jpeg;base64," + base64.b64encode(raw).decode(),
-                        "detail": "auto",
-                    },
-                ],
-            }
-        ]
-    )
-    _, _, images = stage_inputs(request, tmp_path, max_source_pixels=150_000_000, max_images=33, preserve_format=True)
-    assert images[0].name == "input-0.jpg"
-    assert images[0].read_bytes() == raw
-    assert Image.open(images[0]).size == (4755, 1500)
-
-
-def test_training_still_rejects_prompt_override():
-    with pytest.raises(ValidationError, match="Keep the runtime default prompt"):
-        config(opencode_config={"agent": {"build": {"prompt": "override"}}})
-    assert not config().preserve_image_format
-
-
-def test_eval_accepts_native_prompt_and_rejects_duplicate_prefix():
-    native = config().model_dump()
-    assert OpenCodeMultimodalEvalConfig.model_validate(native | {"system_prompt": None}).build_system_prompt is None
-    with pytest.raises(ValidationError):
-        OpenCodeMultimodalEvalConfig.model_validate(native | {"build_system_prompt": "override"})
-
-
-def test_native_training_prompt_keeps_eval_runtime_repairs(monkeypatch, tmp_path):
-    combined = evaluation(monkeypatch, tmp_path)
-    cfg = OpenCodeMultimodalEvalConfig.model_validate(
-        combined.config.model_dump() | {"build_system_prompt": None, "system_prompt": config().system_prompt}
-    )
-    native = OpenCodeMultimodalEvalAgent(config=cfg, server_client=MagicMock(spec=ServerClient))
-    combined_runtime = combined._build_opencode_config("test")
-    native_runtime = native._build_opencode_config("test")
-    del combined_runtime["agent"]["build"]["prompt"]
-    del combined_runtime["plugin"]
-    assert native_runtime == combined_runtime
-    assert native.config.system_prompt == config().system_prompt
-    assert native.config.preserve_image_format
-    native._write_opencode_config(tmp_path)
-    assert not (tmp_path / ".eval-system-prompt.mjs").exists()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "reason,kind",
-    [
-        ("OpenCode failed (timeout=True, exit=-9):", "agent_timeout"),
-        ("Missing assistant turns or exceeded max_turns", "agent_limit"),
-    ],
-)
-async def test_episode_crash_is_persistable_zero(monkeypatch, tmp_path, reason, kind):
-    runner = evaluation(monkeypatch, tmp_path)
-    error = ClientResponseError(SimpleNamespace(real_url="http://agent/v1/responses?_ng_rollout_id=1"), (), status=500)
-    error.response_content = reason.encode()
-    native_run = AsyncMock(side_effect=error)
-    monkeypatch.setattr(OpenCodeMultimodalAgent, "run", native_run)
-    request = OpenCodeMultimodalRunRequest(
-        responses_create_params=body(), verifier_metadata={"index": "12", "benchmark": "VStarBench"}
-    )
-    result = await runner.run(MagicMock(), request)
-    assert result.reward == 0
-    assert result.mask_sample is False
-    assert result.failure_kind == kind
-    assert result.failure_reason == reason
-    assert result.response.status == "failed"
-    assert result.response.error.message == reason
-    assert result.response.output == []
-    assert result.verifier_metadata == request.verifier_metadata
-    assert not result.resolved
-    assert "_ng_failure_class" not in result.model_dump()
-    assert native_run.await_count == 1
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "provider_error,finish,expected",
-    [
-        ({"name": "APIError", "data": {"statusCode": 400}}, None, ("model_request_error", 400)),
-        ({"name": "APIError", "data": {"statusCode": 413}}, None, ("model_request_error", 413)),
-        ({"name": "APIError", "data": {"statusCode": 422}}, None, ("model_request_error", 422)),
-        ({"name": "APIError", "data": {"statusCode": 429}}, None, ("model_request_error", 429)),
-        ({"name": "APIError", "data": {"statusCode": 500}}, None, ("model_request_error", 500)),
-        ({"name": "APIError", "data": {"isRetryable": True}}, None, ("model_transport_error", None)),
-        ({"name": "ContextOverflowError", "data": {}}, "error", ("model_context_limit", None)),
-    ],
-)
-async def test_provider_evidence_selects_scoring_or_retry(monkeypatch, tmp_path, provider_error, finish, expected):
-    runner = evaluation(monkeypatch, tmp_path)
-    runner.config.capture_failure_artifacts = True
-    database = _session_db(
-        tmp_path,
-        [({"role": "assistant", "time": {"completed": 2000}, "finish": finish, "error": provider_error}, [])],
-    )
-    reason = "OpenCode failed (timeout=False, exit=1): controlled model failure"
-    monkeypatch.setattr(OpenCodeMultimodalAgent, "_run_opencode", AsyncMock(side_effect=RuntimeError(reason)))
-    with pytest.raises(HTTPException) as captured:
-        await runner._run_opencode("question", None, artifact_path=database)
-    detail = captured.value.detail
-    outcome = AgentOutcome.model_validate_json(detail[AGENT_OUTCOME_METADATA_KEY])
-    assert (outcome.failure_kind, outcome.status_code) == expected
-    error = ClientResponseError(SimpleNamespace(real_url="http://agent/v1/responses"), (), status=500)
-    error.response_content = json.dumps({"detail": detail}).encode()
-    monkeypatch.setattr(OpenCodeMultimodalAgent, "run", AsyncMock(side_effect=error))
-    model_caused = expected[0] == "model_context_limit" or (
-        expected[0] == "model_request_error" and expected[1] in (400, 413, 422)
-    )
-    if not model_caused:
-        with pytest.raises(ClientResponseError) as caught:
-            await runner.run(MagicMock(), OpenCodeMultimodalRunRequest(responses_create_params=body()))
-        assert caught.value is error
-        return
-    result = await runner.run(MagicMock(), OpenCodeMultimodalRunRequest(responses_create_params=body()))
-    assert AgentOutcome.model_validate_json(result.response.metadata[AGENT_OUTCOME_METADATA_KEY]) == outcome
-    assert result.response.error.message == reason
-    assert result.reward == 0 and result.mask_sample is False and result.response.output == []
-    assert result.scorer == "agent-failure"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["timeout=True, exit=-9", "timeout=False, exit=-11"])
-async def test_crash_does_not_inherit_a_prior_provider_error(monkeypatch, tmp_path, failure):
-    runner = evaluation(monkeypatch, tmp_path)
-    runner.config.capture_failure_artifacts = True
-    database = _session_db(
-        tmp_path,
-        [
-            (
+    # The constructor's matching-gateway checks are covered by the gateway suite.
+    monkeypatch.setattr(OpenCodeMultimodalEvalAgent, "_validate_turn_budget_gateway", lambda self: None)
+    agent = OpenCodeMultimodalEvalAgent(config=cfg, server_client=native.server_client)
+    state = SimpleNamespace(session=SimpleNamespace(session_dir="/session", sandbox=sandbox))
+    payload = {
+        "env": {
+            "OPENCODE_CONFIG_CONTENT": json.dumps(
                 {
-                    "role": "assistant",
-                    "time": {"completed": 2000},
-                    "error": {"name": "APIError", "data": {"statusCode": 400}},
-                },
-                [],
-            )
-        ],
-    )
-    monkeypatch.setattr(
-        OpenCodeMultimodalAgent, "_run_opencode", AsyncMock(side_effect=RuntimeError(f"OpenCode failed ({failure}):"))
-    )
-    with pytest.raises(HTTPException) as captured:
-        await runner._run_opencode("question", None, artifact_path=database)
-    assert AGENT_OUTCOME_METADATA_KEY not in captured.value.detail
-
-
-def test_terminal_model_result_does_not_use_recovered_or_child_errors(tmp_path):
-    error = {
-        "role": "assistant",
-        "time": {"completed": 2000},
-        "error": {"name": "APIError", "data": {"statusCode": 400}},
-    }
-    database = _session_db(
-        tmp_path,
-        [
-            (error, []),
-            ({"role": "assistant", "time": {"completed": 3000}, "finish": "stop"}, []),
-            ("child", error, []),
-        ],
-        sessions=[("root", None), ("child", "root")],
-    )
-    assert terminal_model_result(database) == {}
-
-
-@pytest.mark.parametrize("contents", [b"", b"not a database"])
-def test_terminal_model_result_handles_unavailable_evidence(tmp_path, contents):
-    database = tmp_path / "session.db"
-    assert terminal_model_result(database) == {}
-    database.write_bytes(contents)
-    assert terminal_model_result(database) == {}
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "path,status,reason",
-    [
-        ("/verify", 500, "JudgeError: unavailable"),
-        ("/verify", 500, "OpenCode failed (timeout=False, exit=133): quoted in judge input"),
-        ("/seed_session", 500, "seed failed"),
-        ("/v1/responses", 503, "service unavailable"),
-        ("/v1/responses", 500, "FileNotFoundError: input image"),
-        ("/v1/responses", 500, "OpenCode failed (timeout=False, exit=133): Bun crashed"),
-        ("/v1/responses", 500, "OpenCode failed (timeout=False, exit=1): unshare: Operation not permitted"),
-        ("/v1/responses", 500, "OpenCode recorded a model/runtime error; do not score this rollout"),
-        ("/v1/responses", 500, "OpenCode did not produce its session database"),
-    ],
-)
-async def test_infrastructure_and_judge_failures_remain_unjudged(monkeypatch, tmp_path, path, status, reason):
-    runner = evaluation(monkeypatch, tmp_path)
-    error = ClientResponseError(SimpleNamespace(real_url="http://agent" + path), (), status=status)
-    error.response_content = reason.encode()
-    monkeypatch.setattr(OpenCodeMultimodalAgent, "run", AsyncMock(side_effect=error))
-    with pytest.raises(ClientResponseError) as caught:
-        await runner.run(MagicMock(), OpenCodeMultimodalRunRequest(responses_create_params=body()))
-    assert caught.value is error
-
-
-def test_eval_honors_image_policy_and_disables_subagents(monkeypatch, tmp_path):
-    runner = evaluation(monkeypatch, tmp_path)
-    runner.config.image_policy.auto_resize = False
-    runner.config.image_policy.max_width = 4096
-    runner.config.subagents_enabled = False
-    runtime = runner._build_opencode_config("custom-policy")
-    assert runtime["attachment"]["image"]["auto_resize"] is False
-    assert runtime["attachment"]["image"]["max_width"] == 4096
-    assert runtime["tools"]["task"] is False
-    assert runtime["permission"]["task"] == "deny"
-    assert runtime["permission"]["bash"]["*killall*"] == "deny"
-
-
-def test_eval_missing_executable_fails_before_launch(monkeypatch, tmp_path):
-    runner = evaluation(monkeypatch, tmp_path)
-    command = ["missing-opencode", "run", "--dir", str(tmp_path), "--file", "--", "question"]
-    with pytest.raises(FileNotFoundError, match="OpenCode executable not found"):
-        runner._prepare_command(command, tmp_path, {"PATH": str(tmp_path)})
-
-
-@pytest.mark.parametrize("webfetch", [False, True])
-@pytest.mark.parametrize("websearch", [False, True])
-def test_eval_web_tools_are_independent_and_do_not_override_other_denies(monkeypatch, tmp_path, webfetch, websearch):
-    evaluation_agent = evaluation(monkeypatch, tmp_path)
-    tools = {"webfetch": webfetch, "websearch": websearch}
-    evaluation_agent.config.opencode_config["tools"] = tools
-    cfg = evaluation_agent._build_opencode_config("web-policy")
-    for tool, enabled in tools.items():
-        assert cfg["tools"][tool] is enabled
-        assert cfg["permission"][tool] == ("allow" if enabled else "deny")
-    assert "*" not in cfg["permission"]
-    assert cfg["permission"]["skill"] == "deny"
-    assert cfg["tools"]["skill"] is False
-    assert cfg["tools"]["codesearch"] is False
-    assert cfg["permission"]["codesearch"] == "deny"
-    assert cfg["permission"]["bash"]["*pkill*"] == "deny"
-    assert cfg["permission"]["bash"]["*killall*"] == "deny"
-    assert cfg["permission"]["bash"]["*"] == "allow"
-    monkeypatch.setenv("OPENCODE_ENABLE_EXA", "0" if websearch else "1")
-    assert evaluation_agent._env(str(tmp_path))["OPENCODE_ENABLE_EXA"] == ("1" if websearch else "0")
-
-
-def test_eval_defaults_exclude_training_reward_shaping():
-    values = config().model_dump()
-    values.pop("tool_rewards")
-    assert config().tool_rewards is not None
-    assert OpenCodeMultimodalEvalConfig.model_validate(values).tool_rewards is None
-
-
-@pytest.mark.parametrize(
-    "entrypoint,budget,error",
-    [
-        ("app.py", {"regular_turns": 55, "grace_turns": 10}, "visual_eval"),
-        ("visual_eval.py", {"regular_turns": 30, "grace_turns": 10}, "must match"),
-        ("visual_eval.py", None, "explicitly enable"),
-        ("visual_eval.py", {"regular_turns": 55, "grace_turns": 10}, None),
-        ("hosted_visual_eval.py", {"regular_turns": 55, "grace_turns": 10}, None),
-    ],
-)
-def test_enforced_budget_requires_matching_gateway(monkeypatch, tmp_path, entrypoint, budget, error):
-    runner = evaluation(monkeypatch, tmp_path)
-    runner.config = OpenCodeMultimodalEvalConfig.model_validate(
-        runner.config.model_dump() | {"max_turns": 65, "turn_budget": {"regular_turns": 55, "grace_turns": 10}}
-    )
-    runner.server_client.global_config_dict = {
-        "policy_model": {"responses_api_models": {"vllm_model": {"entrypoint": entrypoint, "turn_budget": budget}}}
-    }
-    if error:
-        with pytest.raises(ValueError, match=error):
-            runner._validate_turn_budget_gateway()
-    else:
-        runner._validate_turn_budget_gateway()
-
-
-@pytest.mark.parametrize("capture_message_ids", [False, True])
-def test_enforced_budget_stages_session_headers_without_optional_capture(monkeypatch, tmp_path, capture_message_ids):
-    runner = evaluation(monkeypatch, tmp_path)
-    runner.config = OpenCodeMultimodalEvalConfig.model_validate(
-        runner.config.model_dump() | {"max_turns": 65, "turn_budget": {}, "capture_message_ids": capture_message_ids}
-    )
-    runner._write_opencode_config(tmp_path, "episode")
-    runtime = json.loads((tmp_path / "opencode.json").read_text())
-    assert runtime["plugin"].count("file:///testbed/.eval-correlation.mjs") == 1
-    assert (tmp_path / ".eval-correlation.mjs").is_file()
-
-
-@pytest.mark.parametrize("idle_timeout", [1, 1800])
-def test_turn_state_expiry_cannot_reset_a_live_episode(monkeypatch, tmp_path, idle_timeout):
-    runner = evaluation(monkeypatch, tmp_path)
-    runner.config = OpenCodeMultimodalEvalConfig.model_validate(
-        runner.config.model_dump() | {"max_turns": 65, "turn_budget": {}, "timeout": 1800}
-    )
-    runner.server_client.global_config_dict = {
-        "policy_model": {
-            "responses_api_models": {
-                "vllm_model": {
-                    "entrypoint": "visual_eval.py",
-                    "turn_budget": runner.config.turn_budget.model_dump(),
-                    "turn_state_idle_timeout_seconds": idle_timeout,
+                    "model": "nemo_gym/dummy",
+                    "provider": {"nemo_gym": {"models": {cfg.sandbox_model_id: {"limit": {}}}}},
                 }
-            }
+            )
         }
     }
-    with pytest.raises(ValueError, match="idle timeout must exceed"):
-        runner._validate_turn_budget_gateway()
+    await agent._prepare_session_launch(state, body(), payload)
+    config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
+    assert "steps" not in config["agent"]["build"]
+    plugin = sandbox.files["/session/eval-budget-headers.mjs"]
+    assert 'output.headers["x-opencode-session-id"] = input.sessionID' in plugin
+    assert "file:///session/eval-budget-headers.mjs" in config["plugin"]

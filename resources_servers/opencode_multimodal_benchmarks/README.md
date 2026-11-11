@@ -14,7 +14,7 @@ to route judge calls through a Gym model server with
 rollout correlation and capture. Judge failures remain errors that require
 resolution before reporting a complete dataset score. For agent sessions, the
 Environment Server's `agent_outcome_policy` determines whether a failed attempt
-is verified, retried or left ungraded. The OpenCode compatibility evaluation
+is verified, retried or left ungraded. The OpenCode session evaluation
 `/run` path scores established model-caused failures as zero; provider 429/5xx,
 transport, setup and unclassified process failures remain retryable or unfinished.
 

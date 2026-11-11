@@ -49,6 +49,7 @@ from nemo_gym.core import (
     NeMoGymResponseUsage,
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.cline_agent.setup_cline import ensure_cline
 
 
@@ -440,6 +441,10 @@ class ClineAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
+        # This install takes no lock across processes, and it relies on an ordering instead.
+        # With num_workers > 1, the main process builds this server before uvicorn starts the workers,
+        # so the install has finished before any worker gets here,
+        # and the workers find the tool on the PATH they inherit.
         ensure_cline(self.config.cline_version)
         command = self.config.command_parts[0] if self.config.command_parts else ""
         if not command or shutil.which(command) is None:
@@ -750,3 +755,6 @@ class ClineAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     ClineAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ClineAgent.run_webserver()  # noqa: F401

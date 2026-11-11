@@ -237,6 +237,7 @@ upstream copyright header and adds an NVIDIA modifications block.
 | ChemReason-Bench | Apache-2.0 (original and NVIDIA modifications) | `resources_servers/chemreason_bench/` (primary metrics ported into `metrics.py` from upstream `eval/eval.py`; `canonicalize_slots`, the post-processors and the lm probability rules ported into `slot_canonicalization.py` and `response_parsing.py` from `predict/predict.py`) | https://github.com/Khadaz/ChemReason-Bench |
 | Harbor | Apache-2.0 (vendored unmodified) | `nemo_gym/data/tasks/harbor/harbor_compat.py` (`environment_content_hash` and `_CONTENT_HASH_IGNORE_NAMES` from `src/harbor/environments/definition.py`, `_sanitize_docker_image_name` from `src/harbor/environments/docker/docker.py`, at tag `v0.22.0`; bodies byte-for-byte, the private sanitiser exposed without its leading underscore) | https://github.com/harbor-framework/harbor |
 | NeMo Skills `generic/math` prompt | Apache-2.0 (vendored unmodified) | `resources_servers/ns_tools/prompts/generic/math.yaml` (upstream `nemo_skills/prompt/config/generic/math.yaml`, byte-for-byte below a provenance header) | https://github.com/NVIDIA-NeMo/Skills |
+| OpenCode max-steps prompt | MIT (vendored unmodified) | `nemo_gym/models/token_capture/harness_notes/opencode.py` (`OPENCODE_MAX_STEPS_PROMPT`, upstream `packages/core/src/session/runner/max-steps.ts`, verbatim) | https://github.com/anomalyco/opencode |
 
 - Upstream license: reproduced in full in the Apple MIT License section below
 - Subcomponent notices: `resources_servers/toolsandbox/tool_sandbox/ACKNOWLEDGEMENTS`
@@ -247,6 +248,7 @@ upstream copyright header and adds an NVIDIA modifications block.
 - Harbor: vendored, unmodified, from upstream tag `v0.22.0` (https://github.com/harbor-framework/harbor/tree/v0.22.0/src/harbor), so that Gym and Harbor compute the same environment content hash and image name for the same task. Upstream is Apache-2.0, the same license as this repository, so no additional license text is required. The vendored section is marked in-file; Gym does not import or depend on the `harbor` package.
 - ChemReason-Bench: pinned at upstream revision `c0b9ac2933708fcca47b1795492952cbf280e194`. Upstream is Apache-2.0, the same license as this repository, so no additional license text is required; its `LICENSE` leaves the copyright holder unfilled, so no upstream notice exists to reproduce. NVIDIA modifications are noted in-file and in `resources_servers/chemreason_bench/README.md`. Benchmark rows committed as test fixtures are CC BY 4.0 (upstream `DATA_LICENSE`), attributed in that README.
 - NeMo Skills `generic/math` prompt: vendored, unmodified, from upstream revision `da85a881d972e6fec847b90cf553a0bf9bf10638` (https://github.com/NVIDIA-NeMo/Skills/blob/da85a881d972e6fec847b90cf553a0bf9bf10638/nemo_skills/prompt/config/generic/math.yaml), the revision `resources_servers/ns_tools/requirements.txt` pins, because the pinned `nemo-skills-tools` package ships no prompt YAMLs. Upstream is Apache-2.0, the same license as this repository, so no additional license text is required. The file header records the same source, revision and license.
+- OpenCode max-steps prompt: copied verbatim from upstream revision `67aec2212010d67775c35e696d8b8b54902eb338` (OpenCode 1.17.11, https://github.com/anomalyco/opencode/blob/67aec2212010d67775c35e696d8b8b54902eb338/packages/core/src/session/runner/max-steps.ts), because token capture must recognize the exact text OpenCode sends at its step limit. Upstream is MIT; its license is reproduced in full in the OpenCode MIT License section below. The file header records the same source, revision and license.
 
 ---
 
@@ -22544,6 +22546,36 @@ copyright notices and license terms - please see the file ACKNOWLEDGEMENTS.
 
 ---
 
+## OpenCode MIT License (max-steps prompt)
+
+Applies to `OPENCODE_MAX_STEPS_PROMPT` in `nemo_gym/models/token_capture/harness_notes/opencode.py`.
+
+```text
+MIT License
+
+Copyright (c) 2025 opencode
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+---
+
 ## SPDX Identifiers
 
 Each NVIDIA-authored source file in this project includes an SPDX identifier
@@ -22566,7 +22598,6 @@ record unknown dataset licensing where an applicable license has not been establ
 | [VLMEvalKit matching utilities and prompts](https://github.com/open-compass/VLMEvalKit/tree/ebac2d9bda8fa28dc426a3b2ccc8f53c886dc0c5/vlmeval) | `ebac2d9bda8fa28dc426a3b2ccc8f53c886dc0c5` | `resources_servers/opencode_multimodal_benchmarks/mcq.py`, `reporting.py`; `benchmarks/opencode_multimodal_benchmarks/data.py` | Apache-2.0; original source-file URLs are in each header |
 | [VTC-Bench evaluator subtree](https://github.com/zhuzil/VTC-Bench/blob/5e0a5533f597b0c56dae7d9705771498202ab19b/eval/eval/VLMEvalKit/vlmeval/dataset/image_vqa.py) | `5e0a5533f597b0c56dae7d9705771498202ab19b` | `resources_servers/opencode_multimodal_benchmarks/vtcbench.py` | Apache-2.0 for the VLMEvalKit evaluator subtree; no assertion about dataset licensing |
 | [ZeroBench scoring example](https://github.com/jonathan-roberts1/zerobench/blob/0debbe43deddfe54f9965a6fdfd4f70a20d8ab62/README.md#code) | `0debbe43deddfe54f9965a6fdfd4f70a20d8ab62` | `resources_servers/opencode_multimodal_benchmarks/zerobench.py` | MIT |
-| [OpenCode maximum-step directive](https://github.com/anomalyco/opencode/blob/67aec2212010d67775c35e696d8b8b54902eb338/packages/core/src/session/runner/max-steps.ts) | `67aec2212010d67775c35e696d8b8b54902eb338` | `responses_api_agents/opencode_agent/protocol.py`; imported by the multimodal agent and `responses_api_models/vllm_model/app_opencode.py` | MIT |
 
 Full applicable notices for confirmed sources are retained in the component
 `third-party-notices.md` files. BabyVision is outside this integration; an attribution to a

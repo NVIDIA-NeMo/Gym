@@ -145,6 +145,13 @@ A failure reports what Gym observed and leaves the decision to you:
 | `stage`, `terminal` | Where in the episode it happened, when known, and the reporter's statement that the episode must not be attempted again. `terminal=False` is not a retry hint. |
 | `reason`, `http_status`, `exception_type` | Diagnostics. |
 
+`TaskRunner.run_task` also counts the rollout in `gym.rollout.completed_total`: `failed` when the outcome has a failure
+(labeled with its kind), otherwise `scored` when it has a reward and `unscored` when it has none. This is Gym's record of
+what the rollout returned; a caller may apply another rule to the same outcome. A result is a failure when it carries
+`failure_kind`; a routing class alone does not make it one. A scored rollout with a finite reward is
+also counted in `gym.rollout.rewarded_total`, masked rewards included. They are exported when telemetry is on in the
+calling process: call `nemo_gym.telemetry.setup.init_telemetry` first.
+
 `RolloutOutcome.raw` holds Gym's raw `/run` response (the failure record for a failed `/run`). Its keys are not part
 of the contract: depend on the other fields, and use `raw` for debugging.
 

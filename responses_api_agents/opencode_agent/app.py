@@ -22,12 +22,9 @@ import os
 import re
 import shlex
 import shutil
-import signal
-import sqlite3
 import tempfile
 from asyncio import Semaphore
 from collections.abc import Mapping, Sequence
-from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from shlex import quote
@@ -142,14 +139,8 @@ from responses_api_agents.opencode_agent.snapshot import stored_message_ids, sto
 
 
 LOG = logging.getLogger(__name__)
-from responses_api_agents.opencode_agent.protocol import (
-    AGENT_OBSERVATIONS_KEY as _INTERNAL_OBSERVATIONS_KEY,
-)
-from responses_api_agents.opencode_agent.protocol import (
-    AGENT_TRAJECTORY_KEY as _INTERNAL_TRAJECTORY_KEY,
-)
-
-
+_INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
+_INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
 _TESTED_OUTCOME_VERSION = "1.17.11"
 _API_ERROR = "APIError"
 _CONTEXT_OVERFLOW_ERROR = "ContextOverflowError"
@@ -331,23 +322,6 @@ def _serialize_replacement_config(config: dict[str, Any]) -> str:
     return _dump_with_serialized_member(config, "agent", agent_json)
 
 
-def _capture_joins_opencode_step_limit() -> bool:
-    """Whether Gym's token capture joins the calls that OpenCode's step-limit note follows.
-
-    The capture fix for OpenCode's step-limit note (Gym #5833) adds ``nemo_gym.models.token_capture.harness_notes``
-    with an OpenCode entry in ``HARNESS_NOTES``. Without it, the note turns the next call into a poisoned capture, so
-    a seed with token capture refuses ``agent.build.steps``. The check imports the module, so it does not depend on
-    whether the module is a file or a package.
-
-    TODO: remove this check once #5833 is on main, and allow ``agent.build.steps`` with token capture always.
-    """
-    try:
-        from nemo_gym.models.token_capture.harness_notes import HARNESS_NOTES
-    except ImportError:
-        return False
-    return any(note.harness == "opencode" for note in HARNESS_NOTES)
-
-
 def _session_opencode_config_error(opencode_config: Mapping[str, Any]) -> str | None:
     """Return why a sandbox session cannot use ``opencode_config``, or ``None``.
 
@@ -362,8 +336,8 @@ def _session_opencode_config_error(opencode_config: Mapping[str, Any]) -> str | 
     - ``agent.build.steps`` (a positive integer): the step limit of OpenCode's ``build`` agent, which the session
       runs, for each prompt. From the call at the limit on, OpenCode adds an assistant message to each request that
       asks for a text answer. It still offers the tools, so a model that keeps calling them runs past the limit.
-      Other agent fields would replace the adapter's prompt, model or sampling. With token capture on, the seed
-      refuses it unless Gym's capture fix for the step-limit note is installed (Gym #5833).
+      Other agent fields would replace the adapter's prompt, model or sampling. Token capture recognizes that
+      message (``nemo_gym.models.token_capture.harness_notes``) and keeps the calls after it chained.
     """
     unsupported = sorted(opencode_config.keys() - {"permission", "tools", "attachment", "compaction", "agent"})
     if unsupported:
@@ -490,9 +464,9 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
         ),
     )
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
-    capture_failure_artifacts: bool = False
     report_agent_sandbox_oom: bool = False
-    # Connection and per-call timeout of a sandbox session's MCP tool grants; OpenCode's default is 30 s.
+    # Connection and per-call timeout of a sandbox session's MCP tool grants. Unset, OpenCode connects within 30 s
+    # and each call gets the MCP SDK's 60 s.
     mcp_tool_timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
     # Sandbox sessions only. Absolute sandbox paths of OpenCode plugin files that the sandbox owner staged,
@@ -518,6 +492,11 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # captured call with no message ID, every call is reported as an unmatched assistant message, and the summary call
     # of a compaction is counted as a step too.
     return_session_trajectory: bool = True
+    # Sandbox sessions only. Let OpenCode's run load the task repository's project config and instruction files
+    # (AGENTS.md or CLAUDE.md, opencode.json, .opencode/), as it does when started in that repository. The configuration
+    # Gym passes is merged last and still wins. Off by default, so a repository cannot add instructions, agents, plugins
+    # or tools.
+    session_project_config: bool = False
 
     @model_validator(mode="after")
     def _validate_prompt_agent(self) -> Self:
@@ -705,10 +684,6 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             env["OPENAI_API_KEY"] = "EMPTY"  # pragma: allowlist secret
         return env
 
-    def _prepare_command(self, command: list[str], project_dir: Path, env: dict[str, str]) -> list[str]:
-        """Allow specialized agents to isolate the process without replacing collection."""
-        return command
-
     async def _run_opencode(
         self,
         instruction: str,
@@ -718,7 +693,6 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         collect_observations: bool = True,
         trajectory: Optional[TrajectoryRecord] = None,
         timeout: float | None = None,
-        artifact_path: Optional[Path] = None,
     ) -> tuple[list[Any], dict[str, int], str, AgentObservationBundle]:
         """Run one headless OpenCode session and read its persisted artifact."""
         try:
@@ -750,7 +724,6 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         cmd.append(prompt)
 
         try:
-            cmd = await asyncio.to_thread(self._prepare_command, cmd, project_dir, env)
             timed_out = False
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -758,67 +731,19 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
-                start_new_session=True,
             )
-            communication = asyncio.create_task(proc.communicate())
-
-            async def stop_and_drain() -> tuple[bytes, bytes]:
-                # SIGTERM lets the network wrapper clean up its nested namespace.
-                with suppress(ProcessLookupError):
-                    os.killpg(proc.pid, signal.SIGTERM)
-                try:
-                    return await asyncio.wait_for(asyncio.shield(communication), 5)
-                except asyncio.TimeoutError:
-                    with suppress(ProcessLookupError):
-                        os.killpg(proc.pid, signal.SIGKILL)
-                    try:
-                        return await asyncio.wait_for(asyncio.shield(communication), 5)
-                    except asyncio.TimeoutError as error:
-                        communication.cancel()
-                        await asyncio.gather(communication, return_exceptions=True)
-                        raise RuntimeError("OpenCode cleanup timed out; process termination is unconfirmed") from error
-
             try:
-                _, stderr = await asyncio.wait_for(asyncio.shield(communication), timeout=timeout)
+                _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             except asyncio.TimeoutError:
-                _, stderr = await stop_and_drain()
+                proc.kill()
+                _, stderr = await proc.communicate()
                 timed_out = True
                 LOG.warning("opencode timed out after %ss", timeout)
-            except asyncio.CancelledError:
-                await stop_and_drain()
-                raise
 
             if proc.returncode not in (0, None):
                 LOG.warning("opencode exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
 
             db_path = data_home / "opencode" / "opencode.db"
-            if artifact_path is not None:
-                failed = timed_out or proc.returncode != 0
-                failure_message = (
-                    f"OpenCode failed (timeout={timed_out}, exit={proc.returncode}): "
-                    + stderr.decode(errors="replace")[-2000:]
-                )
-                if failed and not self.config.capture_failure_artifacts:
-                    raise RuntimeError(failure_message)
-                if failed and not db_path.is_file():
-                    raise RuntimeError(failure_message)
-                if not db_path.is_file():
-                    raise RuntimeError("OpenCode did not produce its session database")
-
-                def save_database() -> None:
-                    source = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)
-                    try:
-                        destination = sqlite3.connect(artifact_path)
-                        try:
-                            source.backup(destination)
-                        finally:
-                            destination.close()
-                    finally:
-                        source.close()
-
-                await asyncio.to_thread(save_database)
-                if failed:
-                    raise RuntimeError(failure_message)
             invocation_id = rollout_id or f"opencode-{uuid4().hex}"
             output_items, usage = (
                 ([], {"input_tokens": 0, "output_tokens": 0})
@@ -1077,23 +1002,6 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
 
     session_state_type: ClassVar[type[OpenCodeSandboxSession]] = OpenCodeSandboxSession
 
-    def _validate_sandbox_options(self) -> None:
-        """Reject settings the session launcher cannot honor before allocating a sandbox."""
-        config_error = _session_opencode_config_error(self.config.opencode_config)
-        if (
-            config_error is None
-            and self._token_id_capture_enabled()
-            and "steps" in self.config.opencode_config.get("agent", {}).get("build", {})
-            and not _capture_joins_opencode_step_limit()
-        ):
-            # OpenCode sends its last-step prompt as an assistant message. Without Gym #5833, capture cannot join
-            # that call to the earlier calls of the rollout. TODO: remove this check once #5833 is on main.
-            config_error = "agent.build.steps cannot be used with token capture without Gym #5833's capture fix"
-        if config_error is not None:
-            raise HTTPException(422, f"OpenCode sandbox config: {config_error}")
-        if self.config.env or self.config.extra_args or self.config.command != "opencode":
-            raise HTTPException(422, "env, extra_args and command overrides are supported only by local OpenCode")
-
     async def _prepare_session_launch(
         self,
         state: OpenCodeSandboxSession,
@@ -1102,16 +1010,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
     ) -> None:
         """Stage adapter-specific inputs before the shared supervised launch."""
 
-    def _sandbox_network_access(self) -> SandboxNetworkAccess:
-        """Provider policy selected by this adapter; subclasses may translate their policy names."""
-        return self.config.network_access
-
     def _restrict_owned_sandbox_network(
         self, spec: SandboxSpec, provider: SandboxProvider, body: AgentSeedSessionRequest
     ) -> SandboxSpec:
         return restrict_sandbox_network(
             spec,
-            network_access=self._sandbox_network_access(),
+            network_access=self.config.network_access,
             provider=provider,
             model_base_url=self.resolve_model_base_url(self.config.model_server.name, trace_context=False),
             tool_urls=[
@@ -1140,7 +1044,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         else:
             if not isinstance(body.sandbox_access.connection, DirectSandboxConnection):
                 raise HTTPException(422, "OpenCode requires direct SandboxAccess")
-            if self._sandbox_network_access() != "inherit":
+            if self.config.network_access != "inherit":
                 raise AgentSeedRejectedError(
                     "OpenCode network_access applies only to a sandbox it creates, not a borrowed one"
                 )
@@ -1186,7 +1090,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise HTTPException(
                 422, "OpenCode sandbox max_output_tokens must be positive and not exceed context_window"
             )
-        self._validate_sandbox_options()
+        config_error = _session_opencode_config_error(self.config.opencode_config)
+        if config_error is not None:
+            raise HTTPException(422, f"OpenCode sandbox config: {config_error}")
+        if self.config.env or self.config.extra_args or self.config.command != "opencode":
+            raise HTTPException(422, "env, extra_args and command overrides are supported only by local OpenCode")
         if not all(_is_sandbox_path(path) for path in self.config.plugins):
             raise AgentSeedRejectedError("OpenCode plugins must be absolute, normalized paths inside the sandbox")
         if self.config.export_dir is not None and (
@@ -1941,6 +1849,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": str(self.config.max_output_tokens),
             },
         }
+        if self.config.session_project_config:
+            del payload["env"]["OPENCODE_DISABLE_PROJECT_CONFIG"]
         error = None
         export = {}
         failure = None

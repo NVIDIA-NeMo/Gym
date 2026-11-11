@@ -25,10 +25,11 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 class StringMatchResourcesServerConfig(BaseResourcesServerConfig):
-    pass
+    strip_trailing_eos: bool = False
 
 
 class StringMatchRunRequest(BaseRunRequest):
@@ -350,7 +351,7 @@ def _soft_numeric_grade(gt_answer: str, pred_answer: str) -> float:
 
 
 def strip_trailing_eos(text: str) -> str:
-    """Remove terminal EOS markers in linear time without altering the captured response."""
+    """Remove trailing end-of-sequence markers in linear time without altering the captured response."""
     end = len(text)
     markers = ("<|im_end|>", "<|endoftext|>", "<|eot_id|>")
     while True:
@@ -395,3 +396,6 @@ class StringMatchResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     StringMatchResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = StringMatchResourcesServer.run_webserver()  # noqa: F401

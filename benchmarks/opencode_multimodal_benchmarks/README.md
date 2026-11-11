@@ -28,23 +28,13 @@ not replace the benchmark's tools with BrowseComp's Exa wrappers. Prompts,
 sampling, 55+10 turn budgets and scorers are preserved; ZeroBench still uses five
 repeats and primary pass@5.
 
-For restricted OpenSandbox runs, compose
-[`opencode_sessions_opensandbox.yaml`](opencode_sessions_opensandbox.yaml) after
-the recipe and provide the six offline-runtime pins and task image. Owned
-OpenSandbox sessions use provider process isolation and creation-time egress;
-they do not install the nested namespace wrapper. The tested deployment completed
-real sessions in all three network modes with separate Gym control endpoints.
-Qualify that separation for your deployment. Supply provider credentials in
-the runtime environment and an image with the task's required libraries. See
-the [agent session setup](../../responses_api_agents/opencode_multimodal_agent/README.md#agent-sessions)
-and [network boundary](../../responses_api_agents/opencode_multimodal_agent/network-policy.md#provider-execution-and-deployment-qualification)
-for runtime requirements and deployment checks.
-
-The `opencode_relay.yaml` configurations in [ONBOARDING.md](ONBOARDING.md) retain
-the local Bubblewrap compatibility path for existing runs and training. They do
-not use the provider session lifecycle; they enforce the private process/network
-boundary. Resume existing results
-with their recorded configuration; choose the provider recipe for a new run.
+All evaluations use owned OpenSandbox sessions. Supply provider credentials through
+runtime environment variables and an image with the visual tools and offline
+OpenCode assets required by the chosen network policy. Evaluation and training
+share the same session implementation; the local relay recipes have been removed.
+See the [agent session setup](../../responses_api_agents/opencode_multimodal_agent/README.md#agent-sessions)
+and [network profiles](../../responses_api_agents/opencode_multimodal_agent/README.md#network-and-tool-profiles).
+Resume historical runs with their recorded Gym revision and configuration.
 
 ## Run configuration
 

@@ -8,9 +8,9 @@ import pytest
 from aiohttp import ClientConnectionError
 from fastapi import HTTPException, Request
 
+from nemo_gym.agents import FINAL_TURN_NOTICE, EvalTurnBudget
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymChatCompletion, NeMoGymChatCompletionCreateParamsNonStreaming, rollout_context
-from responses_api_agents.opencode_multimodal_agent.eval_budget import FINAL_TURN_NOTICE, EvalTurnBudget
 from responses_api_models.vllm_model.app import VLLMModel
 from responses_api_models.vllm_model.hosted_visual_eval import HostedVisualEvalModel
 from responses_api_models.vllm_model.visual_eval import VisualEvalModel, VisualEvalModelConfig

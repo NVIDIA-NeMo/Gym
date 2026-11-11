@@ -66,6 +66,7 @@ if TYPE_CHECKING:
     )
     from nemo_gym.models.token_capture.delivery import finalize_rollout_token_capture, retire_rollout_token_capture
     from nemo_gym.models.token_capture.fingerprint import assistant_fingerprint, conversation_digest
+    from nemo_gym.models.token_capture.harness_notes.opencode import OPENCODE_MAX_STEPS_PROMPT
     from nemo_gym.models.token_capture.lineage import (
         FileLineageStore,
         IncrementalLineageStore,
@@ -139,6 +140,7 @@ if TYPE_CHECKING:
 # Each name's submodule loads on first use.
 # Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "OPENCODE_MAX_STEPS_PROMPT": "harness_notes.opencode",
     "CAPTURE_REFUSAL_HEADER": "protocols",
     "CONTEXT_LENGTH_EXCEEDED_ERROR_CODE": "records",
     "CallRecord": "staging.records",

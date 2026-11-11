@@ -3,12 +3,12 @@
 """Answer-dependent bash rewards using native OpenCode tool execution records."""
 
 import json
-import sqlite3
-from contextlib import closing
-from pathlib import Path
+import re
 from typing import Annotated
 
 from pydantic import BaseModel, Field, field_validator
+
+from nemo_gym.utils import final_assistant_text
 
 
 class OpenCodeToolRewardConfig(BaseModel, extra="forbid"):
@@ -82,13 +82,12 @@ def _identity(item: dict) -> tuple[str, str]:
 
 
 def score_opencode_tools(
-    database: Path,
+    execution_records: dict[str, tuple[str, str, int | None]],
     output: list[dict],
-    initial_input: list[dict],
     base_reward: float,
     config: OpenCodeToolRewardConfig,
 ) -> OpenCodeToolReward:
-    """Score live main-trajectory calls; replay and child calls are not rewarded.
+    """Score main-trajectory calls; child calls are not rewarded.
 
     A completed bash tool can still have a nonzero process exit code. Use the
     native state/exit metadata, never model-visible output text, to distinguish
@@ -97,26 +96,9 @@ def score_opencode_tools(
     """
     calls = [item for item in output if item.get("type") == "function_call"]
     previous = None
-    for item in initial_input:
-        if item.get("type") == "function_call":
-            previous = _identity(item)
-    records = {}
-    if calls:
-        with closing(sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
-            rows = connection.execute(
-                "SELECT json_extract(data, '$.callID'), json_extract(data, '$.tool'), "
-                "json_extract(data, '$.state.status'), json_extract(data, '$.state.metadata.exit') "
-                "FROM part WHERE json_extract(data, '$.type') = 'tool'"
-            )
-            wanted = {item["call_id"] for item in calls}
-            if len(wanted) != len(calls):
-                raise ValueError("Repeated call ID in the live OpenCode trajectory")
-            for call_id, tool, status, exit_code in rows:
-                if call_id not in wanted:
-                    continue
-                if call_id in records:
-                    raise ValueError(f"Ambiguous OpenCode tool record: {call_id}")
-                records[call_id] = (tool, status, exit_code)
+    records = execution_records
+    if len({item["call_id"] for item in calls}) != len(calls):
+        raise ValueError("Repeated call ID in the live OpenCode trajectory")
 
     exploration = penalties = 0.0
     successes = errors = duplicates = 0
@@ -156,3 +138,22 @@ def score_opencode_tools(
         duplicate_tool_call_count=duplicates,
         bash_call_count=sum(item["name"] == "bash" for item in calls),
     ).for_answer(base_reward, config)
+
+
+class EpisodeEvidence(BaseModel):
+    """Validated native evidence passed explicitly across the responses self-call."""
+
+    verification_error: str | None = None
+    turns_used: int
+    finished_naturally: bool
+    tool_reward: OpenCodeToolReward | None
+
+
+def final_answer(output: list[dict], *, strip_reasoning: bool = False) -> str:
+    """Extract the scoring copy; optional training cleanup never mutates history."""
+    text = final_assistant_text(output)
+    if not strip_reasoning:
+        return text
+    text = re.sub(r"<(think|thinking)>.*?</\1>", "", text, flags=re.DOTALL)
+    text = re.split(r"<(?:think|thinking)>", text, maxsplit=1)[0]
+    return re.split(r"</(?:think|thinking)>", text)[-1].strip()

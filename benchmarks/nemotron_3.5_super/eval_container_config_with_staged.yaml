@@ -22,9 +22,9 @@ swebench_multilingual_opencode_sandboxed_agent:
           prepare_script: benchmarks/swebench/multilingual/prepare.py
           num_repeats: 3
 
-deepswe_opencode_sandboxed_agent:
+deepswe_opencode_agent:
   responses_api_agents:
-    opencode_sandboxed_agent:
+    opencode_agent:
       datasets:
         - name: deepswe_v1_1
           type: benchmark

@@ -34,8 +34,7 @@ The verify response echoes `expected_answer` and the `extracted_answer` the grad
 Set `strip_trailing_eos: true` on the standard resources-server config to remove trailing
 `<|im_end|>`, `<|endoftext|>` and `<|eot_id|>` markers before answer extraction.
 This option uses the same matching rules and preserves the original response.
-The default is false. The `app_passrate.py` compatibility entrypoint enables the
-same normalization for existing configurations.
+The default is false.
 
 # Example usage
 
