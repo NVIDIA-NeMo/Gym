@@ -442,6 +442,9 @@ class KimiCodeAgent(SimpleResponsesAPIAgent):
             )
         )
         gaps = ["harness_tool_timing_unavailable"]
+        if self.config.subagents:
+            # Kimi sends one static x-session-id per provider, so child calls are attributed to the root.
+            gaps.append("model_call_ownership_unavailable")
         if not usage_known:
             gaps.append("usage_unavailable")
         gaps += ["optional_tool_grant_skipped" for _ in self.effective_tool_accesses(state.request)]

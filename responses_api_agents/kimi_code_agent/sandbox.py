@@ -94,6 +94,8 @@ class KimiSession(AgentSessionState):
         await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
         await sandbox.upload(Path(__file__).with_name(INSTALLER), f"{directory}/{INSTALLER}")
         arch = await sandbox.exec("uname -m", cwd="/", timeout_s=60)
+        if arch.return_code != 0 or arch.error_type:
+            raise RuntimeError(f"Cannot probe the sandbox architecture: {arch.error_type or arch.stderr}")
         arch_name = {"amd64": "x86_64", "arm64": "aarch64"}.get(
             (arch.stdout or "").strip(), (arch.stdout or "").strip()
         )
@@ -143,6 +145,8 @@ class KimiSession(AgentSessionState):
 
     async def collect(self) -> KimiArtifacts:
         """Copy stdout, the stderr tail and the session store after the supervisor confirms termination."""
+        if self.session.expired_before_launch:
+            return KimiArtifacts("", "", None)  # A rollout stop arrived before launch, so Kimi never ran.
         sandbox, directory = self.session.sandbox, self.session.session_dir
         # A failed read raises, so a transient capture error is retried instead of graded as an empty answer.
         stdout = await read_text(sandbox, path=f"{directory}/stdout.jsonl")

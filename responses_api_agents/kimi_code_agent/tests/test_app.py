@@ -4,10 +4,14 @@
 Kimi CLI."""
 
 import asyncio
+import hashlib
+import io
 import json
 import shlex
 import shutil
+import subprocess
 import sys
+import tarfile
 import tomllib
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,7 +33,7 @@ from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxExecResult
 from responses_api_agents.kimi_code_agent.app import KimiCodeAgent, KimiCodeAgentConfig
 from responses_api_agents.kimi_code_agent.conversion import max_concurrency, parse_session, to_toml
-from responses_api_agents.kimi_code_agent.sandbox import KIMI_VERSION, KimiSession
+from responses_api_agents.kimi_code_agent.sandbox import INSTALLER, KIMI_VERSION, KimiSession
 
 
 FAKE_KIMI = r"""
@@ -189,6 +193,14 @@ def test_unknown_subagent_events_do_not_end_a_child(tmp_path):
     wire.write_text("\n".join(json.dumps(e) for e in events))
     _, children = parse_session(tmp_path)
     assert children[0]["status"] == "incomplete" and "ended" not in children[0]
+    # A cancelled child is incomplete, and an all-zero usage record leaves usage unknown.
+    events += [
+        {"type": "subagent.cancelled", "subagentId": "agent-0", "time": 2000},
+        {"type": "usage.record", "usage": {"inputOther": 0, "output": 0}},
+    ]
+    wire.write_text("\n".join(json.dumps(e) for e in events))
+    usage, children = parse_session(tmp_path)
+    assert usage is None and children[0]["status"] == "incomplete" and children[0]["ended"] == 2000
     assert (
         max_concurrency([{"started": 0, "ended": 10}, {"started": 5, "ended": 6}, {"started": 6, "ended": 7}, {}]) == 2
     )
@@ -223,16 +235,23 @@ def test_config_routes_every_model_through_the_rollout_and_keeps_its_providers()
     assert config["providers"]["subagent"]["custom_headers"] == {"x-session-id": "rollout-1"}
 
 
-@pytest.mark.parametrize("capture", [True, False])
-def test_token_id_capture_routes_root_and_subagent_calls_to_capture(capture):
-    server = agent(
-        subagent_model_server={"type": "responses_api_models", "name": "lightning"}, token_id_capture=capture
-    )
+def test_token_id_capture_refuses_a_subagent_server():
+    server = agent(subagent_model_server={"type": "responses_api_models", "name": "lightning"}, token_id_capture=True)
     server.server_client.global_config_dict = {"token_id_capture": {"enabled": True}}
-    if capture:
-        # Capture would record the subagent server's calls under the policy rollout.
-        reason = "Kimi Code token capture would record subagent_model_server calls as policy"
-        assert check_agent_seed_rejected(server.setup_webserver(), seed()) == reason
+    # Capture would record the subagent server's calls under the policy rollout.
+    reason = "Kimi Code token capture would record subagent_model_server calls as policy"
+    assert check_agent_seed_rejected(server.setup_webserver(), seed()) == reason
+
+
+def test_subagent_settings_require_a_subagent_server():
+    with pytest.raises(ValueError, match="require subagent_model_server"):
+        agent(subagent_model="child")
+
+
+@pytest.mark.parametrize("capture", [True, False])
+def test_token_id_capture_routes_root_calls_to_capture(capture):
+    server = agent(token_id_capture=capture)
+    server.server_client.global_config_dict = {"token_id_capture": {"enabled": True}}
     server.server_client._build_server_base_url.side_effect = lambda config: f"http://{config['name']}:9000"
     with patch(
         "nemo_gym.agents.base_responses_api_agent.get_first_server_config_dict",
@@ -241,7 +260,7 @@ def test_token_id_capture_routes_root_and_subagent_calls_to_capture(capture):
         providers = server.kimi_config(MagicMock(request=seed()))["providers"]
     capture_path = "/training-token-capture" if capture else ""
     assert providers["policy"]["base_url"] == f"http://policy_model:9000/ng-rollout/rollout-1{capture_path}/v1"
-    assert providers["subagent"]["base_url"] == f"http://lightning:9000/ng-rollout/rollout-1{capture_path}/v1"
+    assert "subagent" not in providers
 
 
 @pytest.mark.parametrize(
@@ -341,6 +360,60 @@ async def test_model_only_refuses_a_subagent_server_on_another_host(owned_sandbo
     owned_sandbox.start.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("uname", "installer", "error", "message"),
+    [
+        # A failed probe is a retryable setup error, not a refusal of the episode.
+        (SandboxExecResult("", "", None, error_type="timeout"), None, RuntimeError, "Cannot probe"),
+        (SandboxExecResult("riscv64\n", "", 0), None, AgentSeedRejectedError, "architecture 'riscv64'"),
+        (SandboxExecResult("x86_64\n", "", 0), SandboxExecResult("", "", 3), AgentSeedRejectedError, "glibc"),
+    ],
+)
+async def test_install_refuses_unsupported_images_and_retries_probe_failures(
+    tmp_path, uname, installer, error, message
+):
+    ok = SandboxExecResult("", "", 0)
+    sandbox = MagicMock(upload=AsyncMock(), exec=AsyncMock(side_effect=[ok, uname, installer]))
+    state = KimiSession(
+        request=seed(),
+        provider_name="local",
+        sandbox_id="task",
+        session=SandboxSession(sandbox=sandbox, session_dir=str(tmp_path), workdir="/repo", harness="Kimi Code"),
+    )
+    with patch(
+        "responses_api_agents.miniswe_sandboxed_agent.bootstrap.cached_download", AsyncMock(return_value=tmp_path)
+    ):
+        with pytest.raises(error, match=message):
+            await state.install(timeout=10)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="The installer needs a glibc host")
+def test_installer_installs_the_checked_binary_and_reuses_it(tmp_path):
+    binary = tmp_path / "kimi-code-linux-x64"
+    binary.write_text(f"#!/bin/sh\necho {KIMI_VERSION}\n")
+    sha256 = hashlib.sha256(binary.read_bytes()).hexdigest()
+    runtime = tmp_path / "runtime"
+    installer = Path(__file__).parents[1] / INSTALLER
+    for _ in range(2):  # The second run reuses the installed binary.
+        command = ["bash", installer, runtime, KIMI_VERSION, "linux-x64", sha256, binary]
+        subprocess.run(command, check=True, capture_output=True)
+    assert (runtime / "kimi").read_bytes() == binary.read_bytes()
+    bad = ["bash", installer, tmp_path / "other", KIMI_VERSION, "linux-x64", "0" * 64, binary]
+    assert subprocess.run(bad, capture_output=True).returncode != 0
+
+
+def test_session_usage_without_a_resume_hint_reads_a_single_session(tmp_path):
+    wire = tmp_path / "sessions" / "wd_0" / "session_1" / "agents" / "main" / "wire.jsonl"
+    wire.parent.mkdir(parents=True)
+    wire.write_text(json.dumps({"type": "usage.record", "usage": {"inputOther": 5, "output": 1}}))
+    archive = io.BytesIO()
+    with tarfile.open(fileobj=archive, mode="w:gz") as tar:
+        tar.add(tmp_path / "sessions", arcname="sessions")
+    usage, _ = KimiCodeAgent._read_sessions(archive.getvalue(), None)
+    assert (usage.input_tokens, usage.output_tokens) == (5, 1)
+
+
 def test_request_mapping_and_refusals():
     prompt, instructions = agent()._conversation(body(instructions="Answer in English."))
     assert (prompt, instructions) == ("Fix the bug.", "Answer in English.\n\nUse tools.")
@@ -352,7 +425,7 @@ def test_request_mapping_and_refusals():
         agent()._conversation(NeMoGymResponseCreateParamsNonStreaming(input="x" * (128 * 1024)))
 
 
-async def activate(tmp_path: Path, mode: str, *, timeout: float = 20):
+async def activate(tmp_path: Path, mode: str, *, timeout: float = 20, stop_before_launch: bool = False):
     workdir = tmp_path / "task repo"
     workdir.mkdir()
     request = seed(workdir=str(workdir))
@@ -382,13 +455,16 @@ async def activate(tmp_path: Path, mode: str, *, timeout: float = 20):
         await state.install(timeout=10)
     assert download.await_args.args[0].startswith("https://code.kimi.com/kimi-code/binaries/2.1.1/kimi-code-linux-")
     state.activation_request = body()
+    if stop_before_launch:
+        assert await state.session.expire(timeout=10)
     endpoint = ModelEndpoint(base_url="http://model.invalid/ng-rollout/rollout-1/v1")
     with patch.object(KimiCodeAgent, "model_endpoint", return_value=endpoint):
         try:
             response = await asyncio.wait_for(server._activate(state, state.activation_request), timeout=60)
         except Exception as error:
             response = error
-    seen = json.loads((Path(state.home) / "seen.json").read_text())
+    seen_file = Path(state.home) / "seen.json"
+    seen = json.loads(seen_file.read_text()) if seen_file.exists() else None
     close = await asyncio.wait_for(server._close_agent_session_state(state), timeout=60)
     return response, close, seen, state, sandbox
 
@@ -409,13 +485,16 @@ async def test_real_run_maps_output_usage_and_subagents(tmp_path):
     assert tomllib.loads(seen["config"])["providers"]["policy"]["base_url"].endswith("/ng-rollout/rollout-1/v1")
     assert seen["env"]["KIMI_CODE_HOME"] == state.home
     assert seen["env"]["KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY"] == "4"
+    assert seen["env"]["KIMI_CODE_CACHE_DIR"] == f"{state.runtime}/cache"
     assert (Path(state.session.workdir) / "proof.txt").read_text().splitlines() == [
         str(tmp_path / "task-home"),
         "task-value",
     ]
     records = close.agent_observations.records
     assert records[1].parent_invocation_id == "rollout-1" and records[1].status == "completed"
-    assert "usage_unavailable" not in {gap.code for gap in close.agent_observations.gaps}
+    gaps = {gap.code for gap in close.agent_observations.gaps}
+    # Child calls carry the root's session id, so their ownership is unknown.
+    assert "usage_unavailable" not in gaps and "model_call_ownership_unavailable" in gaps
     assert close.cleanup_confirmed and sandbox.disconnected and not Path(state.session.session_dir).exists()
 
 
@@ -446,3 +525,11 @@ async def test_deadlines_and_native_limits_are_incomplete(tmp_path, mode):
     # A deadline before Kimi printed anything is still graded.
     assert response.output[-1].content[0].text == "Done." if mode != "hang" else response.output == []
     assert state.session.cleanup["timed_out"] == (mode != "overflow")
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "linux", reason="Shared process supervisor requires Linux")
+async def test_rollout_stop_before_launch_is_incomplete_without_running_kimi(tmp_path):
+    response, close, seen, state, _ = await activate(tmp_path, "normal", stop_before_launch=True)
+    assert response.status == "incomplete" and response.output == [] and seen is None
+    assert state.session.expired_before_launch and close.cleanup_confirmed

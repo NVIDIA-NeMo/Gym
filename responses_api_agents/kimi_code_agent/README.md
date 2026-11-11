@@ -115,7 +115,8 @@ prints, so kimi processes the agent starts itself are not counted). Response met
 ## Limitations
 
 - Tool timing is not reported (`harness_tool_timing_unavailable`). Every model call carries the rollout's
-  `x-session-id` header.
+  `x-session-id` header, since Kimi's headers are static per provider. Child calls are therefore attributed to the
+  root, and `model_call_ownership_unavailable` is reported whenever `subagents` is on.
 - Required tool grants are refused at seed; optional grants are skipped and reported. A `SandboxAccess` user override
   is refused.
 - One activation per session; there is no host execution path.
