@@ -59,10 +59,14 @@ def test_user_model_has_no_default_endpoint() -> None:
 
 def test_usersim_revision_pins_are_aligned() -> None:
     # Every project that installs UserSim, including servers added later, must pin the same commit.
+    # A requirement from a tag, a branch or PyPI has no commit to compare, so it fails here rather than being skipped.
     requirement_revisions = {}
     for path in REPOSITORY_ROOT.glob("*/*/pyproject.toml"):
-        for revision in re.findall(r"UserSim\.git@([0-9a-f]+)", path.read_text()):
-            requirement_revisions[path.relative_to(REPOSITORY_ROOT).as_posix()] = revision
+        project = path.relative_to(REPOSITORY_ROOT).as_posix()
+        for requirement in re.findall(r"\"\s*((?:nemo[-_.]?)?usersim(?![\w.-])[^\"]*)\"", path.read_text(), re.I):
+            pin = re.fullmatch(r"\S+\s*@\s*git\+https://github\.com/NVIDIA-NeMo/UserSim\.git@([0-9a-f]+)", requirement)
+            assert pin is not None, f"{project} requires {requirement!r}; pin UserSim to a git commit"
+            requirement_revisions[project] = pin.group(1)
     assert {
         "environments/nemo_user_sim/pyproject.toml",
         "environment_servers/nemo_user_sim/pyproject.toml",
