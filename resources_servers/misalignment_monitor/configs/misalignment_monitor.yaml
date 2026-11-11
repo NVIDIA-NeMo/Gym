@@ -63,7 +63,7 @@ misalignment_monitor:
       sandbox_config:
         image: python:3.12-slim
         ttl_s: 1800
-      # Layer 3: confirm P0 and P1 security findings against the rollout's record and earlier alerts, and review
+      # Layer 3: confirm P0 security findings against the rollout's record and earlier alerts, and review
       # alignment alerts for recurring patterns after this many of them (0 turns that off).
       security_confirmation: true
       pattern_review_every: 25
