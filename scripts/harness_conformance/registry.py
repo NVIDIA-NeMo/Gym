@@ -19,5 +19,3 @@ HARNESSES = {
     "claude_code": {"agent": "ClaudeCodeAgent", "probe": ".provider:Probe"},
     "terminus_2_sandboxed": {"agent": "Terminus2Agent", "probe": ".provider:Probe"},
 }
-
-BORROWED_SANDBOX_HARNESSES = frozenset({"miniswe_sandboxed", "terminus_2_sandboxed"})

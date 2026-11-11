@@ -5,8 +5,13 @@
 
 import json
 import os
+from contextlib import nullcontext
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
+from scripts.harness_conformance import local_sandbox
 from scripts.harness_conformance.local_sandbox import ProbeLocalProvider, borrowable_local_provider
 
 from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, get_provider_class
@@ -53,3 +58,43 @@ def test_provider_override_is_restored_on_failure():
             assert get_provider_class("local") is ProbeLocalProvider
             raise RuntimeError("setup failed")
     assert get_provider_class("local") is previous
+
+
+@pytest.mark.parametrize("stage", ["disabled", "success", "start", "serialize", "body", "tmux"])
+async def test_prepared_sandbox_cleans_up_on_failures(tmp_path, monkeypatch, stage):
+    sandbox = SimpleNamespace(
+        start=AsyncMock(),
+        serialize=AsyncMock(return_value={"sandbox_id": "test"}),
+        stop=AsyncMock(),
+        exec=AsyncMock(return_value=SimpleNamespace(error_type=None, return_code=1, stderr="")),
+    )
+    factory = Mock(return_value=sandbox)
+    monkeypatch.setattr(local_sandbox, "AsyncSandbox", factory)
+    if stage in ("start", "serialize"):
+        getattr(sandbox, stage).side_effect = RuntimeError("injected failure")
+    if stage == "tmux":
+        sandbox.exec.return_value.return_code = 2
+    previous = get_provider_class("local")
+    expected = pytest.raises(RuntimeError) if stage not in ("disabled", "success") else nullcontext()
+    with expected:
+        async with local_sandbox.prepare_sandbox(
+            tmp_path, {"requires_sandbox": stage != "disabled", "requires_tmux": True}
+        ) as access:
+            if stage == "disabled":
+                assert access is None
+            else:
+                assert access["connection"]["descriptor"] == {"sandbox_id": "test"}
+                assert access["workdir"] == str(tmp_path / "workspace")
+                assert get_provider_class("local") is ProbeLocalProvider
+            if stage == "body":
+                raise RuntimeError("injected failure")
+    assert get_provider_class("local") is previous
+    if stage == "disabled":
+        factory.assert_not_called()
+        return
+    assert not Path(sandbox.start.call_args.args[0].env["TMUX_TMPDIR"]).exists()
+    if stage == "start":
+        sandbox.stop.assert_not_awaited()
+    else:
+        sandbox.exec.assert_awaited_once_with("tmux kill-server", timeout_s=5)
+        sandbox.stop.assert_awaited_once()

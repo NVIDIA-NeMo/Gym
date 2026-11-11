@@ -14,8 +14,7 @@ import shutil
 import socket
 import subprocess
 import sys
-import tempfile
-from contextlib import ExitStack, nullcontext
+from contextlib import AsyncExitStack, ExitStack, nullcontext
 from pathlib import Path
 
 import uvicorn
@@ -25,7 +24,8 @@ from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY
 from nemo_gym.core import NeMoGymResponse
 from nemo_gym.rollouts.harness_capabilities import digest_file
 
-from .registry import BORROWED_SANDBOX_HARNESSES, HARNESSES
+from .local_sandbox import prepare_sandbox
+from .registry import HARNESSES
 from .scenarios import SCENARIOS, Scenario
 
 
@@ -138,6 +138,7 @@ def _base_settings(harness: str, directory: Path, timeout: float) -> DictConfig:
             },
         },
         "miniswe_sandboxed": {
+            "requires_sandbox": True,
             "overrides": {
                 "harness": {"step_limit": 6, "step_timeout_sec": 10},
                 "agent_timeout_sec": timeout,
@@ -146,6 +147,8 @@ def _base_settings(harness: str, directory: Path, timeout: float) -> DictConfig:
             },
         },
         "terminus_2_sandboxed": {
+            "requires_sandbox": True,
+            "requires_tmux": True,
             "inherit_adapter_defaults": True,
             "overrides": {
                 "max_turns": 6,
@@ -168,6 +171,9 @@ def _base_settings(harness: str, directory: Path, timeout: float) -> DictConfig:
     }.get(harness, {})
     return OmegaConf.merge(
         {
+            # Whether the episode runner must prepare a sandbox for the agent to borrow.
+            "requires_sandbox": False,
+            "requires_tmux": False,
             "session": {
                 # Session sandboxes replace provider settings inherited from adapter YAML.
                 "pop_fields": ["resources_server", "sandbox_config"],
@@ -372,33 +378,11 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
             ),
             server_client=client,
         )
-        sandbox = None
-        sandbox_started = False
-        sandbox_access = None
-        terminal_directory = None
+        sandbox_stack = AsyncExitStack()
         try:
-            if harness in BORROWED_SANDBOX_HARNESSES:
-                from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
-
-                from .local_sandbox import ProbeLocalProvider, borrowable_local_provider
-
-                stack.enter_context(borrowable_local_provider())
-                sandbox = AsyncSandbox(ProbeLocalProvider(concurrency=1))
-                sandbox_env = {}
-                if harness == "terminus_2_sandboxed":
-                    # tmux socket paths must be short and unique across episodes.
-                    terminal_directory = stack.enter_context(tempfile.TemporaryDirectory(prefix="gym-probe-tmux-"))
-                    sandbox_env["TMUX_TMPDIR"] = terminal_directory
-                await sandbox.start(SandboxSpec(workdir=str(directory / "workspace"), env=sandbox_env))
-                sandbox_started = True
-                sandbox_access = {
-                    "connection": {
-                        "kind": "direct",
-                        "provider_config_ref": "probe_sandbox",
-                        "descriptor": await sandbox.serialize(),
-                    },
-                    "workdir": str(directory / "workspace"),
-                }
+            sandbox_access = await sandbox_stack.enter_async_context(
+                prepare_sandbox(directory, _base_settings(harness, directory, timeout))
+            )
             apps = {
                 "policy_model": probe.model_app(
                     assistant_message_header=client.assistant_message_header("policy_model")
@@ -457,15 +441,7 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
                 server.should_exit = True
             await asyncio.gather(*tasks, return_exceptions=True)
             try:
-                if sandbox_started:
-                    try:
-                        if terminal_directory is not None:
-                            result = await sandbox.exec("tmux kill-server", timeout_s=5)
-                            # Exit 1 also means setup never started this episode's server.
-                            if result.error_type is not None or result.return_code not in (0, 1):
-                                raise RuntimeError(f"Could not close conformance terminal: {result.stderr}")
-                    finally:
-                        await sandbox.stop()
+                await sandbox_stack.aclose()
             finally:
                 await get_global_aiohttp_client().close()
                 probe.save()
