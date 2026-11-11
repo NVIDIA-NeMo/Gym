@@ -23,11 +23,11 @@ ui_generation_agentic_opencode_agent:
       timeout: 3600
       sandbox_install_timeout_seconds: 600
       sandbox_executable_path: /opt/ui-gen/runtime/opencode
-      sandbox_executable_sha256: 0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded
+      sandbox_executable_sha256: 0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded  # pragma: allowlist secret (public runtime digest)
       sandbox_ripgrep_path: /opt/ui-gen/runtime/rg
-      sandbox_ripgrep_sha256: ebeaf56f8a25e102e9419933423738b3a2a613a444fd749d695e15eba53f71f2
+      sandbox_ripgrep_sha256: ebeaf56f8a25e102e9419933423738b3a2a613a444fd749d695e15eba53f71f2  # pragma: allowlist secret (public runtime digest)
       sandbox_plugin_dependencies_path: /opt/ui-gen/runtime/opencode-1.17.11-plugin-dependencies.tar.gz
-      sandbox_plugin_dependencies_sha256: 77b03eba45c8d7fe3d0a58bfc215f6fb99a1db4dd18a7e3d91fd29981fddafb1
+      sandbox_plugin_dependencies_sha256: 77b03eba45c8d7fe3d0a58bfc215f6fb99a1db4dd18a7e3d91fd29981fddafb1  # pragma: allowlist secret (public runtime digest)
       opencode_config:
         permission:
           webfetch: deny
