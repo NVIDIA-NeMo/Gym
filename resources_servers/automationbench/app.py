@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import Body, FastAPI, Request
 from fastapi.responses import PlainTextResponse
-from pydantic import Field, PrivateAttr
+from pydantic import Field, PrivateAttr, ValidationError
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.core import VERIFIER_ERROR, NeMoGymResponseCreateParamsNonStreaming
@@ -177,7 +177,13 @@ class AutomationBenchResourcesServer(SimpleResourcesServer):
         # A seed without the params (a caller that does not send them) cannot be checked, and is served.
         if body.responses_create_params is not None and not body.responses_create_params.tools:
             raise ResourcesSeedRejectedError(NO_TOOLS_REASON)
-        self._episodes[session_id] = _Episode(new_world_state(body.info.model_dump()))
+        try:
+            state = new_world_state(body.info.model_dump())
+        except ValidationError as error:
+            # No retry can build this world: refuse the seed (422) instead of failing it with a 500 the Environment
+            # Server would dispatch again.
+            raise ResourcesSeedRejectedError(f"The task's initial_state is not a valid AutomationBench world: {error}")
+        self._episodes[session_id] = _Episode(state)
 
     async def release_session_state(self, session_id: str) -> None:
         self._episodes.pop(session_id, None)

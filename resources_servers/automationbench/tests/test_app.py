@@ -253,6 +253,15 @@ def test_a_task_without_assertions_is_refused(client):
     assert _post_seed(client, _seed(task=task)).status_code == 422
 
 
+def test_an_initial_state_the_world_rejects_is_refused_at_seed(client):
+    task = TASK | {"info": TASK["info"] | {"initial_state": {"salesforce": {"opportunities": "not-a-list"}}}}
+
+    response = _post_seed(client, _seed(task=task))
+
+    assert response.status_code == 422
+    assert "not a valid AutomationBench world" in response.json()["detail"]
+
+
 def test_close_releases_the_world_and_the_session_follows_the_contract():
     server = _server()
     app = server.setup_webserver()
