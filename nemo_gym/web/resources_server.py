@@ -12,6 +12,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import PrivateAttr
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from nemo_gym.client.server_client import SESSION_ID_KEY
 from nemo_gym.core.failure_kinds import SESSION_LOST, SESSION_RELEASE_FAILED, VERIFIER_ERROR
@@ -57,6 +58,35 @@ def _error_response(*, status_code: int, detail: str, error_kind: str, retryable
     )
 
 
+class _BearerAuthMiddleware:
+    """Check bearer tokens while keeping downstream ASGI handling in the calling task."""
+
+    def __init__(self, app: ASGIApp, *, config: WebResourcesServerConfig) -> None:
+        self.app = app
+        self.config = config
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or not self.config.require_auth:
+            await self.app(scope, receive, send)
+            return
+        request = Request(scope)
+        if request.url.path in {"/", "/healthz", "/docs", "/openapi.json", "/redoc"}:
+            await self.app(scope, receive, send)
+            return
+        expected = self.config.auth_token()
+        authorization = request.headers.get("authorization", "")
+        supplied = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
+        if not supplied or not hmac.compare_digest(supplied, expected):
+            await _error_response(
+                status_code=401,
+                detail="invalid bearer token",
+                error_kind="authentication_error",
+                retryable=False,
+            )(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+
 class WebResourcesServer(SimpleResourcesServer):
     """Expose any common-protocol web backend through Gym's session API."""
 
@@ -92,27 +122,7 @@ class WebResourcesServer(SimpleResourcesServer):
 
         app.router.lifespan_context = lifespan
 
-        @app.middleware("http")
-        async def bearer_auth(request: Request, call_next):
-            if not self.config.require_auth or request.url.path in {
-                "/",
-                "/healthz",
-                "/docs",
-                "/openapi.json",
-                "/redoc",
-            }:
-                return await call_next(request)
-            expected = self.config.auth_token()
-            authorization = request.headers.get("authorization", "")
-            supplied = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
-            if not supplied or not hmac.compare_digest(supplied, expected):
-                return _error_response(
-                    status_code=401,
-                    detail="invalid bearer token",
-                    error_kind="authentication_error",
-                    retryable=False,
-                )
-            return await call_next(request)
+        app.add_middleware(_BearerAuthMiddleware, config=self.config)
 
         @app.exception_handler(SessionNotFoundError)
         async def session_not_found(_request, exc: SessionNotFoundError):
