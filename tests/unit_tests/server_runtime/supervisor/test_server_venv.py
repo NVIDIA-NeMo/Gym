@@ -13,7 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import importlib.metadata
+import json
 import os
+import re
 import select
 import shlex
 import shutil
@@ -796,7 +798,7 @@ class TestLegacySetupContract:
                 global_config_dict=self._debug_global_config_dict(tmp_path),
                 prefix="my server name",
             )
-        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python 'test python version' {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && (echo 'nemo-gym=={version}' && grep -v -i -E {_OUTSIDE_FILTER} requirements.txt) | uv pip install --overrides <(printf '%s\\n' 'ray==test ray version') -c <(printf '%s\\n' 'ray==test ray version') -r /dev/stdin 'openai==test openai version' > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
+        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python 'test python version' {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && (echo 'nemo-gym=={version}' && {{ grep -v -i -E {_OUTSIDE_FILTER} requirements.txt || [ $? -eq 1 ]; }}) | uv pip install --overrides <(printf '%s\\n' 'ray==test ray version') -c <(printf '%s\\n' 'ray==test ray version') -r /dev/stdin 'openai==test openai version' > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         assert expected_command == self._installation_command(actual_command)
 
     @pytest.mark.parametrize("version", ["0.3.0", "0.3.0rc0", "1.0.0", "2.1.3rc1"])
@@ -818,7 +820,7 @@ class TestLegacySetupContract:
                 global_config_dict=self._debug_global_config_dict(tmp_path),
                 prefix="my server name",
             )
-        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python 'test python version' {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install --overrides <(printf '%s\\n' 'ray==test ray version') -c <(printf '%s\\n' 'ray==test ray version') nemo-gym=={version} && uv pip install --overrides <(printf '%s\\n' 'ray==test ray version') -c <(printf '%s\\n' 'ray==test ray version') --no-sources-package nemo-gym '-e .' 'openai==test openai version' > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
+        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python 'test python version' {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install --overrides <(printf '%s\\n' 'ray==test ray version') -c <(printf '%s\\n' 'ray==test ray version') 'nemo-gym=={version}' && uv pip install --overrides <(printf '%s\\n' 'ray==test ray version') -c <(printf '%s\\n' 'ray==test ray version') --no-sources-package nemo-gym --overrides <(printf '%s\\n' nemo-gym=={version}) '-e .' 'openai==test openai version' > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         assert expected_command == self._installation_command(actual_command)
 
     def test_installs_from_pypi_keeps_requested_extras(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
@@ -836,8 +838,9 @@ class TestLegacySetupContract:
                 prefix="my server name",
             )
 
-        assert f"(echo 'nemo-gym[dev,sandbox]==0.3.0' && grep -v -i -E {_OUTSIDE_FILTER} requirements.txt)" in (
-            self._installation_command(actual_command)
+        assert (
+            f"(echo 'nemo-gym[dev,sandbox]==0.3.0' && {{ grep -v -i -E {_OUTSIDE_FILTER} requirements.txt || [ $? -eq 1 ]; }})"
+            in (self._installation_command(actual_command))
         )
 
 
@@ -1101,8 +1104,10 @@ class TestIsGymCheckout:
         (server_dir / "pyproject.toml").write_text('[project]\nname = "my-server"\n')
         command = self._install_command(server_dir, tmp_path)
         assert f"{shlex.quote(f'-e {PARENT_DIR}')} && " in command
-        assert "--no-sources-package nemo-gym '-e .'" in command
-        assert "nemo-gym==" not in command
+        # The only Gym pin left is the override with the checkout's own version, which keeps that install.
+        version = importlib.metadata.version("nemo-gym")
+        assert f"--no-sources-package nemo-gym --overrides <(printf '%s\\n' nemo-gym=={version}) '-e .'" in command
+        assert command.count("nemo-gym==") == 1
 
     @pytest.mark.parametrize("editable", [True, False])
     def test_an_external_server_with_a_lock_still_gets_the_parents_gym(
@@ -1120,8 +1125,8 @@ class TestIsGymCheckout:
             command = self._install_command(server_dir, tmp_path)
         assert "_locked_env.py" not in command
         assert (f"{shlex.quote(f'-e {PARENT_DIR}')} && " in command) is editable
-        assert ("nemo-gym==0.9.0" in command) is not editable
-        assert "--no-sources-package nemo-gym '-e .'" in command
+        assert ("'nemo-gym==0.9.0' && " in command) is not editable
+        assert "--no-sources-package nemo-gym --overrides <(printf '%s\\n' nemo-gym==0.9.0) '-e .'" in command
 
     @pytest.mark.parametrize("editable", [True, False])
     def test_an_external_server_that_is_not_a_package_installs_its_requirements_with_the_parents_gym(
@@ -1138,10 +1143,13 @@ class TestIsGymCheckout:
         with patch("importlib.metadata.version", return_value="0.9.0"):
             command = self._install_command(server_dir, tmp_path)
         # Only Gym's own source is replaced, so the server's helper source still applies.
-        assert "--no-sources-package nemo-gym --requirements pyproject.toml" in command
+        assert (
+            "--no-sources-package nemo-gym --overrides <(printf '%s\\n' nemo-gym==0.9.0) --requirements pyproject.toml"
+            in command
+        )
         assert "--no-sources " not in command
         assert (f"{shlex.quote(f'-e {PARENT_DIR}')} && " in command) is editable
-        assert ("nemo-gym==0.9.0" in command) is not editable
+        assert ("'nemo-gym==0.9.0' && " in command) is not editable
 
     @staticmethod
     def _piped_requirements(command: str, server_dir: Path) -> list[str]:
@@ -1228,7 +1236,7 @@ class TestIsGymCheckout:
 
         with patch("importlib.metadata.version", return_value="0.8.0"):
             command = self._install_command(server_dir, tmp_path)
-        assert "--no-sources '-e .'" in command
+        assert "--no-sources --overrides <(printf '%s\\n' nemo-gym==0.8.0) '-e .'" in command
 
     @pytest.mark.skipif(shutil.which("uv") is None, reason="needs uv")
     def test_an_external_pyproject_server_keeps_its_other_local_sources(
@@ -1248,7 +1256,7 @@ class TestIsGymCheckout:
 
         with patch("importlib.metadata.version", return_value="0.8.0"):
             command = self._install_command(server_dir, tmp_path)
-        assert "--no-sources-package nemo-gym '-e .'" in command
+        assert "--no-sources-package nemo-gym --overrides <(printf '%s\\n' nemo-gym==0.8.0) '-e .'" in command
         resolved = subprocess.run(
             ["uv", "pip", "compile", "--offline", "-q", "--no-sources-package", "nemo-gym", "pyproject.toml"],
             cwd=server_dir,
@@ -1257,3 +1265,110 @@ class TestIsGymCheckout:
         )
         assert resolved.returncode == 0, resolved.stderr
         assert "../../lib" in resolved.stdout
+
+    @pytest.mark.parametrize(
+        ("requirements", "site_packages"),
+        [("nemo-gym==0.7.0\n", False), ("-e nemo-gym @ ../../\n", True)],
+        ids=["external repository", "built-in server in a wheel install"],
+    )
+    def test_requirements_of_only_gym_lines_install_under_pipefail(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch, requirements: str, site_packages: bool
+    ) -> None:
+        """grep selects no line and exits 1; with `pipefail` (a `nemo_gym_log_dir` run) that must not fail setup."""
+        root = tmp_path / "site-packages" if site_packages else tmp_path
+        server_dir = root / "resources_servers" / "my_server"
+        server_dir.mkdir(parents=True)
+        (server_dir / "requirements.txt").write_text(requirements)
+        if site_packages:
+            monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_venv, "PARENT_DIR", root)
+        else:
+            (tmp_path / "pyproject.toml").write_text('[project]\nname = "auto-ontology-eval"\n')
+        monkeypatch.setattr(nemo_gym, "_is_editable_install", False)
+        for name in ("NEMO_GYM_ALLOW_PRERELEASE", "UV_INDEX_URL", "UV_EXTRA_INDEX_URL", "UV_INDEX_STRATEGY"):
+            monkeypatch.delenv(name, raising=False)
+
+        with patch("importlib.metadata.version", return_value="0.8.0"):
+            command = self._install_command(server_dir, tmp_path)
+        pipe = command[command.index("(echo") : command.index(") | uv pip install") + 1]
+
+        def run() -> subprocess.CompletedProcess:
+            script = f"set -o pipefail; {pipe} | cat"
+            return subprocess.run(["bash", "-c", script], cwd=server_dir, capture_output=True, text=True)
+
+        piped = run()
+        assert piped.returncode == 0, piped.stderr
+        assert piped.stdout.splitlines() == ["nemo-gym==0.8.0"]
+        # A real grep error, such as a missing file, still fails the install.
+        (server_dir / "requirements.txt").unlink()
+        assert run().returncode != 0
+
+    @pytest.mark.skipif(shutil.which("uv") is None, reason="needs uv")
+    def test_a_pinned_gym_dependency_with_extras_keeps_the_parents_checkout(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch
+    ) -> None:
+        """A server pinning `nemo-gym[sandbox]==0.7.0` keeps the parent's editable Gym and still gets the extra's
+        dependencies. uv plans the server install offline against a venv holding a stand-in editable Gym, as the first
+        install leaves it; without the override, uv would replace that Gym with 0.7.0 from the package index."""
+        dependency = tmp_path / "sandbox_dep"
+        dependency.mkdir()
+        (dependency / "pyproject.toml").write_text('[project]\nname = "sandbox-dep"\nversion = "1.0.0"\n')
+        gym = tmp_path / "Gym"
+        gym.mkdir()
+        repo = tmp_path / "repo"
+        server_dir = repo / "resources_servers" / "srv"
+        server_dir.mkdir(parents=True)
+        (server_dir / "pyproject.toml").write_text(
+            '[project]\nname = "srv"\nversion = "0.1.0"\ndependencies = ["nemo-gym[sandbox]==0.7.0"]\n'
+            "[tool.uv]\npackage = false\n"
+        )
+        (repo / "pyproject.toml").write_text('[project]\nname = "auto-ontology-eval"\nversion = "0.1.0"\n')
+        monkeypatch.setattr(nemo_gym, "_is_editable_install", True)
+        monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_venv, "PARENT_DIR", gym)
+
+        with patch("importlib.metadata.version", return_value="0.9.0"):
+            command = self._install_command(server_dir, tmp_path)
+        assert f"{shlex.quote(f'-e {gym}[sandbox]')} && " in command
+        [override] = re.findall(r"--no-sources-package nemo-gym --overrides <\(printf '%s\\n' '([^']+)'\)", command)
+        assert override == "nemo-gym[sandbox]==0.9.0"
+
+        # The venv after the first install: the parent's Gym, editable, with the extra declared but not yet installed.
+        venv = tmp_path / "venv"
+        subprocess.run(["uv", "venv", "--offline", "-q", "--python", sys.executable, str(venv)], check=True)
+        [site_packages] = venv.glob("lib/python*/site-packages")
+        dist_info = site_packages / "nemo_gym-0.9.0.dist-info"
+        dist_info.mkdir()
+        (dist_info / "METADATA").write_text(
+            "Metadata-Version: 2.1\nName: nemo-gym\nVersion: 0.9.0\nProvides-Extra: sandbox\n"
+            f"Requires-Dist: sandbox-dep @ {dependency.as_uri()} ; extra == 'sandbox'\n"
+        )
+        (dist_info / "INSTALLER").write_text("uv\n")
+        (dist_info / "RECORD").write_text("")
+        (dist_info / "direct_url.json").write_text(json.dumps({"url": gym.as_uri(), "dir_info": {"editable": True}}))
+        (server_dir / "overrides.in").write_text(override + "\n")
+        # Stands in for the package index: uv takes a URL only from a direct requirement or a constraint.
+        (server_dir / "index.in").write_text(f"sandbox-dep @ {dependency.as_uri()}\n")
+
+        def plan(*overrides: str) -> subprocess.CompletedProcess:
+            return subprocess.run(
+                ["uv", "pip", "install", "--dry-run", "--offline", "--python", str(venv / "bin" / "python")]
+                + [
+                    "--no-sources-package",
+                    "nemo-gym",
+                    *overrides,
+                    "-c",
+                    "index.in",
+                    "--requirements",
+                    "pyproject.toml",
+                ],
+                cwd=server_dir,
+                capture_output=True,
+                text=True,
+            )
+
+        planned = plan("--overrides", "overrides.in")
+        assert planned.returncode == 0, planned.stderr
+        assert "+ sandbox-dep @ " in planned.stderr
+        assert "nemo-gym" not in planned.stderr  # the parent's Gym stays as it is
+        # Without it the pin wins: uv replaces the parent's Gym with 0.7.0, or fails offline with no 0.7.0 cached.
+        replaced = plan()
+        assert "+ nemo-gym==0.7.0" in replaced.stderr if replaced.returncode == 0 else "0.7.0" in replaced.stderr

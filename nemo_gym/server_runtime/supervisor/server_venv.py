@@ -24,7 +24,7 @@ from os import environ
 from pathlib import Path
 from subprocess import Popen
 from sys import stderr, stdout
-from typing import IO, Any, Mapping
+from typing import IO, Any, Iterable, Mapping
 
 from omegaconf import DictConfig, ListConfig
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
@@ -141,8 +141,13 @@ def _local_nemo_gym_extras(requirements_fpath: Path) -> str:
     A server outside a Gym checkout gets Gym from its parent installation instead of its own `nemo-gym[...]` line, so
     the line's extras must be carried over or their dependencies are never installed.
     """
+    return _nemo_gym_extras(requirements_fpath.read_text().splitlines())
+
+
+def _nemo_gym_extras(requirements: Iterable[str]) -> str:
+    """The extras requested on the Gym requirements among ``requirements``, formatted as `[a,b]`, or "" for none."""
     extras: list[str] = []
-    for line in requirements_fpath.read_text().splitlines():
+    for line in requirements:
         match = _NEMO_GYM_REQUIREMENT_RE.match(line)
         if match is None or not match.group("extras"):
             continue
@@ -328,17 +333,23 @@ def _legacy_setup_env_command(dir_path: Path, global_config_dict: DictConfig, pr
             if server_in_gym_checkout:
                 install_cmd = f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{constraint_flag}{target} {head_server_dep_args}"""
             else:
+                extras = _nemo_gym_extras(metadata.get("project", {}).get("dependencies", []))
                 if parent_gym_checkout:
-                    gym_install = shlex.quote(f"-e {PARENT_DIR}")
+                    gym_install = shlex.quote(f"-e {PARENT_DIR}{extras}")
                 else:
                     # install nemo-gym from pypi instead of relative path in pyproject.toml
                     # with support for pre-releases, custom indexes, and version pinning
-                    gym_install = f"{_get_nemo_gym_install_flags()}nemo-gym{_get_nemo_gym_version_spec()}"
+                    gym_install = f"{_get_nemo_gym_install_flags()}'nemo-gym{extras}{_get_nemo_gym_version_spec()}'"
                 # Only Gym's own source is replaced; the server's other sources, such as a local helper, still apply.
                 no_sources = "--no-sources " if bundled_in_wheel else "--no-sources-package nemo-gym "
+                # Dropping Gym's source leaves a pinned `nemo-gym==...` dependency to the package index, which would
+                # replace the Gym just installed. Overriding it with the parent's version keeps that install, and the
+                # server's extras stay on the override, since uv applies an override's extras instead of the pin's.
+                gym_override = shlex.quote(f"nemo-gym{extras}{_get_nemo_gym_version_spec()}")
                 install_cmd = (
                     f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{constraint_flag}{gym_install} && """
-                    f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{constraint_flag}{no_sources}{target} {head_server_dep_args}"""
+                    f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{constraint_flag}{no_sources}"""
+                    f"""--overrides <(printf '%s\\n' {gym_override}) {target} {head_server_dep_args}"""
                 )
         elif has_requirements_txt:
             has_overrides_txt = (dir_path / "overrides.txt").exists()
@@ -353,6 +364,9 @@ def _legacy_setup_env_command(dir_path: Path, global_config_dict: DictConfig, pr
                     other_requirements = "grep -v -F '../..' requirements.txt"
                 else:
                     other_requirements = f"grep -v -i -E {shlex.quote(_NEMO_GYM_REQUIREMENT_ERE)} requirements.txt"
+                # grep exits 1 when it selects no line, as for a file of only Gym requirements; with `pipefail` set
+                # (a `nemo_gym_log_dir` run) that would fail a correct install. Only 2, a real error, fails it.
+                other_requirements = f"{{ {other_requirements} || [ $? -eq 1 ]; }}"
                 if parent_gym_checkout:
                     gym_requirement = shlex.quote(f"-e {PARENT_DIR}{extras}")
                     install_flags = ""
