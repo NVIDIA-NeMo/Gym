@@ -27,6 +27,21 @@ gym eval run --no-serve \
     --limit 5
 ```
 
+## Sessions
+Each rollout gets its own stateful Python session in the NeMo Skills sandbox. The rollout's session cookie keys it, and
+the first `stateful_python_code_exec` call creates it.
+
+Under an Environment Server, such as `ns_tools_environment_server` (`single_agent_turn_legacy`), `/seed_session`
+binds the cookie to the `resources_session_id`. `/close_session` releases the Python session and the rollout's tool
+timings, even when `/verify` never ran. Closing an unknown or already closed session succeeds, and a seed that
+arrives after its session closed is refused with 409 for `session_close_retry_window_seconds`. A tool call for a
+closed session gets 404 with `failure_kind: session_lost`, and a `/verify` for one returns a masked sample with
+reward 0.
+
+Cancelling a Python tool request leaves its bounded backend request owned until it finishes. Close waits for that
+request before deleting the session, including when cleanup itself is cancelled and retried. Verification preserves
+the delegated verifier's mask and failure diagnostics, so a judge outage remains masked.
+
 ## Sample data format
 Each sample requires:
 - `question`: The math question being asked
