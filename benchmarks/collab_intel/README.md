@@ -8,8 +8,11 @@ safety corner, a faked result, a hard bargain, a compromised handoff, ...). 8 di
   when `data/repo/.commit` names another commit) and writes one row per released scenario of the scored set and test
   seed (157 scenarios x 3 seeds = 471 rows; the 3 encrypted GPQA-based scenarios are skipped).
 - `collab_intel_agent` runs the upstream harness CLI from `data/repo/` in that repo's own uv venv: the scenario alone,
-  then the test version only if the policy passed alone. Reward = the test run's pass. `alone_pass=false` rows are not
-  scored (upstream score = mean test pass over scenarios passed alone; upstream also averages over dimensions).
+  then the test version only if the policy passed alone. Reward = the test run's pass.
+- The score is the key metric `collab_intel/score`: upstream's mean test pass over rows with `alone_pass=true`, then
+  the mean over dimensions. `mean/reward` is not the score: gate-failed rows are measured zeros there, since
+  `mask_sample` marks only evaluation-side faults (a harness crash, a judge failure). `collab_intel/alone_pass_rate`
+  and `collab_intel/unfinished` show how many rows the score skipped and why.
 - Partners and referee judges are one self-hosted OpenAI-compatible endpoint (`COLLAB_INTEL_JUDGE_BASE_URL`,
   `COLLAB_INTEL_JUDGE_MODEL`, both required). `judge_extra` defaults to DeepSeek's thinking-off flag: change it with
   the judge model. The upstream leaderboard uses Claude/GPT/Qwen3 partners and Claude judges, so scores here are not

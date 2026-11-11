@@ -265,7 +265,7 @@ class CollabIntelAgent(SimpleResponsesAPIAgent):
         by_dimension = defaultdict(list)
         rollouts = [r for task in tasks for r in task]
         for rollout in rollouts:
-            if not rollout.get("mask_sample") and rollout.get("test_pass") is not None:
+            if rollout.get("alone_pass") and not rollout.get("mask_sample") and rollout.get("test_pass") is not None:
                 by_dimension[rollout["dimension"]].append(float(rollout["test_pass"]))
         rates = {d: sum(v) / len(v) for d, v in sorted(by_dimension.items())}
         metrics = {f"collab_intel/{d}": 100 * rate for d, rate in rates.items()}

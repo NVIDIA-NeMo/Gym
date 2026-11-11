@@ -49,8 +49,8 @@ def _request(result: dict) -> CollabIntelVerifyRequest:
         ({"alone_pass": True, "alone": {"pass": True}, "test": {"pass": True}}, 1.0, True, True, False, False),
         # a completed test failure is a measured zero
         ({"alone_pass": True, "alone": {"pass": True}, "test": {"pass": False}}, 0.0, True, False, False, False),
-        # failed alone: not scored
-        ({"alone_pass": False, "alone": {"pass": False}, "test": None}, 0.0, False, None, False, True),
+        # failed alone: a measured, unmasked row that collab_intel/score leaves out by alone_pass
+        ({"alone_pass": False, "alone": {"pass": False}, "test": None}, 0.0, False, None, False, False),
         # a crashed harness or a missing verdict is unfinished, not a failure
         (
             {"alone_pass": True, "alone": {"pass": True}, "test": {"pass": False, "failure_kind": "agent_run_error"}},
@@ -83,7 +83,7 @@ def _request(result: dict) -> CollabIntelVerifyRequest:
             False,
             None,
             False,
-            True,
+            False,
         ),
     ],
 )

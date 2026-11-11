@@ -14,7 +14,8 @@
 # limitations under the License.
 """Collaborative Intelligence verify: the agent (collab_intel_agent) runs the upstream harness and its checkers; this
 server turns the result into the reward. reward = the test run's pass (1/0); a row the policy failed alone has
-alone_pass=false and reward 0 and is left out of the upstream score (mean reward over alone_pass rows)."""
+alone_pass=false and reward 0. It is a measured row (not masked), and collab_intel/score leaves it out by filtering on
+alone_pass, so mean/reward is the unconditional test pass rate, not the upstream score."""
 
 from typing import Any, Optional
 
@@ -62,8 +63,8 @@ class CollabIntelResourcesServer(SimpleResourcesServer):
         return CollabIntelVerifyResponse(
             **body.model_dump(),
             reward=float(bool(test_pass)),
-            # only a completed test on a passed gate is a measurement; gate failures and unfinished rows are masked
-            mask_sample=unfinished or not r.get("alone_pass"),
+            # mask only evaluation-side faults. A gate failure is a scoring rule, carried by alone_pass for the score.
+            mask_sample=unfinished,
             alone_pass=bool(r.get("alone_pass")),
             test_pass=test_pass,
             unfinished=unfinished,

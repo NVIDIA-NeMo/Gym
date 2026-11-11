@@ -48,11 +48,14 @@ def test_score_weights_dimensions_equally():
     assert CollabIntelAgent._score(tasks)["collab_intel/score"] == pytest.approx(12.5)
     # duplicating rows within a dimension, or adding excluded rows, leaves the score unchanged
     more = tasks + [[_row("d0", True)]] + [[_row("d1", None, mask=True)], [_row("d2", False, mask=True)]]
+    # gate-failed rows are unmasked but carry alone_pass=false, and the score leaves them out
+    more += [[_row("d3", True, alone_pass=False)], [_row("d4", None, alone_pass=False)]]
     assert CollabIntelAgent._score(more)["collab_intel/score"] == pytest.approx(12.5)
 
 
 def test_score_without_scored_rows_reports_no_score():
     metrics = CollabIntelAgent._score([[_row("d0", None, mask=True, alone_pass=False, unfinished=True)]])
+    assert "collab_intel/score" not in CollabIntelAgent._score([[_row("d0", None, alone_pass=False)]])
     assert "collab_intel/score" not in metrics and metrics["collab_intel/scored_rows"] == 0
     assert "collab_intel/alone_pass_rate" not in metrics and metrics["collab_intel/unfinished"] == 1
 
@@ -60,8 +63,8 @@ def test_score_without_scored_rows_reports_no_score():
 def test_score_reports_gate_pass_rate_and_unfinished_rows():
     tasks = [
         [_row("d0", True)],
-        [_row("d0", None, mask=True, alone_pass=False)],
-        [_row("d1", None, mask=True, alone_pass=False)],
+        [_row("d0", None, alone_pass=False)],
+        [_row("d1", None, alone_pass=False)],
         [_row("d1", None, mask=True, unfinished=True)],
     ]
     metrics = CollabIntelAgent._score(tasks)
