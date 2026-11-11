@@ -267,6 +267,8 @@ First run may fail as hooks auto-modify files (`verified: false` flag, README ta
 
 Set `verified: true` in YAML config after the exit checks pass. Link the run folder and its `quality_summary.json` in the PR description.
 
+CI does not start on its own for unverified commits or external contributors; a maintainer must comment `/ok to test <full-sha>`. Use the `nemo-gym-pr-checks-and-labels` skill for CI routing and labels.
+
 To avoid committing unrelated auto-fixes from other servers, scope pre-commit to your files:
 ```bash
 pre-commit run --files resources_servers/my_benchmark/**/*
