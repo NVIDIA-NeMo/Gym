@@ -40,6 +40,7 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
     lost_session_verification,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.swe_atlas_qa.prepare import TASKS_DIR, load_task, validate_source
 
 
@@ -351,3 +352,6 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     SWEAtlasQAResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = SWEAtlasQAResourcesServer.run_webserver()  # noqa: F401
