@@ -24,7 +24,8 @@ that loads it and which `++responses_create_params.temperature=...` replaces.
 Rows carry neither, because `verifiers_agent` would let a row's value win over
 its config. Rows do carry the tools and the 131072-token output budget; rows
 prepared before the resources server existed lack the tools, and `config.yaml`
-masks their samples as `verifier_error` instead of scoring them. Re-run
+refuses them at seed, before any model call, so each fails once as an
+`environment_server_failed` rollout instead of being scored. Re-run
 `gym eval prepare --benchmark automationbench` to get them.
 
 The resources server takes its tool dispatch from verifiers, as a transitional

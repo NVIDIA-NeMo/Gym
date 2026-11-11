@@ -20,8 +20,11 @@ Configuration (`configs/automationbench.yaml`):
 - `reward_fn`: `aa_headline` (default) or `partial_credit`. Both are reported either way.
 - `export_assertion_results`: add every assertion's verdict to the verify response as `assertion_results`.
 
-A row whose `responses_create_params` carries no tools was prepared before this server existed; `/verify` masks its
-sample as `verifier_error` and says to re-run `gym eval prepare --benchmark automationbench`.
+A row whose `responses_create_params` carries no tools was prepared before this server existed. `/seed_session` refuses
+it with HTTP 422 before any model call, reading the params the typed seed carries beside `task_data`, and the message
+says to re-run `gym eval prepare --benchmark automationbench`. A seed without those params, from a caller that does not
+send them, is served, and `/verify` masks such a row's sample as `verifier_error` instead. A task whose
+`info.initial_state` does not build a world is refused at seed with HTTP 422 as well.
 
 Sessions are kept in the worker's memory and are not exported to partial-rollout checkpoints: an episode interrupted
 by a crash starts over.
