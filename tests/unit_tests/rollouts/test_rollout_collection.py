@@ -3780,7 +3780,7 @@ class TestRolloutCollection:
         )
         await RolloutCollectionHelper().run_from_config(config)
 
-        assert {k: v for k, v in exported.items() if k.startswith(("coverage/", "retries/"))} == {
+        assert {k: v for k, v in exported.items() if k.startswith(("coverage/", "retries/", "transport/"))} == {
             "coverage/expected": 3,
             "coverage/scored": 2,
             "coverage/missing": 0,
@@ -3802,6 +3802,8 @@ class TestRolloutCollection:
             "retries/rollouts_retried": 2,
             "retries/at_cap": 1,
             "retries/max_attempts": 3,
+            "transport/resends": 0,
+            "transport/attempts_counted": 3,
         }
 
     async def test_coverage_is_exported_when_aggregation_is_skipped(

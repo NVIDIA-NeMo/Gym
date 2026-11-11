@@ -110,7 +110,12 @@ from nemo_gym.core.failure_kinds import (
     quota_reset_text,
 )
 from nemo_gym.core.failure_records import EpisodeFailure, FailureBoundary, FailureReport
-from nemo_gym.core.failure_transport import FailureHeader, FailureReportRow
+from nemo_gym.core.failure_transport import (
+    FailureHeader,
+    FailureReportRow,
+    RequestFailureLog,
+    observe_transport_resend,
+)
 from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for
 from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.models.model_call_capture import ModelCallCaptureConfig
@@ -135,6 +140,7 @@ from nemo_gym.rollouts.omitted_rollouts import omitted_rollout_record
 from nemo_gym.rollouts.rollout_outcomes import InvalidRolloutResult, RolloutFailureRecord, StaleRolloutResult
 from nemo_gym.rollouts.rollout_perf import NG_PERF_KEY, DispatchLatencyTracker, _attach_ng_perf
 from nemo_gym.rollouts.rollout_records import (
+    NG_TRANSPORT_RESENDS_KEY,
     RUN_ID_KEY,
     coverage_path_for,
     journal_path_for,
@@ -800,6 +806,8 @@ class _CompletedRollout:
     failure_report: Optional[FailureReport] = None
     # A failed `/run` with route_failures_to_sidecar off: the writer keeps evidence of it, then raises this error.
     run_error: Optional[BaseException] = None
+    # Transport resends of this `/run`, in the driver and the Gym servers below it; None if it was never dispatched.
+    transport_resends: Optional[int] = None
 
 
 def _collection_failure_report(exc: BaseException, failure_class: str, headers: Any) -> FailureReport:
@@ -1058,6 +1066,10 @@ def _stamp_collector_fields(completed: "_CompletedRollout", result: dict[str, An
         # Read by the timeouts section of the run health summary. Not `elapsed_seconds`,
         # which resume reads to order dispatch.
         result[ELAPSED_S_KEY] = completed.elapsed_s
+    if completed.transport_resends is not None:
+        # A lower bound: resends a Gym server makes after answering, or by a server without the resend header, are not
+        # seen. Absent for a row that was never dispatched.
+        result[NG_TRANSPORT_RESENDS_KEY] = completed.transport_resends
 
     result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
     result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
@@ -4529,7 +4541,15 @@ executions → not run again (left to recovery)
                 if no_persist:
                     # A returned suppression without a failure is an intentional
                     # omission. Known kill-shaped failures were converted above.
-                    store.record_omission(row, str(result.get("error") or "Producer requested no result persistence"))
+                    store.record_omission(
+                        row
+                        | (
+                            {NG_TRANSPORT_RESENDS_KEY: result[NG_TRANSPORT_RESENDS_KEY]}
+                            if NG_TRANSPORT_RESENDS_KEY in result
+                            else {}
+                        ),
+                        str(result.get("error") or "Producer requested no result persistence"),
+                    )
                     _record_rollout_outcome(metric_result, "omitted", dispatch_name)
                     if batch_tracker is not None:
                         # This attempt supersedes any failure reported before resume.
@@ -5472,6 +5492,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 await reserve_dispatch(row)
                 succeeded = False
                 dispatch_span_context = None
+                transport_log: Optional[RequestFailureLog] = None
                 try:
                     request_body = _episode_request_body(row) if _materialized_taskset(row) else row
                     dispatch_span = (
@@ -5479,7 +5500,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         if is_span_group_enabled(GymSpanGroup.ROLLOUT) and is_trace_exporter_active()
                         else nullcontext()
                     )
-                    with dispatch_span as dispatch_span_context:
+                    # The transport resends of this /run: the driver's own, and those every Gym server below reports.
+                    with dispatch_span as dispatch_span_context, RequestFailureLog.operation() as transport_log:
                         connect_deadline = time.monotonic() + (_connect_grace_s or 0.0)
                         while True:
                             try:
@@ -5509,6 +5531,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                                 ):
                                     raise
                                 await asyncio.sleep(0.5)
+                                # A new post() starts its own attempt count, so this resend is counted here.
+                                observe_transport_resend()
                     await raise_for_status(res)
                     stage = "response"
                     result = await get_response_json(res)
@@ -5543,6 +5567,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         environment_server_type=server_type,
                         elapsed_s=time.monotonic() - started,
                         dispatch_span_context=dispatch_span_context,
+                        transport_resends=None if transport_log is None else transport_log.transport_resends,
                         failure_report=FailureHeader.decode(getattr(res, "headers", None)),
                     )
                 except Exception as e:
@@ -5601,6 +5626,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         environment_server_type=server_type,
                         elapsed_s=time.monotonic() - started,
                         dispatch_span_context=dispatch_span_context,
+                        transport_resends=None if transport_log is None else transport_log.transport_resends,
                         failure_report=_collection_failure_report(
                             e,
                             failure_row[NG_FAILURE_CLASS_KEY],

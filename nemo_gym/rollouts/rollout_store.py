@@ -641,6 +641,7 @@ class RolloutStore:
         self._failures_file.write(raw)
         self._failures_file.flush()
         _record_output_write(write_started, raw)
+        self._state.record_unrouted_transport_resends(row)
 
     def pending(
         self,
@@ -717,7 +718,10 @@ class RolloutStore:
 
         Failed-attempt totals retain history across resubmissions. Budget exhaustion
         uses only eligible failures since the most recent reset and the manifest's
-        saved cap, rather than the exporting process's configuration.
+        saved cap, rather than the exporting process's configuration. ``transport/resends`` adds up the transport resends
+        of every saved attempt that recorded one (including a failed dispatch saved as evidence when failures are not
+        routed to the sidecar), out of ``transport/attempts_counted`` such attempts; both are left out when no attempt
+        recorded a count. They are not rollout retries, so they stay out of ``retries/*``.
         """
         attempts: Counter[str] = Counter()
         failed: Counter[str] = Counter()
@@ -730,6 +734,17 @@ class RolloutStore:
             attempts[key[0]] += 1
         coverage = self.coverage()
         failed.update(coverage["failed_by_class"])
+        # Every saved attempt that carries a count, failed and omitted ones included; none counted means unknown, not 0.
+        transport_resends = [
+            outcome.transport_resends
+            for outcome in self._state.payloads.values()
+            if outcome.transport_resends is not None
+        ]
+        transport_resends += [
+            resends
+            for key, resends in self._state.unrouted_transport_resends.items()
+            if key not in self._state.payloads
+        ]
         return {
             "retries/attempts": sum(attempts.values()),
             "retries/rollouts_retried": sum(
@@ -738,6 +753,11 @@ class RolloutStore:
             "retries/at_cap": coverage["failure_budget_exhausted"],
             "retries/max_attempts": coverage["max_rollout_attempts"],
             **{f"coverage/failed/{name}": count for name, count in sorted(failed.items())},
+            **(
+                {"transport/resends": sum(transport_resends), "transport/attempts_counted": len(transport_resends)}
+                if transport_resends
+                else {}
+            ),
         }
 
     def coverage(self) -> dict:
