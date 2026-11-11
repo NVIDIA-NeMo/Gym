@@ -454,18 +454,23 @@ def test_an_agent_run_seed_has_no_episode_to_tag(browsers) -> None:
 
 
 class _RecordingProvider:
-    """A remote browser provider that records which sessions it was asked to end."""
+    """A remote browser provider that records which sessions it ended.
+
+    Its release can be made slow, like a degraded service, so a cut-short release shows as a session never recorded.
+    """
 
     name = "recording"
 
-    def __init__(self) -> None:
+    def __init__(self, close_delay_s: float = 0.0) -> None:
         self.released: list[str] = []
+        self._close_delay_s = close_delay_s
         self._ids = count(1)
 
     async def acquire(self, spec: BrowserSessionSpec) -> BrowserSessionHandle:
         return BrowserSessionHandle(cdp_url="ws://unused", session_id=f"remote-{next(self._ids)}")
 
     async def release(self, handle: BrowserSessionHandle) -> None:
+        await asyncio.sleep(self._close_delay_s)
         self.released.append(handle.session_id)
 
 
@@ -485,10 +490,12 @@ class _FailingBrowser(_Browser):
         raise RuntimeError("provider unreachable")
 
 
-class _HangingBrowser(_Browser):
-    async def close(self) -> None:
-        await super().close()
-        await asyncio.Event().wait()
+def _serve_remote_browsers(monkeypatch, provider: _RecordingProvider) -> None:
+    monkeypatch.setattr(
+        app_module,
+        "create_backend",
+        lambda config, session_metadata=None: _HeldRemoteBrowser(provider, session_metadata=session_metadata),
+    )
 
 
 class TestShutdown:
@@ -496,24 +503,30 @@ class TestShutdown:
 
     def test_stopping_the_server_releases_a_held_remote_browser(self, monkeypatch) -> None:
         provider = _RecordingProvider()
-        monkeypatch.setattr(
-            app_module,
-            "create_backend",
-            lambda config, session_metadata=None: _HeldRemoteBrowser(provider, session_metadata=session_metadata),
-        )
+        _serve_remote_browsers(monkeypatch, provider)
         server = _server()
 
         with TestClient(server.setup_webserver()) as client:
-            # An episode that never reached verify or close, as when a worker exits mid-run.
+            # An episode that never reached verify or close, as when the server stops mid-run.
             assert client.post("/seed_session", json=_seed_json()).status_code == 200
             assert provider.released == []
 
         assert provider.released == ["remote-1"]
         assert server._session_id_to_state == {}
 
-    def test_one_browser_that_fails_or_hangs_does_not_keep_the_others_open(self, monkeypatch, caplog) -> None:
-        monkeypatch.setattr(app_module, "_SHUTDOWN_CLOSE_TIMEOUT_S", 0.2)
-        kinds = iter([_FailingBrowser, _HangingBrowser, _Browser])
+    def test_a_slow_provider_release_still_finishes(self, monkeypatch) -> None:
+        """Shutdown must not cut a release short: the step that ends the provider session comes last."""
+        provider = _RecordingProvider(close_delay_s=0.5)
+        _serve_remote_browsers(monkeypatch, provider)
+
+        with TestClient(_server().setup_webserver()) as client:
+            for session_id in ("first", "second"):
+                assert client.post("/seed_session", json=_seed_json(session_id)).status_code == 200
+
+        assert sorted(provider.released) == ["remote-1", "remote-2"]
+
+    def test_one_failed_close_does_not_keep_the_others_open(self, monkeypatch, caplog) -> None:
+        kinds = iter([_FailingBrowser, _Browser])
         created: list[_Browser] = []
 
         def _create_backend(config, session_metadata=None):
@@ -525,11 +538,9 @@ class TestShutdown:
 
         with caplog.at_level("WARNING", logger=app_module.logger.name):
             with TestClient(server.setup_webserver()) as client:
-                for session_id in ("failing", "hanging", "healthy"):
+                for session_id in ("failing", "healthy"):
                     assert client.post("/seed_session", json=_seed_json(session_id)).status_code == 200
 
-        assert [browser.closed for browser in created] == [1, 1, 1]
+        assert [browser.closed for browser in created] == [1, 1]
         assert server._session_id_to_state == {}
-        logged = caplog.text
-        assert "could not close the browser for session failing" in logged
-        assert "session hanging did not close" in logged
+        assert "could not close the browser for session failing" in caplog.text

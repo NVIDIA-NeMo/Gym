@@ -27,8 +27,9 @@ session through `/close_session`. An Environment Server assigns the session id a
 registers that close before seeding, so a rollout abandoned before `verify` still
 has its browser released. An Agent's `/run` does not close, so there a rollout
 abandoned without `verify` or a re-seed keeps its browser until the server shuts
-down, when its lifespan closes every browser the process still holds. Only a process
-killed without shutting down leaves its remote browsers for the provider to reclaim.
+down, when its lifespan closes every browser the process still holds. A process killed
+before that close finishes leaves its remote browsers for the provider to reclaim; the
+README says how long to give the server to shut down.
 """
 
 import asyncio
@@ -80,11 +81,6 @@ _SCORING_KEYS = ("final_url", "url_contains", "dom_contains", "answer_equals")
 # Where the browser comes from when the config says nothing: a local Chromium,
 # which needs no account, no network and no quota.
 _DEFAULT_BACKEND: Dict[str, Any] = {"local_playwright": {"headless": True}}
-
-# How long shutdown waits for one browser to close. Browsers close concurrently, so this
-# also bounds the whole shutdown; one that has not closed by then is logged and left to
-# its provider.
-_SHUTDOWN_CLOSE_TIMEOUT_S = 30.0
 
 
 class InteractiveBrowserConfig(BaseResourcesServerConfig):
@@ -198,23 +194,13 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
     async def shutdown(self) -> None:
         """Close every browser this process still holds, local and remote.
 
-        Each close is bounded and runs concurrently with the others; a failure or timeout
-        is logged and does not stop the rest.
+        Browsers close concurrently, and a failed close is logged without stopping the others.
+        No limit covers a whole close: each teardown step has its own, and a limit around the
+        provider release could cancel it before the provider ends the session.
         """
         self._episode_identity.clear()
         self._fences.clear()
-        await asyncio.gather(
-            *(self._release_at_shutdown(session_id) for session_id in list(self._session_id_to_state))
-        )
-
-    async def _release_at_shutdown(self, session_id: str) -> None:
-        try:
-            async with asyncio.timeout(_SHUTDOWN_CLOSE_TIMEOUT_S):
-                await self._release(session_id)
-        except TimeoutError:
-            logger.warning(
-                "browser for session %s did not close within %ss at shutdown", session_id, _SHUTDOWN_CLOSE_TIMEOUT_S
-            )
+        await asyncio.gather(*(self._release(session_id) for session_id in list(self._session_id_to_state)))
 
     # ----- lifecycle ----------------------------------------------------- #
     async def seed_session(
