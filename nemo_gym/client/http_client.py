@@ -20,6 +20,7 @@ import json
 import socket
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from traceback import print_exc
 from typing import Any, NamedTuple, Optional, Type, Union, Unpack
 
@@ -49,7 +50,12 @@ from nemo_gym.config.global_config import (
 from nemo_gym.core.episode_context import (
     current_rollout_id,
 )
-from nemo_gym.core.failure_transport import FailureHeader, observe_reply
+from nemo_gym.core.failure_transport import (
+    FailureHeader,
+    observe_reply,
+    observe_reported_transport_resends,
+    observe_transport_resend,
+)
 from nemo_gym.core.typed_exceptions import NgFailureEvent, rebuild_failure
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, safe_set_span_attributes
 from nemo_gym.telemetry.connection_pool import (
@@ -719,9 +725,15 @@ async def _request_with_retries(
         retries = 0
         retry_start = time.monotonic()
         window = _connection_retry_window
+        attempts_started = 0
         while True:
             if window is not None and window.expired():
                 raise window.last_error
+            if attempts_started:
+                # Counted as the next attempt starts, after the expired-window exit: a failure that exhausts a budget
+                # raises before reaching here, and a cancelled backoff starts nothing.
+                observe_transport_resend()
+            attempts_started += 1
             if _max_num_tries is not None:
                 explicit_tries += 1
             # A tracker belongs to exactly one request. Do not reuse a completed upload across retries.
@@ -735,6 +747,12 @@ async def _request_with_retries(
                 response = await client.request(method=method, url=url, **attempt_kwargs)
                 if window is not None:
                     window.close()
+                if _internal:
+                    # Read as each reply arrives, so a reply whose body is cut off below and resent still reports the
+                    # resends made for it. A bookkeeping error is dropped: it must never reach the retry handling below
+                    # and resend a request the server already accepted.
+                    with suppress(Exception):
+                        observe_reported_transport_resends(response.headers)
                 if (
                     _read_body
                     and _resend_after_disconnect

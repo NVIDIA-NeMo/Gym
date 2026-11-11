@@ -1632,3 +1632,65 @@ class TestHeadServerProxyKwargs:
     def test_listen_backlog_follows_the_global_config(self, monkeypatch: MonkeyPatch) -> None:
         assert 16384 == self._capture_uvicorn_kwargs(monkeypatch, {})["backlog"]
         assert 4096 == self._capture_uvicorn_kwargs(monkeypatch, {"uvicorn_backlog": 4096})["backlog"]
+
+
+class TestRunWebserverReportsTransportResends:
+    """The app run_webserver builds reports a request's transport resends, even when its route raises."""
+
+    async def test_a_raised_route_still_reports_its_resends(self, monkeypatch: MonkeyPatch) -> None:
+        import httpx
+        from fastapi import FastAPI
+
+        from nemo_gym.core.failure_transport import TransportResendHeader, observe_transport_resend
+
+        global_config = DictConfig({DRY_RUN_KEY_NAME: False, "my_server": {"a": {"b": {}}}})
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.base_server, "get_global_config_dict", MagicMock(return_value=global_config)
+        )
+        server_client = ServerClient(
+            head_server_config=BaseServerConfig(host="", port=0), global_config_dict=DictConfig({})
+        )
+        server_client_mock = MagicMock(return_value=server_client)
+        server_client_mock.load_head_server_config = MagicMock(return_value=BaseServerConfig(host="", port=0))
+        monkeypatch.setattr(nemo_gym.server_runtime.base_server, "ServerClient", server_client_mock)
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.base_server, "is_nemo_gym_fastapi_worker", MagicMock(return_value=False)
+        )
+        captured: dict = {}
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.base_server.uvicorn, "run", lambda *args, **kwargs: captured.update(kwargs)
+        )
+        server_config = BaseRunServerInstanceConfig(
+            name="my_server", host="127.0.0.1", port=8000, entrypoint="app.py", num_workers=1
+        )
+
+        class ResendingServer(SimpleServer):
+            @classmethod
+            def load_config_from_global_config(cls):
+                return server_config
+
+            def setup_webserver(self) -> FastAPI:
+                app = FastAPI()
+
+                @app.get("/work")
+                async def work(fail: bool = False) -> dict:
+                    observe_transport_resend()
+                    if fail:
+                        raise RuntimeError("route failed after one resend")
+                    return {}
+
+                return app
+
+            # The real exception middleware stays: it is what turns a raised route into a handled 500.
+            def setup_telemetry(self) -> None: ...
+            def set_ulimit(self) -> None: ...
+            def prefix_server_logs(self) -> None: ...
+            def instrument_app_for_telemetry(self, app) -> None: ...
+
+        ResendingServer.run_webserver()
+        transport = httpx.ASGITransport(app=captured["app"], raise_app_exceptions=False)
+        async with httpx.AsyncClient(transport=transport, base_url="http://gym") as client:
+            ok = await client.get("/work")
+            failed = await client.get("/work", params={"fail": True})
+        assert (ok.status_code, ok.headers.get_list(TransportResendHeader.NAME)) == (200, ["1"])
+        assert (failed.status_code, failed.headers.get_list(TransportResendHeader.NAME)) == (500, ["1"])

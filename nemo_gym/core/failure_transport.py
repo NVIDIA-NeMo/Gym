@@ -96,6 +96,38 @@ UNREGISTERED_KIND_PREFIX = "unregistered:"
 """The namespace a forwarded event keeps when its kind is not registered here (a peer on another Gym version)."""
 
 
+class TransportResendHeader:
+    """Carry the transport resends made while a request was served in a reply header of their own.
+
+    A transport resend is another attempt of the same HTTP request after a connection failure, counted where it starts
+    (``observe_transport_resend``), so a failure that exhausts the retry budget adds nothing. It excludes a model
+    client's retries of 429 and 5xx replies (``ModelOperationObservation.http_attempts``) and rollout retries (the run
+    summary's ``retries/*``). The count stays out of ``FailureReport``, whose ``extra="forbid"`` would make a peer on an
+    older version drop the whole report. A reply with no resends carries no header, and so does a Gym server older than
+    the header, so the total a caller adds up is a lower bound.
+    """
+
+    NAME: ClassVar[str] = "X-NG-Transport-Resend-Count"
+    # A plain decimal of at most this many digits; anything else is malformed and adds nothing.
+    MAX_DIGITS: ClassVar[int] = 18
+
+    @classmethod
+    def encode(cls, count: int) -> dict[str, str]:
+        """The reply headers for ``count`` resends; none for 0."""
+        return {cls.NAME: str(count)} if count > 0 else {}
+
+    @classmethod
+    def decode(cls, headers: Mapping[str, str] | None) -> int:
+        """The resends ``headers`` report; 0 without the header or for a malformed value."""
+        raw = headers.get(cls.NAME) if isinstance(headers, Mapping) else None
+        if raw is None:
+            return 0
+        if not (isinstance(raw, str) and raw.isascii() and raw.isdigit() and len(raw) <= cls.MAX_DIGITS):
+            LOGGER.debug("Ignoring malformed %s header value %r", cls.NAME, raw)
+            return 0
+        return int(raw)
+
+
 def _report_keeping_unknown_kinds(value: Any) -> FailureReport:
     """``value`` as a ``FailureReport``. An event whose kind this Gym does not register (a server pinned to another
     version) is kept under ``unregistered:<kind>`` instead of invalidating the whole report; any other invalid value
@@ -159,6 +191,8 @@ class RequestFailureLog:
     report: FailureReport = field(default_factory=FailureReport)
     model_operations: dict[str, ModelOperationObservation] = field(default_factory=dict)
     dropped_events: int = 0
+    # Transport resends started while serving the request, plus those the Gym replies it received reported.
+    transport_resends: int = 0
 
     MAX_EVENTS: ClassVar[int] = 64
 
@@ -174,6 +208,30 @@ class RequestFailureLog:
             yield log
         finally:
             cls._current.reset(token)
+
+    @classmethod
+    @contextmanager
+    def operation(cls) -> Iterator["RequestFailureLog"]:
+        """Make a new log current for one operation, such as a dispatched rollout, and keep what it observed.
+
+        On exit its failures, model operations and transport resends also join the log of the request it ran in, if
+        any, so opening it inside a Gym server request hides nothing from that request's reply.
+        """
+        enclosing = cls._current.get()
+        with cls.capture() as log:
+            try:
+                yield log
+            finally:
+                if enclosing is not None:
+                    enclosing.add(log.report)
+                    enclosing.transport_resends += log.transport_resends
+                    for operation_id, observation in log.model_operations.items():
+                        previous = enclosing.model_operations.get(operation_id)
+                        enclosing.model_operations[operation_id] = (
+                            previous.model_copy(update=observation.model_dump(exclude_none=True))
+                            if previous
+                            else observation
+                        )
 
     @classmethod
     def current(cls) -> "RequestFailureLog | None":
@@ -250,6 +308,21 @@ def observe_model_operation(
         log.model_operations[operation_id] = (
             previous.model_copy(update=observation.model_dump(exclude_none=True)) if previous else observation
         )
+
+
+def observe_transport_resend() -> None:
+    """Count one transport resend for the request being served: call as another attempt starts, not as one fails."""
+    log = RequestFailureLog.current()
+    if log is not None:
+        log.transport_resends += 1
+
+
+def observe_reported_transport_resends(headers: Mapping[str, str] | None) -> None:
+    """Add the transport resends a reply from another Gym server reports. Only for Gym replies: an external endpoint
+    must not add arbitrary numbers to a request's count."""
+    log = RequestFailureLog.current()
+    if log is not None:
+        log.transport_resends += TransportResendHeader.decode(headers)
 
 
 def observe_failure(error: BaseException) -> None:
