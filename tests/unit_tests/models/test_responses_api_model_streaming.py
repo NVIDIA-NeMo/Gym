@@ -181,6 +181,20 @@ ITEM_FIXTURES: dict[str, dict] = {
         "container_id": "cntr_1",
         "outputs": None,
     },
+    "program": {
+        "type": "program",
+        "id": "program_1",
+        "call_id": "program_call_1",
+        "code": "return 1;",
+        "fingerprint": "opaque-synthetic-fingerprint",
+    },
+    "program_output": {
+        "type": "program_output",
+        "id": "program_output_1",
+        "call_id": "program_call_1",
+        "result": "1",
+        "status": "completed",
+    },
     "mcp_call": {
         "type": "mcp_call",
         "id": "mcp_1",
@@ -294,6 +308,8 @@ ITEM_FIXTURES: dict[str, dict] = {
 # ``vllm_model`` and ``inference_provider`` convert requests to Chat Completions.
 CHAT_INCONVERTIBLE_TYPES = frozenset(
     {
+        "program",
+        "program_output",
         "code_interpreter_call",
         "computer_call",
         "custom_tool_call",
@@ -747,6 +763,35 @@ class TestSynthesizeSSE:
         assert len(completed["output"]) == 1
 
     @pytest.mark.parametrize(
+        "cache_write", [{}, {"cache_write_tokens": None}, {"cache_write_tokens": 0}, {"cache_write_tokens": 7}]
+    )
+    @pytest.mark.parametrize("status", ["completed", "incomplete", "failed"])
+    def test_cache_write_usage_omits_only_unknown_on_created_and_terminal_wire(self, cache_write, status) -> None:
+        reasoning = {**ITEM_FIXTURES["reasoning"], "encrypted_content": "opaque-synthetic-ciphertext"}
+        response = _build_response([reasoning]).model_dump(mode="json")
+        response["status"] = status
+        response["usage"]["input_tokens_details"] = {"cached_tokens": None, **cache_write}
+        response["usage"]["output_tokens_details"]["reasoning_tokens"] = None
+        original = json.loads(json.dumps(response))
+        expected_usage = json.loads(json.dumps(response["usage"]))
+        expected_usage["input_tokens_details"]["cached_tokens"] = 0
+        expected_usage["output_tokens_details"]["reasoning_tokens"] = 0
+        if expected_usage["input_tokens_details"].get("cache_write_tokens") is None:
+            expected_usage["input_tokens_details"].pop("cache_write_tokens", None)
+
+        events = self._events("".join(synthesize_responses_sse(response)))
+
+        assert events[0]["type"] == "response.created"
+        assert events[-1]["type"] == f"response.{status}"
+        assert events[0]["response"]["usage"] == expected_usage
+        assert events[-1]["response"]["usage"] == expected_usage
+        assert events[1]["item"] == original["output"][0]
+        assert events[-1]["response"]["output"] == original["output"]
+        assert response == original
+        assert response["usage"]["input_tokens_details"]["cached_tokens"] is None
+        assert response["usage"]["output_tokens_details"]["reasoning_tokens"] is None
+
+    @pytest.mark.parametrize(
         "status,details,error",
         [
             ("incomplete", {"reason": "max_output_tokens"}, None),
@@ -768,7 +813,9 @@ class TestSynthesizeSSE:
         ]
         assert events[1]["item"] == response["output"][0]
         assert events[2]["item"]["status"] == "incomplete"
-        assert events[-1]["response"] == response
+        expected = json.loads(json.dumps(response))
+        expected["usage"]["input_tokens_details"].pop("cache_write_tokens", None)
+        assert events[-1]["response"] == expected
         assert response == original
 
     @pytest.mark.parametrize(
@@ -1192,7 +1239,10 @@ class TestResponsesDispatchRoute:
         events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
         assert events[-1]["response"]["usage"]["input_tokens_details"] == {"cached_tokens": 0}
         [exchange] = CaptureStore(tmp_path).read("r-0")
-        assert exchange["response"]["usage"]["input_tokens_details"] == {"cached_tokens": None}
+        assert exchange["response"]["usage"]["input_tokens_details"] == {
+            "cached_tokens": None,
+            "cache_write_tokens": None,
+        }
         assert exchange["response"]["usage"]["output_tokens_details"] == {"reasoning_tokens": None}
 
     def test_non_streaming_request_returns_plain_json(self) -> None:
@@ -1483,7 +1533,10 @@ class TestResponsesStreamKeepalive:
         assert events[1]["type"] == "response.in_progress", "keepalives opened the stream"
         assert events[-1]["response"]["usage"]["input_tokens_details"] == {"cached_tokens": 0}
         [exchange] = CaptureStore(tmp_path).read("r-0")
-        assert exchange["response"]["usage"]["input_tokens_details"] == {"cached_tokens": None}
+        assert exchange["response"]["usage"]["input_tokens_details"] == {
+            "cached_tokens": None,
+            "cache_write_tokens": None,
+        }
         assert exchange["response"]["usage"]["output_tokens_details"] == {"reasoning_tokens": None}
 
     def test_fast_call_keeps_the_buffered_stream(self) -> None:

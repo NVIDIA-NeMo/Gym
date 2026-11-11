@@ -35,6 +35,7 @@ from pytest import MonkeyPatch
 import nemo_gym.client.http_client
 import responses_api_models.switchyard_model.app as app_module
 from nemo_gym.client import ServerClient
+from nemo_gym.core import ModelCallSampling, encode_model_sampling
 from responses_api_models.switchyard_model.app import (
     NeMoGymAsyncOpenAI,
     SwitchyardModel,
@@ -333,6 +334,36 @@ class TestApp:
         assert response.status_code == 200
         assert seen["kwargs"]["model"] == "policy-model"
         assert seen["headers"]["x-switchyard-session-id"] == "task0-r1"
+
+    @pytest.mark.parametrize("dialect", ["responses", "chat/completions"])
+    @pytest.mark.parametrize("training_capture", [False, True])
+    def test_sampling_values_keep_the_session_id(
+        self, monkeypatch: MonkeyPatch, dialect: str, training_capture: bool
+    ) -> None:
+        """The sampling segment follows the rollout prefix, so Switchyard still keys the session on the rollout."""
+        server = self._setup_server()
+        seen: dict = {}
+
+        async def generate(self, **kwargs):
+            seen["headers"] = self.default_headers
+            seen["kwargs"] = kwargs
+            return _response_data() if dialect == "responses" else _chat_data()
+
+        monkeypatch.setattr(
+            NeMoGymAsyncOpenAI, "create_response" if dialect == "responses" else "create_chat_completion", generate
+        )
+        capture_path = "/training-token-capture" if training_capture else ""
+        segment = encode_model_sampling(ModelCallSampling(temperature=0.0, top_p=0.7, max_output_tokens=73))
+        inputs = {"input" if dialect == "responses" else "messages": [{"role": "user", "content": "hi"}]}
+
+        response = TestClient(server.setup_webserver()).post(
+            f"/ng-rollout/task0-r1-a2{capture_path}/ng-sampling/{segment}/v1/{dialect}", json=inputs
+        )
+
+        assert response.status_code == 200, response.text
+        assert seen["headers"]["x-switchyard-session-id"] == "task0-r1-a2"
+        assert (seen["kwargs"]["temperature"], seen["kwargs"]["top_p"]) == (0.0, 0.7)
+        assert seen["kwargs"]["max_output_tokens" if dialect == "responses" else "max_completion_tokens"] == 73
 
     def test_extra_session_id_headers_all_carry_the_id(self, monkeypatch: MonkeyPatch) -> None:
         """Attach-mode proxies can key other subsystems on other names; every configured name is sent."""
