@@ -9,6 +9,7 @@ from typing import Annotated, Any
 from pydantic import BaseModel, Field, field_validator
 
 from nemo_gym.server_runtime import BaseVerifyResponse
+from nemo_gym.trajectory import AgentObservationBundle, TrajectoryRecord
 
 
 def final_assistant_text(output: list[dict[str, Any]]) -> str:
@@ -197,6 +198,13 @@ class ToolRewardScoringConfig(BaseModel):
 
     tool_rewards: OpenCodeToolRewardConfig | None = Field(default_factory=OpenCodeToolRewardConfig)
     strip_reasoning_for_grading: bool = True
+
+
+class ToolRewardEvidence(BaseModel):
+    """Execution evidence accepted only by the opt-in reward verifiers."""
+
+    ng_trajectory: TrajectoryRecord | None = Field(default=None, exclude_if=lambda value: value is None)
+    ng_agent_observations: AgentObservationBundle | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class ToolRewardVerifyResponse(BaseVerifyResponse, extra="allow"):

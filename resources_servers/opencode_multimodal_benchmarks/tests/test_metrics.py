@@ -296,3 +296,23 @@ def test_http_aggregation_keeps_masked_repeat_identities(repeated_benchmark):
     assert result["agent_metrics"][f"{benchmark}/complete"] is False
     assert "accuracy" not in result["agent_metrics"]
     assert f"{benchmark}/accuracy" not in result["key_metrics"]
+
+
+@pytest.mark.parametrize("resume", [False, True])
+@pytest.mark.parametrize("missing", [False, True])
+async def test_reverification_keeps_planned_repeats_in_benchmark_metrics(tmp_path, monkeypatch, resume, missing):
+    from tests.unit_tests.eval.test_rollout_reverification import TestResumeOfOutputCachedWithoutIdentityStamps
+
+    server = VisualBenchmarksServer(
+        config=VisualBenchmarksConfig(host="127.0.0.1", port=12345, name="rs_a", entrypoint="app.py"),
+        server_client=MagicMock(spec=ServerClient),
+    )
+
+    async def aggregate(request):
+        return (await server.aggregate_metrics(request)).model_dump(mode="json")
+
+    metrics = await TestResumeOfOutputCachedWithoutIdentityStamps()._stamped_source_plan(
+        tmp_path, monkeypatch, resume, missing, aggregate
+    )
+    assert metrics["agent_metrics"]["VStarBench/complete"] is (not missing)
+    assert ("accuracy" in metrics["agent_metrics"]) is (not missing)

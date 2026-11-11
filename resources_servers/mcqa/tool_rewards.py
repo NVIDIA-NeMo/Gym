@@ -5,6 +5,7 @@
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.mcqa.app import MCQAResourcesServer, MCQAResourcesServerConfig, MCQAVerifyRequest
 from resources_servers.opencode_multimodal_benchmarks.rewards import (
+    ToolRewardEvidence,
     ToolRewardScoringConfig,
     ToolRewardVerifier,
     ToolRewardVerifyResponse,
@@ -15,10 +16,14 @@ class ToolRewardConfig(ToolRewardScoringConfig, MCQAResourcesServerConfig):
     pass
 
 
+class ToolRewardVerifyRequest(ToolRewardEvidence, MCQAVerifyRequest):
+    pass
+
+
 class ToolRewardServer(ToolRewardVerifier, MCQAResourcesServer):
     config: ToolRewardConfig
 
-    async def verify(self, body: MCQAVerifyRequest) -> ToolRewardVerifyResponse:
+    async def verify(self, body: ToolRewardVerifyRequest) -> ToolRewardVerifyResponse:
         return ToolRewardVerifyResponse.model_validate(await super().verify(body))
 
 

@@ -19,7 +19,11 @@ from resources_servers.opencode_multimodal_benchmarks.mcq import (
     matcher_prompt,
     visible_answer,
 )
-from resources_servers.opencode_multimodal_benchmarks.rewards import OpenCodeToolReward, trajectory_tool_reward
+from resources_servers.opencode_multimodal_benchmarks.rewards import (
+    OpenCodeToolReward,
+    ToolRewardEvidence,
+    trajectory_tool_reward,
+)
 from resources_servers.opencode_multimodal_benchmarks.rewards import final_assistant_text as final_answer
 from resources_servers.opencode_multimodal_benchmarks.task_data import TaskData
 from resources_servers.opencode_multimodal_benchmarks.vtcbench import (
@@ -35,7 +39,7 @@ if TYPE_CHECKING:
     from resources_servers.opencode_multimodal_benchmarks.app import VisualBenchmarksConfig
 
 
-class VisualVerifyRequest(BaseVerifyRequest):
+class VisualVerifyRequest(ToolRewardEvidence, BaseVerifyRequest):
     verifier_metadata: dict[str, Any]
 
     @field_validator("verifier_metadata")

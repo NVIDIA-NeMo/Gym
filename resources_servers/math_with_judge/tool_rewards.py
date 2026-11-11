@@ -9,6 +9,7 @@ from resources_servers.math_with_judge.app import (
     LibraryJudgeMathVerifyRequest,
 )
 from resources_servers.opencode_multimodal_benchmarks.rewards import (
+    ToolRewardEvidence,
     ToolRewardScoringConfig,
     ToolRewardVerifier,
     ToolRewardVerifyResponse,
@@ -19,10 +20,14 @@ class ToolRewardConfig(ToolRewardScoringConfig, LibraryJudgeMathResourcesServerC
     pass
 
 
+class ToolRewardVerifyRequest(ToolRewardEvidence, LibraryJudgeMathVerifyRequest):
+    pass
+
+
 class ToolRewardServer(ToolRewardVerifier, LibraryJudgeMathResourcesServer):
     config: ToolRewardConfig
 
-    async def verify(self, body: LibraryJudgeMathVerifyRequest) -> ToolRewardVerifyResponse:
+    async def verify(self, body: ToolRewardVerifyRequest) -> ToolRewardVerifyResponse:
         return ToolRewardVerifyResponse.model_validate(await super().verify(body))
 
 

@@ -4,6 +4,7 @@
 
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.opencode_multimodal_benchmarks.rewards import (
+    ToolRewardEvidence,
     ToolRewardScoringConfig,
     ToolRewardVerifier,
     ToolRewardVerifyResponse,
@@ -19,10 +20,14 @@ class ToolRewardConfig(ToolRewardScoringConfig, StringMatchResourcesServerConfig
     pass
 
 
+class ToolRewardVerifyRequest(ToolRewardEvidence, StringMatchVerifyRequest):
+    pass
+
+
 class ToolRewardServer(ToolRewardVerifier, StringMatchResourcesServer):
     config: ToolRewardConfig
 
-    async def verify(self, body: StringMatchVerifyRequest) -> ToolRewardVerifyResponse:
+    async def verify(self, body: ToolRewardVerifyRequest) -> ToolRewardVerifyResponse:
         return ToolRewardVerifyResponse.model_validate(await super().verify(body))
 
 

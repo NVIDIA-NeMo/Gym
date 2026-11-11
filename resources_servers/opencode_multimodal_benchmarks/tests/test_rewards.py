@@ -248,15 +248,14 @@ async def test_training_verifier_preserves_full_response_and_shapes_from_traject
 
     from nemo_gym.client import ServerClient
     from nemo_gym.trajectory.trajectory_record import grading_transform_source
-    from resources_servers.string_match.app import StringMatchVerifyRequest
-    from resources_servers.string_match.tool_rewards import ToolRewardConfig, ToolRewardServer
+    from resources_servers.string_match.tool_rewards import ToolRewardConfig, ToolRewardServer, ToolRewardVerifyRequest
 
     server = ToolRewardServer(
         config=ToolRewardConfig(name="test", host="127.0.0.1", port=1, entrypoint="tool_rewards.py"),
         server_client=MagicMock(spec=ServerClient),
     )
     response = tool_response("<think>private</think>A")
-    body = StringMatchVerifyRequest(
+    body = ToolRewardVerifyRequest(
         responses_create_params={"input": []},
         response=response,
         expected_answer="A" if base else "B",
@@ -305,12 +304,11 @@ async def test_masked_base_verifier_result_preserves_original_response_without_s
     from nemo_gym.client import ServerClient
     from resources_servers.string_match.app import (
         StringMatchResourcesServer,
-        StringMatchVerifyRequest,
         StringMatchVerifyResponse,
     )
-    from resources_servers.string_match.tool_rewards import ToolRewardConfig, ToolRewardServer
+    from resources_servers.string_match.tool_rewards import ToolRewardConfig, ToolRewardServer, ToolRewardVerifyRequest
 
-    body = StringMatchVerifyRequest(
+    body = ToolRewardVerifyRequest(
         responses_create_params={"input": []}, response=tool_response(), expected_answer="A"
     )
     base = StringMatchVerifyResponse(**body.model_dump(), reward=0, extracted_answer=None, mask_sample=True)
@@ -337,7 +335,7 @@ async def test_existing_training_graders_shape_real_scores_and_preserve_tool_evi
     if resource == "math_with_judge":
         pytest.importorskip("math_verify")
     entrypoint = importlib.import_module(f"resources_servers.{resource}.tool_rewards")
-    request_type = entrypoint.MCQAVerifyRequest if resource == "mcqa" else entrypoint.LibraryJudgeMathVerifyRequest
+    request_type = entrypoint.ToolRewardVerifyRequest
     config = {"name": "test", "host": "127.0.0.1", "port": 1, "entrypoint": "tool_rewards.py"}
     if resource == "math_with_judge":
         config.update(
