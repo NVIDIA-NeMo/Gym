@@ -216,8 +216,8 @@ During rollout collection, Gym's observability layer writes an `ObservationGap` 
 normalize, or correlate evidence exactly. The health runner does not create these gaps. It maps each persisted gap code to health
 behavior according to the evidence required by a check. A recorded gap is not automatically a health finding.
 
-For runaway detection, a missing response keeps that call unobserved without hiding conclusive findings on other bound
-calls. A length limit alone does not establish that unseen output lacked an answer or tool call.
+For runaway detection, a missing response on a length-limited call keeps that call unobserved without hiding conclusive
+findings on other bound calls. A length limit alone does not establish that unseen output lacked an answer or tool call.
 
 | Observation gap | Health behavior |
 | --- | --- |
