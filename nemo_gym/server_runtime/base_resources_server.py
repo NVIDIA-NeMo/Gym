@@ -303,6 +303,16 @@ class ResourcesSeedSessionRequest(BaseModel):
     # for a session built from the task's history or tools; every other server's task_data validates as before.
     responses_create_params: dict[str, JsonValue] | None = None
 
+    # A return annotation would replace the model's serialization schema with that container schema.
+    @model_serializer(mode="wrap")
+    def _serialize_responses_create_params(self, handler: SerializerFunctionWrapHandler):
+        """Leave the key out when there are no params, so tool-server seeds keep the wire shape an older server's
+        extra="forbid" model accepts."""
+        result = handler(self)
+        if self.responses_create_params is None:
+            result.pop("responses_create_params", None)
+        return result
+
 
 def reject_partial_typed_seed(value: object) -> object:
     """Keep a malformed typed seed from falling through to a permissive cookie-seed request model.

@@ -107,8 +107,10 @@ async def test_other_seed_models_validate_task_data_as_before() -> None:
         )
 
 
-def test_the_field_is_optional_on_the_wire() -> None:
+def test_a_seed_without_them_keeps_the_wire_shape() -> None:
+    # Tool servers' seeds carry no params: the key is left out, so a server whose seed request forbids unknown fields
+    # (an older Gym) still accepts them, and a seed without the key validates.
     body = _seed().model_dump(mode="json")
-    assert body["responses_create_params"] is None
-    del body["responses_create_params"]  # an older Environment Server's seed
+    assert "responses_create_params" not in body
     assert ResourcesSeedSessionRequest.model_validate(body).responses_create_params is None
+    assert _seed(responses_create_params=PARAMS).model_dump(mode="json")["responses_create_params"] == PARAMS
