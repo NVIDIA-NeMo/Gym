@@ -50,7 +50,6 @@ from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import BaseServerConfig, ConfigError, ignoring_command_line
 from nemo_gym.config.global_config import (
     AGENT_REF_KEY_NAME,
-    ENVIRONMENT_SERVER_ROUTES_KEY_NAME,
     HEAD_SERVER_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
@@ -316,7 +315,8 @@ class TaskRunner:
     """Runs single tasks of collated rows, flat or materialized, against Gym servers that are already running.
 
     The rows are checked and indexed by task id once. Each `run_task` call then selects one task's row, sends it
-    through the agent's `/run`, or a materialized row through the environment server its taskset routes to, and returns the rollout's outcome. Concurrent calls in one event loop are supported.
+    through the agent's `/run`, or a materialized row through the environment server its taskset routes to, and
+    returns the rollout's outcome. Concurrent calls in one event loop are supported.
     """
 
     @experimental(once=True)
@@ -324,18 +324,16 @@ class TaskRunner:
         self._helper = RolloutCollectionHelper()
         self._registry_server = registry_server
         self._row_of_task = _first_row_of_each_task(rows)
-        self._environment_server_routes: Optional[dict[str, str]] = None
+        self._global_config_dict: Optional[DictConfig] = None
 
     def task_ids(self) -> list[str]:
         return list(self._row_of_task)
 
-    def _routes_of_materialized_tasksets(self) -> dict[str, str]:
-        """The running servers' `environment_server_routes`, read once from the registry server."""
-        if self._environment_server_routes is None:
-            global_config_dict = self._helper.setup_server_client(self._registry_server).global_config_dict
-            routes = global_config_dict.get(ENVIRONMENT_SERVER_ROUTES_KEY_NAME)
-            self._environment_server_routes = {} if routes is None else dict(OmegaConf.to_container(routes))
-        return self._environment_server_routes
+    def _running_global_config_dict(self) -> DictConfig:
+        """The running servers' config, read once from the registry server."""
+        if self._global_config_dict is None:
+            self._global_config_dict = self._helper.setup_server_client(self._registry_server).global_config_dict
+        return self._global_config_dict
 
     @experimental(once=True)
     async def run_task(self, task_id: str, *, rollout_id: Optional[str] = None) -> RolloutOutcome:
@@ -352,10 +350,10 @@ class TaskRunner:
         if task_id not in self._row_of_task:
             raise ConfigError(f"No input rows for task ids {[task_id]}")
         task_row = self._row_of_task[task_id]
-        routes = self._routes_of_materialized_tasksets() if is_materialized_task_row(task_row) else None
+        global_config_dict = self._running_global_config_dict() if is_materialized_task_row(task_row) else None
         with ignoring_command_line():
             rows = self._helper.preprocess_examples(
-                [task_row], task_ids=[task_id], num_repeats=1, environment_server_routes=routes
+                [task_row], task_ids=[task_id], num_repeats=1, global_config_dict=global_config_dict
             )
         row = {**rows[0], "_ng_rollout_id": rollout_id or uuid.uuid4().hex}
         completions = self._helper.run_outcomes(
