@@ -77,3 +77,16 @@ def test_tool_cache_writes_use_shared_mode(tmp_path, restrictive_umask) -> None:
 
     assert stat.S_IMODE(path.stat().st_mode) == SHARED_FILE_MODE
     assert stat.S_IMODE(path.parent.stat().st_mode) == SHARED_DIR_MODE
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file permissions")
+def test_tool_cache_write_into_unwritable_dir_is_skipped(tmp_path) -> None:
+    cache = ToolCache(tmp_path)
+    locked = tmp_path / "filings"
+    locked.mkdir()
+    os.chmod(locked, 0o555)
+    try:
+        cache.write_text(locked / "doc.htm.txt", "body")
+        assert not (locked / "doc.htm.txt").exists()
+    finally:
+        os.chmod(locked, 0o755)
