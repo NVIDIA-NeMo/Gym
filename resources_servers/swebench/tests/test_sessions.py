@@ -122,6 +122,46 @@ def test_episode_seed_over_http_reuses_sandbox_and_accepts_caller_assigned_task_
     task.stop.assert_awaited_once()
 
 
+@pytest.mark.parametrize("fail_first_stop", [False, True])
+def test_agent_run_cookie_close_releases_bare_handle_and_retries_failed_stop(session_server, fail_first_stop):
+    server, task, _, _ = session_server
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        seeded = client.post("/seed_session", json=_seed().task_data)
+        assert seeded.status_code == 200, seeded.text
+        assert seeded.json()["sandbox_handle"] == "task-box"
+        owner_cookies = dict(client.cookies)
+        session_id = next(iter(server._session_id_to_sandbox))
+        if fail_first_stop:
+            task.stop.side_effect = [RuntimeError("Provider unavailable"), None]
+            assert client.post("/close_session", json={}).status_code == 500
+            assert server._session_id_to_sandbox[session_id] is task
+            assert dict(client.cookies) == owner_cookies
+        closed = client.post("/close_session", json={})
+        assert closed.status_code == 200, closed.text
+        assert closed.json() == {"resources_session_id": session_id}
+        assert not server._session_id_to_sandbox
+        assert not server._task_sessions
+        # A caller retrying an acknowledged close may still hold the old cookie.
+        client.cookies.update(owner_cookies)
+        assert client.post("/close_session", json={}).status_code == 200
+        assert task.stop.await_count == (2 if fail_first_stop else 1)
+
+
+def test_cookie_close_cannot_bypass_explicit_episode_identity(session_server):
+    server, task, _, _ = session_server
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        assert client.post("/seed_session", json=_seed().model_dump(mode="json")).status_code == 200
+        assert client.post("/close_session", json={}).status_code == 409
+        assert client.post("/close_session", json={"resources_session_id": "session"}).status_code == 422
+        assert client.post("/close_session", json={"unrelated": True}).status_code == 422
+        task.stop.assert_not_awaited()
+        owner_cookies = dict(client.cookies)
+        assert client.post("/close_session", json=_close().model_dump(mode="json")).status_code == 200
+        client.cookies.update(owner_cookies)
+        assert client.post("/close_session", json={}).status_code == 409
+    task.stop.assert_awaited_once()
+
+
 @pytest.mark.parametrize("field", ["episode_id", "task_id", "task_data"])
 def test_conflicting_http_seed_does_not_replace_existing_session(session_server, field):
     server, task, _, _ = session_server
