@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 from nooa import Agent, CodeActStrategy, strategy
 from nooa.config import CodeActConfig, PredictConfig
-from nooa.errors import GenerationError
+from nooa.errors import GenerationError, IterationLimitExceeded
 from nooa.strategies.predict import PredictStrategy
 
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseFunctionToolCall
@@ -89,7 +89,7 @@ async def test_actual_codeact_limit_wrappers_remain_gradable(
     result = await runner.run(_request())
 
     assert len(raised) == 1
-    assert type(raised[0]) is GenerationError
+    assert type(raised[0]) is (IterationLimitExceeded if scenario == "iterations" else GenerationError)
     assert type(raised[0].__cause__) is cause_type
     assert result.termination_reason is reason
     if reason is NOOATerminationReason.POLICY_BUDGET_EXCEEDED:

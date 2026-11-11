@@ -166,7 +166,9 @@ async def finalize_rollout_token_capture(
 
     response = result.get("response") if isinstance(result.get("response"), dict) else {}
     explicit_terminal = result.get(TERMINAL_CALL_KEY)
-    declared_terminal = result.get(TERMINAL_RESPONSE_ID_KEY)
+    # Session harnesses declare the kept response in metadata; old /run results can name it directly.
+    response_metadata = response.get("metadata") if isinstance(response.get("metadata"), dict) else {}
+    declared_terminal = result.get(TERMINAL_RESPONSE_ID_KEY) or response_metadata.get(TERMINAL_RESPONSE_ID_KEY)
     try:
         # The result's response is what the verifier scored.
         # Terminal attribution joins it to one captured call.

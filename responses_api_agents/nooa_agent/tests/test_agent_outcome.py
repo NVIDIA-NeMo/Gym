@@ -69,8 +69,9 @@ def rejection_agent(status: int) -> NOOAAgent:
     ],
 )
 async def test_model_rejection_obeys_environment_policy_and_closes(
-    status: int, action: str, expected_action: str
+    monkeypatch: pytest.MonkeyPatch, status: int, action: str, expected_action: str
 ) -> None:
+    monkeypatch.setattr("responses_api_agents.nooa_agent.gym_llm.asyncio.sleep", AsyncMock())
     instance = rejection_agent(status)
     environment, client = _environment(instance)
     if action != "default":
@@ -110,8 +111,8 @@ async def test_model_rejection_obeys_environment_policy_and_closes(
     assert receipt.agent_observations == observations
     assert receipt.resources_cookies == {"resource": "seed"}
     assert client.post.call_args_list[-1].kwargs["cookies"] == receipt.resources_cookies
-    # CodeAct exhausts its three attempts before the environment applies its policy.
-    assert instance.server_client.post.await_count == 3
+    # Each of CodeAct's three logical attempts exhausts the transient HTTP budget first.
+    assert instance.server_client.post.await_count == (9 if status == 503 else 3)
     for call in instance.server_client.post.await_args_list:
         assert call.kwargs["url_path"] == "/ng-rollout/rollout-a2/training-token-capture/v1/responses"
         assert call.kwargs["cookies"] == {}
@@ -151,6 +152,7 @@ async def test_rejection_policy_respects_collector_attempt_cap(
 async def test_worker_result_and_checkpoint_preserve_model_status(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, status: int
 ) -> None:
+    monkeypatch.setattr("responses_api_agents.nooa_agent.gym_llm.asyncio.sleep", AsyncMock())
     instance = rejection_agent(status)
     p = payload()
     p.invocation = instance.config.nooa
@@ -173,7 +175,7 @@ async def test_worker_result_and_checkpoint_preserve_model_status(
     root = next(item for item in restored.trajectory.invocations if item.parent_invocation_id is None)
     assert root.status == "failed"
     assert root.error_type == "GenerationError"
-    assert instance.server_client.post.await_count == 3
+    assert instance.server_client.post.await_count == (9 if status == 503 else 3)
     checkpoint_path = tmp_path / "checkpoint.json"
     entrypoint.write_checkpoint(checkpoint_path, restored)
     checkpoint = entrypoint.SandboxCheckpoint.model_validate_json(checkpoint_path.read_text())

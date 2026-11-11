@@ -4,6 +4,7 @@
 """Wire contracts for the built-in single-agent-turn protocol."""
 
 from collections.abc import Mapping
+from typing import Self
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
@@ -56,6 +57,16 @@ class SingleAgentTurnResult(BaseVerifyResponse):
     # The harness's own turns from its session close. Rollout collection takes them over rebuilding turns from
     # the captured model calls; absent, the key stays out of the result as before.
     ng_trajectory: TrajectoryRecord | None = Field(default=None, exclude_if=lambda value: value is None)
+    terminal_response_id: str | None = Field(default=None, exclude_if=lambda value: value is None)
+
+    @model_validator(mode="after")
+    def preserve_terminal_declaration(self) -> Self:
+        """Carry a harness's declaration to receipt consumers; an explicit result field wins."""
+        if not self.terminal_response_id:
+            declared = (self.response.metadata or {}).get("terminal_response_id")
+            if isinstance(declared, str) and declared:
+                self.terminal_response_id = declared
+        return self
 
 
 class SingleAgentTurnFailure(EpisodeFailure):
