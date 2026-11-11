@@ -24,6 +24,8 @@ import time
 import urllib.request
 from pathlib import Path
 
+from nemo_gym.utils.install_lock import adopt_recorded_install, install_lock, record_install
+
 
 LOG = logging.getLogger(__name__)
 
@@ -35,6 +37,8 @@ _NODE_VERSION = "22.15.0"
 _NODE_ARCH = "arm64" if platform.machine().lower() in ("aarch64", "arm64") else "x64"
 _NODE_DIST_URL = f"https://nodejs.org/dist/v{_NODE_VERSION}/node-v{_NODE_VERSION}-linux-{_NODE_ARCH}.tar.xz"
 _LOCAL_PREFIX = Path(__file__).parent / ".cline_node"
+_INSTALL_LOCK = _LOCAL_PREFIX.with_suffix(".lock")
+_INSTALL_RECORD = _LOCAL_PREFIX.with_suffix(".installed")
 
 
 def _cline_version(cline_bin: str) -> str | None:
@@ -94,6 +98,20 @@ def _install_node_locally() -> Path:
 
 def ensure_cline(version: str | None = None) -> None:
     """Ensure ``cline`` is on PATH at the requested version, installing it if necessary."""
+    # Host calls install lazily in each worker. Serialize both the version check and installation,
+    # then let waiting workers discover the installed binary even when its directory was not on PATH.
+    with install_lock(_INSTALL_LOCK):
+        # A custom npm prefix can put Cline elsewhere. Its launcher still needs the Node runtime
+        # provisioned by the installing worker, whose PATH changes are private to that process.
+        local_bin = _LOCAL_PREFIX / "bin"
+        if (local_bin / "node").is_file():
+            os.environ["PATH"] = str(local_bin) + os.pathsep + os.environ.get("PATH", "")
+        adopt_recorded_install(_INSTALL_RECORD, "cline", version=version)
+        _ensure_cline_unlocked(version)
+        record_install(_INSTALL_RECORD, Path(shutil.which("cline")).parent, version=version)
+
+
+def _ensure_cline_unlocked(version: str | None) -> None:
     existing = shutil.which("cline")
     if existing and _version_matches(existing, version):
         return

@@ -79,6 +79,7 @@ from nemo_gym.sandbox import (
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap, SandboxObservation
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.cline_agent.observability import build_cline_observations
 from responses_api_agents.cline_agent.sandbox import CLINE_RUNTIME_SHA512, ClineArtifacts, ClineSandboxSession
 from responses_api_agents.cline_agent.setup_cline import ensure_cline
@@ -1363,3 +1364,6 @@ class ClineAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     ClineAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ClineAgent.run_webserver()  # noqa: F401
