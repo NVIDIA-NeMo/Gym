@@ -27,6 +27,7 @@ from .registry import HARNESSES
 CHECK_NAME = "Harness conformance (non-blocking)"
 ARTIFACT_PREFIX = "harness-conformance"
 RESULT_FILE = f"probes/{CI_RESULT}"
+JOB_NAMES = {harness: f"{harness} conformance probes" for harness in HARNESSES}
 
 
 def p0_check(
@@ -89,9 +90,10 @@ def main() -> int:
             raise ValueError("Invalid selection")
     except (ValueError, TypeError, KeyError):
         harnesses = None
-    download_artifacts(
+    artifact_ids = download_artifacts(
         harnesses or [],
         artifact_prefix=ARTIFACT_PREFIX,
+        job_names=JOB_NAMES,
         repo=repo,
         run_id=run_id,
         attempt=attempt,
@@ -100,12 +102,7 @@ def main() -> int:
     )
     run_url = f"{os.environ['GITHUB_SERVER_URL']}/{repo}/actions/runs/{run_id}/attempts/{attempt}"
     artifact_urls = artifact_download_urls(
-        harnesses or [],
-        artifact_prefix=ARTIFACT_PREFIX,
-        repo=repo,
-        run_id=run_id,
-        attempt=attempt,
-        server_url=os.environ["GITHUB_SERVER_URL"],
+        artifact_ids, repo=repo, run_id=run_id, server_url=os.environ["GITHUB_SERVER_URL"]
     )
     event_sha = os.environ["GITHUB_SHA"]
     tested = tested_sha()
