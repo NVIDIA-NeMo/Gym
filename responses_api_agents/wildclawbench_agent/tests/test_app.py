@@ -7,6 +7,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -16,6 +17,12 @@ from benchmarks.wildclawbench.merge import merge
 from nemo_gym.client.server_client import ServerClient
 from responses_api_agents.wildclawbench_agent import data
 from responses_api_agents.wildclawbench_agent.app import WildClawAgent, WildClawConfig, WildClawRunRequest
+from responses_api_agents.wildclawbench_agent.enroot_docker import (
+    TrackedSubprocess,
+    process_start,
+    remove,
+    stop_owned_groups,
+)
 from responses_api_agents.wildclawbench_agent.metrics import benchmark_metrics
 from responses_api_agents.wildclawbench_agent.worker import grader_failures, read_events
 from responses_api_models.vllm_model.wildclawbench import restore_reasoning
@@ -302,6 +309,70 @@ async def test_missing_rollout_id_is_rejected_before_execution(tmp_path):
     with pytest.raises(HTTPException) as exc:
         await agent.run(body)
     assert exc.value.status_code == 400
+
+
+def test_enroot_detached_warmups_are_owned_and_cleanup_is_idempotent(tmp_path, monkeypatch):
+    rootfs = tmp_path / "data/episode"
+    rootfs.mkdir(parents=True)
+    state = tmp_path / "episode.json"
+    state.write_text("{}")
+    records = state.with_suffix(".processes.json")
+    proxy = TrackedSubprocess(records)
+    service = proxy.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+    removed = []
+
+    def native_remove(names):
+        removed.extend(names)
+        state.unlink()
+        rootfs.rmdir()
+        return 0
+
+    shim = SimpleNamespace(state_path=lambda name: state, remove_container=native_remove)
+    monkeypatch.setenv("ENROOT_DATA_PATH", str(tmp_path / "data"))
+    try:
+        assert json.loads(records.read_text())[0]["start"] == process_start(service.pid)
+        assert remove(shim, "episode") == 0
+        assert service.wait(timeout=5) < 0
+        assert not records.exists()
+        assert remove(shim, "episode") == 0
+        assert removed == ["episode"]
+    finally:
+        if service.poll() is None:
+            import os
+            import signal
+
+            os.killpg(service.pid, signal.SIGKILL)
+            service.wait(timeout=5)
+
+
+def test_enroot_cleanup_does_not_signal_a_reused_or_unowned_pid(tmp_path):
+    service = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+    records = tmp_path / "groups.json"
+    records.write_text(json.dumps([dict(pid=service.pid, start="not-the-recorded-process")]))
+    try:
+        stop_owned_groups(records)
+        assert service.poll() is None
+    finally:
+        service.kill()
+        service.wait(timeout=5)
+
+
+def test_enroot_warmup_cannot_outlive_a_failed_ownership_receipt(tmp_path, monkeypatch):
+    import responses_api_agents.wildclawbench_agent.enroot_docker as bridge
+
+    started = []
+    original = subprocess.Popen
+
+    def start(*args, **kwargs):
+        process = original(*args, **kwargs)
+        started.append(process)
+        return process
+
+    monkeypatch.setattr(bridge.subprocess, "Popen", start)
+    proxy = TrackedSubprocess(tmp_path / "absent-directory/groups.json")
+    with pytest.raises(FileNotFoundError):
+        proxy.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+    assert started[0].poll() is not None
 
 
 @pytest.mark.asyncio

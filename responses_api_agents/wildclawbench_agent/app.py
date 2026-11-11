@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import json
 import os
+import shlex
 import signal
 import time
 from pathlib import Path
@@ -91,7 +92,17 @@ def worker_environment(config: WildClawConfig, output: Path) -> dict[str, str]:
     env["DOCKER_IMAGE"] = "wildclawbench-ubuntu:v1.3"
     env["DOCKER_NETWORK_MODE"] = "host"
     if config.sandbox_runtime == "enroot":
-        env["PATH"] = f"{config.source_root}/cluster/bin:{env['PATH']}"
+        commands = storage / "bin"
+        commands.mkdir(parents=True, exist_ok=True)
+        wrapper = commands / "docker"
+        wrapper.write_text(
+            "#!/bin/sh\nexec "
+            + shlex.quote(config.worker_python)
+            + ' -m responses_api_agents.wildclawbench_agent.enroot_docker "$@"\n'
+        )
+        wrapper.chmod(0o700)
+        env["PATH"] = f"{commands}:{env['PATH']}"
+        env["WILDCLAW_ROOT"] = config.source_root
         env["WILDCLAW_ENROOT_IMAGE"] = str(Path(config.source_root) / ".cache/wildclawbench-ubuntu_v1.3.sqsh")
         env["ENROOT_MOUNT_HOME"] = "n"
         for name, folder in {
