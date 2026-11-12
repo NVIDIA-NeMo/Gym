@@ -1372,6 +1372,61 @@ class TestPreparePayloads:
 
         assert capture["rollout_predicate"] is None
 
+    def test_context_keeps_response_identified_policy_calls_and_removes_only_unique_prior_judge_calls(self, tmp_path):
+        policy = {"type": "responses_api_models", "name": "policy"}
+        judge = {"type": "responses_api_models", "name": "judge"}
+        policy_ref = {"model_ref": policy, "response_id": "policy-response"}
+        judge_ref = {"model_ref": judge, "response_id": "judge-response"}
+        row = {
+            "_ng_task_index": 0,
+            "_ng_rollout_index": 0,
+            "task_id": {"taskset": "suite", "task_id": "task-A"},
+            "task_input": {"question": "Synthetic question"},
+        }
+        rollout = {
+            "_ng_task_index": 0,
+            "_ng_rollout_index": 0,
+            "_ng_rollout_id": "saved",
+            "_ng_attempt_index": 2,
+            "response": {},
+            "ng_trajectory": {
+                "task_id": "task-A",
+                "rollout_id": "saved-a2",
+                "invocations": [{"invocation_id": "policy", "model_calls": [policy_ref]}],
+                "verifier_invocations": [{"invocation_id": "prior-judge", "model_calls": [judge_ref]}],
+                "model_calls": [
+                    {"model_call_id": None, "response_metadata": policy_ref},
+                    {"model_call_id": None, "response_metadata": judge_ref},
+                    {"model_call_id": None, "response_metadata": {"response_id": "unowned"}},
+                ],
+            },
+        }
+        inputs, source = tmp_path / "inputs.jsonl", tmp_path / "source.jsonl"
+        inputs.write_bytes(orjson.dumps(row) + b"\n")
+        source.write_bytes(orjson.dumps(rollout) + b"\n")
+        context = {}
+        [ordinary_payload] = _prepare_payloads(inputs, source, self._paths(tmp_path), False)
+        assert "_ng_rollout_id" not in ordinary_payload and "_ng_attempt_index" not in ordinary_payload
+        [payload] = _prepare_payloads(inputs, source, self._paths(tmp_path), False, context_out=context)
+        assert payload == {
+            "_ng_task_index": 0,
+            "_ng_rollout_index": 0,
+            "question": "Synthetic question",
+            "response": {},
+            "_ng_rollout_id": "saved",
+            "_ng_attempt_index": 2,
+        }
+        selected = context[("saved", 2)]
+        assert selected.row["task_id"] == row["task_id"] and selected.row["task_input"] == row["task_input"]
+        assert selected.row["_ng_rollout_id"] == "saved" and selected.row["_ng_attempt_index"] == 2
+        assert selected.observations["ng_trajectory"]["verifier_invocations"] == []
+        assert selected.observations["ng_trajectory"]["model_calls"] == [
+            rollout["ng_trajectory"]["model_calls"][0],
+            rollout["ng_trajectory"]["model_calls"][2],
+        ]
+        assert source.read_bytes() == orjson.dumps(rollout) + b"\n"
+        assert inputs.read_bytes() == orjson.dumps(row) + b"\n"
+
 
 class TestPrepareAtifPayloads:
     def _paths(self, tmp_path: Path) -> OutputPaths:
@@ -2466,7 +2521,12 @@ class TestRolloutReverificationRunFromConfig:
             if response is reverify_mode_response:
                 return ReverifyMode.STATELESS
             assert response is verify_response
-            return {"reward": 1.0}
+            return {
+                "reward": 1.0,
+                "ng_verifier_invocations": [
+                    {"invocation_id": "fresh-verifier", "status": "completed", "model_calls": []}
+                ],
+            }
 
         mock_client.post = capture_verify
         monkeypatch.setattr("nemo_gym.eval.rollout_reverification.setup_server_client", lambda: mock_client)
@@ -2496,6 +2556,17 @@ class TestRolloutReverificationRunFromConfig:
         assert all(item["call_id"] != "fc_56a9401eb39a449c982424abb3b0fdc2" for item in correlated_items)
         assert returned == self._read_jsonl(tmp_path / "output.jsonl")
         assert returned[0]["reward"] == 1.0
+        assert returned[0]["ng_verifier_invocations"] == [
+            {"invocation_id": "fresh-verifier", "status": "completed", "model_calls": []}
+        ]
+        assert set(returned[0]) == {
+            "reward",
+            "ng_verifier_invocations",
+            TASK_INDEX_KEY_NAME,
+            ROLLOUT_INDEX_KEY_NAME,
+            AGENT_REF_KEY_NAME,
+            ATIF_PROVENANCE_KEY,
+        }
         assert returned[0][ATIF_PROVENANCE_KEY] == {
             "trajectory_id": "relay-887-live-trajectory",
             "session_id": "relay-887-live-session",
@@ -2749,11 +2820,15 @@ class TestRolloutReverificationRunFromConfig:
             (self._make_row("agent_b", task=2), {"reward": 0.5}),
             (self._make_row("agent_b", task=3), {"reward": 0.3}),
         ]
-        payloads = [row for row, _ in pairs]
-        monkeypatch.setattr("nemo_gym.eval.rollout_reverification._prepare_payloads", lambda *_a, **_kw: payloads)
+        inputs, source = tmp_path / "inputs.jsonl", tmp_path / "rollouts.jsonl"
+        inputs.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row, _ in pairs))
+        saved_answer = {"id": "saved-answer", "output": []}
+        source.write_bytes(
+            b"".join(orjson.dumps(row | result | {"response": saved_answer}) + b"\n" for row, result in pairs)
+        )
+        source_bytes = source.read_bytes()
 
-        # Wire _run_verification_payloads through its real impl so routing is exercised.
-        # Patch the hooks it relies on instead.
+        # Prepare actual saved inputs and dispatch through the ordinary reverify route.
         mock_client = MagicMock()
         mock_client.global_config_dict = {}
         verify_calls: list[tuple[str, dict]] = []
@@ -2771,7 +2846,17 @@ class TestRolloutReverificationRunFromConfig:
         monkeypatch.setattr("nemo_gym.eval.rollout_reverification.raise_for_status", AsyncMock())
         monkeypatch.setattr(
             "nemo_gym.eval.rollout_reverification.get_response_json",
-            AsyncMock(side_effect=[{"reward": 1.0}, {"reward": 0.8}, {"reward": 0.5}, {"reward": 0.3}]),
+            AsyncMock(
+                side_effect=[
+                    {
+                        "reward": reward,
+                        "ng_verifier_invocations": [
+                            {"invocation_id": f"fresh-{index}", "status": "completed", "model_calls": []}
+                        ],
+                    }
+                    for index, reward in enumerate((1.0, 0.8, 0.5, 0.3))
+                ]
+            ),
         )
 
         agg_mock = AsyncMock(return_value=None)
@@ -2795,13 +2880,27 @@ class TestRolloutReverificationRunFromConfig:
             assert payload[AGENT_REF_KEY_NAME]["name"] == "agent_a"
         for _, payload in rs_b_calls:
             assert payload[AGENT_REF_KEY_NAME]["name"] == "agent_b"
+        assert all(payload["response"] == saved_answer for _, payload in verify_calls)
+        assert source.read_bytes() == source_bytes
 
         # output file: all 4 results, exact field set matches verify response + stamped metadata
         output_rows = self._read_jsonl(tmp_path / "output.jsonl")
         assert len(output_rows) == 4
-        expected_keys = {"reward", TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, AGENT_REF_KEY_NAME}
+        expected_keys = {
+            "reward",
+            "ng_verifier_invocations",
+            TASK_INDEX_KEY_NAME,
+            ROLLOUT_INDEX_KEY_NAME,
+            AGENT_REF_KEY_NAME,
+        }
         for row in output_rows:
             assert set(row.keys()) == expected_keys
+        assert sorted(row["ng_verifier_invocations"][0]["invocation_id"] for row in output_rows) == [
+            "fresh-0",
+            "fresh-1",
+            "fresh-2",
+            "fresh-3",
+        ]
 
         # both agents present in what aggregate metrics receives
         agg_results = agg_mock.call_args.args[0]

@@ -923,6 +923,7 @@ async def enrich_run_result(
     rollout_latency_ms: Optional[float] = None,
     delete_capture: bool = False,
     trajectory_schema_version: Literal["1.0", "2.0"] = "1.0",
+    excluded_verifier_invocation_ids: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Attach a finished rollout's collected evidence to its ``/run`` result, in place.
 
@@ -974,6 +975,7 @@ async def enrich_run_result(
             result,
             capture_dirs,
             include_payloads=not redacted if trajectory_schema_version == "2.0" else payloads_kept,
+            excluded_verifier_invocation_ids=excluded_verifier_invocation_ids,
         )
         capture = result.get("ng_model_call_capture")
         safe_to_delete = quiesced and payloads_kept and isinstance(capture, dict) and not capture.get("gaps")

@@ -272,6 +272,635 @@ async def test_the_real_reverify_path_settles_a_saved_judge_failure_without_any_
     assert len(posted) == 1
 
 
+@pytest.mark.parametrize("schema_version,redacted", [("1.0", False), ("1.0", True), ("2.0", False), ("2.0", True)])
+@pytest.mark.parametrize(
+    "attempt,explicit,capture_mode,input_shape",
+    [
+        (0, False, "complete", "legacy"),
+        (1, False, "complete", "legacy"),
+        (1, True, "complete", "legacy"),
+        (1, True, "prior_sse", "legacy"),
+        (0, True, "prior_sse_history", "legacy"),
+        (1, True, "missing", "legacy"),
+        (1, True, "mismatched", "legacy"),
+        (1, True, "unreadable", "legacy"),
+        (1, True, "complete", "materialized_flat"),
+        (1, True, "complete", "materialized_canonical"),
+    ],
+)
+async def test_inline_rejudgment_retains_new_captures_and_derives_grading_health(
+    tmp_path, monkeypatch, attempt, explicit, capture_mode, input_shape, schema_version, redacted
+):
+    import asyncio
+    import json
+    from unittest.mock import MagicMock
+
+    from fastapi.testclient import TestClient
+
+    from nemo_gym.cli.eval import _prepare_run_health_metrics
+    from nemo_gym.client.server_client import ServerClient
+    from nemo_gym.core.episode_context import (
+        VERIFIER_INVOCATION_HEADER,
+        current_rollout_id,
+        maybe_rollout_id_from_run_body,
+    )
+    from nemo_gym.core.failure_records import FailureBoundary, FailureEvent, FailureReport
+    from nemo_gym.core.failure_transport import FailureHeader
+    from nemo_gym.core.responses_api_types import NeMoGymResponse
+    from nemo_gym.models.model_call_capture import CaptureStore
+    from nemo_gym.rollouts.rollout_collection import enrich_run_result
+    from nemo_gym.rollouts.rollout_health import run_health_checks
+    from nemo_gym.server_runtime.base_resources_server import (
+        BaseResourcesServerConfig,
+        BaseVerifyRequest,
+        BaseVerifyResponse,
+        SimpleResourcesServer,
+    )
+    from nemo_gym.server_runtime.verifier_observability import observe_llm_judge_grading
+    from nemo_gym.verification.judge import JudgeError, call_judge, record_parsed_judge_verdict
+    from tests.unit_tests.rollouts.test_rollout_collection import FakeResponse
+
+    artifacts = tmp_path / "job" / "artifacts"
+    artifacts.mkdir(parents=True)
+    captures = CaptureStore(tmp_path / "captures")
+    config = {
+        "observability_enabled": True,
+        "model_call_capture_dir": str(captures.root),
+        "model_call_capture": {"trajectory_schema_version": schema_version},
+        "agent": {
+            "responses_api_agents": {
+                "simple_agent": {
+                    "resources_server": {"name": "judge_rs"},
+                    "model_server": {"name": "policy"},
+                    "skip_verification": False,
+                }
+            }
+        },
+        "judge_rs": {"resources_servers": {"synthetic": {}}},
+        "policy": {"responses_api_models": {"synthetic": {}}},
+        "judge": {"responses_api_models": {"synthetic": {}}},
+        "environment": {"environment_servers": {"legacy_agent": {"agent_server": {"name": "agent"}}}},
+    }
+    rows = [
+        {
+            "_ng_task_index": i,
+            "_ng_rollout_index": 0,
+            "agent_ref": {"name": "agent"},
+            "responses_create_params": {"input": "Synthetic question"},
+        }
+        for i in range(2)
+    ]
+    if explicit:
+        rows[1]["_ng_rollout_id"] = "saved-explicit"
+    if input_shape != "legacy":
+        for index, row in enumerate(rows):
+            params = row.pop("responses_create_params")
+            fields = {"responses_create_params": params}
+            row["task_id"] = {"taskset": "synthetic", "task_id": f"semantic-task-{index}"}
+            row["task_input"] = fields if input_shape == "materialized_flat" else {"task_data": fields}
+    source = tmp_path / "source.jsonl"
+    source.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+    prepare = lambda: (rows, RunManifest.create(source, rows, {}, config))
+    output = artifacts / "rollouts.jsonl"
+    state = {"phase": "success", "calls": 0}
+    saved_answers = []
+
+    def response(response_id, text, *, status="completed"):
+        return NeMoGymResponse(
+            id=response_id,
+            object="response",
+            created_at=0,
+            model="synthetic",
+            status=status,
+            output=[
+                {
+                    "id": f"msg-{response_id}",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": text, "annotations": []}],
+                }
+            ],
+            parallel_tool_calls=False,
+            tool_choice="auto",
+            tools=[],
+        ).model_dump(mode="json")
+
+    def exchange(call_id, model, request, reply, *, invocation=None):
+        return {
+            "model_call_id": call_id,
+            "dialect": "responses",
+            "model_ref": {"type": "responses_api_models", "name": model},
+            "status_code": 200,
+            "request": request,
+            "response": reply,
+            "verifier_invocation_id": invocation,
+            "failure_report": {"events": {}, "omitted": False, "failure_id": None},
+            "model_operations": [
+                {
+                    "operation_id": f"operation-{call_id}",
+                    "outcome": "completed",
+                    "final_attempt_id": f"attempt-{call_id}",
+                    "failure_id": None,
+                    "http_attempts": 1,
+                    "transport_failures": 0,
+                }
+            ],
+        }
+
+    async def judge_post(*, server_name, json, headers, **kwargs):
+        assert server_name == "judge" and kwargs["url_path"] == "/v1/responses"
+        state["calls"] += 1
+        call_id = f"judge-{state['calls']}"
+        reply = response(
+            f"response-{call_id}", '{"grade":0.5}', status="incomplete" if state["phase"] == "failure" else "completed"
+        )
+        key = current_rollout_id()
+        captured = exchange(call_id, "judge", json, reply, invocation=headers[VERIFIER_INVOCATION_HEADER])
+        if state["phase"] == "failure" and capture_mode in {"prior_sse", "prior_sse_history"}:
+            event = FailureEvent(
+                boundary=FailureBoundary.MODEL,
+                failure_kind="model_request_error",
+                failure_reason="Prior synthetic transport failure",
+                operation="model_request",
+                http_status=503,
+            )
+            report = FailureReport(events={event.event_id: event}, failure_id=event.event_id)
+            captured["response_raw"] = (
+                "data: "
+                + orjson.dumps(
+                    {"type": "response.failed", FailureHeader.STREAM_FIELD: report.model_dump(mode="json")}
+                ).decode()
+                + "\n\n"
+            )
+        if state["phase"] == "recovery" and state["calls"] == state["recover_start"] + 2:
+            captures.mark_pending(key, call_id)
+
+            async def finish_capture():
+                await asyncio.sleep(0.1)
+                if capture_mode == "mismatched":
+                    captured["response"] = response("wrong-response", '{"grade":0.5}')
+                if capture_mode == "unreadable":
+                    with captures.path_for(key).open("ab") as stream:
+                        stream.write(b"{damaged capture}\n")
+                elif capture_mode != "missing":
+                    captures.record(key, captured)
+                captures.clear_pending(key, call_id)
+
+            asyncio.create_task(finish_capture())
+        else:
+            captures.record(key, captured)
+        return FakeResponse(200, reply)
+
+    judge_client = MagicMock(spec=ServerClient, global_config_dict=config, post=judge_post)
+
+    class Resources(SimpleResourcesServer):
+        async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+            saved_answers.append(body.response.model_dump(mode="json"))
+
+            async def calculate():
+                grades = []
+                for _ in range(2):
+                    reply = await call_judge(
+                        judge_client,
+                        server_name="judge",
+                        url_path="/v1/responses",
+                        json={"input": "Synthetic rubric"},
+                        response_model=NeMoGymResponse,
+                    )
+                    if reply.status != "completed":
+                        raise JudgeError("Synthetic incomplete judge reply")
+                    verdict = json.loads(reply.output[0].content[0].text)
+                    grades.append(verdict["grade"])
+                    record_parsed_judge_verdict()
+                return BaseVerifyResponse(**body.model_dump(), reward=sum(grades) / len(grades))
+
+            return await observe_llm_judge_grading(calculate)
+
+    resources = Resources(
+        config=BaseResourcesServerConfig(name="judge_rs", host="judge_rs", port=8000, entrypoint="app.py"),
+        server_client=judge_client,
+    )
+    posted = []
+    with TestClient(resources.setup_webserver()) as http:
+
+        async def verify(row):
+            key = maybe_rollout_id_from_run_body(row)
+            reply = await asyncio.to_thread(http.post, f"/ng-rollout/{key}/verify", json=row)
+            assert reply.status_code == 200
+            return reply.json()
+
+        async def save_verification(store, row, phase):
+            key = maybe_rollout_id_from_run_body(row)
+            answer = response(f"policy-{key}", "Saved synthetic answer")
+            fields = row.get("task_input", row)
+            fields = fields.get("task_data", fields)
+            policy_capture = exchange(f"policy-{key}", "policy", fields["responses_create_params"], answer)
+            answer["usage"] = {
+                "input_tokens": 11,
+                "output_tokens": 7,
+                "total_tokens": 18,
+                "input_tokens_details": {"cached_tokens": 2},
+                "output_tokens_details": {"reasoning_tokens": 3},
+            }
+            captures.record(key, policy_capture)
+            state["phase"] = phase
+            request = {key: value for key, value in row.items() if key not in ("task_id", "task_input")}
+            result = await verify(request | fields | {"response": answer})
+            result |= {
+                "_ng_environment_server": "environment",
+                "_ng_result_type": "legacy_agent",
+                "ng_agent_observations": {
+                    "schema_version": schema_version,
+                    "source": "synthetic",
+                    "gaps": [{"code": "multimodal_history_redacted"}] if redacted else [],
+                    "records": [
+                        {
+                            "kind": "agent_invocation",
+                            "invocation_id": f"agent-{key}",
+                            **({"agent_instance": "policy-worker"} if schema_version == "2.0" else {}),
+                            "status": "completed",
+                            "in_session": False,
+                            "verification_skipped": False,
+                            "conversation": answer["output"],
+                            "model_calls": [{"model_call_id": f"policy-{key}"}],
+                        }
+                    ],
+                },
+            }
+            await enrich_run_result(
+                row,
+                result,
+                capture_dirs=[captures.root],
+                observability_enabled=True,
+                trajectory_schema_version=schema_version,
+                rollout_latency_ms=42000,
+            )
+            store.record_outcome(row | result)
+
+        with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+            first, second = store.pending()
+            store.record_dispatches([first, second])
+            await save_verification(store, first, "success")
+            if attempt:
+                store.record_outcome(second | {"_ng_failure_class": "agent_run_error"})
+            else:
+                await save_verification(store, second, "failure")
+        if attempt:
+            with RolloutStore.start_or_resume(output, prepare, resume=True) as store:
+                [row] = store.pending()
+                assert row["_ng_attempt_index"] == attempt
+                store.record_dispatch(row)
+                await save_verification(store, row, "failure")
+        before = RolloutStore.read(output)
+        [failure] = before.failures()
+        [prior_success] = before.selected("success")
+        attempt_counts = before.manifest.next_attempt
+        capture_key = maybe_rollout_id_from_run_body(failure)
+        original_capture = captures.path_for(capture_key).read_bytes()
+        failures_bytes = output.with_name("rollouts_failures.jsonl").read_bytes()
+
+        async def post(*, server_name, url_path, json, **kwargs):
+            assert server_name == "judge_rs" and url_path == "/verify"
+            assert maybe_rollout_id_from_run_body(json) == capture_key
+            assert not {"task_id", "task_input", "ng_trajectory", "ng_agent_observations", "ng_perf"}.intersection(
+                json
+            )
+            posted.append(json)
+            result = await verify(json)
+            return FakeResponse(200, result)
+
+        client = MagicMock(spec=ServerClient, global_config_dict=config, post=post)
+        monkeypatch.setattr("nemo_gym.eval.rollout_reverification.setup_server_client", lambda: client)
+        monkeypatch.setattr("nemo_gym.eval.rollout_reverification.get_exporters", lambda: [])
+        if capture_mode == "prior_sse_history":
+            state["phase"] = "failure"
+            assert await rejudge_saved_judge_failures({"disable_aggregation": True}, output) == 0
+            [failure] = RolloutStore.read(output).failures()
+            failures_bytes = output.with_name("rollouts_failures.jsonl").read_bytes()
+            original_capture = captures.path_for(capture_key).read_bytes()
+        state["phase"] = "recovery"
+        state["recover_start"] = state["calls"]
+        assert await rejudge_saved_judge_failures({"disable_aggregation": True}, output) == 1
+
+    selected = RolloutStore.read(output)
+    recovered = next(item for item in selected.selected("success") if item["_ng_task_index"] == 1)
+    trajectory = recovered["ng_trajectory"]
+    assert failure["ng_trajectory"]["schema_version"] == trajectory["schema_version"] == schema_version
+    wire_identity = "capture_key" if schema_version == "2.0" else "rollout_id"
+    assert failure["ng_trajectory"][wire_identity] == trajectory[wire_identity] == capture_key
+    assert (
+        trajectory["task_id"]
+        == ("1" if input_shape == "legacy" else "semantic-task-1")
+        == failure["ng_trajectory"]["task_id"]
+    )
+    assert ("rollout_id" if schema_version == "2.0" else "capture_key") not in trajectory
+    [verifier] = trajectory["verifier_invocations"]
+    assert len(posted) == (2 if capture_mode == "prior_sse_history" else 1)
+    assert all(item["response"] == failure["response"] == recovered["response"] for item in posted)
+    assert saved_answers[-1] == failure["response"] and state["calls"] == state["recover_start"] + 2
+    assert selected.manifest.next_attempt == attempt_counts and not selected.failures()
+    assert prior_success in selected.selected("success")
+    assert recovered["_ng_rejudged_failure_observations"]["ng_trajectory"] == failure["ng_trajectory"]
+    assert trajectory["invocations"] == failure["ng_trajectory"]["invocations"]
+    assert trajectory["turns"] == failure["ng_trajectory"]["turns"]
+    assert trajectory["tool_calls"] == failure["ng_trajectory"]["tool_calls"]
+    assert recovered["ng_agent_observations"] == failure["ng_agent_observations"]
+    assert recovered["ng_perf"] == failure["ng_perf"]
+    assert recovered["ng_perf"]["total_latency_ms"] == 42000
+    assert recovered["ng_perf"]["prompt_tokens"] == 11 and recovered["ng_perf"]["completion_tokens"] == 7
+    if redacted:
+        assert all(call["request"] is None and call["response"] is None for call in trajectory["model_calls"])
+        assert any(gap["code"] == "multimodal_history_redacted" for gap in trajectory["gaps"])
+    assert {item["model_call_id"] for item in trajectory["model_calls"]}.isdisjoint({"judge-3"})
+    assert captures.path_for(capture_key).read_bytes().startswith(original_capture)
+    assert output.with_name("rollouts_failures.jsonl").read_bytes() == failures_bytes
+    assert not captures.has_pending(capture_key)
+    new_calls = {f"judge-{state['recover_start'] + offset}" for offset in (1, 2)}
+    assert {ref["model_call_id"] for ref in verifier["model_calls"]} == (
+        new_calls if capture_mode not in {"missing", "unreadable"} else {"judge-4"}
+    )
+    assert {ref["response_id"] for ref in verifier["grading_operations"][0]["dependencies"]} == {
+        f"response-{call_id}" for call_id in new_calls
+    }
+    recovered_files = list((artifacts / "reverification").glob("*/rollouts.jsonl"))
+    assert len(recovered_files) == (2 if capture_mode == "prior_sse_history" else 1)
+    persisted = [orjson.loads(line) for path in recovered_files for line in path.read_bytes().splitlines()]
+    [persisted_recovery] = [item for item in persisted if item["_ng_task_index"] == 1]
+    assert persisted_recovery["ng_trajectory"]["schema_version"] == schema_version
+    assert persisted_recovery["ng_trajectory"][wire_identity] == capture_key
+    assert persisted_recovery["ng_agent_observations"] == failure["ng_agent_observations"]
+    assert persisted_recovery["ng_perf"] == failure["ng_perf"]
+    assert {item["model_call_id"] for item in persisted_recovery["ng_model_call_capture"]["calls"]} >= {
+        f"judge-{state['recover_start'] + 1}"
+    }
+    (artifacts / "rollouts_resolved_config.yaml").write_text(json.dumps(config))
+    (artifacts / "rollouts_aggregate_metrics.json").write_text(
+        json.dumps([{"agent_ref": {"name": "agent"}, "key_metrics": {"reward": 0.5}}])
+    )
+    if schema_version == "1.0":
+        run_health_checks(output, workers=1)
+        health = _prepare_run_health_metrics(output)
+        complete = capture_mode in {"complete", "prior_sse", "prior_sse_history"}
+        assert health["health/grading_recovery/known"] == int(complete)
+        if complete:
+            assert health["health/grading_recovery/judge_recovered_attempts"] == 0
+            assert health["health/trial/known"] == 1 and health["health/trial/failed"] == 0
+            assert health["health/trial_failures/judge"] == 0
+            assert due_judge_failures(output) == []
+
+
+async def test_false_statement_judge_rejudges_saved_answer_with_fresh_evidence(tmp_path, monkeypatch):
+    """Run the shipped verifier and rubric over a saved answer, substituting only remote judge replies."""
+    import asyncio
+    from unittest.mock import MagicMock
+
+    import yaml
+    from fastapi.testclient import TestClient
+
+    from nemo_gym.cli.eval import _prepare_run_health_metrics
+    from nemo_gym.client.server_client import ServerClient
+    from nemo_gym.core.episode_context import (
+        VERIFIER_INVOCATION_HEADER,
+        current_rollout_id,
+        maybe_rollout_id_from_run_body,
+    )
+    from nemo_gym.core.responses_api_types import NeMoGymResponse
+    from nemo_gym.models.model_call_capture import CaptureStore
+    from nemo_gym.rollouts.rollout_collection import enrich_run_result
+    from nemo_gym.rollouts.rollout_health import run_health_checks
+    from resources_servers.false_statement_judge.app import FalseStatementJudgeConfig, FalseStatementJudgeServer
+    from tests.unit_tests.rollouts.test_rollout_collection import FakeResponse
+
+    root = Path(__file__).resolve().parents[3]
+    config = yaml.safe_load(
+        (root / "resources_servers/false_statement_judge/configs/false_statement_judge.yaml").read_text()
+    )
+    captures = CaptureStore(tmp_path / "captures")
+    config |= {
+        "observability_enabled": True,
+        "model_call_capture_dir": str(captures.root),
+        "model_call_capture": {"trajectory_schema_version": "1.0"},
+        "policy_model": {"responses_api_models": {"synthetic": {}}},
+        "judge_model": {"responses_api_models": {"synthetic": {}}},
+    }
+    question = "Prove every odd integer is divisible by two."
+    original_problem = "Every even integer is divisible by two."
+    saved_text = "For even integers n = 2k, divisibility follows."
+    row = {
+        "_ng_task_index": 0,
+        "_ng_rollout_index": 0,
+        "agent_ref": {"name": "false_statement_judge_simple_agent"},
+        "responses_create_params": {"input": question},
+        "question": question,
+        "original_problem": original_problem,
+    }
+    source = tmp_path / "source.jsonl"
+    source.write_bytes(orjson.dumps(row) + b"\n")
+    artifacts = tmp_path / "job" / "artifacts"
+    artifacts.mkdir(parents=True)
+    output = artifacts / "rollouts.jsonl"
+    judge_requests = []
+    verification_requests = []
+    verification_admissions = []
+    completed_verdict = "<points>1</points><assessment>The proof quietly changes the statement.</assessment>"
+
+    def response(response_id, text, *, status="completed"):
+        return NeMoGymResponse(
+            id=response_id,
+            object="response",
+            created_at=0,
+            model="fixture",
+            status=status,
+            output=[
+                {
+                    "id": f"msg-{response_id}",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": text, "annotations": []}],
+                }
+            ],
+            parallel_tool_calls=False,
+            tool_choice="auto",
+            tools=[],
+            usage={
+                "input_tokens": 11,
+                "output_tokens": 7,
+                "total_tokens": 18,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens_details": {"reasoning_tokens": 0},
+            },
+        ).model_dump(mode="json")
+
+    def exchange(call_id, model, request, reply, *, invocation=None):
+        return {
+            "model_call_id": call_id,
+            "dialect": "responses",
+            "model_ref": {"type": "responses_api_models", "name": model},
+            "status_code": 200,
+            "request": request,
+            "response": reply,
+            "verifier_invocation_id": invocation,
+            "failure_report": {"events": {}, "omitted": False, "failure_id": None},
+            "model_operations": [
+                {
+                    "operation_id": f"operation-{call_id}",
+                    "outcome": "completed",
+                    "final_attempt_id": f"attempt-{call_id}",
+                    "failure_id": None,
+                    "http_attempts": 1,
+                    "transport_failures": 0,
+                }
+            ],
+        }
+
+    async def verify(payload):
+        key = maybe_rollout_id_from_run_body(payload)
+        reply = await asyncio.to_thread(http.post, f"/ng-rollout/{key}/verify", json=payload)
+        assert reply.status_code == 200
+        return reply.json()
+
+    async def post(*, server_name, url_path, json, **kwargs):
+        if server_name == "judge_model":
+            assert url_path == "/v1/responses"
+            request = json.model_dump(mode="json")
+            judge_requests.append(request)
+            call_id = f"judge-{len(judge_requests)}"
+            reply = response(
+                f"response-{call_id}",
+                "The judge stopped before deciding." if len(judge_requests) == 1 else completed_verdict,
+                status="incomplete" if len(judge_requests) == 1 else "completed",
+            )
+            captures.record(
+                current_rollout_id(),
+                exchange(
+                    call_id,
+                    "judge_model",
+                    request,
+                    reply,
+                    invocation=kwargs["headers"][VERIFIER_INVOCATION_HEADER],
+                ),
+            )
+            return FakeResponse(200, reply)
+        assert server_name == "false_statement_judge" and url_path == "/verify"
+        verification_requests.append(json)
+        admission = RolloutStore.read(output).manifest.pending_rejudge[logical_rollout_id(json)]
+        verification_admissions.append(admission)
+        return FakeResponse(200, await verify(json))
+
+    client = MagicMock(spec=ServerClient, global_config_dict=config, post=post)
+    resources = FalseStatementJudgeServer(
+        config=FalseStatementJudgeConfig(
+            name="false_statement_judge",
+            host="false_statement_judge",
+            port=8000,
+            **config["false_statement_judge"]["resources_servers"]["false_statement_judge"],
+        ),
+        server_client=client,
+    )
+    monkeypatch.setattr("nemo_gym.eval.rollout_reverification.setup_server_client", lambda: client)
+    prepare = lambda: ([row], RunManifest.create(source, [row], {}, config))
+    with TestClient(resources.setup_webserver()) as http:
+        with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+            [pending] = store.pending()
+            store.record_dispatch(pending)
+            key = maybe_rollout_id_from_run_body(pending)
+            answer = response("saved-policy-response", saved_text)
+            captures.record(key, exchange("saved-policy-call", "policy_model", row["responses_create_params"], answer))
+            result = await verify(pending | {"response": answer})
+            result |= {
+                "_ng_environment_server": "false_statement_judge_environment_server",
+                "_ng_result_type": "single_agent_turn_legacy",
+                "ng_agent_observations": {
+                    "schema_version": "1.0",
+                    "source": "test.false_statement_judge",
+                    "records": [
+                        {
+                            "kind": "agent_invocation",
+                            "invocation_id": "saved-policy-invocation",
+                            "status": "completed",
+                            "in_session": False,
+                            "verification_skipped": False,
+                            "conversation": answer["output"],
+                            "model_calls": [{"model_call_id": "saved-policy-call"}],
+                        }
+                    ],
+                },
+            }
+            await enrich_run_result(
+                pending,
+                result,
+                capture_dirs=[captures.root],
+                observability_enabled=True,
+                trajectory_schema_version="1.0",
+            )
+            store.record_outcome(pending | result)
+        before = RolloutStore.read(output)
+        [failure] = before.failures()
+        assert failure["_ng_failure_class"] == "judge_failed" and failure["mask_sample"] is True
+        assert failure["response"] == answer
+        attempts_before = before.manifest.next_attempt
+        failures_path = output.with_name("rollouts_failures.jsonl")
+        failure_bytes = failures_path.read_bytes()
+        capture_bytes = captures.path_for(key).read_bytes()
+
+        assert await rejudge_saved_judge_failures({"disable_aggregation": True}, output) == 1
+        selected = RolloutStore.read(output)
+        [recovered] = selected.selected("success")
+        assert recovered["response"] == failure["response"] == answer
+        assert (recovered["reward"], recovered["judge_points"], recovered["judge_output"]) == (
+            0.5,
+            1,
+            completed_verdict,
+        )
+        assert selected.manifest.next_attempt == attempts_before and selected.manifest.pending_rejudge == {}
+        [admission] = verification_admissions
+        assert recovered["_ng_rejudge_operation_id"] == admission.operation_id
+        assert recovered["_ng_rejudge_admitted_at"] == admission.admitted_at
+        assert recovered["_ng_rejudged_failure_id"] == admission.predecessor_failure_id == failure["_ng_failure_id"]
+        assert not selected.failures() and due_judge_failures(output) == []
+        assert recovered["_ng_rejudged_failure_observations"] == {
+            field: value for field, value in failure.items() if field != "response"
+        }
+        assert failures_path.read_bytes() == failure_bytes
+        for field in ("invocations", "turns", "tool_calls"):
+            assert recovered["ng_trajectory"][field] == failure["ng_trajectory"][field]
+        [verifier] = recovered["ng_trajectory"]["verifier_invocations"]
+        assert verifier["invocation_id"] != failure["ng_trajectory"]["verifier_invocations"][0]["invocation_id"]
+        assert [item["model_call_id"] for item in verifier["model_calls"]] == ["judge-2"]
+        [grading] = verifier["grading_operations"]
+        assert grading["outcome"] == "completed"
+        assert [dependency["response_id"] for dependency in grading["dependencies"]] == ["response-judge-2"]
+        assert {call["model_call_id"] for call in recovered["ng_trajectory"]["model_calls"]} == {
+            "saved-policy-call",
+            "judge-2",
+        }
+        raw_calls = captures.read(key)
+        assert [call["model_call_id"] for call in raw_calls] == ["saved-policy-call", "judge-1", "judge-2"]
+        assert raw_calls[-1]["verifier_invocation_id"] == verifier["invocation_id"]
+        assert raw_calls[-1]["response"]["output"][0]["content"][0]["text"] == completed_verdict
+        assert captures.path_for(key).read_bytes().startswith(capture_bytes)
+        assert len(verification_requests) == 1 and verification_requests[0]["response"] == answer
+        assert len(judge_requests) == 2 and judge_requests[0] == judge_requests[1]
+        prompt = judge_requests[1]["input"][0]["content"]
+        assert all(text in prompt for text in (question, original_problem, saved_text, "<points>"))
+
+        output.with_name("rollouts_resolved_config.yaml").write_text(yaml.safe_dump(config))
+        output.with_name("rollouts_aggregate_metrics.json").write_bytes(
+            orjson.dumps([{"agent_ref": row["agent_ref"], "key_metrics": {"reward": 0.5}}])
+        )
+        run_health_checks(output, workers=1)
+        health = _prepare_run_health_metrics(output)
+        assert health["health/grading_recovery/known"] == 1
+        assert health["health/trial/known"] == 1 and health["health/trial/failed"] == 0
+        assert health["health/trial_failures/judge"] == 0
+        selected_bytes = output.read_bytes()
+        assert await rejudge_saved_judge_failures({"disable_aggregation": True}, output) == 0
+        assert len(judge_requests) == 2 and len(verification_requests) == 1
+        assert output.read_bytes() == selected_bytes and failures_path.read_bytes() == failure_bytes
+
+
 def _verifier(monkeypatch, reply) -> list[int]:
     """The run's resources server: ``reply(task, json)`` answers each /verify of a saved answer, or raises."""
     from unittest.mock import AsyncMock, MagicMock
