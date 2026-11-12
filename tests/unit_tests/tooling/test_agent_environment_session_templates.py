@@ -38,6 +38,7 @@ migration = load_migration()
         "pi_agent",
         "pool_agent",
         "goose_agent",
+        "kimi_code_agent",
         "codex_agent",
         "openclaw_agent",
         "opencode_agent",

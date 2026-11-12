@@ -31,6 +31,7 @@ These adapters run a harness inside a sandbox. The `single_agent_turn` Environme
 | mini-SWE (`mini_swe_agent`, `mini_swe_agent_sandboxed.yaml`) | Responses | MCP only, through a task-local CLI that its bash tool calls | Not wired up; evaluation only | Not declared | Not declared | Only when the task runs as root: a task user is refused |
 | Droid (`droid_agent`) | Chat Completions (streaming) | None | Not wired up; evaluation only | Not declared | Not declared | Not validated |
 | Goose (`goose_agent`) | Chat Completions | None | Not validated; evaluation only | Not declared | Not declared | Not validated |
+| Kimi Code (`kimi_code_agent`) | Chat Completions | None | Not validated; evaluation only | Not declared | Not declared | Not validated |
 
 *Declared* means the benchmark's Resources server lists the agent in `allowed_agents`. Gym rejects any other pairing unless you pass `--allow-unsupported-pairing`. Declared support is not a validation: it says nothing about accuracy or training readiness. Check that a pairing works with a real model and the benchmark's verifier before you rely on it.
 
