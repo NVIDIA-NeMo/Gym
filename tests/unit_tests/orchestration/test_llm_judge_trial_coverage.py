@@ -456,3 +456,76 @@ def test_a_completed_grade_on_a_cut_judge_reply_is_a_grading_without_a_valid_ver
     assert len(faults) == 1
     # A caller that does not count gradings without a valid verdict still cannot accept the trial.
     assert _observed_trial_operations(d, collected) is False
+
+
+def _verifier_retried_judge(*, event=True, earlier=True, same_model=True):
+    """A judge request the verifier itself retried: a failed call it owns, then the completed reply the grade rests on."""
+    collected = copy.deepcopy(fixture("healthy"))
+    observed = collected.results[0]["ng_trial_observations"]
+    grade = observed["verifier_invocations"][0]["grading_operations"][0]
+    grade["kind"] = "llm_judge"
+    final = _judge_call(observed)
+    final["started_at"] = 20.0
+    failed = copy.deepcopy(final)
+    failed_meta = failed["response_metadata"]
+    failed["model_call_id"], failed["started_at"] = "failed-judge-call", 10.0 if earlier else 30.0
+    failed_meta.update(response_id=None, status_code=500, error_category="upstream_error")
+    if not same_model:
+        failed_meta["model_ref"] = {"type": "responses_api_models", "name": "another_model"}
+    failed_meta["model_operations"] = [
+        dict(
+            failed_meta["model_operations"][0],
+            operation_id="failed-judge-op",
+            final_attempt_id="failed-judge-attempt",
+            outcome="failed",
+            failure_id="failed-judge-event",
+        )
+    ]
+    failed_meta["failure_report"] = {
+        "failure_id": "failed-judge-event",
+        "omitted": False,
+        "events": {
+            "failed-judge-event": dict(
+                event_id="failed-judge-event",
+                boundary="model",
+                operation="model_request",
+                operation_id="failed-judge-op",
+                attempt_id="failed-judge-attempt",
+                cause_id=None,
+                failure_kind="model_request_error",
+                http_status=500,
+            )
+        }
+        if event
+        else {},
+    }
+    observed["model_calls"].append(failed)
+    _own(observed, failed)
+    _own(observed, final)
+    grade["dependencies"] = [_dep(final)]
+    return collected
+
+
+def _covered(collected):
+    decision = decide_from_collected(collected, max_infra_retries=1, max_walltime_s=None, live_job=False)
+    counters = {}
+    return _observed_trial_operations(decision, collected, judge_recovery=counters), counters
+
+
+def test_a_judge_request_the_verifier_retried_is_a_recovered_grading_attempt():
+    covered, counters = _covered(_verifier_retried_judge())
+
+    assert covered is True
+    assert counters == {
+        "judge_recovered_attempts": 1,
+        "judge_recovered_operations": 1,
+        "observed_grading_attempt_errors": 1,
+        "observed_grading_failed_operations": 1,
+    }
+
+
+@pytest.mark.parametrize(
+    "change", [{"event": False}, {"earlier": False}, {"same_model": False}], ids=["unrecorded", "later", "other_model"]
+)
+def test_a_retried_judge_request_that_is_not_wholly_recorded_stays_unknown(change):
+    assert _covered(_verifier_retried_judge(**change))[0] is False
