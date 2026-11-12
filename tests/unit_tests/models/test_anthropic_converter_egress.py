@@ -222,8 +222,17 @@ class TestAnthropicConverter:
             ]
         )
         before = body.model_dump()
+        converter = AnthropicConverter()
+        dumped_items = []
+        normalize_input = converter._normalize_input
 
-        anthropic_body = AnthropicConverter().responses_to_anthropic(
+        def record_dumped_items(response_input):
+            dumped_items.extend(response_input)
+            return normalize_input(response_input)
+
+        converter._normalize_input = record_dumped_items
+
+        anthropic_body = converter.responses_to_anthropic(
             body, model="m", max_tokens=8, thinking=None, thinking_budget_tokens=None, extra_body={}
         )
 
@@ -231,6 +240,9 @@ class TestAnthropicConverter:
             "role": "assistant",
             "content": [{"type": "tool_use", "id": "c1", "name": "f", "input": {}}],
         }
+        # The mapping ignores token fields either way; the request dump skips them so the lists are not copied.
+        assert {"call_id", "name", "arguments"} <= dumped_items[1].keys()
+        assert not any(field in item for item in dumped_items for field in tokens)
         assert not any(field in json.dumps(anthropic_body) for field in tokens)
         assert body.model_dump() == before
 
