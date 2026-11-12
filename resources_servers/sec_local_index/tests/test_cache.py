@@ -90,3 +90,24 @@ def test_tool_cache_write_into_unwritable_dir_is_skipped(tmp_path) -> None:
         assert not (locked / "doc.htm.txt").exists()
     finally:
         os.chmod(locked, 0o755)
+
+
+def test_tool_cache_missing_entry_is_a_silent_miss(tmp_path, caplog) -> None:
+    cache = ToolCache(tmp_path)
+
+    assert cache.read_text(tmp_path / "missing.txt") is None
+    assert "unreadable" not in caplog.text
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file permissions")
+def test_tool_cache_unreadable_entry_is_a_logged_miss(tmp_path, caplog) -> None:
+    cache = ToolCache(tmp_path)
+    path = tmp_path / "doc.htm.txt"
+    path.write_text("body")
+    os.chmod(path, 0)
+    try:
+        assert cache.read_text(path) is None
+    finally:
+        os.chmod(path, 0o644)
+
+    assert "Ignoring unreadable cache entry" in caplog.text

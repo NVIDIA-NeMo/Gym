@@ -159,7 +159,10 @@ class ToolCache:
     def read_text(self, path: Path) -> Optional[str]:
         try:
             return path.read_text(encoding="utf-8")
-        except (FileNotFoundError, OSError):
+        except FileNotFoundError:
+            return None
+        except OSError as e:
+            logger.warning("Ignoring unreadable cache entry %s: %s", path, e)
             return None
 
     def write_text(self, path: Path, text: str) -> None:
