@@ -221,10 +221,6 @@ def _compaction_settings(harness: str, scenario: Scenario) -> DictConfig:
                 "model_auto_compact_token_limit": 24000,
                 "request_max_retries": 0,
                 "stream_max_retries": 0,
-                "extra_config": {
-                    "model_auto_compact_token_limit_scope": "total",
-                    "features": {"shell_snapshot": False, "token_budget": False},
-                },
             },
             "probe_overrides": {
                 "responses": [
