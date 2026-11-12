@@ -1,0 +1,20 @@
+droid_agent:
+  responses_api_agents:
+    droid_agent:
+      entrypoint: app.py
+      num_workers: 1
+      resources_server: null  # agent sessions only: the Environment Server binds the benchmark
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
+      droid_version: "1.1.0"  # exact release of the @factory/cli-linux-* npm packages
+      concurrency: 32
+      timeout: 1800  # ceiling on one run; a task's metadata.agent_timeout_sec can lower it
+      max_output_tokens: 8192  # max_tokens Droid sends on each model call
+      context_window: null  # the model's context window; Droid compacts against it
+      system_prompt: null  # appended to Droid's own system prompt
+      sandbox_provider: null  # top-level provider ref for agent-owned sandboxes; unused with borrowed SandboxAccess
+      sandbox_config: {}  # SandboxSpec for an owned sandbox, e.g. {image: ubuntu:24.04, workdir: /app}
+      sandbox_install_timeout_seconds: 600
+      session_close_timeout_seconds: 60
