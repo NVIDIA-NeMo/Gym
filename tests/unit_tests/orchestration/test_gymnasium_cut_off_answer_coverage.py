@@ -9,7 +9,7 @@ marks it incomplete. A run that recorded no invocation is unobserved and withhol
 
 import pytest
 
-from nemo_gym.trajectory import AgentInvocation, ModelCallRef
+from nemo_gym.trajectory.trajectory_record import AgentInvocation, ModelCallRef
 from tests.unit_tests.orchestration.test_cut_off_answer_trial_coverage import _cut_off, _verdict
 
 
