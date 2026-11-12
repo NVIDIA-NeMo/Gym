@@ -639,7 +639,6 @@ def _validate_dataset(
     *,
     standard_prompt_config: str | None,
     prompt_source: str = "template",
-    allow_unprepared: bool = False,
 ) -> DatasetValidation:
     data_path = _resolve_under_cwd_or_install(dataset.jsonl_fpath)
     prompt_path: Path | None = None
@@ -664,17 +663,6 @@ def _validate_dataset(
                 raise EnvironmentValidationError(
                     f"Could not materialize benchmark dataset '{dataset.name}': {error}"
                 ) from error
-
-    # Component CI validates committed representative inputs without downloading a full benchmark.
-    # Its preparation and prompt declarations above are still checked, even when data is not prepared.
-    if allow_unprepared and dataset.type == DatasetKind.BENCHMARK and not data_path.exists():
-        return DatasetValidation(
-            name=dataset.name,
-            type=dataset.type.value,
-            path=str(data_path),
-            rows=0,
-            prompt_config=str(prompt_path) if prompt_path else None,
-        )
 
     row_count = 0
     for line_number, row in _iter_dataset_rows(data_path):
@@ -787,13 +775,12 @@ def validate_environment(
     config_path: str | Path | None = None,
     *,
     sync: bool = False,
-    require_all_datasets: bool = True,
+    validate_datasets: bool = True,
 ) -> EnvironmentValidationReport:
     """Validate a manifest without probing services or runtime output paths.
 
-    Component CI may set ``require_all_datasets=False`` to check committed representative inputs
-    without preparing full benchmark splits. Missing example inputs and invalid preparation declarations
-    still fail, and at least one nonempty dataset must be available.
+    Component CI may disable dataset checks to exercise committed verifier fixtures
+    without downloading a workload's full benchmark or training dataset.
     """
     resolved_manifest_path = Path(manifest_path).expanduser().resolve()
     manifest = load_manifest(resolved_manifest_path)
@@ -838,15 +825,11 @@ def validate_environment(
             _validate_rollout_driver(manifest.rollout_driver)
         dataset_reports = tuple(
             _validate_dataset(
-                dataset,
-                standard_prompt_config=manifest.standard_prompt_config,
-                prompt_source=manifest.prompt_source,
-                allow_unprepared=not require_all_datasets,
+                dataset, standard_prompt_config=manifest.standard_prompt_config, prompt_source=manifest.prompt_source
             )
             for dataset in manifest.datasets
+            if validate_datasets
         )
-        if not require_all_datasets and not any(dataset.rows for dataset in dataset_reports):
-            raise EnvironmentValidationError("Manifest data validation requires at least one representative input.")
     if synchronized:
         _write_manifest_atomically(resolved_manifest_path, manifest)
     return EnvironmentValidationReport(
@@ -867,10 +850,5 @@ def validate_environment(
             manifest.integration_profile.value,
             inferred_profile,
             profile_evidence,
-        )
-        + tuple(
-            f"Dataset '{dataset.name}' is not prepared; only its preparation and prompt declarations were checked."
-            for dataset in dataset_reports
-            if dataset.rows == 0
         ),
     )

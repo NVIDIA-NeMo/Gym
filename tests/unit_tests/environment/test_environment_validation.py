@@ -628,53 +628,6 @@ def test_reports_resolved_composition_and_declared_profile(tmp_path: Path) -> No
     assert report.components[0].entrypoint == "app.py"
 
 
-def test_component_validation_allows_an_unprepared_split_but_checks_representative_rows(tmp_path: Path) -> None:
-    path = _asset(tmp_path, kind="benchmark")
-    manifest = yaml.safe_load(path.read_text())
-    full = manifest["datasets"][0] | {"name": "full", "jsonl_fpath": "benchmarks/demo/data/full.jsonl"}
-    manifest["datasets"].append(full)
-    path.write_text(yaml.safe_dump(manifest))
-    config_path = path.with_name("config.yaml")
-    config = yaml.safe_load(config_path.read_text())
-    config["demo_agent"]["responses_api_agents"]["simple_agent"]["datasets"].append(full)
-    config_path.write_text(yaml.safe_dump(config))
-
-    with pytest.raises(EnvironmentValidationError, match="full.jsonl"):
-        validate_environment(path)
-    report = validate_environment(path, require_all_datasets=False)
-    assert [(dataset.name, dataset.rows) for dataset in report.datasets] == [("example", 1), ("full", 0)]
-    assert len(report.warnings) == 1
-    assert "full" in report.warnings[0] and "not prepared" in report.warnings[0]
-
-    # A present full split is validated too; representative mode cannot hide broken data.
-    (path.parent / "data/full.jsonl").write_text("not JSON\n")
-    with pytest.raises(EnvironmentValidationError, match="JSON"):
-        validate_environment(path, require_all_datasets=False)
-
-
-def test_component_validation_requires_at_least_one_representative_input(tmp_path: Path) -> None:
-    path = _asset(tmp_path, kind="benchmark")
-    (path.parent / "data/example.jsonl").unlink()
-    with pytest.raises(EnvironmentValidationError, match="representative input"):
-        validate_environment(path, require_all_datasets=False)
-
-
-def test_component_validation_still_requires_declared_examples(tmp_path: Path) -> None:
-    path = _asset(tmp_path)
-    (path.parent / "data/example.jsonl").unlink()
-    with pytest.raises(EnvironmentValidationError, match="example.jsonl"):
-        validate_environment(path, require_all_datasets=False)
-
-
-@pytest.mark.parametrize("missing", ["prepare.py", "prompts/default.yaml"])
-def test_component_validation_checks_declarations_for_unprepared_splits(tmp_path: Path, missing: str) -> None:
-    path = _asset(tmp_path, kind="benchmark")
-    (path.parent / "data/example.jsonl").unlink()
-    (path.parent / missing).unlink()
-    with pytest.raises(EnvironmentValidationError, match="prepare|prompt"):
-        validate_environment(path, require_all_datasets=False)
-
-
 @pytest.mark.parametrize(
     ("profile", "responses_body", "evidence"),
     [
@@ -1001,3 +954,17 @@ def test_custom_driver_is_checked_without_scaffolding(tmp_path: Path) -> None:
     driver_path.unlink()
     with pytest.raises(EnvironmentValidationError, match="Rollout driver module was not found"):
         validate_environment(manifest_path)
+
+
+def test_component_verifier_validation_does_not_require_full_dataset(tmp_path: Path) -> None:
+    manifest_path = _asset(tmp_path, kind="benchmark")
+    (manifest_path.parent / "data/example.jsonl").unlink()
+    with pytest.raises(EnvironmentValidationError, match="Dataset file was not found"):
+        validate_environment(manifest_path)
+    report = validate_environment(manifest_path, validate_datasets=False)
+    assert report.datasets == ()
+    assert report.components
+    # Dataset-free validation must still catch a stale manifest composition.
+    _replace_manifest(manifest_path, resources_server="wrong_server")
+    with pytest.raises(EnvironmentValidationError, match="composition is stale"):
+        validate_environment(manifest_path, validate_datasets=False)

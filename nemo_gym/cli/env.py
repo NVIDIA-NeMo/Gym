@@ -71,6 +71,7 @@ from nemo_gym.environment.registry import (
     EnvironmentCatalogEntry,
     RegistryError,
     discover_environment_catalog,
+    manifest_workloads_for_server,
     read_environment_details,
     resolve_catalog_entry,
 )
@@ -245,9 +246,7 @@ def run(
     rh.run_forever()
 
 
-def _validate_data_single(
-    test_config: TestConfig, *, global_config_dict: DictConfig | None = None
-) -> None:  # pragma: no cover
+def _validate_data_single(test_config: TestConfig) -> None:  # pragma: no cover
     if not test_config.should_validate_data:
         return
 
@@ -255,27 +254,20 @@ def _validate_data_single(
     if test_config.dir_path.parts[0] != "resources_servers":
         return
 
-    # Manifest-backed workloads own their inputs under benchmarks/ or environments/, rather than
-    # duplicating the legacy five-row bundle in each reusable resources server.
-    if not (test_config.resolved_dir_path / "data").exists():
-        entries = [
-            entry
-            for entry in discover_environment_catalog()
-            if entry.manifest_path is not None and entry.resources_server == test_config.dir_path.name
-        ]
-        if entries:
-            for entry in entries:
-                validation = validate_environment(entry.manifest_path, entry.config_path, require_all_datasets=False)
-                for warning in validation.warnings:
-                    print(f"{entry.name}: {warning}")
-                spec = prepare_verifier_run(entry, validation)
-                if Path(spec.server_dir).resolve() != test_config.resolved_dir_path.resolve():
-                    raise ConfigError(f"Manifest {entry.name!r} resolves to a different resources server.")
-                _run_manifest_verifier(
-                    entry, update_expected=False, validation=validation, setup_config=global_config_dict
-                )
-            print(f"Manifest inputs and verifier fixtures for {test_config.dir_path} have been validated!")
-            return
+    # A server that only manifest workloads use carries verifier fixtures instead of the legacy five-row rollout
+    # artifacts (see manifest_workloads_for_server). Exercise every workload sharing it, offline and without requiring
+    # its full dataset to be downloaded on CI workers.
+    manifest_entries = manifest_workloads_for_server(
+        test_config.dir_path.name, test_config.resolved_dir_path, discover_environment_catalog()
+    )
+    if manifest_entries:
+        conflict_paths = glob(str(test_config.resolved_dir_path / "data/*conflict*"))
+        assert not conflict_paths, f"Found conflicting paths: {conflict_paths}"
+        for entry in manifest_entries:
+            validation = validate_environment(entry.manifest_path, entry.config_path, validate_datasets=False)
+            _run_manifest_verifier(entry, update_expected=False, validation=validation)
+        print(f"The verifier fixtures for {test_config.dir_path} have been successfully validated!")
+        return
 
     # Check that the required examples and example metrics are present. Read from the resolved dir
     # (built-ins live under the install root) while messages reference the relative entrypoint.
@@ -388,8 +380,8 @@ def test():  # pragma: no cover
         exit(return_code)
 
     try:
-        _validate_data_single(test_config, global_config_dict=global_config_dict)
-    except (AssertionError, ConfigError) as e:
+        _validate_data_single(test_config)
+    except AssertionError as e:
         print(f"""{e}
 Data validation failed for {test_config.entrypoint}. You can rerun just the data validation like:
 ```bash
@@ -557,9 +549,8 @@ def test_all():  # pragma: no cover
                 tests_unrecognized.append(dir_path)
 
         try:
-            _validate_data_single(test_config, global_config_dict=global_config_dict)
-        except (AssertionError, ConfigError) as error:
-            print(f"Data validation failed for {dir_path}: {error}")
+            _validate_data_single(test_config)
+        except AssertionError:
             data_validation_failed.append(dir_path)
 
         if test_all_config.delete_venvs_after_each_test:
@@ -1097,18 +1088,16 @@ def _run_manifest_verifier(
     *,
     update_expected: bool,
     validation: EnvironmentValidationReport | None = None,
-    setup_config: DictConfig | None = None,
 ) -> VerifierReport:
     spec = prepare_verifier_run(entry, validation)
-    if setup_config is None:
-        setup_config = GlobalConfigDictParser().parse(
-            GlobalConfigDictParserConfig(
-                initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
-                skip_load_from_cli=True,
-                skip_load_from_dotenv=True,
-                offline=True,
-            )
+    setup_config = GlobalConfigDictParser().parse(
+        GlobalConfigDictParserConfig(
+            initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+            offline=True,
         )
+    )
     server_dir = Path(spec.server_dir)
     prefix = f"resources_servers/{spec.resources_server}".replace("/", "\\/")
 

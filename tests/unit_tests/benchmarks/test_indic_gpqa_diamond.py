@@ -320,13 +320,7 @@ def test_manifest_matches_resolved_grading_mode(monkeypatch):
     from nemo_gym.environment import validation
 
     # Exercise real composition validation without requiring benchmark data in unit tests.
-    monkeypatch.setattr(
-        validation,
-        "_validate_dataset",
-        lambda dataset, **kwargs: validation.DatasetValidation(
-            name=dataset.name, type=dataset.type.value, path=dataset.jsonl_fpath, rows=1
-        ),
-    )
+    monkeypatch.setattr(validation, "_validate_dataset", lambda *args, **kwargs: None)
     report = validation.validate_environment(module.DIRECTORY / "manifest.yaml")
     assert report.grading_mode == "lenient_answer_colon_md"
     assert report.synchronized_fields == ()

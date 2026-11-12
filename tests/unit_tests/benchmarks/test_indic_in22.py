@@ -223,13 +223,7 @@ def test_manifest_is_discoverable_under_its_catalog_path(monkeypatch: pytest.Mon
     from nemo_gym.environment.registry import discover_environment_catalog, resolve_catalog_entry
 
     # Check real catalog identity and configuration without downloading gated benchmark data.
-    monkeypatch.setattr(
-        validation,
-        "_validate_dataset",
-        lambda dataset, **kwargs: validation.DatasetValidation(
-            name=dataset.name, type=dataset.type.value, path=dataset.jsonl_fpath, rows=1
-        ),
-    )
+    monkeypatch.setattr(validation, "_validate_dataset", lambda *args, **kwargs: None)
     entry = resolve_catalog_entry("indic/in22", "benchmark", entries=discover_environment_catalog())
     assert entry.path == BENCHMARK_DIR
     assert validation.validate_environment(entry.manifest_path, entry.config_path).name == "indic/in22"

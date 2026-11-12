@@ -1617,9 +1617,8 @@ class TestOnboardingCommandAdapters:
         assert "None" not in out
 
     @pytest.mark.parametrize("editable_install", [True, False])
-    @pytest.mark.parametrize("reuse_setup_config", [True, False])
     def test_manifest_fixture_runs_in_the_server_environment(
-        self, monkeypatch: MonkeyPatch, tmp_path: Path, editable_install: bool, reuse_setup_config: bool
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, editable_install: bool
     ) -> None:
         install_root = nemo_gym.cli.env.PARENT_DIR if editable_install else tmp_path / "site-packages"
         monkeypatch.setattr(nemo_gym.cli.env, "PARENT_DIR", install_root)
@@ -1630,10 +1629,11 @@ class TestOnboardingCommandAdapters:
         spec.to_dict.return_value = {"name": "alpha"}
         monkeypatch.setattr(nemo_gym.cli.env, "prepare_verifier_run", MagicMock(return_value=spec))
         parser = MagicMock()
-        setup_config = OmegaConf.create({"uv_venv_dir": str(tmp_path / "isolated-envs")})
+        setup_config = OmegaConf.create({})
         parser.parse.return_value = setup_config
         monkeypatch.setattr(nemo_gym.cli.env, "GlobalConfigDictParser", MagicMock(return_value=parser))
         monkeypatch.setattr(nemo_gym.cli.env, "setup_env_command", lambda *args: "setup")
+        monkeypatch.setattr(nemo_gym.cli.env, "get_venv_path", lambda *args: tmp_path / ".venv")
 
         def run_command(command: str, *args, **kwargs):
             result_path = Path(shlex.split(command)[-1])
@@ -1658,17 +1658,10 @@ class TestOnboardingCommandAdapters:
         runner = MagicMock(side_effect=run_command)
         monkeypatch.setattr(nemo_gym.cli.env, "run_command", runner)
 
-        report = nemo_gym.cli.env._run_manifest_verifier(
-            self._ENTRY, update_expected=True, setup_config=setup_config if reuse_setup_config else None
-        )
+        report = nemo_gym.cli.env._run_manifest_verifier(self._ENTRY, update_expected=True)
 
         assert report.name == "alpha"
-        if reuse_setup_config:
-            parser.parse.assert_not_called()
-        else:
-            assert parser.parse.call_args.args[0].offline is True
-        python = tmp_path / "isolated-envs/resources_servers/alpha/.venv/bin/python"
-        assert str(python) in runner.call_args.args[0]
+        assert parser.parse.call_args.args[0].offline is True
         assert "nemo_gym.environment._verifier_runner" in runner.call_args.args[0]
         assert runner.call_args.kwargs["global_config_dict"] is setup_config
         assert runner.call_args.kwargs["stdout_target"] is sys.stderr
@@ -2292,3 +2285,76 @@ def test_invalid_shutdown_budget_fails_before_spawning(monkeypatch):
         RunHelper().start(None)
     initialize.assert_not_called()
     launch.assert_not_called()
+
+
+@pytest.mark.parametrize("verifier_error", [False, True])
+def test_server_data_validation_checks_manifest_verifiers(
+    monkeypatch: MonkeyPatch, tmp_path: Path, verifier_error: bool
+) -> None:
+    server_dir = tmp_path / "resources_servers/demo"
+    server_dir.mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    entries = [
+        EnvironmentCatalogEntry(
+            name=name,
+            config_path=tmp_path / name / "config.yaml",
+            path=tmp_path / name,
+            manifest_path=tmp_path / name / "manifest.yaml",
+            resources_server="demo",
+        )
+        for name in ("benchmark_a", "benchmark_b")
+    ]
+    monkeypatch.setattr(nemo_gym.cli.env, "discover_environment_catalog", lambda: entries)
+    validation = MagicMock(return_value=SimpleNamespace(datasets=()))
+    monkeypatch.setattr(nemo_gym.cli.env, "validate_environment", validation)
+    verifier = MagicMock(side_effect=RuntimeError("bad verifier") if verifier_error else None)
+    monkeypatch.setattr(nemo_gym.cli.env, "_run_manifest_verifier", verifier)
+    config = EnvironmentTestConfig(entrypoint="resources_servers/demo", should_validate_data=True)
+    if verifier_error:
+        with raises(RuntimeError, match="bad verifier"):
+            nemo_gym.cli.env._validate_data_single(config)
+    else:
+        nemo_gym.cli.env._validate_data_single(config)
+        assert verifier.call_count == 2
+        for entry in entries:
+            validation.assert_any_call(entry.manifest_path, entry.config_path, validate_datasets=False)
+            verifier.assert_any_call(entry, update_expected=False, validation=validation.return_value)
+
+
+@pytest.mark.parametrize("legacy_artifact", [None, "example_metrics.json", "example_rollouts.jsonl"])
+def test_server_data_validation_keeps_legacy_contract(
+    monkeypatch: MonkeyPatch, tmp_path: Path, legacy_artifact: str | None
+) -> None:
+    server_dir = tmp_path / "resources_servers/demo/data"
+    server_dir.mkdir(parents=True)
+    (server_dir / "example.jsonl").write_text("{}\n" * 5)
+    monkeypatch.chdir(tmp_path)
+    entries = ()
+    if legacy_artifact:
+        (server_dir / legacy_artifact).write_text("{}\n" * 5)
+        # Neither partial legacy artifacts nor invalid metrics may bypass legacy validation.
+        if legacy_artifact == "example_metrics.json":
+            (server_dir / "example.jsonl").write_text("{}\n" * 4)
+        entries = (SimpleNamespace(manifest_path=tmp_path / "manifest.yaml", resources_server="demo"),)
+    monkeypatch.setattr(nemo_gym.cli.env, "discover_environment_catalog", lambda: entries)
+    config = EnvironmentTestConfig(entrypoint="resources_servers/demo", should_validate_data=True)
+    message = (
+        "Expected 5 examples" if legacy_artifact == "example_metrics.json" else "must run the example data validation"
+    )
+    with raises(AssertionError, match=message):
+        nemo_gym.cli.env._validate_data_single(config)
+
+
+def test_manifest_server_data_validation_rejects_conflict_artifacts(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    data_dir = tmp_path / "resources_servers/demo/data"
+    data_dir.mkdir(parents=True)
+    (data_dir / "example-conflict.jsonl").write_text("{}\n")
+    monkeypatch.chdir(tmp_path)
+    entries = (SimpleNamespace(manifest_path=tmp_path / "manifest.yaml", resources_server="demo"),)
+    monkeypatch.setattr(nemo_gym.cli.env, "discover_environment_catalog", lambda: entries)
+    verifier = MagicMock()
+    monkeypatch.setattr(nemo_gym.cli.env, "_run_manifest_verifier", verifier)
+    config = EnvironmentTestConfig(entrypoint="resources_servers/demo", should_validate_data=True)
+    with raises(AssertionError, match="Found conflicting paths"):
+        nemo_gym.cli.env._validate_data_single(config)
+    verifier.assert_not_called()
