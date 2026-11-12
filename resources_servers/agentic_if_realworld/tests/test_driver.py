@@ -48,8 +48,8 @@ def test_adaptive_capture_selected_parameters_and_resume(
     tmp_path, monkeypatch, complete_stage, fail_last_dispatch, interrupted, fresh_resume, multiple, reasoning_effort
 ):
     monkeypatch.setattr(gym_commit, "installed_gym_commit", lambda: "runtime-revision")
-    # Other CI component workers can change unrelated files in the shared checkout.
-    # Keep dispatch scenarios fixed, then exercise the real identity checks on resume.
+    # Keep checkout-wide identity fixed while exercising adaptive dispatch and resume.
+    # Focused tests below cover real runtime discovery and source changes.
     runtime = core.runtime_identity()
     monkeypatch.setattr(rollout_driver, "runtime_identity", lambda: copy.deepcopy(runtime))
     create(tmp_path / "data", examples=interrupted or multiple)
@@ -470,9 +470,6 @@ def test_adaptive_capture_selected_parameters_and_resume(
         assert not [finding for finding in findings if finding["assertion"].startswith(("steps.", "ownership."))]
     before = {path: core.digest(path) for path in [*store.root.glob("*"), *verifier.receipt_dir.rglob("*.json")]}
     config.resume_from_cache = True
-    # Another component's generated output must not invalidate a completed run.
-    monkeypatch.setattr(rollout_driver, "runtime_identity", core.runtime_identity)
-    monkeypatch.setattr(gym_commit, "installed_gym_commit", lambda: "runtime-revision-dirty")
     asyncio.run(rollout_driver.run_rollout_collection(config, settings))
     assert inventory_path.read_bytes() == inventory_bytes
     assert len(calls) == last_stage + 1 and len(judge_calls) == int(complete_stage is not None)
@@ -480,14 +477,15 @@ def test_adaptive_capture_selected_parameters_and_resume(
     assert all(core.digest(path) == digest for path, digest in before.items())
     assert core.read(tmp_path / "out.jsonl").get("response") == record.get("response")
     artifacts = {path: path.read_bytes() for path in artifacts}
-    original_digest = core.digest
+    changed_runtime = copy.deepcopy(runtime)
+    source = "gym/responses_api_agents/simple_agent/app.py"
+    assert source in changed_runtime["sources"]
+    changed_runtime["sources"][source] = "changed-source"
     with monkeypatch.context() as context:
         context.setattr(
-            core,
-            "digest",
-            lambda path: "changed-source"
-            if path.as_posix().endswith("simple_agent/app.py")
-            else original_digest(path),
+            rollout_driver,
+            "runtime_identity",
+            lambda: copy.deepcopy(changed_runtime),
         )
         with pytest.raises(ValueError, match="fingerprint mismatch"):
             asyncio.run(rollout_driver.run_rollout_collection(config, settings))
