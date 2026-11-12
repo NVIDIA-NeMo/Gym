@@ -357,6 +357,8 @@ The manifest is the place to read this declaration, but not every field is autho
 | Field group | Authority |
 | --- | --- |
 | Identity and catalog metadata: `name`, `version`, `experimental`, `kind`, `integration_profile`, `domain`, `description`, `modality`, `licensing`, and `authors` | Manifest |
+| Relationships: optional `setup_of` and `protocol_of` | Manifest |
+| Selection metadata: optional `maintainers`, `intended_use`, `training_allowed`, `overlaps_with`, `primary_metric`, and `requirements` | Manifest |
 | Behavioral declarations: `reward`, `determinism`, and optional session, state, sandbox, provenance, and lifecycle fields | Manifest |
 | Composition: `resources_server`, `agent_server`, `model_server`, `datasets`, `rollout_driver`, and `grading_mode` | Gym config; mirrored read-only in the manifest |
 | Configuration selection: `config_path` and optional `dataset_owner` | Manifest |
@@ -403,6 +405,8 @@ For benchmarks and named configs, additional fields apply — in particular `con
 | Field | Type | Requirement and allowed values |
 | --- | --- | --- |
 | `name` | string | Required; non-empty and must match the catalog path |
+| `setup_of` | string or null | Optional; the manifest whose tasks and scoring this config runs with another harness or runtime; see [Setups and Protocols](#setups-and-protocols) |
+| `protocol_of` | string or null | Optional, benchmarks only; the benchmark whose tasks this config scores under another prompt, tools, or scoring; not set together with `setup_of` |
 | `version` | string | Required; non-empty, with Semantic Versioning recommended |
 | `experimental` | boolean | Optional; defaults to `true` |
 | `kind` | string | Required; `environment` or `benchmark` |
@@ -412,6 +416,12 @@ For benchmarks and named configs, additional fields apply — in particular `con
 | `modality` | string | Required; non-empty |
 | `licensing` | string | Optional; defaults to `unknown`; SPDX expression, `internal`, `proprietary`, or `unknown` |
 | `authors` | list of strings | Required; non-empty and unique |
+| `maintainers` | list of strings or null | Optional; GitHub logins of the current maintainers, non-empty and unique |
+| `intended_use` | list of strings or null | Optional; `evaluation`, `training`, or both; unknown when absent |
+| `training_allowed` | boolean or null | Optional; whether the environment's data may be used for training; unknown when absent |
+| `overlaps_with` | list of strings or null | Optional; benchmarks whose tasks overlap with this environment's data |
+| `primary_metric` | string or null | Optional; the key metric that is the headline score |
+| `requirements` | object or null | Optional; `gpu` (the environment itself needs a GPU) and `internet` (a run needs outbound internet access), each a boolean and unknown when absent |
 | `reward` | object | Required; `range` is two finite numbers ordered `lower <= upper` (a constant range is allowed) and `higher_is_better` is boolean |
 | `determinism` | string | Optional; `seeded`, `stochastic`, or `unknown` (default) |
 | `config_path` | string | Optional; defaults to `config.yaml` beside the manifest; must be relative and stay inside the catalog tree |
@@ -435,6 +445,15 @@ For benchmarks and named configs, additional fields apply — in particular `con
 Each `datasets` item requires `name`, `type`, and `jsonl_fpath`. `type` is `train`, `validation`, `example`, or `benchmark`; benchmark datasets also require `prepare_script`. `num_repeats` defaults to `1`. `canonical_split` records the source split being measured, while dataset `type: benchmark` selects its role in Gym.
 
 For named configs, put the manifest in the workload's catalog directory and set `config_path` relative to it. For example, `benchmarks/my_benchmark/config_with_system/manifest.yaml` can declare `name: my_benchmark/config_with_system` and `config_path: ../config_with_system.yaml`. Shared prompts and suite fragments are not standalone workloads.
+
+### Setups and Protocols
+
+A named config is often a variant of another workload rather than a workload of its own. Its manifest can say so:
+
+- **`setup_of`:** the config runs the same tasks and scoring as the named manifest, with another harness or runtime. Validation checks that both manifests declare the same kind, task datasets, resources server, and grading mode.
+- **`protocol_of`:** a benchmark config scores the same tasks as the named benchmark under another prompt, tools, or scoring, such as a variant with a system prompt. Validation checks that the named manifest is a benchmark; whether the tasks match is checked in review, because a protocol may prepare its own copy of the data.
+
+`protocol_of` names a benchmark's main manifest. `setup_of` names a main manifest or a protocol, so a protocol can also run under another harness. Neither names a setup. Scores from different protocols are not comparable.
 
 `dataset_owner` names a config instance, not a component implementation. It selects the intended dataset declaration when multiple instances have datasets; runtime agent routing must still be unambiguous. New task scaffolds put datasets on the resources-server instance. Existing agent-owned declarations, including the reuse-verifier scaffold, remain supported.
 
