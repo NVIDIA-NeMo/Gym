@@ -42,8 +42,14 @@ agentic_vbench_agent:
       model_context_tokens: ${oc.select:agentic_vbench_context_tokens,262144}
       model_output_capability_tokens: ${oc.select:agentic_vbench_output_tokens,100000}
       model_call_timeout_ms: ${oc.select:agentic_vbench_model_call_timeout_ms,3600000}
-      opencode_subagents: ${oc.select:agentic_vbench_opencode_subagents,default}
-      keep_task_images: ${oc.select:agentic_vbench_keep_task_images,false}
+      # Fraction of each task's agent time limit; null keeps the task's own cap.
+      agent_timeout_multiplier: ${oc.select:agentic_vbench_agent_timeout_multiplier,null}
+      # Native OpenCode observation bounds; full tool output stays on disk.
+      opencode_tool_output_max_lines: ${oc.select:agentic_vbench_tool_output_max_lines,null}
+      opencode_tool_output_max_bytes: ${oc.select:agentic_vbench_tool_output_max_bytes,null}
+      # OpenCode subagents (task tool with depth-one `general` children); off for the benchmark.
+      opencode_subagents_enabled: ${oc.select:agentic_vbench_subagents_enabled,false}
+      opencode_subagent_max_depth: 1
       datasets:
         - name: agentic_vbench
           type: benchmark

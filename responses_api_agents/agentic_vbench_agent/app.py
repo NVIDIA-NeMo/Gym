@@ -1,6 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Gym /run adapter for the pinned official-compatible Harbor/OpenCode workflow."""
+"""Gym /run adapter for the pinned official-compatible Harbor/OpenCode workflow.
+
+Under NeMo-RL token capture the same workflow trains: OpenCode's calls go
+through a per-episode capture proxy to Gym's rollout-scoped policy route, and
+the returned output is rebuilt from the served completions (see
+``capture_proxy``). Evaluation runs are unchanged.
+"""
 
 import asyncio
 import hashlib
@@ -16,12 +22,25 @@ from typing import Any, Literal
 from fastapi import HTTPException
 from pydantic import ConfigDict, Field, PrivateAttr
 
-from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.agents import (
+    BaseResponsesAPIAgentConfig,
+    SimpleResponsesAPIAgent,
+)
 from nemo_gym.client import get_server_url
 from nemo_gym.config import ModelServerRef
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import (
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
+from responses_api_agents.agentic_vbench_agent.capture_proxy import (
+    CaptureProxy,
+    capture_output,
+    load_records,
+    local_ip_toward,
+)
 from responses_api_agents.agentic_vbench_agent.core import (
+    BACKEND_CLIENT_ENV,
     FAMILIES,
     backend_environment,
     ensure_checkout,
@@ -60,13 +79,49 @@ class AgenticVBenchConfig(BaseResponsesAPIAgentConfig):
     concurrency: int = Field(default=12, ge=1)
     max_turns: int | None = Field(default=None, ge=1)
     verifier_timeout_multiplier: float = Field(default=3.0, ge=1.0)
+    # Bound episode wall time: Harbor stops OpenCode at task budget x multiplier and
+    # verifies what was delivered (a timed-out episode scores as the judge sees it).
+    agent_timeout_multiplier: float | None = Field(default=None, gt=0.0)
     model_context_tokens: int = Field(default=262144, gt=0)
     model_output_capability_tokens: int = Field(default=100000, gt=0)
     model_call_timeout_ms: int = Field(default=3_600_000, gt=0)
-    # OpenCode subagent policy: default (built-ins available), off (primary agent only), on (built-ins + media-analyst)
-    opencode_subagents: Literal["default", "off", "on"] = "default"
-    # Keep task images between trials (trace generation over repeated trials); the benchmark deletes them.
-    keep_task_images: bool = False
+    # OpenCode keeps complete tool output on disk while returning only a bounded
+    # preview to the model. These are observation limits, not command or reward limits.
+    opencode_tool_output_max_lines: int | None = Field(default=None, gt=0)
+    opencode_tool_output_max_bytes: int | None = Field(default=None, gt=0)
+    # OpenCode context compaction. None keeps OpenCode's defaults (evaluation).
+    # Training pins them: auto on with NeMo-RL context compaction, both off for
+    # an append-only context under ordinary token capture.
+    opencode_compaction_auto: bool | None = None
+    opencode_compaction_prune: bool | None = None
+    # Drop OpenCode's session-title model call (a side generation outside the task).
+    opencode_disable_title: bool = False
+    # Answer OpenCode's step-cap turn in the proxy (required for ordinary token
+    # capture: the turn replays an assistant message OpenCode wrote itself).
+    local_step_cap_reply: bool = False
+    # Under token capture, also return compaction summary generations so NeMo-RL
+    # trains them in their own rewritten context.
+    train_compaction_summaries: bool = True
+    # Fixed training mode of a run (plain | compaction | subagent |
+    # compaction_subagent), as in the reference subagent-training harness:
+    # subagent mode enables OpenCode's task tool (depth-one `general` children
+    # sharing the parent's permissions and turn limit) and forbids
+    # compaction/pruning; compaction_subagent enables the task tool and keeps
+    # OpenCode compaction on for every session. Validated here and by the
+    # trainer. None keeps the current behaviour (task tool denied).
+    opencode_training_mode: Literal["plain", "compaction", "subagent", "compaction_subagent"] | None = None
+    opencode_subagents_enabled: bool = False
+    opencode_subagent_max_depth: int = 1
+    opencode_subagent_max_active: int | None = None
+    # Optional primary-agent instruction used by the dedicated subagent-training
+    # recipe. It does not alter the benchmark prompt or verifier metadata.
+    opencode_delegation_prompt: str | None = None
+    # Optional instruction for the depth-one ``general`` child. Keeping this
+    # separate avoids asking a child whose task tool is denied to delegate.
+    opencode_subagent_prompt: str | None = None
+    # Address the task container uses to reach this server's capture proxy; derived
+    # from the route to the policy server when unset.
+    capture_proxy_host: str | None = None
 
 
 class AgenticVBenchRunRequest(BaseRunRequest):
@@ -88,6 +143,17 @@ class AgenticVBenchVerifyResponse(BaseVerifyResponse):
     reward_assembly: float | None = None
     reward_sequencing: float | None = None
     reward_repurpose: float | None = None
+    reward_claweval: float | None = None
+    reward_videoqa: float | None = None
+    # Token-capture runs: served id of the last accepted model call and call statistics.
+    terminal_response_id: str | None = None
+    model_calls: int = 0
+    # Subagent training: served response ids owned by each OpenCode session
+    # (parent first, then depth-one children with their spawn tool-call ids).
+    session_traces: list[dict[str, Any]] = []
+    compaction_summaries: int = 0
+    generated_tokens: int = 0
+    capture_records: str | None = None
 
 
 class AgenticVBenchAgent(SimpleResponsesAPIAgent):
@@ -100,10 +166,13 @@ class AgenticVBenchAgent(SimpleResponsesAPIAgent):
     _output_root: Path = PrivateAttr()
     _runtime_root: Path = PrivateAttr()
     _env: dict[str, str] = PrivateAttr()
+    _proxy: CaptureProxy | None = PrivateAttr(default=None)
+    _proxy_lock: asyncio.Lock = PrivateAttr()
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
         config = self.config
+        self._proxy_lock = asyncio.Lock()
         if (config.model_server is None) == (config.model_base_url is None):
             raise ValueError("Configure exactly one of model_server or model_base_url")
         if config.model_base_url is not None and not config.model_id:
@@ -122,6 +191,7 @@ class AgenticVBenchAgent(SimpleResponsesAPIAgent):
             Path(config.runtime_root) if config.runtime_root else Path(tempfile.mkdtemp(prefix="agentic-vbench-"))
         )
         self._env = self._resolve_environment()
+        self._backend_client_env_mtime = self._backend_client_env_stamp()
 
     def _resolve_output_root(self) -> Path:
         if self.config.output_root:
@@ -131,6 +201,29 @@ class AgenticVBenchAgent(SimpleResponsesAPIAgent):
         if not rollouts:
             raise ValueError("output_root is required when the run has no output_jsonl_fpath")
         return Path(str(rollouts)).with_suffix("") / "agentic_vbench_episodes"
+
+    def _backend_client_env_stamp(self) -> float | None:
+        if self.config.backend != "remote" or not self.config.backend_dir:
+            return None
+        try:
+            return (Path(self.config.backend_dir) / BACKEND_CLIENT_ENV).stat().st_mtime
+        except FileNotFoundError:
+            return None
+
+    def _current_environment(self) -> dict[str, str]:
+        """The backend environment, re-resolved when the backend moved.
+
+        A preemptible backend job is requeued on another node and rewrites
+        client.env (new DOCKER_HOST, new TLS material). Trials launched with the
+        old endpoint fail Harbor's Docker probe for the rest of the server's life;
+        re-reading the file on change keeps the agent on the live backend.
+        """
+        stamp = self._backend_client_env_stamp()
+        if stamp != self._backend_client_env_mtime:
+            print("[agentic_vbench] backend client.env changed; re-resolving the Docker endpoint", flush=True)
+            self._env = self._resolve_environment()
+            self._backend_client_env_mtime = stamp
+        return self._env
 
     def _resolve_environment(self) -> dict[str, str]:
         env = dict(os.environ)
@@ -153,7 +246,9 @@ class AgenticVBenchAgent(SimpleResponsesAPIAgent):
             return self.config.model_base_url.rstrip("/"), str(self.config.model_id)
         server = self.config.model_server
         assert server is not None
-        base_url = self.base_url_for_run(get_server_url(server.name), body.model_dump()) + "/v1"
+        # Pass the request model: the explicit capture id NeMo-RL sends is excluded
+        # from dumps, and the derived task/rollout key would not match its ledger.
+        base_url = self.base_url_for_run(get_server_url(server.name), body) + "/v1"
         global_config = getattr(self.server_client, "global_config_dict", None) or {}
         model = self.config.model_id or (
             global_config.get("policy_model_name") if hasattr(global_config, "get") else None
@@ -163,12 +258,30 @@ class AgenticVBenchAgent(SimpleResponsesAPIAgent):
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
         raise HTTPException(400, "Use /run with an Agentic-VBench dataset row")
 
+    def _proxy_host(self, policy_endpoint: str) -> str:
+        host = self.config.capture_proxy_host or self.config.host
+        if host in ("", "0.0.0.0", "::", "127.0.0.1", "localhost"):
+            from urllib.parse import urlsplit
+
+            policy_host = urlsplit(policy_endpoint).hostname or "127.0.0.1"
+            host = local_ip_toward(policy_host, urlsplit(policy_endpoint).port or 80)
+        return host
+
+    async def _ensure_proxy(self, policy_endpoint: str) -> CaptureProxy:
+        async with self._proxy_lock:
+            if self._proxy is None:
+                proxy = CaptureProxy(
+                    advertise_host=self._proxy_host(policy_endpoint),
+                    request_timeout_s=self.config.model_call_timeout_ms / 1000 + 60,
+                )
+                await proxy.start()
+                self._proxy = proxy
+            return self._proxy
+
     async def run(self, body: AgenticVBenchRunRequest) -> AgenticVBenchVerifyResponse:
         endpoint, model = self._model_endpoint(body)
         # Gym's HTTP retries must never create a second trajectory for a completed zero score.
-        # The policy endpoint is left out on purpose: its host and port change when a resumed
-        # Slurm job redispatches an unfinished rollout, and the episode must still be found.
-        identity = {"request": body.model_dump(), "model": model}
+        identity = {"request": body.model_dump(), "model": model, "endpoint": endpoint}
         key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
         if key not in self._inflight:
             self._inflight[key] = asyncio.create_task(self._run_once(body, key, endpoint, model))
@@ -210,13 +323,26 @@ class AgenticVBenchAgent(SimpleResponsesAPIAgent):
                 await asyncio.to_thread(self._archive_incomplete, output)
             output.mkdir(parents=True, exist_ok=False)
             runtime = self._runtime_root / key[:16]
+            capture = self._token_id_capture_enabled()
+            record_dir = output / "model_calls"
+            agent_endpoint = endpoint
+            if capture:
+                # OpenCode in the task container reaches the proxy; the proxy forwards to
+                # the rollout-prefixed policy route and records every served completion.
+                proxy = await self._ensure_proxy(endpoint)
+                agent_endpoint = proxy.register(
+                    key[:16],
+                    endpoint.removesuffix("/v1"),
+                    record_dir,
+                    local_step_cap_reply=self.config.local_step_cap_reply,
+                )
             command = [
                 self._harbor_python,
                 str(Path(__file__).with_name("harbor_runner.py")),
                 "--task-path",
                 str(self._benchmark_root / "tasks" / f"agentic_vbench_{task['family']}" / task_id),
                 "--endpoint",
-                endpoint,
+                agent_endpoint,
                 "--model",
                 model,
                 "--output",
@@ -233,31 +359,81 @@ class AgenticVBenchAgent(SimpleResponsesAPIAgent):
                 str(self.config.verifier_timeout_multiplier),
                 "--model-timeout-ms",
                 str(self.config.model_call_timeout_ms),
-                "--opencode-subagents",
-                self.config.opencode_subagents,
-                *(["--keep-task-images"] if self.config.keep_task_images else []),
             ]
+            if self.config.agent_timeout_multiplier is not None:
+                command.extend(["--agent-timeout-multiplier", str(self.config.agent_timeout_multiplier)])
+            if self.config.opencode_tool_output_max_lines is not None:
+                command.extend(["--tool-output-max-lines", str(self.config.opencode_tool_output_max_lines)])
+            if self.config.opencode_tool_output_max_bytes is not None:
+                command.extend(["--tool-output-max-bytes", str(self.config.opencode_tool_output_max_bytes)])
             if self.config.judge_protocol:
                 command.extend(["--judge-protocol", self.config.judge_protocol])
             if self.config.max_turns is not None:
                 command.extend(["--max-turns", str(self.config.max_turns)])
             if self.config.credentials_file:
                 command.extend(["--credentials-file", self.config.credentials_file])
+            if self.config.opencode_compaction_auto is not None:
+                command.extend(["--compaction-auto", str(self.config.opencode_compaction_auto).lower()])
+            if self.config.opencode_compaction_prune is not None:
+                command.extend(["--compaction-prune", str(self.config.opencode_compaction_prune).lower()])
+            if self.config.opencode_disable_title:
+                command.append("--disable-title")
+            if self.config.opencode_training_mode is not None:
+                command.extend(["--training-mode", self.config.opencode_training_mode])
+            if self.config.opencode_subagents_enabled:
+                command.extend(["--subagents", "--subagent-max-depth", str(self.config.opencode_subagent_max_depth)])
+            if self.config.opencode_subagent_max_active is not None:
+                command.extend(["--subagent-max-active", str(self.config.opencode_subagent_max_active)])
+            if self.config.opencode_delegation_prompt is not None:
+                command.extend(["--delegation-prompt", self.config.opencode_delegation_prompt])
+            if self.config.opencode_subagent_prompt is not None:
+                command.extend(["--subagent-prompt", self.config.opencode_subagent_prompt])
             try:
-                exit_code = await run_process(command, output, runtime, self._env)
+                exit_code = await run_process(command, output, runtime, self._current_environment())
             except asyncio.CancelledError:
                 await asyncio.shield(asyncio.to_thread(self._cleanup_containers, output))
                 raise
+            finally:
+                if capture:
+                    proxy.unregister(key[:16])
             # A nonzero exit never becomes an invented zero reward. Preserve the original artifacts.
             if exit_code:
                 await asyncio.to_thread(self._cleanup_containers, output)
                 raise RuntimeError(f"Harbor runner exited {exit_code}; inspect {output / 'runner.log'}")
             result = await asyncio.to_thread(read_result, output, task)
             response = HarborAgentUtils.get_default_response_object()
-            response.update(
-                model=model,
-                output=HarborAgentUtils.trial_result_to_responses({}, result["trajectory"]),
-            )
+            extra: dict[str, Any] = {}
+            if capture:
+                # The served completions, converted as the capture ledger converts them,
+                # so NeMo-RL selects every accepted call by content and tool-call id.
+                items, stats = capture_output(
+                    load_records(record_dir), include_compaction_summaries=self.config.train_compaction_summaries
+                )
+                response.update(model=model, output=items)
+                extra = {
+                    "terminal_response_id": stats.terminal_response_id,
+                    "model_calls": stats.model_calls,
+                    "session_traces": stats.session_traces,
+                    "compaction_summaries": stats.compaction_summaries,
+                    "generated_tokens": stats.generated_tokens,
+                    "capture_records": str(record_dir),
+                }
+                if stats.failed_calls:
+                    # The capture ledger records the failure as well; the reward is
+                    # real but the trajectory is not a clean measurement.
+                    extra.update(mask_sample=True, failure_kind="agentic_vbench:model_call_failed")
+                print(
+                    f"[agentic_vbench] task={task_id} reward={result['reward']:.3f} calls={stats.model_calls} "
+                    f"compactions={stats.compaction_summaries} ignored={stats.ignored_calls} "
+                    f"failed={stats.failed_calls} generated_tokens={stats.generated_tokens} "
+                    f"complete={stats.complete}",
+                    flush=True,
+                )
+            else:
+                response.update(
+                    model=model,
+                    output=HarborAgentUtils.trial_result_to_responses({}, result["trajectory"]),
+                )
             response["usage"] = None
             family = task["family"]
             verified = AgenticVBenchVerifyResponse(
@@ -269,6 +445,7 @@ class AgenticVBenchAgent(SimpleResponsesAPIAgent):
                 equal_family_reward=result["reward"] * equal_family_weight(family),
                 **{f"reward_{family}": result["reward"]},
                 **result,
+                **extra,
             )
             temporary = output / "gym_result.json.tmp"
             temporary.write_text(verified.model_dump_json())
@@ -284,7 +461,7 @@ class AgenticVBenchAgent(SimpleResponsesAPIAgent):
         if self.config.backend != "remote":
             return
         try:
-            remove_episode_containers(output, self._env)
+            remove_episode_containers(output, self._current_environment())
         except Exception as error:  # noqa: BLE001 - cleanup must not mask the episode's own failure
             print(f"Backend container cleanup failed for {output}: {error}", file=sys.stderr)
 

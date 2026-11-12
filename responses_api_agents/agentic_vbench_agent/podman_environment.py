@@ -16,8 +16,10 @@ from harbor.environments.capabilities import EnvironmentCapabilities
 class PodmanEnvironment(BaseEnvironment):
     """Execute the benchmark's original Dockerfile without a Docker daemon."""
 
-    def __init__(self, *args, runtime_root: str, **kwargs):
+    def __init__(self, *args, runtime_root: str, mounts_json: list[dict] | None = None, **kwargs):
         super().__init__(*args, **kwargs)
+        # Read-only host bind mounts from the task runtime spec (harbor_runner.load_runtime_spec).
+        self._mounts = list(mounts_json or [])
         self._runtime = Path(runtime_root).resolve() / hashlib.sha256(self.session_id.encode()).hexdigest()[:16]
         self._runtime.mkdir(parents=True, exist_ok=False)
         self._runroot = Path(tempfile.mkdtemp(prefix="avb-podman-", dir="/tmp"))
@@ -124,6 +126,8 @@ class PodmanEnvironment(BaseEnvironment):
         ]:
             host.mkdir(parents=True, exist_ok=True)
             command.extend(["--volume", f"{host.resolve()}:{target}"])
+        for mount in self._mounts:
+            command.extend(["--volume", f"{mount['source']}:{mount['target']}:ro"])
         command.extend(["--entrypoint", "sh", self._image, "-c", "exec sleep infinity"])
         await self._podman(command)
         self._started = True

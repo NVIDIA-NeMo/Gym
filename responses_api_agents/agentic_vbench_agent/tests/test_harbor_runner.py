@@ -16,9 +16,13 @@ import pytest
 from responses_api_agents.agentic_vbench_agent import harbor_runner
 from responses_api_agents.agentic_vbench_agent.harbor_runner import (
     JUDGE_PROTOCOLS,
+    MATERIALS_RETRY,
+    MATERIALS_RETRY_PATCHED,
     TYPING_DIAGNOSTIC,
     container_endpoint,
+    stage_assembly_judge_guard,
     stage_judge,
+    stage_materials,
 )
 
 
@@ -71,19 +75,181 @@ def make_task(root: Path, task_toml: str) -> Path:
     return task
 
 
-def test_hub_judge_is_verifier_only(tmp_path: Path) -> None:
+ASSEMBLY_JUDGE = """import json
+
+
+def _normalize(source):
+    return str(source)
+
+
+def _zero(reason):
+    return {"reward": 0.0, "reason": reason}
+
+
+def score(solution_json):
+    sol = json.loads(solution_json.read_text())
+
+    segments = sol.get("segments")
+    if not isinstance(segments, list):
+        return _zero("solution.json: segments not a list")
+
+    pred = [_normalize(seg.get("source", "")) for seg in segments]
+    return {"reward": len(pred) / 4}
+"""
+
+
+def pin_synthetic_assembly_judge(monkeypatch: pytest.MonkeyPatch, task: Path) -> None:
+    hardened = ASSEMBLY_JUDGE.replace(
+        harbor_runner._ASSEMBLY_MANIFEST_PARSER,
+        harbor_runner._ASSEMBLY_HARDENED_PARSER,
+    )
+    monkeypatch.setattr(
+        harbor_runner,
+        "_ASSEMBLY_JUDGE_SHA256",
+        {
+            task.name: (
+                hashlib.sha256(ASSEMBLY_JUDGE.encode()).hexdigest(),
+                hashlib.sha256(hardened.encode()).hexdigest(),
+            )
+        },
+    )
+
+
+def test_assembly_judge_hash_manifest_covers_all_pinned_tasks() -> None:
+    assert set(harbor_runner._ASSEMBLY_JUDGE_SHA256) == {f"agentic-vbench-assembly-task{i}" for i in range(1, 19)}
+    assert all(
+        len(source_sha256) == len(staged_sha256) == 64
+        for source_sha256, staged_sha256 in harbor_runner._ASSEMBLY_JUDGE_SHA256.values()
+    )
+
+
+PINNED_ASSEMBLY_ROOT = Path(os.environ.get("AGENTIC_VBENCH_ROOT", "/nonexistent")) / ("tasks/agentic_vbench_assembly")
+
+
+@pytest.mark.skipif(not PINNED_ASSEMBLY_ROOT.is_dir(), reason="Pinned Agentic-VBench checkout not available")
+def test_pinned_assembly_judges_match_and_stage_to_exact_hashes(tmp_path: Path) -> None:
+    for task_id, (source_sha256, staged_sha256) in harbor_runner._ASSEMBLY_JUDGE_SHA256.items():
+        task = PINNED_ASSEMBLY_ROOT / task_id
+        source = task / "steps/solve/tests/judge.py"
+        assert hashlib.sha256(source.read_bytes()).hexdigest() == source_sha256
+        output = tmp_path / "outputs" / task_id
+        output.mkdir(parents=True)
+
+        staged = stage_assembly_judge_guard(
+            task,
+            staging=tmp_path / "staging",
+            output=output,
+        )
+
+        assert hashlib.sha256((staged / "steps/solve/tests/judge.py").read_bytes()).hexdigest() == staged_sha256
+
+
+def test_assembly_judge_guard_scores_non_object_manifest_zero_and_is_idempotent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = make_task(tmp_path / "tasks/agentic_vbench_assembly", JUDGED_TASK)
+    source_judge = task / "steps/solve/tests/judge.py"
+    source_judge.write_text(ASSEMBLY_JUDGE)
+    pin_synthetic_assembly_judge(monkeypatch, task)
+    output = tmp_path / "output"
+    output.mkdir()
+
+    staged = stage_assembly_judge_guard(
+        task,
+        staging=tmp_path / "staging",
+        output=output,
+    )
+
+    original_namespace = {}
+    exec(ASSEMBLY_JUDGE, original_namespace)
+    namespace = {}
+    exec((staged / "steps/solve/tests/judge.py").read_text(), namespace)
+    bare_list = tmp_path / "bare-list.json"
+    bare_list.write_text('[{"source": "3"}]')
+    scalar_segment = tmp_path / "scalar-segment.json"
+    scalar_segment.write_text('{"segments": [3]}')
+    valid_object = tmp_path / "valid-object.json"
+    valid_object.write_text('{"segments": [{"source": "3"}, {"source": "4"}]}')
+    assert namespace["score"](bare_list) == {
+        "reward": 0.0,
+        "reason": "solution.json: expected top-level object",
+    }
+    assert namespace["score"](scalar_segment) == {
+        "reward": 0.0,
+        "reason": "solution.json: segment 0 is not an object",
+    }
+    assert namespace["score"](valid_object) == original_namespace["score"](valid_object) == {"reward": 0.5}
+    assert source_judge.read_text() == ASSEMBLY_JUDGE
+    provenance = json.loads((output / "assembly_judge_guard.json").read_text())
+    assert provenance["original_judge_sha256"] == hashlib.sha256(ASSEMBLY_JUDGE.encode()).hexdigest()
+    assert provenance["staged_judge_sha256"] != provenance["original_judge_sha256"]
+    assert (
+        stage_assembly_judge_guard(
+            task,
+            staging=tmp_path / "staging",
+            output=output,
+        )
+        == staged
+    )
+    assert (staged / "steps/solve/tests/judge.py").read_text().count("expected top-level object") == 1
+
+
+def test_assembly_judge_guard_rejects_unexpected_pinned_parser(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = make_task(tmp_path / "tasks/agentic_vbench_assembly", JUDGED_TASK)
+    source = task / "steps/solve/tests/judge.py"
+    source_text = source.read_text()
+    monkeypatch.setattr(
+        harbor_runner,
+        "_ASSEMBLY_JUDGE_SHA256",
+        {task.name: (hashlib.sha256(source_text.encode()).hexdigest(), "0" * 64)},
+    )
+    with pytest.raises(ValueError, match="unexpected manifest parser"):
+        stage_assembly_judge_guard(task, staging=tmp_path / "staging", output=tmp_path)
+    assert source.read_text() == source_text
+    assert not (tmp_path / "staging").exists()
+
+
+def test_assembly_judge_guard_rejects_unexpected_source_without_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = make_task(tmp_path / "tasks/agentic_vbench_assembly", JUDGED_TASK)
+    source = task / "steps/solve/tests/judge.py"
+    source.write_text(ASSEMBLY_JUDGE)
+    pin_synthetic_assembly_judge(monkeypatch, task)
+    source.write_text(ASSEMBLY_JUDGE + "# unexpected edit\n")
+
+    with pytest.raises(ValueError, match="unexpected source digest"):
+        stage_assembly_judge_guard(task, staging=tmp_path / "staging", output=tmp_path)
+
+    assert not (tmp_path / "staging").exists()
+
+
+def test_assembly_judge_guard_leaves_other_families_unstaged(tmp_path: Path) -> None:
+    task = make_task(tmp_path / "tasks/agentic_vbench_repair", JUDGED_TASK)
+    staged = stage_assembly_judge_guard(task, staging=tmp_path / "staging", output=tmp_path)
+    assert staged == task
+    assert not (tmp_path / "staging").exists()
+
+
+@pytest.mark.parametrize("protocol", ["nvinference-hybrid", "nvinference-native"])
+def test_hub_judge_is_verifier_only(tmp_path: Path, protocol: str) -> None:
     task = make_task(tmp_path / "source", JUDGED_TASK)
     output = tmp_path / "output"
     output.mkdir()
 
-    staged = stage_judge(task, staging=tmp_path / "staging", output=output, protocol="nvinference-hybrid")
+    staged = stage_judge(task, staging=tmp_path / "staging", output=output, protocol=protocol)
 
     config = tomllib.loads((staged / "task.toml").read_text())
     assert "env" not in config["environment"]
     assert config["steps"][0]["verifier"]["timeout_sec"] == 1800.0
     assert config["steps"][0]["verifier"]["env"] == {
         "NVINFERENCE_API_KEY": "${NVINFERENCE_API_KEY}",
-        **JUDGE_PROTOCOLS["nvinference-hybrid"],
+        **JUDGE_PROTOCOLS[protocol],
     }
     tests = staged / "steps/solve/tests"
     assert (tests / "avb-original-judge.py").read_text() == "ORIGINAL JUDGE\n"
@@ -150,7 +316,7 @@ def test_hub_claude_keeps_original_request(hub_judge) -> None:
     path, payload, headers = calls[0]
     assert path == "/v1/messages" and headers == {"anthropic-version": "2023-06-01"}
     assert payload == {
-        "model": "aws/anthropic/bedrock-claude-opus-4-7",
+        "model": "us/azure/anthropic/eccn-claude-opus-4-8",
         "max_tokens": 300,
         "system": "grader",
         "messages": [{"role": "user", "content": content}],
@@ -172,7 +338,7 @@ def test_hub_gemini_sends_inline_media_with_bounded_thinking(hub_judge, tmp_path
 
     assert response.text == '{"pass": false, "why": "x"}'
     path, payload, _ = calls[0]
-    assert path == "/v1beta/models/gcp/google/gemini-3.5-flash:generateContent"
+    assert path == "/v1beta/models/us/gcp/google/eccn-gemini-3.5-flash:generateContent"
     parts = payload["contents"][0]["parts"]
     assert parts[0] == {"inlineData": {"mimeType": "video/mp4", "data": base64.b64encode(b"video-bytes").decode()}}
     assert parts[1] == {"inlineData": {"mimeType": "audio/mpeg", "data": base64.b64encode(b"mp3").decode()}}
@@ -213,9 +379,11 @@ def make_job(**kwargs) -> dict:
 
 
 def test_max_turns_caps_opencode_build_agent_steps() -> None:
-    config = make_job(max_turns=50)["agents"][0]["kwargs"]["opencode_config"]
+    agent = make_job(max_turns=50)["agents"][0]
+    config = agent["kwargs"]["opencode_config"]
     assert config["agent"] == {"build": {"steps": 50}}
-    assert config["provider"]["openai"]["options"]["baseURL"] == "http://10.0.0.5:3825"
+    assert config["provider"]["nemo"]["options"]["baseURL"] == "http://10.0.0.5:3825"
+    assert agent["model_name"] == "nemo/m"
 
 
 def test_turns_are_uncapped_by_default() -> None:
@@ -231,7 +399,7 @@ def test_opencode_reserves_the_declared_output_limit() -> None:
     agent = make_job()["agents"][0]
     # A template, because Harbor redacts literal *TOKEN* values when persisting the job config.
     assert agent["env"] == {"OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": "${OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX}"}
-    model = agent["kwargs"]["opencode_config"]["provider"]["openai"]["models"]["m"]
+    model = agent["kwargs"]["opencode_config"]["provider"]["nemo"]["models"]["m"]
     assert model["limit"] == {"context": 262144, "output": 100000}
 
 
@@ -371,11 +539,23 @@ def test_judge_key_prefers_credentials_then_hub_then_driver_key() -> None:
 
 
 def test_model_call_timeout_reaches_opencode_provider() -> None:
-    options = make_job(model_timeout_ms=3_600_000)["agents"][0]["kwargs"]["opencode_config"]["provider"]["openai"]
+    options = make_job(model_timeout_ms=3_600_000)["agents"][0]["kwargs"]["opencode_config"]["provider"]["nemo"]
     assert options["options"]["timeout"] == 3_600_000
-    assert "timeout" not in make_job()["agents"][0]["kwargs"]["opencode_config"]["provider"]["openai"]["options"]
+    assert "timeout" not in make_job()["agents"][0]["kwargs"]["opencode_config"]["provider"]["nemo"]["options"]
     with pytest.raises(ValueError, match="timeout"):
         make_job(model_timeout_ms=0)
+
+
+def test_native_tool_output_limits_reach_opencode_config() -> None:
+    opencode = make_job(tool_output_max_lines=400, tool_output_max_bytes=8192)["agents"][0]["kwargs"][
+        "opencode_config"
+    ]
+    assert opencode["tool_output"] == {"max_lines": 400, "max_bytes": 8192}
+    assert "tool_output" not in make_job()["agents"][0]["kwargs"]["opencode_config"]
+    with pytest.raises(ValueError, match="line limit"):
+        make_job(tool_output_max_lines=0)
+    with pytest.raises(ValueError, match="byte limit"):
+        make_job(tool_output_max_bytes=0)
 
 
 def test_hub_post_persistent_request_error_raises_without_rejecting_verification(
@@ -424,62 +604,229 @@ def test_hub_post_persistent_request_error_raises_without_rejecting_verification
     assert len(module.FAILURES) == 2  # rate limiting is transport, not this request's content
 
 
-def test_subagent_modes_shape_the_opencode_config() -> None:
+def test_compaction_and_title_knobs_reach_opencode_config() -> None:
+    config = make_job(compaction_auto=True, compaction_prune=False, disable_title=True, max_turns=12)
+    opencode = config["agents"][0]["kwargs"]["opencode_config"]
+    assert opencode["compaction"] == {"auto": True, "prune": False}
+    assert opencode["agent"] == {"build": {"steps": 12}, "title": {"disable": True}}
+    # Evaluation keeps OpenCode's own defaults: nothing is pinned.
     default = make_job()["agents"][0]["kwargs"]["opencode_config"]
-    assert "tools" not in default and "agent" not in default
-
-    off = make_job(opencode_subagents="off")["agents"][0]["kwargs"]["opencode_config"]
-    assert off["tools"]["task"] is False
-    assert all(off["agent"][name]["disable"] for name in harbor_runner.OPENCODE_BUILTIN_SUBAGENTS)
-
-    on = make_job(opencode_subagents="on", max_turns=5)["agents"][0]["kwargs"]["opencode_config"]
-    assert on["agent"]["media-analyst"]["mode"] == "subagent"
-    assert on["agent"]["build"]["steps"] == 5  # the mode never clobbers other agent settings
-    assert "tools" not in on
-
-    with pytest.raises(ValueError, match="subagent mode"):
-        make_job(opencode_subagents="sometimes")
+    assert "compaction" not in default and "agent" not in default
+    only_auto = make_job(compaction_auto=False)["agents"][0]["kwargs"]["opencode_config"]
+    assert only_auto["compaction"] == {"auto": False}
 
 
-def test_hub_post_outlasts_a_provider_outage(hub_judge, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A 503 streak shorter than the transient budget still yields the judge result."""
-    import io
-    import urllib.error
-
-    module, _ = hub_judge
-    monkeypatch.setenv("AVB_JUDGE_BASE_URL", "https://hub.example")
-    monkeypatch.setenv("NVINFERENCE_API_KEY", "k")
-    naps: list[float] = []
-    monkeypatch.setattr(module.time, "sleep", naps.append)
-    calls = {"n": 0}
-
-    class Resp(io.BytesIO):
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-    def fake_urlopen(request, timeout):
-        calls["n"] += 1
-        if calls["n"] <= 6:
-            raise urllib.error.HTTPError(request.full_url, 503, "unavailable", {}, io.BytesIO(b"x"))
-        return Resp(b'{"ok": true}')
-
-    monkeypatch.setattr(module.urllib.request, "urlopen", fake_urlopen)
-    module.FAILURES.clear()
-    assert module.real_post("/v1/messages", {}) == {"ok": True}
-    assert calls["n"] == 7 > module.ATTEMPTS
-    assert max(naps) == module.MAX_BACKOFF_SECONDS and module.FAILURES == []
+def test_agent_timeout_multiplier_is_optional_and_positive() -> None:
+    assert "agent_timeout_multiplier" not in make_job()
+    assert make_job(agent_timeout_multiplier=0.4)["agent_timeout_multiplier"] == 0.4
+    with pytest.raises(ValueError, match="Agent timeout multiplier"):
+        make_job(agent_timeout_multiplier=0.0)
 
 
-def test_agent_setup_gets_a_longer_allowance_than_the_agent_budget() -> None:
-    job = make_job()
-    assert job["agent_setup_timeout_multiplier"] == harbor_runner.AGENT_SETUP_TIMEOUT_MULTIPLIER >= 3.0
-    assert job["environment_build_timeout_multiplier"] == harbor_runner.ENVIRONMENT_BUILD_TIMEOUT_MULTIPLIER >= 6.0
-    assert job["config"]["agent_timeout_multiplier"] is None if "config" in job else True
+def test_job_config_denies_task_tool_without_subagents(tmp_path):
+    cfg = harbor_runner.job_config(
+        task_path=tmp_path,
+        output=tmp_path / "out",
+        runtime_root=tmp_path / "rt",
+        model="m",
+        endpoint="http://10.0.0.1:8000/v1",
+        context_tokens=65536,
+        output_tokens=8192,
+        backend="remote",
+        max_turns=32,
+    )
+    opencode = cfg["agents"][0]["kwargs"]["opencode_config"]
+    assert opencode["permission"]["task"] == "deny"
+    assert "general" not in opencode["agent"]
 
 
-def test_keep_task_images_disables_image_deletion():
-    assert make_job()["environment"]["delete"] is True
-    assert make_job(keep_task_images=True)["environment"]["delete"] is False
+def test_job_config_subagent_mode_configures_depth_one_children(tmp_path):
+    prompt = "You may delegate suitable subtasks to subagents when useful."
+    child_prompt = "Return a concise bounded result before the output limit."
+    cfg = harbor_runner.job_config(
+        task_path=tmp_path,
+        output=tmp_path / "out",
+        runtime_root=tmp_path / "rt",
+        model="m",
+        endpoint="http://10.0.0.1:8000/v1",
+        context_tokens=65536,
+        output_tokens=8192,
+        backend="remote",
+        max_turns=32,
+        training_mode="subagent",
+        subagents_enabled=True,
+        compaction_auto=False,
+        compaction_prune=False,
+        delegation_prompt=prompt,
+        subagent_prompt=child_prompt,
+    )
+    opencode = cfg["agents"][0]["kwargs"]["opencode_config"]
+    assert opencode["permission"] == {"*": "allow", "task": "allow"}
+    assert opencode["agent"]["general"] == {
+        "mode": "subagent",
+        "permission": {"*": "allow", "task": "deny"},
+        "steps": 32,
+        "prompt": child_prompt,
+    }
+    assert opencode["agent"]["explore"] == {"disable": True}
+    assert opencode["agent"]["build"] == {"steps": 32, "prompt": prompt}
+
+
+def test_job_config_subagent_mode_rejects_compaction_and_mismatched_flags(tmp_path):
+    common = dict(
+        task_path=tmp_path,
+        output=tmp_path / "out",
+        runtime_root=tmp_path / "rt",
+        model="m",
+        endpoint="http://10.0.0.1:8000/v1",
+        context_tokens=65536,
+        output_tokens=8192,
+        backend="remote",
+    )
+    with pytest.raises(ValueError, match="forbids"):
+        harbor_runner.job_config(**common, training_mode="subagent", subagents_enabled=True, compaction_auto=True)
+    with pytest.raises(ValueError, match="disagree"):
+        harbor_runner.job_config(**common, training_mode="subagent", subagents_enabled=False)
+    with pytest.raises(ValueError, match="disagree"):
+        harbor_runner.job_config(**common, training_mode="plain", subagents_enabled=True)
+    with pytest.raises(ValueError, match="depth-one"):
+        harbor_runner.job_config(**common, training_mode="subagent", subagents_enabled=True, subagent_max_depth=2)
+    with pytest.raises(ValueError, match="requires subagents"):
+        harbor_runner.job_config(**common, delegation_prompt="You may delegate")
+    with pytest.raises(ValueError, match="requires subagents"):
+        harbor_runner.job_config(**common, subagent_prompt="Be concise")
+    with pytest.raises(ValueError, match="must not be empty"):
+        harbor_runner.job_config(**common, training_mode="subagent", subagents_enabled=True, delegation_prompt="  ")
+    with pytest.raises(ValueError, match="must not be empty"):
+        harbor_runner.job_config(**common, training_mode="subagent", subagents_enabled=True, subagent_prompt="  ")
+
+
+MATERIALS_TASK = """version = "1.0"
+[task]
+name = "agentic-vbench/exp-demo"
+[environment]
+cpus = 4
+allow_internet = true
+[[steps]]
+name = "solve"
+[steps.verifier]
+timeout_sec = 1800.0
+[steps.verifier.env]
+MATERIALS_URL = "https://huggingface.co/datasets/demo/resolve/main/materials/exp-demo.zip"
+"""
+
+
+def test_materials_download_retries_are_stretched(tmp_path: Path) -> None:
+    task = make_task(tmp_path / "source", MATERIALS_TASK)
+    verifier = task / "steps/solve/tests/test.sh"
+    verifier.write_text(
+        f"set -euo pipefail\ncurl --fail --silent --show-error --location {MATERIALS_RETRY} \\\n"
+        '     "$MATERIALS_URL" -o /tmp/g.zip\n'
+    )
+    staged = stage_materials(task, staging=tmp_path / "staging")
+    assert staged != task
+    patched = (staged / "steps/solve/tests/test.sh").read_text()
+    assert MATERIALS_RETRY_PATCHED in patched and MATERIALS_RETRY not in patched
+    assert '"$MATERIALS_URL" -o /tmp/g.zip' in patched
+    # Source task and non-verifier files are untouched.
+    assert MATERIALS_RETRY in verifier.read_text()
+    assert (staged / "task.toml").read_text() == MATERIALS_TASK
+    # Re-staging the same task replaces the earlier copy instead of failing.
+    assert stage_materials(task, staging=tmp_path / "staging") == staged
+
+
+def test_tasks_without_materials_download_are_unchanged(tmp_path: Path) -> None:
+    task = make_task(tmp_path / "source", JUDGED_TASK)
+    assert stage_materials(task, staging=tmp_path / "staging") == task
+
+
+def test_job_config_compaction_subagent_mode_keeps_compaction_and_children(tmp_path):
+    common = dict(
+        task_path=tmp_path,
+        output=tmp_path / "out",
+        runtime_root=tmp_path / "rt",
+        model="m",
+        endpoint="http://10.0.0.1:8000/v1",
+        context_tokens=49152,
+        output_tokens=8192,
+        backend="remote",
+        max_turns=32,
+    )
+    cfg = harbor_runner.job_config(
+        **common,
+        training_mode="compaction_subagent",
+        subagents_enabled=True,
+        compaction_auto=True,
+        compaction_prune=False,
+    )
+    opencode = cfg["agents"][0]["kwargs"]["opencode_config"]
+    assert opencode["permission"] == {"*": "allow", "task": "allow"}
+    assert opencode["agent"]["general"]["mode"] == "subagent"
+    assert opencode["compaction"] == {"auto": True, "prune": False}
+    with pytest.raises(ValueError, match="requires OpenCode compaction"):
+        harbor_runner.job_config(
+            **common, training_mode="compaction_subagent", subagents_enabled=True, compaction_auto=False
+        )
+    with pytest.raises(ValueError, match="forbids OpenCode pruning"):
+        harbor_runner.job_config(
+            **common,
+            training_mode="compaction_subagent",
+            subagents_enabled=True,
+            compaction_auto=True,
+            compaction_prune=True,
+        )
+    with pytest.raises(ValueError, match="disagree"):
+        harbor_runner.job_config(
+            **common, training_mode="compaction_subagent", subagents_enabled=False, compaction_auto=True
+        )
+
+
+def test_runtime_spec_adds_mcp_servers_and_readonly_mounts(tmp_path: Path) -> None:
+    task = tmp_path / "videoqa-task"
+    task.mkdir()
+    (task / harbor_runner.RUNTIME_SPEC).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "mcp": {"video": {"command": ["python3", "/workspace/.avb_tools/mcp_server.py"]}},
+                "mounts": [{"source": "/data/frame_lmdb", "target": "/mnt/frame_lmdb", "read_only": True}],
+            }
+        )
+    )
+    runtime = harbor_runner.load_runtime_spec(task)
+    cfg = make_job(runtime=runtime)
+    opencode = cfg["agents"][0]["kwargs"]["opencode_config"]
+    assert opencode["mcp"] == {
+        "video": {"type": "local", "command": ["python3", "/workspace/.avb_tools/mcp_server.py"], "enabled": True}
+    }
+    assert opencode["permission"] == {"task": "deny", "video_*": "allow"}
+    assert cfg["environment"]["kwargs"] == {
+        "runtime_root": "/runtime",
+        "mounts_json": [
+            {"type": "bind", "source": "/data/frame_lmdb", "target": "/mnt/frame_lmdb", "read_only": True}
+        ],
+    }
+    # Children in subagent mode may call the tool too.
+    cfg = make_job(runtime=runtime, training_mode="subagent", subagents_enabled=True)
+    assert cfg["agents"][0]["kwargs"]["opencode_config"]["agent"]["general"]["permission"]["video_*"] == "allow"
+    # Tasks without a spec are unchanged.
+    assert harbor_runner.load_runtime_spec(tmp_path) is None
+    assert "mcp" not in make_job()["agents"][0]["kwargs"]["opencode_config"]
+    assert make_job()["environment"]["kwargs"] == {"runtime_root": "/runtime"}
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        {"version": 2},
+        {"version": 1, "mcp": {"task": {"command": ["x"]}}},
+        {"version": 1, "mcp": {"video": {"command": []}}},
+        {"version": 1, "mounts": [{"source": "/data", "target": "/mnt/data"}]},
+        {"version": 1, "mounts": [{"source": "data", "target": "/mnt/data", "read_only": True}]},
+        {"version": 1, "mounts": [{"source": "/data", "target": "/workspace", "read_only": True}]},
+    ],
+)
+def test_runtime_spec_rejects_writable_or_malformed_entries(tmp_path: Path, spec: dict) -> None:
+    (tmp_path / harbor_runner.RUNTIME_SPEC).write_text(json.dumps(spec))
+    with pytest.raises(ValueError):
+        harbor_runner.load_runtime_spec(tmp_path)

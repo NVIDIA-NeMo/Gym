@@ -169,6 +169,8 @@ async def test_cancelled_http_wait_does_not_cancel_episode(
 @pytest.mark.asyncio
 async def test_policy_server_endpoint_and_served_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(app, "get_server_url", lambda name: f"http://10.0.0.9:6100/{name}")
+    delegation_prompt = "You may delegate suitable subtasks."
+    subagent_prompt = "Return a concise result before the output limit."
     agent = make_agent(
         tmp_path,
         monkeypatch,
@@ -177,6 +179,12 @@ async def test_policy_server_endpoint_and_served_model(tmp_path: Path, monkeypat
         model_id=None,
         output_root=None,
         model_server={"type": "responses_api_models", "name": "policy_model"},
+        opencode_training_mode="subagent",
+        opencode_subagents_enabled=True,
+        opencode_delegation_prompt=delegation_prompt,
+        opencode_subagent_prompt=subagent_prompt,
+        opencode_tool_output_max_lines=400,
+        opencode_tool_output_max_bytes=8192,
     )
     endpoint, model = agent._model_endpoint(request())
     assert endpoint == "http://10.0.0.9:6100/policy_model/v1"
@@ -203,6 +211,12 @@ async def test_policy_server_endpoint_and_served_model(tmp_path: Path, monkeypat
     assert command[command.index("--backend") + 1] == "podman"
     assert command[command.index("--judge-protocol") + 1] == "nvinference-hybrid"
     assert command[command.index("--verifier-timeout-multiplier") + 1] == "3.0"
+    assert command[command.index("--training-mode") + 1] == "subagent"
+    assert "--subagents" in command
+    assert command[command.index("--delegation-prompt") + 1] == delegation_prompt
+    assert command[command.index("--subagent-prompt") + 1] == subagent_prompt
+    assert command[command.index("--tool-output-max-lines") + 1] == "400"
+    assert command[command.index("--tool-output-max-bytes") + 1] == "8192"
     assert "--max-turns" not in command
     assert verified.reward == 1
     assert verified.equal_family_reward == pytest.approx(25 / 18)
@@ -251,7 +265,7 @@ async def test_incomplete_episode_is_archived_and_rerun(
     monkeypatch.setattr(app, "run_process", fake_runner)
     body = request()
     endpoint, model = agent._model_endpoint(body)
-    identity = {"request": body.model_dump(), "model": model}
+    identity = {"request": body.model_dump(), "model": model, "endpoint": endpoint}
     key = app.hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     stale = agent._output_root / f"task1-{key}"
     (stale / "jobs/trial/task1").mkdir(parents=True)
@@ -261,3 +275,184 @@ async def test_incomplete_episode_is_archived_and_rerun(
     assert len(calls) == 1
     archived = [p for p in agent._output_root.iterdir() if ".incomplete-" in p.name]
     assert len(archived) == 1 and (archived[0] / "runner.log").read_text() == "killed at walltime"
+
+
+@pytest.mark.asyncio
+async def test_token_capture_routes_opencode_through_the_proxy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Under NeMo-RL token capture the served completions become the returned output."""
+    import aiohttp
+    from aiohttp import web
+
+    from nemo_gym.token_id_capture.completion import completion_items, output_item_fingerprint
+
+    served = []
+    seen = []
+
+    async def policy(request: web.Request) -> web.Response:
+        body = await request.json()
+        seen.append((request.path, body, request.headers.get("x-opencode-agent")))
+        turn = len(seen) - 1
+        if turn == 0:
+            message = {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": '{"command": "ffprobe in.mp4"}'},
+                    }
+                ],
+            }
+            finish = "tool_calls"
+        elif turn == 1:
+            message, finish = {"role": "assistant", "content": "## Goal\n- fix the clip"}, "stop"
+        else:
+            message, finish = {"role": "assistant", "content": "Finished."}, "stop"
+        completion = {
+            "id": f"chatcmpl-{turn}",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "served-name",
+            "choices": [{"index": 0, "message": message, "finish_reason": finish}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 5, "total_tokens": 105},
+        }
+        served.append(completion)
+        return web.json_response(completion)
+
+    upstream = web.Application()
+    upstream.router.add_post("/ng-rollout/{rollout}/training-token-capture/v1/chat/completions", policy)
+    runner = web.AppRunner(upstream)
+    await runner.setup()
+    await web.TCPSite(runner, "127.0.0.1", 0).start()
+    port = runner.addresses[0][1]
+    monkeypatch.setattr(app, "get_server_url", lambda name: f"http://127.0.0.1:{port}")
+    monkeypatch.setattr(app.AgenticVBenchAgent, "_token_id_capture_enabled", lambda self: True)
+    agent = make_agent(
+        tmp_path,
+        monkeypatch,
+        global_config={"policy_model_name": "served-name"},
+        model_base_url=None,
+        model_id=None,
+        model_server={"type": "responses_api_models", "name": "policy_model"},
+        opencode_compaction_auto=True,
+        opencode_compaction_prune=False,
+        opencode_disable_title=True,
+        max_turns=12,
+    )
+
+    async def fake_runner(command, output, runtime, env=None):
+        # Stock OpenCode would do this from inside the task container: streamed chat calls.
+        endpoint = command[command.index("--endpoint") + 1]
+        assert endpoint.startswith("http://127.0.0.1:") and endpoint.endswith("/v1")
+        assert command[command.index("--compaction-auto") + 1] == "true"
+        assert command[command.index("--compaction-prune") + 1] == "false"
+        assert "--disable-title" in command and command[command.index("--max-turns") + 1] == "12"
+        async with aiohttp.ClientSession() as client:
+            for agent_name in ("build", "compaction", "build"):
+                async with client.post(
+                    f"{endpoint}/chat/completions",
+                    json={
+                        "model": "served-name",
+                        "messages": [{"role": "user", "content": "edit video"}],
+                        "stream": True,
+                    },
+                    headers={"x-opencode-agent": agent_name},
+                ) as response:
+                    assert response.status == 200
+                    await response.read()
+        job = output / "jobs/trial/task1/steps/solve/agent"
+        job.mkdir(parents=True)
+        (job / "trajectory.json").write_text(json.dumps({"steps": [{"source": "agent", "message": "Finished."}]}))
+        (output / "jobs/trial/task1/result.json").write_text(json.dumps({"task_name": "task1"}))
+        (job.parent / "verifier").mkdir()
+        (job.parent / "verifier/reward.json").write_text(json.dumps({"reward": 0.5}))
+        return 0
+
+    monkeypatch.setattr(app, "run_process", fake_runner)
+    try:
+        body = request()
+        body.capture_rollout_id = "r-42"
+        verified = await agent.run(body)
+    finally:
+        await runner.cleanup()
+        if agent._proxy is not None:
+            await agent._proxy.stop()
+    # The explicit capture id NeMo-RL sends names the ledger, not the task/rollout indices.
+    assert {path for path, _, _ in seen} == {"/ng-rollout/r-42/training-token-capture/v1/chat/completions"}
+    assert all("stream" not in body for _, body, _ in seen)
+    assert verified.reward == 0.5
+    assert verified.terminal_response_id == "chatcmpl-2"
+    assert verified.model_calls == 3 and verified.compaction_summaries == 1 and verified.generated_tokens == 15
+    assert verified.mask_sample is False
+    items = [item.model_dump(mode="json") for item in verified.response.output]
+    assert [item["type"] for item in items] == ["function_call", "message", "message"]
+    expected = [item for completion in served for item in completion_items(completion)]
+    assert [output_item_fingerprint(i) for i in items] == [output_item_fingerprint(i) for i in expected]
+    assert Path(verified.capture_records).is_dir() and len(list(Path(verified.capture_records).glob("*.json"))) == 3
+    assert not any(key in item for item in items for key in ("prompt_token_ids", "generation_token_ids"))
+
+
+def test_training_config_resolves_from_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from nemo_gym.config import ResponsesAPIAgentServerTypeConfig
+
+    for key, value in {
+        "AGENTIC_VBENCH_HARBOR_PYTHON": str(tmp_path / "python"),
+        "AGENTIC_VBENCH_OUTPUT_ROOT": str(tmp_path / "episodes"),
+        "AGENTIC_VBENCH_BACKEND_DIR": str(tmp_path / "backend"),
+        "AGENTIC_VBENCH_COMPACTION_AUTO": "true",
+        "AGENTIC_VBENCH_COMPACTION_PRUNE": "false",
+        "AGENTIC_VBENCH_CONTEXT_TOKENS": "20480",
+        "AGENTIC_VBENCH_OUTPUT_TOKENS": "4096",
+        "AGENTIC_VBENCH_MAX_TURNS": "12",
+        "AGENTIC_VBENCH_TOOL_OUTPUT_MAX_LINES": "400",
+        "AGENTIC_VBENCH_TOOL_OUTPUT_MAX_BYTES": "8192",
+        "TRAIN_PATH": str(tmp_path / "train.jsonl"),
+    }.items():
+        monkeypatch.setenv(key, value)
+    for key in ("AGENTIC_VBENCH_ROOT", "AGENTIC_VBENCH_CREDENTIALS_FILE", "AGENTIC_VBENCH_RUNTIME_ROOT"):
+        monkeypatch.delenv(key, raising=False)
+    recipe = OmegaConf.load(Path(__file__).parents[1] / "configs/agentic_vbench_train.yaml")
+    resolved = OmegaConf.to_container(recipe, resolve=True)
+    server = resolved["agentic_vbench_agent"]
+    ResponsesAPIAgentServerTypeConfig.model_validate(server)
+    # Rollout collection dispatches to environment servers, so the agent needs one in front of it.
+    environment_server = resolved["agentic_vbench_environment_server"]["environment_servers"]["legacy_agent"]
+    assert environment_server["agent_server"] == {"type": "responses_api_agents", "name": "agentic_vbench_agent"}
+    config = app.AgenticVBenchConfig.model_validate(
+        {
+            **server["responses_api_agents"]["agentic_vbench_agent"],
+            "name": "agentic_vbench_agent",
+            "host": "10.0.0.1",
+            "port": 8000,
+        }
+    )
+    assert config.token_id_capture is True
+    assert config.opencode_compaction_auto is True and config.opencode_compaction_prune is False
+    assert config.opencode_disable_title is True and config.train_compaction_summaries is True
+    assert config.model_context_tokens == 20480 and config.model_output_capability_tokens == 4096
+    assert config.max_turns == 12 and config.backend == "remote" and config.judge_protocol == "nvinference-hybrid"
+    assert config.opencode_tool_output_max_lines == 400 and config.opencode_tool_output_max_bytes == 8192
+    assert config.opencode_delegation_prompt is None
+    assert config.opencode_subagent_prompt is None
+    assert config.benchmark_root is None and config.credentials_file is None
+    monkeypatch.setenv("AGENTIC_VBENCH_DELEGATION_PROMPT", "You may delegate suitable subtasks.")
+    prompted = OmegaConf.to_container(
+        OmegaConf.load(Path(__file__).parents[1] / "configs/agentic_vbench_train.yaml"), resolve=True
+    )
+    assert (
+        prompted["agentic_vbench_agent"]["responses_api_agents"]["agentic_vbench_agent"]["opencode_delegation_prompt"]
+        == "You may delegate suitable subtasks."
+    )
+    monkeypatch.setenv("AGENTIC_VBENCH_SUBAGENT_PROMPT", "Return a concise result.")
+    child_prompted = OmegaConf.to_container(
+        OmegaConf.load(Path(__file__).parents[1] / "configs/agentic_vbench_train.yaml"), resolve=True
+    )
+    assert (
+        child_prompted["agentic_vbench_agent"]["responses_api_agents"]["agentic_vbench_agent"][
+            "opencode_subagent_prompt"
+        ]
+        == "Return a concise result."
+    )

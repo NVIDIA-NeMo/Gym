@@ -28,11 +28,7 @@ import anthropic
 from google import genai
 
 
-ATTEMPTS = 5  # request-scoped 4xx: retried this many times in case the Hub returned a transient one
-# Provider outages (5xx, 408, 429, transport errors) are retried longer with a capped backoff:
-# 2+4+8+16+32+60+60 s = ~3 min per item, well inside the verifier budget.
-TRANSIENT_ATTEMPTS = 8
-MAX_BACKOFF_SECONDS = 60
+ATTEMPTS = 5
 FAILURES = []
 _LOCK = threading.Lock()
 
@@ -50,7 +46,7 @@ def post(path: str, payload: dict, headers: dict | None = None) -> dict:
     )
     error = "unknown"
     request_error = False
-    for attempt in range(TRANSIENT_ATTEMPTS):
+    for attempt in range(ATTEMPTS):
         try:
             with urllib.request.urlopen(request, timeout=300) as response:
                 return json.load(response)
@@ -72,10 +68,8 @@ def post(path: str, payload: dict, headers: dict | None = None) -> dict:
                 # but when they persist the native SDK would raise the same error to the
                 # judge, which scores that rubric item as a judge error and carries on.
                 request_error = exc.code not in (408, 429) and 400 <= exc.code < 500
-            if request_error and attempt >= ATTEMPTS - 1:
-                break
-            if attempt < TRANSIENT_ATTEMPTS - 1:
-                time.sleep(min(2 ** (attempt + 1), MAX_BACKOFF_SECONDS))
+            if attempt < ATTEMPTS - 1:
+                time.sleep(2 ** (attempt + 1))
     if request_error:
         raise RuntimeError(error)
     # Transport or authentication failures must not silently become zero scores: record

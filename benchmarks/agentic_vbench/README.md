@@ -12,7 +12,7 @@ It does not re-implement the benchmark as a question-answering task and never re
 |---|---|
 | Source | `PhiloLabs/agentic-vbench` @ `410a75fe3dae37de4344fc9e5317da089505330a` (Apache-2.0); the four leaderboard families, the "understanding" family is excluded as upstream does |
 | Task contract | The task prompt is handed to OpenCode unchanged; the model works in the task container with OpenCode's tools and must inspect extracted frames itself (no media is injected into the prompt) |
-| Harness | Harbor 0.6.6, OpenCode 1.14.39, OpenCode's default agent configuration (`opencode_subagents: default`); the policy is reached through Gym's policy model server, so served model name, seed and sampling overrides apply |
+| Harness | Harbor 0.6.6, OpenCode 1.14.39, OpenCode's default agent configuration (subagents off: `opencode_subagents_enabled: false`); the policy is reached through Gym's policy model server, so served model name, seed and sampling overrides apply |
 | Model budget | 262,144 context tokens and 100,000 output tokens advertised to OpenCode; each task's own agent and verifier time limits apply (verifiers get `verifier_timeout_multiplier` x their limit) |
 | Reward | The task's `reward.json`, 0..1, higher is better; `equal_family_reward` = reward x 25 / family size, whose task-weighted mean is the leaderboard number |
 | Aggregate | `mean/equal_family_reward` (equal mean of the four family means), reported as the average of three complete rollouts with request seeds 201, 202 and 203; Gym's task-weighted `mean/reward` is kept alongside |
@@ -39,8 +39,11 @@ point OpenCode at an endpoint the launcher serves instead of Gym's policy server
 
 Run-level knobs (`agentic_vbench_*` in `config.yaml`): `concurrency` (12), `judge_protocol`,
 `verifier_timeout_multiplier` (3), `context_tokens`, `output_tokens`, `max_turns` (unlimited),
-`opencode_subagents` (`default`/`off`/`on`), `keep_task_images` (false; the benchmark deletes
-task images after each trial) and `episode_timeout_seconds` (12 h). `AGENTIC_VBENCH_TASKS`
+`agent_timeout_multiplier` (null, a fraction of each task's agent time limit),
+`tool_output_max_lines`/`tool_output_max_bytes` (null, native OpenCode observation bounds),
+`subagents_enabled` (false) and `episode_timeout_seconds` (12 h). The training variant of this
+configuration, with NeMo-RL token capture and OpenCode compaction/subagent policy knobs, is
+`responses_api_agents/agentic_vbench_agent/configs/agentic_vbench_train.yaml`. `AGENTIC_VBENCH_TASKS`
 selects `all` (default) or a space-separated list of families and exact task ids for
 preparation; preparation validates the whole pinned inventory even for a subset.
 

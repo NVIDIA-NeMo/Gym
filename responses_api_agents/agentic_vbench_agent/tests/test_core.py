@@ -72,9 +72,16 @@ def test_multiple_families_and_overlap_rejection():
         core.dataset_rows(tasks, " ")
 
 
+def test_dataset_rows_follow_the_selector_order():
+    tasks = {f"t{i}": {"task_id": f"t{i}", "family": "repair", "prompt": str(i)} for i in range(4)}
+    rows = core.dataset_rows(tasks, "t2 t0 t3")
+    assert [row["verifier_metadata"]["task_id"] for row in rows] == ["t2", "t0", "t3"]
+    assert [row["verifier_metadata"]["task_id"] for row in core.dataset_rows(tasks)] == ["t0", "t1", "t2", "t3"]
+
+
 def test_equal_family_weights_recover_leaderboard_mean():
     rows = []
-    for family, size in core.FAMILIES.items():
+    for family, size in core.BENCHMARK_FAMILIES.items():
         rows.extend({"family": family, "reward": 1.0 if family == "repair" else 0.0} for _ in range(size))
     weighted = sum(row["reward"] * core.equal_family_weight(row["family"]) for row in rows) / len(rows)
     assert weighted == pytest.approx(0.25)
@@ -147,44 +154,144 @@ def test_lock_falls_back_when_the_filesystem_refuses_flock(tmp_path, monkeypatch
     assert (tmp_path / "x.lock").exists()
 
 
-def _custom_task(root, family, name):
-    task = root / "tasks" / f"agentic_vbench_{family}" / name
-    (task / "steps/solve").mkdir(parents=True)
-    (task / "task.toml").write_text('version = "1.0"\n')
-    (task / "steps/solve/instruction.md").write_text(f"# {name}\n")
+def _write_trial_record(tmp_path, record):
+    (tmp_path / "jobs/trial/repair1/result.json").write_text(json.dumps(record))
 
 
-def test_custom_task_root_skips_pin_and_completeness_checks(tmp_path):
-    root = tmp_path / "generated"
+def test_judge_crash_on_model_deliverable_scores_zero(tmp_path):
+    task = fixture_result(tmp_path, reward="", status="FAIL")
+    stdout = tmp_path / "jobs/trial/repair1/steps/solve/verifier/test-stdout.txt"
+    stdout.write_text(
+        "Traceback (most recent call last):\n"
+        '  File "/tests/judge.py", line 182, in score\n'
+        '    segments = sol.get("segments")\n'
+        "AttributeError: 'list' object has no attribute 'get'\n"
+    )
+    result = core.read_result(tmp_path, task)
+    assert result["reward"] == 0.0 and result["status"] == "VERIFIER_CRASH"
+    assert result["verifier_error"].startswith("AttributeError")
+
+
+def test_verifier_stdout_without_traceback_is_still_an_infra_failure(tmp_path):
+    task = fixture_result(tmp_path, reward="", status="FAIL")
+    (tmp_path / "jobs/trial/repair1/steps/solve/verifier/test-stdout.txt").write_text("scoring...\n")
+    with pytest.raises(RuntimeError, match="Missing native verifier"):
+        core.read_result(tmp_path, task)
+
+
+def test_agent_timeout_keeps_the_verifier_score_without_a_trajectory(tmp_path):
+    task = fixture_result(tmp_path, reward="0", trajectory=False)
+    _write_trial_record(
+        tmp_path,
+        {
+            "task_name": "repair1",
+            "exception_info": None,
+            "step_results": [{"step_name": "solve", "exception_info": {"exception_type": "AgentTimeoutError"}}],
+        },
+    )
+    result = core.read_result(tmp_path, task)
+    assert result["reward"] == 0.0 and result["status"] == "AGENT_TIMEOUT" and result["trajectory"] == {"steps": []}
+
+
+def test_step_runner_timeout_type_is_recognized(tmp_path):
+    task = fixture_result(tmp_path, reward="0")
+    _write_trial_record(
+        tmp_path,
+        {
+            "task_name": "repair1",
+            "step_results": [{"step_name": "solve", "exception_info": {"exception_type": "TimeoutError"}}],
+        },
+    )
+    assert core.read_result(tmp_path, task)["status"] == "AGENT_TIMEOUT"
+
+
+def test_missing_trajectory_without_timeout_still_rejected(tmp_path):
+    task = fixture_result(tmp_path, trajectory=False)
+    _write_trial_record(tmp_path, {"task_name": "repair1", "step_results": [{"exception_info": None}]})
+    with pytest.raises(RuntimeError, match="one model trajectory"):
+        core.read_result(tmp_path, task)
+
+
+def _write_custom_task(root, family, task_id, prompt, image="localhost/avb-sdg-base:1"):
+    task = root / "tasks" / f"agentic_vbench_{family}" / task_id
+    (task / "steps" / "solve").mkdir(parents=True)
+    (task / "environment").mkdir()
+    (task / "task.toml").write_text(f'version = "1.0"\n\n[task]\nname = "curiosity-sdg/{task_id}"\n')
+    (task / "steps" / "solve" / "instruction.md").write_text(prompt)
+    (task / "environment" / "Dockerfile").write_text(f"FROM {image}\nCOPY input/ /baked/input/\n")
+    return task
+
+
+def test_custom_task_root_is_inventoried_without_the_pinned_checkout(tmp_path):
+    root = tmp_path / "sdg_root"
     root.mkdir()
-    (root / core.CUSTOM_TASKS_MARKER).write_text('{"source": "sdg"}\n')
-    _custom_task(root, "assembly", "gen-assembly-1")
-    _custom_task(root, "sequencing", "gen-sequencing-1")
+    (root / "custom_tasks.json").write_text(
+        '{"layout": "tasks/agentic_vbench_<family>/<task>", "created": "2026-10-20"}\n'
+    )
+    _write_custom_task(root, "assembly", "curiosity-assembly-1-0", "# Video Assembly Task\nassemble")
+    _write_custom_task(root, "repair", "curiosity-repair-dns-denoise-2", "# Repair\ndenoise")
+    assert core.is_custom_task_root(root)
     assert core.ensure_checkout(root) == root.resolve()
     tasks = core.inventory(root)
-    assert set(tasks) == {"gen-assembly-1", "gen-sequencing-1"}
-    revision = tasks["gen-assembly-1"]["benchmark_revision"]
-    assert revision.startswith("custom:") and revision != core.REVISION
-    assert len(core.dataset_rows(tasks, "assembly")) == 1
+    assert set(tasks) == {"curiosity-assembly-1-0", "curiosity-repair-dns-denoise-2"}
+    assert tasks["curiosity-repair-dns-denoise-2"]["family"] == "repair"
+    revision = tasks["curiosity-assembly-1-0"]["benchmark_revision"]
+    assert revision.startswith("custom:") and all(t["benchmark_revision"] == revision for t in tasks.values())
+    # The identity follows the task definitions: editing a prompt changes it.
+    (root / "tasks/agentic_vbench_assembly/curiosity-assembly-1-0/steps/solve/instruction.md").write_text("changed")
+    assert core.inventory(root)["curiosity-assembly-1-0"]["benchmark_revision"] != revision
+    rows = core.dataset_rows(tasks, "repair")
+    assert [row["verifier_metadata"]["task_id"] for row in rows] == ["curiosity-repair-dns-denoise-2"]
 
 
-def test_custom_task_root_rejects_unknown_family_and_empty_root(tmp_path):
-    root = tmp_path / "generated"
-    root.mkdir()
-    (root / core.CUSTOM_TASKS_MARKER).write_text("{}\n")
+def test_custom_task_root_requires_its_manifest_and_at_least_one_task(tmp_path):
+    root = tmp_path / "plain_dir"
+    (root / "tasks" / "agentic_vbench_assembly").mkdir(parents=True)
+    assert not core.is_custom_task_root(root)
+    (root / "custom_tasks.json").write_text("{}\n")
     with pytest.raises(ValueError, match="no tasks"):
         core.inventory(root)
-    _custom_task(root, "assembly", "gen-assembly-1")
-    (root / "tasks/agentic_vbench_understanding/x/steps/solve").mkdir(parents=True)
-    (root / "tasks/agentic_vbench_understanding/x/task.toml").write_text("")
-    # Families outside the benchmark's four are ignored, as for the pinned checkout.
-    assert set(core.inventory(root)) == {"gen-assembly-1"}
 
 
-def test_read_result_accepts_custom_task_namespace(tmp_path):
-    task = fixture_result(tmp_path, reward="1")
-    result_path = tmp_path / "jobs/trial/repair1/result.json"
-    data = json.loads(result_path.read_text())
-    data["task_name"] = "curiosity-sdg/" + task["task_id"]
-    result_path.write_text(json.dumps(data))
-    assert core.read_result(tmp_path, task)["reward"] == 1
+def test_read_result_accepts_a_custom_task_namespace(tmp_path):
+    trial = tmp_path / "jobs" / "trial" / "t1"
+    (trial / "steps" / "solve" / "verifier").mkdir(parents=True)
+    (trial / "result.json").write_text(
+        json.dumps({"task_name": "curiosity-sdg/curiosity-assembly-1-0", "agent_result": {"model_calls": 1}})
+    )
+    (trial / "steps" / "solve" / "verifier" / "reward.json").write_text(json.dumps({"reward": 1.0}))
+    task = {"task_id": "curiosity-assembly-1-0", "family": "assembly"}
+    try:
+        result = core.read_result(tmp_path, task)
+    except (KeyError, RuntimeError, ValueError) as error:
+        # Other trial-shape requirements may apply; the task name itself must not be the failure.
+        assert "mismatched task" not in str(error)
+    else:
+        assert result["reward"] == 1.0
+
+
+def test_missing_output_detection_and_penalty(monkeypatch):
+    from responses_api_agents.agentic_vbench_agent import core
+
+    native_missing = {
+        "reward": 0.0,
+        "details": {"reason": "solution.json not found at /workspace/output/solution.json"},
+    }
+    native_wrong = {"reward": 0.0, "details": {"reason": "ok", "n_correct": 0}}
+    repair_missing = {"reward": 0.0, "details": {"reason": "no output.mp4 at /workspace/output/output.mp4"}}
+    repurpose_missing = {"reward": 0.0}
+    repurpose_scored_zero = {"reward": 0.0, "raw": 0, "ceiling": 45, "p0_total": 0}
+    assert core.verdict_missing_output(native_missing)
+    assert core.verdict_missing_output(repair_missing)
+    assert core.verdict_missing_output(repurpose_missing)
+    assert not core.verdict_missing_output(native_wrong)
+    assert not core.verdict_missing_output(repurpose_scored_zero)
+    assert not core.verdict_missing_output({"reward": 0.5, "details": {"reason": "not found"}})
+
+    monkeypatch.delenv("AGENTIC_VBENCH_MISSING_OUTPUT_REWARD", raising=False)
+    assert core.missing_output_reward() is None
+    monkeypatch.setenv("AGENTIC_VBENCH_MISSING_OUTPUT_REWARD", "-0.25")
+    assert core.missing_output_reward() == -0.25
+    monkeypatch.setenv("AGENTIC_VBENCH_MISSING_OUTPUT_REWARD", "0.5")
+    with pytest.raises(ValueError):
+        core.missing_output_reward()

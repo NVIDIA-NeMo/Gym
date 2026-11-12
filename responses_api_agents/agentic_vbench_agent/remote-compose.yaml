@@ -6,6 +6,7 @@ services:
     userns_mode: host
     user: "0:0"
     pid: private
+    network_mode: host
     # The rootless backend cannot enforce the cpus limit (no cgroup delegation), so
     # containers see every host core. Bound BLAS/OpenMP thread pools to the task's
     # declared cpus; otherwise concurrent verifiers thrash the node and time out.

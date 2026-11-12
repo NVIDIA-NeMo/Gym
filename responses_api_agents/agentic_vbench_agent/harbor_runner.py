@@ -7,6 +7,7 @@ import hashlib
 import importlib.metadata
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -32,6 +33,59 @@ def container_endpoint(endpoint: str) -> str:
     return urlunsplit(parts).rstrip("/")
 
 
+TRAINING_MODES = ("plain", "compaction", "subagent", "compaction_subagent")
+# Modes that expose OpenCode's task tool (depth-one children). The combined mode
+# also keeps OpenCode compaction on, so a parent or child whose context fills
+# is rewritten and trains as compaction segments of its own session.
+SUBAGENT_MODES = ("subagent", "compaction_subagent")
+
+# Optional per-task runtime spec (``<task>/avb_runtime.json``): episode-local MCP servers for
+# OpenCode and read-only host bind mounts of shared data. Written by task converters that need
+# a tool over data too large to copy into the image (NeMo-RL scripts/agentic_vbench/videoqa/:
+# ReadMedia over the LMDB frame cache). OpenCode exposes MCP tools as ``<server>_<tool>``.
+RUNTIME_SPEC = "avb_runtime.json"
+_SERVER_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def load_runtime_spec(task_path: Path) -> dict | None:
+    """Read and validate ``<task>/avb_runtime.json``; None when the task has none."""
+    path = task_path / RUNTIME_SPEC
+    if not path.is_file():
+        return None
+    spec = json.loads(path.read_text())
+    if not isinstance(spec, dict) or spec.get("version") != 1:
+        raise ValueError(f"{path}: expected an object with version 1")
+    servers = spec.get("mcp") or {}
+    mounts = spec.get("mounts") or []
+    if not isinstance(servers, dict) or not isinstance(mounts, list):
+        raise ValueError(f"{path}: 'mcp' must be an object and 'mounts' a list")
+    for name, server in servers.items():
+        command = server.get("command") if isinstance(server, dict) else None
+        if not _SERVER_NAME.fullmatch(name) or name == "task":
+            raise ValueError(f"{path}: invalid MCP server name {name!r}")
+        if not command or not isinstance(command, list) or not all(isinstance(c, str) and c for c in command):
+            raise ValueError(f"{path}: MCP server {name} needs a non-empty command list")
+        environment = server.get("environment", {})
+        if not isinstance(environment, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in environment.items()
+        ):
+            raise ValueError(f"{path}: MCP server {name} environment must map strings to strings")
+    for mount in mounts:
+        if not isinstance(mount, dict) or mount.get("read_only") is not True:
+            raise ValueError(
+                f"{path}: every mount must be an object with read_only = true (sandboxes never write shared data)"
+            )
+        for key in ("source", "target"):
+            value = mount.get(key)
+            if (
+                not isinstance(value, str)
+                or not value.startswith("/")
+                or value.rstrip("/") in ("", "/workspace", "/logs")
+            ):
+                raise ValueError(f"{path}: mount {key} must be an absolute path outside /workspace and /logs")
+    return {"mcp": servers, "mounts": mounts}
+
+
 def job_config(
     *,
     task_path: Path,
@@ -44,9 +98,20 @@ def job_config(
     backend: str = "podman",
     max_turns: int | None = None,
     verifier_timeout_multiplier: float = 1.0,
+    agent_timeout_multiplier: float | None = None,
     model_timeout_ms: int | None = None,
-    opencode_subagents: str = "default",
-    keep_task_images: bool = False,
+    tool_output_max_lines: int | None = None,
+    tool_output_max_bytes: int | None = None,
+    compaction_auto: bool | None = None,
+    compaction_prune: bool | None = None,
+    disable_title: bool = False,
+    training_mode: str | None = None,
+    subagents_enabled: bool = False,
+    subagent_max_depth: int = 1,
+    subagent_max_active: int | None = None,
+    delegation_prompt: str | None = None,
+    subagent_prompt: str | None = None,
+    runtime: dict | None = None,
 ) -> dict:
     """Create a single-attempt Harbor job using OpenCode's compatible provider.
 
@@ -54,9 +119,26 @@ def job_config(
     after the cap OpenCode must give a final text-only response.
     ``verifier_timeout_multiplier`` scales only the task's verifier timeout: some
     single-threaded judges need longer than their 1800 s on this hardware. The agent's
-    budget and the scores are unaffected. ``model_timeout_ms`` is OpenCode's per-call
+    budget and the scores are unaffected. ``agent_timeout_multiplier`` scales the
+    task's agent wall-clock budget (1800 s on AgenticVBench); Harbor stops OpenCode at
+    the cap and still runs the verifier on what was delivered, so training can bound
+    episode time without changing the verifier. ``model_timeout_ms`` is OpenCode's per-call
     provider timeout; Gym's model proxy replays a streamed completion only once it is
     complete, so the timeout must cover a whole 100k-token generation.
+    ``tool_output_max_lines``/``tool_output_max_bytes`` use OpenCode's native
+    observation truncation. The complete output remains available in its
+    tool-output directory; only the text returned to the model is bounded.
+    ``compaction_auto``/``compaction_prune`` pin OpenCode's context compaction
+    (``None`` keeps OpenCode's defaults: both on). Training with NeMo-RL token
+    capture sets them explicitly: compaction on for framework-owned context
+    reconstruction, both off for an append-only context. ``disable_title`` drops
+    OpenCode's side model call that names the session. ``delegation_prompt`` adds
+    a run-level instruction to the primary agent without modifying the pinned
+    benchmark prompt; it is valid only when the subagent tool is enabled.
+    ``subagent_prompt`` gives the depth-one ``general`` child a run-level
+    instruction, independently of the primary agent's delegation instruction.
+    ``runtime`` (see ``load_runtime_spec``) adds episode-local MCP servers to OpenCode, allowed
+    for the primary agent and any child, and read-only bind mounts to the task environment.
     """
     if not 0 < output_tokens < context_tokens:
         raise ValueError("Output token limit must be positive and smaller than context")
@@ -71,19 +153,26 @@ def job_config(
         raise ValueError("Maximum agent turns must be positive")
     if verifier_timeout_multiplier < 1.0:
         raise ValueError("Verifier timeout multiplier must not shorten the task's own budget")
+    if agent_timeout_multiplier is not None and not agent_timeout_multiplier > 0:
+        raise ValueError("Agent timeout multiplier must be positive")
     if model_timeout_ms is not None and model_timeout_ms < 1:
         raise ValueError("Model call timeout must be positive")
-    if opencode_subagents not in OPENCODE_SUBAGENT_MODES:
-        raise ValueError(f"Unknown OpenCode subagent mode: {opencode_subagents!r}")
+    if tool_output_max_lines is not None and tool_output_max_lines < 1:
+        raise ValueError("Tool output line limit must be positive")
+    if tool_output_max_bytes is not None and tool_output_max_bytes < 1:
+        raise ValueError("Tool output byte limit must be positive")
     provider_options = {
         "baseURL": endpoint.rstrip("/") if backend == "remote" else container_endpoint(endpoint),
         "apiKey": "unused",
     }
     if model_timeout_ms is not None:
         provider_options["timeout"] = model_timeout_ms
+    # OpenCode gives the built-in ``openai`` provider special Responses API
+    # routing.  ``@ai-sdk/openai-compatible`` only implements the generic
+    # language-model interface, so a custom provider name is required here.
     opencode_config = {
         "provider": {
-            "openai": {
+            "nemo": {
                 "npm": "@ai-sdk/openai-compatible",
                 "options": provider_options,
                 "models": {
@@ -96,9 +185,98 @@ def job_config(
             }
         },
     }
+    if training_mode is not None and training_mode not in TRAINING_MODES:
+        raise ValueError(f"Unknown training mode: {training_mode!r} (expected one of {TRAINING_MODES})")
+    if training_mode is not None and (training_mode in SUBAGENT_MODES) != subagents_enabled:
+        raise ValueError("Fixed training mode and subagent tool configuration disagree")
+    if delegation_prompt is not None:
+        delegation_prompt = delegation_prompt.strip()
+        if not delegation_prompt:
+            raise ValueError("Delegation prompt must not be empty")
+        if not subagents_enabled:
+            raise ValueError("Delegation prompt requires subagents")
+    if subagent_prompt is not None:
+        subagent_prompt = subagent_prompt.strip()
+        if not subagent_prompt:
+            raise ValueError("Subagent prompt must not be empty")
+        if not subagents_enabled:
+            raise ValueError("Subagent prompt requires subagents")
+    if subagents_enabled:
+        if subagent_max_depth != 1:
+            raise ValueError("Subagent training requires depth-one delegation (subagent_max_depth=1)")
+        if subagent_max_active is not None and (type(subagent_max_active) is not int or subagent_max_active < 1):
+            raise ValueError("subagent_max_active must be null (native parallel children) or a positive int")
+        if training_mode == "compaction_subagent":
+            if not compaction_auto:
+                raise ValueError("Compaction-subagent training requires OpenCode compaction (compaction_auto=true)")
+            if compaction_prune:
+                raise ValueError("Compaction-subagent training forbids OpenCode pruning")
+        elif compaction_auto or compaction_prune:
+            raise ValueError("Subagent training forbids OpenCode compaction and pruning")
+    agents: dict = {}
     if max_turns is not None:
-        opencode_config["agent"] = {"build": {"steps": max_turns}}
-    apply_subagent_mode(opencode_config, opencode_subagents)
+        agents["build"] = {"steps": max_turns}
+    if disable_title:
+        agents["title"] = {"disable": True}
+    # Delegation. OpenCode's primary agent owns a `task` tool that starts a child
+    # session (mode: subagent) with its own context. Without subagents the tool is
+    # denied so a rollout stays one session. In subagent mode every non-task
+    # permission is explicit ``allow``: OpenCode 1.14.39's non-interactive CLI
+    # auto-replies only to permission requests owned by the root session, so an
+    # ``ask`` from a child otherwise leaves the child and its waiting parent
+    # deadlocked until Harbor's wall-clock timeout. Only ``general`` is exposed as
+    # a child, matching the reference harness, and its explicit task denial is the
+    # depth-one boundary.
+    if subagents_enabled:
+        opencode_config["permission"] = {"*": "allow", "task": "allow"}
+        if delegation_prompt is not None:
+            agents.setdefault("build", {})["prompt"] = delegation_prompt
+        agents["general"] = {
+            "mode": "subagent",
+            "permission": {"*": "allow", "task": "deny"},
+            **({"steps": max_turns} if max_turns is not None else {}),
+            **({"prompt": subagent_prompt} if subagent_prompt is not None else {}),
+        }
+        agents["explore"] = {"disable": True}
+    else:
+        opencode_config["permission"] = {"task": "deny"}
+    if agents:
+        opencode_config["agent"] = agents
+    if subagent_max_active is not None:
+        # Native OpenCode runs sibling task calls concurrently; a cap is applied by
+        # the capture proxy, which serializes admission per session regardless.
+        opencode_config.setdefault("experimental", {})["subagent_max_active"] = subagent_max_active
+    tool_output = {
+        key: value
+        for key, value in (
+            ("max_lines", tool_output_max_lines),
+            ("max_bytes", tool_output_max_bytes),
+        )
+        if value is not None
+    }
+    if tool_output:
+        opencode_config["tool_output"] = tool_output
+    compaction = {
+        key: value for key, value in (("auto", compaction_auto), ("prune", compaction_prune)) if value is not None
+    }
+    if compaction:
+        opencode_config["compaction"] = compaction
+    environment_kwargs: dict = {"runtime_root": str(runtime_root)}
+    if runtime:
+        for name, server in runtime.get("mcp", {}).items():
+            entry = {"type": "local", "command": list(server["command"]), "enabled": True}
+            if server.get("environment"):
+                entry["environment"] = dict(server["environment"])
+            opencode_config.setdefault("mcp", {})[name] = entry
+            opencode_config.setdefault("permission", {})[f"{name}_*"] = "allow"
+            for agent in agents.values():
+                if isinstance(agent.get("permission"), dict):
+                    agent["permission"][f"{name}_*"] = "allow"
+        if runtime.get("mounts"):
+            environment_kwargs["mounts_json"] = [
+                {"type": "bind", "source": m["source"], "target": m["target"], "read_only": True}
+                for m in runtime["mounts"]
+            ]
     return {
         "job_name": "trial",
         "jobs_dir": str(output / "jobs"),
@@ -106,26 +284,20 @@ def job_config(
         "n_concurrent_trials": 1,
         "retry": {"max_retries": 0},
         "verifier_timeout_multiplier": verifier_timeout_multiplier,
-        # Agent setup installs Node and OpenCode from the network inside the task container;
-        # under registry slowdowns the 360 s default fails before the agent even starts.
-        # Setup time is outside the agent budget, so a longer allowance changes no score.
-        "agent_setup_timeout_multiplier": AGENT_SETUP_TIMEOUT_MULTIPLIER,
-        # The first trial of a task builds its image on the backend (apt, pip, media downloads
-        # from Hugging Face); with 12 trials building at once on a cold backend the tasks' 600 s
-        # default is too short. Build time is outside the agent budget, so no score changes.
-        "environment_build_timeout_multiplier": ENVIRONMENT_BUILD_TIMEOUT_MULTIPLIER,
+        **({"agent_timeout_multiplier": agent_timeout_multiplier} if agent_timeout_multiplier is not None else {}),
         "environment": {
             "import_path": "responses_api_agents.agentic_vbench_agent." + environment_class,
-            # delete=True removes the task image after the trial (benchmark default). Keeping
-            # images lets repeated trials of the same task (trace generation) reuse one build.
-            "delete": not keep_task_images,
-            "kwargs": {"runtime_root": str(runtime_root)},
+            "delete": True,
+            "kwargs": environment_kwargs,
         },
         "tasks": [{"path": str(task_path)}],
         "agents": [
             {
-                "name": "opencode",
-                "model_name": f"openai/{model}",
+                # Stock OpenCode agent plus "skip the nvm/node/opencode download when the
+                # task image already carries this version" (opencode_agent.py). Harbor
+                # resolves `name` before `import_path`, so only the latter is set.
+                "import_path": "responses_api_agents.agentic_vbench_agent.opencode_agent:PrebakedOpenCode",
+                "model_name": f"nemo/{model}",
                 "kwargs": {"version": "1.14.39", "opencode_config": opencode_config},
                 # OpenCode reserves min(model output limit, this cap; default 32000) when deciding
                 # to compact. The Factory adapter sends max_tokens equal to the output limit, so the
@@ -138,55 +310,191 @@ def job_config(
     }
 
 
-# OpenCode lets the primary ("build") agent delegate to subagents through its ``task`` tool;
-# the built-in subagents (general, explore, scout) are available by default, so every run
-# without an explicit mode is "default". "off" removes the task tool and disables the built-in
-# subagents (primary agent only). "on" keeps the built-ins and registers a media-analysis
-# subagent whose description makes delegation an explicit option; the task prompt and the
-# primary agent's system prompt are unchanged in every mode.
-AGENT_SETUP_TIMEOUT_MULTIPLIER = 3.0
-# 6 x the tasks' 600 s build_timeout_sec = 1 h for a cold image build on a busy backend.
-ENVIRONMENT_BUILD_TIMEOUT_MULTIPLIER = 6.0
-OPENCODE_SUBAGENT_MODES = ("default", "off", "on")
-OPENCODE_BUILTIN_SUBAGENTS = ("general", "explore", "scout")
-OPENCODE_MEDIA_SUBAGENT = {
-    "mode": "subagent",
-    "description": (
-        "Media analysis helper for video and audio editing tasks: inspects clips with ffprobe/ffmpeg, "
-        "extracts frames, contact sheets, audio and transcripts, measures loudness, noise, blur, cuts "
-        "or duplicated segments, and reports findings with timestamps. Delegate independent analysis "
-        "subtasks to it (several can run in parallel); it must not write the final deliverables."
-    ),
-}
-
-
-def apply_subagent_mode(opencode_config: dict, mode: str) -> None:
-    """Mutate the OpenCode config for the requested subagent mode."""
-    if mode == "default":
-        return
-    agents = opencode_config.setdefault("agent", {})
-    if mode == "off":
-        opencode_config["tools"] = {**opencode_config.get("tools", {}), "task": False}
-        for name in OPENCODE_BUILTIN_SUBAGENTS:
-            agents[name] = {**agents.get(name, {}), "disable": True}
-    elif mode == "on":
-        agents["media-analyst"] = dict(OPENCODE_MEDIA_SUBAGENT)
-
-
 JUDGE_PROTOCOLS = {
+    "nvinference-native": {
+        "AVB_JUDGE_BASE_URL": "https://inference-api.nvidia.com",
+        "AVB_JUDGE_CLAUDE_MODEL": "azure/anthropic/claude-opus-4-7",
+        "AVB_JUDGE_GEMINI_MODEL": "gcp/google/gemini-3.1-pro-preview",
+        "AVB_JUDGE_GEMINI_THINKING": "low",
+    },
     "nvinference-hybrid": {
         "AVB_JUDGE_BASE_URL": "https://inference-api.nvidia.com",
-        # Same judge models (Claude Opus 4.7, Gemini 3.5 Flash) on the routes the current Hub key
-        # can reach; the earlier key used the us/.../eccn-* aliases of the same models (2026-10-18).
-        "AVB_JUDGE_CLAUDE_MODEL": "aws/anthropic/bedrock-claude-opus-4-7",
-        "AVB_JUDGE_GEMINI_MODEL": "gcp/google/gemini-3.5-flash",
+        # Routes the current Hub judge key can reach; entitlements change without
+        # notice. 2026-10-24: the key lost aws/anthropic/bedrock-claude-opus-4-7 and
+        # gcp/google/gemini-3.5-flash (HTTP 403 "not available for this API key") and
+        # every repurpose verifier fell back to the deterministic format pillar only
+        # (reward 6/45 = 0.133 at best) until 2026-10-26. 2026-10-28: the replacement
+        # key reaches azure/anthropic/claude-opus-4-8 and gcp/google/gemini-3.5-flash
+        # but not the us/.../eccn-* routes. 2026-11-06: flipped back; the plain routes
+        # return 403 and only the us/.../eccn-* routes answer (every repurpose episode of
+        # the iter215 profile was format-pillar only). Verify with GET /v1/models plus one
+        # POST per route before changing these.
+        "AVB_JUDGE_CLAUDE_MODEL": "us/azure/anthropic/eccn-claude-opus-4-8",
+        "AVB_JUDGE_GEMINI_MODEL": "us/gcp/google/eccn-gemini-3.5-flash",
         "AVB_JUDGE_GEMINI_THINKING": "low",
-    }
+    },
 }
 NATIVE_JUDGE_ENV = {"ANTHROPIC_API_KEY", "GEMINI_API_KEY"}
 # Informational scan in the repurpose verifier; inaccessible /proc entries in
 # rootless containers must not abort the verifier under pipefail.
 TYPING_DIAGNOSTIC = "find / -name 'typing_extensions*' 2>/dev/null | head -20"
+
+_ASSEMBLY_FAMILY = "agentic_vbench_assembly"
+_ASSEMBLY_MANIFEST_PARSER = """    segments = sol.get("segments")
+    if not isinstance(segments, list):
+        return _zero("solution.json: segments not a list")
+
+    pred = [_normalize(seg.get("source", "")) for seg in segments]
+"""
+_ASSEMBLY_HARDENED_PARSER = """    if not isinstance(sol, dict):
+        return _zero("solution.json: expected top-level object")
+
+    segments = sol.get("segments")
+    if not isinstance(segments, list):
+        return _zero("solution.json: segments not a list")
+
+    for i, segment in enumerate(segments):
+        if not isinstance(segment, dict):
+            return _zero(f"solution.json: segment {i} is not an object")
+
+    pred = [_normalize(seg.get("source", "")) for seg in segments]
+"""
+_ASSEMBLY_JUDGE_SHA256 = {
+    "agentic-vbench-assembly-task1": (
+        "61a3ec3270a5ecf9ea394c6f7216d08a9af1d9ef794bf6ac297752f30fee168e",
+        "5bc591c8439c11c262dc4073d1db3750f15603f6d6dbc7d6551ca045b3d21fad",
+    ),
+    "agentic-vbench-assembly-task2": (
+        "7c70dc9c2dc357993f91e80b51a74d153c9bf8dc5274ca826ad9eaf2ae0f9ca3",
+        "161d8e04440b8add9280fa2649e4d1470f49f4fcd68697b6cd32eae7aa80868b",
+    ),
+    "agentic-vbench-assembly-task3": (
+        "0e76e6774046ea9448c3d5a906d7c04f50cf05706739f2afb82c77d887639548",
+        "f7a2030f194ebc0befb1fd349efb6d39d78f260abc88672923d91f161a0ec453",
+    ),
+    "agentic-vbench-assembly-task4": (
+        "73da97f7929d94831141a23954b910ae03f5d0de93ac12cf27df3a9a1c713ba5",
+        "02f5894208585abf30fde48c68f5ea9ccaf53182c934eadc1520f8ab97339646",
+    ),
+    "agentic-vbench-assembly-task5": (
+        "129b6d6ceb8ed68e2f1c89246b99ed18db5908c80bffa7425c03dc2dc08ac094",
+        "61e63f8d5401fd496f13757221dec0f550d8f1d9bf93aa30d4a410e4e1f7e2f9",
+    ),
+    "agentic-vbench-assembly-task6": (
+        "609f102e08adf0eccfbd0bb4973a20ff6b88b402f7a61a906a45eb3a55dc3dc4",
+        "6d449633c37da9fd10a8f4cf046623c21f7f15c9da372c01b127d372d31a6156",
+    ),
+    "agentic-vbench-assembly-task7": (
+        "7dd6d792007f581f2b9b843d5ca1958560884b253edd7a8c34e73db1376191d6",
+        "08978a086806d75c1880979160227cc753965eeb6ced6dfc1028d5ff45c8eb5e",
+    ),
+    "agentic-vbench-assembly-task8": (
+        "52b01834e4c342888e0238e399507572ed82e65b6082eb27ddaedded7c985e75",
+        "2dd1339341fe5a4ca6052aeb4edb58c740019a4a2610356eeadef56acb5373a4",
+    ),
+    "agentic-vbench-assembly-task9": (
+        "49b585fd2413798d6b484b1123c5ff476e791715dc99fa42f21e642637cf492f",
+        "30e2816a2fd73e4b0a165943655cd32dea316f830c92a16cdb05e9c3feeb1d15",
+    ),
+    "agentic-vbench-assembly-task10": (
+        "9ce0f3da6ae606f775505e33e8380539e3f27de185bc137d6d401d4747ee40c4",
+        "d7c7124dc304f8a6e8e394b463838b13b1d309615518b6d2ec3d89388e818045",
+    ),
+    "agentic-vbench-assembly-task11": (
+        "2de466f807ab097e1ca754908ebc36ffe9c1ba716a540455287568322de68c06",
+        "955ebfc11fae35bff96f6a9cf2d281bc03f43c2630aa2d3919314bb8ae8164ba",
+    ),
+    "agentic-vbench-assembly-task12": (
+        "c2648737e1de760e743fa29115a0c241ef18c3f0a6132eea70161ab96497ddcb",
+        "fe363ddc8b720c512833064d032ab5e8a3df691efb4d726a98fa4e5475417a38",
+    ),
+    "agentic-vbench-assembly-task13": (
+        "ef488cd4f71e0947cf19ecab470ff6693e15de26a5cdd07e8e203cb75e84866a",
+        "821ee8de3bd3be80c7ece58b0c1ecd9d1d3845572bfb021014b2b3955074d379",
+    ),
+    "agentic-vbench-assembly-task14": (
+        "20660911630e38d25bad3c8d2d9c9148ab9781a3fa4d3d6c5a89c72ec64143ea",
+        "0d8538b9696f1bc1089d8415c0a8a35e5efef8fa34fc289e46a8c92c7305e305",
+    ),
+    "agentic-vbench-assembly-task15": (
+        "26451dde4b9328495aad4610f0f48282b51d4660695219645118cc37b0468b6e",
+        "bab7f16a3c74117ab03c7e5fd8dcae473454768021cbb9ceb31a1f7f37085a1f",
+    ),
+    "agentic-vbench-assembly-task16": (
+        "a7293e8e95cc59c27cdbafe9802983c21d961f868fb426c68f30a99d7e628689",
+        "670f636b37cf077fd5e58054021cad1cd98d34fabd62ef844687199fdb4dc9c0",
+    ),
+    "agentic-vbench-assembly-task17": (
+        "7ad56e110ec984d69a9d2afbaf2d9ed93eda71d1a621ae7c350e1e845858922d",
+        "c5d6dd370825d997bce0138f08760ba14e543e60d70f4503d59391ada669fc99",
+    ),
+    "agentic-vbench-assembly-task18": (
+        "f2dea83ca090e44108be5ce52817b6bbfd4266a0ecf909b30b7f7bcbc2954682",
+        "49724c26534af8519849e42e5411ebc4793257ce6ea68bbdbd1d430812d807cc",
+    ),
+}
+
+
+def _digest(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _harden_assembly_judge(source: bytes, task_id: str) -> bytes:
+    expected = _ASSEMBLY_JUDGE_SHA256.get(task_id)
+    if expected is None:
+        raise ValueError(f"Unexpected pinned assembly task: {task_id}")
+    source_sha256, staged_sha256 = expected
+    if _digest(source) != source_sha256:
+        raise ValueError(f"Pinned assembly judge has an unexpected source digest: {task_id}")
+    text = source.decode()
+    if text.count(_ASSEMBLY_MANIFEST_PARSER) != 1:
+        raise ValueError(f"Pinned assembly judge has an unexpected manifest parser: {task_id}")
+    hardened = text.replace(_ASSEMBLY_MANIFEST_PARSER, _ASSEMBLY_HARDENED_PARSER).encode()
+    if _digest(hardened) != staged_sha256:
+        raise ValueError(f"Assembly judge hardening produced an unexpected digest: {task_id}")
+    return hardened
+
+
+def stage_assembly_judge_guard(task_path: Path, *, staging: Path, output: Path) -> Path:
+    """Make the pinned assembly judge reject a non-object manifest with reward zero.
+
+    The upstream judge calls ``sol.get`` immediately after ``json.loads``. A model
+    can therefore create valid JSON with the wrong top-level shape (for example, a
+    bare list), which raises ``AttributeError`` instead of producing the same zero
+    reward as every other malformed manifest. Stage only exact pinned assembly
+    judges; valid-object scoring is unchanged and the source checkout stays clean.
+    """
+    if task_path.parent.name != _ASSEMBLY_FAMILY:
+        return task_path
+
+    task_id = task_path.name
+    source_judge = task_path / "steps/solve/tests/judge.py"
+    hardened = _harden_assembly_judge(source_judge.read_bytes(), task_id)
+    staged = staging / task_path.name
+    expected_staged_sha256 = _ASSEMBLY_JUDGE_SHA256[task_id][1]
+    if staged.exists():
+        staged_judge = staged / "steps/solve/tests/judge.py"
+        if not staged_judge.is_file() or _digest(staged_judge.read_bytes()) != expected_staged_sha256:
+            raise ValueError(f"Existing staged assembly judge has an unexpected digest: {task_id}")
+        return staged
+
+    shutil.copytree(task_path, staged)
+    judge = staged / "steps/solve/tests/judge.py"
+    judge.write_bytes(hardened)
+
+    (output / "assembly_judge_guard.json").write_text(
+        json.dumps(
+            {
+                "source_task": str(task_path),
+                "reason": "non-object solution manifests score zero instead of crashing the verifier",
+                "original_judge_sha256": _digest(source_judge.read_bytes()),
+                "staged_judge_sha256": _digest(judge.read_bytes()),
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    return staged
 
 
 def stage_judge(task_path: Path, *, staging: Path, output: Path, protocol: str) -> Path:
@@ -213,8 +521,12 @@ def stage_judge(task_path: Path, *, staging: Path, output: Path, protocol: str) 
     tests = staged / "steps" / task["steps"][0]["name"] / "tests"
     verifier = tests / "test.sh"
     verifier.write_text(verifier.read_text().replace(TYPING_DIAGNOSTIC, TYPING_DIAGNOSTIC + " || true"))
-    (tests / "judge.py").rename(tests / "avb-original-judge.py")
-    shutil.copyfile(Path(__file__).with_name("hub_judge.py"), tests / "judge.py")
+    # The repurpose judge is swapped for hub_judge.py; a judged task without tests/judge.py
+    # (ClawEval packages, whose claw_verify.py reads the same NVINFERENCE_API_KEY/AVB_JUDGE_*
+    # settings itself) keeps its own verifier.
+    if (tests / "judge.py").is_file():
+        (tests / "judge.py").rename(tests / "avb-original-judge.py")
+        shutil.copyfile(Path(__file__).with_name("hub_judge.py"), tests / "judge.py")
 
     def digest(path: Path) -> str:
         return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -232,6 +544,7 @@ def stage_judge(task_path: Path, *, staging: Path, output: Path, protocol: str) 
                         "test.sh": verifier.relative_to(staged),
                         "judge.py": (tests / "judge.py").relative_to(staged),
                     }.items()
+                    if (task_path / relative).is_file()
                 },
                 "staged_sha256": {
                     "task.toml": digest(staged / "task.toml"),
@@ -244,6 +557,37 @@ def stage_judge(task_path: Path, *, staging: Path, output: Path, protocol: str) 
         )
         + "\n"
     )
+    return staged
+
+
+# The repair verifiers fetch their golden assets from Hugging Face at verification
+# time with `curl --retry 5 --retry-delay 3`. Under 40 concurrent episodes from one
+# egress address Hugging Face answers bursts with 429/500 and the six attempts
+# finish inside ~20 s; the verifier then writes no reward and the whole rollout
+# is regenerated (run 2242338: 10 of 80 repair verifier logs, 4 lost rollouts).
+MATERIALS_RETRY = "--retry 5 --retry-delay 3"
+MATERIALS_RETRY_PATCHED = "--retry 12 --retry-delay 20 --retry-all-errors"
+
+
+def stage_materials(task_path: Path, *, staging: Path) -> Path:
+    """Copy a task whose verifier downloads MATERIALS_URL, stretching curl's retries.
+
+    Tasks without such a download are returned unchanged. Only the verifier script
+    changes; the agent's environment and instruction are untouched.
+    """
+    text = (task_path / "task.toml").read_text()
+    if "MATERIALS_URL" not in text:
+        return task_path
+    verifiers = [v for v in task_path.glob("steps/*/tests/test.sh") if MATERIALS_RETRY in v.read_text()]
+    if not verifiers:
+        return task_path
+    staged = staging / task_path.name
+    if staged.exists():
+        shutil.rmtree(staged)
+    shutil.copytree(task_path, staged)
+    for verifier in verifiers:
+        target = staged / verifier.relative_to(task_path)
+        target.write_text(target.read_text().replace(MATERIALS_RETRY, MATERIALS_RETRY_PATCHED))
     return staged
 
 
@@ -286,16 +630,35 @@ def main() -> None:
         type=float,
         default=_env_default("AGENTIC_VBENCH_VERIFIER_TIMEOUT_MULTIPLIER", float, 1.0),
     )
-    parser.add_argument("--model-timeout-ms", type=int, default=None)
     parser.add_argument(
-        "--opencode-subagents",
-        choices=OPENCODE_SUBAGENT_MODES,
-        default=os.environ.get("AGENTIC_VBENCH_OPENCODE_SUBAGENTS", "default"),
+        "--agent-timeout-multiplier",
+        type=float,
+        default=None,
+        help="Scale the task's agent wall-clock budget; Harbor still verifies after the cap",
+    )
+    parser.add_argument("--model-timeout-ms", type=int, default=None)
+    parser.add_argument("--tool-output-max-lines", type=int, default=None)
+    parser.add_argument("--tool-output-max-bytes", type=int, default=None)
+    parser.add_argument("--compaction-auto", choices=("true", "false"), default=None)
+    parser.add_argument("--compaction-prune", choices=("true", "false"), default=None)
+    parser.add_argument("--disable-title", action="store_true")
+    parser.add_argument("--training-mode", choices=TRAINING_MODES, default=None)
+    parser.add_argument(
+        "--subagents",
+        action="store_true",
+        help="Enable OpenCode's task tool (depth-one `general` children)",
+    )
+    parser.add_argument("--subagent-max-depth", type=int, default=1)
+    parser.add_argument("--subagent-max-active", type=int, default=None)
+    parser.add_argument(
+        "--delegation-prompt",
+        default=None,
+        help="Primary-agent instruction encouraging useful delegation (subagent mode only)",
     )
     parser.add_argument(
-        "--keep-task-images",
-        action="store_true",
-        help="keep task images after each trial so repeated trials reuse one build (default: delete)",
+        "--subagent-prompt",
+        default=None,
+        help="Instruction for depth-one general children (subagent mode only)",
     )
     args = parser.parse_args()
     if importlib.metadata.version("harbor") != "0.6.6":
@@ -303,6 +666,12 @@ def main() -> None:
     from harbor.models.job.config import JobConfig
 
     task_path = args.task_path.resolve(strict=True)
+    runtime_root = args.runtime_root.resolve()
+    task_path = stage_assembly_judge_guard(
+        task_path,
+        staging=runtime_root / "assembly-judge-task",
+        output=args.output,
+    )
     env = dict(os.environ)
     if args.judge_protocol:
         from dotenv import dotenv_values
@@ -318,16 +687,19 @@ def main() -> None:
         env["NVINFERENCE_API_KEY"] = key
         task_path = stage_judge(
             task_path,
-            staging=args.runtime_root.resolve() / "judge-task",
+            staging=runtime_root / "judge-task",
             output=args.output,
             protocol=args.judge_protocol,
         )
+
+    task_path = stage_materials(task_path, staging=args.runtime_root.resolve() / "materials-task")
+    runtime = load_runtime_spec(task_path)
 
     config = JobConfig.model_validate(
         job_config(
             task_path=task_path,
             output=args.output.resolve(strict=True),
-            runtime_root=args.runtime_root.resolve(),
+            runtime_root=runtime_root,
             model=args.model,
             endpoint=args.endpoint,
             context_tokens=args.context_tokens,
@@ -335,9 +707,20 @@ def main() -> None:
             backend=args.backend,
             max_turns=args.max_turns,
             verifier_timeout_multiplier=args.verifier_timeout_multiplier,
+            agent_timeout_multiplier=args.agent_timeout_multiplier,
             model_timeout_ms=args.model_timeout_ms,
-            opencode_subagents=args.opencode_subagents,
-            keep_task_images=args.keep_task_images,
+            tool_output_max_lines=args.tool_output_max_lines,
+            tool_output_max_bytes=args.tool_output_max_bytes,
+            compaction_auto=None if args.compaction_auto is None else args.compaction_auto == "true",
+            compaction_prune=None if args.compaction_prune is None else args.compaction_prune == "true",
+            disable_title=args.disable_title,
+            training_mode=args.training_mode,
+            subagents_enabled=args.subagents,
+            subagent_max_depth=args.subagent_max_depth,
+            subagent_max_active=args.subagent_max_active,
+            delegation_prompt=args.delegation_prompt,
+            subagent_prompt=args.subagent_prompt,
+            runtime=runtime,
         )
     )
     config_path = args.output / "harbor_job.json"
@@ -355,8 +738,12 @@ def main() -> None:
 
 
 DOCKER_CHECK_FAILURE = "Docker daemon is not running"
-HARBOR_START_ATTEMPTS = 4
-HARBOR_START_BACKOFF_SECONDS = 30.0
+# Harbor's start-up probe is a single ``docker info`` under a 10 s timeout. A
+# rootless backend serving ~64 containers answers in 3 s most of the time but
+# stalls past 10 s under load, so the probe fails in bursts; each exhausted retry
+# costs a whole re-dispatched rollout. Defaults keep trying for ~12 minutes.
+HARBOR_START_ATTEMPTS = int(os.environ.get("AGENTIC_VBENCH_HARBOR_START_ATTEMPTS", "12"))
+HARBOR_START_BACKOFF_SECONDS = float(os.environ.get("AGENTIC_VBENCH_HARBOR_START_BACKOFF_SECONDS", "20"))
 
 
 def run_harbor(command: list[str], *, env: dict, jobs_dir: Path, sleep=time.sleep) -> None:
