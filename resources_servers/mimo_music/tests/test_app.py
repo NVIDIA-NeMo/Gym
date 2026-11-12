@@ -164,6 +164,7 @@ async def test_missing_renderer_masked():
     assert result.reward == 0
     assert result.mask_sample
     assert result.failure_kind == "mimo_music:scorer_error"
+    assert (result.failure_outcome_action, result.failure_outcome_attribution) == ("retry", "evaluation")
     assert "Abc2MidiMissing" in result.failure_reason
 
 
@@ -184,6 +185,7 @@ async def test_process_group_cleanup(cancel, already_exited):
             result = await server().verify(request(ABC))
             assert result.mask_sample
             assert result.failure_kind == "mimo_music:scorer_timeout"
+            assert (result.failure_outcome_action, result.failure_outcome_attribution) == ("retry", "evaluation")
         kill.assert_called_once_with(123, signal.SIGKILL)
         proc.wait.assert_awaited_once()
 
@@ -199,6 +201,7 @@ async def test_bad_worker_output_masked(output):
     assert result.reward == 0
     assert result.mask_sample
     assert result.failure_kind == "mimo_music:scorer_error"
+    assert (result.failure_outcome_action, result.failure_outcome_attribution) == ("retry", "evaluation")
 
 
 @pytest.mark.asyncio

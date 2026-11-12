@@ -31,9 +31,11 @@ from nemo_gym.client import SESSION_ID_KEY, get_response_json, raise_for_status,
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
     JUDGE_FAILED,
+    FailureClass,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    OutcomeAction,
 )
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
@@ -1411,6 +1413,11 @@ Return type in JSON Schema format: {return_type}
         failure_kind, failure_reason = self._masked_failure(state)
         if failure_kind is not None:
             response_payload.update(failure_kind=failure_kind, failure_reason=failure_reason)
+        if failure_kind == SIMULATOR_CALL_FAILED:
+            # The user or tool simulator call failed, not the policy: recovery runs the rollout again.
+            response_payload.update(
+                failure_outcome_action=OutcomeAction.RETRY, failure_outcome_attribution=FailureClass.EVALUATION
+            )
         verified_response = ConversationalToolUseVerifyResponse.model_validate(response_payload)
         self.session_id_to_state.pop(session_id, None)
         return verified_response

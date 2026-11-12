@@ -15,7 +15,7 @@ from typing import ClassVar
 
 from pydantic import ConfigDict, Field, JsonValue, PrivateAttr
 
-from nemo_gym.core import NeMoGymResponse
+from nemo_gym.core import FailureClass, NeMoGymResponse, OutcomeAction
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
@@ -140,12 +140,16 @@ class MimoMusicResourcesServer(SimpleResourcesServer):
             except TimeoutError:
                 result.mask_sample = True
                 result.failure_kind = "mimo_music:scorer_timeout"
+                result.failure_outcome_action = OutcomeAction.RETRY
+                result.failure_outcome_attribution = FailureClass.EVALUATION
                 result.failure_reason = f"Scorer exceeded {self.config.score_timeout_seconds}s"
             except Exception as error:
                 # This is the process boundary, not a bad-composition rejection.
                 logger.exception("Music scorer failed")
                 result.mask_sample = True
                 result.failure_kind = "mimo_music:scorer_error"
+                result.failure_outcome_action = OutcomeAction.RETRY
+                result.failure_outcome_attribution = FailureClass.EVALUATION
                 result.failure_reason = f"{type(error).__name__}: {error}"
         return result
 
