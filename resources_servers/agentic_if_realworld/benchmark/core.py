@@ -410,7 +410,7 @@ def runtime_identity() -> dict:
     import importlib.metadata
     import sys
 
-    from nemo_gym.orchestration.jobs import installed_gym_commit
+    from nemo_gym.utils import installed_gym_commit
 
     # Creation time is a receipt field, not part of the stable fingerprint.
     versions = {

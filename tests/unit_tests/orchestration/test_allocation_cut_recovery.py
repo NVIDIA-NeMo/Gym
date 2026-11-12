@@ -38,9 +38,9 @@ from nemo_gym.orchestration.recovery import (
     decide_from_collected,
     select_managed_evidence,
 )
-from nemo_gym.orchestration.server_supervisor import ServerSpinupTimeoutError
 from nemo_gym.rollouts.rollout_recovery import RunManifest, validate_resume
 from nemo_gym.rollouts.rollout_store import RolloutStore
+from nemo_gym.server_runtime.supervisor.server_supervisor import ServerSpinupTimeoutError
 from tests.unit_tests.orchestration.test_eval_resubmit import _handle, _resumable_run, _sbatch_env
 from tests.unit_tests.orchestration.test_eval_resubmit import _local_index as _local_index
 from tests.unit_tests.orchestration.test_eval_resubmit import slurm_bin as slurm_bin

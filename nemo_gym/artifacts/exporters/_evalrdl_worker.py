@@ -22,6 +22,7 @@ the exit codes below are the ones the EvalRDL command line reports for them.
 """
 
 import sys
+from pathlib import Path
 
 
 EXIT_ACCEPTED = 3
@@ -50,7 +51,22 @@ def _hint(exc: Exception) -> str:
 
 
 def run(payload: dict) -> dict:
-    from evalrdl.sdk.api import Client, IntakeRefused, RdlError
+    from evalrdl.sdk.api import Client, IntakeRefused, RdlError, upload_plan
+
+    # The SDK uploads each rundir under the directory on its own; check its dry run so the gym run is uploaded
+    # whole, as one EvalRDL run. The plan's `dir` is resolved, so compare it with the resolved run directory.
+    try:
+        plan = upload_plan(payload["run_dir"], label=payload.get("label"))
+    except RdlError as exc:
+        return _failed(f"EvalRDL could not plan the upload of {payload['run_dir']}: {exc}", 1)
+    dirs = [unit["dir"] for unit in plan]
+    if dirs != [str(Path(payload["run_dir"]).resolve())]:
+        return _failed(
+            f"EvalRDL would upload {payload['run_dir']} as {', '.join(dirs)}, not as the run directory itself. "
+            "Export each run from a directory of its own.",
+            1,
+            upload_dirs=dirs,
+        )
 
     client = Client(url=payload["url"]) if payload.get("url") else Client()
     try:
