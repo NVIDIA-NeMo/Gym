@@ -38,9 +38,9 @@ from nemo_gym.orchestration.recovery import (
     decide_from_collected,
     select_managed_evidence,
 )
-from nemo_gym.orchestration.server_supervisor import ServerSpinupTimeoutError
 from nemo_gym.rollouts.rollout_recovery import RunManifest, validate_resume
 from nemo_gym.rollouts.rollout_store import RolloutStore
+from nemo_gym.server_runtime.supervisor.server_supervisor import ServerSpinupTimeoutError
 from tests.unit_tests.orchestration.test_eval_resubmit import _handle, _resumable_run, _sbatch_env
 from tests.unit_tests.orchestration.test_eval_resubmit import _local_index as _local_index
 from tests.unit_tests.orchestration.test_eval_resubmit import slurm_bin as slurm_bin
@@ -569,6 +569,29 @@ def test_a_terminal_requeued_chain_is_reconciled_and_resumes_its_in_flight_rows(
     args = _start_queued_job(script, resume, job, slurm_bin)
     assert args[-1] == "++resume_from_cache=True"
     assert (job / ".gym_infra_retries").read_text() == "1\n"
+
+
+def test_a_requeued_then_failed_incarnation_is_accounted_and_recoverable(tmp_path, slurm_bin):
+    from nemo_gym.orchestration.executors.resume_script import REQUEUE_RECONCILED_NOTE
+    from nemo_gym.orchestration.submit import recover
+
+    # A node prolog failure: the first incarnation is REQUEUED with its Start and End recorded, the second FAILED.
+    job, _, _ = _requeued_run(tmp_path, slurm_bin, "100|REQUEUED|36|0\n100|FAILED|15|1\n101|FAILED|16|0\n")
+    result = recover(*_handle(job))
+    assert result.dispatched == "resubmit", result.decision.reason
+    assert (job / ".gym_accumulated_walltime").read_text() == "67\n"
+    assert (job / ".gym_chain_incomplete").read_text() == REQUEUE_RECONCILED_NOTE + "\n"
+
+
+def test_a_requeued_incarnation_without_an_end_still_blocks_recovery(tmp_path, slurm_bin):
+    from nemo_gym.orchestration.submit import recover
+
+    # The last incarnation is still REQUEUED (no End yet): its elapsed time is unknown.
+    job, _, _ = _requeued_run(tmp_path, slurm_bin, "100|REQUEUED|36|0\n101|FAILED|16|0\n")
+    result = recover(*_handle(job))
+    # A requeued incarnation that has not ended is a live continuation: nothing is decided or queued.
+    assert (result.decision.action.value, result.dispatched) == ("noop", None)
+    assert (job / ".gym_chain_incomplete").read_text() == _REQUEUE_MARKER
 
 
 @pytest.mark.parametrize(

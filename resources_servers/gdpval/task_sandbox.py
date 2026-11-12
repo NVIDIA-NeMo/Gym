@@ -31,9 +31,9 @@ LOGGER = logging.getLogger(__name__)
 WORKDIR = "/root"
 
 
-def sandbox_path(path: str) -> str:
+def sandbox_path(path: str, workdir: Optional[str] = None) -> str:
     """Resolve a path the agent reported against the sandbox working directory."""
-    return path if path.startswith("/") else f"{WORKDIR}/{path}"
+    return path if path.startswith("/") else f"{workdir or WORKDIR}/{path}"
 
 
 class GDPValSandboxConfig(SandboxConfig):
@@ -48,6 +48,7 @@ async def start_task_sandbox(
     task_id: str,
     reference_dir: Path,
     reference_files: list[str],
+    workdir: Optional[str] = None,
 ) -> AsyncSandbox:
     """Start a sandbox and stage the task's reference files under the working directory."""
     if not sandbox_config.image:
@@ -59,7 +60,7 @@ async def start_task_sandbox(
     spec = sandbox_config.spec(
         sandbox_provider,
         image=sandbox_config.image,
-        workdir=WORKDIR,
+        workdir=workdir or WORKDIR,
         metadata={"task_id": task_id},
         named_configs=global_config_dict,
     )
@@ -67,18 +68,18 @@ async def start_task_sandbox(
     await sandbox.start(spec)
     try:
         for rel_path in reference_files:
-            await sandbox.upload(reference_dir / rel_path, sandbox_path(rel_path))
+            await sandbox.upload(reference_dir / rel_path, sandbox_path(rel_path, workdir))
     except BaseException:
         await sandbox.stop()
         raise
     return sandbox
 
 
-async def missing_files(sandbox: AsyncSandbox, paths: list[str]) -> list[str]:
+async def missing_files(sandbox: AsyncSandbox, paths: list[str], workdir: Optional[str] = None) -> list[str]:
     """Return the reported paths that are not regular files in the sandbox, in their given order."""
     if not paths:
         return []
-    script = "; ".join(f"test -f {shlex.quote(sandbox_path(p))} || echo {i}" for i, p in enumerate(paths))
+    script = "; ".join(f"test -f {shlex.quote(sandbox_path(p, workdir))} || echo {i}" for i, p in enumerate(paths))
     result = await sandbox.exec(script, timeout_s=60)
     if result.error_type is not None:
         # An infrastructure failure, not something the model should react to.
@@ -88,7 +89,11 @@ async def missing_files(sandbox: AsyncSandbox, paths: list[str]) -> list[str]:
 
 
 async def collect_deliverables(
-    sandbox: AsyncSandbox, finish_call: Optional[Mapping[str, Any]], reference_dir: Path, task_dir: Path
+    sandbox: AsyncSandbox,
+    finish_call: Optional[Mapping[str, Any]],
+    reference_dir: Path,
+    task_dir: Path,
+    workdir: Optional[str] = None,
 ) -> None:
     """Copy the submitted files, the finish arguments and the reference files into ``task_dir``.
 
@@ -103,7 +108,7 @@ async def collect_deliverables(
     staging.mkdir(parents=True)
     try:
         for path in (finish_call or {}).get("paths") or []:
-            await sandbox.download(sandbox_path(path), staging / Path(path).name)
+            await sandbox.download(sandbox_path(path, workdir), staging / Path(path).name)
         finish_params = None if finish_call is None else {k: v for k, v in finish_call.items() if k != "tool"}
         (staging / persisted_layout.FINISH_PARAMS_FILE).write_text(json.dumps(finish_params, indent=2, default=str))
         await asyncio.to_thread(shutil.copytree, reference_dir, staging, dirs_exist_ok=True)

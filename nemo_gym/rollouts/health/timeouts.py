@@ -112,6 +112,12 @@ LEGACY_TIMEOUT_SIGNALS = (
     LegacySignal("agent_timed_out", None, "responses_api_agents/codex_agent/app.py", '"agent_timed_out": timed_out}'),
     LegacySignal("agent_timeout_error", None, "responses_api_agents/harbor_agent/app.py", "agent_timeout_error=int("),
     LegacySignal(
+        "opencode_error_type",
+        "timeout",
+        "responses_api_agents/opencode_sandboxed_agent/app.py",
+        '"opencode_error_type": run_error_type or getattr(result, "error_type", None)',
+    ),
+    LegacySignal(
         "eval_timed_out", None, "resources_servers/swebench_pro/app.py", '"eval_timed_out": result.timed_out'
     ),
     # BrowseComp's per-rollout `rollout_timeout_s`.
@@ -168,6 +174,7 @@ class _Span:
     start: Optional[float]
     end: Optional[float]
     duration_s: Optional[float]
+    clock_domain: Optional[str] = "legacy"
 
     @property
     def is_timed(self) -> bool:
@@ -189,7 +196,7 @@ _TOOL_TIMING_GAPS = frozenset({"tool_timing_unavailable", "agent_artifact_unavai
 _TRANSCRIPT_GAPS = frozenset({"agent_transcript_unavailable"})
 
 
-def read_rollout_timing(row: Mapping[str, Any]) -> RolloutTiming:
+def read_rollout_timing(row: Mapping[str, Any], *, tool_boundary: str = "lifecycle") -> RolloutTiming:
     """Everything the section needs from one rollout's final record.
 
     A malformed record never raises: a value of the wrong type reads as not measured, and the record checks
@@ -203,6 +210,8 @@ def read_rollout_timing(row: Mapping[str, Any]) -> RolloutTiming:
     calls = capture.get("calls")
     whole = isinstance(calls, list) and all(isinstance(call, Mapping) for call in calls)
     model_calls = list(calls) if whole and not partial else []
+    if trajectory.get("schema_version") == "2.0":
+        model_calls = [{**call, "clock_domain": call.get("clock_domain")} for call in model_calls]
     # Collection records which server the agent used as its policy; records without it follow the convention.
     policy_server = row.get("ng_policy_model_server")
     policy_server = policy_server if isinstance(policy_server, str) and policy_server else POLICY_MODEL_SERVER
@@ -210,7 +219,7 @@ def read_rollout_timing(row: Mapping[str, Any]) -> RolloutTiming:
     other_calls = [call for call in model_calls if not _is_policy_call(call, policy_server)]
     events, invalid_events = _timeout_events(row)
     speeds = (_tokens_per_s(call) for call in policy_calls)
-    tool_spans = _tool_spans(trajectory)
+    tool_spans = _tool_spans(trajectory, boundary=tool_boundary)
     elapsed_s = _number(row.get(ELAPSED_S_KEY))
     return RolloutTiming(
         failed=row.get("_ng_failure_class") is not None,
@@ -294,6 +303,7 @@ def _model_call_span(call: Mapping[str, Any]) -> _Span:
         start=_number(call.get("started_at")),
         end=_number(call.get("completed_at")),
         duration_s=latency_ms / 1000 if latency_ms is not None else None,
+        clock_domain=(domain if isinstance(domain := call.get("clock_domain", "legacy"), str) and domain else None),
     )
 
 
@@ -306,7 +316,7 @@ def _tokens_per_s(call: Mapping[str, Any]) -> Optional[float]:
     return tokens / (latency_ms / 1000)
 
 
-def _tool_spans(trajectory: Mapping[str, Any]) -> Optional[list[_Span]]:
+def _tool_spans(trajectory: Mapping[str, Any], *, boundary: str = "lifecycle") -> Optional[list[_Span]]:
     """When the tool calls ran, or None when the trajectory does not measure it.
 
     An empty ``tool_calls`` list is a measured zero. A missing or malformed list leaves the time unknown, and so
@@ -320,15 +330,29 @@ def _tool_spans(trajectory: Mapping[str, Any]) -> Optional[list[_Span]]:
     codes = _gap_codes(trajectory.get("gaps"))
     if not _TOOL_TIMING_GAPS.isdisjoint(codes) or (not tool_calls and not _TRANSCRIPT_GAPS.isdisjoint(codes)):
         return None
-    return [_tool_call_span(call) for call in tool_calls]
+    if trajectory.get("schema_version") == "2.0" and not tool_calls:
+        return None  # An empty list does not establish producer coverage.
+    return [_tool_call_span(call, boundary=boundary) for call in tool_calls]
 
 
-def _tool_call_span(call: Mapping[str, Any]) -> _Span:
+def _tool_call_span(call: Mapping[str, Any], *, boundary: str = "lifecycle") -> _Span:
+    if "timings" in call:
+        measurements = call.get("timings")
+        matching = (
+            [item for item in measurements if isinstance(item, Mapping) and item.get("boundary") == boundary]
+            if isinstance(measurements, list)
+            else []
+        )
+        if len(matching) != 1:
+            return _Span(None, None, None, None)
+        call = matching[0]
+        call = {**call, "clock_domain": call.get("clock_domain")}
     duration_ms = _number(call.get("duration_ms"))
     return _Span(
         start=_number(call.get("started_at")),
         end=_number(call.get("completed_at")),
         duration_s=duration_ms / 1000 if duration_ms is not None else None,
+        clock_domain=(domain if isinstance(domain := call.get("clock_domain", "legacy"), str) and domain else None),
     )
 
 
@@ -338,6 +362,10 @@ def _busy_seconds(spans: list[_Span]) -> Optional[float]:
     Overlapping calls, such as parallel subagents, count once. A call that reports only its duration cannot be
     placed against other calls, so it is measured alone and leaves a union with other calls unknown.
     """
+    if len(spans) > 1 and (
+        any(span.clock_domain is None for span in spans) or len({span.clock_domain for span in spans}) != 1
+    ):
+        return None
     if not all(span.is_timed for span in spans):
         return None
     if len(spans) > 1 and any(span.start is None or span.end is None for span in spans):

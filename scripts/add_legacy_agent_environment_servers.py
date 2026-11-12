@@ -167,8 +167,8 @@ def needs_environment_server(instance: dict) -> bool:
     prime_child = agent_type == "prime_agent" and agent.get("entrypoint") == "child_app.py"
     if (agent_type in AGENT_SESSION_AGENT_TYPES or prime_child) and resources_server is None:
         return False
-    # Stirrup runs only in agent sessions and has no /run for a legacy relay to call.
-    if agent_type == "stirrup_agent":
+    # Stirrup and Copilot run only in agent sessions and have no /run for a legacy relay to call.
+    if agent_type in ("stirrup_agent", "copilot_agent"):
         return False
     return bool(agent.get("entrypoint") or instance.get("_inherit_from"))
 
@@ -645,7 +645,8 @@ def split_servers(
                 refused.append(
                     f"{name} in a run of {display(path)} would merge a {RELAY} server with {inherited}, "
                     f"which switches; keep the name there and replace its definition with a complete {RELAY} server, "
-                    f"deleting _inherit_from and single_agent_turn_legacy, as benchmarks/hle/opencode.yaml does"
+                    f"deleting _inherit_from and single_agent_turn_legacy, "
+                    f"as benchmarks/hle/opencode_legacy_agent.yaml does"
                 )
                 continue
             for declaration in switching:
