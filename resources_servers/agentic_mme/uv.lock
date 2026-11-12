@@ -1821,6 +1821,7 @@ requires-dist = [
     { name = "anyio", specifier = ">=4.15.1" },
     { name = "boto3", marker = "extra == 'sandbox'", specifier = ">=1.34" },
     { name = "coverage", extras = ["toml"], marker = "extra == 'dev'" },
+    { name = "cwsandbox", marker = "extra == 'cwsandbox'", specifier = ">=1.19.1,<2" },
     { name = "datasets" },
     { name = "daytona", marker = "extra == 'sandbox'", specifier = ">=0.179.0" },
     { name = "defusedxml", marker = "extra == 'dev'", specifier = ">=0.7.1" },
@@ -1881,7 +1882,7 @@ requires-dist = [
     { name = "wandb", marker = "extra == 'wandb'", specifier = ">=0.30.0" },
     { name = "yappi", specifier = ">=1.7.6" },
 ]
-provides-extras = ["all", "ray", "mlflow", "wandb", "vllm", "sandbox", "openshell", "telemetry", "dev"]
+provides-extras = ["all", "ray", "mlflow", "wandb", "vllm", "sandbox", "cwsandbox", "openshell", "telemetry", "dev"]
 
 [package.metadata.requires-dev]
 codec = [
