@@ -810,6 +810,24 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         atomic_write(path, content, encoding)
 
     @staticmethod
+    def _read_cache(path: Path) -> Optional[str]:
+        """Read a cache entry; an unreadable entry is a miss, not a tool failure."""
+        try:
+            return path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        except OSError as e:
+            logger.warning("Ignoring unreadable cache entry %s: %s", path, e)
+            return None
+
+    def _write_cache(self, path: Path, content: str) -> None:
+        """Write a cache entry; a failed write leaves the result uncached rather than failing the tool."""
+        try:
+            self._atomic_write(path, content)
+        except OSError as e:
+            logger.warning("Could not cache %s: %s", path, e)
+
+    @staticmethod
     def _parse_filings_columns(columns: Dict[str, Any], cik: str, ticker: str) -> Dict[str, Dict[str, Any]]:
         """Parse SEC columnar filing data into a dict keyed by accession number (no dashes)."""
         acc_numbers = columns.get("accessionNumber", [])
@@ -850,9 +868,9 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                 return self._filings_cache[cik_padded]
 
             cache_path = self._get_company_cache_path(cik)
-            if self.config.use_cache and cache_path.exists():
-                with open(cache_path, "r") as f:
-                    filings = json.load(f)
+            cached = self._read_cache(cache_path) if self.config.use_cache else None
+            if cached is not None:
+                filings = json.loads(cached)
                 self._filings_cache[cik_padded] = filings
                 return filings
 
@@ -880,7 +898,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                             logger.warning("Failed to parse supplementary file %s for CIK %s", filename, cik)
 
                 if filings and self.config.use_cache:
-                    self._atomic_write(cache_path, json.dumps(filings))
+                    self._write_cache(cache_path, json.dumps(filings))
                 self._filings_cache[cik_padded] = filings
                 return filings
             except (json.JSONDecodeError, KeyError):
@@ -1134,18 +1152,15 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         if file_path is None:
             raise ValueError(f"Invalid SEC URL format: {url}")
 
-        text_content = None
-        source = None
-        if self.config.use_cache and file_path.exists():
-            text_content = file_path.read_text(encoding="utf-8")
-            source = "cache"
+        text_content = self._read_cache(file_path) if self.config.use_cache else None
+        source = "cache" if text_content is not None else None
 
         if text_content is None:
             text_content = await self._lookup_dump(url)
             if text_content is not None:
                 source = "sec-corpus"
                 if self.config.use_cache:
-                    self._atomic_write(file_path, text_content)
+                    self._write_cache(file_path, text_content)
 
         if text_content is None:
             html_content = await self._fetch_with_retry(url)
@@ -1159,7 +1174,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
             )
             source = "live"
             if self.config.use_cache:
-                self._atomic_write(file_path, text_content)
+                self._write_cache(file_path, text_content)
 
         if not text_content:
             raise ValueError("Filing content was empty after parsing.")

@@ -16,6 +16,7 @@
 
 import json
 import logging
+import os
 import tempfile
 import urllib.error
 from pathlib import Path
@@ -217,6 +218,46 @@ class TestUseCacheFlag:
         assert "FRESH CONTENT" in text
         assert path.exists()
         assert "FRESH CONTENT" in path.read_text(encoding="utf-8")
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file permissions")
+    @pytest.mark.asyncio
+    async def test_unreadable_cache_entry_falls_back_to_live(self, tmp_path) -> None:
+        """A cache entry another user left unreadable is refetched instead of failing the tool."""
+        server = self._make_server(tmp_path / "cache", use_cache=True)
+        path = server._url_to_filing_path(self._SEC_URL)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("CACHED CONTENT", encoding="utf-8")
+        os.chmod(path, 0)
+        os.chmod(path.parent, 0o555)
+
+        try:
+            fetch_mock = AsyncMock(return_value="<html><body><p>LIVE CONTENT</p></body></html>")
+            with patch.object(server, "_fetch_with_retry", fetch_mock):
+                text = await server._fetch_sec_filing_text(self._SEC_URL)
+        finally:
+            os.chmod(path.parent, 0o755)
+            os.chmod(path, 0o644)
+
+        assert "LIVE CONTENT" in text
+        fetch_mock.assert_called_once()
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file permissions")
+    @pytest.mark.asyncio
+    async def test_unwritable_cache_dir_still_returns_filing(self, tmp_path) -> None:
+        """A cache directory another user left unwritable leaves the filing uncached instead of failing the tool."""
+        server = self._make_server(tmp_path / "cache", use_cache=True)
+        path = server._url_to_filing_path(self._SEC_URL)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(path.parent, 0o555)
+
+        try:
+            with patch.object(server, "_fetch_with_retry", AsyncMock(return_value="<p>LIVE CONTENT</p>")):
+                text = await server._fetch_sec_filing_text(self._SEC_URL)
+        finally:
+            os.chmod(path.parent, 0o755)
+
+        assert "LIVE CONTENT" in text
+        assert not path.exists()
 
 
 # ============================================================================
