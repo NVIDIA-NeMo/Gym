@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import orjson
+import pytest
 
 from nemo_gym.core.failure_kinds import quota_reset_text, quota_reset_unix
 from nemo_gym.eval.rollout_reverification import due_judge_failures, rejudge_saved_judge_failures
@@ -135,3 +136,19 @@ def test_the_run_stop_names_the_quota_and_its_reset():
 def test_the_credentials_stop_is_not_sandbox_only():
     stop = _credentials_rejected_stop([{"failure_kind": "provider_credentials_rejected"}])
     assert stop is not None and "sandbox" not in str(stop) and "refused the credentials" in str(stop)
+
+
+@pytest.mark.parametrize(
+    "kind,stop_for",
+    [
+        ("provider_quota_exhausted", _quota_exhausted_stop),
+        ("provider_credentials_rejected", _credentials_rejected_stop),
+    ],
+)
+@pytest.mark.parametrize("final", [{"failure_outcome_action": "fail"}, {"_ng_failure_terminal": True}])
+def test_provider_stop_hint_does_not_invite_recovery_of_final_failures(kind, stop_for, final):
+    row = {"failure_kind": kind, "failure_reason": "resets at 2099-01-01 00:00 UTC"}
+    assert stop_for([row | final]) is None
+    mixed = stop_for([row | final, row])
+    assert mixed is not None
+    assert "on 1 rollout(s)" in str(mixed)

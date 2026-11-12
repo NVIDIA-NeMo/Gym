@@ -84,7 +84,6 @@ from nemo_gym.core.failure_kinds import (
     MODEL_POLICY_RESPONSE_TIMEOUT,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
-    PROVIDER_CREDENTIALS_REJECTED,
     PROVIDER_QUOTA_EXHAUSTED,
     ROLLOUT_ALLOCATION_ENDED,
     SERVER_START_FAILED,
@@ -572,6 +571,7 @@ class RecoveryOutcomePolicyConfig(OutcomePolicyConfig):
     )
     default_action: OutcomeAction = OutcomeAction.RETRY
     classification: FailureClassificationConfig = Field(default_factory=FailureClassificationConfig)
+    saved_answer_default_action: Literal[OutcomeAction.VERIFY, OutcomeAction.FAIL] = OutcomeAction.VERIFY
 
     supported_actions = frozenset({OutcomeAction.VERIFY, OutcomeAction.RETRY, OutcomeAction.FAIL})
 
@@ -679,7 +679,12 @@ def _policy_evidence(row: Mapping[str, Any]) -> tuple[str | None, int | None]:
 
 
 def _recovery_action(
-    row: Mapping[str, Any], kind: str, policy: RecoveryOutcomePolicyConfig, *, http_status: int | None
+    row: Mapping[str, Any],
+    kind: str,
+    policy: RecoveryOutcomePolicyConfig,
+    *,
+    http_status: int | None,
+    saved_answer: bool = False,
 ) -> OutcomeAction:
     """Apply recovery rules to shared classification without changing the selected evidence or budgets."""
     classification = _applied_class(row)
@@ -687,6 +692,8 @@ def _recovery_action(
         classification = classify_failure(
             failure_kind=kind, stage=_policy_stage(row), http_status=http_status, config=policy.classification
         )
+    if saved_answer:
+        policy = policy.model_copy(update={"default_action": policy.saved_answer_default_action})
     return choose_action(failure_kind=kind, http_status=http_status, failure_class=classification, config=policy)
 
 
@@ -735,22 +742,39 @@ def _now() -> float:
     return time.time()
 
 
-def _judge_state(row: Mapping[str, Any], policy: "RecoveryOutcomePolicyConfig") -> "IdentityState":
+def _quota_wait(row: Mapping[str, Any], policy: "RecoveryOutcomePolicyConfig") -> bool:
+    """A future quota reset delays permitted re-grading, never a final policy stop."""
+    kind, status = _policy_evidence(row)
+    if (
+        kind != PROVIDER_QUOTA_EXHAUSTED
+        or row.get(TERMINAL) is True
+        or row.get("failure_outcome_action") == OutcomeAction.FAIL
+        or not _saved_answer(row)
+    ):
+        return False
+    reset = _quota_reset_unix(row)
+    return (
+        reset is not None
+        and _now() < reset
+        and _recovery_action(row, kind, policy, http_status=status, saved_answer=True) == OutcomeAction.VERIFY
+    )
+
+
+def _judge_state(
+    row: Mapping[str, Any], policy: "RecoveryOutcomePolicyConfig", *, fallback_kind: str = JUDGE_FAILED
+) -> "IdentityState":
     """A judge failure's treatment: verify re-judges the saved answer only (none saved: stop), fail leaves it
     ungraded; any other action would run the policy again, so it stops."""
-    if row.get(TERMINAL) is True:
+    if row.get(TERMINAL) is True or row.get("failure_outcome_action") == OutcomeAction.FAIL:
         return IdentityState.TERMINAL
     kind, status = _policy_evidence(row)
-    if kind in (PROVIDER_QUOTA_EXHAUSTED, PROVIDER_CREDENTIALS_REJECTED):
-        # The grading provider refused until the operator acts (its quota resets, its key is fixed). The saved answer
-        # is graded again, never regenerated; before a quota's named reset time nothing can be graded, so it stops.
+    action = _recovery_action(row, kind or fallback_kind, policy, http_status=status, saved_answer=True)
+
+    if action == OutcomeAction.VERIFY:
         if not _saved_answer(row):
             return IdentityState.UNKNOWN
-        reset = _quota_reset_unix(row) if kind == PROVIDER_QUOTA_EXHAUSTED else None
-        return IdentityState.TERMINAL if reset is not None and _now() < reset else IdentityState.JUDGE_RECOVERABLE
-    action = _recovery_action(row, kind or JUDGE_FAILED, policy, http_status=status)
-    if action == OutcomeAction.VERIFY:
-        return IdentityState.JUDGE_RECOVERABLE if _saved_answer(row) else IdentityState.UNKNOWN
+        # A named future quota reset constrains execution even when policy permits re-verification.
+        return IdentityState.TERMINAL if _quota_wait(row, policy) else IdentityState.JUDGE_RECOVERABLE
     return IdentityState.TERMINAL if action == OutcomeAction.FAIL else IdentityState.UNKNOWN
 
 
@@ -1018,12 +1042,20 @@ def decide_recovery(
                 # selects it as a failure and runs it again under the attempt cap. A run without a Store cannot
                 # reopen a saved result, so there it stays scored and the gate counts its fault evaluation-side.
                 fact = managed[identity]
+                # This is existing recovery-derived evidence, not a new producer failure kind.
+                # Keep clean agent_timeout overrides separate; class/default rules configure this context.
+                action = _recovery_action(row, AGENT_TIMEOUT_INFRASTRUCTURE, policy, http_status=None)
+                if action == OutcomeAction.FAIL:
+                    state = IdentityState.TERMINAL
+                    policy_stopped = True
+                elif action == OutcomeAction.RETRY:
+                    state = IdentityState.RETRYABLE if fact.attempts < fact.max_attempts else IdentityState.EXHAUSTED
+                else:
+                    state = IdentityState.UNKNOWN
                 evidence.append(
                     IdentityEvidence(
                         identity=identity,
-                        state=IdentityState.RETRYABLE
-                        if fact.attempts < fact.max_attempts
-                        else IdentityState.EXHAUSTED,
+                        state=state,
                         failure_kind=AGENT_TIMEOUT_INFRASTRUCTURE,
                         attempts=fact.attempts,
                         max_attempts=fact.max_attempts,
@@ -1064,11 +1096,14 @@ def decide_recovery(
                     continue
                 if reverification_cause(row) is not None:
                     # Masked by a judge or verify-transport failure: its saved answer is graded again, never rerun.
-                    saved_results.add(identity)
+                    state = _judge_state(row, policy)
+                    policy_stopped |= state == IdentityState.TERMINAL
+                    if state == IdentityState.JUDGE_RECOVERABLE:
+                        saved_results.add(identity)
                     evidence.append(
                         IdentityEvidence(
                             identity=identity,
-                            state=IdentityState.JUDGE_RECOVERABLE,
+                            state=state,
                             failure_kind=row.get("failure_kind"),
                             events=_events(row),
                         )
@@ -1153,11 +1188,14 @@ def decide_recovery(
             if not judge and reverification_cause(row) == REVERIFY_JUDGE:
                 # Scored, but its reward is no grade: the judge gave no verdict or the grading did not resolve. Its
                 # saved answer is judged again, never rerun.
-                saved_results.add(identity)
+                state = _judge_state(row, policy, fallback_kind=JUDGE_UNPARSEABLE)
+                policy_stopped |= state == IdentityState.TERMINAL
+                if state == IdentityState.JUDGE_RECOVERABLE:
+                    saved_results.add(identity)
                 evidence.append(
                     IdentityEvidence(
                         identity=identity,
-                        state=IdentityState.JUDGE_RECOVERABLE,
+                        state=state,
                         failure_kind=JUDGE_UNPARSEABLE,
                         events=_events(row),
                         reason=SCORED_UNPARSEABLE_REASON,
@@ -1165,9 +1203,7 @@ def decide_recovery(
                 )
                 continue
             state = _judge_state(row, policy) if judge else IdentityState.SCORED
-            quota_wait = (
-                judge and state == IdentityState.TERMINAL and row.get("failure_kind") == PROVIDER_QUOTA_EXHAUSTED
-            )
+            quota_wait = judge and state == IdentityState.TERMINAL and _quota_wait(row, policy)
             policy_stopped |= judge and state == IdentityState.TERMINAL and not quota_wait
             evidence.append(
                 IdentityEvidence(
@@ -1267,7 +1303,7 @@ def decide_recovery(
         if last.get(FAILURE_CLASS) == JUDGE_FAILED:
             # A judge that failed is re-judged from the saved answer, never by running the policy again.
             state = _judge_state(last, policy)
-            quota_wait = state == IdentityState.TERMINAL and last.get("failure_kind") == PROVIDER_QUOTA_EXHAUSTED
+            quota_wait = state == IdentityState.TERMINAL and _quota_wait(last, policy)
             policy_stopped |= state == IdentityState.TERMINAL and not quota_wait
         elif is_answered_agent_deadline(last, classification=policy.classification):
             # The agent's own deadline ended it with an answer kept: the model's result, which no resume runs again.
@@ -1489,7 +1525,9 @@ def decide_recovery(
             waiting = [
                 item
                 for item in evidence
-                if item.state == IdentityState.TERMINAL and item.failure_kind == PROVIDER_QUOTA_EXHAUSTED
+                if item.state == IdentityState.TERMINAL
+                and item.failure_kind == PROVIDER_QUOTA_EXHAUSTED
+                and item.reason is not None
             ]
             if len(waiting) == counts[IdentityState.TERMINAL]:
                 resets = sorted({text for item in waiting if (text := quota_reset_text(item.reason))})
