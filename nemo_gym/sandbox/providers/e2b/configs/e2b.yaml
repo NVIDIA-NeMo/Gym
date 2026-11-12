@@ -67,6 +67,14 @@ sandbox:
       # false deletes at timeout; true pauses and resumes on the next request (AgentENV).
       # null sends no lifecycle, which can leave timed-out sandboxes paused on AgentENV.
       auto_resume: false
+      # Lease in seconds: create with this timeout and renew it every third of a lease, up to the
+      # sandbox's lifetime, so the sandboxes of a process that died end one lease later. null renews
+      # nothing and creates with the full lifetime.
+      lease_s: null
+      # E2B runs every command in a login shell, and a Debian image's /etc/profile resets PATH, losing the
+      # image's toolchain directories (/usr/local/go/bin, ...). true writes a profile.d hook into each new
+      # sandbox that gives login shells back the environment they started with.
+      restore_login_env: true
       # Secure the sandbox envd service with an access token.
       secure: true
       # Permit outbound internet access. Set false for offline/untrusted workloads.
@@ -109,6 +117,14 @@ sandbox:
       # command that finishes while disconnected cannot be recovered at all.
       background: true
       reconnect_attempts: 2
+    snapshots:
+      # Send checkpoint snapshot names to the service. E2B files a named snapshot as a template
+      # alias visible to the whole team, so names stay off: the checkpointer releases snapshots by id.
+      send_names: false
+      # AgentENV only: create a sandbox from a snapshot with customExtensionParams {keepGuestClock: true}, so
+      # its wall clock continues from the snapshot's instead of jumping to the current time. The clock then
+      # lags real time by the time the snapshot sat unused.
+      keep_guest_clock: false
     operations:
       # Retries for transient transport/5xx failures. Deterministic errors and
       # rate limits are not retried. Command timeouts are terminal; kill
@@ -116,6 +132,9 @@ sandbox:
       retries: 2
       retry_delay_s: 0.5
       retry_max_delay_s: 8.0
+      # Seconds after a create during which "not found" about the new sandbox means "not routable yet": AgentENV
+      # can briefly answer 404 for a sandbox that runs. A kill is repeated, and status reports UNKNOWN. 0 is off.
+      new_sandbox_grace_s: 15.0
     # Job attribution merged into every sandbox's metadata, so the list API's metadata
     # filter (`GET /v2/sandboxes?metadata=k=v` on E2B and AgentENV) finds a team's, user's
     # or run's sandboxes. Unset fields auto-detect from NEMO_GYM_TEAM / NEMO_GYM_USER /

@@ -127,6 +127,8 @@ if TYPE_CHECKING:
     from nemo_gym.sandbox.providers.apptainer.provider import ApptainerProvider
     from nemo_gym.sandbox.providers.base import ORPHAN_REAP_TIMEOUT_S, sandbox_credentials_rejected
     from nemo_gym.sandbox.providers.docker.provider import DockerCreateConfig, DockerProvider
+    from nemo_gym.sandbox.providers.e2b._sdk import require_e2b_sdk
+    from nemo_gym.sandbox.providers.e2b.provider import E2BProvider
     from nemo_gym.sandbox.providers.local.provider import LocalProvider
     from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
     from nemo_gym.sandbox.transfer import (
@@ -164,6 +166,7 @@ _PUBLIC_API = {
     "DirectSandboxConnection": "access",
     "DockerCreateConfig": "providers.docker.provider",
     "DockerProvider": "providers.docker.provider",
+    "E2BProvider": "providers.e2b.provider",
     "LocalProvider": "providers.local.provider",
     "MEDIA_DIRECTORY": "utils",
     "ORPHAN_REAP_TIMEOUT_S": "providers.base",
@@ -186,6 +189,7 @@ _PUBLIC_API = {
     "opensandbox_shm_labels": "compose_config",
     "read_text": "utils",
     "remote_kind": "transfer",
+    "require_e2b_sdk": "providers.e2b._sdk",
     "resolve_compose": "compose_config",
     "sandbox_credentials_rejected": "providers.base",
     "sandbox_failure": "failures",

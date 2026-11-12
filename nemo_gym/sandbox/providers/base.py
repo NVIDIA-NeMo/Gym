@@ -558,6 +558,10 @@ class SupportsSandboxSnapshot(Protocol):
 
     A snapshot is a restore point: ``create_from_snapshot`` builds a new sandbox from it, however the source sandbox
     changed or ended since. Deleting the source sandbox leaves the snapshot; only ``delete_snapshot`` removes it.
+
+    What a snapshot keeps depends on the provider. A provider whose snapshots save memory and running processes, so
+    that a sandbox created from one continues them, sets the class attribute ``snapshot_keeps_processes = True``;
+    read it with ``getattr(provider, "snapshot_keeps_processes", False)``. Otherwise a snapshot keeps files only.
     """
 
     async def snapshot(self, handle: SandboxHandle, *, name: str | None = None) -> str:
