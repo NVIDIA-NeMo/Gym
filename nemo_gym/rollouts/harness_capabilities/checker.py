@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 from jsonschema import Draft202012Validator
 
-from nemo_gym.trajectory.trajectory_record import NG_AGENT_OBSERVATIONS_KEY
+from nemo_gym.trajectory.trajectory_record import NG_AGENT_OBSERVATIONS_KEY, SessionTitleObservation
 
 from .checks import SchemaCheck, SemanticCheck
 from .results import Results, gate_passes
@@ -999,6 +999,31 @@ class Inspector:
                 depends_on=("model_calls.present",),
             )
         )
+        title_valid = True
+        title_schema = Draft202012Validator(SessionTitleObservation.model_json_schema())
+        for observation in self.observations:
+            if observation.get("kind") != "session_title":
+                continue
+            title_valid &= title_schema.is_valid(observation)
+            for reference in _objects(observation.get("model_calls")):
+                matches = _resolve(reference, self.calls)
+                title_valid &= len(matches) == 1
+                for index in matches:
+                    title_valid &= owners[index] == [observation.get("invocation_id")] and index not in helpers
+                    helpers.add(index)
+        self.results.run(
+            SemanticCheck(
+                id="steps.session_title_target",
+                tier="P0",
+                evidence=("TE-9",),
+                location="$.ng_agent_observations.records",
+                reason="session-title call must resolve uniquely to its invocation owner and have no other helper role",
+                predicate=lambda: title_valid,
+                available=self.available,
+                applies=self.scope.steps,
+                depends_on=("model_calls.present", "ownership.call_target"),
+            )
+        )
         refs = Counter()
         turn_valid, owner_valid = True, True
         for turn in self.turns:
@@ -1065,7 +1090,12 @@ class Inspector:
                 and (not any((refs[i] for i in helpers))),
                 available=self.available,
                 applies=self.scope.steps,
-                depends_on=("steps.call_target", "steps.compaction_target", "ownership.call_target"),
+                depends_on=(
+                    "steps.call_target",
+                    "steps.compaction_target",
+                    "steps.session_title_target",
+                    "ownership.call_target",
+                ),
             )
         )
 
