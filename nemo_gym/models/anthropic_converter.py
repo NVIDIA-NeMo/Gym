@@ -40,6 +40,7 @@ changing the egress contract.
 
 import base64
 import binascii
+import io
 import json
 from time import time
 from typing import Any, Dict, Iterator, List, Optional
@@ -433,9 +434,40 @@ class AnthropicConverter:
             "detail": "auto",
         }
 
+    def _anthropic_document_to_text(self, block: Dict[str, Any]) -> str:
+        """Render an Anthropic `document` block (e.g. Claude Code reading a PDF) as text.
+
+        Responses and Chat Completions inputs have no document part, so a PDF is passed as its extracted
+        text (requires the `pdf` extra) and a plain-text document as its text. Anything else becomes a
+        short note, so the tool result still reaches the model instead of failing the request.
+        """
+        source = block.get("source") or {}
+        title = block.get("title")
+        label = f"document {title!r}" if title else "document"
+        if source.get("type") == "text":
+            return source.get("data", "")
+        if source.get("type") == "base64" and source.get("media_type") == "application/pdf":
+            try:
+                from pypdf import PdfReader
+            except ImportError:
+                return f"[{label}: PDF text extraction requires `pip install nemo-gym[pdf]`]"
+            try:
+                reader = PdfReader(io.BytesIO(base64.b64decode(source["data"])))
+                pages = [page.extract_text() or "" for page in reader.pages]
+            except Exception as e:
+                return f"[{label}: could not read PDF ({type(e).__name__})]"
+            return "\n\n".join(pages)
+        return f"[{label}: unsupported document source {source.get('type')!r} ({source.get('media_type')!r})]"
+
     def _anthropic_tool_result_content(self, content: Any) -> Any:
         if isinstance(content, str):
             return content
+        content = [
+            {"type": "text", "text": self._anthropic_document_to_text(block)}
+            if block.get("type") == "document"
+            else block
+            for block in content
+        ]
         if all(block.get("type") == "text" for block in content):
             return "\n".join(block.get("text", "") for block in content)
 

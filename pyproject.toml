@@ -258,7 +258,17 @@ dependencies = [
 
 [project.optional-dependencies]
 all = [
-    "nemo-gym[dev,mlflow,ray,sandbox,wandb]",
+    "nemo-gym[dev,mlflow,pdf,ray,sandbox,wandb]",
+]
+
+# PDF: optional. The Anthropic Messages ingress (nemo_gym/models/anthropic_converter.py) passes a PDF `document`
+# block (e.g. Claude Code reading a PDF) to the model as its extracted text. Without this extra the block
+# becomes a short note instead.
+pdf = [
+    # pypdf: pure-Python PDF text extraction.
+    # Updated Thu Nov 12, 2026 with pypdf>=5.1.0
+    # License: BSD 3-Clause https://github.com/py-pdf/pypdf/blob/main/LICENSE
+    "pypdf>=5.1.0",
 ]
 
 # Ray: optional. Install it where `gym` runs when a configured server declares `ray_enabled = True`; those
