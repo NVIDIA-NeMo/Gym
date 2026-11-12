@@ -866,6 +866,60 @@ async def test_cleanup_timeout_after_verification_keeps_the_verdict(tmp_path, mo
     assert len(releases) == 2
 
 
+@pytest.mark.asyncio
+async def test_shutdown_releases_the_runtime_bundle_after_its_sandboxes_stop(tmp_path, monkeypatch):
+    """The shutdown sweep starts every cleanup at once, so the bundle's release waits for the sandbox stops."""
+    environment = server(tmp_path, cleanup_timeout_seconds=1)
+    order = []
+    activated = asyncio.Event()
+
+    async def release(session_id):
+        order.append("runtime released")
+
+    async def prepare(self, value):
+        value.sandbox = SimpleNamespace(serialize=AsyncMock(return_value={}))
+        value.judge_sandbox = SimpleNamespace()
+        value.runtime = SimpleNamespace(release=release)
+        value.task_metadata = {"agent_kwargs": {}}
+        value.prompt = "first instruction"
+
+    async def stop(self, value, role):
+        await asyncio.sleep(0.05)
+        order.append(role + " sandbox stopped")
+
+    async def post(name, path, *, json, cookies, headers=None, _control=False):
+        if path == "/v1/agent_sessions":
+            data = {
+                "agent_session_id": json.agent_session_id,
+                "capabilities": {"mode": "resume_harness_session", "observations": ["trajectory", "timing"]},
+            }
+        elif path == "/v1/agent_sessions/close":
+            data = {"agent_session_id": json.agent_session_id, "cleanup_confirmed": True}
+        else:
+            activated.set()
+            await asyncio.Event().wait()
+        return SimpleNamespace(cookies={"agent_session_id": SimpleNamespace(value="cookie")}, payload=data)
+
+    async def payload(response):
+        return response.payload
+
+    monkeypatch.setattr(SWETEnvironmentServer, "_prepare", prepare)
+    monkeypatch.setattr(SWETEnvironmentServer, "_stop_owned_sandbox", stop)
+    monkeypatch.setattr(SWETEnvironmentServer, "_activation_path", lambda self, req: "/v1/responses")
+    monkeypatch.setattr(app, "raise_for_status", AsyncMock())
+    monkeypatch.setattr(app, "get_response_json", payload)
+    environment.server_client = SimpleNamespace(post=post)
+    episode = asyncio.create_task(environment.run_request(request()))
+    await asyncio.wait_for(activated.wait(), 5)
+
+    await environment.finish_running_cleanups()
+    episode.cancel()
+    await asyncio.gather(episode, return_exceptions=True)
+
+    assert sorted(order[:2]) == ["candidate sandbox stopped", "judge sandbox stopped"]
+    assert order[2:] == ["runtime released"]
+
+
 @pytest.mark.parametrize(
     "native_outcome,confirmed",
     [("interrupted", True), ("not_started", True), ("failed", True), ("interrupted", False)],
