@@ -46,13 +46,14 @@ import re
 import uuid
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Type, TypeVar
+from typing import Annotated, Any, Awaitable, Callable, ClassVar, Type, TypeVar
 
-from aiohttp import ClientConnectionError, ClientResponseError, ClientTimeout
+from aiohttp import ClientPayloadError, ClientResponseError, ClientTimeout
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from nemo_gym.client.dependency_policy import DependencyOutcomePolicyConfig, dependency_error_evidence
 from nemo_gym.client.http_client import get_response_json, raise_for_status
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import ModelServerRef
@@ -65,9 +66,13 @@ from nemo_gym.core.failure_kinds import (
     JUDGE_FAILED,
     PROVIDER_CREDENTIALS_REJECTED,
     PROVIDER_QUOTA_EXHAUSTED,
+    TRANSPORT_PEER_DROP,
+    FailureClassificationConfig,
+    classify_failure,
 )
 from nemo_gym.core.failure_records import FailureBoundary, SdkErrorDetails
 from nemo_gym.core.failure_transport import FailureReportRow, observe_failure, report_for_current_request
+from nemo_gym.core.outcome_policy import OutcomeAction, OutcomePolicyConfig, choose_action, failure_outcome_policy
 from nemo_gym.core.typed_exceptions import NgFailureEvent, sdk_error_details
 from nemo_gym.trajectory.trajectory_record import ModelCallRef
 from nemo_gym.utils.exception_inspection import bounded_text, error_to_http_status
@@ -209,7 +214,25 @@ JUDGE_CALL_MAX_ATTEMPTS = 3
 """Attempts of one ``call_judge`` call (the first one included) before its failure masks the row."""
 JUDGE_RETRY_BASE_WAIT_S = 2.0
 JUDGE_RETRY_MAX_WAIT_S = 30.0
-_RETRYABLE_JUDGE_STATUSES = frozenset({408, 429})
+
+
+class JudgeCallOutcomePolicyConfig(DependencyOutcomePolicyConfig):
+    """Retry/fail rules for a judge request; call_judge still owns the attempt cap and backoff."""
+
+    by_status_code: dict[Annotated[int, Field(ge=400, le=599)], OutcomeAction] = Field(
+        default_factory=lambda: dict.fromkeys((408, 429, *range(500, 600)), OutcomeAction.RETRY)
+    )
+
+
+class JudgeFailureOutcomePolicyConfig(OutcomePolicyConfig):
+    """Disposition after local judge attempts: retain the answer for re-verification, or stop ungraded."""
+
+    supported_actions: ClassVar[frozenset[OutcomeAction]] = frozenset({OutcomeAction.VERIFY, OutcomeAction.FAIL})
+    classification: FailureClassificationConfig = Field(default_factory=FailureClassificationConfig)
+    default_action: OutcomeAction = OutcomeAction.VERIFY
+
+
+_judge_call_policy: ContextVar[JudgeCallOutcomePolicyConfig | None] = ContextVar("judge_call_policy", default=None)
 
 
 def _judge_http_status(error: BaseException) -> int | None:
@@ -219,15 +242,27 @@ def _judge_http_status(error: BaseException) -> int | None:
     return error.status if isinstance(error, ClientResponseError) else error_to_http_status(error)
 
 
-def _is_retryable_judge_error(error: BaseException) -> bool:
-    """Whether another attempt can succeed: a 408, 429 or 5xx reply, a timeout or a lost connection.
-
-    Other 4xx replies (auth, a bad request) and replies that do not parse fail the same way again.
-    """
+def _is_retryable_judge_error(error: BaseException, *, policy: JudgeCallOutcomePolicyConfig | None = None) -> bool:
+    """Select the next call attempt from observed dependency facts using shared rules."""
+    policy = policy or _judge_call_policy.get() or JudgeCallOutcomePolicyConfig()
+    kind, _ = dependency_error_evidence(error)
+    if isinstance(error, ClientPayloadError):
+        # Preserve the judge helper's existing stop-on-incomplete-body default.
+        kind = "unknown"
+    elif isinstance(error, ConnectionError):
+        kind = TRANSPORT_PEER_DROP
     status = _judge_http_status(error)
-    if status is not None:
-        return status in _RETRYABLE_JUDGE_STATUSES or status >= 500
-    return isinstance(error, (TimeoutError, ClientConnectionError, ConnectionError))
+    return (
+        choose_action(
+            failure_kind=kind,
+            http_status=status,
+            failure_class=classify_failure(
+                failure_kind=kind, stage="verification", http_status=status, config=policy.classification
+            ),
+            config=policy,
+        )
+        == OutcomeAction.RETRY
+    )
 
 
 def _judge_retry_wait_s(attempt: int) -> float:
@@ -270,6 +305,7 @@ async def call_judge(
     response_model: Type[ResponseT],
     timeout: ClientTimeout | None = None,
     max_attempts: int = JUDGE_CALL_MAX_ATTEMPTS,
+    outcome_policy: JudgeCallOutcomePolicyConfig | None = None,
 ) -> ResponseT:
     """POST to a judge model server and parse the reply; report failure as a ``judge_failed`` event.
 
@@ -312,6 +348,8 @@ async def call_judge(
                 grading.unidentified_calls += 1
         return parsed
 
+    if max_attempts < 1:
+        raise ValueError("max_attempts must include at least the first attempt")
     operation_id = uuid.uuid4().hex
     for attempt in range(1, max_attempts):
         try:
@@ -319,13 +357,18 @@ async def call_judge(
                 _call(), operation_id=operation_id, attempt_id=f"{operation_id}-{attempt}"
             )
         except NgFailureEvent as failure:
-            if not _is_retryable_judge_error(failure.__cause__ or failure):
+            if not _is_retryable_judge_error(failure.__cause__ or failure, policy=outcome_policy):
                 raise
         await asyncio.sleep(_judge_retry_wait_s(attempt))
     return await _reraise_judge_errors(_call(), operation_id=operation_id, attempt_id=f"{operation_id}-{max_attempts}")
 
 
-def judge_failsafe(verify_fn: Callable) -> Callable:
+def judge_failsafe(
+    verify_fn: Callable,
+    *,
+    call_policy: JudgeCallOutcomePolicyConfig | None = None,
+    failure_policy: JudgeFailureOutcomePolicyConfig | None = None,
+) -> Callable:
     """Wrap verify() so a judge failure returns a sidecar-routed row (reward 0.0, the
     routing keys, the request's ``response`` carried) instead of propagating.
     functools.wraps keeps verify's signature so FastAPI injects the same params
@@ -334,41 +377,56 @@ def judge_failsafe(verify_fn: Callable) -> Callable:
 
     @functools.wraps(verify_fn)
     async def wrapper(*args, **kwargs):
+        token = _judge_call_policy.set(call_policy or _judge_call_policy.get())
         try:
-            return await verify_fn(*args, **kwargs)
-        except JUDGE_FAILURES as e:
-            if not (is_judge_failure(e) or is_judge_provider_stop(e)):
-                raise
-            kind = e.failure_kind if is_judge_provider_stop(e) else JUDGE_FAILED
-            body = kwargs.get("body") or next(
-                (a for a in (*kwargs.values(), *args) if hasattr(a, "model_dump") and hasattr(a, "response")),
-                None,
-            )
-            if body is None:  # verify always has a request body; guard against an opaque 500
-                raise RuntimeError("judge_failsafe: could not locate the verify request body") from e
-            error = str(e)[:2000]
-            data = body.model_dump()
-            instance_config = data.get("instance_config")
-            data |= {
-                "reward": 0.0,
-                "mask_sample": True,
-                # The judge owns this boundary; more specific diagnostics stay on the explicit cause.
-                "failure_kind": kind,
-                "failure_reason": error,
-                # Keep older NeMo RL consumers working during top-level field migration.
-                "instance_config": {
-                    **(instance_config if isinstance(instance_config, dict) else {}),
+            try:
+                return await verify_fn(*args, **kwargs)
+            except JUDGE_FAILURES as e:
+                if not (is_judge_failure(e) or is_judge_provider_stop(e)):
+                    raise
+                kind = e.failure_kind if is_judge_provider_stop(e) else JUDGE_FAILED
+                body = kwargs.get("body") or next(
+                    (a for a in (*kwargs.values(), *args) if hasattr(a, "model_dump") and hasattr(a, "response")),
+                    None,
+                )
+                if body is None:  # verify always has a request body; guard against an opaque 500
+                    raise RuntimeError("judge_failsafe: could not locate the verify request body") from e
+                error = str(e)[:2000]
+                data = body.model_dump()
+                instance_config = data.get("instance_config")
+                data |= {
+                    "reward": 0.0,
                     "mask_sample": True,
-                },
-                "_ng_failure_class": "judge_failed",
-                "_ng_failure_judge_error": error,
-            }
-            # Legacy/parser JudgeErrors also need a judge-owned event, rather than borrowing an inner kind.
-            failure = e
-            if not (isinstance(e, NgFailureEvent) and e.failure_kind == kind):
-                failure = judge_call_failed(error, operation="judge.verify")
-                failure.__cause__ = e
-            data |= FailureReportRow.fields(report_for_current_request(failure))
-            return JSONResponse(content=jsonable_encoder(data))
+                    # The judge owns this boundary; more specific diagnostics stay on the explicit cause.
+                    "failure_kind": kind,
+                    "failure_reason": error,
+                    # Keep older NeMo RL consumers working during top-level field migration.
+                    "instance_config": {
+                        **(instance_config if isinstance(instance_config, dict) else {}),
+                        "mask_sample": True,
+                    },
+                    "_ng_failure_class": "judge_failed",
+                    "_ng_failure_judge_error": error,
+                }
+                # Legacy/parser JudgeErrors also need a judge-owned event, rather than borrowing an inner kind.
+                failure = e
+                if not (isinstance(e, NgFailureEvent) and e.failure_kind == kind):
+                    failure = judge_call_failed(error, operation="judge.verify")
+                    failure.__cause__ = e
+                config = failure_policy or JudgeFailureOutcomePolicyConfig()
+                action = failure_outcome_policy(failure, config=config, classification=config.classification)
+                data["failure_outcome_action"] = action
+                data["failure_outcome_attribution"] = classify_failure(
+                    failure_kind=failure.failure_kind,
+                    stage=failure.stage or "verification",
+                    http_status=failure.http_status,
+                    config=config.classification,
+                )
+                if action == OutcomeAction.FAIL:
+                    data["_ng_failure_terminal"] = True
+                data |= FailureReportRow.fields(report_for_current_request(failure))
+                return JSONResponse(content=jsonable_encoder(data))
+        finally:
+            _judge_call_policy.reset(token)
 
     return wrapper

@@ -80,7 +80,7 @@ from nemo_gym.server_runtime.request_handling.session_routing import SessionKind
 from nemo_gym.server_runtime.verifier_observability import observe_verifier
 from nemo_gym.telemetry.endpoints import traced_verify_endpoint
 from nemo_gym.trajectory.trajectory_record import VerifierInvocation
-from nemo_gym.verification.judge import judge_failsafe
+from nemo_gym.verification.judge import JudgeCallOutcomePolicyConfig, JudgeFailureOutcomePolicyConfig, judge_failsafe
 
 
 logger = logging.getLogger(__name__)
@@ -147,6 +147,10 @@ class ReverifyMode(str, Enum):
 
 
 class BaseResourcesServerConfig(BaseRunServerInstanceConfig):
+    judge_call_outcome_policy: JudgeCallOutcomePolicyConfig = Field(default_factory=JudgeCallOutcomePolicyConfig)
+    judge_failure_outcome_policy: JudgeFailureOutcomePolicyConfig = Field(
+        default_factory=JudgeFailureOutcomePolicyConfig
+    )
     # Opt in to serve this server's tool routes over MCP; default off.
     expose_tools_over_mcp: bool = False
     session_close_retry_window_seconds: float = Field(
@@ -903,7 +907,11 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         app.post("/verify")(
             traced_verify_endpoint(
                 observe_verifier(
-                    judge_failsafe(self.verify),
+                    judge_failsafe(
+                        self.verify,
+                        call_policy=self.config.judge_call_outcome_policy,
+                        failure_policy=self.config.judge_failure_outcome_policy,
+                    ),
                     enabled=TypeAdapter(bool).validate_python(config.get("observability_enabled", False)),
                     verifier_name=self.config.name,
                     uninstrumented_models=self.grading_may_use_uninstrumented_model,

@@ -716,6 +716,8 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
         if result.get(NG_FAILURE_CLASS_KEY) == JUDGE_FAILED and isinstance(kind, str) and kind.startswith("judge_")
         else set()
     )
+    if judge_markers and result.get("failure_outcome_action") == "fail" and result.get(NG_TERMINAL_KEY) is True:
+        judge_markers.add(NG_TERMINAL_KEY)
     # A producer that settles its rollout as a final zero marks it explicitly: a registered failure class, final,
     # and the marker. Only that complete form may carry these collector keys; the marker alone reopens nothing.
     final_zero_markers = (

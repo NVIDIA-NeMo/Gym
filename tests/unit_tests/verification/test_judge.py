@@ -486,3 +486,87 @@ def test_the_backoff_is_full_jitter_exponential_and_capped(monkeypatch):
         (0, 30.0),
         (0, 30.0),
     ]
+
+
+@pytest.mark.parametrize("failure", [_http_reply(503), TimeoutError("judge timed out")])
+async def test_call_policy_can_stop_a_retryable_judge_attempt(failure):
+    from nemo_gym.verification.judge import JudgeCallOutcomePolicyConfig
+
+    client = _judge(failure, _http_reply(200, b'{"verdict": "CORRECT"}'))
+    policy = JudgeCallOutcomePolicyConfig(by_status_code={503: "fail"}, by_failure_kind={"transport_timeout": "fail"})
+    with pytest.raises(NgFailureEvent):
+        await call_judge(
+            client,
+            server_name="judge",
+            url_path="/v1/responses",
+            json={},
+            response_model=_Verdict,
+            outcome_policy=policy,
+        )
+    assert client.post.await_count == 1
+    # Preserve the internal client's transport retry allowance.
+    assert "_max_num_tries" not in client.post.call_args.kwargs
+
+
+async def test_verification_policy_stops_ungraded_and_collection_keeps_the_decision():
+    from nemo_gym.rollouts.rollout_collection import _episode_record
+    from nemo_gym.verification.judge import JudgeFailureOutcomePolicyConfig
+
+    async def verify(body):
+        raise JudgeError("judge unavailable")
+
+    wrapped = judge_failsafe(verify, failure_policy=JudgeFailureOutcomePolicyConfig(default_action="fail"))
+    row = orjson.loads((await wrapped(_Req(response={"saved": "answer"}))).body)
+    assert row["mask_sample"] is True
+    assert row["_ng_failure_terminal"] is True
+    assert row["failure_outcome_action"] == "fail"
+    assert row["failure_outcome_attribution"] == "evaluation"
+    saved = _episode_record(
+        {"episode_id": {"rollout_id": "r", "attempt": 1}, "task_id": {"taskset": "t", "task_id": "1"}, "result": row}
+    )
+    assert saved["failure_outcome_action"] == "fail"
+    assert saved["response"] == {"saved": "answer"}
+    assert saved["_ng_failure_terminal"] is True
+
+
+async def test_server_call_policy_is_scoped_to_its_verification_request():
+    from nemo_gym.verification.judge import JudgeCallOutcomePolicyConfig, _judge_call_policy
+
+    client = _judge(_http_reply(503))
+
+    async def verify(body):
+        return await _call(client)
+
+    policy = JudgeCallOutcomePolicyConfig(by_status_code={503: "fail"})
+    result = await judge_failsafe(verify, call_policy=policy)(_Req())
+    assert orjson.loads(result.body)["mask_sample"] is True
+    assert client.post.await_count == 1
+    assert _judge_call_policy.get() is None
+
+
+async def test_incomplete_judge_body_keeps_existing_fail_default():
+    from aiohttp import ClientPayloadError
+
+    client = _judge(ClientPayloadError("response body truncated"))
+    with pytest.raises(NgFailureEvent):
+        await call_judge(client, server_name="judge", url_path="/v1/responses", json={}, response_model=_Verdict)
+    assert client.post.await_count == 1
+
+
+@pytest.mark.parametrize("kind", ["provider_quota_exhausted", "provider_credentials_rejected"])
+@pytest.mark.parametrize("action", ["verify", "fail"])
+async def test_provider_stop_retains_kind_and_applies_final_judge_policy(kind, action):
+    from nemo_gym.verification.judge import JudgeFailureOutcomePolicyConfig, judge_provider_stopped
+
+    failure = judge_provider_stopped("provider unavailable", failure_kind=kind, operation="judge.verify")
+
+    async def verify(body):
+        raise failure
+
+    wrapped = judge_failsafe(verify, failure_policy=JudgeFailureOutcomePolicyConfig(by_failure_kind={kind: action}))
+    row = orjson.loads((await wrapped(_Req(response={"saved": "answer"}))).body)
+    assert row["failure_kind"] == kind
+    assert row["failure_outcome_action"] == action
+    assert row.get("_ng_failure_terminal", False) is (action == "fail")
+    assert row["response"] == {"saved": "answer"}
+    assert row["mask_sample"] is True
