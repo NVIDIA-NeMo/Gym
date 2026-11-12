@@ -1234,6 +1234,8 @@ def transcript_to_atif(
     open_calls: dict[str, AtifStep] = {}
     # Every endpoint call's ID, so a function call cannot reuse one; the unanswered ones stay open.
     endpoint_call_ids: set[str] = set()
+    # Every function call ID exported, answered or not; an endpoint call may not reuse one.
+    function_call_ids: set[str] = set()
     unanswered_endpoint_calls: list[str] = []
     pending_reasoning: list[NeMoGymResponseReasoningItem] = []
     reasons: set[str] = set()
@@ -1305,7 +1307,7 @@ def transcript_to_atif(
                     or call.call_id in endpoint_call_ids
                     or any(call.call_id == c.tool_call_id for c in atif_calls)
                 ):
-                    raise _path_error(call_path, f"duplicate function call ID {call.call_id!r}")
+                    raise _path_error(call_path, f"duplicate tool call ID {call.call_id!r}")
                 arguments, argument_extra = _live_arguments(call, reasons=reasons)
                 extra = ({"source_item_id": call.id} if call.id is not None else {}) | (argument_extra or {})
                 atif_calls.append(
@@ -1325,6 +1327,7 @@ def transcript_to_atif(
             )
             for call in atif_calls:
                 open_calls[call.tool_call_id] = step
+                function_call_ids.add(call.tool_call_id)
             pending_reasoning = []
             steps.append(step)
             agent_steps.append(step)
@@ -1332,8 +1335,8 @@ def transcript_to_atif(
         if isinstance(item, NeMoGymResponseMcpCall):
             if not item.id or not item.id.strip() or not item.name.strip():
                 raise _path_error(path, "MCP calls need an id and a name")
-            if item.id in open_calls or item.id in endpoint_call_ids:
-                raise _path_error(path, f"duplicate function call ID {item.id!r}")
+            if item.id in function_call_ids or item.id in endpoint_call_ids:
+                raise _path_error(path, f"duplicate tool call ID {item.id!r}")
             endpoint_call_ids.add(item.id)
             arguments, argument_extra = _live_arguments(item, reasons=reasons)
             call_extra: dict[str, Any] = {"source_item_type": "mcp_call"}
