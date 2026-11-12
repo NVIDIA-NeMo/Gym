@@ -36,12 +36,12 @@ This gives you flexibility to integrate with your existing models and agents:
 
 Many agent frameworks run the agent, its tools, and the model client in one process. NeMo Gym runs each component as its own server instead, for these reasons:
 
-- **Isolated dependencies.** Each server runs in its own virtual environment, built from that server's own dependency file. An agent harness and a resources server can depend on conflicting library versions, or on different Python versions, without breaking each other. See [Per-server runtime files](/reference/configuration#per-server-runtime-files).
+- **Isolated dependencies.** Each server runs in its own virtual environment, built from that server's own dependency file. An agent harness and a resources server can depend on conflicting library versions without breaking each other. See [Per-server runtime files](/reference/configuration#per-server-runtime-files).
 - **Independent scaling.** Each server runs its own worker processes, so a resources server that runs expensive verification can get more of them without changing the agent or model server. Gym servers run on CPU by default and can be deployed on different nodes from the GPUs that train the model. See [Deployment Topology](/infrastructure/deployment-topology).
 - **Reuse across evaluation and training.** The same agent, resources server, and model server serve `gym eval run` and every supported training framework. Changing the trainer or the model doesn't require changing the environment.
 - **HTTP boundaries that match training frameworks.** Training frameworks already serve their policy model through an OpenAI-compatible HTTP endpoint, and the model server calls it the same way it calls any other provider. Episodes reach Gym over HTTP too, so evaluation and training submit work the same way. See [Integrate RL Frameworks](/contribute/rl-framework-integration).
 
-The servers communicate over async HTTP with a shared, pooled client built for high concurrency. A single NeMo Gym instance of three servers can handle 65,000 concurrent math rollouts. See [Communication](#communication).
+You still start everything with one command: `gym env start` launches each server and waits until all of them are ready. The servers then talk to each other over async HTTP through a shared, pooled client built for high concurrency. See [Communication](#communication).
 
 ## How an Agent Runs a Task in NeMo Gym Environments
 
@@ -128,7 +128,7 @@ Sandbox execution and file transfer are not Gym HTTP calls. They use the configu
 Some servers do work too heavy for their own processes, such as running generated code, compilers, or test suites for many rollouts at once. A server can move that work elsewhere in two ways. Neither changes how servers talk to each other: that is always HTTP.
 
 - **Sandboxes.** The [Sandbox API](/infrastructure/sandbox) runs work in isolated environments with the CPU, memory, and GPU the server requests. Remote providers, such as a Kubernetes cluster or a cloud service, run those sandboxes on their own machines rather than on the server's host. Use sandboxes when the work needs isolation or its own runtime.
-- **Ray.** Ray is optional. A server that spreads CPU-heavy work across nodes as Ray tasks opts in, and Gym starts or joins a Ray cluster only for it. Servers that don't opt in never connect to Ray, and Gym installs and runs without it. See [Use Ray for parallelizing CPU-intensive tasks](/reference/faq#how-to-use-ray-for-parallelizing-cpu-intensive-tasks).
+- **Ray.** Ray is optional. A server that spreads CPU-heavy work across nodes as Ray tasks opts in, and Gym starts or joins a Ray cluster only for it. Servers that don't opt in never connect to Ray, and Gym installs and runs without it. See [Scale CPU-Heavy Work with Ray](/infrastructure/scale-cpu-work-with-ray).
 
 ## Where the Code Lives
 

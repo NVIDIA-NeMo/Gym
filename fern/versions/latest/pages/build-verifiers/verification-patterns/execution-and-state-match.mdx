@@ -93,22 +93,14 @@ except asyncio.TimeoutError:
 text = stdout.decode("utf-8", errors="replace")
 ```
 
-For distributed evaluation, put the blocking checker in a Ray task. [`evalplus`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/evalplus) and [`code_fim`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/code_fim) use Ray remote functions to isolate work and distribute it across workers. Ray is opt-in: a server that uses it declares `ray_enabled = True` on its server class and requests the `ray` extra in its own dependencies, for example `nemo-gym[dev,ray]` in its `pyproject.toml`. See [Use Ray for parallelizing CPU-intensive tasks](/reference/faq#how-to-use-ray-for-parallelizing-cpu-intensive-tasks). To run the checker in isolation, possibly on another machine, use a sandbox instead; see [Sandbox and Container Execution](#sandbox-and-container-execution).
-
-```python
-@ray.remote(scheduling_strategy="SPREAD")
-def check_correctness_remote(sample, generation, timeout):
-    return check_correctness(sample, generation, timeout)
-
-results = await check_correctness_remote.remote(sample, code, timeout)
-```
-
-Ray futures are directly awaitable. In async server code, use `await future`; do not call `ray.get()`, which blocks the event loop.
+If the checker is too heavy to run in the server's own processes, run it in a sandbox or spread it across nodes; see [Distributing Heavy Work](/about/architecture#distributing-heavy-work).
 
 Other examples:
 
 - [`competitive_coding_challenges`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/competitive_coding_challenges) checks competitive-programming inputs and outputs.
 - [`nvarc`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/nvarc) executes a generated Python transformation and validates its returned grid.
+- [`evalplus`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/evalplus) runs generated Python functions against the HumanEval+ and MBPP+ tests.
+- [`code_fim`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/code_fim) runs code-infilling completions against the HumanEval-Infilling tests.
 
 ---
 

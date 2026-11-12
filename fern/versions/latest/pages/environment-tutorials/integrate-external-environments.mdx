@@ -21,7 +21,7 @@ Integrating external training environments, benchmarks, or agents into a NeMo Gy
 
 1. Technical design  
    1. Follow NeMo Gym async first-party server design: the `/run` endpoint should be async to maximize efficiency.  
-      1. Avoid using extra threads or processes unless absolutely necessary. If you need to scale heavy work beyond the server's host, run it in sandboxes through the [Sandbox API](/infrastructure/sandbox), or opt into Ray workers and await the `ray.remote` call. Ray is optional: see [Use Ray for parallelizing CPU-intensive tasks](/reference/faq#how-to-use-ray-for-parallelizing-cpu-intensive-tasks).  
+      1. Avoid using extra threads or processes unless absolutely necessary. If you need to scale heavy work beyond the server's host, run it in sandboxes through the [Sandbox API](/infrastructure/sandbox), or opt into Ray workers and await the `ray.remote` call. Ray is optional: see [Scale CPU-Heavy Work with Ray](/infrastructure/scale-cpu-work-with-ray).  
       2. For example, a single NeMo Gym instance that consists of three FastAPI server instances can handle 65,000 concurrent math rollouts without crashing and is not terribly inefficient.  
    2. Use the [NeMo Gym custom OpenAI client](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/client/openai_client.py) rather than other popular LLM clients including OpenAI, Anthropic, and LiteLLM.  
       1. The NeMo Gym OpenAI client has been meticulously designed to scale.

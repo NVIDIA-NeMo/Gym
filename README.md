@@ -96,7 +96,6 @@ NeMo Gym is designed to run on standard development machines:
 
 - **API Keys**: OpenAI API key with available credits (for the quickstart examples)
   - Other model providers supported (Azure OpenAI, self-hosted models via vLLM)
-- **Ray**: Optional. Install the `ray` extra (`pip install "nemo-gym[ray]"`) only to run servers that use Ray, such as `local_vllm_model` or the SWE agents
 
 ## 🚀 Quick Start
 
