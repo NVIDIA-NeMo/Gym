@@ -626,7 +626,10 @@ retained separately. No maintained task was rerun or changed.
 The complete scalar qualification receipt follows; raw logs, results and images
 remain in the run record. The 231/908 score above still measures `f8031c55e`.
 
-```json
+The inline comments identify public file hashes flagged by the entropy detector.
+The unannotated JSON receipt remains in the run record.
+
+```jsonc
 {
   "observed_utc": "2026-11-12T04:13:06Z",
   "status": "PASS",
@@ -648,15 +651,15 @@ remain in the run record. The 231/908 score above still measures `f8031c55e`.
   "successful_environment_steps": 1,
   "injected_failure_model_turns": 0,
   "injected_failure_environment_steps": 0,
-  "evaluator_source_sha256": "270ca92c5c788edee9b1a84589af4123c3af10fe93da57e5952cf8bfa8080c92",
-  "source_authority_sha256": "eff5ee7339b3a78a3421b154a763b99e9f037ab131ec7c128be2d3b8b50b3b2e",
+  "evaluator_source_sha256": "270ca92c5c788edee9b1a84589af4123c3af10fe93da57e5952cf8bfa8080c92", // Public SHA-256 artifact identity; pragma: allowlist secret
+  "source_authority_sha256": "eff5ee7339b3a78a3421b154a763b99e9f037ab131ec7c128be2d3b8b50b3b2e", // Public SHA-256 artifact identity; pragma: allowlist secret
   "latest_sdk": "2.45.0",
   "real_policy_unchanged": true,
   "formal_908_results_untouched": true,
   "raw_logs_and_images_remain_on_cluster": true,
-  "qualification_inputs_sha256": "79677989e94ba32c17dbf2cc1f01b3e24a5913d5f4def6d413111cdcc374ef04",
-  "successful_raw_result_sha256": "0f817b5f6ee27043638536c30683174c93039f0ea5db71f672b042fe95a0092a",
-  "injected_failure_raw_result_sha256": "112bad6df84565a5ec5981b6acb355294cfab3398280bf3616cf03b867f30358",
+  "qualification_inputs_sha256": "79677989e94ba32c17dbf2cc1f01b3e24a5913d5f4def6d413111cdcc374ef04", // Public SHA-256 artifact identity; pragma: allowlist secret
+  "successful_raw_result_sha256": "0f817b5f6ee27043638536c30683174c93039f0ea5db71f672b042fe95a0092a", // Public SHA-256 artifact identity; pragma: allowlist secret
+  "injected_failure_raw_result_sha256": "112bad6df84565a5ec5981b6acb355294cfab3398280bf3616cf03b867f30358", // Public SHA-256 artifact identity; pragma: allowlist secret
   "task_owned_fault_server_stopped": true,
   "actual_model_request_completions": 2
 }
