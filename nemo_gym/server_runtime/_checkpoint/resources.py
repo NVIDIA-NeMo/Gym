@@ -73,6 +73,7 @@ from nemo_gym.server_runtime._checkpoint.control import (
     JsonPayload,
     PrepareReport,
     next_attempt,
+    require_checkpoint_id_keyword,
 )
 from nemo_gym.server_runtime._checkpoint.errors import (
     AdmissionClosedError,
@@ -119,7 +120,7 @@ class ResourcesSessionHooks(Protocol):
 
     A sandbox per session plugs in here:
 
-    - ``export_session_states`` runs at commit.
+    - ``export_session_states`` runs at commit, with the ID of the checkpoint being written.
       Prepare stops agents before resources servers, so no episode step is using a sandbox by then.
       Return what a restore needs to rebuild each sandbox as of this checkpoint, such as a snapshot id.
       A descriptor of the live sandbox is not enough on its own: the sandbox keeps changing after the checkpoint.
@@ -129,18 +130,23 @@ class ResourcesSessionHooks(Protocol):
     - ``retire_session_state`` runs when an attempt is discarded, whatever the server's mode.
       Stop its sandbox.
       It runs again for the same session if a retire was cut short, so it must tolerate state it already released.
+    - ``delete_external_state`` runs when the controller names the checkpoints it may still restore.
+      Delete what the export of any other checkpoint kept outside Gym, such as snapshots.
+      Optional: a server whose checkpoints keep nothing outside Gym leaves it out.
 
     Whatever a checkpoint keeps outside Gym, such as snapshots,
     is the server's to delete once no checkpoint the controller may restore refers to it.
     """
 
-    async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
+    async def export_session_states(self, session_ids: list[str], *, checkpoint_id: str) -> dict[str, JsonValue]:
         """Return the state of each session; leave out a session the server no longer holds."""
 
     async def restore_session_states(self, states: dict[str, JsonValue]) -> None:
         """Validate every state, then install all of them; never install a partial set."""
 
     async def retire_session_state(self, session_id: str) -> None: ...
+
+    async def delete_external_state(self, kept: frozenset[str]) -> None: ...
 
 
 class ResourcesParticipant(CheckpointParticipant):
@@ -156,8 +162,13 @@ class ResourcesParticipant(CheckpointParticipant):
         session_release_pending: Callable[[str], bool] | None = None,
     ) -> None:
         super().__init__()
+        if mode == "exported":
+            require_checkpoint_id_keyword(hooks, "export_session_states")
         self.hooks = hooks
         self.mode = mode
+        # The hook is optional and runs only in the exported mode.
+        # A server whose base class defines a default that keeps nothing sets this itself.
+        self.keeps_external_state = mode == "exported" and getattr(hooks, "delete_external_state", None) is not None
         self.verify_step_type = verify_step_type
         self._session_release_pending = session_release_pending
         # Requests the checkpoint does not wait for:
@@ -174,6 +185,11 @@ class ResourcesParticipant(CheckpointParticipant):
         # Seeds admitted and not finished, by attempt: a retire waits for them,
         # so a session they create is released too.
         self._seeding: Counter[EpisodeId] = Counter()
+        # The first seeds of rollouts in flight when admission closed, until resume: restarts of that checkpoint, as
+        # on a restart_only server. Such a seed has done no work of the episode worth saving, so prepare does not wait
+        # for it and the commit leaves its episode out; after a crash the rollout starts over from its input. A seed
+        # is refused while admission is closed, so these do not change before the commit.
+        self._first_seed_restarts: set[EpisodeId] = set()
         # Sessions a restore installed, until they end.
         # A request on one must name its attempt, since the attempt the restore replaced holds the same cookie.
         self._restored_sessions: set[str] = set()
@@ -312,10 +328,21 @@ class ResourcesParticipant(CheckpointParticipant):
             # only its seeds wait, so the restarts it reports do not change during the checkpoint.
             return
         self.accepting = False
+        # Only a rollout's first seed: a seed that claims a restored session still blocks prepare.
+        self._first_seed_restarts = {
+            episode_id for episode_id in self._seeding if episode_id.rollout_id not in self._rollout_sessions
+        }
 
     async def open_admission(self) -> None:
+        self._first_seed_restarts = set()
         self.accepting = True
         self._open.set()
+
+    async def release(self, kept: frozenset[str]) -> None:
+        release = getattr(self.hooks, "delete_external_state", None)
+        # Optional: a server whose checkpoints keep nothing outside Gym leaves it out.
+        if self.mode == "exported" and release is not None:
+            await release(kept)
 
     def readiness(self) -> PrepareReport:
         # A seed in flight is a restart too: its reply always says so, and prepare does not wait for it.
@@ -325,7 +352,7 @@ class ResourcesParticipant(CheckpointParticipant):
                 | {episode_id.capture_key for episode_id in self._seeding}
             )
             if self.mode == "restart_only"
-            else []
+            else sorted(episode_id.capture_key for episode_id in self._first_seed_restarts)
         )
         # A session whose retire was cut short is still being released: a checkpoint waits for a retried retire.
         blockers = sorted(
@@ -336,7 +363,9 @@ class ResourcesParticipant(CheckpointParticipant):
             }
         )
         # A restart_only server's requests are never captured, so none of them holds up a checkpoint.
-        inflight = 0 if self.mode == "restart_only" else self.inflight - self._carried_inflight()
+        inflight = (
+            0 if self.mode == "restart_only" else self.inflight - self._carried_inflight() - self._restarted_seeds()
+        )
         return PrepareReport(
             ready=inflight == 0 and not blockers,
             blockers=blockers,
@@ -345,10 +374,22 @@ class ResourcesParticipant(CheckpointParticipant):
         )
 
     def ready(self) -> bool:
-        if self.mode != "restart_only" and self.inflight > self._carried_inflight():
+        if self.mode != "restart_only" and self.inflight > self._carried_inflight() + self._restarted_seeds():
             return False
         # Retired sessions not yet released are few; scanning them, not every session, keeps each prepare wake cheap.
         return not any(session_id in self._sessions for session_id in self._retired_session_rollouts)
+
+    def _restarted_seeds(self) -> int:
+        """Seed requests still in flight that the open checkpoint reports as restarts, so it does not wait for them.
+
+        A seed's request is counted in ``inflight`` from its start until it ends, and so is it in ``_seeding``.
+        One whose episode an earlier stage carried is already left out by ``_carried_inflight``.
+        """
+        return sum(
+            self._seeding[episode_id]
+            for episode_id in self._first_seed_restarts
+            if episode_id.capture_key not in self.carried_restarts
+        )
 
     def _carried_inflight(self) -> int:
         """Requests in flight on the sessions of episodes an earlier prepare stage reported as restarts.
@@ -515,7 +556,7 @@ class ResourcesParticipant(CheckpointParticipant):
         if counted:
             self.inflight -= 1
 
-    async def export(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
+    async def export(self, episode_ids: Optional[list[EpisodeId]], *, checkpoint_id: str) -> list[CheckpointRecord]:
         if self.mode == "restart_only":
             return []
         # Only sessions within the commit's scope:
@@ -527,7 +568,10 @@ class ResourcesParticipant(CheckpointParticipant):
         sessions = [
             (session_id, episode_id)
             for session_id, episode_id in self._checkpointed_sessions()
-            if (scope is None or episode_id in scope) and session_id not in carried
+            if (scope is None or episode_id in scope)
+            and session_id not in carried
+            # Nor a session a seed of the open checkpoint created: that seed's episode restarts.
+            and episode_id not in self._first_seed_restarts
         ]
         if self.mode == "stateless":
             # No state, only which sessions continue, so a restore places them where their requests are routed.
@@ -535,7 +579,9 @@ class ResourcesParticipant(CheckpointParticipant):
                 ResourcesSessionRecord(session_id=session_id, episode_id=episode_id, state=None)
                 for session_id, episode_id in sessions
             ]
-        states = await self.hooks.export_session_states([session_id for session_id, _ in sessions])
+        states = await self.hooks.export_session_states(
+            [session_id for session_id, _ in sessions], checkpoint_id=checkpoint_id
+        )
         records = []
         for session_id, episode_id in sessions:
             if session_id not in states:
