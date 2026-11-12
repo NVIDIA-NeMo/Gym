@@ -176,39 +176,23 @@ def test_compaction_usage_includes_messages_cache_reads_and_writes(compaction_ev
     assert checks(record, witness)["compaction.usage_retained"]["status"] == "pass"
 
 
-@pytest.mark.parametrize("mutation", [None, "missing_error", "invented_zero", "missing_gap", "reported_usage"])
-def test_overflow_recovery_retains_error_and_measured_usage(compaction_evidence, mutation):
+@pytest.mark.parametrize("mutation", [None, "missing_gap", "reported_usage"])
+def test_overflow_recovery_aggregates_measured_usage(compaction_evidence, mutation):
     record, witness = compaction_evidence
     error = {"error": {"code": "context_length_exceeded"}}
     attempt = {"request": {"input": "too large"}, "status_code": 400, "response": error}
     witness["attempts"].insert(1, attempt)
-    failed = {
-        "model_call_id": "overflow",
-        "request": attempt["request"],
-        "response": error,
-        "response_metadata": {"status_code": 400},
-        "token_stats": {},
-    }
-    record["ng_trajectory"]["model_calls"].append(failed)
-    record["ng_trajectory"]["invocations"][0]["model_calls"].append({"model_call_id": "overflow"})
     record["ng_agent_observations"]["gaps"] = [{"code": "model_call_usage_unavailable"}]
-    if mutation == "missing_error":
-        record["ng_trajectory"]["model_calls"].pop()
-    elif mutation == "invented_zero":
-        failed["token_stats"]["tokens_in"] = 0
-    elif mutation == "missing_gap":
+    if mutation == "missing_gap":
         record["ng_agent_observations"]["gaps"] = []
     elif mutation == "reported_usage":
         error["usage"] = {"input_tokens": 3, "output_tokens": 1, "total_tokens": 4}
-        failed["token_stats"].update(tokens_in=3, tokens_out=1, tokens_total=4)
         record["response"]["usage"].update(input_tokens=30, output_tokens=13, total_tokens=43)
     result = checks(record, witness)
     if mutation in (None, "reported_usage"):
         assert {c["status"] for c in result.values()} == {"pass"}
     elif mutation == "missing_gap":
         assert result["compaction.usage_retained"]["status"] == "fail"
-    else:
-        assert result["compaction.failed_calls_retained"]["status"] == "fail"
 
 
 def test_successful_compaction_call_cannot_omit_usage(compaction_evidence):

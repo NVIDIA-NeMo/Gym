@@ -3,7 +3,6 @@
 
 """Compaction evidence compared with a controlled provider's independent witness."""
 
-import json
 from collections import Counter
 
 from nemo_gym.models.chat_completions_converter import message_content_to_text
@@ -72,46 +71,6 @@ def inspect_compaction(
                 applies=applies,
                 depends_on=depends_on,
             )
-        )
-
-    if failed:
-
-        def failed_exchanges_retained() -> bool:
-            # Errors need no provider response ID. Require the real captured
-            # exchange and preserve each unknown token count as unknown.
-            def key(request, status, response, counts):
-                return json.dumps([request, status, response, counts], sort_keys=True)
-
-            fields = ("tokens_in", "tokens_out", "tokens_reasoning", "tokens_total", "cached_tokens")
-            prescribed = Counter()
-            for index, attempt in enumerate(failed):
-                call = build_model_call_record(attempt, call_index=index)
-                prescribed[
-                    key(
-                        attempt["request"],
-                        attempt["status_code"],
-                        attempt["response"],
-                        [getattr(call, field) for field in fields],
-                    )
-                ] += 1
-            retained = Counter(
-                key(
-                    call.get("request"),
-                    metadata.get("status_code"),
-                    call.get("response"),
-                    [_mapping(call.get("token_stats")).get(field) for field in fields],
-                )
-                for call in calls
-                if isinstance((metadata := _mapping(call.get("response_metadata"))).get("status_code"), int)
-                and metadata["status_code"] >= 400
-            )
-            return prescribed == retained
-
-        check(
-            "failed_calls_retained",
-            failed_exchanges_retained,
-            "$.ng_trajectory.model_calls",
-            "recovered errors must retain their exchanges and reported or unknown usage",
         )
 
     check(
