@@ -21,8 +21,11 @@ RunnerKind = Literal[
     "pointer_agent",
     "m3_agent",
     "nemotron_v3_nano_omni_agent",
+    "model_protocol_agent",
     "qwen3_omni_agent",
 ]
+
+MODEL_PROTOCOL_RUNNER_KINDS = frozenset({"nemotron_v3_nano_omni_agent", "model_protocol_agent"})
 
 
 @dataclass(frozen=True)
@@ -36,6 +39,7 @@ class RunnerSpec:
     observation_type: str = "screenshot"
     agent_class_path: Optional[str] = None
     agent_kwargs: Dict[str, Any] = field(default_factory=dict)
+    model_protocol_id: Optional[str] = None
 
 
 DEFAULT_RUNNER_NAME = "gym_pyautogui"
@@ -141,6 +145,15 @@ RUNNER_REGISTRY: Dict[str, RunnerSpec] = {
             "thinking": True,
         },
     ),
+    "nemotron_super35_agent": RunnerSpec(
+        name="nemotron_super35_agent",
+        kind="model_protocol_agent",
+        action_space="pyautogui",
+        observation_type="screenshot",
+        agent_class_path="responses_api_agents.osworld_agent.adapter_agents.OSWorldProtocolAgent",
+        agent_kwargs={"coordinate_type": "relative", "thinking": True},
+        model_protocol_id="nemotron-super35-tool-xml-v1",
+    ),
     # Upstream OSWorld contains Qwen3VLAgent. Gym owns its transport/retry
     # compatibility for Qwen3-Omni instead of carrying direct model HTTP calls
     # in OSWorld. This runner is intentionally not used for Nemotron 3 Nano
@@ -209,4 +222,5 @@ def resolve_runner_spec(
         observation_type=observation_type or base.observation_type,
         agent_class_path=agent_class_path or base.agent_class_path,
         agent_kwargs=merged_agent_kwargs,
+        model_protocol_id=base.model_protocol_id,
     )

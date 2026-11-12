@@ -46,6 +46,7 @@ BASE_AGENT_CONFIG = REPO_ROOT / "responses_api_agents" / "osworld_agent" / "conf
 OPENAI_MODEL_CONFIG = REPO_ROOT / "responses_api_models" / "openai_model" / "configs" / "openai_model.yaml"
 POINTER_AGENT_CONFIG = BENCHMARK_DIR / "configs" / "osworld_agent_pointer.yaml"
 NANO_OMNI_AGENT_CONFIG = BENCHMARK_DIR / "configs" / "osworld_agent_nano_omni.yaml"
+SUPER35_AGENT_CONFIG = BENCHMARK_DIR / "configs" / "osworld_agent_super35.yaml"
 OSWORLD_PROVIDER_CONFIG = BENCHMARK_DIR / "configs" / "osworld_docker_pinned.yaml"
 OPENSANDBOX_CONFIG = BENCHMARK_DIR / "configs" / "osworld_opensandbox.yaml"
 AGENTENV_CONFIG = BENCHMARK_DIR / "configs" / "osworld_agentenv.yaml"
@@ -56,11 +57,13 @@ PROFILE_CONFIGS: dict[str, tuple[Path, ...]] = {
     "default": (DEFAULT_CONFIG,),
     "pointer": (BASE_AGENT_CONFIG, POINTER_AGENT_CONFIG, OPENAI_MODEL_CONFIG),
     "nano_omni": (NANO_OMNI_AGENT_CONFIG,),
+    "super35": (SUPER35_AGENT_CONFIG,),
 }
 PROFILE_AGENT_NAMES = {
     "default": "osworld_simple_agent",
     "pointer": "osworld_simple_agent",
     "nano_omni": "osworld_nano_omni_agent",
+    "super35": "osworld_super35_agent",
 }
 BACKEND_CONFIGS: dict[str, Path | None] = {
     # The reusable OSWorld agent config defines the Docker Sandbox provider;
