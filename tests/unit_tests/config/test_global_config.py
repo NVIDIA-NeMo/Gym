@@ -3505,6 +3505,18 @@ class TestComposeUnboundAgent:
             "agent_server": {"type": "responses_api_agents", "name": f"gpqa_mcqa_{harness_type}"},
         }
 
+    @mark.parametrize("harness_type", sorted(nemo_gym.config.global_config.HOST_RUN_SWAP_AGENT_TYPES))
+    def test_swap_to_host_run_template_keeps_legacy_relay(self, harness_type: str) -> None:
+        """A session agent whose swap template runs on the host, with no model_server as shipped, keeps the relay."""
+        config = self._session_environment_config(harness_type)
+        config[harness_type].responses_api_agents[harness_type].pop("model_server")
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        servers = config["gpqa_mcqa_environment_server"]["environment_servers"]
+        assert harness_type in AGENT_SESSION_AGENT_TYPES
+        assert list(servers) == ["legacy_agent"]
+
     def test_legacy_relay_keeps_the_servers_own_worker_settings(self) -> None:
         config = self._session_environment_config("opencode_sandboxed_agent")
         server = config["gpqa_mcqa_environment_server"]["environment_servers"]["single_agent_turn_legacy"]
