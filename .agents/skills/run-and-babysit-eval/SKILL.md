@@ -188,14 +188,20 @@ The line's keys: `decision` (`action`, `reason`), `gate_task`, `ok`, `dispatched
 
 - `operator_verdict` (also inside `gate_task`, and printed on stderr as `operator verdict: <state>: <reason>;
   action: <action>`): the one reading to act on. `accept` is `SUCCESS` with complete coverage, run health `PASS`
-  and a `noop` decision. `needs_action` is any STOP, `FAILED`, incomplete coverage, failed run health, or an
-  `UNVERIFIED` whose cause is known (`gate_task.unverified_cause` and the one-sentence warning name it with counts;
-  the full reason is in `evaluation_health.detail`). `unknown` is an `UNVERIFIED` without a known cause, by
-  configuration (verification skipped: report it, no action) or after a re-judgment whose grading was not
-  recorded, a live job, or evidence the reader could not read. An `accept` whose MLflow delivery is still pending
-  or unverified names the export in its action. Rollout quality never changes the state: when it flags every
-  rollout, an `accept` says so ("accepted by contract; every rollout ended on a failed model call: check the
-  served configuration") and its action is to read the rollout quality.
+  and a `noop` decision. `needs_action` is any STOP, `FAILED`, incomplete coverage or failed run health. `unknown`
+  is a live job, evidence the reader could not read, or any `UNVERIFIED`: by configuration (verification skipped),
+  by a producer that records no grading (`gate_task.unverified_cause` and the one-sentence warning name it with
+  counts; the full reason is in `evaluation_health.detail`), after a re-judgment whose grading was not recorded,
+  or without a known cause. No recovery changes an `UNVERIFIED`, so its action starts `none:` and says what to
+  report and where the fix is (references/benchmark-notes.md); failed run health on a `noop` decision is reported
+  the same way, as no recovery reopens settled trials. Every command an action prints is complete: `gym eval
+  resubmit <job id> <benchmark> --recover`, every option the inspected or recovered call was given (the pin
+  choice and the gate options included), the typed stop's fix, then what the stop needs (an extension, say). The
+  action names `gym eval submit` only where Gym's own stop text does (`environment_protocol_violation`,
+  `collection_resume_refused`). An `accept` whose MLflow delivery is still pending or unverified names the export
+  in its action, or reports it as unverified by configuration when the rollouts were not uploaded. Rollout quality
+  never changes the state: when it flags every rollout, an `accept` says so ("accepted by contract; every rollout
+  ended on a failed model call: check the served configuration") and its action is to read the rollout quality.
 
 Run accounting and rollout quality are two things to read. Run accounting (`run.artifacts.healthy` and
 `unhealthy_reasons` in `quality_summary.json`) counts expected, completed, missing and failed rollouts; a failure
@@ -233,7 +239,7 @@ GDP-PDF, Stirrup, the benchmarks that read `UNVERIFIED` by construction) are in
 
 | The inspection says | Do |
 | --- | --- |
-| `operator_verdict` is `needs_action` | Find the row below that matches the stop reason or the typed failure and follow it; the printed action is the default when no row matches. The action names the command with every option it needs in one call (`--extend-attempts`, `--extend-retries`, `--max-walltime` with `--walltime-reason`, `--rerun-masked-without-artifact`, `--repin`, `--judge-partition`/`--judge-qos`, `--server-spinup-timeout-seconds`, or `--acknowledge-failed-judge-jobs` after reading the failed judge-only jobs), and a typed failure's fix before the resume. When it first asks to wait for the scheduler, a live job or the allocation, to reconcile a follow-up claim, or to make unreadable files readable, do that and inspect again before any recovery. A stopped recovery records none of its options, so repeat them all. When it says no recovery command is known, read the stop reason and the rows below; never fall back to `gym eval submit` while the saved run can continue: a fresh submit samples every policy rollout again. |
+| `operator_verdict` is `needs_action` | Find the row below that matches the stop reason or the typed failure and follow it; the printed action is the default when no row matches. The action prints one complete command: `gym eval resubmit <job id> <benchmark> --recover`, every option the inspected or recovered call was given (`--no-auto-repin`, `--judge-partition`/`--judge-qos`, `--server-spinup-timeout-seconds`, the score and threshold options, ...), the fix of the typed failure the chain or the rows recorded before it (fix the credentials, raise the start-up limit, wait for the quota reset), then what the stop needs (`--extend-attempts`, `--extend-retries`, `--max-walltime` with `--walltime-reason`, `--rerun-masked-without-artifact`, `--repin`, or `--acknowledge-failed-judge-jobs` after reading the failed judge-only jobs). An option the run refused (`--extend-attempts` on a run without a rollout store, say) is dropped when the run can resume without it. When it first asks to wait for the scheduler, a live job or the allocation, to reconcile a follow-up claim, or to make unreadable files readable, do that and inspect again before any recovery. A stopped recovery records none of its options, so repeat them all. When it says no recovery command is known, read the stop reason and the rows below; never fall back to `gym eval submit` while the saved run can continue: a fresh submit samples every policy rollout again. |
 | NOOP, `RUNNING` (`continuation <job> live`) | Wait for the job to end, then inspect again. |
 | Eligible work, `PLANNED` | Run it, with the variables the saved config forwards (`compute.cluster.forward_env`) set in that shell; a missing one stops the dispatch. A run submitted from the login node usually forwards none: its credentials are the `runtime:` entries of the saved `resolved-config.yaml`, which the dispatch does not check, so set those variables (an `HF_TOKEN`, say) in the dispatching shell too, or the resumed job starts without them. |
 | `reverify`, `PLANNED` (only rows with a saved answer remain: a judge failure, or a verify call lost in transport) | Run it: the saved answers are judged again and the policy is not called. A run that served its own model, and nothing else beside it, gets a judge-only job on one CPU node. Its partition is the first of: `--judge-partition <partition>`, a node pool of the saved config with `gpus_per_node: 0`, or the partition `NEMO_GYM_REMOTE_READER_SRUN` names. Its QOS is the first of: `--judge-qos <qos>`, the QOS of the saved CPU pool, the `-q`/`--qos` of `NEMO_GYM_REMOTE_READER_SRUN` when it names this partition or none, the partition's default. Slurm refuses a GPU QOS on a CPU partition (`QOSMinGRES`): pass `--judge-qos`. With no CPU pool and no reader placement, pass `--judge-partition`, or the recovery stops with nothing queued (next row). A run that serves its judge on a node pool of its own gets a judge-only job on that saved pool instead and keeps the run's QOS; `--judge-partition` and `--judge-qos` are not used (when you pass them the report says `--judge-partition/--judge-qos apply to the CPU judge profile only; not used`). A run with both judge failures and policy work is resubmitted; it re-judges the saved failures before its policy work and again at the end. |

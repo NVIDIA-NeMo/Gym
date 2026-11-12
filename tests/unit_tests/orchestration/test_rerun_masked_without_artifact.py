@@ -476,5 +476,8 @@ def test_the_verdict_of_a_masked_stop_names_the_rerun_not_a_fresh_submit(tmp_pat
     verdict = operator_verdict({"status": "FAILED", "expected_samples": 2, "errors": []}, decision)
 
     assert verdict["state"] == "needs_action"
-    assert "`gym eval resubmit --recover --rerun-masked-without-artifact --rerun-reason TEXT`" in verdict["action"]
+    assert (
+        "`gym eval resubmit GYM_JOB_ID BENCHMARK --recover --rerun-masked-without-artifact --rerun-reason TEXT`"
+        in verdict["action"]
+    )
     assert "`gym eval submit`" not in verdict["action"]

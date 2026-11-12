@@ -122,6 +122,7 @@ from nemo_gym.orchestration.executors.resume_script import (
     ACCOUNTED_WALLTIME_PREFIX,
     CHAIN_ACCOUNTING_ENV,
     CONTINUATION_REASON_PREFIX,
+    GUARDED_DRIVER_FAILURE_KINDS,
     PROVISIONAL_MARKER_PREFIX,
     REQUEUE_RECONCILE_STATE,
     REQUEUE_UNKNOWN_REASON,
@@ -528,6 +529,16 @@ class RecoveryDecision(BaseModel):
     # The options of the call this plan was made for, spelled as `gym eval resubmit --recover` takes them (reasons as
     # TEXT), so the operator verdict's command repeats them.
     requested: list[str] = Field(default_factory=list, exclude=True)
+    # The run's `gym eval resubmit` positionals (job id and benchmark, shell-quoted) for the call this plan was made
+    # for, so every command the operator verdict prints is complete; placeholders when no call named them.
+    target: str = Field(default="GYM_JOB_ID BENCHMARK", exclude=True)
+    # The typed driver failure the chain's incomplete marker opens with (one of GUARDED_DRIVER_FAILURE_KINDS) when the
+    # chain stopped on one: the next recovery needs its remedy first, or the resumed segment stops the same way.
+    chain_stop_kind: str | None = Field(default=None, exclude=True)
+    # An option this call asked for that the run cannot take (``--extend-attempts`` or the masked rerun), and the
+    # action the plan would take without it: a RESUBMIT or REVERIFY continues once the option is dropped.
+    refused_option: str | None = Field(default=None, exclude=True)
+    refused_over: RecoveryAction | None = Field(default=None, exclude=True)
     # The OPERATOR-CONTINUATION record a RESUBMIT under an operator budget carries: who, why, the budget, the unknown
     # fields, the counter values it fills with their previous states, and its epoch. The resubmit journals it.
     operator_continuation: dict[str, Any] | None = None
@@ -2127,6 +2138,12 @@ def resume_drift_note(keys: list[str] | None) -> str | None:
     return f"resumed across operational drift: {listed}"
 
 
+# The delivery reason of an export that did not upload the rollouts (``upload_rollouts: false``): unverified by
+# configuration, which no export changes.
+MLFLOW_ROLLOUTS_NOT_UPLOADED = "records that the rollouts were not uploaded"
+_CHAIN_STOP_KIND = re.compile(r"^(?:Previous job \S+ ended [^:]*: )?(?P<kind>[a-z_]+): ")
+
+
 def decide_from_collected(collected: CollectedEvidence, **options: Any) -> RecoveryDecision:
     """``_decide_from_collected``, with the reason naming any operational drift the run's latest resume crossed (see
     ``resume_drift_note``) and a continuation that ended before it queued its follow-up, so an inspection, a recovery
@@ -2149,6 +2166,11 @@ def decide_from_collected(collected: CollectedEvidence, **options: Any) -> Recov
         notes.append(failed_judge_jobs_stop(blocked, "the run's reverification directory"))
     if collected.chain_continuation_note:
         notes.append(f"the chain recorded: {collected.chain_continuation_note}")
+        # The guard's line names the typed kind first, after the previous job's end ("Previous job <id> ended
+        # <state>: <kind>: ..."; resume_script's *_REASON texts).
+        typed = _CHAIN_STOP_KIND.match(collected.chain_continuation_note)
+        if typed and typed["kind"] in GUARDED_DRIVER_FAILURE_KINDS:
+            decision = decision.model_copy(update={"chain_stop_kind": typed["kind"]})
     notes = [note for note in notes if note]
     return decision if not notes else decision.model_copy(update={"reason": "; ".join([decision.reason, *notes])})
 
@@ -2331,6 +2353,8 @@ def _decide_from_collected(
             update={
                 "action": RecoveryAction.STOP,
                 "reason": f"--rerun-masked-without-artifact is refused: {rerun_refused}; {decision.reason}",
+                "refused_option": RERUN_MASKED_FLAGS.split()[0],
+                "refused_over": decision.action,
             }
         )
     if decision.rerun_masked and decision.action == RecoveryAction.RESUBMIT:
@@ -2345,6 +2369,8 @@ def _decide_from_collected(
             update={
                 "action": RecoveryAction.STOP,
                 "reason": f"--extend-attempts {extend_attempts} is refused: {attempts_refused}; {decision.reason}",
+                "refused_option": "--extend-attempts",
+                "refused_over": decision.action,
             }
         )
     saved = _saved_attempt_cap(collected)
@@ -3186,7 +3212,7 @@ def mlflow_errors(
         errors.append(
             f"MLflow post-run export receipt of run {receipt.get('run_id')} "
             + (
-                "records that the rollouts were not uploaded"
+                MLFLOW_ROLLOUTS_NOT_UPLOADED
                 if scope is False
                 else "does not record whether the rollouts were uploaded"
             )
@@ -6167,37 +6193,28 @@ def rollout_quality_facts(quality: Mapping[str, Any] | None) -> dict[str, Any] |
     return {"verdicts": verdicts, "issues": issues} if verdicts is not None or issues is not None else None
 
 
-_RECOVER = "`gym eval resubmit --recover`"
-_SUBMIT_AGAIN = "`gym eval submit` again"
 UNREADABLE_ARTIFACTS_ERROR = "unreadable artifacts, read as unknown"
 _NO_KNOWN_COMMAND = "read the stop reason; no recovery command is known for it"
-# The remedy of each typed stop, as Gym's own stop texts give it: what to fix, then the recovery (with the options
-# it needs), or the fresh run a producer bug or a refused resume needs.
-_TYPED_REMEDIES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
-    (PROVIDER_CREDENTIALS_REJECTED, "fix the credentials, then", ()),
-    (
-        DRIVER_INSTALL_FAILED,
+# The fix each typed stop needs before the recovery, as Gym's own stop texts give it, and the options it adds to it.
+_TYPED_REMEDIES: dict[str, tuple[str, tuple[str, ...]]] = {
+    PROVIDER_CREDENTIALS_REJECTED: ("fix the credentials, then run", ()),
+    DRIVER_INSTALL_FAILED: (
         "fix the driver install (the ref, the network or the image; logs/driver-<job id>.log has the installer's "
-        "output), then",
+        "output), then run",
         (),
     ),
-    (ENVIRONMENT_PREPARE_FAILED, "fix the benchmark's preparation, then", ()),
-    (
-        SERVER_SPINUP_TIMEOUT,
-        "raise the server start-up limit above the recorded one:",
-        ("--server-spinup-timeout-seconds N", "--spinup-timeout-reason TEXT"),
+    ENVIRONMENT_PREPARE_FAILED: ("fix the benchmark's preparation, then run", ()),
+    SERVER_SPINUP_TIMEOUT: (
+        "raise the server start-up limit above the recorded one with",
+        ("--server-spinup-timeout-seconds N --spinup-timeout-reason TEXT",),
     ),
-)
-_FRESH_RUN_REMEDIES = (
-    (
-        COLLECTION_RESUME_REFUSED,
-        "start a fresh run with `gym eval submit` again; only to accept that exact difference, "
-        "`gym eval resubmit --recover --allow-unsafe-resume --unsafe-resume-reason TEXT`",
-    ),
-    (
-        ENVIRONMENT_PROTOCOL_VIOLATION,
-        "fix the server or the benchmark pairing (a producer bug), then `gym eval submit` again",
-    ),
+    PROVIDER_QUOTA_EXHAUSTED: ("wait until the grading provider's quota resets, then run", ()),
+}
+# The typed stops whose own text says a recovery cannot continue the saved run as it is.
+_UNSAFE_RESUME = ("--allow-unsafe-resume", "--unsafe-resume-reason TEXT")
+_PROTOCOL_VIOLATION_REMEDY = (
+    "fix the server or the benchmark pairing (a producer bug), then `gym eval submit` again, as the stop says; "
+    "a recovery would get the same replies"
 )
 # Stops of a judge-only job that a judge placement option clears, and the options.
 _JUDGE_PLACEMENT_STOPS = (
@@ -6213,11 +6230,23 @@ _JUDGE_PLACEMENT_STOPS = (
         "correct the partition or QOS the scheduler refused",
     ),
 )
+# An UNVERIFIED cause no resubmit and no flag changes, and where it is fixed (benchmark-notes: "UNVERIFIED by
+# construction").
 _UNVERIFIED_PRODUCERS = {
-    "grading_unobserved": "the verifier that saves no grading record",
-    "unclassified_failures": "the producer of the unclassified failures",
-    "recovered_not_joined": "the producer that records recovered attempts",
+    "grading_unobserved": "the verifier's grading record",
+    "unclassified_failures": "the classification of those failures by their producer",
+    "recovered_not_joined": "the record of the recovered attempts by their producer",
 }
+# The options `gym eval resubmit --recover --inspect` refuses; an inspect command never repeats them.
+_RECOVER_ONLY_FLAGS = frozenset(
+    {
+        "--max-walltime",
+        "--allow-unsafe-resume",
+        "--server-spinup-timeout-seconds",
+        "--judge-partition",
+        "--judge-qos",
+    }
+)
 _OPEN_STATES = (
     IdentityState.JUDGE_RECOVERABLE,
     IdentityState.RETRYABLE,
@@ -6233,19 +6262,88 @@ def _verdict(state: str, reason: str, action: str) -> dict[str, str]:
     return {"state": state, "reason": reason, "action": action}
 
 
-def _recover_command(requested: Sequence[str], *extra: str) -> str:
-    """`gym eval resubmit --recover` with the options the call asked for and ``extra``; an option named in both is
-    named once, as ``extra`` spells it."""
-    flags = [flag for flag in requested if flag.split()[0] not in {option.split()[0] for option in extra}]
-    return "`" + " ".join(["gym eval resubmit --recover", *flags, *extra]) + "`"
+def _flags(option: str) -> set[str]:
+    """The flags one option spells (``--max-walltime T --walltime-reason TEXT`` is two)."""
+    return {word.lstrip("[") for word in option.split() if word.lstrip("[").startswith("--")}
 
 
-def _typed_remedy(text: str, requested: Sequence[str]) -> str | None:
-    """The remedy of the typed stop ``text`` names, as Gym's own stop texts give it, else None."""
-    for kind, fix, options in _TYPED_REMEDIES:
-        if kind in text:
-            return f"{fix} {_recover_command(requested, *options)}"
-    return next((remedy for kind, remedy in _FRESH_RUN_REMEDIES if kind in text), None)
+def _command(
+    decision: RecoveryDecision,
+    *options: str,
+    remedy: Sequence[str] = (),
+    drop: Sequence[str] = (),
+    inspect: bool = False,
+) -> str:
+    """The one recovery command the operator verdict prints: `gym eval resubmit <job id> <benchmark> --recover`,
+    then every option the call asked for (``decision.requested``), then the typed remedy's options, then ``options``
+    (what the stop itself needs, such as a budget extension). An option is named once: ``options`` replaces the
+    call's own value, the call's own value replaces a remedy's placeholder, and ``drop`` names options the run
+    refused. ``inspect`` makes it the inspection, without the options an inspection refuses."""
+    named = set(drop).union(*map(_flags, options))
+    if "--repin" in named.union(*map(_flags, remedy)):
+        # The CLI refuses --no-auto-repin beside an explicit repin, which is the operator's own pin choice.
+        named.add("--no-auto-repin")
+    asked = [
+        option
+        for option in decision.requested
+        if not _flags(option) & named and not (inspect and _flags(option) & _RECOVER_ONLY_FLAGS)
+    ]
+    held = named.union(*map(_flags, asked))
+    fixes = [option for option in remedy if not _flags(option) & held]
+    words = ["gym eval resubmit", decision.target, "--recover", *(["--inspect"] if inspect else []), *asked, *fixes]
+    return "`" + " ".join([*words, *options]) + "`"
+
+
+def _choices(options: Sequence[str]) -> str:
+    """What in a printed command is the operator's to choose, and that its options go in one call."""
+    choices = [
+        name for name, flag in (("N", " N"), ("the walltime", "HH:MM:SS")) if any(flag in option for option in options)
+    ]
+    chosen = f"; {' and '.join(choices)} {'are' if len(choices) > 1 else 'is'} yours to choose" if choices else ""
+    commit = "; COMMIT is this launcher's full commit" if any("COMMIT" in option for option in options) else ""
+    together = "; every option named goes in the same call" if sum(not o.startswith("[") for o in options) > 1 else ""
+    return chosen + commit + together
+
+
+def _stop_kind(decision: RecoveryDecision) -> str | None:
+    """The typed failure with a known remedy the run stopped on: the chain guard's typed stop, else the one failure
+    kind every terminal identity of the decision records (Gym's own typed stop, such as the grading quota). Read from
+    typed fields only, never from the reason text."""
+    if decision.chain_stop_kind:
+        return decision.chain_stop_kind
+    terminal = [item for item in decision.evidence if item.state == IdentityState.TERMINAL]
+    kinds = {item.failure_kind for item in terminal}
+    if terminal and len(terminal) == decision.counts.get(IdentityState.TERMINAL, 0) and len(kinds) == 1:
+        kind = kinds.pop()
+        return (
+            kind
+            if kind in _TYPED_REMEDIES or kind in (COLLECTION_RESUME_REFUSED, ENVIRONMENT_PROTOCOL_VIOLATION)
+            else None
+        )
+    return None
+
+
+def _continue_with(decision: RecoveryDecision, *options: str, drop: Sequence[str] = ()) -> str:
+    """The recovery command that continues the run, after the typed stop's fix when it stopped on one, with what in
+    it is the operator's to choose. A typed stop whose own text says a recovery cannot continue (a refused resume,
+    a protocol violation) names that instead."""
+    kind = _stop_kind(decision)
+    if kind == COLLECTION_RESUME_REFUSED:
+        unsafe = _command(decision, *options, *_UNSAFE_RESUME, drop=drop)
+        return (
+            "the saved rollouts do not verify against the run's inputs, so start a fresh run as the stop says; only "
+            f"to accept that exact difference, {unsafe}" + _choices([*options, *_UNSAFE_RESUME])
+        )
+    if kind == ENVIRONMENT_PROTOCOL_VIOLATION:
+        return _PROTOCOL_VIOLATION_REMEDY
+    fix, remedy = _TYPED_REMEDIES.get(kind or "", ("", ()))
+    if kind == PROVIDER_QUOTA_EXHAUSTED and (resets := quota_reset_text(decision.reason)):
+        fix = f"wait until {resets}, when the grading provider's quota resets, then run"
+    if remedy and all(_flags(option) & set().union(*map(_flags, decision.requested)) for option in remedy):
+        # The call already carries the fix (a raised start-up limit, say); the command repeats it.
+        fix = ""
+    command = _command(decision, *options, remedy=remedy, drop=drop)
+    return (f"{fix} {command}" if fix else command) + _choices([*(remedy if fix else ()), *options])
 
 
 def _flagged_everything(
@@ -6326,19 +6424,6 @@ def _partial_rerun_note(decision: RecoveryDecision, options: list[str]) -> str:
     )
 
 
-def _continuation_text(options: list[str]) -> str:
-    """The recovery command of ``_continuation_options`` and what in it is the operator's to choose."""
-    choices = [
-        name
-        for name, flag in (("N", " N"), ("the walltime", "HH:MM:SS"), ("the commit", "COMMIT"))
-        if any(flag in option for option in options)
-    ]
-    chosen = f"; {' and '.join(choices)} {'are' if len(choices) > 1 else 'is'} yours to choose" if choices else ""
-    return f"`gym eval resubmit --recover {' '.join(options)}`{chosen}" + (
-        "; every option named goes in the same call" if sum(not o.startswith("[") for o in options) > 1 else ""
-    )
-
-
 # Stops on evidence that cannot be read yet, and how to read it, instead of a fresh submit over the saved run.
 _UNKNOWN_EVIDENCE_STOPS = (
     ("the scheduler query failed", "wait until the scheduler answers and inspect again"),
@@ -6351,8 +6436,8 @@ _UNKNOWN_EVIDENCE_STOPS = (
     ),
     (
         "the results file is absent",
-        "restore the results file if it was moved and inspect again; if it is lost, only `gym eval submit` again "
-        "runs the benchmark",
+        "restore the results file if it was moved and inspect again; if it is lost, report that collection cannot "
+        "resume the run's saved history, as the stop says",
     ),
     # A judge-only job the evidence changed under, or whose snapshot was missing, was not queued.
     ("collect the current evidence", "inspect again: the evidence changed after the recovery was planned"),
@@ -6418,15 +6503,18 @@ def operator_verdict(
     """The one verdict an operator acts on, derived from the gate and the decision only.
 
     ``state`` is ``accept`` (gate SUCCESS, coverage complete, run health PASS, decision noop), ``needs_action`` (a
-    STOP, FAILED, incomplete coverage, failed run health, or UNVERIFIED with a cause an operator can fix) or
-    ``unknown`` (UNVERIFIED without a known cause, by configuration or after a re-judgment whose grading was not
-    recorded, a live job, or evidence missing or unreadable). ``reason`` is one sentence naming the dominant cause
-    with counts; ``action`` is the one thing to do: the recovery command with the options this call asked for
-    (``decision.requested``) and any typed failure's fix first, never a fresh submit for a stop no rule knows. An
-    accepted run whose MLflow delivery is not closed names the export. Rollout quality never changes the state: an accepted run whose every
-    rollout is flagged says so in its reason and points at the quality read. A scheduler refusal of the resubmit and
-    a walltime raise the partition cannot take (refused before any evidence is read) are known dispatch failures:
-    they need the operator's correction, never a plain recover-now or a reader retry.
+    STOP, FAILED, incomplete coverage or failed run health) or ``unknown`` (UNVERIFIED, which no recovery changes: by
+    configuration, by a producer that records no grading, after a re-judgment whose grading was not recorded or
+    without a known cause; a live job; evidence missing or unreadable). ``reason`` is one sentence naming the
+    dominant cause with counts; ``action`` is the one thing to do. Every command it prints comes from ``_command``:
+    `gym eval resubmit <job id> <benchmark> --recover` with every option the call asked for, the typed stop's fix
+    and the options the stop needs. It never adds a fresh submit that Gym's own decision or stop text does not name,
+    and where Gym decided nothing is left to run it says what to report and check. An accepted run whose MLflow
+    delivery is not closed names the export, or that it is unverified by configuration. Rollout quality never changes
+    the state: an accepted run whose every rollout is flagged says so in its reason and points at the quality read. A
+    scheduler refusal of the resubmit and a walltime raise the partition cannot take (refused before any evidence is
+    read) are known dispatch failures: they need the operator's correction, never a plain recover-now or a reader
+    retry.
     """
     refused = (walltime_plan or {}).get("refused")
     if gate_task is None and decision is not None and refused:
@@ -6461,19 +6549,17 @@ def operator_verdict(
             f"{read}; a job without an id cannot be acknowledged, so no further judge-only job is allowed and no "
             "recovery command is known"
             if blocked["unacknowledgeable"]
-            else f"{read}, then `gym eval resubmit --recover {ACKNOWLEDGE_JUDGE_JOBS_FLAGS} TEXT` allows one more "
+            else f"{read}, then {_command(decision, f'{ACKNOWLEDGE_JUDGE_JOBS_FLAGS} TEXT')} allows one more "
             "judge-only job",
         )
     if unreadable := next((str(e) for e in errors if str(e).startswith(UNREADABLE_ARTIFACTS_ERROR)), None):
         # What an unreadable artifact holds is unknown, whatever the decision read around it.
         return _verdict("unknown", unreadable, "make those files readable again and inspect again")
     open_text = ", ".join(f"{counts[s]} {s.value}" for s in _OPEN_STATES if counts.get(s))
-    requested = decision.requested
     if decision.action == RecoveryAction.FRESH_RESTART:
+        # Gym's own decision: no task inventory was saved, and its reason names the command.
         named = re.search(r"--max-walltime is required: (gym eval resubmit \S+ \S+ --recover .*)$", decision.reason)
-        command = (
-            f"`{named[1]}`" if named else _recover_command([], "--max-walltime HH:MM:SS", "--walltime-reason TEXT")
-        )
+        command = f"`{named[1]}`" if named else _command(decision, _EXPLICIT_BUDGET)
         return _verdict(
             "needs_action",
             f"the run saved no task inventory ({decision.reason.split('; --max-walltime is required')[0]})",
@@ -6482,100 +6568,34 @@ def operator_verdict(
     if decision.action in (RecoveryAction.RESUBMIT, RecoveryAction.REVERIFY):
         settled = expected - sum(counts.get(s, 0) for s in _OPEN_STATES)
         # A chain that stopped on a typed failure needs its remedy before the resume, or the resume stops the same way.
-        chain = decision.reason.partition("the chain recorded: ")[2]
+        action = _continue_with(decision)
         return _verdict(
             "needs_action",
             f"{settled} of {expected} rollouts are settled; {open_text or 'recovery work'} remain",
-            (chain and _typed_remedy(chain, requested)) or f"{_recover_command(requested)} now",
+            action if _stop_kind(decision) else f"{action} now",
         )
     if decision.action == RecoveryAction.STOP:
-        if PROVIDER_QUOTA_EXHAUSTED in decision.reason:
-            resets = quota_reset_text(decision.reason)
-            wait = f"wait until {resets}" if resets else "wait until the provider quota resets (no time recorded)"
-            waiting = counts.get(IdentityState.TERMINAL, 0)
-            return _verdict(
-                "needs_action",
-                f"{waiting} of {expected} saved answers wait on the grading provider quota",
-                f"{wait} then {_RECOVER} (quota)",
-            )
-        stopped = f"recovery stopped with {open_text or 'no way to continue'}: {decision.reason.splitlines()[0][:160]}"
-        options = _continuation_options(decision)
-        if decision.continuation_refused == "no_retry_cap":
-            # No continuation exists: the explicit budget has no cap to fill.
-            return _verdict(
-                "needs_action",
-                f"{stopped}; the saved run cannot continue, as it configures no infra-retry cap",
-                f"set the infra-retry cap then {_SUBMIT_AGAIN}",
-            )
-        if decision.continuation_refused is not None:
-            # A guard refuses the continuation: clear it first, and keep every option the continuation needs.
-            state, why, clear = _CONTINUATION_GUARDS[decision.continuation_refused]
-            return _verdict(
-                state,
-                f"an operator continuation is refused: {why}",
-                f"{clear}; the saved run then continues (completed work is kept) with "
-                + (_continuation_text(options) if options else f"{_RECOVER}")
-                + _partial_rerun_note(decision, options),
-            )
-        if options:
-            return _verdict(
-                "needs_action",
-                stopped,
-                f"your decision: continue the saved run (completed work is kept) with {_continuation_text(options)}"
-                + (
-                    "; it is refused while a job of the run is pending or running"
-                    if _EXPLICIT_BUDGET in options
-                    else ""
-                )
-                + _partial_rerun_note(decision, options),
-            )
-        if repinned := next((match for stop in _REPIN_STOPS if (match := stop.search(decision.reason))), None):
-            # Only the launcher's revision runs this recovery: the repin moves the run there and keeps it.
-            commit = repinned.groupdict().get("commit") or "COMMIT"
-            return _verdict(
-                "needs_action",
-                stopped,
-                "your decision: continue the saved run (completed work is kept) at this launcher's revision with "
-                f"`gym eval resubmit --recover --repin {commit} --repin-reason TEXT` and every other option of the "
-                "stopped call" + ("; COMMIT is this launcher's full commit" if commit == "COMMIT" else ""),
-            )
-        if unread := next((action for token, action in _UNKNOWN_EVIDENCE_STOPS if token in decision.reason), None):
-            # What the saved run holds is unknown for now: a fresh submit would discard it, so learn it first.
-            kept = "" if _SUBMIT_AGAIN in unread else " (completed work is kept)"
-            return _verdict("unknown", stopped, f"{unread}{kept}")
-        if _RESERVATIONS_UNKNOWN in decision.reason and "nobody owns them" not in decision.reason:
-            # Whether they ran is unknown until the allocation is known to have ended; then a recovery resumes them.
-            return _verdict(
-                "needs_action",
-                stopped,
-                "confirm with the scheduler that the allocation that made the reservations has ended, then inspect "
-                "again: a recovery resumes them once that is known (completed work is kept)",
-            )
-        for token, options, fix in _JUDGE_PLACEMENT_STOPS:
-            if token in decision.reason:
-                return _verdict(
-                    "needs_action",
-                    stopped,
-                    f"{fix}: {_recover_command(requested, *options)} queues the judge-only job (completed work is kept)",
-                )
-        if remedy := _typed_remedy(decision.reason, requested):
-            return _verdict("needs_action", stopped, remedy)
-        # A stop no rule here knows: its reason is the only guide, and a fresh submit would discard the saved run.
-        return _verdict("needs_action", stopped, _NO_KNOWN_COMMAND)
+        return _stop_verdict(decision, expected, open_text)
     if status == "FAILED" or errors:
         health = gate_task.get("evaluation_health") or {}
         if health.get("status") == "FAIL":
             faults = health.get("evaluation") or {}
             kinds = ", ".join(f"{k} {v}" for k, v in (faults.get("kinds") or {}).items())
-            # Over the trials, not the expected samples: an accepted omission is no trial.
+            # Over the trials, not the expected samples: an accepted omission is no trial. Gym decided nothing is left
+            # to run: the faults are settled outcomes that no recovery reopens.
             return _verdict(
                 "needs_action",
                 f"{faults.get('count')} of {health.get('trials', expected)} trials failed on the evaluation side ({kinds})",
-                f"fix the failing infrastructure then {_SUBMIT_AGAIN}",
+                "none: report the run as failing run health; no recovery reopens settled trials, so check the "
+                "evaluation-side faults evaluation_health names (their kinds and the services' logs)",
             )
         unread = [e for e in errors if str(e).startswith("score unavailable")]
         if decision.complete and errors and len(unread) == len(errors):
-            return _verdict("unknown", "no score was read", "inspect again with --score-agent and --score-key")
+            return _verdict(
+                "unknown",
+                "no score was read",
+                f"inspect again naming the score: {_command(decision, '--score-agent NAME', '--score-key JSON', inspect=True)}",
+            )
         # A known failure dominates an unread score listed before it.
         known = next((str(e) for e in errors if not str(e).startswith("score unavailable")), None)
         return _verdict(
@@ -6587,10 +6607,14 @@ def operator_verdict(
         )
     if not decision.complete or decision.action != RecoveryAction.NOOP:
         return _verdict(
-            "needs_action", f"coverage is incomplete: {open_text or 'rollouts are unsettled'}", f"{_RECOVER} now"
+            "needs_action",
+            f"coverage is incomplete: {open_text or 'rollouts are unsettled'}",
+            f"{_command(decision)} now",
         )
+    delivery = _delivery_action(decision, gate_task.get("mlflow_delivery") or {})
     if status == "UNVERIFIED":
         cause = gate_task.get("unverified_cause")
+        export = f"; {delivery[1]}" if delivery else ""
         if decision.unverified:
             # Verification was configured off: the run is complete and unverified by design, nothing to do.
             skipped = counts.get(IdentityState.SKIPPED, 0)
@@ -6598,28 +6622,30 @@ def operator_verdict(
                 "unknown",
                 f"unverified by configuration: {skipped} of {expected} rows were not verified (verification skipped "
                 "by configuration)",
-                "none: report the run as unverified by configuration",
+                "none: report the run as unverified by configuration" + export,
             )
         if cause and cause.get("kind") == "judge_rejudged":
-            # The judge answered the re-judgment: what is missing is the grading record of the re-judged rows, which
-            # no recovery writes, and a fresh run would sample every policy rollout again.
+            # The re-judgment recorded no grading, so whether the re-judged rows were graded is not evidenced.
             return _verdict(
                 "unknown",
                 f"unverified: {cause['reason']}",
-                "report the run as unverified: the re-judged rows were graded but their grading was not recorded, "
-                "and no recovery command records it",
+                "none: report the run as unverified: the rows were re-judged and no grading was recorded, so whether "
+                "they were graded is unknown; no recovery command records it" + export,
             )
         if cause and cause.get("kind") in _UNVERIFIED_PRODUCERS:
+            # UNVERIFIED by construction: a resubmit cannot change it, and no flag does.
             return _verdict(
-                "needs_action",
+                "unknown",
                 f"unverified: {cause['reason']}",
-                f"fix {_UNVERIFIED_PRODUCERS[cause['kind']]} then {_SUBMIT_AGAIN}",
+                "none: report the run as unverified with this reason and do not present it as verified; a resubmit "
+                f"cannot change it, and no flag does: the fix is {_UNVERIFIED_PRODUCERS[cause['kind']]}, in Gym"
+                + export,
             )
         known = (cause or {}).get("reason") or "summary validity or run health is unknown"
         return _verdict(
             "unknown",
             f"unverified without a known cause: {known}",
-            "report the run as unverified; no operator action is known",
+            "none: report the run as unverified; no operator action is known" + export,
         )
     if status != "SUCCESS" or (gate_task.get("evaluation_health") or {}).get("status") != "PASS":
         return _verdict("unknown", "the gate states no SUCCESS with run health PASS", "inspect again")
@@ -6634,21 +6660,119 @@ def operator_verdict(
         + (f", {omitted} omitted by an accepted stage" if omitted else "")
         + ", run health PASS, nothing to recover"
     )
-    delivery = gate_task.get("mlflow_delivery") or {}
-    if delivery.get("state") in ("pending", "unverified"):
-        # The results are accepted; their MLflow delivery is a fact beside them that is not closed yet.
-        reasons = "; ".join(delivery.get("reasons") or []) or "no reason recorded"
-        exported = not any(str(r).startswith("no MLflow run evidence") for r in delivery.get("reasons") or [])
-        return _verdict(
-            "accept",
-            f"{reason}; MLflow delivery {delivery['state']}: {reasons}",
-            "confirm the MLflow export: inspect again with --mlflow-run-id ID --mlflow-status STATUS as you observed "
-            "them on the tracking server, or repair the export the reason names"
-            if exported
-            else f"export the results to MLflow: {_RECOVER} runs the export of a complete run without a receipt (no "
-            "model calls)",
-        )
+    if delivery:
+        return _verdict("accept", f"{reason}; {delivery[0]}", delivery[1])
     return _verdict("accept", reason, "none")
+
+
+def _delivery_action(decision: RecoveryDecision, delivery: Mapping[str, Any]) -> tuple[str, str] | None:
+    """``(what, action)`` for a complete run whose MLflow delivery is not closed: the results stand, and the delivery
+    is a fact beside them. Unverified by configuration (the export did not upload the rollouts) is reported, as no
+    export changes it."""
+    if delivery.get("state") not in ("pending", "unverified"):
+        return None
+    reasons = [str(r) for r in delivery.get("reasons") or []]
+    what = f"MLflow delivery {delivery['state']}: {'; '.join(reasons) or 'no reason recorded'}"
+    if any(MLFLOW_ROLLOUTS_NOT_UPLOADED in r for r in reasons):
+        return (
+            what,
+            "report the MLflow delivery as unverified by configuration (upload_rollouts: false); an export does not change it",
+        )
+    if any(r.startswith("no MLflow run evidence") for r in reasons):
+        return (
+            what,
+            f"export the results to MLflow: {_command(decision)} runs the export of a complete run without a receipt (no model calls)",
+        )
+    confirm = _command(decision, "--mlflow-run-id ID", "--mlflow-status STATUS", inspect=True)
+    return what, (
+        f"confirm the MLflow export: {confirm} with the run id and status you observed on the tracking server, or "
+        "repair the export the reason names"
+    )
+
+
+def _stop_verdict(decision: RecoveryDecision, expected: int, open_text: str) -> dict[str, str]:
+    """The verdict of a STOP: the continuation its own cause allows, after any guard and typed fix, else the most
+    specific known step, else no command."""
+    counts = decision.counts
+    stopped = f"recovery stopped with {open_text or 'no way to continue'}: {decision.reason.splitlines()[0][:160]}"
+    options = _continuation_options(decision)
+    kind = _stop_kind(decision)
+    if kind == PROVIDER_QUOTA_EXHAUSTED and decision.chain_stop_kind is None:
+        # Gym's own quota stop: every terminal identity waits on the grading provider's quota.
+        waiting = counts.get(IdentityState.TERMINAL, 0)
+        return _verdict(
+            "needs_action",
+            f"{waiting} of {expected} saved answers wait on the grading provider quota",
+            _continue_with(decision, *options),
+        )
+    if kind in (COLLECTION_RESUME_REFUSED, ENVIRONMENT_PROTOCOL_VIOLATION):
+        # The typed stop's own text says a recovery cannot continue the saved run as it is.
+        return _verdict("needs_action", stopped, _continue_with(decision, *options))
+    if decision.continuation_refused == "no_retry_cap":
+        # No continuation exists: the explicit budget has no cap to fill, and Gym names no other way on.
+        return _verdict(
+            "needs_action",
+            f"{stopped}; the saved run cannot continue, as it configures no infra-retry cap",
+            "none: report it; an operator budget has no infra-retry cap to fill, so no recovery command is known",
+        )
+    if decision.continuation_refused is not None:
+        # A guard refuses the continuation: clear it first, and keep every option the continuation needs.
+        state, why, clear = _CONTINUATION_GUARDS[decision.continuation_refused]
+        return _verdict(
+            state,
+            f"an operator continuation is refused: {why}",
+            f"{clear}; the saved run then continues (completed work is kept): {_continue_with(decision, *options)}"
+            + _partial_rerun_note(decision, options),
+        )
+    if options:
+        return _verdict(
+            "needs_action",
+            stopped,
+            f"your decision: continue the saved run (completed work is kept): {_continue_with(decision, *options)}"
+            + ("; it is refused while a job of the run is pending or running" if _EXPLICIT_BUDGET in options else "")
+            + _partial_rerun_note(decision, options),
+        )
+    if decision.refused_option and decision.refused_over in (RecoveryAction.RESUBMIT, RecoveryAction.REVERIFY):
+        # Only the refused option stops it: without it the plan continues the run.
+        return _verdict(
+            "needs_action",
+            stopped,
+            f"drop {decision.refused_option}, which this run cannot take; the saved run continues without it "
+            f"(completed work is kept): {_continue_with(decision, drop=(decision.refused_option,))}",
+        )
+    if repinned := next((match for stop in _REPIN_STOPS if (match := stop.search(decision.reason))), None):
+        # Only the launcher's revision runs this recovery: the repin moves the run there and keeps it.
+        commit = repinned.groupdict().get("commit") or "COMMIT"
+        return _verdict(
+            "needs_action",
+            stopped,
+            "your decision: continue the saved run (completed work is kept) at this launcher's revision: "
+            + _continue_with(decision, f"--repin {commit} --repin-reason TEXT"),
+        )
+    if unread := next((action for token, action in _UNKNOWN_EVIDENCE_STOPS if token in decision.reason), None):
+        # What the saved run holds is unknown for now: learn it before anything else.
+        return _verdict("unknown", stopped, f"{unread} (completed work is kept)")
+    if _RESERVATIONS_UNKNOWN in decision.reason and "nobody owns them" not in decision.reason:
+        # Whether they ran is unknown until the allocation is known to have ended; then a recovery resumes them.
+        return _verdict(
+            "needs_action",
+            stopped,
+            "confirm with the scheduler that the allocation that made the reservations has ended, then inspect "
+            "again: a recovery resumes them once that is known (completed work is kept)",
+        )
+    for token, placement, fix in _JUDGE_PLACEMENT_STOPS:
+        if token in decision.reason:
+            return _verdict(
+                "needs_action",
+                stopped,
+                f"{fix}: {_command(decision, *placement)} queues the judge-only job (completed work is kept)",
+            )
+    if kind in _TYPED_REMEDIES and decision.chain_stop_kind is None:
+        # Every terminal row is the typed failure: its fix, then the recovery its own text names. A chain's typed
+        # stop alone never names a recovery for a stop of another cause.
+        return _verdict("needs_action", stopped, _continue_with(decision))
+    # A stop no rule here knows: its reason is the only guide, and a fresh submit would discard the saved run.
+    return _verdict("needs_action", stopped, _NO_KNOWN_COMMAND)
 
 
 def with_operator_verdict(outcome: RecoveryOutcome) -> RecoveryOutcome:

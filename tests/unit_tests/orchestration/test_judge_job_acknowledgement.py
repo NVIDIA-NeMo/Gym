@@ -279,12 +279,16 @@ def test_the_verdict_names_the_block_and_the_acknowledgement_before_and_after_a_
     refused = recover(*_handle(job_dir), judge_partition="cpu")
 
     assert inspected.decision.action == RecoveryAction.REVERIFY and refused.decision.action == RecoveryAction.STOP
-    for out, where in ((inspected, "the run's reverification directory"), (refused, str(job_dir / "reverification"))):
+    # The acknowledgement command repeats the options of the call it answers (the refused one named a partition).
+    for out, where, asked in (
+        (inspected, "the run's reverification directory", ""),
+        (refused, str(job_dir / "reverification"), " --judge-partition cpu"),
+    ):
         assert out.operator_verdict == {
             "state": "needs_action",
             "reason": reason,
-            "action": f"read their receipts and logs under {where}, then `gym eval resubmit --recover {FLAGS} TEXT` "
-            "allows one more judge-only job",
+            "action": f"read their receipts and logs under {where}, then "
+            f"`gym eval resubmit gym-job-x bench --recover{asked} {FLAGS} TEXT` allows one more judge-only job",
         }
     assert _sbatch_count(judge_slurm_bin) == 2 and _acknowledgements(job_dir) == []
 

@@ -348,8 +348,8 @@ def test_an_extension_refused_for_an_old_reader_keeps_it_and_names_the_repin_in_
     assert decision.action.value == "stop" and decision.reason.startswith("--extend-attempts 1 is refused")
     action = _verdict(decision)["action"]
     assert (
-        "`gym eval resubmit --recover --extend-attempts N --extend-retries N --repin COMMIT --repin-reason TEXT`"
-        in (action)
+        "`gym eval resubmit GYM_JOB_ID BENCHMARK --recover --extend-attempts N --extend-retries N --repin COMMIT "
+        "--repin-reason TEXT`" in (action)
     ), action
     assert "`gym eval submit`" not in action
 

@@ -49,6 +49,10 @@ def _decision(action, reason, counts, *, expected=10, **extra):
     )
 
 
+def _terminal(kind, n):
+    return [IdentityEvidence(identity=(i, 0), state=IdentityState.TERMINAL, failure_kind=kind) for i in range(n)]
+
+
 def _failed_task(**extra):
     return {"status": "FAILED", "expected_samples": 10, "errors": ["x"], "warnings": []} | extra
 
@@ -147,7 +151,10 @@ def test_evaluation_side_failures_over_the_limit_need_action():
     assert task["status"] == "FAILED"
     assert verdict["state"] == "needs_action"
     assert verdict["reason"] == "3 of 100 trials failed on the evaluation side (model_transport_error 3)"
-    assert verdict["action"] == "fix the failing infrastructure then `gym eval submit` again"
+    assert verdict["action"] == (
+        "none: report the run as failing run health; no recovery reopens settled trials, so check the "
+        "evaluation-side faults evaluation_health names (their kinds and the services' logs)"
+    )
 
 
 def test_recoverable_work_says_recover_now():
@@ -158,7 +165,7 @@ def test_recoverable_work_says_recover_now():
     assert verdict == {
         "state": "needs_action",
         "reason": "8 of 10 rollouts are settled; 2 retryable remain",
-        "action": "`gym eval resubmit --recover` now",
+        "action": "`gym eval resubmit GYM_JOB_ID BENCHMARK --recover` now",
     }
 
 
@@ -169,10 +176,14 @@ def test_a_quota_stop_waits_for_the_reset_then_recovers():
         "2026-01-02 03:04 UTC; nothing can be graded before then",
         {IdentityState.SCORED: 4, IdentityState.TERMINAL: 6},
     )
+    decision.evidence = _terminal("provider_quota_exhausted", 6)
     verdict = operator_verdict(_failed_task(), decision)
     assert verdict["state"] == "needs_action"
     assert verdict["reason"] == "6 of 10 saved answers wait on the grading provider quota"
-    assert verdict["action"] == "wait until 2026-01-02 03:04 UTC then `gym eval resubmit --recover` (quota)"
+    assert verdict["action"] == (
+        "wait until 2026-01-02 03:04 UTC, when the grading provider's quota resets, then run "
+        "`gym eval resubmit GYM_JOB_ID BENCHMARK --recover`"
+    )
 
 
 def test_a_credentials_stop_names_the_fix_then_the_recovery_as_gyms_own_stop_text_does():
@@ -181,9 +192,10 @@ def test_a_credentials_stop_names_the_fix_then_the_recovery_as_gyms_own_stop_tex
         "10 failure(s) typed provider_credentials_rejected: the sandbox provider answered 401",
         {IdentityState.TERMINAL: 10},
     )
+    decision.evidence = _terminal("provider_credentials_rejected", 10)
     verdict = operator_verdict(_failed_task(), decision)
     assert verdict["state"] == "needs_action"
-    assert verdict["action"] == "fix the credentials, then `gym eval resubmit --recover`"
+    assert verdict["action"] == "fix the credentials, then run `gym eval resubmit GYM_JOB_ID BENCHMARK --recover`"
 
 
 def test_a_stop_no_rule_knows_names_no_command_and_never_a_fresh_submit():
@@ -202,7 +214,7 @@ def test_incomplete_coverage_needs_action():
     verdict = operator_verdict({"status": "SUCCESS", "expected_samples": 10, "errors": []}, decision)
     assert verdict["state"] == "needs_action"
     assert verdict["reason"] == "coverage is incomplete: 2 missing"
-    assert verdict["action"] == "`gym eval resubmit --recover` now"
+    assert verdict["action"] == "`gym eval resubmit GYM_JOB_ID BENCHMARK --recover` now"
 
 
 def test_a_live_job_and_missing_evidence_are_unknown():
@@ -256,8 +268,8 @@ def test_unverified_after_a_judge_outage_names_the_cause_with_counts():
     assert verdict == {
         "state": "unknown",
         "reason": f"unverified: {cause}",
-        "action": "report the run as unverified: the re-judged rows were graded but their grading was not recorded, "
-        "and no recovery command records it",
+        "action": "none: report the run as unverified: the rows were re-judged and no grading was recorded, so "
+        "whether they were graded is unknown; no recovery command records it",
     }
 
 
@@ -269,16 +281,20 @@ def test_unverified_without_a_cause_is_unknown():
     verdict = operator_verdict(task, decision)
     assert verdict["state"] == "unknown"
     assert verdict["reason"] == "unverified without a known cause: r"
-    assert verdict["action"] == "report the run as unverified; no operator action is known"
+    assert verdict["action"] == "none: report the run as unverified; no operator action is known"
 
 
-def test_unverified_unobserved_grading_names_the_producer():
+def test_unverified_unobserved_grading_is_reported_with_its_producer_never_resubmitted():
     verdict, task, _ = _verdict(_ready(_uncovered(_run(100), 10)))
     assert task["status"] == "UNVERIFIED"
     assert task["unverified_cause"]["kind"] == "grading_unobserved"
-    assert verdict["state"] == "needs_action"
+    # UNVERIFIED by construction: a resubmit cannot change it, and no flag does (benchmark-notes).
+    assert verdict["state"] == "unknown"
     assert verdict["reason"].startswith("unverified: 10 of 100 rows have no recorded grading")
-    assert verdict["action"] == "fix the verifier that saves no grading record then `gym eval submit` again"
+    assert verdict["action"] == (
+        "none: report the run as unverified with this reason and do not present it as verified; a resubmit cannot "
+        "change it, and no flag does: the fix is the verifier's grading record, in Gym"
+    )
 
 
 def test_the_outcome_carries_the_verdict_in_both_places():
@@ -300,7 +316,8 @@ def test_a_proven_health_failure_is_kept_when_the_score_is_also_unread():
     assert verdict == {
         "state": "needs_action",
         "reason": "3 of 100 trials failed on the evaluation side (model_transport_error 3)",
-        "action": "fix the failing infrastructure then `gym eval submit` again",
+        "action": "none: report the run as failing run health; no recovery reopens settled trials, so check the "
+        "evaluation-side faults evaluation_health names (their kinds and the services' logs)",
     }
 
 
@@ -328,7 +345,7 @@ def test_exhausted_attempts_name_the_extension_not_a_fresh_submit():
     )
     verdict = operator_verdict(_failed_task(), decision)
     assert verdict["state"] == "needs_action"
-    assert "`gym eval resubmit --recover --extend-attempts N`" in verdict["action"]
+    assert "`gym eval resubmit GYM_JOB_ID BENCHMARK --recover --extend-attempts N`" in verdict["action"]
     assert "completed work is kept" in verdict["action"] and "submit" not in verdict["action"].replace("resubmit", "")
 
 
@@ -357,6 +374,7 @@ def test_non_budget_stops_keep_their_typed_remedy():
     decision = _decision(
         RecoveryAction.STOP, "10 failure(s) typed provider_credentials_rejected", {IdentityState.TERMINAL: 10}
     )
+    decision.evidence = _terminal("provider_credentials_rejected", 10)
     assert operator_verdict(_failed_task(), decision)["action"].startswith("fix the credentials, then")
 
 
@@ -424,7 +442,7 @@ def test_an_explicit_zero_unobserved_count_is_not_a_missing_grading_count():
         "state": "unknown",
         "reason": "unverified without a known cause: failures recorded only as zero rewards cannot be ruled out "
         "over 2 rows",
-        "action": "report the run as unverified; no operator action is known",
+        "action": "none: report the run as unverified; no operator action is known",
     }
 
 
@@ -479,7 +497,7 @@ def _budget_verdict(collected, **options):
 
 def test_spent_attempts_and_infra_retries_name_both_extensions_at_every_stop(tmp_path):
     collected = _spent_attempts_and_retries(tmp_path)
-    both = "`gym eval resubmit --recover --extend-attempts N --extend-retries N`"
+    both = "`gym eval resubmit GYM_JOB_ID BENCHMARK --recover --extend-attempts N --extend-retries N`"
     # The first stop already names both budgets; following its advice with either flag alone stops again, and that
     # stop keeps naming the flag the call asked for, which nothing recorded.
     for options in ({}, {"extend_attempts": 1}, {"extend_retries": 1}):
@@ -491,7 +509,7 @@ def test_spent_attempts_and_infra_retries_name_both_extensions_at_every_stop(tmp
     # Both in one call continue the saved run: the scored row is kept and only the exhausted one runs again.
     decision, verdict = _budget_verdict(collected, extend_attempts=1, extend_retries=1)
     assert decision.action == RecoveryAction.RESUBMIT and decision.counts == {"scored": 1, "retryable": 1}
-    assert verdict["action"] == "`gym eval resubmit --recover` now"
+    assert verdict["action"] == "`gym eval resubmit GYM_JOB_ID BENCHMARK --recover` now"
 
 
 def test_spent_attempts_alone_still_name_only_the_attempt_extension(tmp_path):
@@ -502,8 +520,8 @@ def test_spent_attempts_alone_still_name_only_the_attempt_extension(tmp_path):
     decision, verdict = _budget_verdict(select_managed_evidence(collect(tmp_path), tmp_path))
     assert decision.action == RecoveryAction.STOP
     assert verdict["action"] == (
-        "your decision: continue the saved run (completed work is kept) with "
-        "`gym eval resubmit --recover --extend-attempts N`; N is yours to choose"
+        "your decision: continue the saved run (completed work is kept): "
+        "`gym eval resubmit GYM_JOB_ID BENCHMARK --recover --extend-attempts N`; N is yours to choose"
     )
 
 
@@ -571,21 +589,26 @@ COMMIT = "b" * 40
         (
             "saved judge driver and installed recovery source must be the same immutable revision; --repin <this "
             "launcher's full commit> --repin-reason TEXT runs the judge-only job at it",
-            "gym eval resubmit --recover --repin COMMIT --repin-reason TEXT",
+            "gym eval resubmit GYM_JOB_ID BENCHMARK --recover --judge-partition cpu --repin COMMIT --repin-reason TEXT",
         ),
         (
             f"planned on {COMMIT} for a run pinned at {'a' * 40}: its judge-only job runs the installed recovery "
             f"source; the pin was kept (--no-auto-repin): recover with --repin {COMMIT} --repin-reason TEXT to move it",
-            f"gym eval resubmit --recover --repin {COMMIT} --repin-reason TEXT",
+            f"gym eval resubmit GYM_JOB_ID BENCHMARK --recover --judge-partition cpu --repin {COMMIT} --repin-reason TEXT",
         ),
     ],
 )
 def test_a_stop_that_needs_the_launchers_revision_names_the_repin_not_a_fresh_submit(reason, command):
-    decision = _decision(RecoveryAction.STOP, reason, {IdentityState.JUDGE_RECOVERABLE: 1})
+    # The command keeps the call's other options; --no-auto-repin goes, as the CLI refuses it beside --repin.
+    decision = _decision(
+        RecoveryAction.STOP,
+        reason,
+        {IdentityState.JUDGE_RECOVERABLE: 1},
+        requested=["--no-auto-repin", "--judge-partition cpu"],
+    )
     verdict = operator_verdict(_failed_task(), decision)
     assert verdict["state"] == "needs_action"
     assert verdict["action"].split("`")[1] == command and "`gym eval submit`" not in verdict["action"]
-    assert "every other option of the stopped call" in verdict["action"]
 
 
 def test_an_accepted_run_whose_mlflow_delivery_is_pending_names_the_export():
@@ -595,6 +618,6 @@ def test_an_accepted_run_whose_mlflow_delivery_is_pending_names_the_export():
     assert task["status"] == "SUCCESS" and task["mlflow_delivery"]["state"] == "pending"
     assert verdict["state"] == "accept" and "MLflow delivery pending" in verdict["reason"]
     assert verdict["action"] == (
-        "export the results to MLflow: `gym eval resubmit --recover` runs the export of a complete run without a "
+        "export the results to MLflow: `gym eval resubmit GYM_JOB_ID BENCHMARK --recover` runs the export of a complete run without a "
         "receipt (no model calls)"
     )

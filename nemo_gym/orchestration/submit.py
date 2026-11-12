@@ -18,6 +18,7 @@ import hashlib
 import json
 import math
 import re
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -252,39 +253,68 @@ def _requested(
     extend_attempts: int = 0,
     max_walltime: str | None = None,
     repin: str | None = None,
+    auto_repin: bool = True,
     unsafe_resume_reason: str | None = None,
     server_spinup_timeout_seconds: int | None = None,
     judge_partition: str | None = None,
     judge_qos: str | None = None,
     rerun_masked_without_artifact: bool = False,
     acknowledge_failed_judge_jobs: bool = False,
+    score_key: list[str | int] | None = None,
+    score_agent: str | None = None,
+    score_environment: str | None = None,
+    max_unhealthy_fraction: float | None = None,
+    max_response_failure_fraction: float | None = None,
+    max_trial_failure_fraction: float | None = None,
+    policy_timeout_counts_as_model: bool | None = None,
+    mlflow_run_id: str | None = None,
+    mlflow_status: str | None = None,
     **_: Any,
 ) -> list[str]:
     """The options of a recovery call as `gym eval resubmit --recover` takes them, each reason as TEXT, so the
-    operator verdict's command repeats them."""
+    operator verdict's command repeats them: the pin choice, the budgets and fixes, and the gate's own options."""
+    q = shlex.quote
     flags = [
+        (repin, f"--repin {repin} --repin-reason TEXT"),
+        (not auto_repin and repin is None, "--no-auto-repin"),
         (extend_attempts, f"--extend-attempts {extend_attempts}"),
         (extend_retries, f"--extend-retries {extend_retries}"),
         (max_walltime, f"--max-walltime {max_walltime} --walltime-reason TEXT"),
-        (repin, f"--repin {repin} --repin-reason TEXT"),
         (unsafe_resume_reason, "--allow-unsafe-resume --unsafe-resume-reason TEXT"),
         (
             server_spinup_timeout_seconds is not None,
             f"--server-spinup-timeout-seconds {server_spinup_timeout_seconds} --spinup-timeout-reason TEXT",
         ),
-        (judge_partition, f"--judge-partition {judge_partition}"),
-        (judge_qos, f"--judge-qos {judge_qos}"),
+        (judge_partition, f"--judge-partition {q(judge_partition or '')}"),
+        (judge_qos, f"--judge-qos {q(judge_qos or '')}"),
         (rerun_masked_without_artifact, f"{RERUN_MASKED_FLAGS} TEXT"),
         (acknowledge_failed_judge_jobs, f"{ACKNOWLEDGE_JUDGE_JOBS_FLAGS} TEXT"),
+        (score_key is not None, f"--score-key {q(json.dumps(score_key))}"),
+        (score_agent is not None, f"--score-agent {q(score_agent or '')}"),
+        (score_environment is not None, f"--score-environment {q(score_environment or '')}"),
+        (max_unhealthy_fraction is not None, f"--max-unhealthy-fraction {max_unhealthy_fraction}"),
+        (
+            max_response_failure_fraction is not None,
+            f"--max-response-failure-fraction {max_response_failure_fraction}",
+        ),
+        (max_trial_failure_fraction is not None, f"--max-trial-failure-fraction {max_trial_failure_fraction}"),
+        (
+            policy_timeout_counts_as_model is not None,
+            f"--policy-timeout-counts-as-model {str(policy_timeout_counts_as_model).lower()}",
+        ),
+        (mlflow_run_id is not None, f"--mlflow-run-id {q(mlflow_run_id or '')}"),
+        (mlflow_status is not None, f"--mlflow-status {q(mlflow_status or '')}"),
     ]
     return [flag for given, flag in flags if given]
 
 
 def _with_requested(outcome: RecoveryOutcome, options: dict[str, Any]) -> RecoveryOutcome:
-    """The outcome whose decision names the options of the call that planned it (see ``_requested``)."""
+    """The outcome whose decision names the run and the options of the call that planned it (see ``_requested``), so
+    every command of the operator verdict is complete."""
     if outcome.decision is None:
         return outcome
-    decision = outcome.decision.model_copy(update={"requested": _requested(**options)})
+    target = f"{shlex.quote(options['gym_job_id'])} {shlex.quote(options['benchmark'])}"
+    decision = outcome.decision.model_copy(update={"requested": _requested(**options), "target": target})
     return outcome.model_copy(update={"decision": decision})
 
 

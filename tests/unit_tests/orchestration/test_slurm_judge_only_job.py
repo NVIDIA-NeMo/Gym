@@ -536,7 +536,7 @@ def test_without_a_cpu_partition_the_verdict_names_the_judge_partition_not_a_fre
     assert refused.dispatched is None and refused.decision.action == RecoveryAction.STOP
     verdict = refused.operator_verdict
     assert verdict["state"] == "needs_action" and "`gym eval submit`" not in verdict["action"]
-    assert "`gym eval resubmit --recover --judge-partition PARTITION`" in verdict["action"]
+    assert "`gym eval resubmit gym-job-x bench --recover --judge-partition PARTITION`" in verdict["action"]
     # The option the verdict names queues the judge-only job.
     assert recover(*_handle(job_dir), judge_partition="cpu").job_id == "4242"
 

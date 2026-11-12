@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""`gym eval resubmit --recover --max-walltime T --walltime-reason R [--extend-retries N]` for a run whose chain
+"""`gym eval resubmit gym-job-x gsm8k --recover --max-walltime T --walltime-reason R [--extend-retries N]` for a run whose chain
 accounting is unknown: an explicit, journaled OPERATOR-CONTINUATION that fills only the unknown counters."""
 
 import hashlib
@@ -136,8 +136,8 @@ def test_without_a_budget_unknown_accounting_stops_as_before_and_names_the_optio
     before = _accounting(job_dir)
 
     continuation = (
-        "your decision: continue the saved run (completed work is kept) with "
-        "`gym eval resubmit --recover --max-walltime HH:MM:SS --walltime-reason TEXT [--extend-retries N]`; "
+        "your decision: continue the saved run (completed work is kept): "
+        "`gym eval resubmit gym-job-x gsm8k --recover --max-walltime HH:MM:SS --walltime-reason TEXT [--extend-retries N]`; "
         "N and the walltime are yours to choose; it is refused while a job of the run is pending or running"
     )
     for out in (inspect_recovery(*_handle(job_dir)), recover(*_handle(job_dir))):
@@ -158,8 +158,8 @@ def test_without_a_budget_unknown_accounting_stops_as_before_and_names_the_optio
     assert extended.decision.reason.endswith(UNKNOWN_BUDGET_HINT)
     # The retries this call asked for are not recorded, so the next call is told to ask for them again.
     assert extended.operator_verdict["action"] == (
-        "your decision: continue the saved run (completed work is kept) with "
-        "`gym eval resubmit --recover --extend-retries N --max-walltime HH:MM:SS --walltime-reason TEXT`; "
+        "your decision: continue the saved run (completed work is kept): "
+        "`gym eval resubmit gym-job-x gsm8k --recover --extend-retries N --max-walltime HH:MM:SS --walltime-reason TEXT`; "
         "N and the walltime are yours to choose; every option named goes in the same call; it is refused while a job "
         "of the run is pending or running"
     )
@@ -463,7 +463,8 @@ def test_a_protocol_violation_keeps_its_producer_fix_over_a_masked_rerun(tmp_pat
     assert out.decision.masked_without_artifact == [(2, 0)]
     assert out.operator_verdict["state"] == "needs_action"
     assert out.operator_verdict["action"] == (
-        "fix the server or the benchmark pairing (a producer bug), then `gym eval submit` again"
+        "fix the server or the benchmark pairing (a producer bug), then `gym eval submit` again, as the stop says; "
+        "a recovery would get the same replies"
     )
 
 
@@ -515,15 +516,15 @@ def test_a_missing_results_file_is_no_budget_continuation(tmp_path, slurm_bin):
 @pytest.mark.parametrize(
     ("reason", "action"),
     [
-        ("CREDENTIALS_REJECTED_REASON", "fix the credentials, then `gym eval resubmit --recover`"),
+        ("CREDENTIALS_REJECTED_REASON", "fix the credentials, then run `gym eval resubmit gym-job-x gsm8k --recover`"),
         (
             "SPINUP_TIMEOUT_REASON",
-            "raise the server start-up limit above the recorded one: `gym eval resubmit --recover "
-            "--server-spinup-timeout-seconds N --spinup-timeout-reason TEXT`",
+            "raise the server start-up limit above the recorded one with `gym eval resubmit gym-job-x gsm8k --recover "
+            "--server-spinup-timeout-seconds N --spinup-timeout-reason TEXT`; N is yours to choose",
         ),
         (
             "PREPARE_FAILED_REASON",
-            "fix the benchmark's preparation, then `gym eval resubmit --recover`",
+            "fix the benchmark's preparation, then run `gym eval resubmit gym-job-x gsm8k --recover`",
         ),
     ],
 )
@@ -553,4 +554,4 @@ def test_the_verdict_of_an_inspection_repeats_the_options_it_was_asked_with(tmp_
     out = inspect_recovery(*_handle(job_dir), extend_attempts=1)
 
     assert out.decision.action.value == "resubmit", out.decision.reason
-    assert out.operator_verdict["action"] == "`gym eval resubmit --recover --extend-attempts 1` now"
+    assert out.operator_verdict["action"] == "`gym eval resubmit gym-job-x gsm8k --recover --extend-attempts 1` now"
