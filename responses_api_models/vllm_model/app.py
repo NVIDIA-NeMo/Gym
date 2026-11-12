@@ -237,6 +237,10 @@ _REFIT_MARGIN_TOKENS = 16
 # ``max_tokens``, and /v1/completions has only ``max_tokens``.
 _CHAT_BUDGET_KEYS = ("max_completion_tokens", "max_tokens")
 _COMPLETIONS_BUDGET_KEYS = ("max_tokens",)
+# Every name an output budget can take: the Chat names, then the one the Responses API reads.
+_OUTPUT_BUDGET_KEYS = (*_CHAT_BUDGET_KEYS, "max_output_tokens")
+# The name each endpoint other than Chat reads its output budget under.
+_OUTPUT_BUDGET_KEY_BY_API = {"completions": "max_tokens", "responses": "max_output_tokens"}
 
 
 def _effective_budget_key(outbound: Dict[str, Any], keys: tuple[str, ...]) -> str | None:
@@ -322,6 +326,36 @@ def _transport_log_context(request: Request) -> Dict[str, Any]:
         else:
             context[field] = value
     return context
+
+
+def _log_web_completion(response: dict[str, Any], context: dict[str, Any]) -> None:
+    """Retain upstream stop diagnostics without logging model text or images."""
+
+    if context.get("adapter") != "web_agent":
+        return
+    choices = response.get("choices") or []
+    if not choices:
+        return
+    choice = choices[0]
+    message = choice.get("message") or {}
+    reasoning = message.get("reasoning_content") or message.get("reasoning") or ""
+    usage = response.get("usage") or {}
+    LOG.info(
+        "event=web_upstream_completion task=%s step=%s parse_attempt=%s response_id=%s "
+        "finish_reason=%s stop_reason=%r tool_calls=%d reasoning_tool_markup=%s "
+        "prompt_tokens=%s completion_tokens=%s total_tokens=%s",
+        context.get("task_id", "unknown"),
+        context.get("step"),
+        context.get("parse_attempt"),
+        response.get("id"),
+        choice.get("finish_reason"),
+        choice.get("stop_reason"),
+        len(message.get("tool_calls") or []),
+        "<tool_call>" in reasoning or "<function=" in reasoning,
+        usage.get("prompt_tokens"),
+        usage.get("completion_tokens"),
+        usage.get("total_tokens"),
+    )
 
 
 def _jsonable(value: Any) -> Any:
@@ -561,8 +595,8 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     forward_unvalidated_reasoning_effort: bool = Field(
         default=False,
         description=(
-            "Forward a Responses `reasoning.effort` that the pinned OpenAI SDK does not list (for example "
-            "`max`, which the Codex CLI sends when its model catalog offers it) verbatim as the chat "
+            "Forward a Responses `reasoning.effort` that the pinned OpenAI SDK does not list "
+            "verbatim as the chat "
             "`reasoning_effort`, instead of refusing the request with 422. The engine validates the value. "
             "Efforts the SDK lists keep their existing path. Requires `is_responses_native: false` and "
             "`use_completions_api: false`."
@@ -629,6 +663,14 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     extra_body: Optional[Dict[str, Any]] = None
 
     default_headers: Dict[str, str] = Field(default_factory=dict)
+    session_key_headers: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Headers that carry the current session key to the engine endpoint, e.g. for session-affinity routing. "
+            "The key reaches this server only when agents add the rollout prefix: set rollout_correlation, "
+            "observability_enabled or token capture."
+        ),
+    )
 
     # Optional path to a file that publishes the current backend base_url.
     # Used for shared serving jobs that move hosts when they restart.
@@ -1017,12 +1059,28 @@ class VLLMModel(SimpleResponsesAPIModel):
                 self.config.name,
                 self.config.sampling_overrides,
             )
+            pinned_limits = [
+                (key, self.config.sampling_overrides[key])
+                for key in _OUTPUT_BUDGET_KEYS
+                if key in self.config.sampling_overrides
+            ]
+            if any(value != pinned_limits[0][1] for _, value in pinned_limits[1:]):
+                LOG.warning(
+                    "`%s` pins the output-token limit to different values under different names %s; "
+                    "every endpoint sends %s=%s",
+                    self.config.name,
+                    dict(pinned_limits),
+                    *pinned_limits[0],
+                )
 
         self._clients = [
             NeMoGymAsyncOpenAI(
                 base_url=base_url,
                 api_key=self.config.api_key,
+                # The inference engine is not a NeMo Gym server, so its retries stay bounded.
+                internal=False,
                 default_headers=self.config.default_headers,
+                session_key_headers=self.config.session_key_headers,
                 max_connection_retries=(
                     self.config.endpoint_connection_retries
                     if (self.config.endpoint_file or self.config.route_around_failing_endpoints)
@@ -1159,7 +1217,9 @@ class VLLMModel(SimpleResponsesAPIModel):
             response.metadata = {**(response.metadata or {}), "nemo_gym_context_window_exceeded": "true"}
         return response
 
-    def _apply_sampling_overrides(self, body_dict: Dict[str, Any]) -> Dict[str, Any]:
+    def _apply_sampling_overrides(
+        self, body_dict: Dict[str, Any], *, api: Literal["chat", "completions", "responses"]
+    ) -> Dict[str, Any]:
         """Force ``config.sampling_overrides`` onto an outbound body, in place.
 
         Applied last at every site that builds a request for the engine, so the pinned values win
@@ -1167,19 +1227,36 @@ class VLLMModel(SimpleResponsesAPIModel):
         the client sent nothing. Every path has to call this: a harness picks its own endpoint, and
         a pin that covers only one of them yields off-policy generation while reporting that
         sampling is pinned.
+
+        A pinned output-token limit replaces the request's limit under every name and is sent under
+        the name the ``api`` endpoint reads. Otherwise a request that names the limit differently
+        from the pin reaches the engine with both, and the engine may read the request's. A pin that
+        names the limit more than once sends the value of the first name in ``_OUTPUT_BUDGET_KEYS``
+        order on every endpoint, so one config caps a run alike whichever endpoint serves it.
         """
-        if self.config.sampling_overrides:
-            pins = self._sampling_pins()
-            if pins and current_model_sampling_segment() not in (None, MODEL_SAMPLING_NULL):
-                # 409, not 500: the conflict is configuration, so retrying the rollout cannot help.
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"Model Server {self.config.name!r} sets sampling_overrides {pins}, but this call carries a "
-                    "training framework's values for an agent it trains, which must sample with them. Remove them "
-                    "from this Model Server's sampling_overrides, and give an untrained agent that needs a pin a "
-                    "Model Server of its own.",
-                )
-            body_dict.update(self.config.sampling_overrides)
+        if not self.config.sampling_overrides:
+            return body_dict
+        pins = self._sampling_pins()
+        if pins and current_model_sampling_segment() not in (None, MODEL_SAMPLING_NULL):
+            # 409, not 500: the conflict is configuration, so retrying the rollout cannot help.
+            raise HTTPException(
+                status_code=409,
+                detail=f"Model Server {self.config.name!r} sets sampling_overrides {pins}, but this call carries a "
+                "training framework's values for an agent it trains, which must sample with them. Remove them "
+                "from this Model Server's sampling_overrides, and give an untrained agent that needs a pin a "
+                "Model Server of its own.",
+            )
+        overrides = dict(self.config.sampling_overrides)
+        pinned_limits = {key: overrides.pop(key) for key in _OUTPUT_BUDGET_KEYS if key in overrides}
+        body_dict.update(overrides)
+        if pinned_limits:
+            for key in _OUTPUT_BUDGET_KEYS:
+                body_dict.pop(key, None)
+            if api == "chat":
+                limit_key = next((key for key in _CHAT_BUDGET_KEYS if key in pinned_limits), "max_tokens")
+            else:
+                limit_key = _OUTPUT_BUDGET_KEY_BY_API[api]
+            body_dict[limit_key] = next(iter(pinned_limits.values()))
         return body_dict
 
     async def _responses_native(
@@ -1205,7 +1282,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             body_dict["chat_template_kwargs"] = deepcopy(self.config.chat_template_kwargs)
         if self.config.extra_body:
             body_dict = self.config.extra_body | body_dict
-        self._apply_sampling_overrides(body_dict)
+        self._apply_sampling_overrides(body_dict, api="responses")
 
         note_generation_request(body_dict)
         client = self._resolve_client(request)
@@ -1446,11 +1523,15 @@ class VLLMModel(SimpleResponsesAPIModel):
                     raise NotImplementedError
 
         if extra_body:
+            if _effective_budget_key(body_dict, _CHAT_BUDGET_KEYS) is not None:
+                # The request body's limit wins under either name. An extra_body limit under the other
+                # name would otherwise reach the engine too, and vLLM reads max_completion_tokens first.
+                extra_body = {key: value for key, value in extra_body.items() if key not in _CHAT_BUDGET_KEYS}
             body_dict = extra_body | body_dict
 
         self._splice_audio_from_metadata(body_dict, metadata)
 
-        self._apply_sampling_overrides(body_dict)
+        self._apply_sampling_overrides(body_dict, api="chat")
         self._validate_single_choice_token_request(body_dict)
         if self._external_capture_handler is not None:
             body_dict = self._external_capture_handler.prepare_request(body_dict)
@@ -1847,6 +1928,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             )
 
         choice_dict = chat_completion_dict["choices"][0]
+        _log_web_completion(chat_completion_dict, log_context)
         # An aborted request is an infrastructure failure, not a token-limit
         # completion. Failing before conversion prevents grading partial text;
         # the rollout collector can retain the failure for retry on resume.
@@ -2370,6 +2452,15 @@ class VLLMModel(SimpleResponsesAPIModel):
         # request-level fields.
         if self.config.extra_body:
             extra_body = deepcopy(self.config.extra_body)
+            # /v1/completions reads only max_tokens and ignores max_completion_tokens, falling back to
+            # its own default of 16 tokens. Rename a chat-spelled default so it applies. A request
+            # limit still wins, because the request body is merged over the defaults.
+            default_limit = extra_body.pop("max_completion_tokens", None)
+            if default_limit is not None:
+                extra_body.setdefault("max_tokens", default_limit)
+            if out.get("max_tokens") is None:
+                # A null request limit is unset; /v1/completions would turn it into its 16-token default.
+                out.pop("max_tokens", None)
             out = extra_body | out
 
         if self.config.return_token_id_information:
@@ -2382,7 +2473,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         # chat_completions() branches here before preprocessing, so the pin has to be applied again.
         # vLLM accepts the same sampling field names on /v1/completions, and the body is forwarded as raw JSON,
         # so params without a first-class OpenAI completion field (top_k, min_p) pass through.
-        return self._apply_sampling_overrides(out)
+        return self._apply_sampling_overrides(out, api="completions")
 
     def _completion_dict_to_chat_completion(self, completion_dict: Dict[str, Any]) -> NeMoGymChatCompletion:
         """Wrap a /v1/completions response as a NeMoGymChatCompletion.
@@ -2447,6 +2538,8 @@ class VLLMModel(SimpleResponsesAPIModel):
             ],
         }
 
+        if choice_dict.get("stop_reason") is not None:
+            chat_completion_dict["choices"][0]["stop_reason"] = choice_dict["stop_reason"]
         if completion_dict.get("usage") is not None:
             chat_completion_dict["usage"] = completion_dict["usage"]
         if completion_dict.get("metrics") is not None:
@@ -2526,7 +2619,10 @@ class VLLMModel(SimpleResponsesAPIModel):
             NeMoGymAsyncOpenAI(
                 base_url=url,
                 api_key=self.config.api_key,
+                # The inference engine is not a NeMo Gym server, so its retries stay bounded.
+                internal=False,
                 default_headers=self.config.default_headers,
+                session_key_headers=self.config.session_key_headers,
                 max_connection_retries=self.config.endpoint_connection_retries,
                 max_rate_limit_wait_seconds=0,
                 max_http_attempts=self.config.max_http_attempts,

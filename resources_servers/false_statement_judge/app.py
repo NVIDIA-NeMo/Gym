@@ -54,6 +54,7 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
     observe_llm_judge_grading,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import JudgeError, call_judge, record_parsed_judge_verdict
 
 
@@ -226,7 +227,12 @@ class FalseStatementJudgeServer(SimpleResourcesServer):
             content = chat_response.choices[0].message.content if chat_response.choices else None
             return observed_text(
                 content.strip() if content else "",
-                completed=bool(chat_response.choices) and chat_response.choices[0].finish_reason == "stop",
+                completed=(
+                    bool(chat_response.choices)
+                    and chat_response.choices[0].finish_reason == "stop"
+                    and getattr(chat_response.choices[0], "native_finish_reason", None) != "repetition"
+                    and getattr(chat_response.choices[0], "stop_reason", None) != "repetition_detected"
+                ),
             )
 
         request_params = judge_params.model_copy(deep=True)
@@ -288,3 +294,6 @@ class FalseStatementJudgeServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     FalseStatementJudgeServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = FalseStatementJudgeServer.run_webserver()  # noqa: F401

@@ -52,6 +52,37 @@ def test_default_agent_composes_with_exactly_one_session_environment(tmp_path: P
     assert resolved[agent_type].responses_api_agents[agent_type].resources_server is None
 
 
+def test_mini_swe_session_template_composes_with_exactly_one_session_environment(tmp_path: Path) -> None:
+    config = tmp_path / "agent.yaml"
+    template = SCRIPT.parents[1] / "responses_api_agents/mini_swe_agent/configs/mini_swe_agent_sandboxed.yaml"
+    config.write_text(template.read_text())
+    composition = tmp_path / "run.yaml"
+    composition.write_text(
+        "policy_model_name: test-model\n"
+        + _server_fronting("mini_swe_agent", name="session_environment", server_type="single_agent_turn_legacy")
+    )
+    before = config.read_text()
+    assert migration.main([str(config)]) == 0
+    assert config.read_text() == before
+    resolved = _parse(config, composition, strict=True)
+    assert _environment_servers_by_agent(resolved) == {"mini_swe_agent": ["session_environment"]}
+    assert resolved.mini_swe_agent.responses_api_agents.mini_swe_agent.resources_server is None
+
+
+def test_mini_swe_run_config_keeps_its_one_legacy_relay(tmp_path: Path) -> None:
+    config = tmp_path / "agent.yaml"
+    config.write_text(
+        (SCRIPT.parents[1] / "responses_api_agents/mini_swe_agent/configs/mini_swe_agent.yaml").read_text()
+    )
+    before = config.read_text()
+    assert migration.main([str(config)]) == 0
+    # The SWE-Gym /run config already declares its relay; listing the agent for sessions adds no second server.
+    assert config.read_text() == before
+    assert _environment_servers(yaml.safe_load(before)) == {
+        "mini_swe_simple_agent": ["mini_swe_simple_environment_server"]
+    }
+
+
 def test_default_codex_composes_with_exactly_one_session_environment(tmp_path: Path) -> None:
     config = tmp_path / "agent.yaml"
     default = SCRIPT.parents[1] / "responses_api_agents/codex_agent/configs/codex_agent.yaml"
@@ -102,6 +133,32 @@ def test_default_claude_composes_with_exactly_one_session_environment(tmp_path: 
     resolved = _parse(config, composition, strict=True)
     assert _environment_servers_by_agent(resolved) == {"claude_code_agent": ["session_environment"]}
     assert resolved.claude_code_agent.responses_api_agents.claude_code_agent.resources_server is None
+
+
+def test_default_droid_composes_with_exactly_one_session_environment(tmp_path: Path) -> None:
+    config = tmp_path / "agent.yaml"
+    default = SCRIPT.parents[1] / "responses_api_agents/droid_agent/configs/droid_agent.yaml"
+    config.write_text(default.read_text())
+    composition = tmp_path / "run.yaml"
+    composition.write_text(
+        "policy_model_name: test-model\n"
+        + _server_fronting("droid_agent", name="session_environment", server_type="single_agent_turn")
+    )
+    before = config.read_text()
+    assert migration.main([str(config)]) == 0
+    assert config.read_text() == before
+    resolved = _parse(config, composition, strict=True)
+    assert _environment_servers_by_agent(resolved) == {"droid_agent": ["session_environment"]}
+    assert resolved.droid_agent.responses_api_agents.droid_agent.resources_server is None
+
+
+def test_droid_bound_to_resources_gets_no_legacy_relay(tmp_path: Path) -> None:
+    # Droid has no /run for a legacy relay to call, whatever its Resources binding.
+    config = tmp_path / "agent.yaml"
+    config.write_text(AGENT_CONFIG.replace("simple_agent", "droid_agent"))
+    before = config.read_text()
+    assert migration.main([str(config)]) == 0
+    assert config.read_text() == before
 
 
 def test_opencode_session_template_composes_with_one_environment(tmp_path: Path) -> None:
@@ -192,6 +249,7 @@ def test_default_hermes_composes_with_exactly_one_session_environment(tmp_path: 
         "claude_code_agent",
         "harbor_oracle_agent",
         "terminus_2_sandboxed_agent",
+        "mini_swe_agent",
         "miniswe_sandboxed_agent",
     ],
 )
