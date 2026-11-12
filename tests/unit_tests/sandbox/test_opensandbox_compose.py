@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxHandle
 from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
 
@@ -107,7 +108,7 @@ async def test_hosts_append_validated_mapping_as_root(monkeypatch):
     assert args[1].endswith(" >> /etc/hosts")
     assert kwargs["user"] == "root"
     execute.return_value = SandboxExecResult("uid change failed", "permission denied", 1)
-    with pytest.raises(RuntimeError, match="hosts") as error:
+    with pytest.raises(NgFailureEvent, match="hosts") as error:
         await provider.set_hosts(handle, {"database": "10.2.3.4"})
     assert "sandbox" in str(error.value)
     assert "uid change failed" in str(error.value)
@@ -196,7 +197,7 @@ async def test_shared_memory_check_never_requests_root_or_remount(monkeypatch, r
     monkeypatch.setattr(provider, "exec", execute)
     handle = SandboxHandle("nonroot", "opensandbox", None)
     if return_code:
-        with pytest.raises(RuntimeError, match="shm_size.*allocation mismatch"):
+        with pytest.raises(NgFailureEvent, match="shm_size.*allocation mismatch"):
             await provider.configure_runtime(handle, cap_add=(), shm_size=67108864)
     else:
         await provider.configure_runtime(handle, cap_add=(), shm_size=67108864)
@@ -225,7 +226,7 @@ async def test_port_forwarding_requires_opt_in_and_reports_process_exit(monkeypa
     )
     execute = AsyncMock(return_value=SandboxExecResult("", "address in use", 1))
     monkeypatch.setattr(provider, "exec", execute)
-    with pytest.raises(RuntimeError, match="address in use"):
+    with pytest.raises(NgFailureEvent, match="address in use"):
         await provider.forward_ports(
             SandboxHandle("box", "opensandbox", None), "10.1.2.3", (5432,), ready_file="/tmp/ready"
         )
@@ -254,12 +255,12 @@ async def test_port_forwarding_setup_failure_does_not_launch_relay(monkeypatch):
     execute = AsyncMock(return_value=SandboxExecResult("", "package unavailable", 1))
     monkeypatch.setattr(provider, "exec", execute)
     handle = SandboxHandle("box", "opensandbox", None)
-    with pytest.raises(RuntimeError, match="setup failed.*package unavailable"):
+    with pytest.raises(NgFailureEvent, match="setup failed.*package unavailable"):
         await provider.forward_ports(handle, "10.1.2.3", (5432,), ready_file="/tmp/ready")
     execute.assert_awaited_once_with(handle, "install-python", user="root", timeout_s=180)
     execute.reset_mock()
     execute.side_effect = [SandboxExecResult("", "", 0), SandboxExecResult("", "listener stopped", 1)]
-    with pytest.raises(RuntimeError, match="listener stopped"):
+    with pytest.raises(NgFailureEvent, match="listener stopped"):
         await provider.forward_ports(handle, "10.1.2.3", (5432,), ready_file="/tmp/ready")
     assert execute.await_count == 2
     assert execute.call_args.kwargs["timeout_s"] is None

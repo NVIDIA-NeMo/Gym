@@ -29,6 +29,7 @@ from nemo_gym.core import (
     EpisodeId,
     FailureReportRow,
     NeMoGymResponse,
+    failure_kinds,
     rollout_context,
 )
 from nemo_gym.rollouts import NG_TERMINAL_KEY
@@ -46,7 +47,12 @@ from nemo_gym.server_runtime import (
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.terminal_bench_4 import lifecycle
-from resources_servers.terminal_bench_4.environment import EnvironmentConfig, ExecLimitConfigurationError
+from resources_servers.terminal_bench_4.environment import (
+    EnvironmentConfig,
+    ExecLimitConfigurationError,
+    ProviderCapabilityError,
+    resolve_environment_provider,
+)
 from resources_servers.terminal_bench_4.lifecycle import NATIVE_VERSION, Session
 from resources_servers.terminal_bench_4.models import (
     AgentTermination,
@@ -79,13 +85,13 @@ class TerminalBench4Config(BaseResourcesServerConfig):
     seeded_session_timeout_sec: float = Field(default=10 * 60 * 60, gt=0)
     task_download_dir: Path | None = None
     # Top-level sandbox provider block equivalent to environment.sandbox_provider. Agents that
-    # borrow the task sandbox through SandboxAccess (Environment Server sessions) reconnect with it.
+    # borrow the task sandbox through SandboxAccess (episode sessions) reconnect with it.
     sandbox_provider_ref: str | None = None
     session_close_retry_window_seconds: float = Field(
         default=300,
         gt=0,
         allow_inf_nan=False,
-        description="Retain completed close fences for this many seconds; cover the caller's retry horizon.",
+        description="How long a completed close fences its session, in seconds; cover the caller's retry horizon.",
     )
 
 
@@ -93,6 +99,8 @@ class TerminalBench4Config(BaseResourcesServerConfig):
 # the sandbox's default user, which is root for every image this server provisions.
 _DEFAULT_AGENT_USERS = (None, "root", 0, "0")
 _RESOURCES_SESSION_KEY = "tb4_resources_session_id"
+# Setup errors that no retry can fix: the attempt ends as a final infrastructure failure.
+_DETERMINISTIC_SETUP = frozenset({ExecLimitConfigurationError.__name__, ProviderCapabilityError.__name__})
 
 
 def atomic_json(path, value):
@@ -208,15 +216,18 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         # Overrides are known before any task loads; package budgets are checked when each task loads.
         for name, timeout_sec in environment.verifier_timeout_overrides.items():
             environment.require_exec_limit_covers(name, timeout_sec)
+        if isinstance(environment.sandbox_provider, str):
+            # A reference to a missing sandbox block fails at startup, not once per task.
+            resolve_environment_provider(environment.sandbox_provider)
         self._sessions: dict[str, Session] = {}
         self._by_identity: dict[str, str] = {}
-        # Environment Server sessions: resources_session_id -> TB4 session ID, closed IDs (which
-        # fence late seeds) with their episode, per-ID locks for seed/close ordering, and when each
-        # completed close is forgotten. Closes whose cleanup failed or is pending never expire.
+        # Episode sessions: resources_session_id -> Terminal-Bench 4 session ID, the fences of closed IDs
+        # (which refuse late seeds) with their episode, per-ID locks for seed/close ordering, and when each
+        # completed close's fence expires. Fences of closes whose cleanup failed or is pending never expire.
         self._resources_sessions: dict[str, str] = {}
-        self._closed_resources: dict[str, EpisodeId] = {}
+        self._fenced_resources: dict[str, EpisodeId] = {}
         self._resources_locks: dict[str, asyncio.Lock] = {}
-        self._close_expiry: OrderedDict[str, float] = OrderedDict()
+        self._fence_expiry: OrderedDict[str, float] = OrderedDict()
         self._slots = asyncio.Semaphore(self.config.max_concurrent_sessions)
         self._loader = PackageLoader(self.config.task_download_dir)
         self._closing = False
@@ -448,7 +459,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
     async def _seed_resources_session(
         self, request: Request, body: ResourcesSeedSessionRequest
     ) -> ResourcesSeedSessionResponse:
-        """Provision an Environment Server episode and lend its task sandbox through SandboxAccess.
+        """Provision an episode session and lend its task sandbox through SandboxAccess.
 
         The episode reuses TB4's own seed and verify lifecycle: Resources owns the task and verifier sandboxes, the
         borrowing agent runs in the task sandbox, ``/verify`` grades in the separate offline verifier,
@@ -465,9 +476,9 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             raise HTTPException(422, f"Task data does not name a pinned package: {error}") from error
         self._check_task_identity(identity)
         key = body.resources_session_id
-        self._expire_close_records()
+        self._expire_fences()
         async with self._resources_lock(key):
-            if key in self._closed_resources:
+            if key in self._fenced_resources:
                 raise HTTPException(409, "Resources session is already closed")
             session_id = self._resources_sessions.get(key)
             if session_id is None:
@@ -498,7 +509,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         await asyncio.shield(session.execution)
         if session.resources_error is not None:
             raise HTTPException(*session.resources_error)
-        if key in self._closed_resources:
+        if key in self._fenced_resources:
             raise HTTPException(409, "Resources session is already closed")
         self._check_expiry(session)
         if session.verify_body is not None:
@@ -510,15 +521,14 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         key = session.resources_request.resources_session_id
         await self._prepare_session(session)
         if session.seed_response.termination is not None:
-            # Invalid execution limits are deterministic; preserve other setup retry behavior.
-            invalid_limits = (session.result.get("exception_info") or {}).get(
-                "exception_type"
-            ) == ExecLimitConfigurationError.__name__
+            # Invalid execution limits and tasks the provider cannot host are deterministic; preserve other setup
+            # retry behavior.
+            deterministic = (session.result.get("exception_info") or {}).get("exception_type") in _DETERMINISTIC_SETUP
             session.resources_error = (
-                422 if invalid_limits else 503,
+                422 if deterministic else 503,
                 f"Task sandbox setup failed: {session.termination.detail}",
             )
-            self._remember_close(key, session)
+            self._start_fence_expiry(key, session)
             return
         with rollout_context(session.request.capture_rollout_id):
             try:
@@ -548,7 +558,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                 )
                 session.persist()
             except (Exception, asyncio.CancelledError) as exc:
-                closed = isinstance(exc, asyncio.CancelledError) or key in self._closed_resources
+                closed = isinstance(exc, asyncio.CancelledError) or key in self._fenced_resources
                 session.termination = AgentTermination(
                     reason="cancelled" if closed else "infrastructure_error",
                     detail=f"{type(exc).__name__}: {exc}",
@@ -559,11 +569,11 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                 session.seed_response = SeedSessionResponse(
                     session_id=session.session_id, termination=session.termination
                 )
-                # A late seed that performs a fenced close's teardown starts its retention window.
-                self._remember_close(key, session)
+                # A late seed that performs a fenced close's teardown starts its fence's close retry window.
+                self._start_fence_expiry(key, session)
 
     def _raise_if_closed_during_setup(self, session: Session) -> None:
-        if session.resources_request.resources_session_id in self._closed_resources:
+        if session.resources_request.resources_session_id in self._fenced_resources:
             session.resources_error = (409, "Resources session closed during setup")
             raise RuntimeError(session.resources_error[1])
 
@@ -579,27 +589,27 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                 yield
                 return
 
-    def _remember_close(self, key: str, session: Session | None) -> None:
-        """Start a completed close's retention window once; close retries do not extend it.
+    def _start_fence_expiry(self, key: str, session: Session | None) -> None:
+        """Start a completed close's close retry window once; close retries do not extend it.
 
         Only fenced sessions whose sandboxes all stopped expire: failed or pending cleanup keeps
         its fence, so a late seed can never lend a sandbox for a closed episode.
         """
-        if key not in self._closed_resources or key in self._close_expiry:
+        if key not in self._fenced_resources or key in self._fence_expiry:
             return
         if session is not None and not lifecycle.released(session):
             return
-        self._close_expiry[key] = monotonic() + self.config.session_close_retry_window_seconds
+        self._fence_expiry[key] = monotonic() + self.config.session_close_retry_window_seconds
 
-    def _expire_close_records(self) -> None:
-        """Forget completed closes past the retry window, so the fences do not grow without bound."""
+    def _expire_fences(self) -> None:
+        """Expire fences past the close retry window, so they do not grow without bound."""
         now = monotonic()
-        while self._close_expiry:
-            key, expires_at = next(iter(self._close_expiry.items()))
+        while self._fence_expiry:
+            key, expires_at = next(iter(self._fence_expiry.items()))
             if expires_at > now:
                 break
-            del self._close_expiry[key]
-            self._closed_resources.pop(key, None)
+            del self._fence_expiry[key]
+            self._fenced_resources.pop(key, None)
             self._resources_locks.pop(key, None)
             session = self._sessions.pop(self._resources_sessions.pop(key, ""), None)
             if session is not None:
@@ -673,7 +683,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             session.verified_response = self._verified_response(session, body.harness_metadata)
             session.persist()
         if session.resources_request is not None:
-            self._remember_close(session.resources_request.resources_session_id, session)
+            self._start_fence_expiry(session.resources_request.resources_session_id, session)
 
     def _verified_response(self, session, extra):
         result = session.result or {}
@@ -710,7 +720,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             legacy_failure["_ng_failure_class"] = "infrastructure_error"
             if failure_type:
                 legacy_failure["_ng_failure_type"] = failure_type
-            if failure_type == ExecLimitConfigurationError.__name__:
+            if failure_type in _DETERMINISTIC_SETUP:
                 legacy_failure[NG_TERMINAL_KEY] = True
         return SandboxedVerifyResponse(
             **(
@@ -731,7 +741,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             failure_kind=(
                 VERIFIER_ERROR
                 if verifier_failure or ungraded_verifier
-                else (session.termination.failure_kind or _selected_failure_kind(extra))
+                else _agent_failure_kind(session.termination, extra, masked=not legacy)
                 if failure
                 else None
             ),
@@ -813,7 +823,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
     async def _verify_resources_session(
         self, request: Request, body: ResourcesSessionVerifyRequest
     ) -> SandboxedVerifyResponse | JSONResponse:
-        """Grade an Environment Server episode once; identical retries replay the verdict.
+        """Grade an episode session once; identical retries replay the verdict.
 
         The Environment Server closes the agent first, so the task sandbox is quiet. Grading uses
         the same finalizer as TB4's own verify path: collect artifacts, stop the task sandbox, then run
@@ -822,7 +832,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         """
         key = request.session.get(_RESOURCES_SESSION_KEY)
         session = self._sessions.get(self._resources_sessions.get(key, ""))
-        if key in self._closed_resources:
+        if key in self._fenced_resources:
             expired = session is not None and "agent_expired_at" in session.deadlines
             return _lost_session(
                 body, "Resources session is already closed", SESSION_EXPIRED if expired else SESSION_LOST
@@ -867,25 +877,25 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         return session.verified_response
 
     async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
-        """Release an Environment Server episode, verified or not; repeated closes succeed.
+        """Release an episode session, verified or not; repeated closes succeed.
 
         Close fences the session first, so a seed still provisioning releases its sandboxes instead
         of lending them, even if this close's caller stops waiting. It then waits for in-flight
         provisioning or grading and stops any sandbox still running without grading it. A close
         before (or instead of) the seed fences a late seed. If a sandbox cannot be stopped, close
         raises and keeps the fence; a repeated close retries, and the provider TTL bounds the orphan.
-        A completed close is remembered for ``session_close_retry_window_seconds``.
+        A completed close fences the session for ``session_close_retry_window_seconds``.
         """
         key = body.resources_session_id
-        self._expire_close_records()
+        self._expire_fences()
         session = self._sessions.get(self._resources_sessions.get(key, ""))
-        expected = self._closed_resources.get(key) or (
+        expected = self._fenced_resources.get(key) or (
             session.resources_request.episode_id if session is not None else None
         )
         if expected is not None and expected != body.episode_id:
             raise HTTPException(409, "episode_id does not match the resources session")
         # Fence before waiting: a timed-out close must not leave a late allocation running.
-        self._closed_resources[key] = body.episode_id
+        self._fenced_resources[key] = body.episode_id
         async with self._resources_lock(key):
             session = self._sessions.get(self._resources_sessions.get(key, ""))
             if session is not None:
@@ -894,12 +904,12 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                         await asyncio.shield(task)
                 if session.phase != "closed" or not lifecycle.released(session):
                     # The session owns its teardown: a caller that stops waiting cannot abandon a sandbox,
-                    # the admission slot, or the retention record.
+                    # the admission slot, or the fence's expiry.
                     session.finalization = asyncio.create_task(self._release_closed_session(key, session))
                     await asyncio.shield(session.finalization)
                 if not lifecycle.released(session):
                     raise HTTPException(503, "Task sandboxes could not be stopped; the provider TTL applies")
-            self._remember_close(key, session)
+            self._start_fence_expiry(key, session)
             return ResourcesCloseSessionResponse(resources_session_id=key)
 
     async def _release_closed_session(self, key: str, session: Session) -> None:
@@ -909,7 +919,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                     reason="cancelled", detail="Resources session closed before verification"
                 )
             await lifecycle.cleanup(session)
-        self._remember_close(key, session)
+        self._start_fence_expiry(key, session)
 
 
 def _lost_session(body: ResourcesSessionVerifyRequest, reason: str, failure_kind: str) -> JSONResponse:
@@ -927,6 +937,13 @@ def _termination_from_response(response: NeMoGymResponse) -> AgentTermination:
             return AgentTermination(reason="nonzero_exit", detail="The final model call hit max_output_tokens")
         return AgentTermination(reason="timeout", detail="The agent stopped at its time limit")
     return AgentTermination(reason="nonzero_exit", detail=f"Agent response status: {response.status}")
+
+
+def _agent_failure_kind(termination: AgentTermination, harness_metadata: dict, *, masked: bool) -> str | None:
+    """The kind of an agent infrastructure failure: the one the server typed, else the harness's, else, for a masked
+    result, ``infrastructure_error`` so the row is never masked without a kind."""
+    kind = termination.failure_kind or _selected_failure_kind(harness_metadata)
+    return kind or (failure_kinds.INFRASTRUCTURE_ERROR if masked else None)
 
 
 def _selected_failure_kind(harness_metadata: dict) -> str | None:

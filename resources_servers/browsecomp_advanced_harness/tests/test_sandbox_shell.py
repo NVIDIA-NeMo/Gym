@@ -14,12 +14,15 @@ import pytest
 from fastapi import Request
 from fastapi.testclient import TestClient
 from pocketshell import run
+from pydantic import ValidationError
 
 from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.sandbox import create_provider
 from nemo_gym.server_runtime import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
+from nemo_gym.verification import JudgeError
 from resources_servers.browsecomp_advanced_harness import app as harness
 from resources_servers.browsecomp_advanced_harness import sandbox as shell_module
-from resources_servers.browsecomp_advanced_harness.app import BashCommandRequest
+from resources_servers.browsecomp_advanced_harness.app import BashCommandRequest, JudgeEvaluation
 from resources_servers.browsecomp_advanced_harness.shell_output import format_shell_output
 from resources_servers.browsecomp_advanced_harness.tests.test_resources_sessions import (
     _close,
@@ -74,21 +77,25 @@ def shell_install(monkeypatch: pytest.MonkeyPatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("stdout", "return_code", "error_type"),
+    ("stdout", "return_code", "error_type", "final"),
     [
-        ("pid:[100]\npid:[100]\n", 0, None),
-        ("pid:[200]\npid:[100]\n", 0, None),
-        ("pid:[200]\npid:[200]\n", 1, None),
-        ("pid:[200]\npid:[200]\n", 0, "timeout"),
-        (None, 0, None),
-        ("unavailable\nunavailable\n", 0, None),
+        ("pid:[100]\npid:[100]\n", 0, None, True),
+        ("pid:[200]\npid:[100]\n", 0, None, True),
+        ("pid:[200]\npid:[200]\n", 1, None, False),
+        ("pid:[200]\npid:[200]\n", 0, "timeout", False),
+        (None, 0, None, False),
+        ("unavailable\nunavailable\n", 0, None, False),
     ],
 )
-async def test_enroot_install_refuses_unproven_pid_isolation(shell_install, stdout, return_code, error_type) -> None:
+async def test_enroot_install_refuses_unproven_pid_isolation(
+    shell_install, stdout, return_code, error_type, final
+) -> None:
     state, sandbox, runtime, readlink = shell_install
     sandbox.exec.return_value = SimpleNamespace(stdout=stdout, return_code=return_code, error_type=error_type)
-    with pytest.raises(RuntimeError, match="older Enroot builds can ignore ENROOT_UNSHARE_PID"):
+    with pytest.raises(RuntimeError, match="older Enroot builds can ignore ENROOT_UNSHARE_PID") as refused:
         await state.install(timeout=20)
+    # Only a finished probe that names the host's namespace, or a mismatched /proc, is final; the rest may retry.
+    assert isinstance(refused.value, shell_module.SandboxIsolationError) is final
     runtime.install.assert_awaited_once_with(sandbox, timeout_s=20)
     readlink.assert_called_once_with("/proc/self/ns/pid")
     assert not state.ready
@@ -154,13 +161,52 @@ async def test_pid_guard_failure_keeps_failed_stop_retryable(
     assert not server._shell_sessions and not server._session_workspaces
 
 
+def test_a_sandbox_in_the_host_pid_namespace_refuses_the_seed_for_good(
+    shell_install, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Every sandbox from this provider shares the namespace alike, so a retryable 500 would only repeat the probe.
+    _, sandbox, _, _ = shell_install
+    server = _server(tmp_path, workspace="per_session", sandbox_provider="sandbox", allow_host_execution=False)
+    monkeypatch.setattr(harness, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(harness, "resolve_provider_config", lambda *_: {"enroot": {}})
+    monkeypatch.setattr(harness, "resolve_provider_metadata", lambda *_: {})
+    monkeypatch.setattr(harness, "create_provider", lambda *_: object())
+    monkeypatch.setattr(harness, "AsyncSandbox", lambda *_: sandbox)
+    sandbox.exec.return_value = SimpleNamespace(stdout="pid:[100]\npid:[100]\n", return_code=0, error_type=None)
+    with TestClient(server.setup_webserver()) as client:
+        response = client.post("/seed_session", json=_seed())
+        assert response.status_code == 422
+        assert "namespace probe did not confirm isolation" in response.json()["detail"]
+        sandbox.stop.assert_awaited_once()
+        assert not server._shell_sessions
+        assert client.post("/close_session", json=_close()).status_code == 200
+    assert not server._session_workspaces
+
+
+def test_an_unknown_provider_refuses_the_seed_for_good(sandboxed, monkeypatch: pytest.MonkeyPatch) -> None:
+    server, containers = sandboxed
+    monkeypatch.setattr(harness, "resolve_provider_config", lambda *_: {"no-such-provider": {}})
+    monkeypatch.setattr(harness, "create_provider", create_provider)
+    with TestClient(server.setup_webserver()) as client:
+        response = client.post("/seed_session", json=_seed())
+    assert response.status_code == 422
+    assert "Unknown sandbox provider 'no-such-provider'" in response.json()["detail"]
+    assert not containers and not server._shell_sessions
+
+
+def test_sandbox_timeouts_must_be_finite(tmp_path: Path) -> None:
+    for field in ("sandbox_install_timeout_seconds", "sandbox_close_timeout_seconds"):
+        with pytest.raises(ValidationError, match="finite number"):
+            _server(tmp_path, **{field: float("inf")})
+
+
 def test_missing_provider_refuses_seed_without_creating_workspace(tmp_path: Path) -> None:
     server = _server(tmp_path, workspace="per_session", allow_host_execution=False)
     with TestClient(server.setup_webserver()) as client:
         response = client.post("/seed_session", json=_seed())
     assert response.status_code == 422
     assert "sandbox_provider" in response.json()["detail"]
-    assert not server._typed_sessions and not server._shell_sessions
+    assert not server._episode_sessions and not server._shell_sessions
     assert list(tmp_path.iterdir()) == []
 
 
@@ -195,7 +241,7 @@ def test_invalid_sandbox_configuration_refuses_the_seed_for_good(
         response = client.post("/seed_session", json=_seed())
     assert response.status_code == 422
     assert "sandbox configuration is invalid" in response.json()["detail"]
-    assert not containers and not server._typed_sessions
+    assert not containers and not server._episode_sessions
 
 
 @pytest.mark.asyncio
@@ -266,13 +312,24 @@ async def test_bash_uses_sandbox_and_retains_guard_output(sandboxed, monkeypatch
 @pytest.mark.parametrize(
     ("error", "expected", "masked"),
     [
-        (TimeoutError("supervisor deadline"), "[command timed out after 10s]\n[exit_code=-1]", False),
+        (
+            shell_module.ShellCommandTimedOut("supervisor deadline"),
+            "[command timed out after 10s]\n[exit_code=-1]",
+            False,
+        ),
         (
             RuntimeError("exec failed: provider detail"),
             "[bash error: the sandbox could not run the command]\n[exit_code=-2]",
             True,
         ),
+        # A provider timeout (docker cp, the exec, a read) is not the command's deadline.
+        (
+            TimeoutError("docker command timed out after 60s"),
+            "[bash error: the sandbox could not run the command]\n[exit_code=-2]",
+            True,
+        ),
     ],
+    ids=["supervisor deadline", "provider error", "provider timeout"],
 )
 async def test_sandbox_failures_answer_with_the_host_error_envelope(sandboxed, error, expected, masked) -> None:
     server, _ = sandboxed
@@ -286,8 +343,8 @@ async def test_sandbox_failures_answer_with_the_host_error_envelope(sandboxed, e
     assert verified.reward == 1
     assert verified.mask_sample is masked
     assert verified.failure_kind == ("provider_unavailable" if masked else None)
-    assert not server._shell_failures
     await server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close()))
+    assert not server._shell_failures
 
 
 @pytest.mark.asyncio
@@ -336,7 +393,138 @@ async def test_a_run_whose_sandbox_cannot_start_gets_the_envelope_and_a_masked_s
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("timed_out", "raised"), [(True, TimeoutError), (False, RuntimeError)])
+async def test_commands_after_a_failed_start_do_not_start_another_sandbox(
+    sandboxed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server, containers = sandboxed
+    install = AsyncMock(side_effect=RuntimeError("docker daemon unavailable"))
+    monkeypatch.setattr(shell_module.BrowsecompShellSandbox, "install", install)
+    await server.seed_session(_request(), harness.BaseSeedSessionRequest())
+    for _ in range(3):
+        output = await server.bash_command(_request(), BashCommandRequest(keystrokes="cat pages/0001.txt"))
+        assert output.results_string == "[bash error: the sandbox could not run the command]\n[exit_code=-2]"
+    assert len(containers) == 1 and install.await_count == 1
+    body = harness.TavilySearchVerifyRequest.model_validate(_verify_body("Answer: Paris Confidence: 90%"))
+    assert (await server.verify(_request(), body)).mask_sample is True
+
+
+@pytest.mark.asyncio
+async def test_a_run_whose_start_and_first_stop_fail_is_masked_and_stopped_by_verify(
+    sandboxed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server, containers = sandboxed
+
+    async def fail_install(state, *, timeout):
+        state.session.sandbox.stop.side_effect = [RuntimeError("stop unavailable"), None]
+        raise RuntimeError("install unavailable")
+
+    monkeypatch.setattr(shell_module.BrowsecompShellSandbox, "install", fail_install)
+    await server.seed_session(_request(), harness.BaseSeedSessionRequest())
+    for _ in range(2):
+        output = await server.bash_command(_request(), BashCommandRequest(keystrokes="ls"))
+        assert output.results_string == "[bash error: the sandbox could not run the command]\n[exit_code=-2]"
+    # The failed stop retains the sandbox, so the second command neither starts another nor reaches the host.
+    assert "resources-session" in server._shell_sessions and len(containers) == 1
+    body = harness.TavilySearchVerifyRequest.model_validate(_verify_body("Answer: Paris Confidence: 90%"))
+    verified = await server.verify(_request(), body)
+    assert (verified.mask_sample, verified.failure_kind) == (True, "provider_unavailable")
+    assert containers[0].stop.await_count == 2
+    assert not server._shell_sessions and not server._session_workspaces
+
+
+@pytest.mark.asyncio
+async def test_concurrent_commands_on_a_run_seed_start_one_sandbox(sandboxed, monkeypatch: pytest.MonkeyPatch) -> None:
+    server, containers = sandboxed
+    entered, release = asyncio.Event(), asyncio.Event()
+    running = peak = 0
+
+    async def execute(state, **kwargs):
+        nonlocal running, peak
+        running += 1
+        peak = max(peak, running)
+        entered.set()
+        await release.wait()
+        running -= 1
+        return f"{kwargs['command']}\n[exit_code=0]"
+
+    monkeypatch.setattr(shell_module.BrowsecompShellSandbox, "execute", execute)
+    await server.seed_session(_request(), harness.BaseSeedSessionRequest())
+    calls = [
+        asyncio.create_task(server.bash_command(_request(), BashCommandRequest(keystrokes=f"cat pages/{n}.txt")))
+        for n in range(3)
+    ]
+    await asyncio.wait_for(entered.wait(), 1)
+    await asyncio.sleep(0.01)
+    release.set()
+    outputs = await asyncio.wait_for(asyncio.gather(*calls), 1)
+    assert sorted(output.results_string for output in outputs) == [
+        f"cat pages/{n}.txt\n[exit_code=0]" for n in range(3)
+    ]
+    # The session's lock serializes the lazy start and the commands.
+    assert len(containers) == 1 and peak == 1
+    containers[0].start.assert_awaited_once()
+    body = harness.TavilySearchVerifyRequest.model_validate(_verify_body("Answer: Paris Confidence: 90%"))
+    await server.verify(_request(), body)
+    containers[0].stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_provider_upload_timeout_is_a_masked_sandbox_failure(sandboxed) -> None:
+    # Through the real SandboxSession: docker cp timed out before launch, so no supervisor deadline passed.
+    server, containers = sandboxed
+    await server.seed_session(_request(), ResourcesSeedSessionRequest.model_validate(_seed()))
+    containers[0].exec.return_value = SimpleNamespace(return_code=0, error_type=None, stdout="", stderr="")
+    containers[0].upload.side_effect = TimeoutError("docker command timed out after 60s: docker cp")
+    output = await server.bash_command(_request(), BashCommandRequest(keystrokes="cat manifest.tsv"))
+    assert output.results_string == "[bash error: the sandbox could not run the command]\n[exit_code=-2]"
+    body = harness.TavilySearchVerifyRequest.model_validate(_verify_body("Answer: Paris Confidence: 90%"))
+    verified = await server.verify(_request(), body)
+    assert (verified.mask_sample, verified.failure_kind) == (True, "provider_unavailable")
+    await server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close()))
+
+
+@pytest.mark.asyncio
+async def test_a_provider_exec_timeout_without_a_timed_out_receipt_is_a_masked_sandbox_failure(sandboxed) -> None:
+    server, _ = sandboxed
+    await server.seed_session(_request(), ResourcesSeedSessionRequest.model_validate(_seed()))
+    shell = server._shell_sessions["resources-session"]
+    shell.session.begin_activation = AsyncMock()
+    shell.session.execute = AsyncMock(side_effect=TimeoutError("supervisor exceeded its execution deadline"))
+    shell.session.cleanup = {"cleanup_confirmed": True, "return_code": None, "error": None, "timed_out": False}
+    output = await server.bash_command(_request(), BashCommandRequest(keystrokes="cat manifest.tsv"))
+    assert output.results_string == "[bash error: the sandbox could not run the command]\n[exit_code=-2]"
+    body = harness.TavilySearchVerifyRequest.model_validate(_verify_body("Answer: Paris Confidence: 90%"))
+    assert (await server.verify(_request(), body)).mask_sample is True
+    await server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close()))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shell_failed", [True, False], ids=["masked", "unmasked"])
+async def test_a_judge_failure_raises_only_for_an_unmasked_sample(sandboxed, shell_failed: bool) -> None:
+    # A re-sent verify, or one retried after the judge error, must read the same session state as the first.
+    server, _ = sandboxed
+    server.config.use_judge = True
+    await server.seed_session(_request(), ResourcesSeedSessionRequest.model_validate(_seed()))
+    if shell_failed:
+        server._shell_sessions["resources-session"].execute = AsyncMock(side_effect=RuntimeError("exec failed"))
+        await server.bash_command(_request(), BashCommandRequest(keystrokes="ls"))
+    judged = JudgeEvaluation(reasoning="", extracted_final_answer="Paris", reward=1.0)
+    server._verify_answer_with_judge = AsyncMock(side_effect=[(judged, JudgeError("judge down")), (judged, None)])
+    body = harness.TavilySearchVerifyRequest.model_validate(_verify_body("Answer: Paris Confidence: 90%"))
+    if shell_failed:
+        first = await server.verify(_request(), body)
+        assert (first.mask_sample, first.failure_kind) == (True, "provider_unavailable")
+    else:
+        with pytest.raises(JudgeError, match="judge down"):
+            await server.verify(_request(), body)
+    retried = await server.verify(_request(), body)
+    assert (retried.reward, retried.mask_sample) == (1, shell_failed)
+    await server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close()))
+    assert not server._shell_failures and "resources-session" not in server._session_id_to_metrics
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("timed_out", "raised"), [(True, shell_module.ShellCommandTimedOut), (False, RuntimeError)])
 async def test_a_command_the_supervisor_ends_at_its_deadline_reads_as_a_timeout(timed_out, raised) -> None:
     # The supervisor kills the runner and exits 0 with a timed_out receipt, so only the missing output fails.
     session = SimpleNamespace(
@@ -371,19 +559,26 @@ async def test_setup_failure_retains_failed_cleanup_for_retry(sandboxed, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_verify_does_not_remove_workspace_until_sandbox_stop_succeeds(sandboxed) -> None:
+async def test_episode_verify_keeps_the_session_and_close_retries_a_failed_stop(sandboxed) -> None:
+    # The Environment Server closes every session it seeds, so the close, not verify, stops the sandbox.
     server, containers = sandboxed
     await server.seed_session(_request(), ResourcesSeedSessionRequest.model_validate(_seed()))
     workspace = server._session_workspaces["resources-session"].workspace
     containers[0].stop.side_effect = [RuntimeError("stop unavailable"), None]
     body = harness.TavilySearchVerifyRequest.model_validate(_verify_body("Answer: Paris Confidence: 90%"))
-    with pytest.raises(RuntimeError, match="stop unavailable"):
-        await server.verify(_request(), body)
+    assert (await server.verify(_request(), body)).reward == 1
+    containers[0].stop.assert_not_awaited()
     assert workspace.exists() and "resources-session" in server._shell_sessions
     assert "resources-session" in server._session_id_to_metrics
-    output = await server.verify(_request(), body)
-    assert output.reward == 1
+    with pytest.raises(RuntimeError, match="stop unavailable"):
+        await server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close()))
+    assert workspace.exists() and "resources-session" in server._shell_sessions
+    assert server._fences.get("resources-session") is None
+    await server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close()))
+    assert containers[0].stop.await_count == 2
     assert not workspace.exists() and not server._shell_sessions
+    assert "resources-session" not in server._session_id_to_metrics
+    assert server._fences.get("resources-session") is not None
 
 
 @pytest.mark.asyncio
@@ -406,7 +601,9 @@ async def test_close_waits_for_cancelled_tool_cleanup(sandboxed) -> None:
     tool.cancel()
     await asyncio.wait_for(cleanup_started.wait(), 1)
     close = asyncio.create_task(server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close())))
-    await asyncio.sleep(0)
+    # Long enough for a close that ignored the lock to finish.
+    await asyncio.sleep(0.05)
+    assert not close.done()
     containers[0].stop.assert_not_awaited()
     assert "resources-session" in server._session_workspaces
     cleanup_allowed.set()
@@ -440,6 +637,22 @@ def test_real_runner_preserves_pocketshell_output(tmp_path: Path, command: str) 
     expected = run(command, str(tmp_path), 5)
     assert output_file.read_text() == format_shell_output(expected.stdout, expected.stderr, expected.exit_code)
     assert len(output_file.read_text()) < 25_000
+
+
+def test_real_runner_keeps_the_envelope_for_a_lone_surrogate(tmp_path: Path) -> None:
+    # A tool argument JSON-escaped as "\ud83d" (half an emoji) reaches echo as a lone surrogate.
+    command = "echo a\ud83db"
+    input_file, output_file = tmp_path / "input.json", tmp_path / "output.txt"
+    input_file.write_text(json.dumps({"command": command, "duration": 5, "workspace": str(tmp_path)}))
+    runner = Path(shell_module.__file__).with_name("shell_runner.py")
+    subprocess.run(
+        [sys.executable, "-E", "-s", str(runner), str(input_file), str(output_file)], check=True, timeout=15
+    )
+    expected = run(command, str(tmp_path), 5)
+    assert "\ud83d" in expected.stdout
+    rendered = format_shell_output(expected.stdout, expected.stderr, expected.exit_code).replace("\ud83d", "?")
+    assert output_file.read_text(encoding="utf-8") == rendered
+    assert rendered.endswith("[exit_code=0]")
 
 
 @pytest.mark.asyncio

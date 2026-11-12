@@ -393,15 +393,15 @@ class TestBenchmarkConfigName:
 
     def test_every_listed_token_round_trips_through_the_benchmark_selector(self) -> None:
         # The point of keying by token: every value `gym list benchmarks` prints must resolve back to its own
-        # config via `--benchmark`, using the same `_asset_config_path` mapping the CLI uses. This covers the
+        # config via `--benchmark`, using the same `asset_config_path` mapping the CLI uses. This covers the
         # benchmarks whose `dataset.name` diverges from their on-disk path (e.g. tau2, livecodebench).
-        from nemo_gym.cli.main import _asset_config_path
+        from nemo_gym.environment.assets import asset_config_path
         from nemo_gym.environment.benchmarks import discover_benchmarks
 
         benchmarks = discover_benchmarks()
         assert benchmarks, "no benchmarks discovered"
         for token, bench in benchmarks.items():
-            resolved = Path(_asset_config_path("benchmark", token))
+            resolved = Path(asset_config_path("benchmark", token))
             assert resolved.resolve() == bench.path.resolve(), f"token {token!r} does not select its own config"
 
 
@@ -519,7 +519,7 @@ class TestPrepareBenchmark:
                     {"config_paths": [str(config_path)], **safe_load(config_path.read_text())}
                 ),
             ),
-            patch("nemo_gym.cli._prepare_worker.load_preparer", return_value=mock_module),
+            patch("nemo_gym.server_runtime.supervisor._prepare_worker.load_preparer", return_value=mock_module),
         ):
             prepare_benchmark()
             mock_module.prepare.assert_called_once_with()
@@ -549,7 +549,7 @@ class TestPrepareBenchmark:
                     {"config_paths": [str(config_path)], **safe_load(config_path.read_text())}
                 ),
             ),
-            patch("nemo_gym.cli._prepare_worker.load_preparer", return_value=mock_module),
+            patch("nemo_gym.server_runtime.supervisor._prepare_worker.load_preparer", return_value=mock_module),
         ):
             prepare_benchmark()
 
@@ -595,7 +595,7 @@ class TestPrepareBenchmark:
 
         with (
             patch("nemo_gym.cli.eval.get_global_config_dict", return_value=_mock_global_config(config)),
-            patch("nemo_gym.cli._prepare_worker.load_preparer", side_effect=import_prepare),
+            patch("nemo_gym.server_runtime.supervisor._prepare_worker.load_preparer", side_effect=import_prepare),
         ):
             prepare_benchmark()
 
@@ -624,7 +624,7 @@ class TestPrepareBenchmark:
                     }
                 ),
             ),
-            patch("nemo_gym.cli._prepare_worker.load_preparer", return_value=mock_module),
+            patch("nemo_gym.server_runtime.supervisor._prepare_worker.load_preparer", return_value=mock_module),
         ):
             prepare_benchmark()
 
@@ -660,7 +660,7 @@ class TestPrepareBenchmark:
                     {"config_paths": [str(config_path)], **safe_load(config_path.read_text())}
                 ),
             ),
-            patch("nemo_gym.cli._prepare_worker.load_preparer", return_value=mock_module),
+            patch("nemo_gym.server_runtime.supervisor._prepare_worker.load_preparer", return_value=mock_module),
         ):
             with pytest.raises(SystemExit) as exc_info:
                 prepare_benchmark()
@@ -712,7 +712,7 @@ class TestPrepareBenchmark:
                     {"config_paths": [str(config_path)], **safe_load(config_path.read_text())}
                 ),
             ),
-            patch("nemo_gym.cli._prepare_worker.load_preparer", return_value=mock_module),
+            patch("nemo_gym.server_runtime.supervisor._prepare_worker.load_preparer", return_value=mock_module),
         ):
             prepare_benchmark()
 
@@ -736,7 +736,7 @@ class TestPrepareBenchmark:
                     }
                 ),
             ),
-            patch("nemo_gym.cli._prepare_worker.load_preparer", return_value=mock_module),
+            patch("nemo_gym.server_runtime.supervisor._prepare_worker.load_preparer", return_value=mock_module),
         ):
             prepare_benchmark()
 
@@ -750,7 +750,7 @@ class TestPrepareBenchmark:
             config["use_cached_prepared_benchmarks"] = True
         with (
             patch("nemo_gym.cli.eval.get_global_config_dict", return_value=_mock_global_config(config)),
-            patch("nemo_gym.cli._prepare_worker.load_preparer", return_value=module),
+            patch("nemo_gym.server_runtime.supervisor._prepare_worker.load_preparer", return_value=module),
         ):
             prepare_benchmark()
 
@@ -877,7 +877,7 @@ class TestPrepareBenchmark:
 
         with (
             patch("nemo_gym.cli.eval.get_global_config_dict", return_value=_mock_global_config(config)),
-            patch("nemo_gym.cli._prepare_worker.load_preparer", side_effect=fake_import),
+            patch("nemo_gym.server_runtime.supervisor._prepare_worker.load_preparer", side_effect=fake_import),
         ):
             prepare_benchmark()
 
@@ -1100,7 +1100,7 @@ class TestMaterializedTasksetBenchmark:
         module = MagicMock()
         module.prepare.side_effect = prepare
         monkeypatch.setattr("nemo_gym.cli.eval.get_global_config_dict", lambda **_: config)
-        with patch("nemo_gym.cli._prepare_worker.load_preparer", return_value=module):
+        with patch("nemo_gym.server_runtime.supervisor._prepare_worker.load_preparer", return_value=module):
             prepare_benchmark()
         module.prepare.assert_called_once_with()
         original = source.read_bytes()

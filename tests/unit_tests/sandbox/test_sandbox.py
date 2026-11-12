@@ -27,10 +27,12 @@ import pytest
 from pydantic import ValidationError
 
 import nemo_gym.sandbox.providers.registry as provider_registry
+from nemo_gym.core.failure_kinds import PROVIDER_UNAVAILABLE
+from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.sandbox.api import AsyncSandbox, Sandbox, _AsyncLoopRunner
 from nemo_gym.sandbox.config import SandboxConfig, resolve_provider_config, resolve_provider_metadata
+from nemo_gym.sandbox.failures import sandbox_failure
 from nemo_gym.sandbox.providers.base import (
-    SandboxCreateError,
     SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
@@ -131,14 +133,12 @@ def _require_opensandbox_provider() -> tuple[Any, Any, Any, str, str]:
     from nemo_gym.sandbox.providers.opensandbox.provider import (
         IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY,
         IMAGE_PULL_POLICY_EXTENSION_KEY,
-        OpenSandboxCreateVerificationError,
         OpenSandboxProvider,
     )
 
     return (
         opensandbox_provider_module,
         OpenSandboxProvider,
-        OpenSandboxCreateVerificationError,
         IMAGE_PULL_POLICY_EXTENSION_KEY,
         IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY,
     )
@@ -858,6 +858,22 @@ def test_resolve_provider_volume_sources() -> None:
         resolve_provider_volume_sources({"opensandbox": {}, "volume_sources": {"pgdata": {"path": "x"}}})
 
 
+def test_async_sandbox_start_uploads_spec_files_byte_for_byte() -> None:
+    class RecordingProvider(TransferOnlySandboxProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.uploaded: dict[str, bytes] = {}
+
+        async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
+            self.uploaded[target_path] = source_path.read_bytes()
+
+    png = b"\x89PNG\r\n\x1a\n\x00\xff\xfe"
+    provider = RecordingProvider()
+    files = {"/remote/image.png": png, "/remote/note.txt": "héllo"}
+    asyncio.run(AsyncSandbox(provider).start(SandboxSpec(image="image:tag", files=files)))
+    assert provider.uploaded == {"/remote/image.png": png, "/remote/note.txt": "héllo".encode()}
+
+
 def test_async_sandbox_transfer_fallback_and_unknown_status(tmp_path: Path) -> None:
     asyncio.run(_assert_async_sandbox_transfer_fallback_and_unknown_status(tmp_path))
 
@@ -1022,11 +1038,9 @@ async def _assert_opensandbox_sdk_create_receives_default_image_pull_policy(monk
     (
         opensandbox_provider_module,
         OpenSandboxProvider,
-        _OpenSandboxCreateVerificationError,
         IMAGE_PULL_POLICY_EXTENSION_KEY,
         IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY,
     ) = _require_opensandbox_provider()
-    del _OpenSandboxCreateVerificationError
 
     class FakeSDKSandbox:
         create_calls: list[dict[str, Any]] = []
@@ -1228,17 +1242,18 @@ def test_opensandbox_create_probe_failures_are_retryable() -> None:
     (
         opensandbox_provider_module,
         _OpenSandboxProvider,
-        OpenSandboxCreateVerificationError,
         *_unused,
     ) = _require_opensandbox_provider()
 
-    error = OpenSandboxCreateVerificationError("pod sdk-sandbox-0 failed create probe")
+    error = sandbox_failure(
+        operation="create_probe", sandbox_id="sdk-sandbox-0", failure_kind="provider_not_ready", reason="probe failed"
+    )
 
-    assert isinstance(error, SandboxCreateError)
+    assert error.boundary.value == "sandbox"
     assert opensandbox_provider_module._is_retryable_create_error(error) is True
 
 
-def test_opensandbox_starting_pod_endpoint_errors_are_retryable() -> None:
+def test_opensandbox_create_policy_does_not_guess_from_error_text() -> None:
     opensandbox_provider_module, *_unused = _require_opensandbox_provider()
 
     error = RuntimeError(
@@ -1246,11 +1261,11 @@ def test_opensandbox_starting_pod_endpoint_errors_are_retryable() -> None:
         "Pod IP is not yet available. The Pod may still be starting."
     )
 
-    assert opensandbox_provider_module._is_retryable_create_error(error) is True
+    assert opensandbox_provider_module._is_retryable_create_error(error) is False
 
 
 @requires_tenacity
-def test_opensandbox_exec_retries_retryable_sdk_failures(monkeypatch) -> None:
+def test_opensandbox_exec_does_not_replay_uncertain_delivery(monkeypatch) -> None:
     asyncio.run(_assert_opensandbox_exec_retries_retryable_sdk_failures(monkeypatch))
 
 
@@ -1307,11 +1322,11 @@ async def _assert_opensandbox_exec_retries_retryable_sdk_failures(monkeypatch) -
     raw = FakeRaw()
     handle = SandboxHandle(sandbox_id="sdk-sandbox-1", provider_name="opensandbox", raw=raw)
 
-    result = await provider.exec(handle, "echo hello", timeout_s=30)
-
-    assert result.stdout == "ok"
-    assert result.return_code == 0
-    assert raw.commands.calls == 3
+    with pytest.raises(NgFailureEvent) as caught:
+        await provider.exec(handle, "echo hello", timeout_s=30)
+    assert caught.value.failure_kind == PROVIDER_UNAVAILABLE
+    assert isinstance(caught.value.__cause__, ConnectionError)
+    assert raw.commands.calls == 1
 
 
 @requires_tenacity
@@ -1358,8 +1373,9 @@ async def _assert_opensandbox_command_retries_default_to_disabled(monkeypatch) -
 
     try:
         await provider.exec(handle, "echo hello", timeout_s=30)
-    except ConnectionError:
-        pass
+    except NgFailureEvent as failure:
+        assert failure.failure_kind == PROVIDER_UNAVAILABLE
+        assert isinstance(failure.__cause__, ConnectionError)
     else:
         raise AssertionError("expected provider.exec to propagate the command failure")
 
@@ -1417,7 +1433,7 @@ async def _assert_opensandbox_close_propagates_stop_failure() -> None:
     )
     handle = SandboxHandle(sandbox_id="sdk-sandbox-1", provider_name="opensandbox", raw=StopFailureRaw())
 
-    with pytest.raises(RuntimeError, match="stop failed"):
+    with pytest.raises(NgFailureEvent):
         await provider.close(handle)
 
 
@@ -1753,7 +1769,7 @@ async def test_pty_exec_timeout_closes_session() -> None:
 
 
 async def test_pty_exec_on_existing_session() -> None:
-    from nemo_gym.sandbox.providers.base import SandboxPtyError, SandboxPtySpec
+    from nemo_gym.sandbox.providers.base import SandboxPtySpec
 
     class NoCreateProvider(PlainSandboxProvider):
         async def create_pty(self, handle: SandboxHandle, spec: SandboxPtySpec) -> object:
@@ -1781,7 +1797,7 @@ async def test_pty_exec_on_existing_session() -> None:
     assert not session.closed, "an existing session must stay open"
 
     dying = _LiveShellSession(die=True)
-    with pytest.raises(SandboxPtyError, match="ended before the command finished"):
+    with pytest.raises(NgFailureEvent, match="ended before the command finished"):
         await sandbox.pty.exec("make", session=dying)
     await sandbox.stop()
 

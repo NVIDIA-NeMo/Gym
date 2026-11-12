@@ -114,7 +114,7 @@ otherwise more turns hit the cap and are masked, and the score leaves out the sl
 | Masked | The agent stopped on `time_cap`, the context overflowed before its first step (`context_overflow` at `steps` 0: the row does not fit; only when the policy server reports the overflow), or a tool result in the turn is a simulator failure. | `mask_sample: true`, no judge call |
 | Code gate | A call in the turn fails a code gate (below), or the turn is unfinished: it ended on `max_steps`, `max_output_tokens`, a later `context_overflow`, or `empty_output` from the policy (`unfinished_turn`; a failed request's empty reply is judged, see [design](docs/design.md#masking)). | `reward: 0.0`, `code_gate` set, no judge call |
 | Judged | Otherwise: each judge in `judges` returns its verdicts. | `reward: 1.0` if the turn is correct, else `0.0` |
-| Masked | No judge returned a usable verdict: one with every field the verdict schema (`prompts/evaluation_schema.json`) requires, each a string and one of the values the schema lists. Unusable ones are retried (`judge_max_attempts`). | `mask_sample: true`, `failure_kind: judge_failed` |
+| Masked | No judge returned a usable verdict: one with every field the verdict schema (`prompts/evaluation_schema.json`) requires, each a string and one of the values the schema lists. Unusable ones are retried (`judge_max_attempts`). A judge that cannot be reached (a transport or HTTP failure on every attempt, or a context-length rejection) fails the row as a `judge_failed` event, whatever the other judges said. | `mask_sample: true`, `failure_kind: judge_failed` |
 
 The code gates check each call (and policy message) of the turn in order; the first failure sets `code_gate`, even
 when the policy repaired the call later in the turn:
@@ -270,7 +270,7 @@ a short description of the agent to a shared judge frame; the rubrics are the sa
 | `tool_simulator_model_server`, `judges[].model_server` | required | Model servers (chat completions) for the simulator and the judges. Several judges vote. |
 | `tool_simulator_chat_completions_create_params`, `judge_chat_completions_create_params` | required | Request parameters (`messages: []`; the server fills them). Shipped: `max_tokens: 16384` / `20000`, `temperature: 1.0`, `reasoning_effort: high`. |
 | `judges[].overrides` | `{}` | Per-judge parameter overrides (`null` removes a parameter). |
-| `tool_simulator_max_attempts`, `judge_max_attempts` | `4`, `6` | Attempts per call. A simulator call that fails them all masks the rollout; a judge that fails them all leaves the vote (masked only when no judge is usable). |
+| `tool_simulator_max_attempts`, `judge_max_attempts` | `4`, `6` | Attempts per call. A simulator call that fails them all masks the rollout; a judge that cannot be reached on any of them fails the row as `judge_failed`, and one that only returns unusable verdicts leaves the vote (masked when no judge is usable). |
 | `tool_simulator_max_tokens_cap`, `judge_max_tokens_cap` | `49152`, `65536` | Ceiling when a cut-off reply doubles `max_tokens`. |
 | `tool_simulator_max_concurrency`, `judge_max_concurrency` | `64`, `32` | Concurrent requests (`null` or `0`: unlimited). |
 | `retry_backoff_max_seconds` | `20.0` | Cap of the exponential backoff between attempts. |

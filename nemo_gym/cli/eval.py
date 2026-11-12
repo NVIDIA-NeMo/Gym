@@ -21,26 +21,22 @@ import logging
 import os
 import re
 import signal
-import site
 import subprocess
 import sys
-import sysconfig
 import time
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import replace
-from multiprocessing import Pool
 from pathlib import Path
-from tempfile import TemporaryDirectory
-from typing import TYPE_CHECKING, Any, Dict, List
+from typing import TYPE_CHECKING, Any, List
 
 import yaml
 from omegaconf import DictConfig, OmegaConf, open_dict
 from pydantic import Field, ValidationError
 from rich.table import Table
-from tqdm.auto import tqdm
 
-from nemo_gym import PARENT_DIR, WORKING_DIR, _resolve_under_cwd_or_install
+from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.artifacts.exporters import mark_run_failed
 from nemo_gym.artifacts.run_files import QUALITY_SUMMARY_FILENAME as QUALITY_SUMMARY_FILENAME
 from nemo_gym.artifacts.run_files import ROLLOUT_VERDICTS_FILENAME as ROLLOUT_VERDICTS_FILENAME
@@ -54,10 +50,8 @@ from nemo_gym.cli.utils import (
 )
 from nemo_gym.config.config_types import (
     BaseNeMoGymCLIConfig,
-    BenchmarkDatasetConfig,
     ConfigError,
     ConfigPathNotFoundError,
-    DatasetConfig,
     ServerInstanceConfig,
 )
 from nemo_gym.config.global_config import (
@@ -68,10 +62,7 @@ from nemo_gym.config.global_config import (
     TASK_INDEX_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
-    get_first_server_config_dict,
     get_global_config_dict,
-    resolve_dataset_agent,
-    taskset_environment_server_name,
 )
 from nemo_gym.data.tasks.harbor.build_options import (
     _block_from_overrides,
@@ -118,24 +109,24 @@ from nemo_gym.data.tasks.harbor.validation_report import (
     _validation_rows,
     summarize_validation,
 )
+from nemo_gym.environment.benchmark_preparation import (
+    PrepareBenchmarkConfig,
+    datasets_to_prepare,
+    plan_for_config,
+    prepare_datasets,
+)
 from nemo_gym.environment.benchmarks import (
-    BenchmarkConfig,
     discover_benchmarks,
 )
 from nemo_gym.environment.discovery import read_config_metadata
 from nemo_gym.eval.eval_plan import (
-    PlanBenchmark,
-    PlanGym,
-    build_eval_plan,
     eval_plan_json_schema,
     write_eval_plan,
 )
-from nemo_gym.orchestration.jobs import installed_gym_commit
-from nemo_gym.orchestration.server_supervisor import RunHelper
-from nemo_gym.package_info import __version__
 from nemo_gym.rollouts.health.types import RunHealthConfig
 from nemo_gym.sandbox.compose_config import deployment_platform
 from nemo_gym.sandbox.config import SANDBOX_BLOCK_VOLUME_SOURCES_KEY, validate_volume_sources
+from nemo_gym.server_runtime.supervisor.server_supervisor import RunHelper
 from nemo_gym.utils.path_utils import materialized_path_for
 
 
@@ -255,347 +246,6 @@ def list_benchmarks() -> None:
     print_rich_table(table)
 
 
-class PrepareBenchmarkConfig(BaseNeMoGymCLIConfig):
-    """
-    Prepare benchmark data by running the benchmark's prepare.py script.
-
-    The benchmark is identified from a config_paths entry pointing to a
-    benchmarks/*/config.yaml file.
-
-    With `use_cached_prepared_benchmarks=true`, an existing prepared file is reused. A prepare.py whose output
-    depends on its own code (for example, settings written into each row) can define
-    `is_prepared_data_current(fpath: Path) -> bool`; when it returns False, the cached file is prepared again.
-
-    Examples:
-
-    ```bash
-    gym eval prepare --benchmark aime24
-    ```
-    """
-
-    uv_venv_dir: Path = Field(default=WORKING_DIR, description="Writable root for isolated preparation environments")
-    use_cached_prepared_benchmarks: bool = Field(
-        default=False, description="Skip benchmark preparation if the prepared file is already present"
-    )
-    num_prepare_benchmark_processes: int = Field(
-        default=1, description="Number of processes to parallelize benchmark preparation"
-    )
-    prepare_script_args: Dict[str, Any] = Field(
-        default_factory=dict, description="Arguments forwarded to the benchmark's prepare() function"
-    )
-
-
-def _multiprocess_benchmark_prepare_fn(args):
-    benchmark_config: BenchmarkConfig
-    prepare_module_path: str
-    prepare_script_args: Dict[str, Any]
-    (benchmark_config, prepare_module_path, prepare_script_args, python) = args[:4]
-    config = args[4] if len(args) > 4 else None
-
-    print(f"Preparing dataset: {benchmark_config.name}")
-
-    if python is not None:
-        _run_isolated_prepare(
-            python,
-            prepare_module_path,
-            "prepare",
-            Path(benchmark_config.dataset.jsonl_fpath),
-            prepare_script_args,
-            config=config,
-        )
-        return
-    from nemo_gym.cli._prepare_worker import load_preparer
-
-    module = load_preparer(prepare_module_path)
-    output_fpath = module.prepare(**prepare_script_args)
-    expected_output_fpath = Path(benchmark_config.dataset.jsonl_fpath).absolute()
-    if output_fpath.absolute() != expected_output_fpath:
-        raise ConfigError(
-            f"Expected the actual prepared dataset output fpath to match the jsonl_fpath set in the config. "
-            f"Instead got {output_fpath=} jsonl_fpath={expected_output_fpath}"
-        )
-    print(f"Dataset prepared at: {output_fpath}")
-
-
-def _install_prepare_dependencies(benchmark_config: "BenchmarkConfig") -> None:
-    """Install what a benchmark's prepare script imports, before importing it.
-
-    Gym cannot depend on every benchmark's data-prep requirements, so a benchmark
-    needing something extra had to shell out to pip from inside the prepare script
-    itself. Declaring it on the dataset puts it in the config instead.
-    """
-    dependencies = benchmark_config.dataset.prepare_dependencies
-    if not dependencies:
-        return
-    logger.info("Installing prepare dependencies for %s: %s", benchmark_config.name, " ".join(dependencies))
-    try:
-        subprocess.run(["uv", "pip", "install", "--python", sys.executable, *dependencies], check=True)
-        # An editable install only adds a .pth file, which `site` reads at
-        # interpreter startup -- this process would not see it otherwise.
-        importlib.invalidate_caches()
-        site.addsitedir(sysconfig.get_paths()["purelib"])
-    except FileNotFoundError as exc:
-        raise ConfigError(
-            f"`uv` is required to install prepare_dependencies for dataset '{benchmark_config.name}'."
-        ) from exc
-    except subprocess.CalledProcessError as exc:
-        raise ConfigError(
-            f"Could not install prepare_dependencies for dataset '{benchmark_config.name}': {' '.join(dependencies)}"
-        ) from exc
-
-
-def _prepare_environment(benchmark_config: "BenchmarkConfig", venv_root: Path | None = None) -> Path | None:
-    """Use explicit dependency arguments as before, or sync an isolated locked project."""
-    from nemo_gym.cli._locked_env import sync_environment
-
-    dataset = benchmark_config.dataset
-    if dataset.prepare_dependencies:
-        # Explicit arguments retain their existing meaning, including editable installs
-        # and requirements-file options. Do not silently ignore caller overrides.
-        _install_prepare_dependencies(benchmark_config)
-        return None
-    if dataset.prepare_project is None:
-        return None
-    project = _resolve_under_cwd_or_install(dataset.prepare_project).resolve()
-    venv = project / ".venv"
-    if venv_root is not None:
-        try:
-            relative = project.relative_to(PARENT_DIR.resolve())
-        except ValueError:
-            import hashlib
-
-            relative = Path("external") / (project.name + "-" + hashlib.sha256(str(project).encode()).hexdigest()[:12])
-        venv = venv_root.absolute() / "preparation" / relative / ".venv"
-    try:
-        sync_environment(project, venv, sys.executable, [], [])
-    except (FileNotFoundError, RuntimeError, subprocess.CalledProcessError) as exc:
-        raise ConfigError(
-            f"Could not sync locked prepare_project for dataset '{benchmark_config.name}': {exc}"
-        ) from exc
-    return venv / "bin/python"
-
-
-def _run_isolated_prepare(
-    python: Path, module: str, action: str, expected: Path, args: dict, *, config: DictConfig | dict | None = None
-) -> dict:
-    """Keep preparer stdout visible and pass structured results over a separate file."""
-    from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, maybe_get_global_config_dict
-
-    worker = Path(__file__).with_name("_prepare_worker.py")
-    if module.endswith(".py"):
-        root = Path(module).parent
-    else:
-        relative = Path(*module.split(".")).with_suffix(".py")
-        script = _resolve_under_cwd_or_install(relative)
-        root = script.parents[len(relative.parts) - 1]
-    with TemporaryDirectory(prefix="gym-prepare-") as tmp:
-        result = Path(tmp) / "result.json"
-        options = Path(tmp) / "arguments.json"
-        if config is None:
-            config = maybe_get_global_config_dict()
-        serialized_config = (
-            OmegaConf.to_container(config, resolve=True) if OmegaConf.is_config(config) else config or {}
-        )
-        serialized_args = OmegaConf.to_container(args, resolve=True) if OmegaConf.is_config(args) else args
-        options.write_text(json.dumps(serialized_args, default=_prepare_json_default))
-        subprocess.run(
-            [
-                str(python),
-                str(worker),
-                "--root",
-                str(root.absolute()),
-                "--module",
-                module,
-                "--action",
-                action,
-                "--expected",
-                str(expected.absolute()),
-                "--args-file",
-                str(options),
-                "--result",
-                str(result),
-            ],
-            check=True,
-            env=os.environ
-            | {
-                NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME: json.dumps(serialized_config, default=_prepare_json_default),
-                "NEMO_GYM_PREPARE_VENV": str(python.parent.parent),
-                "VIRTUAL_ENV": str(python.parent.parent),
-                "PATH": str(python.parent) + os.pathsep + os.environ.get("PATH", ""),
-            },
-        )
-        return json.loads(result.read_text())
-
-
-def _prepare_json_default(value: Any) -> Any:
-    """Serialize path arguments without silently coercing unsupported values."""
-    if isinstance(value, Path):
-        return str(value)
-    if OmegaConf.is_config(value):
-        return OmegaConf.to_container(value, resolve=True)
-    raise TypeError(f"Cannot serialize preparation value of type {type(value).__name__}")
-
-
-def _datasets_to_prepare(global_config_dict: DictConfig) -> List[BenchmarkConfig]:
-    """Every dataset the resolved config prepares: benchmark datasets and other datasets with a prepare_script."""
-    # A benchmark dataset may be declared by an agent block (legacy) or a resources server
-    # block (decoupled layout). `resolve_dataset_agent` is the same resolver rollout dispatch
-    # uses, so preparation and rollout always agree.
-    datasets_to_prepare: List[BenchmarkConfig] = []
-    inspected_server_instances: List[str] = []
-    for server_instance_name in global_config_dict:
-        server_config = global_config_dict[server_instance_name]
-        if not isinstance(server_config, (dict, DictConfig)):
-            continue
-        is_agent = "responses_api_agents" in server_config
-        if not is_agent and "resources_servers" not in server_config:
-            continue
-
-        inspected_server_instances.append(server_instance_name)
-        inner_server_config = get_first_server_config_dict(global_config_dict, server_instance_name)
-
-        datasets: List[BenchmarkDatasetConfig | DatasetConfig] = []
-        for dataset in inner_server_config.get("datasets") or []:
-            if dataset["type"] == "benchmark":
-                datasets.append(BenchmarkDatasetConfig.model_validate(dataset))
-            elif dataset.get("prepare_script"):
-                datasets.append(DatasetConfig.model_validate(dataset))
-            else:
-                continue
-
-        for dataset in datasets:
-            try:
-                agent_name = resolve_dataset_agent(
-                    global_config_dict,
-                    str(server_instance_name),
-                    pin=getattr(dataset, "agent", None),
-                    taskset=dataset.taskset,
-                )
-            except ConfigError as e:
-                raise ConfigError(f"Dataset {dataset.name!r}: {e}") from e
-
-            datasets_to_prepare.append(
-                BenchmarkConfig(
-                    name=dataset.name,
-                    path=Path(""),
-                    agent_name=agent_name,
-                    num_repeats=dataset.num_repeats,
-                    dataset=dataset,
-                    environment_server=taskset_environment_server_name(global_config_dict, dataset.taskset),
-                )
-            )
-
-    if not datasets_to_prepare:
-        raise ConfigError(
-            "No preparable dataset config found. "
-            + (
-                f"Inspected server instances {inspected_server_instances}, but none declared a `benchmark` dataset "
-                "or another dataset with `prepare_script`."
-                if inspected_server_instances
-                else "No server instances with `responses_api_agents` were found in the resolved config."
-            )
-            + " Pass a config with `--config <config path>` or a benchmark with `--benchmark <name>`."
-        )
-
-    return datasets_to_prepare
-
-
-def _prepare_datasets(datasets: Sequence[BenchmarkConfig], prepare_benchmark_config: PrepareBenchmarkConfig) -> None:
-    """Run each dataset's prepare script, after validating all of them."""
-    from nemo_gym.config.global_config import maybe_get_global_config_dict
-
-    config = maybe_get_global_config_dict()
-    # Validate all datasets before preparing any
-    prepare_script_missing: List[BenchmarkConfig] = []
-    prepare_function_missing: List[BenchmarkConfig] = []
-
-    validated: list[tuple[BenchmarkConfig, str, dict, Path | None, DictConfig | None]] = []
-    already_prepared: List[BenchmarkConfig] = []
-    for benchmark_config in datasets:
-        prepare_script = benchmark_config.dataset.prepare_script
-        if prepare_script is None:
-            raise ConfigError(f"Dataset {benchmark_config.name!r} has no prepare_script")
-        prepare_script_path = _resolve_under_cwd_or_install(prepare_script)
-        if not prepare_script_path.exists():
-            prepare_script_missing.append(benchmark_config)
-            continue
-
-        prepare_module_path = (
-            str(prepare_script)
-            if Path(prepare_script).is_absolute()
-            else ".".join(Path(prepare_script).with_suffix("").parts)
-        )
-        python = _prepare_environment(benchmark_config, prepare_benchmark_config.uv_venv_dir)
-        if python is not None:
-            probe = _run_isolated_prepare(
-                python,
-                prepare_module_path,
-                "inspect",
-                Path(benchmark_config.dataset.jsonl_fpath),
-                {"check_cache": prepare_benchmark_config.use_cached_prepared_benchmarks},
-                config=config,
-            )
-            if not probe["has_prepare"]:
-                prepare_function_missing.append(benchmark_config)
-                continue
-            if probe["cache_current"]:
-                already_prepared.append(benchmark_config)
-                continue
-        else:
-            from nemo_gym.cli._prepare_worker import load_preparer
-
-            module = load_preparer(prepare_module_path)
-            if not hasattr(module, "prepare"):
-                prepare_function_missing.append(benchmark_config)
-                continue
-            is_already_prepared = Path(benchmark_config.dataset.jsonl_fpath).exists()
-            if prepare_benchmark_config.use_cached_prepared_benchmarks and is_already_prepared:
-                is_current = getattr(module, "is_prepared_data_current", None)
-                if not callable(is_current) or is_current(benchmark_config.dataset.jsonl_fpath):
-                    already_prepared.append(benchmark_config)
-                    continue
-                print(f"The cached file for {benchmark_config.name} is out of date, so it will be prepared again.")
-
-        validated.append(
-            (benchmark_config, prepare_module_path, dict(prepare_benchmark_config.prepare_script_args), python, config)
-        )
-
-    if already_prepared:
-        already_prepared_str = "".join(f"- {bc.name}: {bc.dataset.jsonl_fpath}\n" for bc in already_prepared)
-        already_prepared_str = f"""The following datasets have already been prepared. Since `use_cached_prepared_benchmarks=true`, we will skip re-preparation of those datasets.
-        {already_prepared_str}"""
-        print(already_prepared_str)
-
-    errors_to_print = ""
-    if prepare_script_missing:
-        prepare_script_missing_str = "".join(
-            f"- {bc.name}: {bc.dataset.prepare_script}\n" for bc in prepare_script_missing
-        )
-        errors_to_print += f"""The following datasets are missing a valid prepare script:
-{prepare_script_missing_str}
-"""
-    if prepare_function_missing:  # pragma: no cover
-        prepare_function_missing_str = "".join(
-            f"- {bc.name}: {bc.dataset.prepare_script}\n" for bc in prepare_function_missing
-        )
-        errors_to_print += f"""The following datasets have a prepare script, but are missing the prepare function:
-{prepare_function_missing_str}
-"""
-    if errors_to_print:
-        errors_to_print = f"""Did not prepare any datasets due to dataset config errors.
-{errors_to_print}"""
-        raise ConfigError(errors_to_print)
-
-    # Prepare after all validations pass
-    if prepare_benchmark_config.num_prepare_benchmark_processes > 1:  # pragma: no cover
-        with Pool(processes=prepare_benchmark_config.num_prepare_benchmark_processes) as pool:
-            results = pool.imap_unordered(_multiprocess_benchmark_prepare_fn, validated)
-            list(tqdm(results, total=len(validated)))
-    else:
-        results = map(_multiprocess_benchmark_prepare_fn, validated)
-        list(tqdm(results, total=len(validated)))
-
-
 @exit_cleanly_on_config_error
 def prepare_benchmark() -> None:
     """CLI command: prepare benchmark data."""
@@ -605,7 +255,7 @@ def prepare_benchmark() -> None:
         )
     )
     prepare_benchmark_config = PrepareBenchmarkConfig.model_validate(global_config_dict)
-    _prepare_datasets(_datasets_to_prepare(global_config_dict), prepare_benchmark_config)
+    prepare_datasets(datasets_to_prepare(global_config_dict), prepare_benchmark_config)
 
 
 class PlanBenchmarkConfig(PrepareBenchmarkConfig):
@@ -628,14 +278,6 @@ class PlanBenchmarkConfig(PrepareBenchmarkConfig):
     print_plan_schema: bool = Field(default=False, description="Print the plan file's JSON Schema and exit")
 
 
-def _gym_relative_path(path: str) -> str:
-    """A config path relative to the Gym checkout when it lies inside it, so plans match across machines."""
-    try:
-        return str(Path(path).resolve().relative_to(PARENT_DIR.resolve()))
-    except ValueError:
-        return str(path)
-
-
 @exit_cleanly_on_config_error
 def plan_benchmark() -> None:
     """CLI command: write a benchmark's evaluation plan."""
@@ -651,33 +293,9 @@ def plan_benchmark() -> None:
     if plan_config.plan_output_fpath is None:
         raise ConfigError("Pass `--out <path>` for the plan file.")
 
-    # Other datasets with a prepare script are not benchmarks, so they are not part of the plan.
-    benchmarks = [
-        dataset
-        for dataset in _datasets_to_prepare(global_config_dict)
-        if isinstance(dataset.dataset, BenchmarkDatasetConfig)
-    ]
-    if len(benchmarks) != 1:
-        raise ConfigError(
-            f"A plan covers exactly one benchmark, but the config declares {len(benchmarks)}: "
-            f"{[benchmark.name for benchmark in benchmarks]}."
-        )
-    benchmark = benchmarks[0]
-
-    _prepare_datasets([benchmark], plan_config)
-    rows = [json.loads(line) for line in benchmark.dataset.jsonl_fpath.read_text().splitlines() if line.strip()]
-    plan = build_eval_plan(
-        rows,
-        benchmark=PlanBenchmark(
-            name=benchmark.name,
-            config_paths=[_gym_relative_path(path) for path in global_config_dict.get("config_paths") or []],
-        ),
-        taskset=benchmark.dataset.taskset or benchmark.name,
-        gym=PlanGym(version=__version__, commit=installed_gym_commit()),
-        selected_task_ids=plan_config.plan_task_ids,
-    )
+    plan = plan_for_config(global_config_dict, plan_config, plan_config.plan_task_ids)
     write_eval_plan(plan, plan_config.plan_output_fpath)
-    print(f"Wrote the plan for {benchmark.name} ({len(plan.tasks)} tasks) to {plan_config.plan_output_fpath}")
+    print(f"Wrote the plan for {plan.benchmark.name} ({len(plan.tasks)} tasks) to {plan_config.plan_output_fpath}")
 
 
 def _validate_split_datasets_declared(split: str, server_instance_configs: Sequence[ServerInstanceConfig]) -> None:
@@ -890,8 +508,10 @@ def _prepare_run_health_metrics(output: Path) -> dict[str, int | float]:
         COLLECT_SCRIPT,
         CollectedEvidence,
         IdentityState,
+        RecoveryOutcomePolicyConfig,
         _observed_trial_operations,
         decide_from_collected,
+        decision_classification,
         failure_facts,
         fault_report,
         response_health,
@@ -900,7 +520,7 @@ def _prepare_run_health_metrics(output: Path) -> dict[str, int | float]:
         trial_population,
         trial_verdict,
     )
-    from nemo_gym.rollouts.rollout_recovery import atomic_output_file
+    from nemo_gym.rollouts.rollout_recovery import atomic_output_file, saved_failure_classification
 
     artifacts = RunArtifacts(output)
     version = _artifact_version(artifacts)
@@ -938,7 +558,13 @@ def _prepare_run_health_metrics(output: Path) -> dict[str, int | float]:
             [sys.executable, "-I", "-S", "-c", COLLECT_SCRIPT, str(job)], capture_output=True, text=True, check=True
         )
         collected = select_managed_evidence(CollectedEvidence.model_validate_json(raw.stdout), job)
-        decision = decide_from_collected(collected, max_infra_retries=None, max_walltime_s=None, live_job=None)
+        decision = decide_from_collected(
+            collected,
+            max_infra_retries=None,
+            max_walltime_s=None,
+            live_job=None,
+            outcome_policy=RecoveryOutcomePolicyConfig(classification=saved_failure_classification(output)),
+        )
         quality = collected.quality if collected.quality and collected.quality.get("source_matches") is True else None
         response, _ = response_health(decision, quality)
         if response is not None:
@@ -957,13 +583,18 @@ def _prepare_run_health_metrics(output: Path) -> dict[str, int | float]:
         trial, _, evaluation = trial_verdict(decision, collected)
         if evaluation is None and trials > 0:
             # Not evaluated (the run is not complete): its known faults are a lower bound.
-            evaluation = fault_report(trial_faults(decision, collected), trials) | {"exact": False}
+            attributions = Counter()
+            kinds = trial_faults(decision, collected, attributions=attributions)
+            evaluation = fault_report(
+                kinds, trials, attributions=attributions, classification=decision_classification(decision)
+            ) | {"exact": False}
         if evaluation is not None:
             exact = evaluation["exact"]
             failed = evaluation["evaluation"]["count"]
             metrics.update(
                 {
                     "health/trial/counts_known": int(exact),
+                    "health/trial/unclassified": evaluation["unknown"]["count"],
                     "health/trial/failed" if exact else "health/trial/failed_lower_bound": failed,
                     "health/trial/expected": trials,
                     "health/trial/omitted": decision.counts.get(IdentityState.OMITTED, 0),
@@ -1230,8 +861,7 @@ def _collect_and_rejudge(
     except IncompleteEvaluationError as rejected:
         if not config.require_complete or _terminated:
             raise
-        _rejudge_saved_judge_failures(global_config_dict, output, config)
-        if not _saved_run_complete(output):
+        if not _rejudge_saved_judge_failures(global_config_dict, output, config, complete_only=True):
             raise _settled_rejection(output, rejected) from None
         return
     _rejudge_saved_judge_failures(global_config_dict, output, config)
@@ -1289,14 +919,22 @@ def _saved_run_complete(output: Path) -> bool:
 
 
 def _rejudge_saved_judge_failures(
-    global_config_dict: DictConfig | Mapping[str, Any], output: Path, collection_config: Any, *, aggregate: bool = True
-) -> None:
+    global_config_dict: DictConfig | Mapping[str, Any],
+    output: Path,
+    collection_config: Any,
+    *,
+    aggregate: bool = True,
+    complete_only: bool = False,
+) -> bool:
     """Re-judge the run's saved judge failures while its servers are up, then recompute its metrics in place.
 
     Collection calls it at the end of a run and of each resumed run (see ``rejudge_saved_judge_failures``), and at the
     start of a resumed run, with ``aggregate`` off since its collection aggregates afterwards. The saved results to
     grade again (masked by a judge or verify-transport failure, or never graded) are re-verified in the same pass. A
     pass that cannot run, or fails, leaves the failures masked as before and never fails the collected run.
+    ``complete_only`` recomputes the metrics only when the settled run is complete: a strict run that was rejected as
+    incomplete publishes no score; the saved run's completeness is then read once, after the pass, and returned
+    (always False without ``complete_only``).
     """
     from nemo_gym.eval.rollout_reverification import rejudge_saved_judge_failures
     from nemo_gym.rollouts.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
@@ -1306,16 +944,22 @@ def _rejudge_saved_judge_failures(
         run_config = OmegaConf.to_container(global_config_dict, resolve=True)
     else:
         run_config = dict(global_config_dict)
+    scored = 0
     try:
         scored = asyncio.run(rejudge_saved_judge_failures(run_config, output))
     except Exception as error:  # an optional pass after the run is saved; recovery still sees the failures
         print(f"Saved judge failures were not re-judged: {type(error).__name__}: {error}", flush=True)
-        return
-    if not scored:
-        return
-    print(f"Re-judged saved judge failures: {scored} rollout(s) settled from their saved answers", flush=True)
+    # A pass that raised after saving its grades can still have completed a strict run: settled completeness,
+    # not a normal return, decides whether its metrics are rebuilt.
+    complete = complete_only and _saved_run_complete(output)
+    if not scored and not complete:
+        return complete
+    if scored:
+        print(f"Re-judged saved judge failures: {scored} rollout(s) settled from their saved answers", flush=True)
     if collection_config.disable_aggregation or not aggregate:
-        return
+        return complete
+    if complete_only and not complete:
+        return complete
     try:
         aggregation = RolloutAggregationConfig.model_validate(
             run_config | {"input_glob": str(output), "output_jsonl_fpath": str(output), "merge_shards": False}
@@ -1327,6 +971,7 @@ def _rejudge_saved_judge_failures(
             f"run `gym eval aggregate +input_glob={output} +output_jsonl_fpath={output} +merge_shards=false`.",
             flush=True,
         )
+    return complete
 
 
 class _SettledHealthSettings(RunHealthConfig):
@@ -1530,12 +1175,25 @@ def collect_rollouts():  # pragma: no cover
 @exit_cleanly_on_config_error
 def aggregate_rollouts():  # pragma: no cover
     from nemo_gym.rollouts.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
+    from nemo_gym.telemetry.setup import (
+        configure_telemetry_env,
+        init_telemetry,
+        shutdown_telemetry,
+        telemetry_config_from_global_config,
+    )
 
     global_config = get_global_config_dict()
     config = RolloutAggregationConfig.model_validate(global_config)
     rah = RolloutAggregationHelper()
 
-    asyncio.run(rah.run_from_config(config))
+    # Like a standalone collection, a standalone aggregation sets up its own telemetry, so the merged run's summary
+    # reaches OpenTelemetry as well as an experiment tracker.
+    configure_telemetry_env(telemetry_config_from_global_config(global_config))
+    init_telemetry(server_name="driver", server_type="driver")
+    try:
+        asyncio.run(rah.run_from_config(config))
+    finally:
+        shutdown_telemetry()
 
 
 def health_check_rollouts(
@@ -2312,13 +1970,18 @@ def validate_target(args: argparse.Namespace, overrides: list[str], *, agent: Ag
         sys.exit(1)
 
 
-def eval_status(target: str, *, json_output: bool = False) -> None:
-    """Print saved progress for a run directory or a locally indexed Gym job ID.
+def eval_status(
+    target: str,
+    *,
+    json_output: bool = False,
+    job_artifact_dirs: Callable[[str], dict[str, Path] | None],
+) -> None:
+    """Print saved progress for a run directory or, through `job_artifact_dirs`, a Gym job ID.
 
-    Submitted job artifacts must be visible on the current filesystem. This command
-    reads saved progress and does not contact a scheduler or a remote host.
+    `job_artifact_dirs` is required: it maps a target that is not a run directory with status files to each benchmark's
+    artifacts directory, or to None when it names no submission. Artifacts must be visible on the current filesystem. This
+    command reads saved progress and does not contact a scheduler or a remote host.
     """
-    from nemo_gym.orchestration.jobs import MANIFEST_NAME, SubmissionRecord, local_index_dir
     from nemo_gym.rollouts.batch_status import BATCH_STATUS_FNAME
 
     def status_files(directory: Path) -> list[Path]:
@@ -2349,26 +2012,24 @@ def eval_status(target: str, *, json_output: bool = False) -> None:
     path = Path(target)
     if not path.is_dir() and (path.exists() or "/" in target or "\\" in target):
         raise NotADirectoryError(f"Run directory expected: {target}")
-    record_path = path / MANIFEST_NAME if path.is_dir() else local_index_dir() / f"{target}.json"
     files = status_files(path) if path.is_dir() else []
     exports: dict[str, dict[str, dict[str, Any]]] = {}
     if files:
         statuses = {str(file): json.loads(file.read_text()) for file in files}
         exports = {str(file): export_facts(file) for file in files}
-    elif record_path.is_file():
-        record = SubmissionRecord.load(json.loads(record_path.read_text()))
+    else:
+        artifact_dirs = job_artifact_dirs(target)
+        if artifact_dirs is None:
+            raise FileNotFoundError(f"No {BATCH_STATUS_FNAME} or Gym job record found for {target}")
         statuses = {}
-        for benchmark in record.benchmarks:
-            directory = Path(benchmark.job_dir) / "artifacts"
+        for benchmark, directory in artifact_dirs.items():
             files = status_files(directory)
             if not files:
-                statuses[benchmark.benchmark] = {"status": "unavailable", "path": str(directory)}
+                statuses[benchmark] = {"status": "unavailable", "path": str(directory)}
             for file in files:
-                name = benchmark.benchmark if len(files) == 1 else f"{benchmark.benchmark}/{file.name}"
+                name = benchmark if len(files) == 1 else f"{benchmark}/{file.name}"
                 statuses[name] = json.loads(file.read_text())
                 exports[name] = export_facts(file)
-    else:
-        raise FileNotFoundError(f"No {BATCH_STATUS_FNAME} or Gym job record found for {target}")
     if json_output:
         print(
             json.dumps(
@@ -2413,3 +2074,26 @@ def eval_status(target: str, *, json_output: bool = False) -> None:
                 f"by kind: {json.dumps(member.get('failures_by_kind', {}), sort_keys=True)}; "
                 f"model-final by kind: {json.dumps(member.get('model_final_by_kind', {}), sort_keys=True)}"
             )
+
+
+@exit_cleanly_on_config_error
+def compare_suite() -> None:
+    """Compare baseline and candidate runs across a configured benchmark and model suite."""
+    from nemo_gym.environment.comparison import resolve_benchmark_reward_metric
+    from nemo_gym.eval.comparison.suite.report import render_suite_summary, write_suite_reports
+    from nemo_gym.eval.comparison.suite.runner import build_suite_comparison, invoked_command
+    from nemo_gym.eval.comparison.suite.schema import SuiteComparisonConfig
+
+    config_dict = get_global_config_dict()
+    if not config_dict.get("suite_fpath") and not (config_dict.get("help") or config_dict.get("h")):
+        raise ConfigError("gym eval compare-suite requires --suite PATH.")
+    config = SuiteComparisonConfig.model_validate(config_dict)
+    result = build_suite_comparison(config, invoked_command(), reward_metric_resolver=resolve_benchmark_reward_metric)
+    output = Path(config.output_dirpath) if config.output_dirpath else result.suite_fpath.parent
+    written = write_suite_reports(result, output, config.report_format)
+    print(render_suite_summary(result))
+    for path in written:
+        print(f"Wrote: {path}")
+
+
+__getattr__ = moved_names_getattr(__name__)

@@ -102,6 +102,7 @@ def test_routes_the_complete_episode_without_rewriting_native_fields(harness):
                 cleanup_timeout_seconds=180,
                 agent_server={"type": "responses_api_agents", "name": f"agent-{harness}"},
                 resources_server={"type": "resources_servers", "name": "resources"},
+                tool_servers=[],
             ),
             server_client=downstream,
         )

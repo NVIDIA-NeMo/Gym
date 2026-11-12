@@ -171,6 +171,22 @@ def _nonempty(value: Any) -> bool:
     return False
 
 
+def _reasoning_nonempty(value: Any) -> bool:
+    """Whether a turn's reasoning holds anything, Anthropic Messages thinking blocks included.
+
+    Kept out of ``_nonempty``, which also decides whether a response is actionable, so that thinking never counts
+    as an answer there.
+    """
+    if isinstance(value, (list, tuple)):
+        return any(_reasoning_nonempty(item) for item in value)
+    if isinstance(value, dict):
+        if value.get("type") == "thinking":
+            return _nonempty(value.get("thinking")) or _nonempty(value.get("signature"))
+        if value.get("type") == "redacted_thinking":
+            return _nonempty(value.get("data"))
+    return _nonempty(value)
+
+
 def _call_ref_key(ref: Any) -> str | None:
     if not isinstance(ref, dict):
         return None
@@ -263,7 +279,7 @@ def _agent_steps(trajectory: dict[str, Any]) -> list[_AgentStep]:
         steps.append(
             _AgentStep(
                 locator={"turn": turn.get("turn_no", position)},
-                has_message=_nonempty(turn.get("answer")) or _nonempty(turn.get("reasoning_content")),
+                has_message=_nonempty(turn.get("answer")) or _reasoning_nonempty(turn.get("reasoning_content")),
                 has_tool_calls=_item_has_tool_call(turn.get("answer")),
                 model_call_refs=refs,
             )
@@ -892,18 +908,52 @@ def _rollout_token_count_mismatch(
     return []
 
 
+def _repetition_stop_evidence(call: dict[str, Any]) -> dict[str, str]:
+    response = call.get("response")
+    response = response if isinstance(response, dict) else {}
+    choices = response.get("choices")
+    choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+    evidence = {}
+    if "repetition_detected" in (
+        response.get("native_stop_reason"),
+        response.get("stop_reason"),
+        choice.get("stop_reason"),
+    ):
+        evidence["native_stop_reason"] = "repetition_detected"
+    if "repetition" in (
+        call.get("finish_reason"),
+        response.get("native_finish_reason"),
+        response.get("finish_reason"),
+        choice.get("native_finish_reason"),
+        choice.get("finish_reason"),
+    ):
+        evidence["native_finish_reason"] = "repetition"
+    return evidence
+
+
+def _is_repetition_stop(call: dict[str, Any]) -> bool:
+    return bool(_repetition_stop_evidence(call))
+
+
 def _model_call_runaway_generation(bindings: _CallBindings, subject: dict[str, int | str]) -> list[Finding]:
     return [
         Finding(
             check="model_call_runaway_generation",
             subject=subject,
             locator=_call_locator(call, position),
-            detail={"finish_reason": call.get("finish_reason")},
+            detail={
+                "finish_reason": call.get("finish_reason"),
+                **_repetition_stop_evidence(call),
+            },
         )
         for position, call in enumerate(bindings.matched_calls)
-        if not _is_length_refusal(call)
-        and call.get("finish_reason") in _LENGTH_LIMIT_FINISH_REASONS
-        and not _response_has_usable_output(call.get("response"))
+        if _is_repetition_stop(call)
+        or (
+            not _is_length_refusal(call)
+            and call.get("finish_reason") in _LENGTH_LIMIT_FINISH_REASONS
+            and call.get("response") is not None
+            and not _response_has_usable_output(call.get("response"))
+        )
     ]
 
 

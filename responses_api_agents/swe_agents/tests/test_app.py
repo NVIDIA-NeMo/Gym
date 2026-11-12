@@ -30,11 +30,18 @@ from nemo_gym.client import ServerClient
 from nemo_gym.config import CACHE_DIR_KEY_NAME, ModelServerRef
 from nemo_gym.config.config_types import OmegaConf
 from nemo_gym.core import (
+    AGENT_LIMIT,
+    AGENT_TIMEOUT,
+    MODEL_CONTEXT_LIMIT,
+    PROVIDER_OOM_KILLED,
+    PROVIDER_UNAVAILABLE,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    model_sampling_context,
     rollout_context,
 )
 from responses_api_agents.swe_agents.app import (
+    EVAL_TIMEOUT,
     ActiveContainerCommand,
     AgentPromptOverride,
     BaseDatasetHarnessProcessor,
@@ -55,6 +62,7 @@ from responses_api_agents.swe_agents.app import (
     SWERebenchDatasetProcessor,
     _extract_instance_dict,
     _extract_replay_system_content,
+    _masked_failure,
     _parse_replay_messages,
     _render_opencode_user_message,
     _resolve_opencode_workspace_path,
@@ -2851,6 +2859,36 @@ class TestSWEBenchWrapperSetupParams:
             # The sandboxed agent reaches the model through the capture-prefixed URL.
             assert "/training-token-capture/" in params.agent_script
 
+    @pytest.mark.parametrize("sampling", [None, "null", "VALUES"])
+    def test_sampling_alone_hands_openhands_the_per_run_url(self, monkeypatch, sampling) -> None:
+        """With capture off, a training run's segment must still reach OpenHands, which ignores llm.base_url."""
+        wrapper = _create_wrapper(monkeypatch)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "django__django-12345.sif").touch()
+            wrapper.config.container_formatter = [str(Path(tmpdir) / "{instance_id}.sif")]
+            self._setup_oh_dirs(wrapper)
+            body = NeMoGymResponseCreateParamsNonStreaming(
+                model="test-model",
+                input=[],
+                metadata={
+                    "problem_statement": "Fix bug",
+                    "instance_id": "django__django-12345",
+                    "base_commit": "abc123",
+                    "dataset_name": "SWE-bench",
+                    "split": "test",
+                    "instance_dict": json.dumps({"repo": "django/django"}),
+                },
+            )
+            monkeypatch.setattr(type(wrapper), "_token_id_capture_enabled", lambda self: False)
+            with rollout_context("rollout-1"), model_sampling_context(sampling):
+                params, _ = wrapper._setup_params(body)
+
+            # Gym-only evaluation (no segment) keeps its bare-URL behavior.
+            assert params.install_openhands_capture_overlay is (sampling is not None)
+            if sampling is not None:
+                assert params.model_server_base_url.endswith(f"/ng-sampling/{sampling}")
+                assert f"/ng-sampling/{sampling}" in params.agent_script
+
     def test_setup_params_raises_when_capture_enabled_without_rollout_id(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3634,6 +3672,8 @@ class TestEvaluatorLaunchFailure:
         assert result.reward == 0.0
         assert result.mask_sample is expected_mask
         assert result.instance_config.mask_sample is expected_mask
+        assert result.failure_kind == (PROVIDER_UNAVAILABLE if expected_mask else None)
+        assert bool(result.failure_reason) is expected_mask
         assert result.response.output[-1].generation_token_ids == [3, 4]
         if outcome == "failed_tests":
             # A completed negative verifier result is a valid policy outcome.
@@ -3644,3 +3684,28 @@ class TestEvaluatorLaunchFailure:
     def test_legacy_metrics_do_not_imply_launch_failure(self) -> None:
         metrics = SWEBenchMetrics.model_validate({"patch_exists": True, "eval_timed_out": False})
         assert metrics.eval_launch_failed is False
+
+
+@pytest.mark.parametrize(
+    ("metrics", "expected_kind"),
+    [
+        # An unmeasured reward outranks the agent's own limit.
+        ({"eval_launch_failed": True, "agent_error_kind": "max_iteration"}, PROVIDER_UNAVAILABLE),
+        ({"oom_killed": True, "agent_error_kind": "oom"}, PROVIDER_OOM_KILLED),
+        ({"eval_oom_killed": True, "agent_error_kind": "max_iteration"}, PROVIDER_OOM_KILLED),
+        ({"eval_timed_out": True, "agent_error_kind": "context_window"}, EVAL_TIMEOUT),
+        ({"agent_timed_out": True, "resolved": True}, AGENT_TIMEOUT),
+        ({"agent_error_kind": "max_iteration", "resolved": True}, AGENT_LIMIT),
+        ({"agent_error_kind": "context_window", "resolved": False}, MODEL_CONTEXT_LIMIT),
+        ({"agent_error_kind": "stuck_in_loop", "resolved": False}, None),
+        ({"agent_error_kind": "other", "resolved": True}, None),
+    ],
+)
+def test_masked_failure_names_the_first_matching_kind(metrics: dict, expected_kind: Optional[str]) -> None:
+    masked_failure = _masked_failure(SWEBenchMetrics.model_validate(metrics))
+    if expected_kind is None:
+        assert masked_failure is None
+    else:
+        kind, reason = masked_failure
+        assert kind == expected_kind
+        assert reason

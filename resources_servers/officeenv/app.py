@@ -55,12 +55,12 @@ from nemo_gym.server_runtime import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    ClosedResourcesSessionRecords,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
     ResourcesSessionConflictError,
+    ResourcesSessionFences,
     ResourcesSessionLostError,
     ReverifyMode,
     SimpleResourcesServer,
@@ -221,7 +221,7 @@ _SEEDED_TOOLS: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar
 
 @dataclass
 class _Episode:
-    """An Environment Server episode, kept by its ``resources_session_id`` until it is closed."""
+    """An episode session, kept by its ``resources_session_id`` until it is closed."""
 
     episode_id: EpisodeId
     task_id: TaskId
@@ -235,11 +235,11 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
     # Episodes by Gym's session ID, which an Environment Server's seed sets to its resources_session_id.
     service: EpisodeService = Field(default_factory=EpisodeService)
     _episodes: dict[str, _Episode] = PrivateAttr(default_factory=dict)
-    _closed: ClosedResourcesSessionRecords[EpisodeId] = PrivateAttr()
+    _fences: ResourcesSessionFences[EpisodeId] = PrivateAttr()
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
-        self._closed = ClosedResourcesSessionRecords(self.config.session_close_retry_window_seconds)
+        self._fences = ResourcesSessionFences(self.config.session_close_retry_window_seconds)
         if self.config.artifacts_dirs:  # the service reads a row's artifact references back from them at seed
             self.service = EpisodeService(artifacts=ArtifactStore(self.config.artifacts_dirs))
 
@@ -262,11 +262,11 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         return OfficeEnvSeedSessionResponse(**reply.body)
 
     def _seed_episode(self, request: Request, body: ResourcesSeedSessionRequest) -> ResourcesSeedSessionResponse:
-        """Seed an Environment Server episode under its ``resources_session_id``. Seeding the same ID
-        for the same episode again answers as the first seed did; a closed ID is never seeded again."""
+        """Seed an episode session under its ``resources_session_id``. Seeding the same ID
+        for the same episode again answers as the first seed did; a fenced ID is not seeded again."""
         session_id = body.resources_session_id
         # Nothing below awaits, so no other request runs between the checks and the updates.
-        if session_id in self._closed:
+        if session_id in self._fences:
             raise ResourcesSessionConflictError(f"Resources session {session_id} is already closed")
         episode = self._episodes.get(session_id)
         if episode is None:
@@ -302,19 +302,19 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         return reply
 
     async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
-        """Free the episode's world unless verification already has; a retried close, or the
+        """Release the episode's world unless verification already has; a retried close, or the
         close of a session that was never seeded, succeeds."""
         session_id = body.resources_session_id
         # Nothing below awaits, so no other request runs between the checks and the updates.
-        closed = self._closed.get(session_id)
-        if closed is None:
+        fenced_episode = self._fences.get(session_id)
+        if fenced_episode is None:
             episode = self._episodes.get(session_id)
             if episode is not None and episode.episode_id != body.episode_id:
                 raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
             self._episodes.pop(session_id, None)
             self._discard(session_id)
-            self._closed.remember(session_id, body.episode_id)
-        elif closed != body.episode_id:
+            self._fences.fence(session_id, body.episode_id)
+        elif fenced_episode != body.episode_id:
             raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
         return ResourcesCloseSessionResponse(resources_session_id=session_id)
 

@@ -15,7 +15,14 @@ from pathlib import Path
 from shlex import quote
 from uuid import uuid4
 
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, SupportsSandboxSharedStorage, create_provider
+from nemo_gym.sandbox import (
+    PLACEMENT_GROUP_KEY,
+    AsyncSandbox,
+    SandboxResources,
+    SandboxSpec,
+    SupportsSandboxSharedStorage,
+    create_provider,
+)
 
 
 RUNTIME_ROOT = "/opt/gym-runtime"
@@ -86,7 +93,7 @@ class RuntimeProvisioner:
                 resources=SandboxResources(cpu=1, memory_mib=1024),
                 provider_options=self.provider.shared_volume_options(None, STORAGE_ROOT)
                 | {"network_policy": {"defaultAction": "deny", "egress": []}},
-                metadata=self.provider.shared_volume_metadata() | {"benchmark": "swe-together", "role": "runtime"},
+                metadata=self.metadata() | {"benchmark": "swe-together", "role": "runtime"},
             )
         )
         await self.helper.upload(Path(__file__).with_name("runtime_worker.py"), self._worker)
@@ -155,8 +162,11 @@ class RuntimeProvisioner:
         """Copy the candidate archive into a separate read-only judge mount and verify its digest."""
         await self._exec("seal", STORAGE_ROOT + "/" + self._bundles[session_id], json.dumps(manifest))
 
-    def metadata(self) -> dict:
-        return self.provider.shared_volume_metadata()
+    def metadata(self, overrides: dict[str, str] | None = None) -> dict[str, str]:
+        """Keep every consumer on the cell owning this helper's cache and submissions."""
+        return (
+            self.provider.shared_volume_metadata() | (overrides or {}) | {PLACEMENT_GROUP_KEY: "swet-" + self._owner}
+        )
 
     async def release(self, session_id: str):
         async with self._lock:

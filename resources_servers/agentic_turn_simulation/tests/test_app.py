@@ -26,9 +26,11 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
+    NgFailureEvent,
     failure_kinds,
 )
 from nemo_gym.metrics import MASK_SAMPLE_FIELD
+from nemo_gym.verification import is_judge_failure, judge_failsafe
 from resources_servers.agentic_turn_simulation.app import (
     AgenticTurnSimulationResourcesServer,
     AgenticTurnSimulationResourcesServerConfig,
@@ -517,6 +519,45 @@ class TestSimulateWithLLM:
 # --- /verify ------------------------------------------------------------------------------------------------
 
 
+class TestJudgeGrading:
+    async def test_a_judged_row_records_its_judge_grading_and_is_not_graded_again(self) -> None:
+        from nemo_gym.orchestration.recovery import reverification_cause, saved_row_evidence
+        from nemo_gym.server_runtime import verifier_observability
+        from nemo_gym.trajectory import VerifierInvocation, grading_result_binding
+
+        server = make_server()
+        script(server, [judge_reply(GOOD)])
+        invocation = VerifierInvocation(invocation_id="verify-1")
+        token = verifier_observability._active_verifier.set(invocation)
+        try:
+            out = await server.verify(req(), _verify_body())
+        finally:
+            verifier_observability._active_verifier.reset(token)
+
+        (operation,) = invocation.grading_operations
+        assert (operation.kind, operation.outcome) == ("llm_judge", "completed")
+        assert len(operation.dependencies) == 1
+        assert operation.result_binding_sha256 == grading_result_binding(out)
+        row = out.model_dump(mode="json") | {
+            "ng_trial_observations": {"verifier_invocations": [invocation.model_dump(mode="json")]}
+        }
+        assert reverification_cause(saved_row_evidence(row)) is None
+
+    async def test_an_unusable_verdict_leaves_the_grading_unknown(self) -> None:
+        from nemo_gym.server_runtime import verifier_observability
+        from nemo_gym.trajectory import VerifierInvocation
+
+        server = make_server()
+        script(server, [judge_reply(text="no verdict here")] * server.config.judge_max_attempts)
+        invocation = VerifierInvocation(invocation_id="verify-1")
+        token = verifier_observability._active_verifier.set(invocation)
+        try:
+            await server.verify(req(), _verify_body())
+        finally:
+            verifier_observability._active_verifier.reset(token)
+        assert [operation.outcome for operation in invocation.grading_operations] == ["unknown"]
+
+
 class TestVerifyMasks:
     async def test_the_wall_clock_cap_is_masked(self) -> None:
         server = make_server()
@@ -684,7 +725,7 @@ class TestVerifyMasks:
 
     async def test_no_usable_verdict_is_masked(self, sleep: AsyncMock) -> None:
         server = make_server(judge_max_attempts=3)
-        sent = script(server, [RuntimeError("boom"), http(status=500, body="oops"), judge_reply(text="no idea")])
+        sent = script(server, [ConnectionError("boom"), http(status=500, body="oops"), judge_reply(text="no idea")])
         out = await server.verify(req(), _verify_body())
         assert getattr(out, MASK_SAMPLE_FIELD) is True and out.failure_kind == failure_kinds.JUDGE_FAILED
         assert out.reward == 0.0 and out.correct_ladder is None and out.judge_verdicts == [None]
@@ -697,14 +738,54 @@ class TestVerifyMasks:
         out = await server.verify(req(), _verify_body())
         assert getattr(out, MASK_SAMPLE_FIELD) is True and out.judge_verdicts == [partial]
 
-    async def test_context_length_rejection_gives_up_at_once(self, sleep: AsyncMock) -> None:
+    async def test_context_length_rejection_is_a_judge_failure_at_once(self, sleep: AsyncMock) -> None:
         server = make_server()
         body = "This model's maximum context length is 131072 tokens. However, you requested 150000 tokens."
         sent = script(server, [http(status=400, body=body)])
-        out = await server.verify(req(), _verify_body())
-        assert len(sent) == 1 and getattr(out, MASK_SAMPLE_FIELD) is True
-        assert out.failure_kind == failure_kinds.JUDGE_FAILED
+        with pytest.raises(NgFailureEvent) as raised:
+            await server.verify(req(), _verify_body())
+        assert len(sent) == 1 and is_judge_failure(raised.value)
         sleep.assert_not_awaited()
+
+    async def test_unreachable_judge_is_a_judge_failure_after_every_attempt(self, sleep: AsyncMock) -> None:
+        server = make_server(judge_max_attempts=3)
+        sent = script(server, [ConnectionError("boom"), http(status=500, body="oops"), http(status=503, body="down")])
+        with pytest.raises(NgFailureEvent) as raised:
+            await server.verify(req(), _verify_body())
+        assert len(sent) == 3 and is_judge_failure(raised.value) and sleep.await_count == 3
+
+    async def test_a_non_retryable_status_fails_at_once(self) -> None:
+        server = make_server()
+        sent = script(server, [http(status=401, body="bad key")])
+        with pytest.raises(NgFailureEvent) as raised:
+            await server.verify(req(), _verify_body())
+        assert len(sent) == 1 and is_judge_failure(raised.value)
+
+    async def test_a_transport_error_then_a_usable_verdict_is_scored(self) -> None:
+        server = make_server()
+        sent = script(server, [http(status=429, body="slow down"), judge_reply(GOOD)])
+        out = await server.verify(req(), _verify_body())
+        assert len(sent) == 2 and out.reward == 1.0 and not getattr(out, MASK_SAMPLE_FIELD)
+
+    async def test_one_lost_judge_of_two_fails_the_row_instead_of_shrinking_the_vote(self) -> None:
+        server = make_server(n_judges=2, judge_max_attempts=1)
+        script(server, {"judge_0": [judge_reply(GOOD)], "judge_1": [http(status=500, body="down")]})
+        with pytest.raises(NgFailureEvent) as raised:
+            await server.verify(req(), _verify_body())
+        assert is_judge_failure(raised.value)
+
+    async def test_one_unusable_judge_of_two_still_votes_on_the_rest(self) -> None:
+        server = make_server(n_judges=2, judge_max_attempts=1)
+        script(server, {"judge_0": [judge_reply(GOOD)], "judge_1": [judge_reply(text="no idea")]})
+        out = await server.verify(req(), _verify_body())
+        assert out.reward == 1.0 and not getattr(out, MASK_SAMPLE_FIELD) and out.judge_verdicts[1] is None
+
+    async def test_failsafe_masks_a_lost_judge_as_judge_failed(self) -> None:
+        server = make_server(judge_max_attempts=1)
+        script(server, [http(status=500, body="down")])
+        out = json.loads((await judge_failsafe(server.verify)(req(), _verify_body())).body)
+        assert out["reward"] == 0.0 and out[MASK_SAMPLE_FIELD] is True
+        assert out["failure_kind"] == failure_kinds.JUDGE_FAILED and out["_ng_failure_class"] == "judge_failed"
 
 
 class TestVerifyCodeGates:
@@ -1049,9 +1130,8 @@ class TestVerifyJudge:
         [
             ([GOOD, GOOD], 1.0, 2),
             ([GOOD, BAD], 0.0, 2),  # a tie does not give the policy credit
-            ([None, GOOD], 1.0, 1),  # one judge without a verdict: the other decides
         ],
-        ids=["agree", "tie", "one-failed"],
+        ids=["agree", "tie"],
     )
     async def test_two_judges_vote(self, verdicts: list[dict[str, Any] | None], reward: float, usable: int) -> None:
         server = make_server(n_judges=2, judge_max_attempts=1)

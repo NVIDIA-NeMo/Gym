@@ -262,15 +262,15 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
     ) -> SWEGymSeedSessionResponse | ResourcesSeedSessionResponse:
         """Start the instance's image so an agent can work in it.
 
-        An Environment Server seeds a typed session and gets the sandbox back as ``sandbox_access``; an
+        An Environment Server seeds an episode session and gets the sandbox back as ``sandbox_access``; an
         agent's ``/run`` seeds with the row and gets the sandbox handle.
         """
         if isinstance(body, ResourcesSeedSessionRequest):
             return await self.seed_task_sandbox_session(request, body, SWEGymInstanceRequest)
         session_id = request.session[SESSION_ID_KEY]
         async with self._locked_task_session(session_id) as record:
-            if record.seed is not None or self._task_session_fence.closed_episode(session_id) is not None:
-                raise ResourcesSessionConflictError("A legacy seed cannot replace a typed resources session")
+            if record.seed is not None or self._task_session_fences.get(session_id) is not None:
+                raise ResourcesSessionConflictError("An agent-run seed cannot replace an episode session")
             await self._stop_task_sandbox(session_id)
             try:
                 await self._start_task_sandbox(session_id, body)
@@ -319,7 +319,7 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
         )
 
     async def verify(self, request: Request, body: SWEGymVerifyRequest) -> SWEGymVerifyResponse:
-        """Serialize task ownership and replay the verdict for an identical typed retry."""
+        """Serialize task ownership and replay the verdict for an identical episode session retry."""
         return await self.verify_task_sandbox_session(
             request,
             body,

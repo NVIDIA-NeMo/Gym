@@ -245,6 +245,12 @@ includes a gap to show the complete shape. The `gaps` field is omitted when ther
 reported by the provider; a `null` value means unknown, not zero. For example, Anthropic does not
 report reasoning-token usage, so `tokens_reasoning` is `null` for that dialect.
 
+Each call's `tokens_in` is the whole prompt size. When the provider reports prompt caching, the call
+also carries `cached_tokens` (tokens read from the cache) and `cache_creation_tokens` (tokens written
+to the cache); both are part of `tokens_in`. Gym reads cache writes from OpenAI's
+`input_tokens_details.cache_write_tokens` (Responses) or `prompt_tokens_details.cache_write_tokens`
+(Chat Completions), and from Anthropic's `cache_creation_input_tokens`.
+
 After successful [`ng_trajectory`](/main/observability/rollout-evidence#which-artifact-to-read) projection, attached calls
 omit request and response payloads; those remain in `CaptureStore`. If projection fails, payloads
 remain attached and `gaps` includes `trajectory_projection_failed`. LabBench rows with the
@@ -340,6 +346,22 @@ policy_model:
     vllm_model:
       entrypoint: app.py
 ```
+
+### Trajectory schema selection
+
+The default trajectory schema is `"1.0"`. To retain qualified v2 tool timing, add:
+
+```yaml
+model_call_capture:
+  trajectory_schema_version: "2.0"
+```
+
+`observability_enabled` and `model_call_capture_dir` remain top-level settings as shown above.
+Direct callers can use `run_examples(..., trajectory_schema_version="2.0")`; an explicit argument
+wins over the configured version. Schema selection also applies with `enrich_results=False`:
+the default projects raw results to v1, while selecting v2 preserves producer evidence without
+upgrading legacy evidence or reading captures. Direct HTTP `/run` replies remain raw producer
+evidence; schema negotiation happens at collection or export.
 
 Model servers and `rollout_collection` must resolve `model_call_capture_dir` to the same location.
 For separate pods or nodes, mount that absolute path in every producer and the collector. Multiple

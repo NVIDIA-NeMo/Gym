@@ -4,6 +4,7 @@
 """Check the shared Gym test-data inventory without importing server dependencies."""
 
 import argparse
+import hashlib
 import os
 import shutil
 import tempfile
@@ -11,6 +12,8 @@ from pathlib import Path
 
 
 IFBENCH_COMMIT = "c6767a19bd82ac0536cab950f2f8f6bcc6fabe7c"  # pragma: allowlist secret
+SACREBLEU_MODEL = "sacrebleu/models/flores200sacrebleuspm"
+SACREBLEU_MODEL_SHA256 = "14bb8dfb35c0ffdea7bc01e56cea38b9e3d5efcdcb9c251d6b40538e1aab555a"
 REQUIRED_FILES = (
     f"ifbench/{IFBENCH_COMMIT}/REVISION",
     f"ifbench/{IFBENCH_COMMIT}/instructions.py",
@@ -25,12 +28,21 @@ REQUIRED_FILES = (
     "nltk_data/taggers/averaged_perceptron_tagger_eng/averaged_perceptron_tagger_eng.classes.json",
     "nltk_data/taggers/averaged_perceptron_tagger_eng/averaged_perceptron_tagger_eng.tagdict.json",
     "nltk_data/taggers/averaged_perceptron_tagger_eng/averaged_perceptron_tagger_eng.weights.json",
+    SACREBLEU_MODEL,
     "SHA256SUMS",
 )
 
 
+def check_sacrebleu_model(path: Path) -> None:
+    """Reject a tokenizer model that differs from the pinned FLORES-200 artifact."""
+    with path.open("rb") as stream:
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    if digest != SACREBLEU_MODEL_SHA256:
+        raise ValueError(f"FLORES-200 tokenizer checksum mismatch: {path}")
+
+
 def check_test_data(root: Path) -> None:
-    """Require nonempty files and the pinned IFBench revision in a mounted data root."""
+    """Require nonempty files, pinned IFBench source, and a verified tokenizer."""
     missing = [
         relative
         for relative in REQUIRED_FILES
@@ -40,6 +52,7 @@ def check_test_data(root: Path) -> None:
         raise FileNotFoundError(f"Missing or empty Gym test data under {root}: {', '.join(missing)}")
     if (root / REQUIRED_FILES[0]).read_text().strip() != IFBENCH_COMMIT:
         raise ValueError(f"IFBench revision mismatch under {root}")
+    check_sacrebleu_model(root / SACREBLEU_MODEL)
 
 
 def prepare_nltk_cache(root: Path, cache_dir: Path) -> Path:
@@ -61,6 +74,7 @@ def prepare_nltk_cache(root: Path, cache_dir: Path) -> Path:
 
 
 def main() -> None:
+    """Check the mounted bundle and optionally export GitHub test-data paths."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", nargs="?", default=os.environ.get("NEMO_GYM_TEST_DATA_ROOT"))
     parser.add_argument("--nltk-cache", type=Path, help="Prepare a private NLTK copy under this cache directory")
@@ -73,6 +87,7 @@ def main() -> None:
         target = prepare_nltk_cache(Path(args.root), args.nltk_cache)
         with Path(os.environ["GITHUB_ENV"]).open("a") as output:
             output.write(f"NLTK_DATA={target}\n")
+            output.write(f"SACREBLEU={Path(args.root).resolve() / 'sacrebleu'}\n")
         print(f"Prepared private NLTK cache: {target}")
 
 

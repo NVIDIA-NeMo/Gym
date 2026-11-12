@@ -177,9 +177,40 @@ When metrics export is active at client construction, Gym uses `QueueTimedTCPCon
 connection attempts and measure queue waits. Otherwise, Gym uses aiohttp's `TCPConnector` directly
 without collecting these metrics.
 
+### HTTP Timeouts and Retries Between Servers
+
+Two settings bound how long one call from a Gym server to another waits on an unreachable peer.
+
+```yaml
+global_aiohttp_sock_connect_timeout_seconds: 60
+global_aiohttp_internal_retry_budget_seconds: 600
+```
+
+`global_aiohttp_sock_connect_timeout_seconds` (default `60`) limits one TCP handshake. It does not
+count the wait for a free connection-pool slot, so a request queued behind a busy pool is not cut
+short. Total and read time stay unlimited unless the caller passes its own timeout, because a model
+generation or a `/run` episode can run for hours. A handshake that times out counts as a connection
+that was never made: the request cannot have been delivered, so it is retried like a refused
+connection, within the caller's limits and even where a dropped connection is not resent.
+
+`global_aiohttp_internal_retry_budget_seconds` (default `600`) is the retry budget of a call between
+Gym servers whose caller sets none of `_max_num_tries`, `_max_connection_retries` or a connection
+retry window. Such a call retries quietly through a peer that is restarting, and past the budget it
+raises the last error. Two clocks make up the budget:
+
+- **Connection errors.** The window opens at the first connection error and closes when the server
+  answers, so it bounds an unbroken run of failures. After the first connection error, the window
+  also bounds each attempt's wait for a free pool slot, not only the handshake.
+- **Other errors**, such as a timeout or a DNS failure. The cap is the time since the call started.
+
+A call that sets its own limit uses that limit and not the budget. Set the budget to `0` to retry
+without a time limit, as before. Model connection retries are separate: `connection_retry_timeout_s`
+on a model client stays unset by default.
+
 ### Listen Backlog
 
-`uvicorn_backlog` sets how many new connections the kernel queues for each Gym server before the server accepts them.
+`uvicorn_backlog` sets how many new connections the kernel queues for each Gym server before the server accepts them
+(for each worker, on a server that uses `uvicorn_reuse_port`).
 It applies to the head server, every agent, model, environment, and resources server, and the private sockets that
 the workers of a multi-worker server use to forward requests to each other. The default is 16384:
 
@@ -217,6 +248,47 @@ Only list reverse proxies you control. Trusting a loopback address such as `127.
 only a proxy running on that address. Deployments that previously relied on Uvicorn's implicit loopback trust must set
 these options explicitly.
 </Warning>
+
+### Per-Worker Listening Sockets
+
+A server with `num_workers` above 1 runs that many Uvicorn worker processes. By default they share one listening
+socket, and whichever worker wakes first accepts the next connection. Under load this spreads connections unevenly,
+and because clients keep connections alive, a few workers can end up serving most of the traffic while the rest idle;
+on a busy model server the overloaded workers then delay every call they hold.
+
+On Linux, top-level `uvicorn_reuse_port` gives every worker its own listening socket on the server's port
+(`SO_REUSEPORT`), and the kernel spreads new connections evenly across the workers:
+
+```yaml
+uvicorn_reuse_port: true
+```
+
+The setting applies to every multi-worker server and has no effect on single-worker servers. A multi-worker server
+fails at startup on platforms other than Linux. To turn it on for one server only, or to exempt one server, set
+`uvicorn_reuse_port` on that server; an explicit `true` or `false` there wins over the top-level key:
+
+```yaml
+policy_model:
+  responses_api_models:
+    vllm_model:
+      num_workers: 32
+      uvicorn_reuse_port: true
+```
+
+The kernel balances connections, not requests, so a few long-lived keep-alive connections can still load one worker
+more than the others. Each worker queues up to `uvicorn_backlog` connections on its own socket. When a worker exits,
+the connections waiting in its queue are reset rather than handed to another worker, unless
+`net.ipv4.tcp_migrate_req=1` is set in the server's network namespace (Linux 5.14 or later; it covers TCP over IPv6
+too). In a container with its own network namespace, such as a Kubernetes pod, the host's value does not apply. A
+worker that stops responding keeps receiving its share of new connections until Uvicorn's health check replaces it
+after `uvicorn_timeout_worker_healthcheck` seconds, and a worker whose event loop is blocked while its process still
+answers the health check is not replaced. While every worker is down, new connections are refused instead of queued.
+The server holds its address from start-up, so within about a minute of a server that ran on the same port without
+`uvicorn_reuse_port`, while that server's closed connections are in TIME_WAIT, the start fails with "Address already in
+use".
+
+With checkpointing on, `/run` is never resent, so a reset connection in a dead worker's queue fails that episode
+attempt. Prefer enabling the setting only on the servers that need it, such as the model server.
 
 ### Model Server Fields
 
@@ -427,6 +499,59 @@ Metrics and config are still exported. The old name `upload_rollouts_to_wandb` i
 <Note>
 Exporting is best-effort. Errors that happen during export (e.g., unavailable server) are reported as warnings and the run continues.
 </Note>
+
+---
+
+## Harbor image builds
+
+A task folder whose Dockerfile needs a build (see [Dockerfile modes](/main/data/task-folders/task-folder-format#dockerfile-modes))
+is built once at prepare, inside `gym eval run` and `gym dataset validate`. The top-level `builds:` block configures
+those builds. Set it in `env.yaml`, a `--config` file or with `++builds.<key>=<value>`:
+
+```yaml
+builds:
+  tool: buildah
+  repository: registry.example.com:5005/my-team/harbor-builds
+  platform: linux/amd64
+  enabled: true
+  force: false
+```
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `tool` | detected | `buildah`, `podman` or `docker`. With a repository, the first of the three on `PATH`; without one, only `docker` is accepted. |
+| `repository` | `$NEMO_GYM_BUILD_REPOSITORY` | Registry path that built images are pushed under: `<repository>/hb__<hash>` for a task's image, `hb__<hash>-<service>` for a Compose sidecar and `hb__<hash>-verifier` for a separate verifier built from `tests/`. Unset, images stay in the local Docker daemon, which only the Docker sandbox provider can start. OpenSandbox needs pushed images. |
+| `platform` | `linux/amd64` | Platform asked of the tool, and the one prepare records base and Compose images for, even when nothing is built. Set it to your sandboxes' platform: the server refuses a Compose task whose images were recorded for another. An image that comes out for another platform is refused, and so is an amd64 level above the baseline, such as `linux/amd64/v3`. |
+| `enabled` | `true` | `false` never builds: a task that needs a build runs only on an image an earlier prepare recorded that fits this run. Others are listed in `skipped.json`, and `gym eval run` then stops unless you pass `--skip-unloadable`. |
+| `force` | `false` | Also build the Dockerfile of a task that declares `docker_image`, and run the built image, as Harbor's `--force-build` does. |
+
+The hash is Harbor's hash of the task's `environment/` folder (of `tests/` for a separate verifier), so identical
+folders share one image. The tool pulls base images and pushes built ones with its own login
+(`buildah login`, `podman login` or `docker login`).
+
+- **buildah** runs as the user who runs Gym, with `chroot` isolation and the `vfs` storage driver, under
+  `/raid/scratch/<user>/nemo-gym-buildah` when `/raid/scratch` exists, else in the system temp folder. It reads each
+  build context (`environment/`, or a Compose service's `build.context`) in place inside the dataset folder. Its
+  heredoc support fails on Lustre, so keep a dataset whose Dockerfiles use heredocs on local disk while it builds.
+- **buildah and podman** run with Gym's own `containers.conf`, layered over the host's, and `registries.conf`, which
+  replaces the host's main one, so registry mirrors set there no longer apply unless you export your own
+  `CONTAINERS_REGISTRIES_CONF`. They build Docker-format images.
+  Dockerfile heredocs need a tool built with openshift/imagebuilder 1.2.6 or later (upstream buildah 1.33.0 or later);
+  Ubuntu 24.04's packaged buildah 1.33.7 and podman 4.9.3 do not qualify. Prepare checks the tool before
+  the first heredoc build. If the check fails, tasks whose Dockerfiles use heredocs are left out, with the remedy as
+  their reason in `skipped.json`, and `gym eval run` stops unless you pass `--skip-unloadable`.
+- **docker** builds through `docker compose build`, so it needs the Compose v2 plugin (`docker-compose-plugin`).
+- **Proxies.** A proxy the build tool inherits can answer 403 to the registry, which fails the base-image pull or the
+  push. Add the registry host to `no_proxy` and `NO_PROXY`, including in the tool's own proxy configuration.
+
+## Harbor environment variables
+
+| Variable | Description |
+|----------|-------------|
+| `NEMO_GYM_DATASETS_DIR` | Where pulled task-folder datasets live. Default: `environments/harbor/` in the Gym checkout, or under the working directory for a package install. See [Task Folder Files and Storage](/main/reference/task-folder-storage#pulled-datasets). |
+| `NEMO_GYM_BUILD_REPOSITORY` | Default for `builds.repository`. |
+| `NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING` | Run a harness that a dataset's `[gym] allowed_agents` does not list, like `--allow-unsupported-pairing`. |
+| `CONTAINERS_CONF_OVERRIDE`, `CONTAINERS_REGISTRIES_CONF` | Your own buildah and podman configuration. When set, Gym leaves them alone instead of supplying its own. |
 
 ---
 

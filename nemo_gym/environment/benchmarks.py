@@ -67,7 +67,7 @@ class BenchmarkConfig(BaseModel):
             )
 
         # `strict=True` (default): unset `???`/`${...}` values are errors, as non-listing workflows expect.
-        # `strict=False`: listing-only tolerance for those runtime-only values (see the helper's docstring).
+        # `strict=False`: a listing-only offline parse that tolerates those runtime-only values (see the helper).
         if strict:
             global_config_dict = GlobalConfigDictParser().parse_no_environment(
                 initial_global_config_dict=initial_config_dict
@@ -220,7 +220,7 @@ __getattr__ = moved_attr_getter(
     __name__,
     {
         "list_benchmarks": "nemo_gym.cli.eval",
-        "PrepareBenchmarkConfig": "nemo_gym.cli.eval",
+        "PrepareBenchmarkConfig": "nemo_gym.environment.benchmark_preparation",
         "prepare_benchmark": "nemo_gym.cli.eval",
     },
 )

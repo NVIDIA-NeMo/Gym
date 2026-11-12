@@ -23,7 +23,12 @@ import pytest
 # (old_module, old_name, new_module, new_name) for each relocated symbol.
 MOVED_SYMBOLS = [
     ("nemo_gym.benchmarks", "list_benchmarks", "nemo_gym.cli.eval", "list_benchmarks"),
-    ("nemo_gym.benchmarks", "PrepareBenchmarkConfig", "nemo_gym.cli.eval", "PrepareBenchmarkConfig"),
+    (
+        "nemo_gym.benchmarks",
+        "PrepareBenchmarkConfig",
+        "nemo_gym.environment.benchmark_preparation",
+        "PrepareBenchmarkConfig",
+    ),
     ("nemo_gym.benchmarks", "prepare_benchmark", "nemo_gym.cli.eval", "prepare_benchmark"),
     (
         "nemo_gym.dataset_orchestrator",
@@ -56,7 +61,7 @@ MOVED_SYMBOLS = [
     ("nemo_gym.rollout_collection", "collect_rollouts", "nemo_gym.cli.eval", "collect_rollouts"),
     ("nemo_gym.rollout_collection", "aggregate_rollouts", "nemo_gym.cli.eval", "aggregate_rollouts"),
     ("nemo_gym.train_data_utils", "prepare_data", "nemo_gym.cli.dataset", "prepare_data"),
-    ("nemo_gym.cli", "RunHelper", "nemo_gym.orchestration.server_supervisor", "RunHelper"),
+    ("nemo_gym.cli", "RunHelper", "nemo_gym.server_runtime.supervisor.server_supervisor", "RunHelper"),
     ("nemo_gym.cli", "RunConfig", "nemo_gym.cli.env", "RunConfig"),
     ("nemo_gym.cli", "TestConfig", "nemo_gym.cli.env", "TestConfig"),
     ("nemo_gym.cli", "TestAllConfig", "nemo_gym.cli.env", "TestAllConfig"),

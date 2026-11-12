@@ -22,6 +22,8 @@ The participant order is a Gym invariant:
 - ``forget`` runs in the same order.
   A retired attempt stays refused everywhere until then:
   a request its caller sent just before the caller's retire can reach a server after that server's retire finished.
+- ``release`` fans out to every participant at once, best effort: a participant that fails is named in the reply,
+  and the next release catches up.
 
 What the controller still owns:
 
@@ -44,9 +46,13 @@ What the controller still owns:
   Once a rollout it retired or restored is finished for good, so nothing of any of its attempts can still run,
   the controller calls ``forget`` for it.
   Until then every participant keeps one entry for the rollout.
+- Releasing.
+  After every checkpoint it publishes, once it has pruned old ones, the controller calls ``release`` with every
+  checkpoint it may still restore, so servers delete what other checkpoints kept outside Gym, such as sandbox
+  snapshots; and with none once the run is complete for good.
 
 Restore is all-or-nothing: if any participant fails, the replacement attempts are retired everywhere,
-which frees the restored state, every participant is resumed,
+which releases the restored state, every participant is resumed,
 and the controller restarts those rollouts from their inputs.
 """
 
@@ -97,6 +103,9 @@ class Participant:
     kind: ParticipantKind
     # What the server can capture; a ``restart_only`` server's rollouts start over after a crash.
     mode: CheckpointMode
+    # Whether the server's checkpoints keep state outside Gym, such as sandbox snapshots, that only ``release``
+    # deletes: a controller that never releases leaves it behind.
+    keeps_external_state: bool = False
 
 
 @dataclass(frozen=True)
@@ -172,7 +181,15 @@ async def discover(client: ServerClient, *, auth_token: str) -> Participants:
                 raise ValueError(f"unknown participant kind {kind!r}")
             if mode not in get_args(CheckpointMode):
                 raise ValueError(f"participant reports no checkpoint mode (got {mode!r})")
-            members.append(Participant(server_name=name, kind=kind, mode=mode))
+            members.append(
+                Participant(
+                    server_name=name,
+                    kind=kind,
+                    mode=mode,
+                    # A server from before the field existed keeps nothing outside Gym.
+                    keeps_external_state=bool(status.get("keeps_external_state", False)),
+                )
+            )
         except TimeoutError:
             failures[name] = f"no status reply within {_DISCOVER_TIMEOUT_SECONDS:g} seconds"
         except Exception as error:
@@ -224,7 +241,7 @@ async def renew(participants: Participants, checkpoint_id: str, *, deadline_ts: 
 async def retire(
     participants: Participants, checkpoint_id: str, episode_ids: Iterable[EpisodeId], *, deadline_ts: float
 ) -> None:
-    """Stop these attempts everywhere and free their state; their rollouts restart from input.
+    """Stop these attempts everywhere and release their state; their rollouts restart from input.
 
     Refused while a checkpoint is open: resume first.
     """
@@ -254,6 +271,37 @@ async def forget(
         with _coordinating("forget", checkpoint_id, participants) as span:
             span.set(rollouts=len(body["rollout_ids"]))
             await _in_retire_order(participants, "forget", body, deadline_ts)
+
+
+async def release(
+    participants: Participants, checkpoint_id: str, kept: Iterable[str], *, deadline_ts: float
+) -> dict[str, str]:
+    """Tell every participant which checkpoints the controller may still restore, so each deletes external state,
+    such as sandbox snapshots, that only other checkpoints referred to.
+
+    Call it after publishing a checkpoint and pruning old ones, with ``kept`` every checkpoint the controller
+    could restore, the one just published included.
+    The list must be complete: a checkpoint it leaves out can no longer be restored.
+    Pass an empty list only once the run is complete for good.
+    ``checkpoint_id`` names the latest checkpoint the controller resumed, published or aborted: the one just
+    published after a publication, and whichever came last for the release that ends the run.
+    Refused while a checkpoint is open: resume first.
+    A participant refuses a release as stale once it committed or restored a checkpoint after the one named,
+    or, having restored one, when it never resumed the one named.
+
+    Best effort: every participant is asked, and the failures are returned by server name instead of raised.
+    What a failed release left behind is still recorded, and the next release deletes it.
+    """
+    body = {"checkpoint_id": checkpoint_id, "deadline_ts": deadline_ts, "kept": sorted(set(kept))}
+    with _coordinating("release", checkpoint_id, participants) as span:
+        span.set(kept=len(body["kept"]))
+        try:
+            await _fan_out(participants, participants.members, "release", body, deadline_ts)
+        except CoordinationError as error:
+            LOGGER.warning("checkpoint %s: %s", checkpoint_id, error)
+            span.set(failures=len(error.failures))
+            return error.failures
+        return {}
 
 
 async def _in_retire_order(
@@ -321,7 +369,7 @@ async def restore(
         LOGGER.warning("checkpoint %s restore failed; retiring the restored state everywhere", checkpoint_id)
         cleanup_deadline = max(deadline_ts, time.time() + 30)
         try:
-            # Retiring the replacement attempts frees their restored state,
+            # Retiring the replacement attempts releases their restored state,
             # so nothing can continue from a partial restore.
             await retire(
                 participants, checkpoint_id, [next_attempt(e) for e in episode_ids], deadline_ts=cleanup_deadline

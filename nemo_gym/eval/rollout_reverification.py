@@ -25,8 +25,9 @@ from asyncio import Future, Semaphore
 from collections import Counter, defaultdict
 from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass
+from math import isfinite
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Literal, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Literal, Optional, Tuple, Union
 
 import orjson
 from omegaconf import DictConfig
@@ -105,6 +106,8 @@ from nemo_gym.utils.tqdm import tqdm
 # Todo after merging branch `edobrowolska/judge_failures_v2`: replace this by importing from judge.py
 JUDGE_FAILED_FAILURE_CLASS = "judge_failed"
 ATIF_PROVENANCE_KEY = "_ng_atif_provenance"
+_SOURCE_RUN_ID_KEY = "_ng_reverification_source_run_id"
+_SOURCE_ANSWER_KEY = "_ng_reverification_source_answer"
 ATIF_NO_PERSIST_FAILURE_CLASS = "kill_shaped"
 _CONFIG_BOOL_ADAPTER = TypeAdapter(bool)
 
@@ -598,6 +601,14 @@ def _reject_multistage_recovery_source(rollouts_jsonl_fpath: Path) -> None:
                 )
 
 
+def _project_reverification_row(row: Dict) -> Dict:
+    """Retain source provenance without claiming ownership of its recovery history."""
+    result = dict(row)
+    if RUN_ID_KEY in result:
+        result[_SOURCE_RUN_ID_KEY] = result.pop(RUN_ID_KEY)
+    return result
+
+
 def _seed_output_with_successes(
     successes_fpath: Path, output_fpath: Path, exclude: frozenset[tuple[int, int]] = frozenset()
 ) -> set[tuple[int, int]]:
@@ -609,8 +620,17 @@ def _seed_output_with_successes(
         with output_fpath.open("rb") as f:
             present = {key for line in f if (key := _parse_output_line_key(line)) is not None}
     seeded = 0
+    source_store = RolloutStore.read(successes_fpath, import_legacy=False)
     with successes_fpath.open("rb") as src, output_fpath.open("ab") as dst:
-        for line in src:
+        selected = (
+            (
+                orjson.dumps(_project_reverification_row(record.read())) + b"\n"
+                for record in source_store.selected_records("success").values()
+            )
+            if source_store is not None
+            else src
+        )
+        for line in selected:
             if not line.strip():
                 continue
             key = _parse_output_line_key(line)
@@ -640,6 +660,8 @@ def _yield_inputs_and_rollouts_paired(
     rollouts_jsonl_fpath: Path,
     limit: Optional[int] = None,
     rollout_predicate: Optional[Callable[[Dict[str, Any]], bool]] = None,
+    *,
+    selected_rollouts: Optional[Iterable[Dict]] = None,
 ) -> "Iterator[InputRolloutPair]":
     inputs_by_key = {}
     with open(materialized_inputs_jsonl_fpath) as m_f:
@@ -648,11 +670,14 @@ def _yield_inputs_and_rollouts_paired(
             inputs_by_key[(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])] = r
     # `limit` bounds the number of pairs actually YIELDED (post-predicate)
     n_yielded = 0
-    with open(rollouts_jsonl_fpath) as r_f:
-        for line in tqdm(r_f, desc="Reading rollouts"):  # never holds the whole file
-            if limit is not None and n_yielded >= limit:
+    with nullcontext(selected_rollouts) if selected_rollouts is not None else open(rollouts_jsonl_fpath) as r_f:
+        rows = iter(tqdm(r_f, desc="Reading rollouts"))
+        while limit is None or n_yielded < limit:
+            try:
+                line = next(rows)
+            except StopIteration:
                 break
-            rollout_row = orjson.loads(line)
+            rollout_row = line if selected_rollouts is not None else orjson.loads(line)
             if rollout_predicate is not None and not rollout_predicate(rollout_row):
                 continue
             input_row = inputs_by_key.get((rollout_row[TASK_INDEX_KEY_NAME], rollout_row[ROLLOUT_INDEX_KEY_NAME]))
@@ -746,8 +771,10 @@ def _build_verify_payload(pair: InputRolloutPair) -> Dict:
         payload = row_keys | task_data | fields | {"response": response}
     # File-backed verifiers need the artifact path produced by the rollout, and
     # adaptive comparison needs the exact reference subset used for that row.
-    # Preserve only verifier inputs, not rewards or failure bookkeeping.
-    for key in ("deliverables_dir", "reference_ids"):
+    # Preserve only verifier inputs, not rewards or failure bookkeeping. SciCode's /verify grades the accumulated
+    # per-sub-step solutions an agent sent, which a masked row keeps (the response holds only the last step), with the
+    # usage accounting that travels through the verifier.
+    for key in ("deliverables_dir", "reference_ids", "solutions", "token_usage_version", "step_usage"):
         if key in pair.rollout:
             payload[key] = pair.rollout[key]
     if replay_patch:
@@ -755,10 +782,74 @@ def _build_verify_payload(pair: InputRolloutPair) -> Dict:
         payload["saved_model_patch_sha256"] = pair.rollout["model_patch_sha256"]
     # The Environment Server that ran the rollout routes the row and groups its result as in the run; the
     # materialized input never carries it. It is not sent to /verify (see _IDENTITY_KEYS).
-    for key in _IDENTITY_KEYS:
+    for key in (*_IDENTITY_KEYS, _SOURCE_RUN_ID_KEY, _SOURCE_ANSWER_KEY):
         if key in pair.rollout:
             payload[key] = pair.rollout[key]
     return payload
+
+
+def _rescoring_source_answer(row: Dict, run_id: str) -> dict[str, str | int]:
+    """Bind a re-score to its saved answer, independently of changes to the source grade."""
+    return {
+        "run_id": run_id,
+        "rollout_id": logical_rollout_id(row),
+        "attempt": row.get(ATTEMPT_INDEX_KEY_NAME, 0),
+        "task_index": row[TASK_INDEX_KEY_NAME],
+        "rollout_index": row[ROLLOUT_INDEX_KEY_NAME],
+        "answer_sha256": hashlib.sha256(orjson.dumps(_rollout_response(row), option=orjson.OPT_SORT_KEYS)).hexdigest(),
+    }
+
+
+def _selected_rescoring_rows(store: RolloutStore) -> Iterator[Dict]:
+    """Read answers on demand so a bounded re-score does not materialize the whole run."""
+    for record in store.selected_records("success").values():
+        row = record.read()
+        yield row | {
+            _SOURCE_RUN_ID_KEY: store.manifest.run_id,
+            _SOURCE_ANSWER_KEY: _rescoring_source_answer(row, store.manifest.run_id),
+        }
+
+
+def _validate_rescoring_cache(store: RolloutStore, output_fpaths: OutputPaths) -> None:
+    """Refuse stale successes and failure-budget entries before cache filtering or any dispatch."""
+    selected = store.selected_records("success")
+    # Repeated cached failures share an answer: retain its small binding, never its trajectory.
+    bindings: dict[tuple[str, int], dict[str, str | int]] = {}
+    for path in (output_fpaths.output, output_fpaths.failures):
+        if not path.exists():
+            continue
+        with path.open("rb") as file:
+            for line_number, line in enumerate(file, 1):
+                if not line.strip():
+                    continue
+                message = (
+                    f"Cached re-scoring row in {path}:{line_number} is not bound to the currently selected "
+                    "source answer. Choose a fresh output path; saved artifacts were not changed."
+                )
+                try:
+                    cached = orjson.loads(line)
+                except orjson.JSONDecodeError as error:
+                    raise ConfigError(message) from error
+                binding = cached.get(_SOURCE_ANSWER_KEY) if isinstance(cached, dict) else None
+                if not isinstance(binding, dict):
+                    raise ConfigError(message)
+                identity, attempt = binding.get("rollout_id"), binding.get("attempt")
+                if not isinstance(identity, str) or type(attempt) is not int:
+                    raise ConfigError(message)
+                key = (identity, attempt)
+                record = selected.get(key)
+                if record is None:
+                    raise ConfigError(message)
+                if key not in bindings:
+                    bindings[key] = _rescoring_source_answer(record.read(), store.manifest.run_id)
+                expected = bindings[key]
+                if (
+                    binding != expected
+                    or cached.get(_SOURCE_RUN_ID_KEY) != store.manifest.run_id
+                    or cached.get(TASK_INDEX_KEY_NAME) != expected["task_index"]
+                    or cached.get(ROLLOUT_INDEX_KEY_NAME) != expected["rollout_index"]
+                ):
+                    raise ConfigError(message)
 
 
 def _prepare_payloads(
@@ -769,11 +860,17 @@ def _prepare_payloads(
     limit: Optional[int] = None,
     rollout_predicate: Optional[Callable[[Dict[str, Any]], bool]] = None,
     retry_terminal_timeouts: bool = False,
+    *,
+    selected_rollouts: Optional[Iterable[Dict]] = None,
 ) -> List[Dict]:
     all_payloads = [
         _build_verify_payload(pair)
         for pair in _yield_inputs_and_rollouts_paired(
-            materialized_inputs_jsonl_fpath, rollouts_jsonl_fpath, limit=limit, rollout_predicate=rollout_predicate
+            materialized_inputs_jsonl_fpath,
+            rollouts_jsonl_fpath,
+            limit=limit,
+            rollout_predicate=rollout_predicate,
+            **({"selected_rollouts": selected_rollouts} if selected_rollouts is not None else {}),
         )
     ]
     if resume_from_cache:
@@ -854,7 +951,10 @@ def _run_verification_payloads(
             rs_name = _rs_for_row(row, agent_to_rs, server_client.global_config_dict)
             check_saved_patch_replay(row, rs_name, server_client.global_config_dict)
             request_row = {
-                key: value for key, value in row.items() if key != ATIF_PROVENANCE_KEY and key not in _IDENTITY_KEYS
+                key: value
+                for key, value in row.items()
+                if key not in (ATIF_PROVENANCE_KEY, _SOURCE_RUN_ID_KEY, _SOURCE_ANSWER_KEY)
+                and key not in _IDENTITY_KEYS
             }
             # A /verify request that may have been delivered is never resent: the verifier may already have graded it
             # (and called its judge). A refused connection is still retried. A lost outcome fails this run; with
@@ -1014,15 +1114,21 @@ async def _call_aggregate_metrics(
         agent_results.setdefault((agent_name, rs_name), []).append(result)
 
     async def _fetch_agent_metrics(agent_name: str, rs_name: str, agent_result_list: List[Dict]) -> Dict:
-        # Strip heavyweight fields before sending, but preserve response.usage
+        # Preserve usage and truncation metadata: policy token-limit failures score zero, not as judge failures.
         stripped = []
         for r in agent_result_list:
             entry = {
                 k: v for k, v in r.items() if k not in ("response", "responses_create_params", ATIF_PROVENANCE_KEY)
             }
-            usage = (r.get("response") or {}).get("usage")
-            if usage:
-                entry["response"] = {"usage": usage}
+            response = r.get("response") or {}
+            response_metadata = {
+                key: response[key] for key in ("usage", "incomplete_details") if response.get(key) is not None
+            }
+            context_marker = (response.get("metadata") or {}).get("nemo_gym_context_window_exceeded")
+            if context_marker is not None:
+                response_metadata["metadata"] = {"nemo_gym_context_window_exceeded": context_marker}
+            if response_metadata:
+                entry["response"] = response_metadata
             stripped.append(entry)
 
         agg_request = AggregateMetricsRequest(verify_responses=stripped)
@@ -1517,6 +1623,20 @@ def settle_rejudgments(source: Path, judged: List[Dict], binding: Dict[str, Any]
     return settled
 
 
+def _validate_rescored_completion(result: object) -> None:
+    """Keep a malformed verifier reply out of a managed source's separate scoring output."""
+    if not isinstance(result, dict):
+        raise ConfigError("The verifier must return a JSON object.")
+    if result.get(NG_FAILURE_CLASS_KEY) is not None or result.get(NG_NO_PERSIST_KEY):
+        return
+    try:
+        scored = type(result.get("reward")) in (int, float) and isfinite(result["reward"])
+    except OverflowError:
+        scored = False
+    if not isinstance(result.get("response"), dict) or not scored:
+        raise ConfigError("A completed verifier reply requires a response object and a finite numeric reward.")
+
+
 def _ungraded_reverification(result: Dict[str, Any]) -> bool:
     """Whether a re-verification answered without a usable grade: a failure, a mask or no finite reward."""
     reward = result.get("reward")
@@ -1671,6 +1791,7 @@ class RolloutReverificationHelper(BaseModel):
         # whose superseded rows are earlier judge failures of the same attempt may be re-judged again.
         if (
             config.rollouts_jsonl_fpath is not None
+            and config.judge_failed_only
             and not config.settle_into_source
             and not raw_outcomes_are_selected(_resolve_under_cwd_or_install(config.rollouts_jsonl_fpath))
         ):
@@ -1741,6 +1862,11 @@ class RolloutReverificationHelper(BaseModel):
             _start_over_without_cache(config, output_fpaths)
             reverify_source_fpath = rollouts_jsonl_fpath
             rollout_predicate = None
+            source_store = (
+                RolloutStore.read(rollouts_jsonl_fpath, import_legacy=False) if not config.judge_failed_only else None
+            )
+            if source_store is not None:
+                _validate_rescoring_cache(source_store, output_fpaths)
 
             if config.judge_failed_only:
                 print(_RECOVERY_TWO_SOURCES_WARNING)
@@ -1786,6 +1912,7 @@ class RolloutReverificationHelper(BaseModel):
                 config.limit,
                 rollout_predicate=rollout_predicate,
                 retry_terminal_timeouts=config.retry_terminal_timeouts,
+                **({"selected_rollouts": _selected_rescoring_rows(source_store)} if source_store is not None else {}),
             )
             if config.settle_into_source and settle_binding["saved_results"]:
                 # The bound saved results are read from the run's results, exactly as bound.
@@ -1851,6 +1978,8 @@ class RolloutReverificationHelper(BaseModel):
         try:
             for future in _run_verification_payloads(payloads_to_reverify, semaphore=semaphore):
                 row, result = await future
+                if _SOURCE_RUN_ID_KEY in row:
+                    _validate_rescored_completion(result)
 
                 result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
                 result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
@@ -1863,8 +1992,9 @@ class RolloutReverificationHelper(BaseModel):
                     result[TASK_SOURCE_KEY_NAME] = row[TASK_SOURCE_KEY_NAME]
                 if SKILLS_REF_KEY_NAME in row:
                     result[SKILLS_REF_KEY_NAME] = row[SKILLS_REF_KEY_NAME]
-                if ATIF_PROVENANCE_KEY in row:
-                    result[ATIF_PROVENANCE_KEY] = row[ATIF_PROVENANCE_KEY]
+                for key in (ATIF_PROVENANCE_KEY, _SOURCE_RUN_ID_KEY, _SOURCE_ANSWER_KEY):
+                    if key in row:
+                        result[key] = row[key]
 
                 no_persist = bool(result.get(NG_NO_PERSIST_KEY))
                 failure_class = result.get(NG_FAILURE_CLASS_KEY)

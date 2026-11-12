@@ -34,6 +34,7 @@ from docker.models.containers import ExecResult
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
 from nemo_gym.core import (
+    SESSION_LOST,
     VERIFIER_ERROR,
     FailureBoundary,
     NgFailureEvent,
@@ -54,10 +55,14 @@ from nemo_gym.server_runtime import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    SimpleResourcesServer,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
+    lost_session_verification,
 )
 from nemo_gym.trajectory import SandboxObservation
-from nemo_gym.utils import bounded_text
+from nemo_gym.utils import bounded_text, is_nemo_gym_fastapi_entrypoint
+from resources_servers.swebench.sandbox_sessions import SandboxSessionResourcesServer
 from resources_servers.swebench.swebench_patches import (
     patch_swebench_multilingual_golden_patch_pass,
     patch_swebench_multilingual_log_parsing,
@@ -278,6 +283,7 @@ class DockerContainer(BaseModel):
 
         return SandboxObservation(
             role="verifier",
+            stage="verification",
             provider=handle.provider_name if handle is not None else None,
             sandbox_id=handle.sandbox_id if handle is not None else None,
             outcome=outcome,
@@ -322,17 +328,21 @@ def strip_binary_diffs(patch: str) -> str:
     return "".join(sec for sec in sections if not re.search(r"(?m)^Binary files .* differ$", sec))
 
 
-class SwebenchResourcesServer(SimpleResourcesServer):
+class SwebenchResourcesServer(SandboxSessionResourcesServer):
     config: SwebenchResourcesServerConfig
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
 
-        self._session_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
         self._session_id_to_seed_head: Dict[str, str] = dict()
 
     async def _create_sandbox(
-        self, test_spec: TestSpec, *, test_assets: Sequence[SWEBenchTestAsset] = ()
+        self,
+        test_spec: TestSpec,
+        *,
+        test_assets: Sequence[SWEBenchTestAsset] = (),
+        task_session_id: str | None = None,
+        verifier_session_id: str | None = None,
     ) -> AsyncSandbox:
         """Start a sandbox from the instance image. ``test_assets`` are uploaded for the evaluation script only: the
         agent's sandbox must not hold the hidden tests' reference files."""
@@ -369,6 +379,10 @@ class SwebenchResourcesServer(SimpleResourcesServer):
             provider_options=self.config.sandbox_config.get("provider_options", {}),
         )
         eval_sandbox = AsyncSandbox(resolved_sandbox_provider)
+        if task_session_id is not None:
+            self._session_id_to_sandbox[task_session_id] = eval_sandbox
+        if verifier_session_id is not None:
+            self._verifier_sandboxes[verifier_session_id] = eval_sandbox
 
         async def _run_setup(sandbox: AsyncSandbox) -> None:
             await patch_swebench_multilingual_sandbox(
@@ -390,8 +404,10 @@ class SwebenchResourcesServer(SimpleResourcesServer):
 
     def _make_test_spec(self, body: SWEBenchInstanceRequest) -> TestSpec:
         test_spec = make_test_spec(
-            # This accepts a SWEbenchInstance which is identically our body.
-            body.model_dump(),
+            # This accepts a SWEbenchInstance: our body's instance fields, without the agent's request and response.
+            # SWE-bench reads some optional keys whenever they are present, such as image_assets for JavaScript,
+            # so an unset optional field is left out rather than sent as null.
+            body.model_dump(include=set(SWEBenchInstanceRequest.model_fields), exclude_none=True),
             namespace="swebench",  # Dockerhub namespace
             instance_image_tag=LATEST,
             env_image_tag=LATEST,
@@ -399,14 +415,46 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         restore_test_assets_from_staging(test_spec, body.test_assets())
         return test_spec
 
-    async def seed_session(self, request: Request, body: SWEBenchSeedSessionRequest) -> SWEBenchSeedSessionResponse:
+    async def seed_session(
+        self, request: Request, body: SWEBenchSeedSessionRequest | ResourcesSeedSessionRequest
+    ) -> SWEBenchSeedSessionResponse | ResourcesSeedSessionResponse:
+        """Create the task sandbox for an agent-run seed's instance body or an Environment Server's episode seed.
+
+        An episode seed returns ``sandbox_access`` with the serialized task sandbox and the image's working
+        directory; an agent-run seed returns the sandbox handle.
+        """
+        if isinstance(body, ResourcesSeedSessionRequest):
+            return await self.seed_task_sandbox_session(request, body, SWEBenchInstanceRequest)
+        session_id = request.session[SESSION_ID_KEY]
+        async with self._locked_task_session(session_id) as record:
+            if record.seed is not None or session_id in self._task_session_fences:
+                raise ResourcesSessionConflictError("An agent-run seed cannot replace an episode session")
+            await self._stop_task_sandbox(session_id)
+            try:
+                record.workdir = await self._start_task_sandbox(session_id, body)
+            except BaseException:
+                await self._stop_failed_seed_sandbox(session_id)
+                raise
+            return SWEBenchSeedSessionResponse(
+                sandbox_handle=self._session_id_to_sandbox[session_id]._handle.sandbox_id
+            )
+
+    async def _start_task_sandbox(self, session_id: str, body: SWEBenchInstanceRequest) -> str:
+        """Create the task sandbox for ``session_id``, apply the anti-cheating setup, and return its WORKDIR.
+
+        The agent works where verify later extracts the patch: the image's WORKDIR.
+        """
         test_spec = self._make_test_spec(body)
-        eval_sandbox = await self._create_sandbox(test_spec)
-        self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = eval_sandbox
+        eval_sandbox = await self._create_sandbox(test_spec, task_session_id=session_id)
+        self._session_id_to_sandbox[session_id] = eval_sandbox
+
+        pwd = await eval_sandbox.exec("pwd")
+        wd = (pwd.stdout or "").strip()
+        if pwd.error_type is not None or pwd.return_code != 0 or not wd.startswith("/"):
+            raise RuntimeError(f"Could not resolve the task sandbox workdir: {pwd.stderr}")
 
         if self.config.apply_anti_cheating:
             # Remove the current Git repo's future history beyond the current commit to prevent the model from cheating.
-            wd = (await eval_sandbox.exec("pwd")).stdout.strip()
             anti_cheat_setup_fpath = Path(__file__).parent / "anti_cheat_setup.sh"
             await eval_sandbox.upload(anti_cheat_setup_fpath, f"{wd}/anti_cheat_setup.sh")
             result = await eval_sandbox.exec(
@@ -424,60 +472,68 @@ Stderr:
         # the task's base commit if git is unavailable.
         head_result = await eval_sandbox.exec("git rev-parse HEAD")
         seed_head = (head_result.stdout or "").strip() if head_result.return_code == 0 else ""
-        self._session_id_to_seed_head[request.session[SESSION_ID_KEY]] = seed_head or test_spec.base_commit
+        self._session_id_to_seed_head[session_id] = seed_head or test_spec.base_commit
 
-        return SWEBenchSeedSessionResponse(sandbox_handle=eval_sandbox._handle.sandbox_id)
+        return wd
+
+    def _forget_task_sandbox_state(self, session_id: str) -> None:
+        self._session_id_to_seed_head.pop(session_id, None)
 
     async def verify(self, request: Request, body: SWEBenchVerifyRequest) -> SWEBenchVerifyResponse:
-        """
-        Key requirements:
-        1. Extract the model_patch from the input container
-            Proposal
-                1. Spinup a fresh container (need this anyways for running eval)
-                2. pwd in the fresh container (defaults to WORKDIR)
-                3. cd into WORKDIR in the input container
-                4. extract the patch via git
-            Notes
-                1. DeepSWE expects the model to commit. That will go in the DeepSWE resources server and not this one.
-        2. Docker Client - Make a mock client class here that wraps our sandbox client.
-        3. Harnesses like OpenCode open a new terminal rather than reusing the existing one. Grab the environment variables and workdir from the outer terminal first, and then export/cd as appropriate in the new terminal
-            Notes
-                1. This is a harness-specific thing that the harness will handle across benchmarks.
-        4. Interleaved thinking - Verify how is the harness behaving i.e. it has interleaved thinking or not and to force interleaved thinking unconditionally.
-            Proposal
-                1. For seeing what the harness is doing, use model call capture
-                2. For forcing, we can add it in the Responses API model proxy i.e. save all the past requests/responses and populate as necessary.
-        5. Restrict number of turns - same as interleaved thinking, we could add in Responses API model proxy
-        """
+        """Grade the resources-owned sandbox, reusing the patch and verdict on an episode session's retries."""
+        return await self.verify_task_sandbox_session(
+            request,
+            body,
+            verify=lambda: self._verify(request, body),
+            lost_response=lambda reason, failure_kind: _lost_session_response(body, reason, failure_kind=failure_kind),
+            allow_seedless=self.config.is_verifying_golden_patch,
+        )
 
+    async def _verify(self, request: Request, body: SWEBenchVerifyRequest) -> SWEBenchVerifyResponse:
+        session_id = request.session[SESSION_ID_KEY]
         test_spec = self._make_test_spec(body)
-
-        verifier_sandbox_lifecycle_started_at = monotonic()
-        eval_sandbox = await self._create_sandbox(test_spec, test_assets=body.test_assets())
-        eval_sandbox_start_time_taken = monotonic() - verifier_sandbox_lifecycle_started_at
-
-        model_patch = ""
         patch_extraction_failed = False
         if self.config.is_verifying_golden_patch:
             model_patch = body.patch
         else:
-            original_sandbox = self._session_id_to_sandbox.pop(request.session[SESSION_ID_KEY])
-            try:
-                original_workdir = (await eval_sandbox.exec("pwd")).stdout.strip()
-                seed_head = (
-                    self._session_id_to_seed_head.pop(request.session[SESSION_ID_KEY], None) or test_spec.base_commit
-                )
-                model_patch_result = await original_sandbox.exec(patch_extraction_command(original_workdir, seed_head))
-                model_patch = strip_binary_diffs(model_patch_result.stdout or "")
-            except:
-                patch_extraction_failed = True
-                print("Failed to extract patch from container", format_exc(), file=sys.stderr)
-            try:
-                await original_sandbox.stop()
-            except:
-                print("Failed to stop original sandbox", format_exc(), file=sys.stderr)
 
-        run_id = request.session[SESSION_ID_KEY]
+            async def capture() -> str:
+                original_sandbox = self._session_id_to_sandbox[session_id]
+                record = self._task_sessions.get(session_id)
+                if record is not None and record.workdir:
+                    workdir = record.workdir
+                else:
+                    pwd = await original_sandbox.exec("pwd")
+                    workdir = (pwd.stdout or "").strip()
+                    if pwd.error_type is not None or pwd.return_code != 0 or not workdir.startswith("/"):
+                        raise RuntimeError("Could not resolve the task sandbox workdir for patch capture")
+                seed_head = self._session_id_to_seed_head.get(session_id) or test_spec.base_commit
+                result = await original_sandbox.exec(patch_extraction_command(workdir, seed_head))
+                if result.error_type is not None:
+                    raise RuntimeError("Failed to extract the model patch from the task sandbox")
+                if result.return_code != 0:
+                    # The agent can break the repository this runs in (removing .git, pruning the seed commit), so
+                    # a git failure is its graded result: the empty patch fails to apply and scores 0, unmasked.
+                    print(f"Patch extraction exited {result.return_code}: {result.stderr}", file=sys.stderr)
+                return strip_binary_diffs(result.stdout or "")
+
+            try:
+                model_patch = await self.capture_task_sandbox_patch(session_id, capture)
+            except Exception:
+                patch_extraction_failed = True
+                model_patch = ""
+                print("Failed to extract patch from container", format_exc(), file=sys.stderr)
+            # A failed stop of an episode session retains the handle and captured patch for a retry.
+            await self.stop_task_sandbox_after_capture(session_id)
+
+        verifier_sandbox_lifecycle_started_at = monotonic()
+        eval_sandbox = await self._create_sandbox(
+            test_spec, test_assets=body.test_assets(), verifier_session_id=session_id
+        )
+        self._verifier_sandboxes[session_id] = eval_sandbox
+        eval_sandbox_start_time_taken = monotonic() - verifier_sandbox_lifecycle_started_at
+
+        run_id = session_id
         mock_container = DockerContainer(id=run_id, instance_id=test_spec.instance_id)
         mock_container._inner_container = eval_sandbox
 
@@ -570,5 +626,29 @@ Stderr:
         )
 
 
+def _lost_session_response(
+    body: SWEBenchVerifyRequest, reason: str, *, failure_kind: str = SESSION_LOST
+) -> SWEBenchVerifyResponse:
+    """Return an unscored, masked result when the task state is unavailable."""
+    return SWEBenchVerifyResponse.model_validate(
+        body.model_dump()
+        | lost_session_verification(reason, failure_kind=failure_kind)
+        | {
+            "evaluation_completed": False,
+            "resolved": False,
+            "eval_sandbox_start_time_taken": 0.0,
+            "patch_verification_time_taken": 0.0,
+            "instance_id": body.instance_id,
+            "model_patch": None,
+            "model_patch_sha256": None,
+            "test_output": "",
+            "log_dir": "",
+        }
+    )
+
+
 if __name__ == "__main__":
     SwebenchResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = SwebenchResourcesServer.run_webserver()  # noqa: F401

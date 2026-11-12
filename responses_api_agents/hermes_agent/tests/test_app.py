@@ -126,6 +126,16 @@ class TestSanity:
         agent = HermesAgent(config=_config(model="Qwen3.6-35B-A3B"), server_client=MagicMock(spec=ServerClient))
         assert agent._model_name() == "Qwen3.6-35B-A3B"
 
+    def test_context_length_is_written_as_the_model_context_length(self) -> None:
+        agent = HermesAgent(
+            config=_config(model="policy", context_length=262144), server_client=MagicMock(spec=ServerClient)
+        )
+        assert yaml.safe_load(agent._build_config())["model"] == {"default": "policy", "context_length": 262144}
+
+    def test_model_stays_a_name_without_context_length(self) -> None:
+        agent = HermesAgent(config=_config(model="policy"), server_client=MagicMock(spec=ServerClient))
+        assert yaml.safe_load(agent._build_config())["model"] == "policy"
+
     @pytest.mark.parametrize("with_mcp", [False, True])
     async def test_sandbox_access_selects_runtime_provider(self, monkeypatch, with_mcp) -> None:
         hermes = HermesAgent(
@@ -413,7 +423,7 @@ class TestSanity:
             ({}, "Hermes requires sandbox_access or a configured sandbox_provider for an episode session"),
         ],
     )
-    def test_unsupported_seed_is_refused_with_a_final_422(self, unsupported: dict, reason: str) -> None:
+    def test_unsupported_seed_is_refused_with_a_terminal_422(self, unsupported: dict, reason: str) -> None:
         hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
         seed = AgentSeedSessionRequest(
             agent_session_id="session",

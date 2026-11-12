@@ -641,9 +641,13 @@ async def test_real_benchagent_loop_guard_preserves_gradable_evidence(tmp_path, 
     response, observations = finalize_run_result(result)
     assert response.status == "incomplete" and response.error is None
     expected_calls = {f"c{index}" for index in range(1, 9)}
+    native_prefills = {
+        item.call_id for item in calls[0]["json"].input if item.type == "function_call" and item.name == "python_cell"
+    }
+    assert native_prefills
     assert {
         item.call_id for item in response.output if item.type == "function_call" and item.name == "python_cell"
-    } == expected_calls
+    } == expected_calls | native_prefills
     # Failed repeats are blocked before execution on calls 7 and 8.
     expected_outputs = {f"c{index}" for index in range(1, 7 if tool_fails else 9)}
     actual_outputs = {item.call_id for item in response.output if item.type == "function_call_output"}

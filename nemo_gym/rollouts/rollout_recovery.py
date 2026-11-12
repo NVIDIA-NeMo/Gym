@@ -33,7 +33,7 @@ from collections.abc import Collection, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from itertools import combinations
 from pathlib import Path
-from typing import Annotated, Any, BinaryIO, Literal
+from typing import Annotated, Any, BinaryIO, Literal, cast, get_args
 from uuid import uuid4
 
 from omegaconf import OmegaConf
@@ -52,13 +52,19 @@ from nemo_gym.core.failure_kinds import (
     JUDGE_UNPARSEABLE,
     MODEL_SERVER_ERROR,
     MODEL_TRANSPORT_ERROR,
-    PROVIDER_OOM_KILLED,
-    SESSION_RELEASE_FAILED,
+    PROVIDER_FAILURE_KINDS,
+    SESSION_EXPIRED,
+    SESSION_LOST,
     TRANSPORT_PEER_DROP,
     TRANSPORT_UNREACHABLE,
-    is_evaluation_side,
+    FailureClass,
+    FailureClassificationConfig,
+    FailureStage,
+    classify_failure,
+    is_registered,
     is_server_status,
 )
+from nemo_gym.core.outcome_policy import OutcomeAction
 from nemo_gym.utils.path_utils import (
     attempt_extension_path_for,
     failures_path_for,
@@ -141,7 +147,9 @@ def _row_failure_kind(row: Mapping[str, Any]) -> Any:
     return row.get("failure_kind") if row.get("failure_kind") is not None else row.get("_ng_failure_class")
 
 
-def is_answered_agent_deadline(row: Mapping[str, Any]) -> bool:
+def is_answered_agent_deadline(
+    row: Mapping[str, Any], *, classification: FailureClassificationConfig | None = None
+) -> bool:
     """Whether the agent ran out of its own deadline and kept its answer: the evaluated model's final result.
 
     The deadline belongs to the agent, so what it kept is its result, scored by the benchmark's rule (a recorded
@@ -153,7 +161,7 @@ def is_answered_agent_deadline(row: Mapping[str, Any]) -> bool:
     return (
         _row_failure_kind(row) == AGENT_TIMEOUT
         and (has_saved_generation(row) or keeps_partial_response(row))
-        and not is_infrastructure_agent_timeout(row)
+        and not is_infrastructure_agent_timeout(row, classification=classification)
     )
 
 
@@ -166,8 +174,9 @@ AGENT_TIMEOUT_FAULT_SHARE = 0.25
 # that failed. ``timeout``, ``cancelled``, ``stream_truncated`` and client errors are not: a slow model is the model's
 # result under its time limit, and the agent's own deadline cancels the call it was waiting on.
 SERVER_FAULT_CATEGORIES = frozenset({"upstream_error", "connection"})
-# Failure-report kinds of a server-side failure; ``transport_timeout`` is left out for the same reason.
-SERVER_FAULT_EVENT_KINDS = frozenset(
+# Evidence eligible for the timeout-materiality test; responsibility still comes from the shared classifier.
+# ``transport_timeout`` is left out for the same reason as the capture timeout category.
+_MATERIAL_CALL_FAILURE_KINDS = frozenset(
     {MODEL_TRANSPORT_ERROR, MODEL_SERVER_ERROR, TRANSPORT_UNREACHABLE, TRANSPORT_PEER_DROP}
 )
 
@@ -202,7 +211,11 @@ def captured_model_calls(row: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "upstream_status_code": meta.get("upstream_status_code"),
                 "error_category": meta.get("error_category"),
                 "failure_events": [
-                    {"failure_kind": event.get("failure_kind"), "http_status": event.get("http_status")}
+                    {
+                        "failure_kind": event.get("failure_kind"),
+                        "http_status": event.get("http_status"),
+                        "stage": event.get("stage"),
+                    }
                     for event in (events.values() if isinstance(events, Mapping) else ())
                     if isinstance(event, Mapping)
                 ],
@@ -213,22 +226,100 @@ def captured_model_calls(row: Mapping[str, Any]) -> list[dict[str, Any]]:
     return calls
 
 
-def is_server_fault_call(call: Mapping[str, Any]) -> bool:
-    """Whether a captured model call recorded a server-side fault of the model server or the path to it.
+def saved_failure_classification(output: Path) -> FailureClassificationConfig:
+    """Read only the owning launcher's saved classification in its conventional artifact layout.
 
-    Any of: ``status_code`` or ``upstream_status_code`` in the 5xx class (``is_server_status``); ``error_category``
-    ``upstream_error`` or ``connection``; a failure-report event of kind ``model_transport_error``,
-    ``model_server_error``, ``transport_unreachable`` or ``transport_peer_drop``, or with a 5xx ``http_status``.
-    A timeout, a cancellation, a truncated stream and a 4xx rejection are not (``SERVER_FAULT_CATEGORIES``).
+    Standalone outputs have no launcher policy and use shared defaults. A malformed saved policy is never
+    silently replaced with defaults. Applied classes on individual results still take precedence.
     """
-    if is_server_status(call.get("status_code")) or is_server_status(call.get("upstream_status_code")):
+    if output.name != "rollouts.jsonl" or output.parent.name != "artifacts":
+        return FailureClassificationConfig()
+    job = output.parent.parent
+    resolved = job.parent / "resolved-config.yaml"
+    if not resolved.is_file():
+        return FailureClassificationConfig()
+    try:
+        config = OmegaConf.to_container(OmegaConf.load(resolved), resolve=False)
+        benchmark = config["driver"]["benchmarks"][job.name]
+        resumable = benchmark.get("resumable")
+        if resumable is None:
+            resumable = {}
+        if not isinstance(resumable, Mapping):
+            raise ValueError("resumable must be a mapping")
+        policy = resumable.get("recovery_outcome_policy")
+        if policy is None:
+            policy = {}
+        if not isinstance(policy, Mapping):
+            raise ValueError("recovery_outcome_policy must be a mapping")
+        return FailureClassificationConfig.model_validate(policy.get("classification", {}))
+    except (OSError, KeyError, TypeError, AttributeError, ValueError, OmegaConfBaseException) as error:
+        raise ConfigError(f"Cannot read saved failure classification from {resolved}: {error}") from error
+
+
+def applied_failure_class(row: Mapping[str, Any]) -> FailureClass | None:
+    """Read an applied result class, preserving explicit unknown over later configuration."""
+    action, attribution = row.get("failure_outcome_action"), row.get("failure_outcome_attribution")
+    if (
+        isinstance(action, str)
+        and action in OutcomeAction
+        and isinstance(attribution, str)
+        and attribution in FailureClass
+    ):
+        return FailureClass(attribution)
+    return None
+
+
+def failure_stage(row: Mapping[str, Any]) -> FailureStage | None:
+    """Read selected final context; recovered observations never supply the final stage."""
+    events, selected_id = row.get("_ng_failure_events"), row.get("_ng_failure_id")
+    if isinstance(selected_id, str):
+        selected = events.get(selected_id) if isinstance(events, Mapping) else None
+        stage = selected.get("stage") if isinstance(selected, Mapping) else None
+    else:
+        record = row.get("_ng_failure_record")
+        failure = record.get("failure") if isinstance(record, Mapping) else None
+        stage = failure.get("stage") if isinstance(failure, Mapping) else row.get("_ng_failure_stage")
+    return cast(FailureStage, stage) if stage in get_args(FailureStage) else None
+
+
+def _evaluation_event(event: Mapping[str, Any], *, classification: FailureClassificationConfig | None = None) -> bool:
+    stage = event.get("stage")
+    return (
+        classify_failure(
+            failure_kind=event.get("failure_kind"),
+            stage=cast(FailureStage, stage) if stage in get_args(FailureStage) else None,
+            http_status=event.get("http_status"),
+            config=classification,
+        )
+        == FailureClass.EVALUATION
+    )
+
+
+def is_server_fault_call(
+    call: Mapping[str, Any], *, classification: FailureClassificationConfig | None = None
+) -> bool:
+    """Whether eligible recorded model-call failures classify as evaluation-side.
+
+    Temporal materiality excludes timeout, cancellation and truncated-stream evidence: a slow model or an
+    agent cancelling its current call does not establish time spent on infrastructure. HTTP evidence and the
+    eligible transport errors use the shared classifier; classification alone does not establish materiality.
+    """
+    if any(
+        classify_failure(failure_kind=None, http_status=call.get(key), config=classification)
+        == FailureClass.EVALUATION
+        for key in ("status_code", "upstream_status_code")
+    ):
         return True
-    if call.get("error_category") in SERVER_FAULT_CATEGORIES:
-        return True
+    category = call.get("error_category")
+    if category in SERVER_FAULT_CATEGORIES:
+        kind = MODEL_TRANSPORT_ERROR if category == "connection" else MODEL_SERVER_ERROR
+        if classify_failure(failure_kind=kind, config=classification) == FailureClass.EVALUATION:
+            return True
     events = call.get("failure_events")
     return any(
         isinstance(event, Mapping)
-        and (event.get("failure_kind") in SERVER_FAULT_EVENT_KINDS or is_server_status(event.get("http_status")))
+        and (event.get("failure_kind") in _MATERIAL_CALL_FAILURE_KINDS or is_server_status(event.get("http_status")))
+        and _evaluation_event(event, classification=classification)
         for event in (events if isinstance(events, list) else ())
     )
 
@@ -237,7 +328,9 @@ def _number(value: Any) -> float | None:
     return float(value) if type(value) in (int, float) and math.isfinite(value) and value >= 0 else None
 
 
-def _material_model_call_faults(row: Mapping[str, Any]) -> bool:
+def _material_model_call_faults(
+    row: Mapping[str, Any], *, classification: FailureClassificationConfig | None = None
+) -> bool:
     """Whether server-faulted model calls own the window: the agent's last call faulted, or faulted calls took at
     least ``AGENT_TIMEOUT_FAULT_SHARE`` of it. The window is the attempt's recorded elapsed time, else the span of its
     captured calls; an early fault that a retry recovered within a long window is the model's time, not ours."""
@@ -249,9 +342,13 @@ def _material_model_call_faults(row: Mapping[str, Any]) -> bool:
         # Capture order is append order; when every call recorded its start, the last started is the last call.
         order = sorted(range(len(calls)), key=lambda index: (starts[index], index))
         calls, starts = [calls[index] for index in order], [starts[index] for index in order]
-    if is_server_fault_call(calls[-1]):
+    if is_server_fault_call(calls[-1], classification=classification):
         return True
-    faulted = sum(_number(call.get("duration_ms")) or 0.0 for call in calls if is_server_fault_call(call))
+    faulted = sum(
+        _number(call.get("duration_ms")) or 0.0
+        for call in calls
+        if is_server_fault_call(call, classification=classification)
+    )
     if not faulted:
         return False
     elapsed = _number(row.get("_ng_elapsed_s")) or observed_elapsed(dict(row))
@@ -267,30 +364,39 @@ def _material_model_call_faults(row: Mapping[str, Any]) -> bool:
     return window_ms > 0 and faulted >= AGENT_TIMEOUT_FAULT_SHARE * window_ms
 
 
-def _sandbox_or_tool_fault(row: Mapping[str, Any]) -> bool:
-    """Whether the row recorded a sandbox or tool-server failure event, selected or not.
+def _sandbox_or_tool_fault(
+    row: Mapping[str, Any], *, classification: FailureClassificationConfig | None = None
+) -> bool:
+    """Eligible sandbox/session or tool-server evidence classified by the shared mapping.
 
-    A sandbox provider's or session's failure (``provider_*``, ``session_*``) other than an out-of-memory kill (the
-    model's own command can exhaust it) or a release failure after the episode; or a resources server's tool call
-    that failed with a 5xx status or a server-side transport kind. A verification failure is not one.
+    Cleanup and verification lie outside the agent's execution window. Registered provider/session kinds
+    identify candidate observations; prefixes do not assign responsibility. For example agent OOM remains
+    model-side while seed OOM is evaluation-side when its originating stage is available.
     """
     events = row.get("_ng_failure_events")
     for event in events.values() if isinstance(events, Mapping) else ():
         if not isinstance(event, Mapping) or not isinstance(event.get("failure_kind"), str):
             continue
         kind = event["failure_kind"]
-        if kind.startswith(("provider_", "session_")) and kind not in (PROVIDER_OOM_KILLED, SESSION_RELEASE_FAILED):
+        if event.get("stage") in ("cleanup", "verification"):
+            continue
+        if kind in PROVIDER_FAILURE_KINDS | {SESSION_LOST, SESSION_EXPIRED} and _evaluation_event(
+            event, classification=classification
+        ):
             return True
         if (
             event.get("boundary") == "resources_server"
             and event.get("operation") != "verify"
-            and (kind in SERVER_FAULT_EVENT_KINDS or is_server_status(event.get("http_status")))
+            and (kind in _MATERIAL_CALL_FAILURE_KINDS or is_server_status(event.get("http_status")))
+            and _evaluation_event(event, classification=classification)
         ):
             return True
     return False
 
 
-def is_infrastructure_agent_timeout(row: Mapping[str, Any]) -> bool:
+def is_infrastructure_agent_timeout(
+    row: Mapping[str, Any], *, classification: FailureClassificationConfig | None = None
+) -> bool:
     """Whether an ``agent_timeout`` row's window held a recorded server-side fault: the evaluation's failure.
 
     The row (a failure row, or a graded result such as Harbor's) names ``agent_timeout`` and either recorded a sandbox
@@ -298,8 +404,14 @@ def is_infrastructure_agent_timeout(row: Mapping[str, Any]) -> bool:
     (``is_server_fault_call``) that owns the window (``_material_model_call_faults``). A clean agent timeout stays the
     model's result under the benchmark's time limit. Read from saved rows alone, so it applies to existing runs.
     """
+    applied = applied_failure_class(row)
+    if applied is not None:
+        if row.get("failure_outcome_action") in (OutcomeAction.COUNT_AS_ZERO, OutcomeAction.FAIL):
+            return False
+        return _row_failure_kind(row) == AGENT_TIMEOUT and applied == FailureClass.EVALUATION
     return _row_failure_kind(row) == AGENT_TIMEOUT and (
-        _sandbox_or_tool_fault(row) or _material_model_call_faults(row)
+        _sandbox_or_tool_fault(row, classification=classification)
+        or _material_model_call_faults(row, classification=classification)
     )
 
 
@@ -308,25 +420,43 @@ def is_infrastructure_agent_timeout(row: Mapping[str, Any]) -> bool:
 _MASKED_REGRADE_KINDS = frozenset({JUDGE_FAILED, JUDGE_UNPARSEABLE, AGENT_ROUTE_FAILED})
 
 
-def _masked_evaluation_side_kind(row: Mapping[str, Any]) -> str | None:
+def _masked_evaluation_side_kind(
+    row: Mapping[str, Any], *, classification: FailureClassificationConfig | None = None
+) -> str | None:
     """The evaluation-side kind of a masked result row that is not set aside for another owner; else None.
 
     The rules ``masked_infrastructure_kind`` and ``masked_kept_answer_kind`` share, all but the saved answer: the row
     is masked by the Environment Server that graded it, is no failure row, omitted stand-in or re-judgment, and its
-    ``failure_kind`` is registered, evaluation-side (``is_evaluation_side``), not one whose saved answer is graded
+    ``failure_kind`` is registered, evaluation-side through the shared classifier, not one whose saved answer is graded
     again (``_MASKED_REGRADE_KINDS``) and not a ``transport_*`` verify call.
     """
     if (
         row.get("mask_sample") is not True
+        or row.get("failure_outcome_action") == OutcomeAction.FAIL
         or row.get("_ng_failure_class") is not None
         or row.get("_ng_omitted_rollout") is True
         or row.get("_ng_rejudge_operation_id") is not None
     ):
         return None
     kind = row.get("failure_kind")
+    selected_class = applied_failure_class(row)
+    if selected_class is None:
+        events, selected_id = row.get("_ng_failure_events"), row.get("_ng_failure_id")
+        selected = events.get(selected_id) if isinstance(events, Mapping) and isinstance(selected_id, str) else None
+        if isinstance(selected, Mapping):
+            kind, status = selected.get("failure_kind"), selected.get("http_status")
+        else:
+            status = row.get("_ng_failure_http_status")
+        selected_class = classify_failure(
+            failure_kind=kind if isinstance(kind, str) else None,
+            stage=failure_stage(row),
+            http_status=status,
+            config=classification,
+        )
     if (
         not isinstance(kind, str)
-        or not is_evaluation_side(kind)
+        or not is_registered(kind)
+        or (selected_class != FailureClass.EVALUATION and row.get("failure_outcome_action") != OutcomeAction.RETRY)
         or kind in _MASKED_REGRADE_KINDS
         or kind.startswith("transport_")
     ):
@@ -334,29 +464,33 @@ def _masked_evaluation_side_kind(row: Mapping[str, Any]) -> str | None:
     return kind
 
 
-def masked_infrastructure_kind(row: Mapping[str, Any]) -> str | None:
+def masked_infrastructure_kind(
+    row: Mapping[str, Any], *, classification: FailureClassificationConfig | None = None
+) -> str | None:
     """The kind of a masked result that infrastructure, not the evaluated model, left unmeasured; else None.
 
     A result row is masked (``mask_sample``) by the Environment Server that graded it, so its ``failure_kind`` was
     reported at that boundary: a lost session, a failed provider, an infrastructure error, a verifier that could not
-    run. When the kind is evaluation-side (``is_evaluation_side``) the rollout is retried like an infrastructure
-    failure, within its attempt cap: the masked row counts one failed attempt and a later attempt supersedes it. A
+    run. When the kind is evaluation-side through the shared classifier, or its owner recorded the ``retry`` action (honored
+    whatever the attribution), the rollout is retried like an infrastructure failure, within its attempt cap: the masked row counts one failed attempt and a later attempt supersedes it. A
     model-class kind, no kind, an unregistered or namespaced kind, and the kinds whose saved answer is graded again
     (``_MASKED_REGRADE_KINDS``, including a ``transport_*`` verify call) keep the masked row as the result. So does a
     saved answer (``_keeps_saved_answer``): it is never sampled again, whatever its verifier could grade of it.
     """
-    kind = _masked_evaluation_side_kind(row)
+    kind = _masked_evaluation_side_kind(row, classification=classification)
     return None if kind is None or _keeps_saved_answer(row) else kind
 
 
-def masked_kept_answer_kind(row: Mapping[str, Any]) -> str | None:
+def masked_kept_answer_kind(
+    row: Mapping[str, Any], *, classification: FailureClassificationConfig | None = None
+) -> str | None:
     """The kind of a masked result that ``masked_infrastructure_kind`` rejects only for its saved answer and that has
     no recorded grade (``has_recorded_grade``); else None.
 
     The part of ``masked_without_artifact_kind`` that the Store can decide: the planner adds that no re-verification
     cause applies. A graded result is a result and stays one.
     """
-    kind = _masked_evaluation_side_kind(row)
+    kind = _masked_evaluation_side_kind(row, classification=classification)
     return kind if kind is not None and _keeps_saved_answer(row) and not has_recorded_grade(row) else None
 
 
@@ -528,6 +662,7 @@ _SERVER_RUNTIME_OPTIONS = frozenset(
         "switchyard_api_key",
         "hf_token",
         "num_workers",
+        "uvicorn_reuse_port",
         "base_url",
         "openai_base_url",
         "policy_base_url",

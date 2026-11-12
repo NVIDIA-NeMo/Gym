@@ -28,14 +28,19 @@ DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "lmarena_v3_validation.jsonl"
 
 
-def prepare() -> Path:
+def prepare(*, prompt_set: str = "full") -> Path:
+    """Download the full v3 dataset or a difficulty level subset."""
+    if prompt_set not in {"full", "super35", "nano35"}:
+        raise ValueError("prompt_set must be full, super35, or nano35")
+    dataset_name = "lmarena_v3" if prompt_set == "full" else f"lmarena_v3_{prompt_set}"
+    output = OUTPUT_FPATH if prompt_set == "full" else DATA_DIR / f"{dataset_name}_validation.jsonl"
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     download_jsonl_dataset(
         DownloadJsonlDatasetGitlabConfig(
-            dataset_name="lmarena_v3",
+            dataset_name=dataset_name,
             version="0.0.1",
-            artifact_fpath="lmarena_v3_validation.jsonl",
-            output_fpath=str(OUTPUT_FPATH),
+            artifact_fpath=output.name,
+            output_fpath=str(output),
         )
     )
-    return OUTPUT_FPATH
+    return output
