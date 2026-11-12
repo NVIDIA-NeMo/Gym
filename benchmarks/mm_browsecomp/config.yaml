@@ -1,0 +1,25 @@
+# MM-BrowseComp on the flagship BrowseComp harness (browsecomp_agent + browsecomp_advanced_harness).
+# Same agent, tools and judge as benchmarks/browsecomp; only the dataset and the excluded domains change.
+# Rows carry the question image(s) as input_image parts on the user turn, so the policy model must be
+# vision-capable. The agent passes the user turn through unchanged on every call and every context reset.
+config_paths:
+- benchmarks/browsecomp/config.yaml
+
+# BrowseComp's TDM opt-out domains plus huggingface.co and hf.co, which host copies of the dataset.
+# The path is resolved from the resources server's directory.
+browsecomp_benchmark_resources_server:
+  resources_servers:
+    browsecomp_advanced_harness:
+      exclude_domains_file_path: ../../benchmarks/mm_browsecomp/exclusions.json
+
+browsecomp_benchmark_agent:
+  responses_api_agents:
+    browsecomp_agent:
+      # OmegaConf replaces lists wholesale, so the dataset entry is restated in full.
+      datasets:
+      - name: mm_browsecomp
+        type: benchmark
+        jsonl_fpath: benchmarks/mm_browsecomp/data/mm_browsecomp_benchmark.jsonl
+        prompt_config: null
+        prepare_script: benchmarks/mm_browsecomp/prepare.py
+        num_repeats: 1

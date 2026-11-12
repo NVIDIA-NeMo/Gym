@@ -23,7 +23,7 @@ The sandbox path declares **Evaluation** capability. It returns an observation b
 - With `save_model_call_using_vllm_tokenize_endpoint: true`, a session-authenticated adapter endpoint counts prompts without copying the upstream key into the sandbox. Hosted endpoints without `/tokenize` must explicitly set this option to `false`, using the existing post-call token-count reset path.
 - `snap_dir` is rejected for sandbox sessions. Use captured model calls and rollout output; snapshots remain available in explicit host compatibility mode.
 - Harness source, runtime and session files live under `/tmp/nemo-gym-*`, outside the task workdir. The runner deletes its staged input after loading scoped grants. The runtime needs no Python or package download access in the task image; seed builds its archives on the Agent Server.
-- Agent sessions use one worker, bind the attempt-qualified rollout URL, and replay identical activation retries. A different activation returns 409. Disconnecting an HTTP waiter does not cancel the harness; close owns cancellation.
+- Agent sessions run with several workers, because session routing sends each session's requests to the worker that holds it. They bind the attempt-qualified rollout URL, and replay identical activation retries. A different activation returns 409. Disconnecting an HTTP waiter does not cancel the harness; close owns cancellation.
 
 ## Failure semantics and compatibility
 
