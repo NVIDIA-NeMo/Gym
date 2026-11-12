@@ -76,11 +76,12 @@ For NVCF endpoints, requests that take longer than 340 seconds to produce a firs
 | `max_rate_limit_wait_seconds` | `float` | `3600` | Seconds one call may spend, counted from its start and including provider response time, on 429 and 503 answers, which are retried until it is spent instead of `max_http_attempts` times; the request fails once the elapsed time plus the next wait would pass it, even when `max_http_attempts` allows more tries. `0` keeps 429 and 503 on the `max_http_attempts` count. A client built with `internal=True` (calls to NeMo Gym's own servers) waits out 429, 502, 503, 504 and 520 on the same budget. HTTP-status retries are bounded; connection-error retries have separate limits and can still be unlimited. |
 | `reasoning_effort_none_replacement` | `str` | `null` | Opt-in value reported in place of a response's `reasoning.effort: "none"`, for callers that cannot accept `"none"`. `null` reports the provider's value unchanged. |
 | `upstream_max_num_tries` | `int` | `null` | Set to `1` so each provider call makes exactly one HTTP attempt. Disables the client's transport and HTTP-status retries, replacing their generic-error and `max_http_attempts` limits. Required by an `upstream_retry_policy` with more than one attempt. |
-| `upstream_request_timeout_seconds` | `float` | `1800` | Total time limit for each provider attempt, not a deadline for the whole retry schedule. `null` means no limit. |
+| `upstream_request_timeout_seconds` | `float` | `1800` | Total time limit for each provider attempt, not a deadline for the whole retry schedule. For a stream relayed by `responses_stream_passthrough`, it bounds the wait for the response headers and for each read of the body instead (see [Relay Streaming Responses Calls](#relay-streaming-responses-calls)). `null` means no limit. |
 | `upstream_connect_timeout_seconds` | `float` | `null` | Time limit for each attempt to obtain a connection, including waiting for a free aiohttp connection-pool slot. Requires `upstream_request_timeout_seconds`. |
 | `upstream_pool_timeout_seconds` | `float` | `null` | Time limit for each attempt to wait for one of the `max_concurrent_requests` slots. Requires `max_concurrent_requests`. |
 | `upstream_retry_policy` | `object` | one attempt | Model-server retry layer around provider calls: `max_attempts`, `pre_request_jitter_seconds`, `backoff_initial_seconds`, `backoff_multiplier`, `backoff_jitter_fraction`, and `terminal_http_status_codes`. Each attempt reacquires a concurrency slot. A spent or unauthorized key stops retries immediately; exhausted retries return HTTP 500. |
 | `propagate_upstream_http_status_codes` | `list[int]` | `[]` | Upstream error statuses (400–599) returned to the caller with that status and the provider's error body, instead of HTTP 500. A status that the retry policy retries until it is exhausted still returns HTTP 500. |
+| `responses_stream_passthrough` | `bool` | `false` | Relay streaming `/v1/responses` requests to the upstream as sent and stream its SSE back unchanged. For evaluation only; see [Relay Streaming Responses Calls](#relay-streaming-responses-calls). |
 
 <Note>
 **The model is fixed by configuration.** This server always sends the configured `openai_model` (from `policy_model_name`) to the upstream endpoint. If an incoming request carries its own `model` field — as standard OpenAI-compatible clients and SDKs do — that value is **overwritten**, so you cannot switch models on a per-request basis. To run a different model, change the config and start a new server.
@@ -101,6 +102,35 @@ gym env start --config ${environment_config} --config ${model_config} \
 - `session_key_headers` defaults to `[]`, so nothing changes unless you set it.
 - A request that carries no rollout identity gets no generated header. Static headers from `openai_default_headers` still apply to every request, inside or outside a rollout.
 - A session is a rollout attempt. The header carries the session key, which is the rollout's capture key: `<rollout id>`, or `<rollout id>-a<N>` for a retry. Agents that make model calls inside the same attempt, such as a policy and a user simulator, or a judge that calls through this model server, share one session and therefore one replica.
+
+## Relay Streaming Responses Calls
+
+Some agent harnesses send Responses requests that the typed path changes. For example, the Codex CLI running a
+model from its bundled catalog sends code-mode tools in `additional_tools` items, which the typed path drops. With
+`responses_stream_passthrough: true`, the server relays such requests instead:
+
+```yaml
+policy_model:
+  responses_api_models:
+    openai_model:
+      responses_stream_passthrough: true
+```
+
+- It is off by default (`false`).
+- It applies only to streaming `/v1/responses` requests (`"stream": true`). Non-streaming requests and Chat
+  Completions keep the typed path.
+- The request goes to `{openai_base_url}/responses` as the harness sent it, with two changes: `model` becomes
+  `openai_model`, and `extra_body` fills only fields the request does not set. The upstream SSE comes back unchanged,
+  so the upstream must serve the OpenAI Responses API natively.
+- It is for evaluation. The relay skips Gym's request sanitizer and rejects token-ID capture with HTTP 422.
+  [Model-Call Capture](/model-server/model-call-capture) still records each exchange.
+- It rejects an `upstream_retry_policy` with more than one attempt and `drop_input_reasoning_items`. The client's
+  HTTP retries before the stream starts, the retry policy's `pre_request_jitter_seconds`, `max_concurrent_requests`
+  and `propagate_upstream_http_status_codes` still apply. A relayed stream holds its concurrency slot until it ends.
+- A relayed stream lasts as long as the model's answer, which can exceed the default 30-minute
+  `upstream_request_timeout_seconds`. For a relayed stream, that setting bounds the wait for the response headers
+  and for each read of the body, not the whole stream. Set it to `null` to leave every time limit to the harness.
+  For every other request it stays the total limit for each provider attempt.
 
 ## Usage Example
 
