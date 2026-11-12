@@ -24,6 +24,7 @@ from nemo_gym.core.episode_types import BaseEpisodeRequest, BaseEpisodeResponse,
 from nemo_gym.core.failure_kinds import EPISODE_FAILED, SESSION_RELEASE_FAILED, FailureStage
 from nemo_gym.core.failure_records import EpisodeFailure, FailureBoundary, FailureReport
 from nemo_gym.core.failure_transport import reply_failure_report, report_for_current_request
+from nemo_gym.core.model_call_sampling import MODEL_SAMPLING_NULL, encode_model_sampling
 from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for
 from nemo_gym.server_runtime._checkpoint.control import CheckpointMode
 from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant
@@ -32,6 +33,7 @@ from nemo_gym.server_runtime._checkpoint.participant_workers import install_serv
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 from nemo_gym.server_runtime._checkpoint.steps import StepType
 from nemo_gym.server_runtime.base_server import SimpleServer
+from nemo_gym.telemetry.concurrency import MeteredSemaphore
 
 
 LOGGER = logging.getLogger(__name__)
@@ -188,7 +190,7 @@ _RETRYABLE_CLIENT_ERROR_STATUSES = frozenset({408, 425, 429})
 def is_retryable_dependency_status(status: int) -> bool:
     """Return whether an HTTP error status from another server is worth another episode attempt.
 
-    408, 425, 429 and every 5xx are retried; every other 4xx is final.
+    408, 425, 429 and every 5xx are retried; every other 4xx is terminal.
     """
     return status in _RETRYABLE_CLIENT_ERROR_STATUSES or status >= 500
 
@@ -257,11 +259,22 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
     # The default fails closed: episodes of a protocol that records no boundaries cannot be continued.
     # They are restarts, which never hold up a checkpoint and start over from their input after a crash.
     checkpoint_mode: ClassVar[CheckpointMode] = "restart_only"
+    # Whether this protocol puts a training framework's sampling values (the request's ``model_sampling``) in the
+    # model URLs of the agents the framework trains, and ``null`` in every other participant's
+    # (``model_sampling_segment``). The default fails closed: such an episode is refused, because the agents it trains
+    # would sample with other values.
+    applies_model_sampling: ClassVar[bool] = False
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
         self._admission = (
-            asyncio.Semaphore(self.config.max_concurrent_episodes)
+            MeteredSemaphore(
+                self.config.max_concurrent_episodes,
+                component="environment_server",
+                limit_name="episodes",
+                server_name=self.config.name,
+                admission_timeout_s=self.config.queue_timeout_seconds,
+            )
             if self.config.max_concurrent_episodes is not None
             else None
         )
@@ -294,14 +307,38 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         """
         return self.config.default_episode_timeout_seconds
 
+    @staticmethod
+    def model_sampling_segment(request: BaseEpisodeRequest[Any], *, trained: bool) -> str | None:
+        """The ``/ng-sampling/`` value for one participant's model calls in this episode, or ``None`` for none.
+
+        A participant the training framework trains samples with the values the episode carries. Every other
+        participant gets ``null``: it keeps its own sampling, or its Model Server's ``sampling_overrides``. An episode
+        without values, as in Gym-only evaluation, gives every participant none, so its URLs stay as they are.
+        """
+        if request.model_sampling is None:
+            return None
+        return encode_model_sampling(request.model_sampling) if trained else MODEL_SAMPLING_NULL
+
     async def run_request(self, request: EpisodeRequestT) -> EpisodeResponseT:
+        if request.model_sampling is not None and not self.applies_model_sampling:
+            return self.failure_response(
+                request,
+                EpisodeFailure(
+                    failure_reason=(
+                        f"{type(self).__name__} does not apply a training framework's sampling values, but this "
+                        "episode carries them (model_sampling), so the agents the framework trains would sample with "
+                        "other values. Run this environment without them, or make it apply them "
+                        "(BaseEnvironmentServer.applies_model_sampling)."
+                    ),
+                    terminal=True,
+                    stage="admission",
+                ),
+            )
         acquired = False
         if self._admission is not None:
             try:
-                await asyncio.wait_for(
-                    self._admission.acquire(),
-                    timeout=self.config.queue_timeout_seconds,
-                )
+                # The semaphore applies queue_timeout_seconds and counts the timeout.
+                await self._admission.acquire()
             except TimeoutError as error:
                 return self.failure_response(
                     request,

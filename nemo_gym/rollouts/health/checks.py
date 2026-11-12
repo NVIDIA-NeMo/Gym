@@ -91,6 +91,12 @@ CHECK_REGISTRY: tuple[CheckSpec, ...] = (
         reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.OWNED_MODEL_CALLS}),
     ),
     CheckSpec(
+        id="rollout_tool_call_failed",
+        evaluation_scope=CheckScope.ROLLOUT,
+        subject=CheckSubject.ROLLOUT,
+        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY}),
+    ),
+    CheckSpec(
         id="task_consistently_unhealthy",
         evaluation_scope=CheckScope.TASK,
         subject=CheckSubject.TASK,
@@ -163,6 +169,22 @@ def _nonempty(value: Any) -> bool:
             )
         )
     return False
+
+
+def _reasoning_nonempty(value: Any) -> bool:
+    """Whether a turn's reasoning holds anything, Anthropic Messages thinking blocks included.
+
+    Kept out of ``_nonempty``, which also decides whether a response is actionable, so that thinking never counts
+    as an answer there.
+    """
+    if isinstance(value, (list, tuple)):
+        return any(_reasoning_nonempty(item) for item in value)
+    if isinstance(value, dict):
+        if value.get("type") == "thinking":
+            return _nonempty(value.get("thinking")) or _nonempty(value.get("signature"))
+        if value.get("type") == "redacted_thinking":
+            return _nonempty(value.get("data"))
+    return _nonempty(value)
 
 
 def _call_ref_key(ref: Any) -> str | None:
@@ -257,7 +279,7 @@ def _agent_steps(trajectory: dict[str, Any]) -> list[_AgentStep]:
         steps.append(
             _AgentStep(
                 locator={"turn": turn.get("turn_no", position)},
-                has_message=_nonempty(turn.get("answer")) or _nonempty(turn.get("reasoning_content")),
+                has_message=_nonempty(turn.get("answer")) or _reasoning_nonempty(turn.get("reasoning_content")),
                 has_tool_calls=_item_has_tool_call(turn.get("answer")),
                 model_call_refs=refs,
             )
@@ -581,17 +603,20 @@ def _transcript_tokens(record: dict[str, Any]) -> tuple[int, int, bool]:
     return prompt or 0, completion or 0, prompt is not None and completion is not None
 
 
-def _rollout_missing_agent_turns(trajectory: dict[str, Any], subject: dict[str, int | str]) -> list[Finding]:
+def _rollout_missing_agent_turns(
+    record: dict[str, Any], trajectory: dict[str, Any], subject: dict[str, int | str]
+) -> list[Finding]:
     steps = _agent_steps(trajectory)
     if any(step.has_model_activity for step in steps):
         return []
-    return [
-        Finding(
-            check="rollout_missing_agent_turns",
-            subject=subject,
-            detail={"reason": "no agent turn with model activity"},
-        )
-    ]
+    detail: dict[str, Any] = {"reason": "no agent turn with model activity"}
+    # A sandbox the provider ended for exceeding a resource limit explains the missing turns. The finding stays: the
+    # detail only says the absence was expected.
+    limit = record.get("sandbox_resource_limit")
+    resource = limit.get("resource") if isinstance(limit, dict) else None
+    if isinstance(resource, str) and resource:
+        detail["expected_absence"] = f"sandbox_resource_limit:{resource}"
+    return [Finding(check="rollout_missing_agent_turns", subject=subject, detail=detail)]
 
 
 def _agent_turn_hollow(
@@ -883,18 +908,97 @@ def _rollout_token_count_mismatch(
     return []
 
 
+def _repetition_stop_evidence(call: dict[str, Any]) -> dict[str, str]:
+    response = call.get("response")
+    response = response if isinstance(response, dict) else {}
+    choices = response.get("choices")
+    choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+    evidence = {}
+    if "repetition_detected" in (
+        response.get("native_stop_reason"),
+        response.get("stop_reason"),
+        choice.get("stop_reason"),
+    ):
+        evidence["native_stop_reason"] = "repetition_detected"
+    if "repetition" in (
+        call.get("finish_reason"),
+        response.get("native_finish_reason"),
+        response.get("finish_reason"),
+        choice.get("native_finish_reason"),
+        choice.get("finish_reason"),
+    ):
+        evidence["native_finish_reason"] = "repetition"
+    return evidence
+
+
+def _is_repetition_stop(call: dict[str, Any]) -> bool:
+    return bool(_repetition_stop_evidence(call))
+
+
 def _model_call_runaway_generation(bindings: _CallBindings, subject: dict[str, int | str]) -> list[Finding]:
     return [
         Finding(
             check="model_call_runaway_generation",
             subject=subject,
             locator=_call_locator(call, position),
-            detail={"finish_reason": call.get("finish_reason")},
+            detail={
+                "finish_reason": call.get("finish_reason"),
+                **_repetition_stop_evidence(call),
+            },
         )
         for position, call in enumerate(bindings.matched_calls)
-        if not _is_length_refusal(call)
-        and call.get("finish_reason") in _LENGTH_LIMIT_FINISH_REASONS
-        and not _response_has_usable_output(call.get("response"))
+        if _is_repetition_stop(call)
+        or (
+            not _is_length_refusal(call)
+            and call.get("finish_reason") in _LENGTH_LIMIT_FINISH_REASONS
+            and call.get("response") is not None
+            and not _response_has_usable_output(call.get("response"))
+        )
+    ]
+
+
+# Prefixes of the text a harness returns to the model in place of a tool's result when the tool itself could not
+# run, lower-case. A tool that ran and reported an error of its own is not listed. Add a prefix here once a harness
+# is known to return one.
+# Each marker with the tools that return it: OpenCode's built-in grep and glob return this text when they cannot
+# run ripgrep.
+_TOOL_FAILURE_MARKERS: dict[str, frozenset[str]] = {"ripgrep execution failed": frozenset({"grep", "glob"})}
+
+
+def _tool_output_text(output: Any) -> str | None:
+    if isinstance(output, str):
+        return output
+    if isinstance(output, dict):
+        for key in ("output", "text"):
+            if isinstance(output.get(key), str):
+                return output[key]
+    return None
+
+
+def _rollout_tool_call_failed(trajectory: dict[str, Any], subject: dict[str, int | str]) -> list[Finding]:
+    """One finding per rollout, counting the tool outputs that open with a harness tool-failure marker.
+
+    A marker counts only from a tool that returns it (``_TOOL_FAILURE_MARKERS``), and a call recorded as ``completed``
+    is not counted: a command that succeeded can print the same text, for example when it reads a log."""
+    failed = 0
+    for call in trajectory.get("tool_calls") or []:
+        if not isinstance(call, dict) or call.get("status") == "completed":
+            continue
+        text = _tool_output_text(call.get("output"))
+        opening = text.lstrip().lower() if text is not None else ""
+        if any(
+            opening.startswith(marker) and call.get("tool_name") in tools
+            for marker, tools in _TOOL_FAILURE_MARKERS.items()
+        ):
+            failed += 1
+    if not failed:
+        return []
+    return [
+        Finding(
+            check="rollout_tool_call_failed",
+            subject=subject,
+            detail={"reason": "tool output reports that the harness tool could not run", "count": failed},
+        )
     ]
 
 
@@ -909,7 +1013,7 @@ _ROLLOUT_CHECKS: dict[
     "record_unreadable": lambda record, trajectory, bindings, subject: [],
     "rollout_duplicate_identity": lambda record, trajectory, bindings, subject: [],
     "rollout_missing_agent_turns": lambda record, trajectory, bindings, subject: _rollout_missing_agent_turns(
-        trajectory, subject
+        record, trajectory, subject
     ),
     "rollout_ended_on_failed_model_call": lambda record, trajectory, bindings, subject: (
         _rollout_ended_on_failed_model_call(trajectory, subject)
@@ -931,5 +1035,8 @@ _ROLLOUT_CHECKS: dict[
     ),
     "model_call_runaway_generation": lambda record, trajectory, bindings, subject: _model_call_runaway_generation(
         bindings, subject
+    ),
+    "rollout_tool_call_failed": lambda record, trajectory, bindings, subject: _rollout_tool_call_failed(
+        trajectory, subject
     ),
 }

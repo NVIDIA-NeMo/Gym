@@ -6,7 +6,11 @@ verification, and cleanup. Pi borrows the sandbox and runs its own model/tool lo
 
 [configs/pi_agent.yaml](configs/pi_agent.yaml) is the default agent configuration. Benchmark
 and agent settings are independent; the run configuration connects them through the
-Environment Server. This harness is currently for evaluation; token IDs and logprobs are not wired up.
+Environment Server.
+
+Training token-ID capture is off by default. With `model_server`, model calls go to the Gym Model Server under
+the rollout's prefix, so capture needs only run-level `token_id_capture.enabled: true` and either the agent's
+`token_id_capture: true` or run-level `token_id_capture.all_agents: true`.
 
 ## Configure and run
 
@@ -74,6 +78,22 @@ install or rebind one. The existing `--agent-type` swap and automatic benchmark-
 still depend on legacy Agent-to-Resources bindings; they are not equivalent to this workflow.
 A new pairing does not need another combined preset.
 
+`configs/profiles/benchmark.yaml` is a swappable profile for benchmarks whose Resources server supplies no sandbox,
+such as HLE. It leaves `resources_server.name` unset (`???`), so Gym composes this agent onto the benchmark's own
+agent instance, and each session creates its own sandbox through the `sandbox` provider. That sandbox must reach the
+model server by address, so the profile sets `use_absolute_ip: true` and keeps the head server and the agent itself
+on `127.0.0.1`: the head server's config endpoint is unauthenticated, and an unseeded request to the agent runs the
+harness on the Gym host. The profile sets the sandbox's lifetime (`ttl_s`), which OpenSandbox otherwise ends after
+10 minutes. Supply the image in `sandbox_config.image`; set other `sandbox_config` keys under the profile's own
+instance name, `pi_agent.responses_api_agents.pi_agent.sandbox_config`. Like `pi_sandboxed_agent`'s profile, it sets
+`network_access: model_only`, so the sandbox reaches only the model server; a search preset overrides it with
+`model_and_tools`. A restricted sandbox cannot download Pi, so supply `sandbox_runtime_dir`, or set it to `null` for
+an image prebaked at the default path.
+
+HLE, HLE Diamond, GPQA and APEX Shortlist need no Environment Server setting: their judges serve no tools, so their
+Environment Servers grant the agent none. This agent rejects a required `direct_http` grant with a 422, so a
+benchmark whose Resources server serves its tools over direct HTTP does not pair with it.
+
 ## Runtime and model requirements
 
 Use an exact `pi_version` (default **0.80.2**), and a Gym `model_server`.
@@ -91,7 +111,10 @@ also need patchelf so Pi's Node can use a private, checksum-verified C++ library
 replacing the task's system library. The pinned Node version has no arm64 musl build.
 The provider must support sandbox exec and file upload/download.
 Installation needs network access to nodejs.org and npm; musl also uses unofficial-builds.nodejs.org
-and, for the older C++ runtime fallback, dl-cdn.alpinelinux.org.
+and, for the older C++ runtime fallback, dl-cdn.alpinelinux.org. An image without that access can carry the
+runtime instead: set `sandbox_runtime_dir` to the directory `install_pi_runtime.sh` produces, copied whole
+(`node/`, `pi/` and, on older Alpine, `libstdcpp/`), and setup checks that it runs `pi_version` rather than
+installing one. A runtime that is missing or runs another version refuses the seed with HTTP 422.
 
 The Node runtime, Pi package, and private `PI_CODING_AGENT_DIR` are outside the task repository.
 Task HOME and XDG directories are preserved for tools and verification. Pi's
@@ -141,14 +164,37 @@ extra-argument, and environment overrides; those remain available on the local p
 
 ## Requests and settings
 
-Sandbox session input is one text user message, optionally preceded by a system message. Both sandbox
+Sandbox session input is one user message, optionally preceded by a system message. The user message
+may include images as base64 data-URI `input_image` parts. The adapter stages each image at
+`/tmp/nemo-gym-media/<sha256>.<extension>`, a path named by the image's content, and passes it to Pi as an
+`@file` argument, so the same task gives Pi the same prompt in every sandbox. Staging is part of the
+activation: it spends the agent timeout, and closing the session stops it. Staged images stay in a
+borrowed sandbox after the session ends. A session declares image input on the Gym model when the prompt
+has images or when the agent configuration sets `image_input: true`. With image input declared, Pi also sends the
+model images its tools return, such as task files it reads, and a text-only deployment rejects those requests.
+Without it, Pi replaces such an image with a note saying it was omitted. Set `image_input: true` for a vision model
+whose tasks keep their images in the sandbox, where the prompt has none.
+Images in the system message and image URLs are rejected. Both sandbox
 and local execution combine the configured system prompt, request `instructions`, and input
 system message in that order. Sampling and chat-template settings belong on the Gym Model Server.
 Sandbox sessions reject unsupported request controls before execution.
 
+Pi decides how to send each attached file:
+
+- Pi adds a `<file name="<sandbox path>">` tag to the end of the prompt text for each file, and sends the
+  images after all the text, so the order of text and images in the request is not kept.
+- Pi recognizes an image from its leading bytes, not from the declared media type. Pi inlines a file it
+  does not recognize as an image, such as an animated PNG, into the prompt as text.
+- Sessions turn off Pi's image resizing (`images.autoResize` in `settings.json`), so images reach the model
+  as the environment sent them, both prompt images and images the read tool returns.
+- The `detail` field of an `input_image` part has no effect.
+
+Saved trajectories record the user prompt's text but not its images.
+
 Set the agent configuration's `max_output_tokens` for a per-model-call output cap, including
-reasoning tokens. An adapter-owned Pi extension applies it as `max_tokens`, preserving any
-smaller upstream cap. Limits must be positive JavaScript-safe integers. Request-level
+reasoning tokens. Under the default `output_token_policy: fixed`, an adapter-owned Pi extension applies it as
+`max_tokens`, preserving any smaller upstream cap; under `remaining_context` the extension removes the cap
+(see [Local CLI compatibility](#local-cli-compatibility)). Limits must be positive JavaScript-safe integers. Request-level
 `max_output_tokens` is rejected in sandbox sessions because a total-response budget is not implemented. Model Server
 configuration must not replace the agent's cap with a larger value. Enforcement is tested with Pi 0.80.2.
 
@@ -224,6 +270,10 @@ detail, not a separate endpoint or a setup step users must run.
 - `pi_version`: npm version to pin on install (null means latest on the local path; sandbox sessions require an exact version)
 - `resources_server`: required only for the agent's existing `/run` endpoint, not for sandbox sessions or direct `/v1/responses`
 - `sandbox_install_timeout_seconds`: sandbox runtime installation timeout (default 600)
+- `sandbox_runtime_dir`: absolute sandbox path of a preinstalled runtime to use instead of installing one
+  (default none)
+- `network_access`: egress of a sandbox the agent creates: `inherit` (default, the provider's network),
+  `model_only`, or `model_and_tools`; OpenSandbox only
 - `sandbox_bash_timeout_seconds`: maximum runtime of each sandbox bash tool call (default 900);
   shorter tool-requested deadlines are preserved
 - `sandbox_mcp_timeout_seconds`: maximum time of each call to a granted MCP tool (default 300)
@@ -262,8 +312,10 @@ evidence or failed release retains the handle for retry. Cleanup is cooperative,
 
 ## Local CLI compatibility
 
-Local settings retain `output_token_policy` (`fixed` or `remaining_context`),
-`auto_compaction`, and an optional per-call `bash_timeout`. The dedicated
+`auto_compaction` and `output_token_policy` apply to local runs and sandbox sessions alike. Under
+`output_token_policy`, `fixed` caps each request at `max_output_tokens`, and `remaining_context` drops the cap
+so the model server sizes the output from the context the request leaves. The optional per-call `bash_timeout`
+is local only; sandbox sessions use `sandbox_bash_timeout_seconds`. The dedicated
 `pi_sandboxed_agent` also uses this local adapter inside its sandbox and supplies
 `mcp_servers` for authenticated Gym tools. Sandbox sessions take Resources tools from MCP grants
 instead and reject required HTTP tool grants rather than silently ignoring them.
@@ -323,3 +375,24 @@ It creates a sandbox, runs there, and destroys it on close; the default workdir 
 never triggers a replacement or host execution. With neither access nor a usable
 provider, setup fails. Verifiers that inspect task files must keep using a
 Resources-owned sandbox, since agent-owned sandboxes are gone before verification.
+
+`network_access: model_only` limits a created sandbox's egress to the model server's host;
+`model_and_tools` also allows the host of each MCP grant. Each allowed host is open on every port.
+Under `model_and_tools`, an MCP grant at an address the sandbox cannot reach, such as loopback, refuses the seed
+with a 422, even an optional one that `inherit` would skip; a required grant under `model_only` is refused too. The policy is
+set when the sandbox is created, so a session that borrows a task sandbox rejects any value other than `inherit`,
+and a `sandbox_config.provider_options.network_policy` cannot be combined with it. A created sandbox must reach
+the model server by address (`use_absolute_ip: true`). A borrowed sandbox relies on its owner's network policy,
+and the owner never learns which endpoints the agent needs: a deny-by-default owner must allow the model server
+itself, and a profile that sets `model_only` cannot be reused for a benchmark that supplies task sandboxes.
+
+A restricted sandbox cannot download Pi, so pair it with `sandbox_runtime_dir`, or with an image that already holds
+the runtime at the default path, `/tmp/nemo-gym-pi-node-22.19.0-<pi_version>`, with its `ready` marker.
+
+Allowing the model server's host opens every Gym server bound to that address, not only the model server. With
+`model_only`, set `absolute_ip_server_types: [responses_api_models]` so that only the model server leaves loopback;
+with `model_and_tools`, also list `resources_servers` for the tool servers.
+
+The policy is only as strong as the OpenSandbox server's egress mode. In `dns` mode only name resolution is filtered,
+so a hard-coded IP bypasses the policy; `dns+nft` also enforces it at the IP layer. Use `dns+nft` for full isolation
+(see [OpenSandbox](../../fern/versions/latest/pages/infrastructure/sandbox/opensandbox.mdx#network-policy)).

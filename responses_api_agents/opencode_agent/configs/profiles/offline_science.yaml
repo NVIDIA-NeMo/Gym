@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Shared settings of the offline scientific benchmark presets (benchmarks/hle/opencode.yaml,
+# benchmarks/apex_shortlist/opencode.yaml), merged into the `opencode_agent` instance that each preset's agent
+# inherits. It builds on profiles/benchmark.yaml and fills in the offline science image
+# (responses_api_agents/opencode_sandboxed_agent/offline_science_image), which reaches only the model server.
+# The settings follow opencode_sandboxed_agent's configs/benchmark.yaml where opencode_agent has them; the
+# benchmark READMEs list what differs.
+config_paths:
+- responses_api_agents/opencode_agent/configs/profiles/benchmark.yaml
+# A sandbox allowed to reach the model server's host reaches every port on it, so only the model server leaves
+# loopback. A search preset adds resources_servers for its tool server.
+absolute_ip_server_types: [responses_api_models]
+opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      num_workers: 4
+      concurrency: 512
+      timeout: 14400
+      # One model call must fit the served 262,144-token context: OpenCode asks for max_output_tokens on every call.
+      context_window: 229376
+      max_output_tokens: 32768
+      token_id_capture: false
+      # The image ships the pinned OpenCode binary (offline_science_image/Dockerfile checks this digest).
+      sandbox_executable_path: /usr/local/bin/opencode
+      sandbox_executable_sha256: 0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded  # pragma: allowlist secret
+      system_prompt: |
+        Internet access is disabled on this machine.
+        Scientific Python packages (including NumPy, SciPy, and SymPy), SageMath, and Lean/Mathlib are preinstalled. See /opt/science/README.md for available tools and usage.
+      opencode_config:
+        permission:
+          # No subagents, as in the deprecated preset; the web and skill tools are denied by the default rules.
+          task: deny
+      sandbox_config:
+        # profiles/benchmark.yaml's 14,400 s TTL starts when the seed creates the sandbox, but the 14,400 s run budget
+        # only after the seed (up to the 1,200 s ready wait). A run near its deadline would outlive its sandbox, and a
+        # lost sandbox is retried, not graded: the TTL adds 1,800 s for the seed.
+        ttl_s: 16200
+        image: ${oc.env:OPENCODE_SANDBOX_IMAGE}
+        workdir: /workspace
+        entrypoint:
+        - sleep
+        - infinity
+        resources:
+          cpu: 2
+          memory_mib: 8192
+        env:
+          EXECD_API_GRACE_SHUTDOWN: 50ms

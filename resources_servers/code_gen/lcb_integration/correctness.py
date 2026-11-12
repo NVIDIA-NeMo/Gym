@@ -15,9 +15,8 @@
 
 """Grade one candidate against its unit tests in a child process.
 
-Kept free of Ray and other server dependencies so the identical code runs on a Ray worker
-(``compute_code_generation_metrics.check_correctness_remote``) and inside a verification
-sandbox (``sandbox/sandbox_runner.py``), which is what keeps the two execution paths at parity.
+Kept free of server dependencies for execution inside a verification sandbox
+(``sandbox/sandbox_runner.py``).
 """
 
 import json

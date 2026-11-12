@@ -52,6 +52,7 @@ from uuid import uuid4
 from anthropic.types.message_create_params import MessageCreateParams
 
 from nemo_gym.core.responses_api_types import (
+    TOKEN_METADATA_FIELDS,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -65,6 +66,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
     NeMoGymSummary,
+    TokenIDLogProbMixin,
 )
 from nemo_gym.models.anthropic_utils import NeMoGymAnthropicMessage
 
@@ -89,7 +91,16 @@ class AnthropicConverter:
         thinking_budget_tokens: Optional[int],
         extra_body: Dict[str, Any],
     ) -> Dict[str, Any]:
-        body_dict = body.model_dump(exclude_unset=True)
+        # Anthropic requests carry no token metadata, so skip copying the token lists of training variants.
+        # A nested exclude slows the dump even when nothing matches, so apply it only when an input item
+        # carries token metadata.
+        carries_token_metadata = not isinstance(body.input, str) and any(
+            isinstance(item, TokenIDLogProbMixin) for item in body.input
+        )
+        body_dict = body.model_dump(
+            exclude_unset=True,
+            exclude={"input": {"__all__": TOKEN_METADATA_FIELDS}} if carries_token_metadata else None,
+        )
         anthropic_body = dict(extra_body)
         anthropic_body.update(
             {
@@ -122,6 +133,8 @@ class AnthropicConverter:
                     [self._function_call_to_tool_use(item)],
                 )
             elif item_type == "function_call_output":
+                if (item.get("caller") or {}).get("type", "direct") != "direct":
+                    raise NotImplementedError("Responses tool caller metadata has no Anthropic representation.")
                 self._append_content(
                     anthropic_body["messages"],
                     "user",
@@ -209,13 +222,19 @@ class AnthropicConverter:
         usage = self._usage_to_responses_usage(anthropic_response.get("usage"))
         stop_reason = anthropic_response.get("stop_reason")
         incomplete_details = self._incomplete_details_from_stop_reason(stop_reason)
+        # The items are already validated, so the response takes them as is instead of a dump to
+        # validate again. A rebuilt item would have every field marked as set, and exclude_unset dumps
+        # such as request replay read that, so mark them the same way. Their nested parts are built
+        # with every field passed explicitly, so they are marked already.
+        for item in output:
+            item.__pydantic_fields_set__ = set(type(item).model_fields)
 
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
             model=model,
             object="response",
-            output=[item.model_dump() for item in output],
+            output=output,
             tool_choice=request_body.tool_choice,
             parallel_tool_calls=request_body.parallel_tool_calls,
             tools=request_body.tools,
@@ -528,28 +547,44 @@ class AnthropicConverter:
                 "usage": self._responses_usage_to_anthropic(response.usage),
             }
         )
-        return message.model_dump(mode="json", exclude_none=True)
+        result = message.model_dump(mode="json", exclude_none=True)
+        for field in ("native_stop_reason", "native_finish_reason"):
+            value = getattr(response, field, None)
+            if value is not None:
+                result[field] = value
+        return result
 
     def _responses_usage_to_anthropic(self, usage: Optional[NeMoGymResponseUsage]) -> Dict[str, int]:
         """Responses usage as an Anthropic usage object.
 
-        Responses counts cached input inside ``input_tokens``; Anthropic reports cache reads apart from it, in
-        ``cache_read_input_tokens``. Responses has no count of cache writes, so none is reported.
+        Responses counts cache reads and writes inside ``input_tokens``; Anthropic reports them apart from it, in
+        ``cache_read_input_tokens`` and ``cache_creation_input_tokens``.
         """
         if usage is None:
             return {"input_tokens": 0, "output_tokens": 0}
         details = usage.input_tokens_details
         cached = details.cached_tokens if details is not None else None
+        written = details.cache_write_tokens if details is not None else None
         anthropic_usage = {"input_tokens": usage.input_tokens, "output_tokens": usage.output_tokens}
+        if written is not None:
+            anthropic_usage["input_tokens"] = max(anthropic_usage["input_tokens"] - written, 0)
+            anthropic_usage["cache_creation_input_tokens"] = written
         if cached is not None:
-            anthropic_usage["input_tokens"] = max(usage.input_tokens - cached, 0)
+            anthropic_usage["input_tokens"] = max(anthropic_usage["input_tokens"] - cached, 0)
             anthropic_usage["cache_read_input_tokens"] = cached
         return anthropic_usage
 
     def _iter_output_dicts(self, response: NeMoGymResponse) -> List[Dict[str, Any]]:
+        # The Anthropic mapping drops token metadata, so skip copying the token lists of training variants
+        # into the dumps. The exclude slows the dump even when nothing matches, so apply it only to them.
         items = []
         for item in response.output or []:
-            items.append(item if isinstance(item, dict) else item.model_dump())
+            if isinstance(item, dict):
+                items.append(item)
+            elif isinstance(item, TokenIDLogProbMixin):
+                items.append(item.model_dump(exclude=TOKEN_METADATA_FIELDS))
+            else:
+                items.append(item.model_dump())
         return items
 
     def _output_message_to_anthropic_blocks(self, item: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -784,6 +819,8 @@ class AnthropicConverter:
         return blocks
 
     def _function_call_to_tool_use(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        if (item.get("caller") or {}).get("type", "direct") != "direct":
+            raise NotImplementedError("Responses tool caller metadata has no Anthropic representation.")
         return {
             "type": "tool_use",
             "id": item["call_id"],
@@ -813,6 +850,10 @@ class AnthropicConverter:
 
         anthropic_tools = []
         for tool in tools:
+            if tool.get("allowed_callers") is not None:
+                raise NotImplementedError("Responses tool caller eligibility has no Anthropic representation.")
+            if tool.get("output_schema") is not None:
+                raise NotImplementedError("Responses tool output schema has no Anthropic representation.")
             if tool.get("type") != "function":
                 raise NotImplementedError(f"Unsupported Responses API tool type for Anthropic: {tool.get('type')}")
             anthropic_tool = {
@@ -850,6 +891,8 @@ class AnthropicConverter:
                     NeMoGymResponseOutputText(
                         annotations=[],
                         text="".join(pending_text),
+                        type="output_text",
+                        logprobs=None,
                     )
                 ],
                 role="assistant",
@@ -870,7 +913,7 @@ class AnthropicConverter:
         output_tokens = usage.get("output_tokens", 0)
         return NeMoGymResponseUsage(
             input_tokens=input_tokens,
-            input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=read),
+            input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=read, cache_write_tokens=written),
             output_tokens=output_tokens,
             output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=None),
             total_tokens=input_tokens + output_tokens,
