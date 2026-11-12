@@ -467,6 +467,64 @@ class TestNeMoGymResponse:
         assert web_search_call.model_dump(mode="json") == payload
 
 
+class TestChatCompletionFinishReasons:
+    @pytest.mark.parametrize("stop_reason", [None, 0, 11, "repetition_detected"])
+    def test_vllm_repetition_finish_reason_is_sdk_compatible(self, stop_reason: str | int | None) -> None:
+        payload = {
+            "id": "chatcmpl-repetition",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "test",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "repetition",
+                    "stop_reason": stop_reason,
+                    "message": {"role": "assistant", "content": "Retained answer."},
+                }
+            ],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+        }
+        original = deepcopy(payload)
+
+        completion = NeMoGymChatCompletion.model_validate(payload)
+        saved = NeMoGymChatCompletion.model_validate_json(completion.model_dump_json(exclude_unset=True))
+
+        expected = deepcopy(original)
+        expected["choices"][0].update(finish_reason="stop", native_finish_reason="repetition")
+        assert saved.model_dump(exclude_unset=True) == expected
+        assert payload == original
+        assert type(saved.choices[0].stop_reason) is type(stop_reason)
+        sdk = ChatCompletion.model_validate_json(saved.model_dump_json(exclude_unset=True))
+        assert sdk.choices[0].finish_reason == "stop"
+        assert sdk.choices[0].native_finish_reason == "repetition"
+
+    @pytest.mark.parametrize("finish_reason", ["stop", "length", "content_filter", "tool_calls", "function_call"])
+    def test_standard_finish_reasons_are_unchanged(self, finish_reason: str) -> None:
+        payload = {
+            "index": 0,
+            "finish_reason": finish_reason,
+            "stop_reason": 0,
+            "message": {"role": "assistant", "content": "Retained answer."},
+        }
+
+        choice = NeMoGymChoice.model_validate(payload)
+
+        assert choice.model_dump(exclude_unset=True) == payload
+        assert "native_finish_reason" not in choice.model_dump()
+
+    def test_unrecognized_finish_reason_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="finish_reason"):
+            NeMoGymChoice.model_validate(
+                {
+                    "index": 0,
+                    "finish_reason": "unknown_provider_error",
+                    "stop_reason": "repetition_detected",
+                    "message": {"role": "assistant", "content": "Retained answer."},
+                }
+            )
+
+
 class TestTokenMetadataValidation:
     @pytest.mark.parametrize(
         "token_metadata",
