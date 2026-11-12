@@ -19,12 +19,13 @@ import reasoning_gym
 from fastapi import FastAPI
 from reasoning_gym.utils import extract_answer
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 class ReasoningGymResourcesServerConfig(BaseResourcesServerConfig):
@@ -44,7 +45,10 @@ class ReasoningGymVerifyResponse(BaseVerifyResponse):
 
 
 class ReasoningGymResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
+    # Each verification scores the answer with its reasoning_gym task: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     config: ReasoningGymResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:
@@ -115,3 +119,6 @@ class ReasoningGymResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     ReasoningGymResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ReasoningGymResourcesServer.run_webserver()  # noqa: F401

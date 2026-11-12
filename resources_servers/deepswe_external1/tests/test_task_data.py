@@ -144,3 +144,14 @@ async def test_real_git_patch_preserves_binary_deletion_symlink_and_executable_m
     assert (fresh / "executable.sh").stat().st_mode & 0o111
     assert (fresh / "link").is_symlink() and (fresh / "link").readlink() == Path("new.txt")
     assert not (fresh / "untracked.txt").exists() and not (fresh / "ignored").exists()
+
+
+@pytest.mark.parametrize("workdir", ["/app", "/workspace/repo"])
+def test_workdir_accepts_both_task_layouts(task: InlineTask, workdir: str) -> None:
+    data = task.data.model_copy(update={"workdir": workdir})
+    validated = TaskData.model_validate(data.model_dump(mode="json"))
+    assert validated.workdir == workdir
+    inline = InlineTask(validated)
+    collect = inline.config.verifier.collect[0].command
+    assert f"cd {workdir};" in collect and f"safe.directory {workdir};" in collect
+    assert ("/app" in collect) == (workdir == "/app")

@@ -209,7 +209,7 @@ class TestDropTestPatchFiles:
 
 class _FakeSandbox:
     def __init__(self, stdout: str, return_code: int = 0) -> None:
-        self._result = SimpleNamespace(stdout=stdout, stderr="", return_code=return_code)
+        self._result = SimpleNamespace(stdout=stdout, stderr="", error_type=None, return_code=return_code)
         self.commands: list[str] = []
 
     async def exec(self, command: str, timeout_s=None):
@@ -356,7 +356,7 @@ class TestSandboxCpuCap:
     This set is the compile-heaviest in the repo, so it is the one that most needs them."""
 
     def test_cpu_cap_env_is_derived_from_the_cpu_limit(self) -> None:
-        from nemo_gym.sandbox.utils import cpu_cap_env
+        from nemo_gym.sandbox import cpu_cap_env
 
         env = cpu_cap_env(4)
         assert env["OMP_NUM_THREADS"] == "4"
@@ -364,7 +364,7 @@ class TestSandboxCpuCap:
         assert env["CARGO_BUILD_JOBS"] == "4"
 
     def test_the_server_applies_them_and_explicit_env_still_wins(self) -> None:
-        from nemo_gym.sandbox.utils import cpu_cap_env
+        from nemo_gym.sandbox import cpu_cap_env
 
         # Mirrors the precedence in _create_sandbox: derived caps first, explicit env over them.
         derived = cpu_cap_env(4)
@@ -542,6 +542,19 @@ class TestMavenMirror:
         assert MAVEN_SETTINGS_PATH in files, "Maven reads ~/.m2/settings.xml by default"
         assert GRADLE_INIT_PATH in files, "Gradle auto-loads $GRADLE_USER_HOME/init.d/*.gradle"
         assert "maven-central.storage-download.googleapis.com" in files[MAVEN_SETTINGS_PATH]
+
+    def test_maven_settings_can_be_left_to_the_provider(self) -> None:
+        """Some providers mount their own read-only ~/.m2/settings.xml that already mirrors Central, so
+        writing ours fails sandbox creation; the Gradle script is unaffected."""
+        from resources_servers.swe_rebench.verification import (
+            GRADLE_INIT_PATH,
+            MAVEN_SETTINGS_PATH,
+            verification_files,
+        )
+
+        files = verification_files(_inputs(), overwrite_maven_settings=False)
+        assert MAVEN_SETTINGS_PATH not in files
+        assert GRADLE_INIT_PATH in files
 
     def test_gradle_home_is_set_or_the_init_script_is_never_read(self) -> None:
         """Shipping init.gradle is useless on its own: Gradle only scans init.d under

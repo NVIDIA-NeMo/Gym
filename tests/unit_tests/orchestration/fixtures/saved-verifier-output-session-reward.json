@@ -1,0 +1,101 @@
+[
+ {
+  "reward": 0.0,
+  "evaluation_completed": true,
+  "infrastructure_error": null,
+  "num_tests_passed": 1,
+  "num_tests_total": 1,
+  "num_tests_failed": 0,
+  "partial_credit": 1.0,
+  "task_id": "terminal-bench/task-a",
+  "session_id": "tb4-00000000000000000000000000000001",
+  "_reward_file": {
+   "reward": 0.0
+  },
+  "response": {
+   "object": "response",
+   "id": "resp-zero-with-passes",
+   "status": "completed",
+   "output": [
+    {
+     "type": "message",
+     "role": "assistant",
+     "status": "completed",
+     "content": [
+      {
+       "type": "output_text",
+       "text": "Task complete."
+      }
+     ]
+    }
+   ]
+  },
+  "_class": "zero-with-passes"
+ },
+ {
+  "reward": 0.0,
+  "evaluation_completed": true,
+  "infrastructure_error": null,
+  "num_tests_passed": null,
+  "num_tests_total": null,
+  "num_tests_failed": null,
+  "partial_credit": 0.0,
+  "task_id": "terminal-bench/task-b",
+  "session_id": "tb4-00000000000000000000000000000002",
+  "_reward_file": {
+   "reward": 0.0
+  },
+  "response": {
+   "object": "response",
+   "id": "resp-zero",
+   "status": "completed",
+   "output": [
+    {
+     "type": "message",
+     "role": "assistant",
+     "status": "completed",
+     "content": [
+      {
+       "type": "output_text",
+       "text": "Task complete."
+      }
+     ]
+    }
+   ]
+  },
+  "_class": "zero"
+ },
+ {
+  "reward": 1.0,
+  "evaluation_completed": true,
+  "infrastructure_error": null,
+  "num_tests_passed": null,
+  "num_tests_total": null,
+  "num_tests_failed": null,
+  "partial_credit": 1.0,
+  "task_id": "terminal-bench/task-c",
+  "session_id": "tb4-00000000000000000000000000000003",
+  "_reward_file": {
+   "reward": 1.0
+  },
+  "response": {
+   "object": "response",
+   "id": "resp-full",
+   "status": "completed",
+   "output": [
+    {
+     "type": "message",
+     "role": "assistant",
+     "status": "completed",
+     "content": [
+      {
+       "type": "output_text",
+       "text": "Task complete."
+      }
+     ]
+    }
+   ]
+  },
+  "_class": "full"
+ }
+]

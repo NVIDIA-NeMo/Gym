@@ -33,12 +33,65 @@ different filesystems.
 The Gym container image (`docker/Dockerfile`, `release` target) seeds its `UV_CACHE_DIR` with the
 root lock, so `lint.sh` and `core_unit_tests.sh` run without a package index; in the container,
 `setup_dev.sh` syncs the driver environment with `--offline`. Every server module also installs its
-own unlocked `requirements.txt` or `pyproject.toml`, which the root lock does not cover. Built with
+own `pyproject.toml` and committed `uv.lock`, which the root lock does not cover. Built with
 `--build-arg NEMO_GYM_SEED_SERVER_ENVS=1`, the image also seeds every server's environment through
 `ng_test_all +setup_only=true`, installed exactly as `server_tests.sh` installs it, so the server
 suite runs offline too when the provider sets `UV_OFFLINE=1` for the nested installs. A server
 whose Git source, direct or transitive, is not pinned to a full commit (a branch, a tag, an
 abbreviated SHA, or no ref) still needs the network, because `uv` must fetch to resolve it.
+
+## Shared server-test data
+
+IFBench source, NLTK resources, and the FLORES-200 SentencePiece tokenizer live under
+`s3://nemo-ci-storage-31ff58e3-a555-4c8b-ad91-c453ce311bbd/nemo-fw/TestData/nemo_gym/v1/`.
+GitHub test jobs use the existing `nemo-ci-aws-cpu-4-16` ARC runner pool, which already mounts
+that bucket read-only at `/mnt/s3-data-ro`. Jobs set `NEMO_GYM_TEST_DATA_ROOT` to
+`/mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1`, set `NLTK_DATA` to its `nltk_data` child, and
+run `scripts/ci/check_test_data.py`. The preflight requires 15 nonempty files, the pinned
+IFBench revision, and the tokenizer's pinned SHA-256 before tests start.
+Its `--nltk-cache` option copies the NLTK resources into a
+private cache and exports that path for the job: NLTK 3.10 refuses foreign-UID or writable shared
+trees. It also exports `SACREBLEU` pointing to the bundle's `sacrebleu` directory.
+Native CI workers derive the same path from `NEMO_GYM_TEST_DATA_ROOT`.
+SacreBLEU reads `sacrebleu/models/flores200sacrebleuspm` directly from the read-only mount,
+so WMT tests do not fetch the model through its external download URL.
+Missing NLTK packages can download into the private cache. Compiler and browser dependencies
+are installed by `install_test_dependencies.sh`; the S3 mount is supplied by ARC.
+
+TF-States owns recurring S3 → GCS → Singapore GCS transfers. Its existing `gpu-datasets-sync`
+CronJob copies the complete `nemo-fw/TestData` parent to the read-only dataset export and verifies
+the Gym bundle's checksums. CI-Events' `nemo-gym` profile mounts the same versioned subtree at
+`/mnt/gcs-data-ro/nemo-fw/TestData/nemo_gym/v1` and checks each required file during inventory,
+before admitting test shards. The existing dataset root is mounted so inventory can also report
+an absent Gym subtree.
+These declarations require artifact seeding, infrastructure apply, and a pod-launcher release
+before they can supply a running job.
+
+Prepare the bundle locally while online, supplying a previously downloaded FLORES-200 model:
+
+```bash
+uv run --no-project --with 'nltk>=3.10.0' --with regex --with defusedxml \
+  python scripts/ci/seed_test_data.py cache/gym-test-data/v1 \
+    --sacrebleu-model "$HOME/.sacrebleu/models/flores200sacrebleuspm"
+(cd cache/gym-test-data/v1 && sha256sum --strict -c SHA256SUMS)
+```
+
+Upload all files beneath that directory to the S3 prefix, with `SHA256SUMS` last. Preserve the
+relative paths across both GCS mirrors and the dataset export. Use a new versioned prefix for
+future incompatible bundles and update consumers together.
+
+The tokenizer must have SHA-256
+`14bb8dfb35c0ffdea7bc01e56cea38b9e3d5efcdcb9c251d6b40538e1aab555a`.
+Seeding rejects a different file before preparing the bundle. When extending an existing v1
+bundle, publish the model and its manifest entry before rolling out the stricter inventory.
+
+For a supplied filesystem tree, set `NEMO_GYM_TEST_DATA_ROOT` to the versioned root and `NLTK_DATA`
+to its `nltk_data` child. IFBench copies mounted source into its private `.ifbench` cache before
+patching; an absent source path falls back to its pinned online clone. Existing NLTK resources
+are read from the supplied paths; missing ones download into `$XDG_CACHE_HOME/nltk_data` (default
+`~/.cache/nltk_data`). Supplied directories may be read-only. Scoring checks use cached resources
+without fetching NLTK's package index. Aviary lifecycle tests use local synthetic GSM8K rows.
+Other servers can still require their own external data or tools.
 
 Both CI providers run `core_unit_tests.sh` in its deterministic `dev`-only environment. GitHub then
 installs its public-only sandbox dependencies and runs the sandbox-marked tests as a separate
@@ -50,3 +103,25 @@ Lint clears `SKIP`; core and server tests clear external Gym roots, root configu
 `PYTHONSAFEPATH` overrides. Clearing `PYTHONSAFEPATH` keeps nested module imports consistent with
 GitHub when a CI image enables Python safe-path mode globally. Resolver/index settings are
 intentionally preserved so internal package access remains available.
+
+## Four-way core sharding on GitHub
+
+`unit-tests.yml` runs `core_unit_tests.sh INDEX 4` on four independent runners.
+The default invocation without arguments still runs every non-sandbox test for the internal adapter.
+The opt-in pytest plugin assigns whole collected files, longest first, to the least-loaded shard.
+Assignments use `core_test_durations.json`; new files use the median recorded duration.
+Every collected file belongs to exactly one shard. Tests within a file stay serial.
+
+The initial weights estimate file durations from timestamped verbose results in run `41587144451`.
+They exclude collection and sandbox time; log buffering makes them approximate, not speedup measurements.
+Each shard publishes JUnit durations with its coverage artifact for future weight updates.
+Sum JUnit testcase times by source file to refresh the `files` map, and update the source metadata.
+Keep all four shards on the same checked-in weights so they select disjoint partitions.
+
+Sandbox tests run once on a separate runner. Coverage uses relative paths across runner checkouts.
+The coverage job requires all four core files and the sandbox file before combining them.
+Only the combined report enforces `pyproject.toml`'s coverage threshold and precision.
+The report includes measured Git-tracked sources, not dependency-cache helpers or synthetic code from tests.
+Missing tracked sources still fail reporting; the job does not ignore coverage errors.
+The existing `Test` check requires every core shard, sandbox tests, combined coverage, and any required changed-server tests.
+The eight server shards and the separate on-demand `full-test-suite.yml` keep their existing behavior.

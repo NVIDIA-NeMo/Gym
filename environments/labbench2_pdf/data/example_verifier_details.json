@@ -1,0 +1,19 @@
+{
+  "schema_version": "labbench2_pdf_reward.v1",
+  "execution_status": "completed",
+  "error_type": null,
+  "reward": 1.0,
+  "score": 1.0,
+  "judge_result": "correct",
+  "judge_rationale": "Exact normalized match.",
+  "judge_available": false,
+  "judge_model": null,
+  "judge_error": null,
+  "fallback_exact": true,
+  "answer": "PBMC (12k)",
+  "answer_source": "file",
+  "question": "In a study looking at the performance of single-cell foundation models, using the scGPT model, which dataset had the highest average BIO score?",
+  "ideal": "PBMC (12k)",
+  "tag": "figqa2",
+  "item_id": "b9ba0817-f8c1-4817-8293-c71aa0d6efec"
+}

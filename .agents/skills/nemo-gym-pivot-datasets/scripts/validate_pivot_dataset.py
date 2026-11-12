@@ -169,7 +169,7 @@ def load_gym_validators(gym_repo: Path | None):
     try:
         from pydantic import TypeAdapter
 
-        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+        from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
         from resources_servers.single_step_tool_use_with_argument_comparison.common.verification_utils import (
             ExpectedAction,
         )

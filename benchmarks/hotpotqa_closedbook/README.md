@@ -64,8 +64,11 @@ Fully deterministic, matching Skills:
    flagged as unreliable for substring evaluation (length >40, or 3-6 word
    strings that look like multi-word proper names).
 
-The reward emitted by `/verify` is `is_correct_strict`. The full set of
-scores (`answer_em`, `answer_f1`, `is_correct`, `is_correct_strict`) is
+The reward emitted by `/verify` is `is_correct_strict`, the default
+`reward_metric` of the
+[`hotpotqa_qa` resources server](../../resources_servers/hotpotqa_qa/README.md#reward-metric).
+The full set of scores (`answer_em`, `answer_f1`, `is_correct`,
+`is_correct_strict`) is
 returned in the verify response so downstream metric aggregation can compute
 pass@k for each channel.
 

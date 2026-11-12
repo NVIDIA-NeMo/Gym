@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import yaml
 
-from nemo_gym.server_metadata import ServerMetadata, visit_agent_server, visit_resources_server
+from nemo_gym.config import ServerMetadata, visit_agent_server, visit_resources_server
 
 
 README_PATH = Path("README.md")

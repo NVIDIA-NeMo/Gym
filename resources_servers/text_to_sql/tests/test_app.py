@@ -17,14 +17,14 @@ from unittest.mock import AsyncMock, MagicMock
 import orjson
 import pytest
 
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import ServerClient
 from resources_servers.text_to_sql.app import (
     FailureCode,
     TextToSqlResourcesServer,

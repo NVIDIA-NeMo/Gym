@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Stock Claude Code binding using the same prepared questions and document sandbox.
+config_paths:
+- benchmarks/officeqa_pro/config.yaml
+officeqa_pro_opencode_agent: null
+officeqa_claude_version: 2.1.285
+# Supply the SHA-256 printed by Containerfile.claude for the deployment architecture.
+officeqa_claude_binary_sha256: null
+# Native Responses preserves image-bearing Read tool results through Gym's adapter.
+policy_model:
+  responses_api_models:
+    vllm_model:
+      is_responses_native: true
+officeqa_pro_claude_code_agent:
+  responses_api_agents:
+    claude_code_agent:
+      entrypoint: app.py
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
+      claude_code_version: ${officeqa_claude_version}
+      bare: true
+      max_turns: 256
+      timeout: 7200
+      disallowed_tools: ${officeqa_network_settings.${officeqa_network_access}.claude_disallowed_tools}
+      sandbox_executable_path: /opt/cli/claude
+      sandbox_executable_sha256: ${officeqa_claude_binary_sha256}
+officeqa_pro_environment_server:
+  environment_servers:
+    single_agent_turn:
+      agent_server:
+        type: responses_api_agents
+        name: officeqa_pro_claude_code_agent

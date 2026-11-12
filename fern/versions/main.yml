@@ -16,10 +16,13 @@ navigation:
         title: "Get Started"
         title-source: frontmatter
       - folder: ./latest/pages/data
-        title: "Prepare Data"
+        title: "Prepare Tasks"
         title-source: frontmatter
       - folder: ./latest/pages/agent-server
         title: "Configure Agents"
+        title-source: frontmatter
+      - folder: ./latest/pages/agent-interactions
+        title: "Design Agent-Environment Interactions"
         title-source: frontmatter
       - folder: ./latest/pages/model-server
         title: "Configure Models"
@@ -46,6 +49,9 @@ navigation:
         title-source: frontmatter
       - folder: ./latest/pages/infrastructure
         title: "Infrastructure"
+        title-source: frontmatter
+      - folder: ./latest/pages/orchestration
+        title: "Orchestration"
         title-source: frontmatter
       - folder: ./latest/pages/observability
         title: "Observability"

@@ -1,0 +1,14 @@
+{
+  "provider": {
+    "nemo_gym": {
+      "models": {
+        "dummy_model": {
+          "modalities": {
+            "input": ["text", "image"],
+            "output": ["text"]
+          }
+        }
+      }
+    }
+  }
+}

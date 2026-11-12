@@ -1,0 +1,16 @@
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12.*
+  - pip
+  - datasets
+  - matplotlib
+  - matplotlib-venn
+  - seaborn
+  - plotly
+  - openpyxl
+  - jupyter
+  - ipykernel
+  - nbconvert
+  - sqlite
+  - xlrd

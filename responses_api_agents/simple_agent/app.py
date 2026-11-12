@@ -12,42 +12,104 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import json
 import logging
-from collections.abc import Mapping
+import re
+from collections.abc import Awaitable, Callable, Mapping
+from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass
-from time import perf_counter, time
-from typing import Any
+from time import monotonic, perf_counter, time
+from typing import Any, ClassVar
+from uuid import uuid4
 
+from aiohttp import ClientResponseError
 from fastapi import Request, Response
-from pydantic import ConfigDict, Field, ValidationError
-
-from nemo_gym.base_resources_server import (
-    AggregateMetrics,
-    AggregateMetricsRequest,
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
+from fastapi.responses import JSONResponse
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    PrivateAttr,
+    TypeAdapter,
+    ValidationError,
+    model_validator,
 )
-from nemo_gym.base_responses_api_agent import (
+
+from nemo_gym.agents import (
+    AGENT_ACTIVATION_HEADER,
+    AGENT_OUTCOME_METADATA_KEY,
     AgentCloseSessionResponse,
+    AgentOutcome,
+    AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    OutcomeAction,
+    OutcomePolicyConfig,
     SimpleResponsesAPIAgent,
+    confirmed_policy_response_timeout,
+    failure_outcome_policy,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.agents.agent_outcome import POLICY_TIMEOUT_OPERATION, policy_timeout_failure
+from nemo_gym.client import get_response_json, raise_for_status, rollout_path_prefix
+from nemo_gym.client import request as http_request
+from nemo_gym.config import (
+    ROLLOUT_PATH_PREFIX,
+    AggregateMetrics,
+    AggregateMetricsRequest,
+    ModelServerRef,
+    ResourcesServerRef,
+)
+from nemo_gym.core import (
+    AGENT_RUN_ERROR,
+    MODEL_POLICY_RESPONSE_TIMEOUT,
+    MODEL_REQUEST_ERROR,
+    TOOL_OUTPUT_IMAGES_KEY,
+    EpisodeId,
+    FailureBoundary,
+    FailureClassificationConfig,
+    FailureHeader,
+    FailureReportRow,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
+    NeMoGymResponseInput,
     NeMoGymResponseOutputMessage,
+    NeMoGymResponseUsage,
+    NgFailureEvent,
+    RequestFailureLog,
+    ToolOutputImage,
     accumulate_response_usage,
+    report_for_current_request,
+    split_tool_output_images,
 )
-from nemo_gym.rollout_observability import (
+from nemo_gym.rollouts.health.timeouts import TimeoutEvent
+from nemo_gym.server_runtime import (
+    CHECKPOINT_CLOSE_FOLLOWS_HEADER,
+    SESSION_OWNER_HEADER,
+    Activation,
+    ActivationOutOfOrderError,
+    BaseRunRequest,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    DirectHTTPToolAccess,
+    LegacyRun,
+    MCPToolAccess,
+    ResourcesCloseSessionRequest,
+    RestoredAgentSession,
+    RolloutIdRequiredError,
+    StepType,
+    is_retryable_dependency_status,
+    require_rollout,
+    seed_restarts,
+    seed_verify_step_type,
+)
+from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
     ModelCallRef,
@@ -55,29 +117,108 @@ from nemo_gym.rollout_observability import (
     TrajectoryRecord,
     TrajectoryToolCall,
     TrajectoryTurn,
+    failure_observations,
 )
-from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
-from nemo_gym.server_utils import request as http_request
-from nemo_gym.tool_access import DirectHTTPToolAccess, MCPToolAccess
+from nemo_gym.utils import explicit_causes, is_nemo_gym_fastapi_entrypoint
 
 
 LOG = logging.getLogger(__name__)
 
 _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
+RESOURCE_ONLY_METADATA_KEYS = frozenset(
+    {"baseline_response", "baseline_model", "baseline_dataset_file", "baseline_row_index"}
+)
+
+# Legacy /run episodes are checkpointed under their logical rollout ID so a replacement attempt finds them.
+_LEGACY_SESSION_PREFIX = "run:"
+_INPUT_ITEMS_ADAPTER = TypeAdapter(NeMoGymResponseInput)
+
+
+class SimpleAgentLoopState(BaseModel):
+    """Loop position at a boundary: before a model call, or after a model response whose tools are pending."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    step: int
+    pending_tools: bool
+    new_outputs: list[dict[str, Any]]
+    usage: dict[str, Any] | None
+    last_model_response: dict[str, Any] | None
+    model_server_cookies: dict[str, str]
+    resources_server_cookies: dict[str, str]
+    # Each turn without its question, which repeats the request's input and the loop's outputs before the turn.
+    turns: list[dict[str, Any]]
+    # For each turn, how many of the loop's outputs its question holds after the request's input.
+    # A restore rebuilds each question from the input the caller sends again and the restored outputs.
+    question_outputs: list[int]
+    tool_records: list[dict[str, Any]]
+    model_calls: list[dict[str, Any]]
+    gaps: list[dict[str, Any]]
+
+
+def _to_json(item: Any) -> Any:
+    return item.model_dump(mode="json") if isinstance(item, BaseModel) else item
+
+
+def _cookie_values(cookies: Any) -> dict[str, str]:
+    """Flatten a plain dict or an aiohttp cookie jar of morsels into name-to-value pairs."""
+    return {str(name): str(getattr(value, "value", value)) for name, value in (cookies or {}).items()}
 
 
 @dataclass
 class SimpleAgentSessionState(AgentSessionState):
     tool_access: DirectHTTPToolAccess | None
-    resources_cookies: dict[str, str]
+    # None means the session holds no resources cookie jar, so close leaves the Environment Server's jar unchanged.
+    resources_cookies: dict[str, str] | None
     observations: AgentObservationBundle | None = None
     activations: int = 0
+    # With checkpointing, the last activation that finished and the reply it gave:
+    # an environment server restored from a checkpoint before that reply invokes it again and gets the same reply.
+    # The saved reply's response is kept as the object the activation returned,
+    # and serialized only to return or export it;
+    # a restored reply holds the JSON it was exported as.
+    completed_activation: int = 0
+    completed_reply: dict[str, Any] | None = None
+
+
+def _dump_reply(reply: dict[str, Any] | None) -> dict[str, Any] | None:
+    """A completed reply as a checkpoint records it."""
+    if reply is None:
+        return None
+    return {"response": _to_json(reply["response"]), "cookies": reply["cookies"]}
+
+
+@dataclass
+class _LegacyLoopReply:
+    """The reply of a legacy /run's turn loop, the /run's one activation, kept while the /run runs.
+
+    A checkpoint after the loop replied, and before /run recorded its next boundary, exports it with the session.
+    The replacement /run continues at the loop step and gets this reply instead of running the loop again.
+    """
+
+    completed_activation: int = 0
+    completed_reply: dict[str, Any] | None = None
+
+
+class SimpleAgentOutcomePolicyConfig(OutcomePolicyConfig):
+    """The legacy /run boundary can retry or stop; it has no output to verify after a timeout."""
+
+    supported_actions: ClassVar[frozenset[OutcomeAction]] = frozenset(
+        {OutcomeAction.RETRY, OutcomeAction.FAIL, OutcomeAction.COUNT_AS_ZERO}
+    )
+    classification: FailureClassificationConfig = Field(default_factory=FailureClassificationConfig)
+    default_action: OutcomeAction = OutcomeAction.RETRY
 
 
 class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef | None = None
     model_server: ModelServerRef
     max_steps: int = None
+    max_model_retries: int = Field(
+        default=2,
+        ge=0,
+        description="Additional attempts for model HTTP 408, 425, 429 and 5xx responses, with bounded exponential backoff.",
+    )
     execute_tools: bool = Field(
         default=True,
         description=(
@@ -85,6 +226,106 @@ class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
             "requests, where unresolved function calls are returned to the Environment Server."
         ),
     )
+    outcome_policy: SimpleAgentOutcomePolicyConfig = Field(default_factory=SimpleAgentOutcomePolicyConfig)
+    final_on_model_timeout: bool = Field(
+        default=False,
+        exclude=True,
+        description="Compatibility alias for the confirmed policy-response timeout rule in outcome_policy.",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def resolve_timeout_alias(cls, value: Any) -> Any:
+        """Resolve the old opt-in once; conflicting explicit policy is rejected instead of silently overridden."""
+        if not isinstance(value, Mapping) or "final_on_model_timeout" not in value:
+            return value
+        value = dict(value)
+        enabled = TypeAdapter(bool).validate_python(value["final_on_model_timeout"])
+        action = OutcomeAction.COUNT_AS_ZERO if enabled else OutcomeAction.RETRY
+        supplied = value.get("outcome_policy") or {}
+        if isinstance(supplied, OutcomePolicyConfig):
+            supplied = supplied.model_dump(exclude_unset=True)
+        policy = dict(supplied)
+        rules = dict(policy.get("by_failure_kind") or {})
+        selected = rules.get(MODEL_POLICY_RESPONSE_TIMEOUT, policy.get("default_action"))
+        if selected is not None and selected != action:
+            raise ValueError("final_on_model_timeout conflicts with the explicit outcome_policy timeout action")
+        policy["by_failure_kind"] = rules | {MODEL_POLICY_RESPONSE_TIMEOUT: action}
+        value["outcome_policy"] = policy
+        return value
+
+
+def _selected_model_body_failure(error: ClientResponseError) -> bool:
+    """Whether the reply's selected failure chain holds a model request that failed after successful headers.
+
+    The provider may have generated that answer, so neither a resend nor a session reply may give the model another
+    chance. An omitted, missing or cyclic chain is not proof of one; it keeps its existing handling.
+    """
+    report = FailureHeader.decode(error.headers)
+    if report is None:
+        return False
+    current, seen = report.failure_id, set()
+    while current is not None and current not in seen:
+        seen.add(current)
+        event = report.events.get(current)
+        if event is None:
+            return False
+        if (
+            event.boundary == FailureBoundary.MODEL
+            and event.failure_kind == MODEL_REQUEST_ERROR
+            and event.operation == "model_request"
+            and event.http_status is not None
+            and 200 <= event.http_status < 300
+        ):
+            return True
+        current = event.cause_id
+    return False
+
+
+def _selected_failure_unknown(error: ClientResponseError) -> bool:
+    """Whether the reply carries a failure report whose selected failure cannot be read.
+
+    An omitted or invalid report, or a selected chain with a missing or repeated event, may hide a model body
+    failure, so it gives no resend and no session reply either. A reply without a report, or with only recovered
+    observations and no selected failure, keeps its existing handling.
+    """
+    report = FailureHeader.decode(error.headers)
+    if report is None:
+        return False
+    if report.omitted:
+        return True
+    current, seen = report.failure_id, set()
+    while current is not None:
+        if current in seen or current not in report.events:
+            return True
+        seen.add(current)
+        current = report.events[current].cause_id
+    return False
+
+
+def _policy_request_timed_out(error: ClientResponseError) -> bool:
+    """Whether the policy model server's failed reply shows that its final model call timed out on every attempt.
+
+    The reply's ``failure_id`` names the model attempt the failure ended on. Only that call's attempts count, so an
+    earlier call or a recovered attempt is not taken for the final failure, and each must have timed out waiting for
+    the model's response rather than while connecting. A reply that names no model attempt, or whose report was
+    omitted, is not a known request timeout.
+    """
+    report = FailureHeader.decode(error.headers)
+    return confirmed_policy_response_timeout(report)
+
+
+def _policy_timeout_failure(error: ClientResponseError) -> NgFailureEvent | None:
+    """The agent's policy-timeout failure among ``error``'s explicit causes, or ``None``."""
+    for cause in explicit_causes(error):
+        if (
+            isinstance(cause, NgFailureEvent)
+            and cause.boundary == FailureBoundary.AGENT
+            and cause.failure_kind == MODEL_POLICY_RESPONSE_TIMEOUT
+            and cause.operation == POLICY_TIMEOUT_OPERATION
+        ):
+            return cause
+    return None
 
 
 class SimpleAgentRunRequest(BaseRunRequest):
@@ -100,27 +341,104 @@ class SimpleAgentVerifyResponse(BaseVerifyResponse):
 
 
 class SimpleAgent(SimpleResponsesAPIAgent):
-    ray_enabled = False
+    checkpoint_mode = "exported"
     config: SimpleAgentConfig
+    # With checkpointing, each legacy /run's loop reply, by its session key.
+    # An entry leaves with its /run, or with a retire.
+    _legacy_replies: dict[str, _LegacyLoopReply] = PrivateAttr(default_factory=dict)
+
+    @staticmethod
+    def _strip_resource_only_metadata(
+        body: NeMoGymResponseCreateParamsNonStreaming,
+    ) -> NeMoGymResponseCreateParamsNonStreaming:
+        # Keep judge-only baseline data out of policy requests to avoid unnecessary payload.
+        metadata = dict(body.metadata or {})
+        for key in RESOURCE_ONLY_METADATA_KEYS:
+            metadata.pop(key, None)
+        return body.model_copy(update={"metadata": metadata or None})
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> SimpleAgentSessionState:
+        return self._new_session_state(body)
+
+    def _new_session_state(self, body: AgentSeedSessionRequest) -> SimpleAgentSessionState:
+        """Validate a seed request's grants and build its session state; a restore rebuilds sessions the same way."""
         if body.sandbox_access is not None:
-            raise ValueError("Simple Agent does not support sandbox access")
+            raise AgentSeedRejectedError("Simple Agent does not support sandbox access")
 
         accesses = self.effective_tool_accesses(body)
         unsupported = [access.name for access in accesses if isinstance(access, MCPToolAccess) and access.required]
         if unsupported:
-            raise ValueError(f"Simple Agent does not support required MCP tool access: {', '.join(unsupported)}")
+            raise AgentSeedRejectedError(
+                f"Simple Agent does not support required MCP tool access: {', '.join(unsupported)}"
+            )
 
         direct_accesses = [access for access in accesses if isinstance(access, DirectHTTPToolAccess)]
         if len(direct_accesses) > 1:
-            raise ValueError("Simple Agent supports at most one direct HTTP tool access per session")
+            raise AgentSeedRejectedError("Simple Agent supports at most one direct HTTP tool access per session")
         direct_access = direct_accesses[0] if direct_accesses else None
         return SimpleAgentSessionState(
             request=body,
             tool_access=direct_access,
-            resources_cookies=dict(direct_access.cookies) if direct_access is not None else {},
+            resources_cookies=dict(direct_access.cookies) if direct_access is not None else None,
         )
+
+    async def export_agent_sessions(
+        self, session_keys: list[str], *, checkpoint_id: str
+    ) -> dict[str, dict[str, JsonValue]]:
+        return {session_key: self._export_agent_session(session_key) for session_key in session_keys}
+
+    def _export_agent_session(self, session_key: str) -> dict[str, JsonValue]:
+        if session_key.startswith(_LEGACY_SESSION_PREFIX):
+            # A legacy /run keeps everything else it needs in its own boundaries.
+            loop = self._legacy_replies.get(session_key)
+            if loop is None or loop.completed_reply is None:
+                return {}
+            return {
+                "completed_activation": loop.completed_activation,
+                "completed_reply": _dump_reply(loop.completed_reply),
+            }
+        state = self._session_state(session_key)
+        if not isinstance(state, SimpleAgentSessionState):
+            raise TypeError(f"no open Simple Agent session {session_key!r}")
+        return {
+            "request": state.request.model_dump(mode="json"),
+            "resources_cookies": state.resources_cookies,
+            "observations": state.observations.model_dump(mode="json") if state.observations is not None else None,
+            # Activations started so far, so a restored session neither reuses an invocation ID nor renames one.
+            "activations": state.activations,
+            "completed_activation": state.completed_activation,
+            "completed_reply": _dump_reply(state.completed_reply),
+        }
+
+    async def restore_agent_sessions(self, sessions: list[RestoredAgentSession]) -> None:
+        restored: dict[str, SimpleAgentSessionState] = {}
+        legacy: dict[str, _LegacyLoopReply] = {}
+        for session in sessions:
+            if session.session_key.startswith(_LEGACY_SESSION_PREFIX):
+                if session.session.get("completed_reply") is not None:
+                    legacy[session.session_key] = _LegacyLoopReply(
+                        session.session["completed_activation"], session.session["completed_reply"]
+                    )
+                continue
+            request = AgentSeedSessionRequest.model_validate(
+                session.session["request"] | {"episode_id": session.episode_id.model_dump(mode="json")}
+            )
+            state = self._new_session_state(request)
+            cookies = session.session["resources_cookies"]
+            state.resources_cookies = dict(cookies) if cookies is not None else None
+            observations = session.session.get("observations")
+            state.observations = AgentObservationBundle.model_validate(observations) if observations else None
+            state.activations = session.session["activations"]
+            state.completed_activation = session.session["completed_activation"]
+            state.completed_reply = session.session["completed_reply"]
+            restored[session.session_key] = state
+        for session_key, state in restored.items():
+            self._install_restored_session(session_key, state)
+        self._legacy_replies.update(legacy)
+
+    async def retire_agent_session(self, session_key: str) -> None:
+        self._legacy_replies.pop(session_key, None)
+        self._release_retired_session(session_key)
 
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         if not isinstance(state, SimpleAgentSessionState):
@@ -138,18 +456,22 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         model_url_path: str,
         resources_server_cookies: Any = None,
         tool_access: DirectHTTPToolAccess | None = None,
+        resources_prefix: str = "",
         in_session: bool = False,
         execute_tools: bool = True,
         invocation_id: str = "root",
         task_id: str = "unscoped",
         rollout_id: str = "unscoped",
         collect_trajectory: bool = False,
+        activation: Activation | None = None,
     ) -> tuple[NeMoGymResponse, TrajectoryRecord | None, Any, Any]:
         tool_records: list[TrajectoryToolCall] = []
         model_calls: list[ModelCallRef] = []
         turns: list[TrajectoryTurn] = []
+        question_outputs: list[int] = []
         trajectory_gaps: list[ObservationGap] = []
         body = body.model_copy(deep=True)
+        body = self._strip_resource_only_metadata(body)
 
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
@@ -158,104 +480,252 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         usage = None
         step = 0
         invocation_status = "completed"
+        invocation_error_type = None
         model_server_cookies = None
+        # A restored boundary after a model response resumes with that response's tool calls.
+        pending_tools = False
+        model_response: NeMoGymResponse | None = None
+
+        async def commit_boundary() -> None:
+            if activation is None:
+                return
+            # Pin the loop position now and build the state only if a checkpoint exports it.
+            # The lists only grow,
+            # so their current lengths pin this boundary even while the loop has moved on to its next policy call.
+            frozen = (step, pending_tools, usage, model_response, model_server_cookies, resources_server_cookies)
+            lists = (new_outputs, turns, question_outputs, tool_records, model_calls, trajectory_gaps)
+            lengths = tuple(len(items) for items in lists)
+
+            def snapshot() -> dict[str, Any]:
+                at_step, tools_pending, at_usage, response, model_cookies, resources_cookies = frozen
+                outputs, at_turns, at_questions, at_tools, at_calls, at_gaps = (
+                    items[:n] for items, n in zip(lists, lengths)
+                )
+                # The fields of SimpleAgentLoopState, built as JSON directly: a restore validates them.
+                return {
+                    "step": at_step,
+                    "pending_tools": tools_pending,
+                    "new_outputs": [_to_json(item) for item in outputs],
+                    "usage": _to_json(at_usage) if at_usage is not None else None,
+                    "last_model_response": response.model_dump(mode="json") if response is not None else None,
+                    "model_server_cookies": _cookie_values(model_cookies),
+                    "resources_server_cookies": _cookie_values(resources_cookies),
+                    "turns": [turn.model_dump(mode="json", exclude={"question"}) for turn in at_turns],
+                    "question_outputs": at_questions,
+                    "tool_records": [record.model_dump(mode="json") for record in at_tools],
+                    "model_calls": [call.model_dump(mode="json") for call in at_calls],
+                    "gaps": [gap.model_dump(mode="json") for gap in at_gaps],
+                }
+
+            await activation.boundary(snapshot)
+
+        if activation is not None and activation.continuation is not None:
+            restored = SimpleAgentLoopState.model_validate(activation.continuation)
+            step = restored.step
+            pending_tools = restored.pending_tools
+            new_outputs = _INPUT_ITEMS_ADAPTER.validate_python(restored.new_outputs)
+            usage = NeMoGymResponseUsage.model_validate(restored.usage) if restored.usage is not None else None
+            if restored.last_model_response is not None:
+                model_response = NeMoGymResponse.model_validate(restored.last_model_response)
+            model_server_cookies = restored.model_server_cookies
+            resources_server_cookies = restored.resources_server_cookies
+            turns = [
+                TrajectoryTurn.model_validate(turn | {"question": body.input + new_outputs[:count]})
+                for turn, count in zip(restored.turns, restored.question_outputs)
+            ]
+            question_outputs = list(restored.question_outputs)
+            tool_records = [TrajectoryToolCall.model_validate(record) for record in restored.tool_records]
+            model_calls = [ModelCallRef.model_validate(call) for call in restored.model_calls]
+            trajectory_gaps = [ObservationGap.model_validate(gap) for gap in restored.gaps]
+        # The boundary before the first model call, or the restored one:
+        # a checkpoint may park the activation before it does anything, and export this boundary meanwhile.
+        await commit_boundary()
 
         while True:
-            step += 1
-            new_body = body.model_copy(update={"input": body.input + new_outputs})
-            if collect_trajectory:
-                turn_timestamp = time()
+            if not pending_tools:
+                step += 1
+                new_body = body.model_copy(update={"input": body.input + new_outputs})
+                question_length = len(new_outputs)
+                if collect_trajectory:
+                    turn_timestamp = time()
 
-            model_response = await self.server_client.post(
-                server_name=self.config.model_server.name,
-                url_path=model_url_path,
-                json=new_body,
-                cookies=model_server_cookies,
-            )
-            # We raise for status here since we expect model calls to always work.
-            await raise_for_status(model_response)
-            model_response_json = await get_response_json(model_response)
-            model_server_cookies = model_response.cookies
-            try:
-                model_response = NeMoGymResponse.model_validate(model_response_json)
-            except ValidationError as e:
-                raise RuntimeError(
-                    f"Received an invalid response from model server: {json.dumps(model_response_json)}"
-                ) from e
+                async def call_model() -> tuple[Any, Any]:
+                    retry = 0
+                    while True:
+                        response = await self.server_client.post(
+                            server_name=self.config.model_server.name,
+                            url_path=model_url_path,
+                            json=new_body,
+                            cookies=model_server_cookies,
+                            **({"headers": {"x-session-id": invocation_id}} if collect_trajectory else {}),
+                        )
+                        try:
+                            await raise_for_status(response)
+                        except ClientResponseError as error:
+                            # A report of every attempt timing out is final: the model server spent its own attempts.
+                            if (
+                                retry == self.config.max_model_retries
+                                or not is_retryable_dependency_status(error.status)
+                                or _policy_request_timed_out(error)
+                                or _selected_model_body_failure(error)
+                                or _selected_failure_unknown(error)
+                            ):
+                                raise
+                            LOG.warning(
+                                "Retrying model HTTP %s (%s/%s) model_server=%s rollout_id=%s",
+                                error.status,
+                                retry + 1,
+                                self.config.max_model_retries,
+                                self.config.model_server.name,
+                                rollout_id,
+                            )
+                            await asyncio.sleep(0.5 * 2 ** min(retry, 4))
+                            retry += 1
+                            continue
+                        return await get_response_json(response), response.cookies
 
-            output = model_response.output
-            new_outputs.extend(output)
-            if collect_trajectory:
-                turn_model_calls = []
-                if model_response.id:
-                    model_call_ref = ModelCallRef(model_ref=self.config.model_server, response_id=model_response.id)
-                    model_calls.append(model_call_ref)
-                    turn_model_calls.append(model_call_ref)
-                else:
-                    trajectory_gaps.append(
-                        ObservationGap(
-                            code="model_call_reference_unavailable", invocation_id=invocation_id, detail=f"turn:{step}"
+                try:
+                    model_response_json, model_server_cookies = await self._call_policy(activation, call_model)
+                except ClientResponseError as error:
+                    if _selected_model_body_failure(error) or _selected_failure_unknown(error):
+                        raise  # The reply's report travels on unchanged; it is not another session chance.
+                    failure = policy_timeout_failure(error)
+                    if not in_session:
+                        if failure is not None:
+                            raise failure from error
+                        raise
+                    # The session reply is checkpointed. Keep its selected cause in that reply, not
+                    # only in request-local observations, whose selected ID is deliberately absent.
+                    log = RequestFailureLog.current()
+                    report = (
+                        log.reply_report(failure or error) if log else report_for_current_request(failure or error)
+                    )
+                    forwarded = FailureHeader.decode(error.headers)
+                    if forwarded is not None:
+                        report = report.merged(forwarded)
+                    reported_kind = MODEL_POLICY_RESPONSE_TIMEOUT if failure is not None else MODEL_REQUEST_ERROR
+                    # Return the cause and partial work; the Environment Server owns grading and retry policy.
+                    content = getattr(error, "response_content", b"")
+                    detail = content.decode(errors="replace") if isinstance(content, bytes) else str(content)
+                    invocation_status = "failed"
+                    invocation_error_type = reported_kind
+                    model_response = NeMoGymResponse(
+                        id=f"resp_{uuid4().hex}",
+                        created_at=time(),
+                        model=body.model or self.config.model_server.name,
+                        object="response",
+                        output=[],
+                        status="failed",
+                        failure_report=report.model_dump(mode="json"),
+                        error={
+                            "code": "server_error",
+                            "message": f"Model HTTP {error.status}: {detail or error.message}",
+                        },
+                        tools=body.tools,
+                        tool_choice=body.tool_choice,
+                        parallel_tool_calls=body.parallel_tool_calls,
+                        metadata={
+                            **(body.metadata or {}),
+                            AGENT_OUTCOME_METADATA_KEY: AgentOutcome(
+                                failure_kind=reported_kind,
+                                status_code=error.status if reported_kind == MODEL_REQUEST_ERROR else None,
+                            ).model_dump_json(),
+                        },
+                    )
+                    # No successful model response means known zero aggregate usage, not invented per-call usage.
+                    if step == 1:
+                        usage = NeMoGymResponseUsage.sum_from_list([])
+                    break
+                try:
+                    model_response = NeMoGymResponse.model_validate(model_response_json)
+                except ValidationError as e:
+                    raise RuntimeError(
+                        f"Received an invalid response from model server: {json.dumps(model_response_json)}"
+                    ) from e
+
+                output = model_response.output
+                new_outputs.extend(output)
+                if collect_trajectory:
+                    turn_model_calls = []
+                    if model_response.id:
+                        model_call_ref = ModelCallRef(
+                            model_ref=self.config.model_server, response_id=model_response.id
+                        )
+                        model_calls.append(model_call_ref)
+                        turn_model_calls.append(model_call_ref)
+                    else:
+                        trajectory_gaps.append(
+                            ObservationGap(
+                                code="model_call_reference_unavailable",
+                                invocation_id=invocation_id,
+                                detail=f"turn:{step}",
+                            )
+                        )
+                    reasoning = [item.model_dump(mode="json") for item in output if item.type == "reasoning"] or None
+                    answer = [item for item in output if item.type != "reasoning"]
+                    turns.append(
+                        TrajectoryTurn(
+                            invocation_id=invocation_id,
+                            task_id=task_id,
+                            rollout_id=rollout_id,
+                            turn_no=step,
+                            timestamp=turn_timestamp,
+                            question=new_body.input,
+                            answer=answer,
+                            reasoning_content=reasoning,
+                            step_count=len(tool_records),
+                            model_calls=turn_model_calls,
                         )
                     )
-                reasoning = [item.model_dump(mode="json") for item in output if item.type == "reasoning"] or None
-                answer = [item for item in output if item.type != "reasoning"]
-                turns.append(
-                    TrajectoryTurn(
-                        invocation_id=invocation_id,
-                        task_id=task_id,
-                        rollout_id=rollout_id,
-                        turn_no=step,
-                        timestamp=turn_timestamp,
-                        question=new_body.input,
-                        answer=answer,
-                        reasoning_content=reasoning,
-                        step_count=len(tool_records),
-                        model_calls=turn_model_calls,
-                    )
-                )
+                    question_outputs.append(question_length)
 
-            usage = accumulate_response_usage(usage, model_response.usage)
-            model_response.usage = None
+                usage = accumulate_response_usage(usage, model_response.usage)
+                model_response.usage = None
 
-            if model_response.incomplete_details:
-                invocation_status = "incomplete"
-                break
-
-            all_fn_calls: list[NeMoGymResponseFunctionToolCall] = [o for o in output if o.type == "function_call"]
-            all_output_messages: list[NeMoGymResponseOutputMessage] = [
-                o for o in output if o.type == "message" and o.role == "assistant"
-            ]
-            if not all_fn_calls:
-                if not all_output_messages:
+                if model_response.incomplete_details:
                     invocation_status = "incomplete"
-                    termination_message = (
-                        "Ending trajectory: model returned no assistant message or tool calls "
-                        "(reasoning-only or empty output) without reported truncation. "
-                        "This is the stop-token case (finish_reason='stop'), not length truncation "
-                        "(finish_reason='length', handled separately via incomplete_details). "
-                        "This indicates either a badly trained model requiring training-level fixes "
-                        "or a bug in the inference engine."
-                    )
-                    termination_reason = "incomplete_reasoning" if output else "empty_output"
-                    model_response.status = "incomplete"
-                    model_response.metadata = {
-                        **(model_response.metadata or {}),
-                        "ng_termination_reason": termination_reason,
-                        "ng_termination_message": termination_message,
-                    }
-                    LOG.warning(
-                        "%s model_server=%s response_id=%s rollout_id=%s step=%s",
-                        termination_message,
-                        self.config.model_server.name,
-                        model_response.id,
-                        rollout_id,
-                        step,
-                    )
-                break
+                    break
 
-            if not execute_tools:
-                break
+                all_fn_calls: list[NeMoGymResponseFunctionToolCall] = [o for o in output if o.type == "function_call"]
+                all_output_messages: list[NeMoGymResponseOutputMessage] = [
+                    o for o in output if o.type == "message" and o.role == "assistant"
+                ]
+                if not all_fn_calls:
+                    if not all_output_messages:
+                        invocation_status = "incomplete"
+                        termination_message = (
+                            "Ending trajectory: model returned no assistant message or tool calls "
+                            "(reasoning-only or empty output) without reported truncation. "
+                            "This is the stop-token case (finish_reason='stop'), not length truncation "
+                            "(finish_reason='length', handled separately via incomplete_details). "
+                            "This indicates either a badly trained model requiring training-level fixes "
+                            "or a bug in the inference engine."
+                        )
+                        termination_reason = "incomplete_reasoning" if output else "empty_output"
+                        model_response.status = "incomplete"
+                        model_response.metadata = {
+                            **(model_response.metadata or {}),
+                            "ng_termination_reason": termination_reason,
+                            "ng_termination_message": termination_message,
+                        }
+                        LOG.warning(
+                            "%s model_server=%s response_id=%s rollout_id=%s step=%s",
+                            termination_message,
+                            self.config.model_server.name,
+                            model_response.id,
+                            rollout_id,
+                            step,
+                        )
+                    break
 
+                if not execute_tools:
+                    break
+
+                pending_tools = True
+                await commit_boundary()
+
+            all_fn_calls = [o for o in model_response.output if o.type == "function_call"]
+            tool_images: list[ToolOutputImage] = []
             for output_function_call in all_fn_calls:
                 if collect_trajectory:
                     started_at = time()
@@ -272,7 +742,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     if tool_access is not None:
                         api_response = await http_request(
                             method="POST",
-                            url=f"{str(tool_access.base_url).rstrip('/')}/{output_function_call.name}",
+                            url=f"{_tools_base_url(tool_access, resources_prefix)}/{output_function_call.name}",
                             json=parsed_arguments,
                             cookies=resources_server_cookies,
                             headers=dict(tool_access.headers),
@@ -293,11 +763,12 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                             )
                         api_response = await self.server_client.post(
                             server_name=self.config.resources_server.name,
-                            url_path=f"/{output_function_call.name}",
+                            url_path=f"{resources_prefix}/{output_function_call.name}",
                             json=parsed_arguments,
                             cookies=resources_server_cookies,
                         )
-                    tool_output = (await api_response.content.read()).decode()
+                    tool_output, images = _split_tool_output_images((await api_response.content.read()).decode())
+                    tool_images.extend(images)
                     resources_server_cookies = dict(resources_server_cookies or {})
                     resources_server_cookies.update(_cookies(api_response))
                     if collect_trajectory:
@@ -329,13 +800,18 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     )
                 )
 
+            # Images follow all of the turn's tool outputs, one user message each.
+            new_outputs.extend(_tool_image_message(image) for image in tool_images)
+
             if collect_trajectory and all_fn_calls:
                 turns[-1].step_count = len(tool_records)
+            pending_tools = False
 
             # Check if max steps is not None and if we have exhausted it.
             if self.config.max_steps and step >= self.config.max_steps:
                 invocation_status = "incomplete"
                 break
+            await commit_boundary()
 
         model_response.output = new_outputs
         model_response.usage = usage
@@ -343,7 +819,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         if collect_trajectory:
             invocation = AgentInvocation(
                 invocation_id=invocation_id,
+                in_session=in_session,
                 status=invocation_status,
+                error_type=invocation_error_type,
                 model_calls=model_calls,
                 conversation=[*body.input, *new_outputs],
             )
@@ -375,47 +853,199 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 "Simple Agent execute_tools=false is supported only for agent-session requests; "
                 "seed an agent session before calling /v1/responses"
             )
-        invocation_id = "root"
-        if state is not None:
-            # A session spans several activations, and its observations keep one invocation per activation.
-            # The first keeps "root" so single-activation sessions report what they did before.
-            state.activations += 1
-            if state.activations > 1:
-                invocation_id = f"activation-{state.activations}"
-        model_response, trajectory, model_server_cookies, resources_server_cookies = await self._create_episode(
-            body,
-            model_url_path=self.url_path_for_request("/v1/responses", request),
-            resources_server_cookies=state.resources_cookies if state is not None else request.cookies,
-            tool_access=state.tool_access if state is not None else None,
-            in_session=state is not None,
-            execute_tools=self.config.execute_tools,
-            invocation_id=invocation_id,
-            rollout_id=rollout_id or "unscoped",
-            collect_trajectory=collect_trajectory,
-        )
-        if state is not None:
-            state.resources_cookies = dict(resources_server_cookies or {})
-            if trajectory is not None:
-                # A session returns agent evidence at close, where the Environment Server records it.
-                previous = state.observations
-                state.observations = AgentObservationBundle(
-                    source="simple_agent",
-                    records=[*(previous.records if previous else []), *trajectory.invocations],
-                    gaps=[*(previous.gaps if previous else []), *trajectory.gaps],
-                )
-
-        # Legacy self-dispatch propagates resources cookies for its later verification call.
-        if state is None:
-            downstream_cookies = (*resources_server_cookies.items(), *model_server_cookies.items())
+        participant = self.checkpoint_participant
+        target = self._activation_target(state, rollout_id)
+        index = None
+        if target is None:
+            # Without checkpointing nothing is tracked.
+            # With it, a direct call is a restart.
+            activation_scope = participant.restart_call(rollout_id) if participant is not None else nullcontext()
         else:
-            downstream_cookies = (model_server_cookies or {}).items()
-        for k, v in downstream_cookies:
-            response.set_cookie(k, v)
-        if trajectory is not None:
-            model_response = model_response.model_copy(
-                update={_INTERNAL_TRAJECTORY_KEY: trajectory.model_dump(mode="json")}
-            )
+            session_key, episode_id, loop = target
+            participant.check_session(session_key, episode_id)
+            index = self._activation_index(request)
+            while index is not None:
+                if index == loop.completed_activation:
+                    # The caller's checkpoint precedes the reply this activation already gave: give it again.
+                    participant.answered_from_saved_reply(session_key, episode_id)
+                    return self._saved_reply(loop, session_key)
+                if index != loop.completed_activation + 1:
+                    raise ActivationOutOfOrderError(
+                        f"activation {index} of agent session {session_key!r} is out of order: "
+                        f"activation {loop.completed_activation} is the last one completed"
+                    )
+                # A caller that sends the activation again while the first request still runs gets its reply.
+                if not await participant.wait_activation(session_key, index):
+                    break
+            activation_scope = participant.activation(session_key, episode_id, index=index)
+        async with activation_scope as activation:
+            invocation_id = "root"
+            if state is not None:
+                # A session spans several activations, and its observations keep one invocation per activation.
+                # The first keeps "root" so single-activation sessions report what they did before.
+                # An activation continued from a restored boundary was already counted, so it keeps its ID.
+                if activation is None or activation.continuation is None:
+                    state.activations = index if index is not None else state.activations + 1
+                if state.activations > 1:
+                    invocation_id = f"activation-{state.activations}"
+            observed_invocation = None
+            if collect_trajectory:
+                observed_invocation = AgentInvocation(invocation_id=invocation_id, in_session=state is not None)
+                request.state.nemo_gym_agent_observations = AgentObservationBundle(
+                    source="simple_agent", records=[observed_invocation]
+                )
+            try:
+                (
+                    model_response,
+                    trajectory,
+                    model_server_cookies,
+                    resources_server_cookies,
+                ) = await self._create_episode(
+                    body,
+                    model_url_path=self.url_path_for_request("/v1/responses", request),
+                    resources_server_cookies=state.resources_cookies if state is not None else request.cookies,
+                    tool_access=state.tool_access if state is not None else None,
+                    # With checkpointing on, the Resources Server refuses a tool call that does not name its attempt.
+                    # Each call names the attempt of the activation it serves,
+                    # which after a restore is the replacement, not the attempt that seeded the session.
+                    resources_prefix=rollout_path_prefix(rollout_id) if participant is not None else "",
+                    in_session=state is not None,
+                    execute_tools=self.config.execute_tools,
+                    invocation_id=invocation_id,
+                    rollout_id=rollout_id or "unscoped",
+                    collect_trajectory=collect_trajectory,
+                    activation=activation,
+                )
+            except BaseException as error:
+                if observed_invocation is not None:
+                    observed_invocation.status = "failed" if isinstance(error, Exception) else "incomplete"
+                    observed_invocation.error_type = type(error).__name__
+                raise
+            if state is not None:
+                # Only a session with a direct tool grant holds the resources cookie jar.
+                if state.tool_access is not None:
+                    state.resources_cookies = dict(resources_server_cookies or {})
+                if trajectory is not None:
+                    # A session returns agent evidence at close, where the Environment Server records it.
+                    previous = state.observations
+                    state.observations = AgentObservationBundle(
+                        source="simple_agent",
+                        records=[
+                            *(previous.records if previous else []),
+                            *trajectory.invocations,
+                            *trajectory.tool_calls,
+                        ],
+                        gaps=[*(previous.gaps if previous else []), *trajectory.gaps],
+                    )
+
+            # Legacy self-dispatch propagates resources cookies for its later verification call.
+            if state is None:
+                downstream_cookies = (*resources_server_cookies.items(), *model_server_cookies.items())
+            else:
+                downstream_cookies = (model_server_cookies or {}).items()
+            for k, v in downstream_cookies:
+                response.set_cookie(k, v)
+            # A session caller that sends the activation index takes the session's evidence at close,
+            # so its reply carries no trajectory, and neither does the saved reply.
+            # Other callers, and a legacy /run, read the trajectory from the reply.
+            if trajectory is not None and (state is None or index is None):
+                model_response = model_response.model_copy(
+                    update={_INTERNAL_TRAJECTORY_KEY: trajectory.model_dump(mode="json")}
+                )
+            if target is not None:
+                loop = target[2]
+                # Recorded before the activation ends, so a checkpoint exports the session with its reply.
+                if state is not None:
+                    loop.completed_activation = state.activations
+                else:
+                    loop.completed_activation = index if index is not None else loop.completed_activation + 1
+                # Only a caller that sends the index can ask for the reply again.
+                loop.completed_reply = (
+                    {"response": model_response, "cookies": _cookie_values(dict(downstream_cookies))}
+                    if index is not None
+                    else None
+                )
         return model_response
+
+    @staticmethod
+    def _saved_reply(loop: SimpleAgentSessionState | _LegacyLoopReply, session_key: str) -> JSONResponse:
+        """The saved reply of the session's last completed activation, without running anything again."""
+        if loop.completed_reply is None:
+            raise ActivationOutOfOrderError(f"agent session {session_key!r} has completed no activation to reply with")
+        reply = JSONResponse(content=_to_json(loop.completed_reply["response"]))
+        for name, value in loop.completed_reply["cookies"].items():
+            reply.set_cookie(name, value)
+        return reply
+
+    @staticmethod
+    async def _call_policy(activation: Activation | None, call: Callable[[], Awaitable[Any]]) -> Any:
+        """Issue a policy call from the latest boundary; a checkpoint may hold its reply.
+
+        ``call`` must read the whole reply, body included.
+        The model server's checkpoint gate can send a held reply's headers and hold its body until resume,
+        so a session that left its boundary on the headers alone would wait on the body and hold up prepare.
+        """
+        if activation is None:
+            return await call()
+        async with activation.awaiting_model():
+            return await call()
+
+    def _activation_target(
+        self, state: SimpleAgentSessionState | None, capture_key: str | None
+    ) -> tuple[str, EpisodeId, SimpleAgentSessionState | _LegacyLoopReply] | None:
+        """The checkpointed session a request activates, the attempt it runs as, and where its reply is kept.
+
+        ``None`` without checkpointing, and for a direct call, which has neither an agent session nor a legacy /run.
+        With checkpointing, an activation of an agent session must name its attempt in its rollout path.
+        """
+        participant = self.checkpoint_participant
+        if participant is None:
+            return None
+        path_episode = EpisodeId.from_capture_key(capture_key) if capture_key is not None else None
+        if state is not None:
+            # The session's own episode cannot stand in for a missing rollout path.
+            # A restore rewrites it to the replacement attempt,
+            # so a late call from the replaced attempt's harness, with only the session's cookie,
+            # would pass as the replacement and could get its saved reply or start its next activation.
+            if path_episode is None:
+                raise RolloutIdRequiredError(
+                    f"checkpointing requires the /ng-rollout/<id> prefix on every activation of agent session "
+                    f"{state.request.agent_session_id!r}"
+                )
+            # The rollout path names the caller's attempt, which the session's must match.
+            return state.request.agent_session_id, path_episode, state
+        if path_episode is None:
+            return None
+        # Only a legacy /run opens this session.
+        session_key = f"{_LEGACY_SESSION_PREFIX}{path_episode.rollout_id}"
+        if not participant.has_session(session_key):
+            return None
+        return session_key, path_episode, self._legacy_replies.setdefault(session_key, _LegacyLoopReply())
+
+    def _model_timeout_row(self, failure: NgFailureEvent, *, elapsed_s: float) -> dict[str, Any]:
+        """Translate a recorded timeout and the boundary's policy into existing Collection failure fields."""
+        action = failure_outcome_policy(
+            failure, config=self.config.outcome_policy, classification=self.config.outcome_policy.classification
+        )
+        report = report_for_current_request(failure)
+        return {
+            "_ng_failure_class": AGENT_RUN_ERROR,
+            "_ng_failure_terminal": action != OutcomeAction.RETRY,
+            "_ng_failure_counts_as_zero": action == OutcomeAction.COUNT_AS_ZERO,
+            "failure_kind": failure.failure_kind,
+            "failure_reason": failure.failure_reason,
+            "_ng_failure_message": failure.failure_reason,
+            "timeouts": [
+                TimeoutEvent(
+                    event_id=failure.event_id,
+                    limit="model_request",
+                    enforcer=self.config.model_server.name,
+                    evidence="internal",
+                    elapsed_s=elapsed_s,
+                ).model_dump(mode="json", exclude_none=True)
+            ],
+            **FailureReportRow.fields(report),
+        }
 
     async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
         if not self.config.execute_tools:
@@ -425,29 +1055,110 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             )
         if self.config.resources_server is None:
             raise ValueError("resources_server is required when invoking the legacy Simple Agent /run route")
-        cookies = request.cookies
+        participant = self.checkpoint_participant
+        capture_key = self.rollout_id_from_run(body)
+        if participant is None:
+            return await self._run(request, body, legacy_run=None)
+        episode_id = EpisodeId.from_capture_key(require_rollout(capture_key))
+        session_key = f"{_LEGACY_SESSION_PREFIX}{episode_id.rollout_id}"
+        async with participant.legacy_run(session_key, episode_id) as legacy_run:
+            try:
+                return await self._run(request, body, legacy_run=legacy_run)
+            finally:
+                # A /run that ends can no longer be continued at its loop step.
+                self._legacy_replies.pop(session_key, None)
 
-        seed_session_response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/seed_session",
-            json=body.model_dump(),
-            cookies=cookies,
-        )
-        await raise_for_status(seed_session_response)
-        cookies = seed_session_response.cookies
+    async def _run(
+        self, request: Request, body: SimpleAgentRunRequest, *, legacy_run: LegacyRun | None
+    ) -> SimpleAgentVerifyResponse:
+        # Steps: seed → turn loop → verify.
+        # With checkpointing, a boundary before each step names the next step and what it needs,
+        # so a replacement attempt resumes at that step.
+        continuation = (legacy_run.continuation if legacy_run is not None else None) or {}
+        stage = continuation.get("next", "seed")
+        cookies: Any = continuation.get("cookies", request.cookies)
+        # Whether the resources server's /verify may be replayed, as its seed reply reported.
+        resources_verify_step_type: StepType = continuation.get("resources_verify_step_type", "wait")
 
-        response = await self.server_client.post(
-            server_name=self.config.name,
-            url_path=self.url_path_for_run("/v1/responses", body),
-            json=body.responses_create_params,
-            cookies=cookies,
-        )
-        await raise_for_status(response)
-        model_response_json = await get_response_json(response)
-        cookies = response.cookies
+        async def boundary(state: dict[str, Any]) -> None:
+            if legacy_run is None:
+                return
+            loop = self._legacy_replies.get(legacy_run.key)
+            if state["next"] in ("verify", "return") and loop is not None:
+                # From verify on, this boundary holds the loop's reply, so the session no longer exports its own copy.
+                # Dropped with no await before the boundary is recorded, so no export sees both or neither.
+                # The completed activation stays, so a late duplicate of the loop request is refused, not run again.
+                loop.completed_reply = None
+            await legacy_run.boundary(state)
+
+        def step(step_type: StepType) -> AbstractAsyncContextManager[None]:
+            return legacy_run.step(step_type) if legacy_run is not None else nullcontext()
+
+        if stage == "seed":
+            await boundary({"next": "seed"})
+            # A seed creates a new session for a new cookie, so running it again after a crash is safe.
+            async with step("replay"):
+                seed_session_response = await self.server_client.post(
+                    server_name=self.config.resources_server.name,
+                    url_path="/seed_session",
+                    json=body.model_dump(),
+                    cookies=cookies,
+                )
+                await raise_for_status(seed_session_response)
+            cookies = _cookie_values(seed_session_response.cookies)
+            resources_verify_step_type = seed_verify_step_type(seed_session_response.headers)
+            if legacy_run is not None and seed_restarts(seed_session_response.headers):
+                # The resources server cannot capture its session, so this episode starts over after a crash.
+                await legacy_run.mark_restart()
+            stage = "loop"
+
+        if stage == "loop":
+            await boundary(
+                {
+                    "next": "loop",
+                    "cookies": _cookie_values(cookies),
+                    "resources_verify_step_type": resources_verify_step_type,
+                }
+            )
+            # The turn loop parks at its own boundaries and continues from them after a restore.
+            # It is the /run's one activation: a restore after its reply invokes it again and gets the same reply.
+            # Its activation is tracked by this worker, which holds the episode, so the call comes back here.
+            owner = getattr(request.app.state, "nemo_gym_routing_id", None) if legacy_run is not None else None
+            headers = {AGENT_ACTIVATION_HEADER: "1"} if legacy_run is not None else {}
+            if owner is not None:
+                headers[SESSION_OWNER_HEADER] = owner
+            loop_started = monotonic()
+            try:
+                async with step("replay"):
+                    response = await self.server_client.post(
+                        server_name=self.config.name,
+                        url_path=self.url_path_for_run("/v1/responses", body),
+                        json=self._strip_resource_only_metadata(body.responses_create_params),
+                        cookies=cookies,
+                        headers=headers,
+                    )
+                    await raise_for_status(response)
+                    model_response_json = await get_response_json(response)
+            except ClientResponseError as error:
+                failure = _policy_timeout_failure(error)
+                if failure is None:
+                    raise
+                result = self._model_timeout_row(failure, elapsed_s=monotonic() - loop_started)
+                try:
+                    result.update(failure_observations(json.loads(getattr(error, "response_content", None))))
+                except (TypeError, ValueError):
+                    pass
+                return JSONResponse(result, status_code=200)
+            cookies = _cookie_values(response.cookies)
+        elif stage in ("verify", "return"):
+            model_response_json = continuation["response"]
 
         trajectory = None
         expected_rollout_id = self.rollout_id_from_run(body)
+        # The boundaries keep the response with its trajectory,
+        # so a /run restored at verify or return still reports it.
+        boundary_response_json = model_response_json
+        model_response_json = dict(model_response_json)
         raw_trajectory = (
             model_response_json.pop(_INTERNAL_TRAJECTORY_KEY, None) if expected_rollout_id is not None else None
         )
@@ -474,23 +1185,76 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 }
             )
 
-        if self.config.skip_verification:
+        if trajectory is not None:
+            request.state.nemo_gym_agent_trajectory = trajectory
+        verification_skipped: bool | None = None
+        if stage == "return":
+            # A /run restored at its return step returns the result it recorded, whether or not it verified.
+            result = continuation["result"]
+        elif self.config.skip_verification:
+            verification_skipped = True
             result = body.model_dump() | {
                 "response": model_response_json,
                 "reward": float(self.config.skip_verification_reward),
                 "verification_skipped": True,
             }
-        else:
-            verify_payload = body.model_dump() | {"response": model_response_json}
-            verify_response = await self.server_client.post(
-                server_name=self.config.resources_server.name,
-                url_path="/verify",
-                json=verify_payload,
-                cookies=cookies,
+            # The same boundary a verified result gets.
+            # A checkpoint that closed while the turn loop's reply was on its way back parks the /run here,
+            # so the commit still holds the episode, and a restore returns this result without running the loop again.
+            await boundary(
+                {
+                    "next": "return",
+                    "response": boundary_response_json,
+                    "result": result,
+                    "cookies": _cookie_values(cookies),
+                    "resources_verify_step_type": resources_verify_step_type,
+                }
             )
-            await raise_for_status(verify_response)
-            result = await get_response_json(verify_response)
+        else:
+            await boundary(
+                {
+                    "next": "verify",
+                    "response": boundary_response_json,
+                    "cookies": _cookie_values(cookies),
+                    "resources_verify_step_type": resources_verify_step_type,
+                }
+            )
+            verification_skipped = False
+            if trajectory is not None:
+                for invocation in trajectory.invocations:
+                    invocation.verification_skipped = False
+            verify_payload = body.model_dump() | {"response": model_response_json}
+            async with step(resources_verify_step_type):
+                verify_response = await self.server_client.post(
+                    server_name=self.config.resources_server.name,
+                    url_path="/verify",
+                    json=verify_payload,
+                    cookies=cookies,
+                    # A checkpoint does not wait for a replayable verification, so it may keep the boundary before it.
+                    # The resources server then keeps the session until the close below, so a restore can verify again.
+                    headers=(
+                        {CHECKPOINT_CLOSE_FOLLOWS_HEADER: "1"}
+                        if self._closes_after_verify(legacy_run, resources_verify_step_type)
+                        else {}
+                    ),
+                )
+                await raise_for_status(verify_response)
+                result = await get_response_json(verify_response)
+            # Record the result so a restore never runs a state-changing verification twice.
+            await boundary(
+                {
+                    "next": "return",
+                    "response": boundary_response_json,
+                    "result": result,
+                    "cookies": _cookie_values(cookies),
+                    "resources_verify_step_type": resources_verify_step_type,
+                }
+            )
+        if self._closes_after_verify(legacy_run, resources_verify_step_type) and not self.config.skip_verification:
+            await self._close_legacy_resources_session(body, cookies)
         if trajectory is not None:
+            for invocation in trajectory.invocations:
+                invocation.verification_skipped = verification_skipped
             resolved = result.get("resolved")
             if isinstance(resolved, bool) and trajectory.turns:
                 trajectory.turns[-1].resolved = resolved
@@ -498,6 +1262,31 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 trajectory.gaps.append(ObservationGap(code="resolution_unavailable", invocation_id="root"))
             result["ng_trajectory"] = trajectory.model_dump(mode="json")
         return SimpleAgentVerifyResponse.model_validate(result)
+
+    @staticmethod
+    def _closes_after_verify(legacy_run: LegacyRun | None, resources_verify_step_type: StepType) -> bool:
+        """Whether a legacy /run closes its resources session after a verification a checkpoint does not wait for."""
+        return legacy_run is not None and resources_verify_step_type == "replay"
+
+    async def _close_legacy_resources_session(self, body: SimpleAgentRunRequest, cookies: Any) -> None:
+        """Close the resources session a legacy /run seeded, keeping the run's verdict if the close fails.
+
+        The session cookie names the session.
+        A legacy seed assigns no resources session ID, so the close names the /run's own session key.
+        """
+        episode_id = EpisodeId.from_capture_key(require_rollout(self.rollout_id_from_run(body)))
+        try:
+            close_response = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path="/close_session",
+                json=ResourcesCloseSessionRequest(
+                    resources_session_id=f"{_LEGACY_SESSION_PREFIX}{episode_id.capture_key}", episode_id=episode_id
+                ).model_dump(mode="json"),
+                cookies=cookies,
+            )
+            await raise_for_status(close_response)
+        except Exception:
+            LOG.warning("could not close the resources session of %s", episode_id.capture_key, exc_info=True)
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         """Proxy aggregate_metrics to the resources server."""
@@ -516,10 +1305,44 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
 
 def _cookies(response: Any) -> dict[str, str]:
-    return {str(name): str(getattr(morsel, "value", morsel)) for name, morsel in response.cookies.items()}
+    return _cookie_values(response.cookies)
+
+
+_ROLLOUT_PREFIX_SUFFIX = re.compile(rf"/{re.escape(ROLLOUT_PATH_PREFIX)}/[^/]+$")
+
+
+def _split_tool_output_images(tool_output: str) -> tuple[str, list[ToolOutputImage]]:
+    """Move the images out of a JSON tool reply, so the tool output keeps only the rest of the reply."""
+    if TOOL_OUTPUT_IMAGES_KEY not in tool_output:
+        return tool_output, []
+    try:
+        payload = json.loads(tool_output)
+    except json.JSONDecodeError:
+        return tool_output, []
+    if not isinstance(payload, dict) or TOOL_OUTPUT_IMAGES_KEY not in payload:
+        return tool_output, []
+    rest, images = split_tool_output_images(payload)
+    # The JSON format FastAPI sends, so the text matches a reply without images and the MCP tool result.
+    return json.dumps(rest, ensure_ascii=False, separators=(",", ":")), images
+
+
+def _tool_image_message(image: ToolOutputImage) -> NeMoGymEasyInputMessage:
+    """Show one tool image to the model as a user message, after its label."""
+    content = [{"type": "input_text", "text": image.label}] if image.label else []
+    content.append({"type": "input_image", "image_url": image.image_url, "detail": "auto"})
+    return NeMoGymEasyInputMessage(type="message", role="user", content=content)
+
+
+def _tools_base_url(tool_access: DirectHTTPToolAccess, resources_prefix: str) -> str:
+    """The grant's base URL, under ``resources_prefix`` in place of the rollout prefix the grant carries, if any."""
+    base_url = str(tool_access.base_url).rstrip("/")
+    if not resources_prefix:
+        return base_url
+    return f"{_ROLLOUT_PREFIX_SUFFIX.sub('', base_url)}{resources_prefix}"
 
 
 if __name__ == "__main__":
     SimpleAgent.run_webserver()
 elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
     app = SimpleAgent.run_webserver()  # noqa: F401

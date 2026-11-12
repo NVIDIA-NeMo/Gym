@@ -597,6 +597,7 @@ def judge_rubric(
     timeout_sec: int = 300,
     max_retries: int = 3,
     image_attachments: list[tuple[str, str]] | None = None,
+    max_completion_tokens: int = 200000,
 ) -> tuple[dict, dict]:
     rubric_text = rubric.get("rubric", "")
     weight = rubric.get("weight", 0)
@@ -677,7 +678,7 @@ IMPORTANT:
                     },
                     {"role": "user", "content": user_content},
                 ],
-                max_completion_tokens=200000,
+                max_completion_tokens=max_completion_tokens,
                 temperature=0.0,
                 timeout=timeout_sec,
             )

@@ -67,8 +67,9 @@ gym eval run --no-serve \
 
 ## Session limits
 
-- Each session accepts one activation, which may contain multiple model/tool turns.
-- Use `num_workers: 1`.
+- Each Hermes session accepts one activation, which may contain multiple model/tool turns.
+  OpenCode separately supports [resuming harness sessions](/agent-server/integrate-existing-agents#resuming-harness-sessions).
+- With several agent workers, session routing sends each session's requests to the worker that seeded it.
 - Use a Linux sandbox that can reach the Gym Model Server.
 - This integration is evaluation-only, not suitable for producing RL training data.
 - The sandbox runner records `stop_reason=wall_time` for its deadline and

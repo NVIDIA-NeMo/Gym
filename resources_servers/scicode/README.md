@@ -28,13 +28,35 @@ The agent + its `example` dataset are defined in this server's own `configs/scic
 
 The agent sends a `solutions` dict — `{"<problem_id>.<step>": accumulated_code}` — to `/verify`. For
 each scored sub-step the server builds a program (`accumulated_code` + HDF5/compare helpers + the
-sub-step's sanitized test assertions) and runs it in a **Ray subprocess** (`scicode_integration/runner.py`);
+sub-step's sanitized test assertions) and runs it in a **subprocess** (`scicode_integration/runner.py`);
 exit code 0 = pass. The HDF5 target-loading and comparison helpers (`process_hdf5_to_tuple`,
 `cmp_tuple_or_list`, …) are ported from nemo-skills' `scicode_utils.eval_prefix`; the only change is
 that the `test_data.h5` path is injected from config rather than hardcoded.
 
-Because the generated code runs in this server's own venv, `requirements.txt` pins `scipy<1.14`
-(keeps `scipy.integrate.simps`, has Python 3.12 wheels) plus `numpy`, `matplotlib`, `h5py`, `sympy`.
+By default, generated code runs in a separate local Python 3.11 environment with the scientific
+stack frozen in `grading-requirements.lock`, including SciPy 1.10.1 and
+`scipy.integrate.simps`. The server needs `uv` and download access when creating
+or updating that environment; a matching prebuilt environment can be reused
+offline. A changed lock or Python version recreates the environment and applies
+`uv pip sync`, removing obsolete packages. Explicit `grading_interpreters`
+(such as SciCode-Verified's 2024/2025 environments) take precedence.
+
+When `sandbox` is configured, grading uses the explicitly configured interpreters
+and test data inside the image. The server skips local environment creation,
+interpreter preflight, and test-data checksum checks; the sandbox runner checks the data.
+
+After editing `grading-requirements.txt`, regenerate the lock with:
+
+```bash
+uv pip compile resources_servers/scicode/grading-requirements.txt \
+  --python-version 3.11 --universal --no-header --emit-index-url \
+  --index-url https://pypi.org/simple \
+  --output-file resources_servers/scicode/grading-requirements.lock
+```
+
+Default step outputs use the environment name `scicode`. Grading fixes can
+change scores for problems that previously failed due to scientific API
+incompatibilities, including problems 2 and 28.
 
 **Scoring notes** (mirroring nemo-skills):
 - Sub-steps absent from `solutions` (prefilled reference steps) are excluded from the denominator.
@@ -42,6 +64,43 @@ Because the generated code runs in this server's own venv, `requirements.txt` pi
 - `verify()` returns `reward` + `step_results`, `num_steps_passed`, `num_steps_total`,
   `problem_accuracy`. The headline `subtask_accuracy` (total passed / total over all rollouts) is
   computed on the **agent** (`/aggregate_metrics` runs there), not this server.
+
+**How each sub-step's grading process ended (always recorded).** `step_exits` holds one record per
+scored sub-step, aligned with `step_results`: `returncode` (`null` when no process exit code exists),
+`timed_out` and `exit`, typed as `exit:<code>`, `timeout`, `killed:<SIGNAL>` for a negative return code
+(a signal killed the grading process, e.g. `killed:SIGKILL` from an out-of-memory kill) or `not_run`
+(an out-of-context or empty step). It describes the run that decided the step, as below, and holds no model
+output, so it is on by default. The step's score does not change: a killed step still fails.
+
+**Per-sub-step execution records (opt-in).** By default the server keeps only the pass/fail bit per
+sub-step: the subprocess's stdout is never read and its stderr is discarded after the exit code is
+known. Set `record_step_outputs: true` to add `step_outputs` to the verify response (and therefore to
+every rollout row): one record per scored sub-step, aligned with `step_results`, with `step_id`,
+`step_number`, `environment` (the grading interpreter whose run the record describes: under the OR rule
+the one that passed, else the last one tried; `null` for a sentinel step), `status` (`executed`, or
+`out_of_context` / `empty` for sentinels that never ran), `passed`, `returncode` (`null` on a timeout),
+`timed_out`, `exit` (as in `step_exits`), `duration_s`, `exception_class` (the class named on the last traceback line, e.g.
+`AssertionError`, `ImportError`, `numpy.linalg.LinAlgError`; `null` when there is none) and the last
+`output_tail_chars` characters (default 2000; 0 keeps none, negative values are rejected) of `stdout_tail`
+and `stderr_tail`. The per-environment
+pass bits and error text of SciCode-Verified's OR grading stay in `step_environment_results` /
+`step_environment_errors`; the record adds the execution details of the decisive run. The tails contain model-generated output and tracebacks, so the flag is off by
+default and the rows grow by up to `2 * output_tail_chars` per sub-step when it is on. With
+`record_step_code: true` as well, each record also carries `code`: the accumulated program the
+sub-step's tests ran against (the agent's `solutions[step_id]`: the problem's dependency header and any
+prefilled reference steps from the dataset, then the model's code for the previous sub-steps and this
+one; `null` for a sentinel step that never ran). That mixes dataset text with model-generated code and
+grows a row by the size of every scored program, so it is a second opt-in. The agent's raw per-step
+generations are a separate concern: enable model-call observability to keep them.
+
+```yaml
+scicode:
+  resources_servers:
+    scicode:
+      record_step_outputs: true
+      output_tail_chars: 2000
+      record_step_code: true
+```
 
 ## Test data (required, staged manually)
 
@@ -89,9 +148,10 @@ gym eval run --no-serve \
 gym env test +entrypoint=resources_servers/scicode
 ```
 
-Covers test sanitization, the program builder, subprocess pass/fail/timeout, and the `verify()`
-paths (no solutions, missing/unconfigured test data, all-pass, all-fail, prefilled-excluded,
-out-of-context).
+Covers test sanitization, the program builder, subprocess pass/fail/timeout and the execution
+details it reports (exit code, timeout, duration, bounded output tails, exception class), and the
+`verify()` paths (no solutions, missing/unconfigured test data, all-pass, all-fail, prefilled-excluded,
+out-of-context, `step_outputs` on and off, `code` on and off).
 
 ## Licensing
 

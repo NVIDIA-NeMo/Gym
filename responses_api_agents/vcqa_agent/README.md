@@ -158,14 +158,56 @@ gym env start \
 For local development without Apptainer, use `sandbox_backend=local`. This is
 not isolated and should only be used with trusted artifacts.
 
+Apptainer sandboxes run with `--containall --cleanenv` (`apptainer_contain`,
+default true): tool commands see no host environment variables, home
+directory, or working directory, only the read-only working tree and the
+rollout's scratch directory. Set `apptainer_network_none: true` to also give
+each sandbox an empty network namespace; artifact fetches and judge calls run
+in the agent server and are unaffected. Concurrent rollouts of the same task
+share one read-only working tree (`share_working_trees`); `scratch_root` moves
+the extracted trees to node-local disk.
+
+### Sandbox providers
+
+`sandbox_backend=provider` runs each rollout in its own sandbox on a NeMo Gym
+sandbox provider, such as OpenSandbox, named by `sandbox_provider`. The working
+tree is built inside the sandbox: root installs the tools, extracts the fileset
+tarball or clones the git bundle into `/codebase`, and tool commands then run as
+the non-root `sandbox_user` (default `vcqa`), for whom the root-owned tree is
+read-only.
+
+| Setting | Purpose |
+| ------- | ------- |
+| `sandbox_image`, `sandbox_resources`, `sandbox_ttl_s` | Sandbox image, resources, and time to live |
+| `sandbox_provider_options` | Provider options; the default is OpenSandbox's deny-all egress policy, which other providers ignore |
+| `sandbox_tools_archive` or `sandbox_tools_command` | Tools (`rg`, `fd`, `git`, `tree`) for the image: an archive uploaded and extracted over `/`, or a root command that installs them |
+| `sandbox_artifact_root` | Sandbox-side directory with the artifacts under their `artifact_key`, for example a mounted bucket; unset uploads each artifact from `artifact_url_prefix` |
+| `sandbox_hidden_paths` | Paths made root-only after setup (default `/mnt`), so the tool user cannot browse a shared mount that holds every task's artifacts |
+
+```bash
+gym env start \
+    --config responses_api_agents/vcqa_agent/configs/vcqa_agent.yaml \
+    --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
+    --model-type openai_model \
+    ++vcqa_agent.responses_api_agents.vcqa_agent.sandbox_backend=provider \
+    ++vcqa_agent.responses_api_agents.vcqa_agent.sandbox_tools_archive=/path/to/vcqa-tools-amd64.tar.gz
+```
+
+Egress is denied only where the provider enforces it. On OpenSandbox the default
+`sandbox_provider_options` does; other providers need their own setting, for example
+`++sandbox.docker.create.network=none` for Docker.
+
+A sandbox that fails mid-rollout is an infrastructure failure: the rollout is
+masked (see below) and the sandbox is stopped.
+
 ## Tools
 
 The model gets six real tools:
 
 | Tool | Behavior |
 | ---- | -------- |
-| `read_file` | Read a file under `/codebase`, capped by `max_bytes`. |
-| `grep` | Search under `/codebase` with ripgrep. |
+| `read_file` | Read a file under `/codebase`, capped by `max_bytes`; `start_line`/`end_line` return a numbered line range. |
+| `grep` | Search under `/codebase` with ripgrep; `include` restricts the files searched with a glob. |
 | `glob` | Find files under `/codebase` with `fd`. |
 | `list_dir` | List a directory under `/codebase`. |
 | `write_todos` | Append notes to `/tmp/scratch/todos.md`. |
@@ -179,6 +221,28 @@ judge.
 All tool handlers return structured JSON. Invalid arguments, path escapes,
 non-zero exits, and timeouts are returned to the model as tool results instead
 of crashing the rollout.
+
+## Judge and Masking
+
+Each must-have criterion is one judge call. Timeouts, transport errors, HTTP
+408/429/5xx, and replies that are not YES/NO are retried with exponential
+backoff (`judge_max_attempts`, default 4; `judge_retry_backoff_s`), and
+`judge_max_concurrency` (default 256) caps judge calls in flight across
+rollouts. `judge_extra_body` is merged into every judge request, for example
+`{chat_template_kwargs: {enable_thinking: false}}`. `judge_api_key_env` names an
+environment variable read at call time instead of `judge_api_key`, which keeps
+the key out of resolved configs that training drivers print.
+
+A rollout that could not be measured sets `evaluation_completed: false`,
+`mask_sample: true`, `failure_stage`, and `failure_kind`: the artifact cannot be
+fetched or materialized, the sandbox fails, the model server errors, the row has
+no must-have criteria, or a judge call still fails after its last attempt
+(`judge_errors`). Trainers and evaluations can drop these rows instead of
+scoring them 0. An empty answer, the turn cap, and running out of context are
+measurements and keep their reward.
+
+Model calls go through the run's URL path, so NeMo RL token capture records
+every turn of the tool loop.
 
 ## Tests
 

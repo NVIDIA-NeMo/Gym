@@ -4,6 +4,7 @@
 """Exercise mini-SWE without importing a benchmark or its resource models."""
 
 import asyncio
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -12,8 +13,10 @@ from fastapi import FastAPI, HTTPException, Request
 from httpx import ASGITransport, AsyncClient
 from starlette.middleware.sessions import SessionMiddleware
 
-from nemo_gym.rollout_correlation import RolloutContextMiddleware
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
+from nemo_gym.server_runtime import RolloutContextMiddleware
+from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
+from nemo_gym.utils import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
 from responses_api_agents.miniswe_sandboxed_agent import app as module
 from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessOutcome
 from responses_api_agents.miniswe_sandboxed_agent.models import MiniSWERunRequest, SeedSessionResponse
@@ -493,3 +496,62 @@ async def test_cancellation_during_cleanup_delays_transport_release_and_verifica
     f.provider.aclose.assert_awaited_once()
     assert f.verification["termination"]["reason"] == "cancelled"
     assert not f.agent._sessions
+
+
+@pytest.mark.parametrize("legacy_run", [True, False])
+@pytest.mark.parametrize("worker", [True, False])
+def test_legacy_and_session_configurations_log_the_adapter_deprecation_once(
+    tmp_path, caplog, monkeypatch, legacy_run, worker
+):
+    """Both paths are superseded; existing configurations still construct successfully.
+
+    Workers of a multi-worker server rebuild it after the main process has logged the warning.
+    """
+    module._warn_deprecated_once.cache_clear()
+    monkeypatch.setenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, "1" if worker else "")
+    config = module.MiniSWESandboxedConfig(
+        host="localhost",
+        port=1,
+        name="agent",
+        entrypoint="app.py",
+        resources_server={"type": "resources_servers", "name": "terminal_bench_4"} if legacy_run else None,
+        model_server={"type": "responses_api_models", "name": "model"},
+        artifacts_dir=tmp_path,
+    )
+    with caplog.at_level(logging.WARNING, logger=module.__name__):
+        for _ in range(2):
+            module.MiniSWESandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+
+    warnings = [r.getMessage() for r in caplog.records if r.name == module.__name__]
+    assert warnings == ([module.DEPRECATION_WARNING] if not worker else [])
+    for phrase in (
+        "Legacy /run",
+        "--agent mini_swe_agent/mini_swe_agent_sandboxed",
+        "tasks with [agent].user",
+        "Terminal-Bench-Science",
+        "mini_swe_agent/README.md#agent-sessions",
+    ):
+        assert phrase in module.DEPRECATION_WARNING
+
+
+def test_several_workers_are_refused_only_with_the_run_path(tmp_path) -> None:
+    """Episode sessions are routed by agent_session_id; the agent's own /run replays retries from this process."""
+
+    def agent(**resources_server) -> module.MiniSWESandboxedAgent:
+        return module.MiniSWESandboxedAgent(
+            config=module.MiniSWESandboxedConfig(
+                host="localhost",
+                port=1,
+                name="agent",
+                entrypoint="app.py",
+                num_workers=2,
+                model_server={"type": "responses_api_models", "name": "model"},
+                artifacts_dir=tmp_path,
+                **resources_server,
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+    with pytest.raises(ValueError, match="needs num_workers=1: its own /run path replays a retried run"):
+        refuse_unsupported_num_workers(agent(resources_server={"type": "resources_servers", "name": "resources"}))
+    refuse_unsupported_num_workers(agent())

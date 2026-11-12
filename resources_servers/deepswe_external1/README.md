@@ -33,12 +33,33 @@ standalone golden/null validation without an agent.
 
 Configure the sandbox connection and model credentials privately. The model-server
 address must be reachable from the sandbox. The OpenCode configuration is inherited
-from Gym; offline images need its locally cached binary setup.
+from Gym. On providers that enforce the sandbox network policy, the agent sandbox
+denies network except the model host, so OpenCode cannot download its runtime there.
+Pin the whole offline bundle in `opencode_agent`: the binary
+(`sandbox_executable_path`, `sandbox_executable_sha256`), ripgrep
+(`sandbox_ripgrep_path`, `sandbox_ripgrep_sha256`) and the plugin dependencies
+(`sandbox_plugin_dependencies_path`, `sandbox_plugin_dependencies_sha256`), each a
+file already inside the sandbox, for example on a mounted cache. Alternatively, use
+task images that hold the runtime at `/tmp/nemo-gym-opencode-runtime-<opencode_version>`
+and `rg` on `PATH`; still set `sandbox_plugin_dependencies_path` and
+`sandbox_plugin_dependencies_sha256` to populate each session's private config directory. See the `opencode_agent` README's
+[Pinned offline runtime bundle](../../responses_api_agents/opencode_agent/README.md#pinned-offline-runtime-bundle).
 The hosted-inference example normalizes structured reasoning for Gym's chat
 contract. Select the model adapter appropriate for your endpoint; training that
 requires token IDs needs a compatible training model server.
-The OpenCode config includes upstream's `legacy_agent` environment server for
-rollout routing; it forwards requests without changing task rows or grading.
+
+`deepswe_external1_opencode.yaml` runs `opencode_agent` through `single_agent_turn`:
+the server seeds an episode session, lends the agent sandbox to the agent session
+through `sandbox_access`, and after the agent closes grades the committed patch in a
+fresh verifier. Rows reach it through the `deepswe_external1` taskset. An episode
+session is verified once; an identical retry replays the verdict, and a verify after
+close is masked as a lost session. Close stops the agent sandbox if verify did not.
+
+`deepswe_external1_opencode_legacy_agent.yaml` is deprecated. It runs
+`opencode_sandboxed_agent` through the `legacy_agent` relay, which seeds with the flat
+row and gets the sandbox handle back, and that agent
+[will be removed](../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx)
+after the Environment Server migration.
 
 `data/example_rollouts.jsonl` contains one recorded Super/OpenCode attempt per public
 example, run with inline-file provisioning on 2026-10-05. Original task fields and
@@ -65,6 +86,19 @@ For another dataset, supply rows matching `task_data.py`. Keep local training da
 uncommitted. Rows are trusted controller inputs: grading files live in `files`,
 not `responses_create_params.input`, and are not shown to the agent. There is no
 task store, file-checksum manifest or legacy fingerprint-only row loader.
+
+## Task layouts beyond the public set
+
+Rows may declare `workdir` as `/app` (the public DeepSWE layout) or `/workspace/repo`; every git check, the patch
+collection and the verifier's `test.sh` run in the row's workdir. The setup checks compare real paths, so an image
+whose `/app` is a symlink to the actual clone passes. Each task's own `test.sh` and `grader.py` already target the
+same path, so nothing is rewritten in the grading files.
+
+`grader_applies_model_patch` (default `true`) records which grader generation a row ships. DeepSWE v1.0 graders apply
+`/logs/artifacts/model.patch` themselves in `prepare`; v1.1 graders grade the working tree as-is and never apply it.
+For rows with `false`, the server applies the collected candidate patch in the verifier's workdir before `test.sh`
+runs. A patch that does not apply at the base commit is graded as such (the base tree fails FAIL_TO_PASS), which is
+the same outcome a v1.0 grader gives a non-applying `model.patch`; nothing is masked.
 
 ## Verification contract
 

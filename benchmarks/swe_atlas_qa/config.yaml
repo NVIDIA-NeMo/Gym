@@ -1,0 +1,13 @@
+config_paths:
+  - resources_servers/swe_atlas_qa/configs/swe_atlas_qa.yaml
+  - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+  - responses_api_models/vllm_model/configs/vllm_model.yaml
+
+swe_atlas_qa_agent:
+  responses_api_agents:
+    harness_agent:
+      datasets:
+        - name: swe_atlas_qa
+          type: benchmark
+          jsonl_fpath: resources_servers/swe_atlas_qa/data/benchmark.jsonl
+          prepare_script: resources_servers/swe_atlas_qa/prepare.py

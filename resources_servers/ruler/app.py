@@ -15,12 +15,13 @@
 
 from typing import List, Optional
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 class RulerResourcesServerConfig(BaseResourcesServerConfig):
@@ -50,7 +51,6 @@ class RulerVerifyResponse(RulerVerifyRequest, BaseVerifyResponse):
 
 
 class RulerResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: RulerResourcesServerConfig
 
     async def verify(self, body: RulerVerifyRequest) -> BaseVerifyResponse:
@@ -78,3 +78,6 @@ class RulerResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     RulerResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = RulerResourcesServer.run_webserver()  # noqa: F401

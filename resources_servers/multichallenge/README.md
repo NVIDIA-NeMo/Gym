@@ -250,7 +250,8 @@ Key transformations:
 multichallenge/
 ├── app.py                   # Main server implementation
 ├── dataset_preprocess.py    # JSON → JSONL converter
-├── requirements.txt         # Dependencies (-e nemo-gym[dev])
+├── pyproject.toml          # Dependency declarations
+├── uv.lock                 # Locked dependencies
 ├── README.md                # This file
 ├── .gitignore               # Excludes data from git
 ├── configs/

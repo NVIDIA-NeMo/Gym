@@ -12,17 +12,26 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
-from nemo_gym.sandbox.providers.base import SandboxExecResult
-from responses_api_agents.codex_agent import sandbox_runner
-from responses_api_agents.codex_agent.sandbox import CodexSandboxSession
-from responses_api_agents.codex_agent.tests.test_native_sessions import seed
+from nemo_gym.agents import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SUPERVISOR_FILE, SandboxSession
+from nemo_gym.agents.utils.supervisor_client import LAUNCH_CLAIM_FILE, SUPERVISOR_PID_FILE
+from nemo_gym.sandbox import SandboxExecResult
+from responses_api_agents.codex_agent.sandbox import LAUNCHER_FILE, CodexSandboxSession
+from responses_api_agents.codex_agent.tests.test_sandbox_sessions import seed
 
 
-pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux child-subreaper and /proc required")
+pytestmark = pytest.mark.skipif(
+    sys.platform != "linux" or shutil.which("node") is None, reason="Linux process supervision and Node required"
+)
+
+# These integration tests run real shells and scan /proc on shared CI runners.
+# Tight cancellation deadlines are covered separately by the SandboxSession unit tests.
+CLOSE_TIMEOUT = 10
 
 
 class ExecOnlySandbox:
+    # File copies do not wait for the supervised exec in this local provider.
+    uploads_independent_of_execs = True
+
     def __init__(self):
         self.cancelled_launch = False
         self.lost_launch = False
@@ -40,7 +49,7 @@ class ExecOnlySandbox:
         self.disconnected = True
 
     async def exec(self, command, *, cwd=None, timeout_s=30):
-        launch = "--receipt" in command and "process_supervisor.py" in command
+        launch = "--receipt" in command and "process_supervisor.sh" in command
         if launch:
             self.deadline = timeout_s
             self.delayed_command = command
@@ -77,7 +86,10 @@ def make_session(tmp_path):
         ),
         runtime=str(tmp_path / "runtime"),
     )
-    shutil.copyfile(sandbox_runner.__file__, directory / "sandbox_runner.py")
+    (tmp_path / "runtime/node/bin").mkdir(parents=True)
+    (tmp_path / "runtime/node/bin/node").symlink_to(shutil.which("node"))
+    shutil.copyfile(HARNESS_RUNNER_SCRIPT, directory / HARNESS_RUNNER_FILE)
+    shutil.copyfile(Path(__file__).parents[1] / LAUNCHER_FILE, directory / LAUNCHER_FILE)
     return state, provider, workdir
 
 
@@ -93,81 +105,115 @@ def payload(state, code, timeout=0.5):
     }
 
 
-@pytest.mark.parametrize("ending", ["natural", "timeout", "cancel", "close"])
-async def test_exec_only_supervision_reaps_detached_child(tmp_path, ending):
+@pytest.mark.parametrize("ending", ["natural", "crash", "timeout", "cancel", "close"])
+@pytest.mark.parametrize("startup_delay", [0, 0.6])
+async def test_exec_only_supervision_leaves_task_children_for_sandbox_owner(tmp_path, ending, startup_delay):
     state, provider, workdir = make_session(tmp_path)
-    code = (
-        "import subprocess,sys,time,pathlib; "
-        "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],start_new_session=True); "
-        "pathlib.Path('child.pid').write_text(str(p.pid)); "
-        + ("print('{}')" if ending == "natural" else "time.sleep(60)")
+    # Complete the tool before interruption so its detached service is already adopted.
+    tool = (
+        "import pathlib,subprocess,sys; "
+        "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],"
+        "start_new_session=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); "
+        "pathlib.Path('child.pid').write_text(str(p.pid))"
     )
-    deadline = 0.5 if ending == "timeout" else 60
+    code = (
+        "import os,subprocess,sys,time,pathlib; "
+        f"time.sleep({startup_delay}); "
+        f"subprocess.run([sys.executable,'-c',{tool!r}],check=True); "
+        "pathlib.Path('ready').touch(); "
+        + {"natural": "print('{}')", "crash": "raise SystemExit(7)"}.get(ending, "time.sleep(60)")
+    )
+    # Expire only after the detached child is ready; startup speed is not under test.
+    deadline = 60
     task = state.task = asyncio.create_task(
-        state.execute(payload(state, code, timeout=deadline), timeout=deadline, close_timeout=3)
+        state.execute(payload(state, code, timeout=deadline), timeout=deadline, close_timeout=CLOSE_TIMEOUT)
     )
     try:
-        async with asyncio.timeout(5):
-            while not (workdir / "child.pid").exists():
+        async with asyncio.timeout(30):
+            while not (workdir / "ready").exists():
+                if task.done():
+                    await task
+                    pytest.fail("Harness exited before its detached child was ready")
                 await asyncio.sleep(0.01)
+        if ending == "timeout":
+            assert await state.session.expire(timeout=CLOSE_TIMEOUT)
         if ending == "cancel":
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
         elif ending == "close":
-            await state.close(3)
+            await state.close(CLOSE_TIMEOUT)
             await asyncio.gather(task, return_exceptions=True)
         else:
             await task
         assert state.session.cleanup["cleanup_confirmed"] is True
         if ending == "timeout":
             assert state.session.cleanup["timed_out"] is True
-        with pytest.raises(ProcessLookupError):
-            os.kill(int((workdir / "child.pid").read_text()), 0)
+        child_pid = int((workdir / "child.pid").read_text())
+        assert Path(f"/proc/{child_pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
         assert provider.cancelled_launch is False
-        assert provider.deadline > deadline + 3 * 1
-        await state.close(3)
-        await state.close(3)
+        assert provider.deadline == pytest.approx(deadline + CLOSE_TIMEOUT + 30)
+        await state.close(CLOSE_TIMEOUT)
+        await state.close(CLOSE_TIMEOUT)
         assert provider.disconnected
         assert not Path(state.session.session_dir).exists()
+        # Agent close releases its session; Resources owns descendant teardown.
+        assert Path(f"/proc/{child_pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
     finally:
-        if not state.session.closed:
-            await state.close(3)
+        try:
+            if not state.session.closed:
+                await state.close(CLOSE_TIMEOUT)
+        finally:
+            if (workdir / "child.pid").exists():
+                try:
+                    os.kill(int((workdir / "child.pid").read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
 
-async def test_lost_launch_is_fenced_even_after_directory_retirement(tmp_path):
+@pytest.mark.parametrize("retired", [False, True], ids=["before_retirement", "after_retirement"])
+async def test_lost_launch_is_fenced_before_and_after_directory_retirement(tmp_path, retired):
     state, provider, workdir = make_session(tmp_path)
     provider.lost_launch = True
     with pytest.raises(TimeoutError, match="lost launch response"):
-        await state.execute(payload(state, "open('started','w').close()"), timeout=0.5, close_timeout=3)
+        await state.execute(payload(state, "open('started','w').close()"), timeout=10, close_timeout=CLOSE_TIMEOUT)
     assert state.session.cleanup["cleanup_confirmed"] is True
     assert state.runtime_info is None  # No worker ran after the failed launch.
-    await state.close(3)
     provider.lost_launch = False
+    session_dir = Path(state.session.session_dir)
+    if retired:
+        await state.close(CLOSE_TIMEOUT)
+    else:
+        # The supervisor is still in place, so only the stop's launch claim can fence the delayed command.
+        assert (session_dir / SUPERVISOR_FILE).exists()
     await provider.exec(provider.delayed_command, cwd=str(workdir))
+    # Under a broken claim the stop file halts the harness before it writes this; the PID file shows the start.
     assert not (workdir / "started").exists()
-    assert not Path(state.session.session_dir).exists()
+    if not retired:
+        assert not (session_dir / SUPERVISOR_PID_FILE).exists()
+        assert (session_dir / LAUNCH_CLAIM_FILE).readlink() == Path("stop")
+        await state.close(CLOSE_TIMEOUT)
+    assert not session_dir.exists()
 
 
-async def test_failed_receipt_keeps_files_and_can_retry(tmp_path):
+async def test_terminal_failed_receipt_releases_borrowed_session(tmp_path):
     state, provider, _ = make_session(tmp_path)
     state.session.launch_started = True
     receipt = {
         "return_code": 1,
         "timed_out": False,
         "cleanup_confirmed": False,
-        "error": "descendants remain",
+        "error": "harness termination unconfirmed",
     }
     path = Path(state.session.session_dir) / "cleanup.json"
     path.write_text(json.dumps(receipt))
-    with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
-        await state.close(3)
-    assert not provider.disconnected
-    assert path.exists()
-    receipt.update(cleanup_confirmed=True, error=None)
-    path.write_text(json.dumps(receipt))
-    await state.close(3)
+    await state.close(CLOSE_TIMEOUT)
     assert provider.disconnected
+    assert state.session.closed
+    assert state.session.cleanup is None
+    assert state.session.termination_error.receipt == receipt
+    assert state.session.capture_error is state.session.termination_error
+    assert not path.exists()
 
 
 async def test_confirmed_cleanup_cancels_stuck_transport(tmp_path):

@@ -1,0 +1,16 @@
+partner_if:
+  resources_servers:
+    partner_if:
+      entrypoint: app.py
+      domain: instruction_following
+      verified: false
+      description: Versioned instruction-following rubric verification across visible evidence types.
+      judge_model_server:
+        type: responses_api_models
+        name: partner_if_judge
+      allow_provisional_rubrics: false
+      judge_responses_create_params:
+        input: []
+        max_output_tokens: 8192
+        temperature: 0.0
+      judge_max_concurrency: 8

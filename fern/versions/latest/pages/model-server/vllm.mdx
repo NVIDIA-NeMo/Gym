@@ -5,7 +5,7 @@ position: 5
 ---
 [vLLM](https://docs.vllm.ai/) is a popular LLM inference engine. The NeMo Gym VLLMModel server wraps vLLM's Chat Completions endpoint and converts requests and responses to NeMo Gym's native format, the OpenAI [Responses API](https://platform.openai.com/docs/api-reference/responses) schema.
 
-Most open-source models use Chat Completions format, while NeMo Gym uses the Responses API natively. VLLMModel bridges this gap by converting between the two formats automatically. For background on why NeMo Gym chose the Responses API and how the two schemas differ, see [responses-api-evolution](/infrastructure/engineering-notes/responses-api-evolution).
+Most open-source models use Chat Completions format, while NeMo Gym uses the Responses API natively. VLLMModel bridges this gap by converting between the two formats automatically. For background on why NeMo Gym chose the Responses API and how the two schemas differ, see [Responses API](/infrastructure/engineering-notes/responses-api-evolution).
 
 VLLMModel provides a Responses API to Chat Completions mapping middleware layer via `responses_api_models/vllm_model`. It assumes you are pointing to a vLLM instance since it relies on vLLM-specific endpoints like `/tokenize` and vLLM-specific arguments like `return_tokens_as_token_ids`.
 
@@ -139,7 +139,7 @@ If you want to run NeMo Gym on a separate machine from the one used to spin up t
 hostname -i
 ```
 
-Then replace the `policy_base_url=http://0.0.0.0:10240/v1` to point to the hostname `policy_base_url=http://{hostname}:10240/v1`.
+Then change `--model-url http://0.0.0.0:10240/v1` to `--model-url http://{hostname}:10240/v1`.
 
 </Tip>
 
@@ -168,8 +168,6 @@ policy_model:
       uses_reasoning_parser: false   # /v1/completions does not run vLLM's reasoning parser
       uses_interleaved_reasoning: false
       use_completions_api: true      # drives vLLM /v1/completions
-      chat_template_kwargs: null
-      extra_body: null
 ```
 
 ### Render modes
@@ -206,7 +204,7 @@ If the loaded tokenizer has no `chat_template`, the server fails at startup — 
 
 **Tools in chat-template mode.** The chat template renders the tool definitions into the prompt (Hermes / Qwen / etc. all do this), but `/v1/completions` doesn't run vLLM's tool-call parser regardless of how the prompt is built — so any tool-call output text the model emits is **not** parsed by Gym. The caller is responsible for parsing tool calls out of the assistant text. If you need first-class tool-call routing, use `use_completions_api: false`.
 
-`<think>...</think>` blocks emitted inline by the model are extracted downstream by `VLLMConverter._extract_reasoning_from_content` when results are converted back to a Response, exactly as on the chat path.
+`<think>...</think>` blocks emitted inline by the model are extracted downstream by `ChatCompletionsConverter._extract_reasoning_from_content` when results are converted back to a Response, exactly as on the chat path.
 
 ### Token-ID extraction (RL training)
 
@@ -242,15 +240,24 @@ Make sure your input JSONL respects the selected mode in the [Constraint matrix]
 | `return_token_id_information` | `bool` | — | **Required.** Set `true` for training (token IDs + log probs), `false` for inference only. |
 | `uses_reasoning_parser` | `bool` | — | **Required.** Set `true` for reasoning models (extracts `<think>` tags), `false` otherwise. |
 | `reasoning_field` | `str` | `both` | Which key(s) carry the `<think>` reasoning that vllm_model extracts from replayed assistant messages (`uses_reasoning_parser: true`, `uses_interleaved_reasoning: true`, `preserve_reasoning_in_assistant_content: false`): `both`, `reasoning`, or `reasoning_content`. Use a single key for servers that reject a message carrying both. When unset, falls back to the `NEMO_GYM_REASONING_FIELD` environment variable, then `both`. |
+| `refit_output_budget_to_window` | `bool` | `true` | When the engine refuses a call for length because the requested output budget (`max_tokens` or `max_completion_tokens`) alone exceeds the context window, send the call once more with the budget lowered to the window minus the prompt minus a 16-token margin. The prompt length comes from the refusal, else from one `/tokenize` call. The model call's capture records `requested_max_tokens`, `applied_max_tokens` and an `output_budget_refit` event. A budget within the window is not changed by this setting (see `refit_output_budget_to_prompt`). Set `false` to keep the refusal. |
+| `refit_output_budget_to_prompt` | `bool` | `false` | Opt in to the same single resend when the requested output budget fits the context window by itself but the prompt and the budget together overflow it (for example a 131072-token budget in a 262144-token window, once the prompt passes 131072 tokens). The call is sent once more with the budget lowered to the window minus the prompt minus the 16-token margin, so the model answers with what the window leaves instead of the call ending on an empty `length` completion. The prompt length and the capture are the same as for `refit_output_budget_to_window`, and the refit is recorded in the same `output_budget_refit` event; it does not depend on that setting. A prompt that alone fills the window leaves no output token and keeps the `context_length_exceeded` refusal. Off by default, because a harness that compacts its history relies on that refusal as its cue; turn it on for a benchmark whose agent does not compact and whose output budget is large against the window. |
 | `replace_developer_role_with_system` | `bool` | `false` | Convert "developer" role to "system" for models that don't support developer role. |
 | `chat_template_kwargs` | `dict` | `null` | Override chat template parameters. Forwarded to upstream chat completions when `use_completions_api: false`, or to `apply_chat_template` when `use_completions_api: true` and `render_chat_template: true`. |
 | `forward_request_chat_template_kwargs` | `bool` | `false` | Merge a request's top-level `chat_template_kwargs` over the configured value. When `false`, the request field is accepted and dropped, with a warning logged once. Chat path only: ignored when `use_completions_api: true`. |
 | `extra_body` | `dict` | `null` | Pass additional vLLM-specific parameters (e.g., `guided_json`). |
+| `session_key_headers` | `list[str]` | `[]` | Names of headers that carry the current session key on every request to the engine made for a rollout, so a router can keep a session on one replica. Requires rollout correlation: set `++rollout_correlation=true` (see [Keep a Session on One Replica](/main/model-server/openai#keep-a-session-on-one-replica)). Requests outside a rollout get no generated header. Static headers from `default_headers` still apply. |
 | `use_completions_api` | `bool` | `false` | When `true`, drives vLLM's `/v1/completions` instead of `/v1/chat/completions`. See [Two upstream backends](#two-upstream-backends). |
 | `render_chat_template` | `bool` | `false` | Only consulted when `use_completions_api: true`. When `true`, renders messages to the `prompt` string client-side via `AutoTokenizer.apply_chat_template`. Lifts the multi-turn restriction. See [Render modes](#render-modes). |
 | `tokenizer` | `str` | `null` | Only consulted when `use_completions_api: true` and `render_chat_template: true`. HF identifier or local path passed to `AutoTokenizer.from_pretrained`. When `null`, falls back to `model`. Use this to borrow a chat template from a different model. |
 | `drop_hosted_tools` | `bool` | `false` | Streaming (`stream: true`) requests only; available on every model server. When `true`, every tool type other than `function` and `custom` is dropped from the request before it reaches the backend: the provider-hosted tools (web search, file search, code interpreter, image generation, computer use, remote MCP) and client-executed built-in types such as `local_shell`. A backend that serves none of them cannot answer a call to one, so the model sees only the tools the client executes. |
-| `drop_custom_tools` | `bool` | `false` | Streaming requests only; available on every model server. When `true`, `custom` (free-form) tools are dropped instead of being converted to Chat Completions custom tools, which a backend that expresses function tools only rejects with 422. Leave `false` for a backend with free-form tool support. |
+| `drop_custom_tools` | `bool` | `false` | Streaming requests only; available on every model server. When `true`, `custom` (free-form) tools are dropped instead of being converted to Chat Completions custom tools, which a backend that expresses function tools only rejects with 422. Leave `false` for a backend with free-form tool support, or set `custom_tool_strategy: function_bridge` to keep the capability on a function-only backend instead of dropping it. |
+| `custom_tool_strategy` | `str` | `"passthrough"` | How a Responses `custom` (free-form) tool reaches a backend whose chat schema admits function tools only. `passthrough` sends the converted request unchanged and the backend decides: vLLM's chat route refuses a request carrying a Chat custom tool, and `drop_custom_tools` remains the kill switch. `function_bridge` lowers each custom tool to a function tool with one required plain-string `input` parameter, replays `custom_tool_call`/`custom_tool_call_output` history in the lowered form, lifts a returned call whose name the request declared as custom back into a `custom_tool_call` item, and hoists custom entries from a streaming harness's `additional_tools` carrier instead of dropping them. A grammar `format` on the tool is dropped at the lowering (warned once per tool name): no vLLM tool parser enforces a grammar through function calling. Honored by the servers that run the Responses-to-Chat conversion — `vllm_model` and its subclasses (the compaction and GenRM servers included), `inference_provider`, and `azure_openai_model`; rejected together with `is_responses_native: true`, whose native route renders function tools only. Parser caveat: with a JSON-format tool parser (`hermes`, `llama3_json`, `mistral`) the model must JSON-escape the free-form payload inside the bridged arguments object, and an escaping mistake surfaces as plain text with no tool call; XML-style parsers (`qwen3_coder`, `nemotron_v3`) carry the payload as raw text. |
+| `stream_keepalive_s` | `float` | `null` | Streaming `/v1/responses` requests only; available on model servers that build their own responses (the Chat Completions conversion here, `azure_openai_model`, `inference_provider`), and refused at startup with `is_responses_native: true`. Responses streaming is buffered, so the client sees no event until the whole generation returns, and a client that bounds the silence between events (the Codex CLI's `stream_idle_timeout_ms`, 300 s by default) abandons long turns. SSE comments do not reset such a timer. When set, a call still running after this many seconds opens the stream with `response.created`, then sends `response.in_progress` every this many seconds; the item and terminal events that follow are unchanged, and every event names the same response id, which capture records too. A failure after the stream opened ends it with `response.failed`, carrying the error code the client would otherwise have received (for example `context_length_exceeded`), instead of an HTTP error status. |
+| `drop_unrepresentable_request_fields` | `bool` | `false` | How the Responses-to-Chat-Completions conversion treats a request field with no Chat Completions representation. When `false`, the conversion refuses the request with `NotImplementedError`, so the caller can route it to a server that serves Responses natively. When `true`, the reporting-only fields are dropped and the request proceeds: a non-empty `include` (every value; an empty `include` is already treated as absent), `reasoning.summary` and `reasoning.generate_summary`, and a message `phase`. A `reasoning.context` of `auto` or `all_turns` (the Codex CLI sends `all_turns` when its model catalog enables reasoning context) is dropped too: the conversion passes every reasoning item the request carries to the engine and leaves what is rendered to its chat template, which is what those values ask for. An image part in a tool's output is replaced with the text placeholder `[image omitted from tool output]`, so the model does not see that image, unless `inline_tool_output_images` is on. Every other unrepresentable field, a `current_turn` reasoning context included, is still refused. The setting also applies to the compaction model server (`vllm_model_with_compaction`) and has no effect when `is_responses_native` is `true`, because that path skips the conversion. |
+| `forward_unvalidated_reasoning_effort` | `bool` | `false` | Requires `is_responses_native: false` and `use_completions_api: false`. Forward a Responses `reasoning.effort` that the pinned OpenAI SDK does not list verbatim as the chat `reasoning_effort`, instead of refusing the request with 422. The engine validates the value. Efforts the SDK lists keep their existing path. The compaction model server (`vllm_model_with_compaction`) rejects it. |
+| `inline_tool_output_images` | `bool` | `false` | Requires `is_responses_native: false`. Send each image part of a Responses tool call output, such as the Codex CLI's `view_image` returns, to the engine as an `image_url` part of the chat tool message. OpenAI's chat tool messages carry text only, so by default such an output is refused, or replaced with a text placeholder under `drop_unrepresentable_request_fields`. vLLM accepts image parts in a tool message and leaves their rendering to the chat template, so a vision model sees the image inside the tool result. Detail `original`, which chat lacks, is sent as `high`. Other part types a tool message cannot carry are still refused. |
+| `endpoint_connection_retry_timeout_s` | `float` | `null` | Wall-clock seconds one model call may spend retrying connection errors before the last one is raised. See [Bound retries to a dead model server](#bound-retries-to-a-dead-model-server). |
 
 ### Advanced: `chat_template_kwargs`
 
@@ -278,6 +285,20 @@ extra_body:
   min_tokens: 10
   repetition_penalty: 1.1
 ```
+
+The shipped `vllm_model` configs leave `chat_template_kwargs`, `sampling_overrides`, and `extra_body` unset, so
+a value a benchmark or environment config sets for `policy_model` survives `--model-type vllm_model`, whose
+config merges after the benchmark's. A `null` there would replace it.
+
+### Bound retries to a dead model server
+
+By default a model call retries a refused or dropped connection without a time limit, so a training run can ride out an engine restart. For evaluation, where a dead engine should fail the run, set a cap:
+
+```yaml
+endpoint_connection_retry_timeout_s: 300
+```
+
+The value must be positive. The window starts at the call's first connection error and closes when the server answers, so it bounds only an unbroken run of connection failures. A call that has connected and is generating is not cut short, and HTTP-status retries (for example a 503 with `Retry-After`) keep their own limits. Each model call gets its own window, so a caller that retries the failed call (for example the OpenAI SDK's `max_retries` in an agent's policy client) waits up to one window per retry. Set the cap above the model server's startup time if rollouts can start before the engine accepts connections. `null` adds no time cap, but does not lift the attempt cap that `endpoint_connection_retries` sets when `endpoint_file` or `route_around_failing_endpoints` is used.
 
 ## Use VLLMModel with multiple replicas of a model endpoint
 

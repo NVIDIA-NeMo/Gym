@@ -3,6 +3,9 @@
 
 import json
 import logging
+import os
+import subprocess
+import sys
 import tempfile
 from asyncio import Semaphore
 from contextlib import nullcontext
@@ -16,11 +19,10 @@ from fastapi import Body, Request
 from nemo_fabric import Fabric, FabricConfig, RunRequest
 from pydantic import ConfigDict, Field, PositiveInt
 
-from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import SKILLS_REF_KEY_NAME, get_first_server_config_dict
-from nemo_gym.openai_utils import (
+from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import SKILLS_REF_KEY_NAME, ModelServerRef, ResourcesServerRef, get_first_server_config_dict
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionCallOutput,
@@ -33,11 +35,21 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_runtime import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 LOG = logging.getLogger(__name__)
 _MODEL_API_KEY_ENV = "NEMO_GYM_FABRIC_MODEL_API_KEY"  # pragma: allowlist secret
+# Adapter failures that are the model's own outcome, as (error code, metadata subtype): the model ran out of turns or
+# its step budget, so the rollout is verified and scored.
+_MODEL_STOPS = frozenset(
+    {
+        ("mini_swe_agent_incomplete", None),
+        ("deepagents_recursion_limit_reached", None),
+        ("claude_result_failed", "error_max_turns"),
+    }
+)
 
 
 def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
@@ -57,6 +69,9 @@ def _content_text(content: Any) -> str:
         return ""
     parts: list[str] = []
     for part in content:
+        if isinstance(part, str):
+            parts.append(part)
+            continue
         if isinstance(part, dict):
             text = part.get("text")
         else:
@@ -88,6 +103,12 @@ def _extract_request_input(body_input: Any) -> tuple[Any, Optional[str]]:
     else:
         request_input = messages
     return request_input, "\n\n".join(instruction_parts) or None
+
+
+def _reasoning_item(text: str) -> NeMoGymResponseReasoningItem:
+    return NeMoGymResponseReasoningItem(
+        id=f"rs_{uuid4().hex}", summary=[NeMoGymSummary(text=text, type="summary_text")]
+    )
 
 
 def _fabric_event_items(events: list[Any], response_text: str) -> list[Any]:
@@ -144,6 +165,9 @@ def _fabric_event_items(events: list[Any], response_text: str) -> list[Any]:
                             type="function_call_output",
                         )
                     )
+                elif isinstance(block.get("thinking"), str):
+                    if block["thinking"]:
+                        items.append(_reasoning_item(block["thinking"]))
                 else:
                     text = _content_text(block.get("text"))
                     if text and text.strip() != response_text.strip():
@@ -156,6 +180,12 @@ def _fabric_event_items(events: list[Any], response_text: str) -> list[Any]:
                                 type="message",
                             )
                         )
+        elif etype == "reasoning":
+            summary = "\n".join(
+                part if isinstance(part, str) else _content_text([part]) for part in event.get("summary") or []
+            )
+            if summary:
+                items.append(_reasoning_item(summary))
         elif etype == "agentMessage":
             text = _content_text(event.get("text"))
             if text and text.strip() != response_text.strip():
@@ -200,12 +230,7 @@ def _fabric_output_items(output: dict[str, Any], response_text: str) -> list[Any
                 continue
             reasoning = message.get("reasoning_content")
             if isinstance(reasoning, str) and reasoning:
-                items.append(
-                    NeMoGymResponseReasoningItem(
-                        id=f"rs_{uuid4().hex}",
-                        summary=[NeMoGymSummary(text=reasoning, type="summary_text")],
-                    )
-                )
+                items.append(_reasoning_item(reasoning))
             text = _content_text(message.get("content"))
             if text:
                 items.append(
@@ -247,6 +272,140 @@ def _fabric_output_items(output: dict[str, Any], response_text: str) -> list[Any
     return items
 
 
+def _atif_trajectories(output: dict[str, Any]) -> list[dict[str, Any]]:
+    """Load the ATIF trajectories that NeMo Relay wrote for this invocation."""
+    trajectories = []
+    for artifact in output.get("relay_artifacts") or []:
+        if not isinstance(artifact, dict) or artifact.get("kind") != "atif" or not artifact.get("path"):
+            continue
+        try:
+            trajectories.append(json.loads(Path(artifact["path"]).read_text(encoding="utf-8")))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            LOG.warning("Could not read Relay ATIF trajectory %s (%s)", artifact["path"], type(error).__name__)
+    # Relay names the files by session id, so order the trajectories by their first step's timestamp.
+    return sorted(
+        trajectories, key=lambda trajectory: str(_mapping((trajectory.get("steps") or [{}])[0]).get("timestamp"))
+    )
+
+
+def _emitted_arguments(value: Any, call_id: str) -> Optional[str]:
+    """The arguments string of tool call call_id in a raw chat or Responses API model response, if present."""
+    if isinstance(value, list):
+        return next((found for item in value if (found := _emitted_arguments(item, call_id)) is not None), None)
+    if not isinstance(value, dict):
+        return None
+    arguments = _mapping(value.get("function")).get("arguments", value.get("arguments"))
+    if call_id in (value.get("id"), value.get("call_id")) and isinstance(arguments, str):
+        return arguments
+    return _emitted_arguments(list(value.values()), call_id)
+
+
+def _atif_trajectory_items(trajectory: dict[str, Any], response_text: str, items: list[Any]) -> None:
+    """Append the agent-step items of one ATIF trajectory, inlining embedded subagent trajectories at their call."""
+    subagents = {
+        str(sub.get("trajectory_id")): sub
+        for sub in trajectory.get("subagent_trajectories") or []
+        if isinstance(sub, dict)
+    }
+    for step in trajectory.get("steps") or []:
+        # Copied-context steps repeat earlier steps (for example after compaction), so they are not new output.
+        if not isinstance(step, dict) or step.get("source") != "agent" or step.get("is_copied_context"):
+            continue
+        # A step without LLM calls only wraps a subagent (for example the Deep Agents orchestrator scope).
+        # The policy did not emit it, so only its subagent steps become items.
+        wrapper = step.get("llm_call_count") == 0
+        if not wrapper:
+            reasoning = step.get("reasoning_content")
+            if isinstance(reasoning, str) and reasoning:
+                items.append(_reasoning_item(reasoning))
+            text = _content_text(step.get("message"))
+            if text and text.strip() != response_text.strip():
+                items.append(
+                    NeMoGymResponseOutputMessage(
+                        id=f"msg_{uuid4().hex}",
+                        content=[NeMoGymResponseOutputText(text=text, annotations=[])],
+                        role="assistant",
+                        status="completed",
+                        type="message",
+                    )
+                )
+            for tool_call in step.get("tool_calls") or []:
+                if not isinstance(tool_call, dict):
+                    continue
+                call_id = str(tool_call.get("tool_call_id") or f"call_{uuid4().hex}")
+                # Relay records arguments that are not a JSON object as {"raw": text} or {"value": json}, so take them
+                # from its copy of the model's response when it has one.
+                arguments = _emitted_arguments(_mapping(step.get("extra")).get("llm_response"), call_id)
+                if arguments is None:
+                    arguments = tool_call.get("arguments")
+                if not isinstance(arguments, str):
+                    arguments = json.dumps(arguments or {}, ensure_ascii=False, sort_keys=True)
+                items.append(
+                    NeMoGymResponseFunctionToolCall(
+                        id=f"fc_{uuid4().hex}",
+                        call_id=call_id,
+                        name=str(tool_call.get("function_name") or ""),
+                        arguments=arguments,
+                        status="completed",
+                    )
+                )
+        for result in _mapping(step.get("observation")).get("results") or []:
+            if not isinstance(result, dict):
+                continue
+            for ref in result.get("subagent_trajectory_ref") or []:
+                subagent = subagents.get(str(_mapping(ref).get("trajectory_id")))
+                if subagent is not None:
+                    _atif_trajectory_items(subagent, response_text, items)
+            if wrapper:
+                continue
+            content = result.get("content")
+            extra = _mapping(result.get("extra"))
+            if content is None and "tool_result" in extra:
+                # Relay stores non-text tool returns here because ATIF content is text or image parts only.
+                value = extra["tool_result"]
+                if isinstance(value, dict) and "__nv_pydantic__" in value:
+                    # A serialized object such as a LangChain ToolMessage. Its content is what the model saw.
+                    value = _mapping(value.get("data")).get("content", value)
+                    if isinstance(value, list):
+                        value = _content_text(value)
+                content = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, sort_keys=True)
+            items.append(
+                NeMoGymResponseFunctionCallOutput(
+                    id=f"fco_{uuid4().hex}",
+                    call_id=str(result.get("source_call_id") or ""),
+                    output=_content_text(content),
+                    status="completed",
+                    type="function_call_output",
+                )
+            )
+
+
+def _atif_output_items(trajectories: list[dict[str, Any]], response_text: str) -> list[Any]:
+    """Response items from the agent steps of Relay ATIF trajectories, or [] when there are none."""
+    items: list[Any] = []
+    for trajectory in trajectories:
+        _atif_trajectory_items(trajectory, response_text, items)
+    if not items:
+        return []
+    items.append(
+        NeMoGymResponseOutputMessage(
+            id=f"msg_{uuid4().hex}",
+            content=[NeMoGymResponseOutputText(text=response_text, annotations=[])],
+            role="assistant",
+            status="completed",
+            type="message",
+        )
+    )
+    return items
+
+
+def _record_counts(items: list[Any]) -> tuple[int, int, int]:
+    """(non-empty tool outputs, all tool outputs, reasoning items). An empty output is still a completed call."""
+    outputs = [item.output for item in items if getattr(item, "type", None) == "function_call_output"]
+    reasoning = sum(1 for item in items if getattr(item, "type", None) == "reasoning")
+    return sum(1 for output in outputs if output), len(outputs), reasoning
+
+
 def _skill_paths(skills_root: Optional[str]) -> list[str]:
     if not skills_root:
         return []
@@ -276,10 +435,9 @@ def _usage_value(usage: dict[str, Any], *names: str) -> int:
 
 
 def _normalized_usage(result: dict[str, Any], output: dict[str, Any]) -> dict[str, Any]:
-    usage = _mapping(result.get("usage"))
-    if not usage:
-        output_usage = _mapping(output.get("usage"))
-        usage = _mapping(output_usage.get("total")) or output_usage
+    output_usage = _mapping(output.get("usage"))
+    # Fabric's normalized usage wins. The adapter's own usage fills fields it lacks, such as Codex reasoning tokens.
+    usage = _deep_merge(_mapping(output_usage.get("total")) or output_usage, _mapping(result.get("usage")))
     details = _deep_merge(_mapping(usage.get("extensions")), _mapping(usage.get("metadata")))
     return _deep_merge(details, usage)
 
@@ -317,6 +475,15 @@ class NeMoFabricAgentConfig(BaseResponsesAPIAgentConfig):
     cwd: Optional[str] = None
     harness_settings: dict[str, Any] = Field(default_factory=dict)
     fabric_config: dict[str, Any] = Field(default_factory=dict)
+    # Record each run with NeMo Relay. The response is then built from Relay's ATIF trajectory unless the adapter's own
+    # output is fuller, and fabric_result carries the trajectory as relay_atif.
+    relay: bool = False
+    # Adapters whose model schema has no base_url (Factory Droid reads custom endpoints from its own settings)
+    # reject a config that sets it. False leaves models.default.base_url out.
+    send_model_base_url: bool = True
+    # A uv project, relative to this server, whose environment runs the adapter. The agent syncs it at startup and
+    # passes its interpreter to Fabric as ADAPTER_PYTHON. Hermes uses one because it needs Python 3.14.
+    adapter_project: Optional[str] = None
 
 
 class NeMoFabricAgentRunRequest(BaseRunRequest):
@@ -331,13 +498,48 @@ class NeMoFabricAgentVerifyResponse(BaseVerifyResponse):
 
 
 class NeMoFabricAgent(SimpleResponsesAPIAgent):
-    ray_enabled = False
     config: NeMoFabricAgentConfig
     sem: Semaphore | None = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
+    _relay_supported: Optional[bool] = None
+    _adapter_python: Optional[str] = None
+
+    def _adapter_supports_relay(self, fabric_config: FabricConfig, base_dir: str) -> bool:
+        """Whether the adapter descriptor declares the Relay telemetry provider. Planned once per agent."""
+        if self._relay_supported is None:
+            adapter = _mapping(Fabric().plan(fabric_config, base_dir=base_dir).to_mapping().get("adapter"))
+            self._relay_supported = "relay" in _mapping(_mapping(adapter.get("telemetry")).get("providers"))
+            if self._relay_supported and self.config.adapter_id == "nvidia.fabric.hermes":
+                # Hermes declares Relay, but only a Hermes Agent build with Relay support can start with it. Check in
+                # the interpreter that runs the adapter.
+                check = subprocess.run(
+                    [
+                        self._adapter_python or sys.executable,
+                        "-c",
+                        "from nemo_fabric_adapters.hermes.telemetry import validate_hermes_relay_compatibility as v; v()",
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+                if check.returncode != 0:
+                    LOG.warning("%s", check.stderr.strip().splitlines()[-1] if check.stderr.strip() else check)
+                    self._relay_supported = False
+            if not self._relay_supported:
+                LOG.warning("%s does not support NeMo Relay, so it runs without Relay", self.config.adapter_id)
+        return self._relay_supported
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
+        if self.config.adapter_project:
+            project = Path(__file__).parent / self.config.adapter_project
+            self._adapter_python = str(project / ".venv" / "bin" / "python")
+            # The project pins its packages exactly instead of keeping a lock, so install it as plain requirements.
+            subprocess.run(["uv", "venv", "--allow-existing", ".venv"], cwd=project, check=True)
+            subprocess.run(
+                ["uv", "pip", "install", "--python", self._adapter_python, "-r", "pyproject.toml"],
+                cwd=project,
+                check=True,
+            )
 
     def _resources_server_base_url(self) -> str:
         config = get_first_server_config_dict(
@@ -372,6 +574,7 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
         system_prompt: Optional[str],
         mcp_servers: dict[str, Any],
         skills: list[str],
+        relay_dir: Optional[Path] = None,
     ) -> FabricConfig:
         authored = deepcopy(self.config.fabric_config)
         generated: dict[str, Any] = {
@@ -399,6 +602,20 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
                 }
             },
         }
+        if relay_dir is not None:
+            # Relay only runs with an artifacts root, and only writes ATIF when observability enables it. Keep a
+            # configured artifacts root, since relay_dir is removed after the run.
+            atif_dir = str(relay_dir / "atif")
+            if not (authored.get("runtime") or {}).get("artifacts"):
+                generated["runtime"]["artifacts"] = str(relay_dir / "artifacts")
+            generated["telemetry"] = {"providers": {"relay": {}}}
+            generated["relay"] = {
+                "project": "nemo-gym",
+                "output_dir": atif_dir,
+                "observability": {"version": 4, "atif": {"enabled": True, "output_directory": atif_dir}},
+            }
+        if not self.config.send_model_base_url:
+            del generated["models"]["default"]["base_url"]
         merged = _deep_merge(authored, generated)
 
         authored_instruction = ((authored.get("instructions") or {}).get("system") or {}).get("content")
@@ -447,14 +664,23 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
             if configured_workspace is None
             else nullcontext(str(configured_workspace))
         )
-        with workspace_context as workspace:
-            fabric_config = self._fabric_config(
+        relay_context = (
+            tempfile.TemporaryDirectory(prefix="nemo_gym_relay_") if self.config.relay else nullcontext(None)
+        )
+        with relay_context as relay_dir, workspace_context as workspace:
+            config_kwargs = dict(
                 model_base_url=model_base_url,
                 workspace=Path(workspace),
                 system_prompt=system_prompt,
                 mcp_servers=mcp_servers or {},
                 skills=_skill_paths(skills_path),
             )
+            if relay_dir and not self._adapter_supports_relay(self._fabric_config(**config_kwargs), workspace):
+                relay_dir = None
+            fabric_config = self._fabric_config(**config_kwargs, relay_dir=Path(relay_dir) if relay_dir else None)
+            # Fabric otherwise starts Python adapters on VIRTUAL_ENV's interpreter, which in R2E-style task
+            # images is the repo's venv and lacks the adapter. This agent's interpreter has the adapters installed.
+            os.environ.setdefault("ADAPTER_PYTHON", self._adapter_python or sys.executable)
             result = await Fabric().run(
                 fabric_config,
                 base_dir=workspace,
@@ -464,9 +690,14 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
                     context={"nemo_gym_rollout_id": rollout_id} if rollout_id else {},
                 ),
             )
+            # The trajectory files live in relay_dir, so read them before it is removed.
+            trajectories = _atif_trajectories(_mapping(result.output)) if relay_dir else []
 
         result_mapping = result.to_mapping()
-        if result.status != "succeeded":
+        model_stop = (
+            result.error is not None and (result.error.code, result.error.metadata.get("subtype")) in _MODEL_STOPS
+        )
+        if result.status != "succeeded" and not model_stop:
             error = result.error.message if result.error is not None else "unknown Fabric failure"
             error_mapping = _mapping(result_mapping.get("error"))
             details = {k: v for k, v in error_mapping.items() if k != "message" and v not in (None, {}, [])}
@@ -489,12 +720,41 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
             response_text = (
                 "" if response_text is None else json.dumps(response_text, ensure_ascii=False, sort_keys=True)
             )
+        atif_items = _atif_output_items(trajectories, response_text)
+        native_items = _fabric_output_items(output, response_text)
+        if self.config.adapter_id == "nvidia.fabric.claude":
+            # Claude's Relay results can be hook payloads; its native events preserve model-visible text and call IDs.
+            native_outputs = {
+                item.call_id: item.output
+                for item in native_items
+                if isinstance(item, NeMoGymResponseFunctionCallOutput) and item.call_id
+            }
+            for item in atif_items:
+                if isinstance(item, NeMoGymResponseFunctionCallOutput):
+                    item.output = native_outputs.get(item.call_id, item.output)
+        # Some adapters' trajectories drop tool outputs or collapse the run into one step, and Relay's ATIF steps carry
+        # no reasoning. Keep the fuller record. ATIF must also keep every native tool result under its call ID, since
+        # an unrelated Relay-only result would otherwise make up for a dropped one in the counts.
+        atif_outputs = {item.call_id: item.output for item in atif_items if item.type == "function_call_output"}
+        native_results_kept = all(
+            item.call_id in atif_outputs and (atif_outputs[item.call_id] or not item.output)
+            for item in native_items
+            if item.type == "function_call_output"
+        )
+        atif_counts, native_counts = _record_counts(atif_items), _record_counts(native_items)
+        output_items = (
+            atif_items
+            if atif_items
+            and native_results_kept
+            and all(atif >= native for atif, native in zip(atif_counts, native_counts))
+            else native_items
+        )
         response = NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
             model=str(output.get("model") or self.config.model),
             object="response",
-            output=_fabric_output_items(output, response_text),
+            output=output_items,
             tool_choice=body.tool_choice,
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,
@@ -509,6 +769,8 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
                 total_tokens=total_tokens,
             ),
         )
+        if relay_dir:
+            result_mapping["relay_atif"] = trajectories
         return response, json.loads(json.dumps(result_mapping, default=str))
 
     async def responses(
@@ -553,8 +815,8 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
             await raise_for_status(verify_response)
             verify_json = await get_response_json(verify_response)
             fabric_output = _mapping(fabric_result.get("output"))
-            finished_naturally = not fabric_output.get("failed", False)
-            if "completed" in fabric_output:
+            finished_naturally = fabric_result.get("status") == "succeeded" and not fabric_output.get("failed", False)
+            if finished_naturally and "completed" in fabric_output:
                 finished_naturally = bool(fabric_output["completed"])
             return NeMoFabricAgentVerifyResponse.model_validate(
                 verify_json
@@ -568,3 +830,6 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     NeMoFabricAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = NeMoFabricAgent.run_webserver()  # noqa: F401

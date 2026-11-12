@@ -24,13 +24,24 @@ name: Suggest Reviewers
 # .github/workflows/_suggest_reviewers.yml and .github/scripts/
 # codeowners_suggestions.py (+ its unit tests) for the matching logic.
 
+# Manual runs: dispatch this workflow from main with a PR number to (re)suggest
+# reviewers on an already-open PR, e.g.
+#   gh workflow run suggest-reviewers.yml -f pr_number=1234
+# The PR is read from the API; drafts are still skipped.
+
 on:
   push:
     branches:
       - "pull-request/[0-9]+"
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Open PR number to suggest reviewers for"
+        required: true
+        type: string
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ inputs.pr_number || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -39,9 +50,10 @@ permissions:
 
 jobs:
   suggest-reviewers:
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_suggest_reviewers.yml@b0a3760374f50b3d6a7d5f8629e826dddca3b931 # v1.10.1
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_suggest_reviewers.yml@5d472fb485ffe334332f0e95f6f69bed650f70a0 # v1.16.1
     with:
-      workflow_ref: b0a3760374f50b3d6a7d5f8629e826dddca3b931  # pragma: allowlist secret
+      workflow_ref: 5d472fb485ffe334332f0e95f6f69bed650f70a0  # pragma: allowlist secret
+      pr_number: ${{ inputs.pr_number }}
       # nemo-automation-bot -- same App community-bot.yml uses -- confirmed
       # working live for team-reviewer resolution. No PAT needed.
       app-id: ${{ vars.BOT_ID }}

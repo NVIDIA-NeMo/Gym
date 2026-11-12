@@ -59,6 +59,7 @@ async def test_extracts_openai_shape():
         llm,
         _mock_response(
             content="hello",
+            id="chatcmpl-terminal",
             extra_message={"generation_token_ids": [7, 8]},
             extra_choice={"logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}]}},
             prompt_token_ids=[1, 2, 3],
@@ -73,6 +74,7 @@ async def test_extracts_openai_shape():
     assert response.logprobs == [-0.1, -0.2]
     assert response.usage.prompt_tokens == 10
     assert response.usage.cache_tokens == 4
+    assert llm.last_response_id == "chatcmpl-terminal"
 
 
 @pytest.mark.asyncio

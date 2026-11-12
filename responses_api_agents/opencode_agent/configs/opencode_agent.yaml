@@ -1,33 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+config_paths:
+  - responses_api_agents/opencode_agent/configs/permissions/default.yaml
+
+# Agent sessions run in a sandbox; unseeded requests run the local CLI.
 opencode_agent:
   responses_api_agents:
     opencode_agent:
       entrypoint: app.py
-      resources_server:
-        type: resources_servers
-        name: ???
-      concurrency: 8
-      command: opencode
-      model: nvinf/nvidia/qwen/qwen3-next-80b-a3b-instruct
-      openai_api_key: ""
-      openai_base_url: null
-      env: {}
-      workspace_root: outputs/opencode_agent/workspaces
-      thinking: false
-      system_prompt: null
-      setup_timeout: 900
-      timeout: 900
-      extra_args: []
-      # written to opencode.json in the run dir
-      opencode_config:
-        permission:
-          bash: allow
-          edit: allow
-          webfetch: allow
-        provider:
-          nvinf:
-            npm: "@ai-sdk/openai-compatible"
-            options:
-              baseURL: https://integrate.api.nvidia.com/v1
-              apiKey: ${nvidia_api_key}
-            models:
-              nvidia/qwen/qwen3-next-80b-a3b-instruct: {}
+      num_workers: 1
+      resources_server: null
+      model: ${policy_model_name}
+      model_server:
+        type: responses_api_models
+        name: policy_model
+
+      # Set this to the actual model context window; it is metadata, not an output-token limit.
+      context_window: 262144
+      timeout: 10800
+      sandbox_install_timeout_seconds: 600
+      session_close_timeout_seconds: 60
+      session_close_retry_window_seconds: 300
+
+      # Owner extensions for sandbox sessions (README "Owner extensions"); these defaults change nothing.
+      plugins: []  # absolute sandbox paths of owner-staged OpenCode plugins, loaded after Gym's
+      # Pinned offline bundle beside the binary: a file already in the sandbox (*_path), each requiring its SHA-256
+      # (*_sha256), which is checked inside the sandbox.
+      sandbox_ripgrep_path: null  # e.g. ripgrep 15.1.0, the build OpenCode 1.17.11 downloads
+      sandbox_ripgrep_sha256: null
+      sandbox_plugin_dependencies_path: null  # tar of package.json, package-lock.json and node_modules
+      sandbox_plugin_dependencies_sha256: null
+      export_dir: null  # absolute sandbox directory outside the workdir; keeps OpenCode session exports after close
+      session_import_path: null  # absolute sandbox path of an OpenCode export to continue, if present
+      # Close also returns an ordinary session's own turns (no compaction summaries). false: one turn per captured
+      # call, so evidence checks report every call as unmatched, and compaction summaries count as steps.
+      return_session_trajectory: true
+
+      datasets: []

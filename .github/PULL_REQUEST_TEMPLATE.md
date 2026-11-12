@@ -18,6 +18,8 @@
 
 ## Checklist
 
+<!-- CI note: if your commits are unverified or you are an external contributor, a NVIDIA-NeMo member must comment `/ok to test <full 40-char commit SHA>` before CI runs. -->
+
 - [ ] I have read the [contributing guidelines](https://github.com/NVIDIA-NeMo/Gym/blob/main/CONTRIBUTING.md).
 - [ ] The change is focused; unrelated "drive-by" edits are tracked as separate issues/PRs.
 - [ ] Tests added or updated and pass locally, or N/A for docs-only / non-code changes (so CI unit/server checks pass when applicable).

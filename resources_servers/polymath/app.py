@@ -39,11 +39,12 @@ import math
 from collections import Counter
 from typing import Any, Dict, List, Optional
 
-from nemo_gym.reward_profile import (
+from nemo_gym.metrics import (
     compute_pass_majority_metrics,
     compute_subset_metrics,
     highest_k_metrics,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.math_with_judge.app import (
     LibraryJudgeMathResourcesServer,
     LibraryJudgeMathResourcesServerConfig,
@@ -71,8 +72,6 @@ class PolyMathVerifyResponse(LibraryJudgeMathVerifyResponse):
 
 class PolyMathResourcesServer(LibraryJudgeMathResourcesServer):
     """math_with_judge + difficulty-weighted aggregation + per-language metrics."""
-
-    ray_enabled = False
 
     config: PolyMathResourcesServerConfig
 
@@ -237,3 +236,6 @@ class PolyMathResourcesServer(LibraryJudgeMathResourcesServer):
 
 if __name__ == "__main__":
     PolyMathResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = PolyMathResourcesServer.run_webserver()  # noqa: F401

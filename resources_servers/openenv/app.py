@@ -27,7 +27,8 @@ from typing import Any, Dict, Optional
 from fastapi import FastAPI, Request
 from pydantic import BaseModel, create_model
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
@@ -35,7 +36,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 def _import_class(dotted_path: str) -> type:
@@ -73,8 +74,6 @@ class SessionState(BaseModel):
 
 class OpenEnvResourcesServer(SimpleResourcesServer):
     """Generic adapter that wraps any OpenEnv environment as a NeMo-Gym resource server."""
-
-    ray_enabled = False
 
     config: OpenEnvResourcesServerConfig
     _sessions: Dict[str, SessionState] = {}
@@ -250,3 +249,6 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     OpenEnvResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = OpenEnvResourcesServer.run_webserver()  # noqa: F401

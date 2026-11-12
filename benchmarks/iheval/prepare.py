@@ -123,7 +123,7 @@ def convert_row(row: Dict[str, Any]) -> Dict[str, Any]:
     if "agent_ref" in converted:
         converted["agent_ref"] = {"type": "responses_api_agents", "name": _BENCHMARK_AGENT}
     # Upstream IHEval uses int ``id`` for some tasks and str for others. Gym's
-    # dataset metric aggregator (train_data_utils.aggregate_other_metrics) keys a
+    # dataset metric aggregator (dataset_preparation.aggregate_other_metrics) keys a
     # single accumulator per top-level field and cannot mix numeric (AvgMinMax)
     # and string (Counter) values, so normalize ``id`` to str across all rows.
     if "id" in converted:

@@ -32,23 +32,26 @@ from typing import Any, Dict, List, Optional
 from fastapi import Request, Response
 from pydantic import ConfigDict
 
-from nemo_gym.base_resources_server import (
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-)
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import raise_for_status
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseUsage,
+    accumulate_response_usage,
 )
-from nemo_gym.server_utils import raise_for_status
+from nemo_gym.server_runtime import (
+    BaseRunRequest,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+)
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 LOG = logging.getLogger(__name__)
@@ -96,8 +99,6 @@ class ProofRefinementVerifyResponse(BaseVerifyResponse):
 
 class ProofRefinementAgent(SimpleResponsesAPIAgent):
     """Agent that implements multi-turn proof refinement with error feedback."""
-
-    ray_enabled = False
 
     config: ProofRefinementAgentConfig
 
@@ -162,6 +163,7 @@ class ProofRefinementAgent(SimpleResponsesAPIAgent):
         # Start the verify-correction loop
         current_input = body.responses_create_params
         turn_index = 0
+        usage: Optional[NeMoGymResponseUsage] = None
 
         while True:
             LOG.info("Turn %d: Generating proof attempt", turn_index)
@@ -176,6 +178,10 @@ class ProofRefinementAgent(SimpleResponsesAPIAgent):
             await raise_for_status(gen_response)
             cookies = gen_response.cookies
             model_response_json = await gen_response.json()
+            turn_usage = model_response_json.get("usage")
+            usage = accumulate_response_usage(
+                usage, NeMoGymResponseUsage.model_validate(turn_usage) if turn_usage is not None else None
+            )
 
             # 3. Verify the proof
             verify_request_data = body.model_dump()
@@ -257,8 +263,8 @@ class ProofRefinementAgent(SimpleResponsesAPIAgent):
                 "input": [{"role": "user", "content": correction_prompt}],
                 "model": getattr(params, "model", None),
             }
-            # Preserve any other params like temperature, max_tokens
-            for key in ["temperature", "max_tokens", "top_p"]:
+            # Preserve the caller's sampling params and output cap (Responses names it max_output_tokens)
+            for key in ["temperature", "max_output_tokens", "top_p"]:
                 value = getattr(params, key, None)
                 if value is not None:
                     current_input[key] = value
@@ -268,6 +274,8 @@ class ProofRefinementAgent(SimpleResponsesAPIAgent):
         # Build final response
         final_response = ProofRefinementVerifyResponse.model_validate(verify_result)
         final_response.total_turns = turn_index + 1
+        # The verifier echoes the last turn's response; usage covers every turn's model call.
+        final_response.response.usage = usage
 
         if self.config.include_all_attempts:
             final_response.all_attempts = all_attempts
@@ -277,3 +285,6 @@ class ProofRefinementAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     ProofRefinementAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ProofRefinementAgent.run_webserver()  # noqa: F401

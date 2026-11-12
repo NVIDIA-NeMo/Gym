@@ -1,2 +1,0 @@
-# Self-contained: only nemo-gym core
--e nemo-gym[dev] @ ../../

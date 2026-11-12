@@ -45,11 +45,10 @@
 # the run. To accept stage 1 with a bounded number of missing rows, give it a
 # partial_completion policy (see benchmarks/gdpval/README.md).
 #
-# To resume, rerun the same command with --resume, adding RERUN_INCOMPLETE=true
-# to reuse finished deliverables and cached judgements. The resume journal is
+# To resume, rerun the same command with --resume. The resume journal is
 # discarded (renamed *.stale.<ns>) when the dataset, stage shape, seed,
 # num_repeats, references or any model/agent/judge setting other than
-# endpoints, API keys, headers, RERUN_INCOMPLETE and agent concurrency changes.
+# endpoints, API keys, headers and agent concurrency changes.
 #
 # NOTE ON MEDIA: MiniMax-M3 reads images + video but has NO audio tower, so audio
 # deliverables are dropped with a warning (everything else is still graded).
@@ -65,7 +64,8 @@ gdpval_judge_model:
       # Must match the server's --served-model-name (defaults to the HF id).
       openai_model: ${oc.env:MINIMAX_MODEL,MiniMaxAI/MiniMax-M3}
       # Ride out overload 502/503s instead of failing after 3 quick retries.
-      max_http_attempts: 1800
+      max_http_attempts: 36
+      max_rate_limit_wait_seconds: 0
       openai_default_headers: {}
 
 # --- Comparison mode + references + single MiniMax-M3 judge -------------------
@@ -94,7 +94,7 @@ gdpval_resources_server:
       # past the ceiling.
       # The reference deliverables are NOT shipped with Gym: you must provide
       # each reference model's per-task `task_<task_id>/` deliverables yourself
-      # (the layout the Stirrup agent persists), produced by the exact model
+      # (the layout the GDPVal resources server persists), produced by the exact model
       # variant whose `elo` is listed. /gdpval/refs is only a placeholder.
       # Each deliverables_dir resolves to $GDPVAL_REFS_ROOT/<id>, defaulting to
       # /gdpval/refs/<id>. Three ways to point at your copies:

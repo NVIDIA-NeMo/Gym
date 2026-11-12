@@ -1,0 +1,81 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SWE-bench Pro (agentic coding): 731 harder, larger tasks (public set) x 3 repeats. The
+# OpenCode agent fixes each one inside a container holding the project; the project's tests
+# decide; there is no judge model.
+#
+#   nemotron_recipes/super-3.5/run.sh swebench-pro
+#
+# Tech report (key_metrics of swebench_pro_opencode_sandboxed_agent):
+#   SWE-bench Pro: mean/reward x100
+#
+# Set in .env: POLICY_API_KEY, OPENSANDBOX_DOMAIN, OPENSANDBOX_API_KEY, OPENCODE_DIR
+#
+# Needs Docker (task images come from Docker Hub; log in to avoid pull limits), ~4 CPU / 30 GB per
+# concurrent task, OpenSandbox self-hosted on your machine (the published run used NVIDIA's
+# hosted instance) and your own copy of OpenCode in OPENCODE_DIR. Setup for both:
+# reproducibility.md, "SWE-bench Verified, Multilingual and Pro".
+
+# Gym commit the published number was produced with; run.sh pins to it.
+gym_commit: 1e668906d2e69a9e8ee9aaafc60050a4025d9688
+# Gym benchmark config this recipe builds on.
+benchmark_config:
+  - benchmarks/swebench/pro/opencode.yaml
+  - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      # The published run's values, set by Gym on every request (the agent asks for max_tokens
+      # 262144). Its num_workers and max_output_tokens are left out: not Chat Completions
+      # fields, and stricter endpoints reject them.
+      sampling_overrides:
+        temperature: 1.0
+        top_p: 0.95
+        max_tokens: null
+        max_completion_tokens: null
+      propagate_context_overflow_errors: true
+
+# Sandboxes call Gym's servers back. Docker's default bridge gateway on Linux: reachable from
+# the sandboxes, not from your network. Change it if your Docker network differs.
+default_host: 172.17.0.1
+
+# Tasks at once; PARALLEL overrides it. Each task is a container on your machine, so keep it low.
+num_samples_in_parallel: 16
+
+# OpenCode from your own copy, as in the published run, not downloaded per task: many task
+# images have no curl.
+swebench_pro_opencode_resources_server:
+  resources_servers:
+    swebench_pro:
+      sandbox_config:
+        provider_options:
+          volumes:
+            - name: opencode
+              host: {path: "${oc.env:OPENCODE_DIR}"}
+              mount_path: /opt/opencode
+              read_only: true
+            - name: recipes
+              host: {path: "${oc.env:RECIPES_DIR}"}
+              mount_path: /opt/recipes
+              read_only: true
+swebench_pro_opencode_sandboxed_agent:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      remote_opencode_install_script_path: /opt/recipes/install-opencode.sh
+      remote_opencode_binary_path: /opt/opencode/glibc/opencode
+      # Alpine-based task images need OpenCode's musl build.
+      remote_opencode_musl_binary_path: /opt/opencode/musl/opencode

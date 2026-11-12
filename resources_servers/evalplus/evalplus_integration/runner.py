@@ -19,9 +19,7 @@ Wraps `evalplus.evaluate.check_correctness` so that each verify() call
 in the resource server can dispatch a single-task check to a Ray worker
 and await the result without blocking the asyncio loop.
 
-The Ray runtime_env mirrors the pattern in
-`resources_servers/code_gen/lcb_integration/compute_code_generation_metrics.py`:
-the worker uses the server's venv Python and adds the server directory
+The Ray runtime_env makes the worker use the server's venv Python and adds the server directory
 to PYTHONPATH so the package-less `evalplus_integration` module resolves.
 """
 

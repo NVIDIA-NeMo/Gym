@@ -32,10 +32,10 @@ concurrency:
 env:
   # Number of parallel shards for the full server suite. Keep in sync with the matrix below.
   NUM_SHARDS: "8"
-  # Pin uv: 0.11.21+ supports Python 3.13.14; 0.11.29 is the latest stable.
-  # 0.11.20 had a regression dropping pinned deps (fixed in 0.11.21).
-  # 
-  UV_INSTALL_URL: "https://astral.sh/uv/0.11.29/install.sh"
+  # Managed lockfiles require uv 0.13.4+, including the corrected certificate trust store.
+  UV_INSTALL_URL: "https://astral.sh/uv/0.13.4/install.sh"
+  CRANE_URL: "https://github.com/google/go-containerregistry/releases/download/v0.22.1/go-containerregistry_Linux_x86_64.tar.gz"
+  CRANE_SHA256: "0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0" # pragma: allowlist secret
 
 jobs:
   full-test-suite:
@@ -73,18 +73,22 @@ jobs:
           # mlflow/wandb are optional extras; the core suite covers both their
           # installed- and missing-dependency paths, so they're synced here too.
           # Mirrors scripts/ci/core_unit_tests.sh, which syncs the same extras.
-          uv sync --extra dev --extra sandbox --extra openshell --extra telemetry --extra mlflow --extra wandb
+          uv sync --extra dev --extra ray --extra sandbox --extra openshell --extra telemetry --extra mlflow --extra wandb
 
       - name: Test
         run: |
           source .venv/bin/activate
-          PYTEST_ADDOPTS='-m "not sandbox" --cov-report= --cov-fail-under=0' ng_dev_test
+          source scripts/ci/test_worker_env.sh
+          PYTEST_ADDOPTS='-m "not sandbox" -n 4 --dist=loadfile --cov-report= --cov-fail-under=0' ng_dev_test
           pytest --cov=. --cov-append --cov-report=term-missing \
             --cov-fail-under="$(python3 scripts/ci/cov_fail_under.py)" --durations=10 -m sandbox
 
   server-suite:
     name: Server suite (shard ${{ matrix.shard }})
-    runs-on: ubuntu-latest
+    runs-on: nemo-ci-aws-cpu-4-16
+    env:
+      NEMO_GYM_TEST_DATA_ROOT: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1
+      NLTK_DATA: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1/nltk_data
     strategy:
       fail-fast: false
       matrix:
@@ -110,21 +114,76 @@ jobs:
         run: |
           export UV_CACHE_DIR="$HOME/.cache/uv"
           echo "UV_CACHE_DIR=$UV_CACHE_DIR" >> "$GITHUB_ENV"
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends git curl ca-certificates
+          bash scripts/ci/install_test_dependencies.sh
           curl -LsSf "$UV_INSTALL_URL" | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          uv --version
           uv venv
           source .venv/bin/activate
           uv sync --extra dev
 
+      - name: Check shared test-data inventory
+        run: python3 scripts/ci/check_test_data.py --nltk-cache "$HOME/.cache/gym-test-data"
+
       - name: Server tests (shard ${{ matrix.shard }}/${{ env.NUM_SHARDS }})
         run: |
           source .venv/bin/activate
-          ng_test_all \
+          source scripts/ci/test_worker_env.sh
+          # Capture what the server venvs and tests download at the paths the Gym image uses,
+          # so the offline-image job can layer them onto the image.
+          export UV_CACHE_DIR="${RUNNER_TEMP}/gym-offline-cache/opt/nemo-gym/cache/uv"
+          export XDG_CACHE_HOME="${RUNNER_TEMP}/gym-offline-cache/opt/nemo-gym/cache/xdg"
+          export npm_config_cache="${XDG_CACHE_HOME}/npm"
+          python scripts/ci/server_test_workers.py "${{ matrix.shard }}" "${{ env.NUM_SHARDS }}" \
             +fail_on_total_and_test_mismatch=true \
-            +delete_venvs_after_each_test=true \
-            +num_shards=${{ env.NUM_SHARDS }} \
-            +shard_index=${{ matrix.shard }}
+            +delete_venvs_after_each_test=true
+
+      - name: Log in to ECR
+        id: ecr
+        if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
+        uses: aws-actions/amazon-ecr-login@fa648b43de3d4d023bcb3f89ed6940096949c419 # v2.1.5
+        env:
+          AWS_REGION: us-east-1
+
+      # Runs after failed tests too: a failing assertion still downloaded its dependencies. A failed
+      # venv install leaves the cache incomplete, so this shard's venvs (the union of its workers')
+      # are set up once more into the same cache: a transient failure completes it, and a persistent
+      # one fails here before anything is published. Assets that tests fetch at runtime (Chromium,
+      # datasets) are captured only when a test reaches the download, so a test that already fails
+      # before it at this commit may also miss that asset offline. As in docker/Dockerfile, Ray's
+      # unused Java worker jar is dropped from the cache. The revision annotation lets the
+      # offline-image job reject a tag left by an earlier commit.
+      - name: Publish dependency cache layer
+        if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
+        env:
+          REPOSITORY: ${{ steps.ecr.outputs.registry }}/gym
+          SHARD: ${{ matrix.shard }}
+        run: |
+          source .venv/bin/activate
+          export UV_CACHE_DIR="${RUNNER_TEMP}/gym-offline-cache/opt/nemo-gym/cache/uv"
+          export XDG_CACHE_HOME="${RUNNER_TEMP}/gym-offline-cache/opt/nemo-gym/cache/xdg"
+          export npm_config_cache="${XDG_CACHE_HOME}/npm"
+          ng_test_all +setup_only=true +delete_venvs_after_each_test=true \
+            "+num_shards=${NUM_SHARDS}" "+shard_index=${SHARD}"
+          find "$RUNNER_TEMP/gym-offline-cache" -name ray_dist.jar -delete
+          curl -fsSL "$CRANE_URL" -o "$RUNNER_TEMP/crane.tar.gz"
+          echo "$CRANE_SHA256  $RUNNER_TEMP/crane.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/crane.tar.gz" -C "$RUNNER_TEMP" crane
+          tar -C "$RUNNER_TEMP/gym-offline-cache" --numeric-owner --owner=65532 --group=65532 \
+            -czf "$RUNNER_TEMP/cache.tar.gz" opt/nemo-gym/cache
+          "$RUNNER_TEMP/crane" append --oci-empty-base --new_layer "$RUNNER_TEMP/cache.tar.gz" \
+            --new_tag "$REPOSITORY:main-cache-$SHARD"
+          "$RUNNER_TEMP/crane" mutate "$REPOSITORY:main-cache-$SHARD" \
+            --annotation "org.opencontainers.image.revision=$GITHUB_SHA" --tag "$REPOSITORY:main-cache-$SHARD"
+
+      - name: Upload server worker logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gym-server-worker-logs-${{ matrix.shard }}
+          path: results/server-workers
+          if-no-files-found: warn
 
   server-suite-result:
     name: Server suite
@@ -141,13 +200,110 @@ jobs:
           echo "One or more server-suite shards failed (result: ${{ needs.server-suite.result }})."
           exit 1
 
+  # Merges every shard's dependency cache into one layer on top of the gym image built from the
+  # same commit, as gym:main-offline: an image that runs the server suite without network access.
+  offline-image:
+    name: Publish offline server image
+    runs-on: nemo-ci-aws-cpu-4-16
+    needs: [server-suite]
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
+    steps:
+      - name: Log in to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@fa648b43de3d4d023bcb3f89ed6940096949c419 # v2.1.5
+        env:
+          AWS_REGION: us-east-1
+
+      # A shard that failed before publishing leaves an earlier commit's cache under its tag, or no
+      # tag at all. That shard's own failure is reported and classified for retry, so this job
+      # publishes nothing instead of failing too; re-running the failed shard re-runs this job.
+      # Only the registry's MANIFEST_UNKNOWN means absent: any other lookup error fails the job.
+      - name: Check this commit's shard caches
+        id: shards
+        shell: bash
+        env:
+          REPOSITORY: ${{ steps.ecr.outputs.registry }}/gym
+          SERVER_SUITE_RESULT: ${{ needs.server-suite.result }}
+        run: |
+          curl -fsSL "$CRANE_URL" -o "$RUNNER_TEMP/crane.tar.gz"
+          echo "$CRANE_SHA256  $RUNNER_TEMP/crane.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/crane.tar.gz" -C "$RUNNER_TEMP" crane
+          stale=()
+          for shard in $(seq 0 $((NUM_SHARDS - 1))); do
+            if ! "$RUNNER_TEMP/crane" manifest "$REPOSITORY:main-cache-$shard" \
+              > "$RUNNER_TEMP/main-cache-$shard.json" 2> "$RUNNER_TEMP/lookup.err"; then
+              cat "$RUNNER_TEMP/lookup.err" >&2
+              grep -q MANIFEST_UNKNOWN "$RUNNER_TEMP/lookup.err" || exit 1
+              stale+=("$shard")
+              continue
+            fi
+            revision="$(python3 -c 'import json, sys; print(json.load(sys.stdin).get("annotations", {}).get(sys.argv[1], ""))' \
+              org.opencontainers.image.revision < "$RUNNER_TEMP/main-cache-$shard.json")"
+            [[ "$revision" == "$GITHUB_SHA" ]] || stale+=("$shard")
+          done
+          if ((${#stale[@]} == 0)); then
+            echo "current=true" | tee -a "$GITHUB_OUTPUT"
+          elif [[ "$SERVER_SUITE_RESULT" == "success" ]]; then
+            echo "::error::Shards ${stale[*]} passed but their main-cache tags are missing or hold another commit's cache."
+            exit 1
+          else
+            echo "::warning::Shards ${stale[*]} did not publish this commit's cache; gym:main-offline keeps its previous image."
+            echo "current=false" | tee -a "$GITHUB_OUTPUT"
+          fi
+
+      # Shards download shared wheels (torch, CUDA libraries) into separate uv archives. Each
+      # shard's links replace the previous shard's, and pruning drops the archives left unlinked.
+      - name: Merge this commit's shard caches
+        if: steps.shards.outputs.current == 'true'
+        shell: bash
+        env:
+          REPOSITORY: ${{ steps.ecr.outputs.registry }}/gym
+        run: |
+          curl -LsSf "$UV_INSTALL_URL" | env UV_UNMANAGED_INSTALL="$RUNNER_TEMP/uv" sh
+          crane="$RUNNER_TEMP/crane"
+          merged="$RUNNER_TEMP/merged"
+          mkdir -p "$merged"
+          for shard in $(seq 0 $((NUM_SHARDS - 1))); do
+            digest="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["layers"][0]["digest"])' \
+              < "$RUNNER_TEMP/main-cache-$shard.json")"
+            "$crane" blob "$REPOSITORY@$digest" | tar -xzf - -C "$merged"
+            "$RUNNER_TEMP/uv/uv" cache prune --cache-dir "$merged/opt/nemo-gym/cache/uv"
+          done
+          tar -C "$merged" --numeric-owner --owner=65532 --group=65532 \
+            -czf "$RUNNER_TEMP/cache.tar.gz" opt/nemo-gym/cache
+
+      # cicd-main's schedule builds gym:<commit> on the same cron, once its unit tests pass. Layering
+      # onto that image keeps its source and locks in step with the caches; another commit's image
+      # could miss dependencies its own locks need, so publication waits for the next run instead.
+      # As for the shard tags, only MANIFEST_UNKNOWN means the image is not there yet.
+      - name: Publish onto this commit's gym image
+        if: steps.shards.outputs.current == 'true'
+        shell: bash
+        env:
+          REPOSITORY: ${{ steps.ecr.outputs.registry }}/gym
+        run: |
+          base="$REPOSITORY:$GITHUB_SHA"
+          for attempt in $(seq 45); do
+            "$RUNNER_TEMP/crane" digest "$base" 2> "$RUNNER_TEMP/lookup.err" && break
+            cat "$RUNNER_TEMP/lookup.err" >&2
+            grep -q MANIFEST_UNKNOWN "$RUNNER_TEMP/lookup.err" || exit 1
+            if ((attempt == 45)); then
+              echo "::warning::gym:$GITHUB_SHA was not built; gym:main-offline keeps its previous image."
+              exit 0
+            fi
+            sleep 60
+          done
+          "$RUNNER_TEMP/crane" append --base "$base" --new_layer "$RUNNER_TEMP/cache.tar.gz" \
+            --new_tag "$REPOSITORY:main-offline" --set-base-image-annotations
+
   test-wheel-install:
     name: Test Wheel Use
     runs-on: ubuntu-latest
     env:
       NEMO_GYM_ALLOW_PRERELEASE: "true"
-      UV_INDEX_URL: "http://127.0.0.1:8888/"
-      UV_EXTRA_INDEX_URL: "https://pypi.org/simple/"
+      # Extra indexes take priority over the default index: resolve Gym from our wheel first.
+      UV_INDEX_URL: "https://pypi.org/simple/"
+      UV_EXTRA_INDEX_URL: "http://127.0.0.1:8888/"
     steps:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -169,7 +325,8 @@ jobs:
 
       - name: Build wheel and serve as local PyPI index
         run: |
-          uv build
+          # The local index is not serving yet; resolve build dependencies from PyPI.
+          env -u UV_EXTRA_INDEX_URL uv build
           mkdir -p /tmp/local-pypi/nemo-gym
           cp dist/*.whl /tmp/local-pypi/nemo-gym/
           ls /tmp/local-pypi/nemo-gym/ | sed 's|.*|<a href="&">&</a>|' > /tmp/local-pypi/nemo-gym/index.html
@@ -239,10 +396,20 @@ jobs:
           source .venv/bin/activate
           ng_init_resources_server +entrypoint=resources_servers/hello_world
           test -f resources_servers/hello_world/app.py
-          test -f resources_servers/hello_world/requirements.txt
+          test -f resources_servers/hello_world/pyproject.toml
           test -f resources_servers/hello_world/configs/hello_world.yaml
           test -d resources_servers/hello_world/tests
-          grep -q "nemo-gym" resources_servers/hello_world/requirements.txt
+          grep -q "nemo-gym" resources_servers/hello_world/pyproject.toml
+          # Scaffolding emits dependency metadata; resolve and verify the lock before setup.
+          uv lock --project resources_servers/hello_world
+          uv lock --check --project resources_servers/hello_world
+          test -f resources_servers/hello_world/uv.lock
+          # The child must use the parent wheel, not a different release from PyPI.
+          NEMO_GYM_VERSION=$(python -c "from importlib.metadata import version; print(version('nemo-gym'))")
+          uv sync --locked --project resources_servers/hello_world
+          resources_servers/hello_world/.venv/bin/python -c \
+            "import sys; from importlib.metadata import version; import nemo_gym.server_runtime; assert version('nemo-gym') == sys.argv[1]" \
+            "$NEMO_GYM_VERSION"
           echo '{"responses_create_params":{"input":[{"role":"user","content":"Hello!"}]},"expected_answer":"Mock response.","verifier_metadata":{}}' \
             > resources_servers/hello_world/data/example.jsonl
 
@@ -280,7 +447,7 @@ jobs:
   notify-failure:
     name: Notify test failure
     runs-on: ubuntu-latest
-    needs: [full-test-suite, server-suite, server-suite-result, test-wheel-install]
+    needs: [full-test-suite, server-suite, server-suite-result, offline-image, test-wheel-install]
     environment: main
     permissions: {}
     # Use the event directly: setup outputs are empty when setup fails.
@@ -308,4 +475,4 @@ jobs:
         uses: NVIDIA-NeMo/FW-CI-templates/.github/actions/notify-ci-failure@631c404d00a9e60afc591cd071d35d2e18f82fc6
         with:
           needs-json: ${{ toJSON(needs) }}
-          webhook: ${{ secrets.SLACK_WEBHOOK }}
+          webhook: ${{ secrets.SLACK_TEAM_CHANNEL_WEBHOOK }}

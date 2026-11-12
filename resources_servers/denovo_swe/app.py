@@ -41,20 +41,25 @@ from typing import Any
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.config import get_global_config_dict
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    SandboxResources,
+    SandboxSpec,
+    cpu_cap_env,
+    resolve_provider_config,
+    resolve_provider_metadata,
+)
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    ResourcesSeedSessionRequest,
-    ResourcesSeedSessionResponse,
+    SimpleResourcesServer,
 )
-from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.sandbox.utils import cpu_cap_env
-from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.denovo_swe.verification import (
     DOCUMENT_PATH,
     VerificationInputs,
@@ -65,7 +70,6 @@ from resources_servers.denovo_swe.verification import (
     verification_files,
 )
 from resources_servers.swebench.anti_cheat import apply_anti_cheat_setup
-from resources_servers.swebench.sandbox_sessions import SandboxSessionResourcesServer
 
 
 class DeNovoSWEResourcesServerConfig(BaseResourcesServerConfig):
@@ -128,8 +132,7 @@ class DeNovoSWEVerifyResponse(BaseVerifyResponse):
     patch_verification_time_taken: float
 
 
-class DeNovoSWEResourcesServer(SandboxSessionResourcesServer):
-    ray_enabled = False
+class DeNovoSWEResourcesServer(SimpleResourcesServer):
     config: DeNovoSWEResourcesServerConfig
 
     def model_post_init(self, context: Any, /) -> None:
@@ -239,38 +242,22 @@ class DeNovoSWEResourcesServer(SandboxSessionResourcesServer):
                 raise RuntimeError(result.stderr or "git diff failed")
             return drop_patch_sections(result.stdout or "", pristine_untracked)
         finally:
-            await self._release_task_sandbox(session_id, original_sandbox)
+            await self._stop_sandbox(original_sandbox)
 
-    async def seed_session(
-        self, request: Request, body: DeNovoSWESeedSessionRequest | ResourcesSeedSessionRequest
-    ) -> DeNovoSWESeedSessionResponse | ResourcesSeedSessionResponse:
-        """Start the instance's image so an agent can work in it.
-
-        An Environment Server seeds a typed session and gets the sandbox back as ``sandbox_access``; an
-        agent's ``/run`` seeds with the row and gets the sandbox handle.
-        """
-        if isinstance(body, ResourcesSeedSessionRequest):
-            return await self.seed_task_sandbox_session(request, body, DeNovoSWEInstanceRequest)
-        session_id = request.session[SESSION_ID_KEY]
-        await self._stop_sandbox(self._session_id_to_sandbox.pop(session_id, None))
-        await self._start_task_sandbox(session_id, body)
-        return DeNovoSWESeedSessionResponse(
-            sandbox_handle=str(self._session_id_to_sandbox[session_id]._handle.sandbox_id)
-        )
-
-    async def _start_task_sandbox(self, session_id: str, body: DeNovoSWEInstanceRequest) -> str:
+    async def seed_session(self, request: Request, body: DeNovoSWESeedSessionRequest) -> DeNovoSWESeedSessionResponse:
         """Start the instance's image, then wipe the pre-existing source and re-inject the spec
         as README.md -- without this the agent could just read the implementation it is supposed
         to regenerate (see module docstring).
         """
-        self._forget_task_sandbox_state(session_id)
+        session_id = request.session[SESSION_ID_KEY]
+        await self._stop_sandbox(self._session_id_to_sandbox.pop(session_id, None))
+        self._session_id_to_pristine_untracked.pop(session_id, None)
+        self._session_id_to_base_commit.pop(session_id, None)
 
         document = body.document or body.problem_statement
         sandbox = await self._create_sandbox(
             body, files={"/tmp/nemo_gym_seed_prep.sh": seed_prep_script(body.workdir), DOCUMENT_PATH: document}
         )
-        # Own the sandbox before preparing it, so a failed seed can still stop it.
-        self._session_id_to_sandbox[session_id] = sandbox
         prep_result = await sandbox.exec("bash /tmp/nemo_gym_seed_prep.sh")
         if prep_result.return_code != 0:
             print(
@@ -288,11 +275,8 @@ class DeNovoSWEResourcesServer(SandboxSessionResourcesServer):
         self._session_id_to_pristine_untracked[session_id] = await self._pristine_untracked_files(
             sandbox, body.workdir
         )
-        return body.workdir
-
-    def _forget_task_sandbox_state(self, session_id: str) -> None:
-        self._session_id_to_pristine_untracked.pop(session_id, None)
-        self._session_id_to_base_commit.pop(session_id, None)
+        self._session_id_to_sandbox[session_id] = sandbox
+        return DeNovoSWESeedSessionResponse(sandbox_handle=str(sandbox._handle.sandbox_id))
 
     async def verify(self, request: Request, body: DeNovoSWEVerifyRequest) -> DeNovoSWEVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
@@ -301,7 +285,6 @@ class DeNovoSWEResourcesServer(SandboxSessionResourcesServer):
         if is_golden:
             patch = body.patch
         else:
-            self._claim_task_sandbox(session_id)
             base_commit = self._session_id_to_base_commit.pop(session_id, "")
             if not base_commit:
                 patch = ""

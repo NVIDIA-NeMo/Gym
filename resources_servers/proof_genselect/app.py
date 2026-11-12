@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import fcntl
 import json
 import logging
 import os
@@ -9,12 +10,13 @@ from typing import Any, Optional
 
 from pydantic import PrivateAttr
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 LOG = logging.getLogger(__name__)
@@ -56,7 +58,6 @@ class ProofGenSelectVerifyRequest(BaseVerifyRequest):
 
 
 class ProofGenSelectResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: ProofGenSelectResourcesServerConfig
 
     _log_lock: Optional[Any] = PrivateAttr(default=None)
@@ -110,6 +111,16 @@ class ProofGenSelectResourcesServer(SimpleResourcesServer):
             }
             async with self._log_lock:
                 with open(log_path, "a", encoding="utf-8") as fout:
+                    # The asyncio lock covers this worker only.
+                    # With num_workers > 1, every worker appends to this file,
+                    # and a long record can reach it in several writes.
+                    # The file lock keeps records from different workers from interleaving.
+                    # A filesystem without file locks (NFS without lockd, Lustre mounted noflock) raises here;
+                    # the record is still written, unlocked, as it was before workers shared the file.
+                    try:
+                        fcntl.flock(fout, fcntl.LOCK_EX)
+                    except OSError:
+                        pass
                     fout.write(json.dumps(record, ensure_ascii=False) + "\n")
         except Exception as exc:
             LOG.warning("[proof_genselect] Failed to append log_jsonl %s: %s", log_path, exc)
@@ -132,3 +143,6 @@ class ProofGenSelectResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     ProofGenSelectResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ProofGenSelectResourcesServer.run_webserver()  # noqa: F401

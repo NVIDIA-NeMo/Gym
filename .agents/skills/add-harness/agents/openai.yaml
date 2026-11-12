@@ -1,0 +1,4 @@
+interface:
+  display_name: "NeMo Gym Add Harness"
+  short_description: "Add or update an agent harness adapter and validate its pairings"
+  default_prompt: "Use $add-harness to add or update a harness adapter in NeMo Gym and pass its exit checks."

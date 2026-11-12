@@ -41,6 +41,36 @@ class TestThrottleVeto:
         assert is_permanent_judge_error(error) is True
         assert is_permanent_judge_error("maximum context length exceeded: input is too long") is True
 
+    # The proxy wraps the provider's 400 in a 500, so only the body text says the payload is over the limit.
+    PROXIED_IMAGE_LIMIT = (
+        "Error code: 500 - Hit an exception in SimpleModelServer___gdpval_gpt55_judge_model calling an inner "
+        'server: b\'{"error":{"message":"litellm.BadRequestError: OpenAIException - {\\n  \\"error\\": {\\n    '
+        '\\"message\\": \\"Total image size is 140.25MB, which exceeds the allowed limit of 50MB.\\",\\n    '
+        '\\"type\\": \\"invalid_request_error\\",'
+    )
+
+    def test_proxied_image_payload_limit_is_permanent(self) -> None:
+        assert is_permanent_judge_error(self.PROXIED_IMAGE_LIMIT) is True
+        error = RuntimeError("Error code: 500 - Hit an exception calling an inner server")
+        error.status_code = 500
+        error.body = self.PROXIED_IMAGE_LIMIT.encode()
+        assert is_permanent_judge_error(error) is True
+
+    def test_image_size_diagnostic_without_limit_stays_retryable(self) -> None:
+        message = "Upstream error while calculating total image size"
+        assert is_permanent_judge_error(message) is False
+        error = RuntimeError("Error code: 500 - inner server error")
+        error.status_code = 500
+        error.body = message.encode()
+        assert is_permanent_judge_error(error) is False
+
+    def test_image_payload_limit_inside_rate_limit_stays_retryable(self) -> None:
+        assert is_permanent_judge_error("Error code: 429 - rate limit; total image size is 140.25MB") is False
+        error = RuntimeError("upstream failure")
+        error.status = 429
+        error.body = "Total image size is 140.25MB, which exceeds the allowed limit of 50MB."
+        assert is_permanent_judge_error(error) is False
+
 
 class TestLossMarkers:
     def test_new_marker_forms_are_detected(self) -> None:

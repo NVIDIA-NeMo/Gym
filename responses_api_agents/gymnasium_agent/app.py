@@ -24,20 +24,21 @@ import anyio
 from fastapi import Body, Request, Response
 from pydantic import ConfigDict, Field, PrivateAttr
 
-from nemo_gym.base_resources_server import (
-    BaseRunRequest,
-    BaseVerifyResponse,
-)
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     accumulate_response_usage,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_runtime import (
+    BaseRunRequest,
+    BaseVerifyResponse,
+)
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.gymnasium import EnvResetResponse, EnvStepResponse, extract_text
 
 
@@ -82,7 +83,6 @@ class GymnasiumRunResponse(BaseVerifyResponse):
 
 
 class GymnasiumAgent(SimpleResponsesAPIAgent):
-    ray_enabled = False
     config: GymnasiumAgentConfig
     _model_response_semaphore: asyncio.Semaphore | None = PrivateAttr(default=None)
 
@@ -315,6 +315,12 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
             terminated=step_data.terminated,
             truncated=step_data.truncated,
             info=step_data.info,
+            # An environment that ended the episode because of its own failure (a user simulator or judge
+            # that never answered) reports it on the final step; carry it onto the rollout so the reward
+            # is masked out of quality metrics and training data instead of counted as a policy outcome.
+            mask_sample=step_data.mask_sample,
+            failure_kind=step_data.failure_kind,
+            failure_reason=step_data.failure_reason,
         )
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
@@ -329,3 +335,6 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     GymnasiumAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = GymnasiumAgent.run_webserver()  # noqa: F401

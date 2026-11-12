@@ -30,7 +30,6 @@ abandoned without `verify` or a re-seed keeps its browser until the process exit
 (local) or the provider reclaims it (remote).
 """
 
-import asyncio
 import logging
 import re
 from pathlib import Path
@@ -40,7 +39,9 @@ from fastapi import Body, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.core import VERIFIER_ERROR, EpisodeId, TaskId
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
@@ -48,12 +49,17 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
+    ResourcesSeedRejectedError,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
+    ResourcesSessionFences,
+    ResourcesSessionLocks,
+    ResourcesSessionLostError,
     SimpleResourcesServer,
+    lost_session_verification,
 )
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 logger = logging.getLogger(__name__)
@@ -111,7 +117,7 @@ class ToolResponse(BaseModel):
 
 # Fields ``BaseVerifyResponse`` owns. A verify request may carry them as extras, so they
 # are dropped from the spread rather than passed twice.
-_RESPONSE_OWNED_FIELDS = frozenset({"reward", "failure_reason", "mask_sample"})
+_RESPONSE_OWNED_FIELDS = frozenset({"reward", "failure_reason", "mask_sample", "failure_kind"})
 
 
 class _ScoringUnavailable(RuntimeError):
@@ -143,7 +149,6 @@ class _SessionState:
 
 
 class InteractiveBrowserResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: InteractiveBrowserConfig
     # Per-rollout session state. A private attr (leading underscore) so pydantic
     # does not try to build a schema for the non-pydantic _SessionState.
@@ -151,17 +156,15 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
-        # Session state lives in this process, so a second worker would serve tool calls
-        # for browsers it does not hold.
-        if self.config.num_workers not in (None, 1):
-            raise ValueError("interactive_browser keeps browsers in-process and requires num_workers=1")
         self._session_id_to_state = {}
-        # Sessions an Environment Server seeded under its own resources_session_id.
-        self._typed_identity: Dict[str, Tuple[EpisodeId, TaskId]] = {}
-        self._typed_locks: Dict[str, asyncio.Lock] = {}
-        # Closed ids stay known: a seed that lands after its close would otherwise open a
-        # browser nobody will ever close.
-        self._typed_closed: Dict[str, EpisodeId] = {}
+        # Episode sessions, which an Environment Server seeded under its own resources_session_id.
+        self._episode_identity: Dict[str, Tuple[EpisodeId, TaskId]] = {}
+        # Closed IDs stay fenced for the close retry window: a seed that lands after its close would
+        # otherwise open a browser nobody will ever close.
+        self._locks = ResourcesSessionLocks()
+        self._fences: ResourcesSessionFences[EpisodeId] = ResourcesSessionFences(
+            self.config.session_close_retry_window_seconds
+        )
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -176,8 +179,8 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
     async def seed_session(
         self,
         request: Request,
-        # Typed first and left to right: the legacy model allows extra fields, so it would
-        # otherwise swallow a typed body and answer it with an empty response.
+        # Episode seed first and left to right: the agent-run seed model allows extra fields, so it would
+        # otherwise swallow an episode body and answer it with an empty response.
         body: Annotated[
             Union[ResourcesSeedSessionRequest, BrowserSeedSessionRequest],
             Field(union_mode="left_to_right"),
@@ -188,19 +191,26 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
             return BaseSeedSessionResponse()
 
         session_id = body.resources_session_id
-        request.session[SESSION_ID_KEY] = session_id
-        async with self._typed_locks.setdefault(session_id, asyncio.Lock()):
-            if session_id in self._typed_closed:
-                raise ValueError(f"resources session is already closed: {session_id}")
-            identity = self._typed_identity.get(session_id)
+        # The cookie is bound only once the seed succeeds: a refused seed's reply would otherwise point this client at
+        # the session it was refused, which may belong to another episode.
+        async with self._locks.locked(session_id):
+            self._fences.raise_if_fenced(session_id)
+            identity = self._episode_identity.get(session_id)
             if identity is not None:
                 # A retried seed for the same episode gets the browser it already has.
                 if identity != (body.episode_id, body.task_id):
-                    raise ValueError("resources_session_id is already bound to another episode or task")
+                    raise ResourcesSessionConflictError(
+                        "resources_session_id is already bound to another episode or task"
+                    )
+                request.session[SESSION_ID_KEY] = session_id
                 return ResourcesSeedSessionResponse(resources_session_id=session_id)
-            spec = BrowserSeedSessionRequest.model_validate(body.task_data)
+            try:
+                spec = BrowserSeedSessionRequest.model_validate(body.task_data)
+            except ValidationError as error:
+                raise ResourcesSeedRejectedError(f"task_data is not an interactive_browser task: {error}") from error
             await self._open_session(session_id, spec, episode_id=body.episode_id)
-            self._typed_identity[session_id] = (body.episode_id, body.task_id)
+            self._episode_identity[session_id] = (body.episode_id, body.task_id)
+            request.session[SESSION_ID_KEY] = session_id
             return ResourcesSeedSessionResponse(resources_session_id=session_id)
 
     async def close_resources_session(
@@ -216,25 +226,26 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
             return {"closed": True}
 
         try:
-            typed = ResourcesCloseSessionRequest.model_validate(body)
+            close = ResourcesCloseSessionRequest.model_validate(body)
         except ValidationError as error:
             raise RequestValidationError(error.errors()) from error
-        session_id = typed.resources_session_id
-        async with self._typed_locks.setdefault(session_id, asyncio.Lock()):
-            closed_episode = self._typed_closed.get(session_id)
-            if closed_episode is not None:
-                if typed.episode_id != closed_episode:
-                    raise ValueError("episode_id does not match the closed resources session")
+        session_id = close.resources_session_id
+        # The body names the session, so a close without a cookie (after a lost seed reply) still releases it.
+        async with self._locks.locked(session_id):
+            fenced_episode = self._fences.get(session_id)
+            if fenced_episode is not None:
+                if close.episode_id != fenced_episode:
+                    raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
                 request.session.pop(SESSION_ID_KEY, None)
                 return ResourcesCloseSessionResponse(resources_session_id=session_id)
-            identity = self._typed_identity.get(session_id)
-            if identity is not None and typed.episode_id != identity[0]:
-                raise ValueError("episode_id does not match the seeded resources session")
+            identity = self._episode_identity.get(session_id)
+            if identity is not None and close.episode_id != identity[0]:
+                raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
             # Usually `verify` has already released the browser; this is the path for an
             # episode that ended before it, and a no-op otherwise.
             await self._release(session_id)
-            self._typed_identity.pop(session_id, None)
-            self._typed_closed[session_id] = typed.episode_id
+            self._episode_identity.pop(session_id, None)
+            self._fences.fence(session_id, close.episode_id)
             request.session.pop(SESSION_ID_KEY, None)
             return ResourcesCloseSessionResponse(resources_session_id=session_id)
 
@@ -279,18 +290,20 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
         return self._session_id_to_state.get(request.session[SESSION_ID_KEY])
 
     @staticmethod
-    def _no_session() -> "ToolResponse":
-        return ToolResponse(observation="", error="no active session; seed_session must be called first")
+    def _no_session() -> ResourcesSessionLostError:
+        # A 404 marks the call failed in the trajectory. simple_agent still shows the body to the model and keeps
+        # going; verify then masks the sample, which is what keeps a lost browser out of the score.
+        return ResourcesSessionLostError("no active browser session; seed_session must be called first")
 
     async def _render(self, st: _SessionState) -> str:
         obs = await st.backend.observe(max_elements=self.config.max_elements)
         return obs.render(max_elements=self.config.max_elements)
 
-    # ----- tools (errors returned to model, never raised) ----------------- #
+    # ----- tools (no browser: 404 session_lost; other errors returned to model) ----- #
     async def browser_navigate(self, request: Request, body: NavigateRequest) -> ToolResponse:
         st = self._state(request)
         if st is None:
-            return self._no_session()
+            raise self._no_session()
         try:
             await st.backend.goto(body.url)
             return ToolResponse(observation=await self._render(st))
@@ -300,7 +313,7 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
     async def browser_click(self, request: Request, body: ElementRequest) -> ToolResponse:
         st = self._state(request)
         if st is None:
-            return self._no_session()
+            raise self._no_session()
         try:
             await st.backend.click(body.element_id)
             return ToolResponse(observation=await self._render(st))
@@ -310,7 +323,7 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
     async def browser_type(self, request: Request, body: TypeRequest) -> ToolResponse:
         st = self._state(request)
         if st is None:
-            return self._no_session()
+            raise self._no_session()
         try:
             await st.backend.type(body.element_id, body.text)
             return ToolResponse(observation=await self._render(st))
@@ -320,7 +333,7 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
     async def browser_observe(self, request: Request) -> ToolResponse:
         st = self._state(request)
         if st is None:
-            return self._no_session()
+            raise self._no_session()
         try:
             return ToolResponse(observation=await self._render(st))
         except Exception as e:
@@ -329,7 +342,7 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
     async def browser_finish(self, request: Request, body: FinishRequest) -> ToolResponse:
         st = self._state(request)
         if st is None:
-            return self._no_session()
+            raise self._no_session()
         if not st.finished:
             # First finish wins: the reward reflects the state the model committed to.
             st.answer = body.answer
@@ -345,7 +358,11 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
 
     # ----- reward -------------------------------------------------------- #
     def _verify_response(
-        self, body: BrowserVerifyRequest, reward: float, failure_reason: Optional[str] = None
+        self,
+        body: BrowserVerifyRequest,
+        reward: float,
+        failure_reason: Optional[str] = None,
+        failure_kind: Optional[str] = None,
     ) -> BaseVerifyResponse:
         """Build the response without letting a request field collide with a response one.
 
@@ -357,6 +374,7 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
             **{k: v for k, v in body.model_dump().items() if k not in _RESPONSE_OWNED_FIELDS},
             reward=reward,
             failure_reason=failure_reason,
+            failure_kind=failure_kind,
         )
 
     async def verify(self, request: Request, body: BrowserVerifyRequest) -> BaseVerifyResponse:
@@ -366,19 +384,23 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
             # The session this rollout ran in is gone: it was never seeded, it was already
             # verified, or the server lost it. There is nothing to measure, so say so
             # instead of reporting a zero that reads as a policy that solved nothing.
-            return self._verify_response(body, reward=0.0, failure_reason="browser session not found at verify")
+            return BaseVerifyResponse(
+                **{k: v for k, v in body.model_dump().items() if k not in _RESPONSE_OWNED_FIELDS},
+                **lost_session_verification("browser session not found at verify"),
+            )
 
-        reward, failure_reason = 0.0, None
+        reward, failure_reason, failure_kind = 0.0, None, None
         try:
             reward = await self._score(st)
         except _ScoringUnavailable as exc:
             # The browser died before it could be read. The rollout itself may have been
             # fine; what failed is the measurement. Raising here would abort the whole
             # collection run, because only JudgeError is converted to a routed row.
-            failure_reason = str(exc)
+            # The kind names the failed measurement; the row stays unmasked, as it was.
+            failure_reason, failure_kind = str(exc), VERIFIER_ERROR
         finally:
             await self._release(session_id)
-        return self._verify_response(body, reward=reward, failure_reason=failure_reason)
+        return self._verify_response(body, reward=reward, failure_reason=failure_reason, failure_kind=failure_kind)
 
     async def _score(self, st: _SessionState) -> float:
         gt = st.gt or {}
@@ -414,3 +436,6 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     InteractiveBrowserResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = InteractiveBrowserResourcesServer.run_webserver()  # noqa: F401

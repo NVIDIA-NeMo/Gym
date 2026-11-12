@@ -127,7 +127,7 @@ distinguishes a parse failure from a scored answer.
 Upstream decides an `lm` row from token probabilities, never from text. Each `lm` row
 therefore asks for them: `logprobs` is not a Responses API field and `top_logprobs` alone is
 inert in vLLM, so both travel on the row's `metadata.extra_body`, and
-`nemo_gym/responses_converter.py` carries the choice-level logprobs back onto the output text.
+`nemo_gym/models/chat_completions_converter.py` carries the choice-level logprobs back onto the output text.
 The decision follows the paper's appendix F.3.2: eq. (1), a softmax over `{YES, NO}` with
 label `P(YES) >= 0.5`, and eq. (2), an argmax over the option indices. The distribution is read
 at the first token of the output text; with a reasoning parser that is the first token after the
@@ -269,6 +269,25 @@ gym eval prepare --benchmark chemreason_bench \
 ```
 
 Upstream evaluates with deterministic decoding (`temperature = 0`) and one pass per instance.
+
+### Task-type subsets
+
+`prepare()` accepts `task_types` to keep only some of the six task families; it applies
+after the `protocol` selection and before `limit`, and writes to the normal dataset path:
+
+```bash
+gym eval prepare --benchmark chemreason_bench \
+  +prepare_script_args.protocol=gen \
+  +prepare_script_args.task_types=[step_completion,step_validation,condition_validation,rationalization]
+```
+
+That selection, the four families whose answer describes or validates a procedure step,
+is 4,963 `gen` instances; its `mean/reward` is a pooled per-instance score over those
+families, **not** the published Primary-Overall. The filter is also exposed as repeatable
+`--task-type` flags. Unknown families are rejected, and the download count gate still
+checks the complete corpus before any subset is written. A selection that matches no rows (for
+example `protocol=lm` with a family that has no LM variant) is an error and leaves an
+existing dataset file untouched.
 
 ## Tests
 

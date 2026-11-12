@@ -19,13 +19,18 @@ import metrics as M
 from pydantic import model_validator
 from response_parsing import extract_json, to_prediction, to_prediction_lm
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+
+
+# A task row this server cannot score, so its masked zero says nothing about the model.
+INVALID_TASK = "chemreason_bench:invalid_task"
 
 
 class ChemReasonBenchResourcesServerConfig(BaseResourcesServerConfig):
@@ -100,8 +105,6 @@ def _sanitize(value: Any) -> Optional[str]:
 class ChemReasonBenchResourcesServer(SimpleResourcesServer):
     """Scores one ChemReason-Bench instance against its gold record."""
 
-    ray_enabled = False  # pure-stdlib scorer; no Ray in the verify path
-
     config: ChemReasonBenchResourcesServerConfig
 
     async def verify(self, body: ChemReasonBenchVerifyRequest) -> ChemReasonBenchVerifyResponse:
@@ -116,11 +119,23 @@ class ChemReasonBenchResourcesServer(SimpleResourcesServer):
         # downstream score as well as out of compute_metrics.
         if not isinstance(task_type, str) or task_type not in M.TASK_TYPES:
             return ChemReasonBenchVerifyResponse(
-                **payload, reward=0.0, status="bad_task_type", harness_failure=True, mask_sample=True
+                **payload,
+                reward=0.0,
+                status="bad_task_type",
+                harness_failure=True,
+                mask_sample=True,
+                failure_kind=INVALID_TASK,
+                failure_reason="The row's task_type is missing or is not a ChemReasonBench task type",
             )
         if not isinstance(ground_truth, dict):
             return ChemReasonBenchVerifyResponse(
-                **payload, reward=0.0, status="bad_ground_truth", harness_failure=True, mask_sample=True
+                **payload,
+                reward=0.0,
+                status="bad_ground_truth",
+                harness_failure=True,
+                mask_sample=True,
+                failure_kind=INVALID_TASK,
+                failure_reason="The row's ground_truth is not an object",
             )
 
         # Optional: a wrong-typed value degrades to empty rather than failing the row.
@@ -131,7 +146,13 @@ class ChemReasonBenchResourcesServer(SimpleResourcesServer):
         if body.protocol == "lm":
             if task_type not in M.DUAL_PROTOCOL_TASKS:
                 return ChemReasonBenchVerifyResponse(
-                    **payload, reward=0.0, status="no_lm_protocol", harness_failure=True, mask_sample=True
+                    **payload,
+                    reward=0.0,
+                    status="no_lm_protocol",
+                    harness_failure=True,
+                    mask_sample=True,
+                    failure_kind=INVALID_TASK,
+                    failure_reason=f"Task type {task_type} has no lm protocol",
                 )
             prediction = to_prediction_lm(
                 task_type, body.response.output_text, _first_output_logprobs(body.response), options
@@ -213,3 +234,6 @@ class ChemReasonBenchResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     ChemReasonBenchResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ChemReasonBenchResourcesServer.run_webserver()  # noqa: F401

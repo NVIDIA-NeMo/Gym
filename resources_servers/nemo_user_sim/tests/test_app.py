@@ -10,21 +10,21 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException
 
-from nemo_gym.base_resources_server import ResourcesSeedSessionRequest
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.failure_kinds import JUDGE_FAILED, VERIFIER_ERROR
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
-from nemo_gym.testing.session_conformance import check_resources_session_contract
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import JUDGE_FAILED, SESSION_EXPIRED, SESSION_LOST, VERIFIER_ERROR, EpisodeId, TaskId
+from nemo_gym.server_runtime import ResourcesSeedSessionRequest, check_resources_session_contract
 from resources_servers.nemo_user_sim import app as usersim_app
 from resources_servers.nemo_user_sim.app import (
     PROBE_SCORERS,
+    SIMULATION_FAILED,
     UserSimResourcesServer,
     UserSimResourcesServerConfig,
     _decode_provenance,
     _ResourcesModelFacade,
     _scorer_for_row,
     _validate_resolved_row,
+    installed_usersim_revision,
 )
 from resources_servers.nemo_user_sim.episode_contracts import (
     UserSimSimulationResult,
@@ -33,8 +33,8 @@ from resources_servers.nemo_user_sim.episode_contracts import (
 )
 
 
-REVISION = "a5f676bf6dc5a73914c8a0860f97c10dd2c214ee"  # pragma: allowlist secret
-PERSONAS_VERSION = "0.0.2"
+REVISION = installed_usersim_revision()
+PERSONAS_VERSIONS = {"en_US": "0.0.2", "ja_JP": "0.0.2", "ko_KR": "0.0.1"}
 
 
 def _resolved_row(probe_type: str = "tool_calling", *, provenance_as_text: bool = True) -> dict:
@@ -125,23 +125,24 @@ def _judge_payload(score: int = 4) -> str:
     )
 
 
+def _verify_body(row: dict[str, Any]) -> UserSimVerifyRequest:
+    return UserSimVerifyRequest(
+        episode_id=EpisodeId(rollout_id="0-0", attempt=0),
+        task_id=TaskId(taskset="nemo_user_sim:example", task_id="0"),
+        verification_input=UserSimVerificationInput(
+            resolved_row=row,
+            usersim_result=_usersim_result(str(row["probe_type"])),
+            invocations=[],
+        ),
+    )
+
+
 async def _verify(
     server: UserSimResourcesServer,
     request: SimpleNamespace,
     row: dict[str, Any],
 ) -> Any:
-    return await server.verify(
-        request,
-        UserSimVerifyRequest(
-            episode_id=EpisodeId(rollout_id="0-0", attempt=0),
-            task_id=TaskId(taskset="nemo_user_sim:example", task_id="0"),
-            verification_input=UserSimVerificationInput(
-                resolved_row=row,
-                usersim_result=_usersim_result(str(row["probe_type"])),
-                invocations=[],
-            ),
-        ),
-    )
+    return await server.verify(request, _verify_body(row))
 
 
 def _install_evaluator_scripts(
@@ -159,7 +160,7 @@ def _install_evaluator_scripts(
 @pytest.mark.parametrize("as_text", [True, False])
 def test_resolved_row_accepts_json_and_legacy_mapping_provenance(as_text: bool) -> None:
     row = _resolved_row(provenance_as_text=as_text)
-    _validate_resolved_row(row, expected_revision=REVISION, expected_personas_version=PERSONAS_VERSION)
+    _validate_resolved_row(row, expected_revision=REVISION, expected_personas_versions=PERSONAS_VERSIONS)
     assert _decode_provenance(row["usersim_provenance"])["bank_version"] == {}
 
 
@@ -216,7 +217,57 @@ def test_resolved_row_rejects_invalid_provenance(provenance: object, message: st
     row = _resolved_row()
     row["usersim_provenance"] = provenance
     with pytest.raises(ValueError, match=message):
-        _validate_resolved_row(row, expected_revision=REVISION, expected_personas_version=PERSONAS_VERSION)
+        _validate_resolved_row(row, expected_revision=REVISION, expected_personas_versions=PERSONAS_VERSIONS)
+
+
+def _distribution(commit: str | None) -> SimpleNamespace:
+    direct_url = json.dumps({"vcs_info": {"commit_id": commit}}) if commit else None
+    return SimpleNamespace(read_text=lambda filename: direct_url if filename == "direct_url.json" else None)
+
+
+def test_installed_revision_ignores_the_superseded_distribution(monkeypatch: pytest.MonkeyPatch) -> None:
+    distributions = {
+        "nemo-usersim": _distribution("a5f676bf6dc5a73914c8a0860f97c10dd2c214ee"),
+        "usersim": _distribution("e6282672a5e5359bccbed20f42753c3054dd6209"),
+    }
+    monkeypatch.setattr(usersim_app.metadata, "distribution", distributions.__getitem__)
+    monkeypatch.setattr(
+        usersim_app.metadata, "packages_distributions", lambda: {"usersim": ["nemo-usersim", "usersim"]}
+    )
+
+    assert installed_usersim_revision() == "e6282672a5e5"
+
+
+@pytest.mark.parametrize("distributions", [{}, {"usersim": _distribution(None)}])
+def test_installed_revision_requires_a_git_install_of_usersim(
+    monkeypatch: pytest.MonkeyPatch, distributions: dict[str, SimpleNamespace]
+) -> None:
+    distributions = {"nemo-usersim": _distribution("a5f676bf6dc5a73914c8a0860f97c10dd2c214ee"), **distributions}
+
+    def distribution(name: str) -> SimpleNamespace:
+        if name not in distributions:
+            raise usersim_app.metadata.PackageNotFoundError(name)
+        return distributions[name]
+
+    monkeypatch.setattr(usersim_app.metadata, "distribution", distribution)
+
+    with pytest.raises(RuntimeError, match="records no git commit"):
+        installed_usersim_revision()
+
+
+@pytest.mark.parametrize("suffix", ["", "359bccbed20f42753c3054dd6209"])  # pragma: allowlist secret
+def test_resolved_row_accepts_short_and_full_revisions(suffix: str) -> None:
+    row = _resolved_row()
+    row["usersim_provenance"] = json.dumps({"code_sha": REVISION + suffix, "nemotron_personas_version": "synthetic"})
+    _validate_resolved_row(row, expected_revision=REVISION, expected_personas_versions=PERSONAS_VERSIONS)
+
+
+@pytest.mark.parametrize("suffix", ["-not-a-commit", "0", "0" * 27, "0" * 29])
+def test_resolved_row_rejects_malformed_revisions_that_share_the_prefix(suffix: str) -> None:
+    row = _resolved_row()
+    row["usersim_provenance"] = json.dumps({"code_sha": REVISION + suffix, "nemotron_personas_version": "synthetic"})
+    with pytest.raises(ValueError, match="does not match"):
+        _validate_resolved_row(row, expected_revision=REVISION, expected_personas_versions=PERSONAS_VERSIONS)
 
 
 @pytest.mark.asyncio
@@ -233,7 +284,7 @@ async def test_seed_requires_pinned_personas_version_for_validation_tasks() -> N
         )
     assert error.value.status_code == 422
 
-    row["usersim_provenance"]["nemotron_personas_version"] = server.config.nemotron_personas_version
+    row["usersim_provenance"]["nemotron_personas_version"] = server.config.nemotron_personas_versions["en_US"]
     response = await server.seed_session(
         _request("pinned-personas-version"),
         _seed_body(row, taskset="nemo_user_sim:validation"),
@@ -365,6 +416,44 @@ async def test_verify_masks_swallowed_judge_failure_from_real_evaluator(
     assert verification.mask_sample is True
     assert verification.failure_kind == JUDGE_FAILED
     assert verification.scenario_completed is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("outcome", "failure_kind", "failure_reason"),
+    [
+        (
+            {"failure_class": "user_simulator_error", "failure_detail": "User simulator returned HTTP 503"},
+            "usersim:user_simulator_error",
+            "User simulator returned HTTP 503",
+        ),
+        ({"failure_reason": "The simulation stopped early"}, SIMULATION_FAILED, "The simulation stopped early"),
+    ],
+)
+async def test_verify_masks_a_failed_simulation_under_a_failure_kind(
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: dict[str, str],
+    failure_kind: str,
+    failure_reason: str,
+) -> None:
+    server = _server()
+    server.session_id_to_seed = {}
+    row = _resolved_row()
+    request = _request("simulation-failed")
+    await server.seed_session(request, _seed_body(row))
+
+    async def scorer(_trajectory: dict[str, Any], _models: dict[str, Any]) -> dict[str, Any]:
+        return {"status_proposal": True, "scores": {}}
+
+    _install_evaluator_scripts(monkeypatch, _ScriptedModelFacade(_judge_payload()), scorer)
+    body = _verify_body(row)
+    body.verification_input.usersim_result.conversation_status = False
+    body.verification_input.usersim_result.simulation_outcome = {"status": "failed", **outcome}
+
+    verification = await server.verify(request, body)
+
+    assert (verification.reward, verification.mask_sample) == (0.0, True)
+    assert (verification.failure_kind, verification.failure_reason) == (failure_kind, failure_reason)
 
 
 @pytest.mark.asyncio
@@ -523,7 +612,7 @@ async def test_verify_bounds_overall_evaluation_time(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.asyncio
-async def test_closed_and_unknown_sessions_return_404() -> None:
+async def test_closed_and_unknown_sessions_verify_as_masked_lost_sessions() -> None:
     server = _server()
     server.session_id_to_seed = {}
     row = _resolved_row()
@@ -535,39 +624,96 @@ async def test_closed_and_unknown_sessions_return_404() -> None:
         SimpleNamespace(resources_session_id=body.resources_session_id, episode_id=body.episode_id),
     )
 
-    with pytest.raises(HTTPException) as error:
-        server._seeded_episode(request)
-    assert error.value.status_code == 404
-
-    with pytest.raises(HTTPException) as error:
-        server._seeded_episode(_request("unknown"))
-    assert error.value.status_code == 404
+    for gone in (request, _request("unknown")):
+        verification = await _verify(server, gone, row)
+        assert (verification.reward, verification.mask_sample, verification.failure_kind) == (0.0, True, SESSION_LOST)
 
 
 def test_resources_session_contract() -> None:
     server = _server()
     server.session_id_to_seed = {}
-    server.closed_resources_session_ids = {}
+    server.resources_session_id_to_session_id = {}
+    server.fenced_resources_session_ids = {}
 
-    check_resources_session_contract(server.setup_webserver(), _seed_body(_resolved_row()), keeps_state=True)
+    check_resources_session_contract(
+        server.setup_webserver(),
+        _seed_body(_resolved_row()),
+        keeps_state=True,
+        holds_state=lambda resources_session_id: any(
+            seeded.resources_session_id == resources_session_id for seeded in server.session_id_to_seed.values()
+        ),
+        verify_body=_verify_body(_resolved_row()).model_dump(mode="json"),
+    )
 
 
 @pytest.mark.asyncio
-async def test_expired_session_is_removed_and_returns_404(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_seed_retried_under_a_new_cookie_moves_the_record_and_close_without_it_releases() -> None:
+    server = _server()
+    server.session_id_to_seed = {}
+    server.resources_session_id_to_session_id = {}
+    server.fenced_resources_session_ids = {}
+    body = _seed_body(_resolved_row())
+
+    await server.seed_session(_request("lost-reply"), body)
+    retried = _request("retry")
+    await server.seed_session(retried, body)
+
+    assert set(server.session_id_to_seed) == {"retry"}
+    assert server._seeded_episode(retried).resources_session_id == body.resources_session_id
+
+    await server.close_resources_session(
+        _request("no-cookie"),
+        SimpleNamespace(resources_session_id=body.resources_session_id, episode_id=body.episode_id),
+    )
+    assert server.session_id_to_seed == {}
+    assert server.resources_session_id_to_session_id == {}
+
+
+@pytest.mark.asyncio
+async def test_expired_session_is_removed_and_verifies_as_masked(monkeypatch: pytest.MonkeyPatch) -> None:
     now = 100.0
     monkeypatch.setattr(usersim_app, "monotonic", lambda: now)
     server = _server()
     server.config.session_ttl_seconds = 10.0
     server.session_id_to_seed = {}
+    server.resources_session_id_to_session_id = {}
     request = _request("expired")
     await server.seed_session(request, _seed_body(_resolved_row()))
     now = 111.0
 
-    with pytest.raises(HTTPException) as error:
-        server._seeded_episode(request)
+    verification = await _verify(server, request, _resolved_row())
 
-    assert error.value.status_code == 404
+    # The server dropped the seed because its lifetime ran out, which is an expiry, not a lost session.
+    assert (verification.mask_sample, verification.failure_kind) == (True, SESSION_EXPIRED)
     assert "expired" not in server.session_id_to_seed
+    assert server.resources_session_id_to_session_id == {}
+    # The expiry record is bounded like a fence.
+    now = 122.0
+    verification = await _verify(server, request, _resolved_row())
+    assert verification.failure_kind == SESSION_LOST
+    assert server.expired_session_ids == {}
+
+
+@pytest.mark.asyncio
+async def test_close_finds_the_session_by_id_before_the_cookie() -> None:
+    server = _server()
+    server.session_id_to_seed = {}
+    server.resources_session_id_to_session_id = {}
+    server.fenced_resources_session_ids = {}
+    first = _seed_body(_resolved_row())
+    second = first.model_copy(update={"resources_session_id": "resources-session-1"})
+    await server.seed_session(_request("cookie-a"), first)
+    await server.seed_session(_request("cookie-b"), second)
+
+    # The close names the first session but carries the second one's cookie.
+    await server.close_resources_session(
+        _request("cookie-b"),
+        SimpleNamespace(resources_session_id=first.resources_session_id, episode_id=first.episode_id),
+    )
+
+    assert set(server.session_id_to_seed) == {"cookie-b"}
+    assert server.resources_session_id_to_session_id == {"resources-session-1": "cookie-b"}
+    assert first.resources_session_id in server.fenced_resources_session_ids
 
 
 def test_health_scorer_only_applies_to_guarded_rows() -> None:
@@ -583,3 +729,34 @@ def test_resources_server_exposes_no_runtime_or_tool_routes() -> None:
     assert "/verify" in routes
     assert "/close_session" in routes
     assert not any(path.startswith("/runtime") or path.startswith("/tools") for path in routes)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "window"),
+    [
+        ({}, 1980.0),
+        ({"session_ttl_seconds": 3600.0}, 3600.0),
+        ({"session_close_retry_window_seconds": 5000.0}, 5000.0),
+    ],
+)
+def test_the_session_keeps_its_owner_at_least_as_long_as_the_tombstone(overrides: dict, window: float) -> None:
+    """A delayed seed of a closed session reaches the worker that holds its tombstone, which lasts session_ttl_seconds."""
+    server = _server()
+    for name, value in overrides.items():
+        setattr(server.config, name, value)
+    assert server.owned_session_routing()["close_retry_window_seconds"] == window
+
+
+@pytest.mark.parametrize(
+    ("locale", "version", "accepted"),
+    [("ko_KR", "0.0.1", True), ("ko_KR", "0.0.2", False), ("ja_JP", "0.0.2", True), ("xx_XX", "0.0.2", False)],
+)
+def test_resolved_row_checks_personas_version_of_its_locale(locale: str, version: str, accepted: bool) -> None:
+    row = _resolved_row(provenance_as_text=False)
+    row["locale"] = locale
+    row["usersim_provenance"]["nemotron_personas_version"] = version
+    if accepted:
+        _validate_resolved_row(row, expected_revision=REVISION, expected_personas_versions=PERSONAS_VERSIONS)
+    else:
+        with pytest.raises(ValueError, match=f"for locale {locale!r}"):
+            _validate_resolved_row(row, expected_revision=REVISION, expected_personas_versions=PERSONAS_VERSIONS)

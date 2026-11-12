@@ -53,19 +53,20 @@ from typing import Any, ClassVar, Dict, List, Optional, Union
 
 from pydantic import ConfigDict, Field
 
-from nemo_gym.judge import call_judge
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
 )
-from nemo_gym.prompt import PromptConfig, fill_prompt, load_prompt_config
-from nemo_gym.reward_profile import (
+from nemo_gym.data import PromptConfig, fill_prompt, load_prompt_config
+from nemo_gym.metrics import (
     compute_pass_majority_metrics,
     compute_subset_metrics,
     highest_k_metrics,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import call_judge
 from resources_servers.math_with_judge.app import (
     JudgeEvaluation,
     LibraryJudgeMathResourcesServer,
@@ -166,8 +167,6 @@ class UGPhysicsJudgeVerifyResponse(LibraryJudgeMathVerifyResponse):
 
 class UGPhysicsJudgeResourcesServer(LibraryJudgeMathResourcesServer):
     """math_with_judge subclass with the UGPhysics TRUE/FALSE judge."""
-
-    ray_enabled = False
 
     JUDGE_TRUE_LABEL: ClassVar[str] = "TRUE"
     JUDGE_FALSE_LABEL: ClassVar[str] = "FALSE"
@@ -427,3 +426,6 @@ class UGPhysicsJudgeResourcesServer(LibraryJudgeMathResourcesServer):
 
 if __name__ == "__main__":
     UGPhysicsJudgeResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = UGPhysicsJudgeResourcesServer.run_webserver()  # noqa: F401

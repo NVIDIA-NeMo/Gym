@@ -19,37 +19,83 @@ Runs the agent's accumulated per-sub-step Python solutions against each sub-step
 (targets loaded from test_data.h5) and returns a binary reward: 1.0 iff every sub-step passes.
 Per-sub-step counts are also returned so sub-step accuracy can be computed downstream.
 
-Each sub-step is executed in a subprocess in this server's own process (instead of a
-Docker sandbox), so the subprocess inherits this server's interpreter and dependencies.
+Each sub-step runs in a subprocess using the configured grading interpreter. Optional
+sandbox execution moves that subprocess and its scientific dependencies off the server host.
+The default local grading environment isolates pinned scientific dependencies from Gym.
 """
 
 import asyncio
+import hashlib
+import os
+import shutil
+from functools import partial
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import ClassVar, Dict, List, Optional
 
-from pydantic import ConfigDict
-from scicode_integration.runner import build_test_program, run_substep, sanitize_test
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+from scicode_integration.runner import (
+    build_test_program,
+    preflight_grading_interpreter,
+    process_exit,
+    run_substep,
+    sanitize_test,
+)
+from scicode_integration.sandbox_runner import ScicodeSandboxConfig, run_sandbox_substep
+from setup_grading_env import ensure_grading_env
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 # Agent sentinel for a sub-step it could not generate (ran out of context); always fails.
 _OUT_OF_CONTEXT = "_ran_out_of_context_"
 
 
+class ScicodeGradingInterpreter(BaseModel):
+    """One Python interpreter used to grade generated SciCode programs."""
+
+    name: str
+    python_executable: str
+
+
 class ScicodeResourcesServerConfig(BaseResourcesServerConfig):
-    num_processes: int = 20
+    # Grading is a pure function of the request, so the same saved answer can be graded again.
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
+
+    num_processes: int = Field(default=20, ge=1)
+    # Optional remote execution; interpreter and test-data paths then refer to the image.
+    sandbox: Optional[ScicodeSandboxConfig] = None
     # Per-sub-step execution timeout
     timeout_secs: float = 30.0
     # Local path to SciCode's test_data.h5 (staged manually)
     test_data_fpath: Optional[str] = None
+    # Optional checksum for binding problem/test releases. Existing SciCode configs leave this unset.
+    test_data_md5: Optional[str] = None
+    grading_venv_path: str = "resources_servers/scicode/.grading_venv"
+    # Empty uses the pinned Python 3.11 grading environment.
+    grading_interpreters: List[ScicodeGradingInterpreter] = Field(default_factory=list)
+    # Minimum number of explicitly configured grading environments.
+    required_grading_interpreters: int = Field(default=1, ge=1)
+    # The canonical OR rule short-circuits after the first pass. Enable this only for diagnostics.
+    run_all_grading_interpreters: bool = False
+    # Opt-in: keep each scored sub-step's execution record (exit code, timeout, duration, exception class
+    # and bounded stdout/stderr tails) in the verify response as `step_outputs`, aligned with `step_results`.
+    # Off by default: the record carries model-generated output text and grows every rollout row.
+    record_step_outputs: bool = False
+    # Last N characters of stdout and of stderr kept per sub-step when record_step_outputs is on (0 keeps none).
+    output_tail_chars: int = Field(default=2000, ge=0)
+    # Opt-in on top of record_step_outputs: each record also carries `code`, the accumulated solution the
+    # sub-step's tests ran against (the agent's solutions[step_id]); None for a sentinel step that never ran.
+    # Off by default: the code is model-generated and grows a row by the size of every scored program.
+    record_step_code: bool = False
 
 
 class ScicodeRunRequest(BaseRunRequest):
@@ -80,16 +126,40 @@ class ScicodeVerifyResponse(BaseVerifyResponse):
     # gets the full generic statistics (mean/std/min/max/median) from the
     # RewardProfiler, which the aggregate-only pooled scalar cannot provide.
     subtask_accuracy: float = 0.0
+    # Audit fields are aligned with step_results and contain only scored (non-prefilled) steps.
+    scored_step_ids: List[str] = Field(default_factory=list)
+    step_environment_results: List[Dict[str, bool]] = Field(default_factory=list)
+    step_environment_errors: List[Dict[str, str]] = Field(default_factory=list)
+    # Per scored sub-step, aligned with step_results, only when record_step_outputs is on (None otherwise):
+    # {step_id, step_number, environment, status (executed | out_of_context | empty), passed, returncode,
+    #  timed_out, duration_s, exception_class, stdout_tail, stderr_tail} plus `code` when record_step_code
+    # is on too. The record describes the grading run that decided the step: the environment that passed
+    # under the OR rule, else the last one tried; `environment` is None for a sentinel step that never ran.
+    step_outputs: Optional[List[dict]] = None
+    # Per scored sub-step, aligned with step_results, always recorded: how the grading run that decided the step
+    # ended, {returncode, timed_out, exit}, `exit` typed by process_exit (`killed:<SIGNAL>` for a negative return
+    # code; `not_run` for an out-of-context or empty step). Unlike step_outputs it carries no model output.
+    step_exits: List[dict] = Field(default_factory=list)
 
 
 class ScicodeResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: ScicodeResourcesServerConfig
+    _resolved_test_data_path: Optional[str] = PrivateAttr(default=None)
+    _resolved_grading_interpreters: Optional[List[tuple[str, str]]] = PrivateAttr(default=None)
 
     def model_post_init(self, context):
         self._semaphore = asyncio.Semaphore(value=self.config.num_processes)
+        if self.config.test_data_md5 and not self.config.sandbox:
+            self._resolve_test_data()
+        self._resolve_grading_interpreters()
 
     def _resolve_test_data(self) -> str:
+        if self.config.sandbox:
+            if not self.config.test_data_fpath or not Path(self.config.test_data_fpath).is_absolute():
+                raise ValueError("Sandbox test_data_fpath must be an absolute path inside the image")
+            return self.config.test_data_fpath
+        if self._resolved_test_data_path is not None:
+            return self._resolved_test_data_path
         if not self.config.test_data_fpath:
             raise RuntimeError(
                 "test_data_fpath is not configured. Stage SciCode's test_data.h5 and set "
@@ -104,10 +174,84 @@ class ScicodeResourcesServer(SimpleResourcesServer):
                 f"SciCode test_data.h5 not found at {path}. Download and stage it "
                 "(see benchmarks/scicode/README.md) before running."
             )
-        return str(path)
+        if self.config.test_data_md5:
+            digest = hashlib.md5()  # noqa: S324 - release integrity, not cryptographic security
+            with path.open("rb") as test_data:
+                for chunk in iter(lambda: test_data.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            actual_md5 = digest.hexdigest()
+            if actual_md5 != self.config.test_data_md5.lower():
+                raise RuntimeError(
+                    f"SciCode test data checksum mismatch at {path}: expected "
+                    f"{self.config.test_data_md5.lower()}, got {actual_md5}."
+                )
+        self._resolved_test_data_path = str(path)
+        return self._resolved_test_data_path
+
+    def _resolve_grading_interpreters(self) -> List[tuple[str, str]]:
+        if self._resolved_grading_interpreters is not None:
+            return self._resolved_grading_interpreters
+
+        configured = self.config.grading_interpreters
+        if self.config.sandbox:
+            self._resolve_test_data()
+            if len(configured) < self.config.required_grading_interpreters:
+                raise ValueError("Sandbox grading requires explicit grading_interpreters inside the image")
+            if len({item.name for item in configured}) != len(configured):
+                raise ValueError("Duplicate SciCode grading interpreter name")
+            if any(not Path(item.python_executable).is_absolute() for item in configured):
+                raise ValueError("Sandbox grading interpreter paths must be absolute")
+            return [(item.name, item.python_executable) for item in configured]
+        if configured:
+            resolved = []
+            seen_names = set()
+            for interpreter in configured:
+                if interpreter.name in seen_names:
+                    raise RuntimeError(f"Duplicate SciCode grading interpreter name: {interpreter.name!r}.")
+                seen_names.add(interpreter.name)
+
+                configured_path = Path(interpreter.python_executable).expanduser()
+                if configured_path.is_absolute() or configured_path.parent != Path("."):
+                    if not configured_path.is_absolute():
+                        configured_path = PARENT_DIR / configured_path
+                    # Keep the configured path rather than resolving symlinks. A virtual
+                    # environment's ``bin/python`` is normally a symlink; dereferencing it
+                    # changes argv[0] to the base interpreter and prevents Python from finding
+                    # the venv's pyvenv.cfg and site-packages.
+                    executable = os.path.abspath(configured_path)
+                else:
+                    executable = shutil.which(interpreter.python_executable) or ""
+                if not executable or not Path(executable).is_file() or not os.access(executable, os.X_OK):
+                    raise RuntimeError(
+                        f"SciCode grading interpreter {interpreter.name!r} is not executable: "
+                        f"{interpreter.python_executable!r}."
+                    )
+                resolved.append((interpreter.name, executable))
+        elif self.config.required_grading_interpreters == 1:
+            venv_path = Path(self.config.grading_venv_path).expanduser()
+            if not venv_path.is_absolute():
+                venv_path = PARENT_DIR / venv_path
+            resolved = [("scicode", str(ensure_grading_env(venv_path)))]
+        else:
+            resolved = []
+
+        if len(resolved) < self.config.required_grading_interpreters:
+            raise RuntimeError(
+                "SciCode requires at least "
+                f"{self.config.required_grading_interpreters} grading interpreters, but "
+                f"{len(resolved)} resolved. Configure grading_interpreters explicitly."
+            )
+        for name, executable in resolved:
+            # Cold imports on a network filesystem need the same budget as grading, not a tighter cutoff.
+            if error := preflight_grading_interpreter(executable, timeout_secs=self.config.timeout_secs):
+                raise RuntimeError(f"SciCode grading environment preflight failed for {name!r}:\n{error}")
+        self._resolved_grading_interpreters = resolved
+        return self._resolved_grading_interpreters
 
     async def verify(self, body: ScicodeVerifyRequest) -> ScicodeVerifyResponse:
         solutions = body.solutions or {}
+        record = self.config.record_step_outputs
+        record_code = record and self.config.record_step_code
         # Score only sub-steps the agent produced a solution for. Sub-steps absent from solutions
         # (prefilled steps) are excluded from the denominator entirely; out-of-context sentinels
         # are present and counted as failures.
@@ -117,26 +261,119 @@ class ScicodeResourcesServer(SimpleResourcesServer):
                 **body.model_dump(),
                 reward=0.0,
                 step_results=[],
+                step_outputs=[] if record else None,
                 num_steps_passed=0,
                 num_steps_total=0,
                 problem_accuracy=False,
             )
 
         h5_path = self._resolve_test_data()
+        grading_interpreters = self._resolve_grading_interpreters()
         loop = asyncio.get_running_loop()
 
-        async def _run_substep(i: int) -> bool:
+        def _step_output(
+            i: int,
+            status: str,
+            passed: bool,
+            result: Optional[dict] = None,
+            code: Optional[str] = None,
+            environment: Optional[str] = None,
+        ) -> dict:
+            result = result or {}
+            output = {
+                "step_id": f"{body.problem_id}.{i + 1}",
+                "step_number": body.sub_steps[i]["step_number"],
+                "environment": environment,
+                "status": status,
+                "passed": passed,
+                "returncode": result.get("returncode"),
+                "timed_out": bool(result.get("timed_out", False)),
+                "exit": process_exit(result),
+                "duration_s": result.get("duration_s"),
+                "exception_class": result.get("exception_class"),
+                "stdout_tail": result.get("stdout_tail", ""),
+                "stderr_tail": result.get("stderr_tail", ""),
+            }
+            if record_code:
+                output["code"] = code
+            return output
+
+        def _step_exit(result: dict) -> dict:
+            return {
+                "returncode": result.get("returncode"),
+                "timed_out": bool(result.get("timed_out", False)),
+                "exit": process_exit(result),
+            }
+
+        async def _run_substep(i: int) -> tuple[bool, Dict[str, bool], Dict[str, str], Optional[dict], dict]:
             sub_step = body.sub_steps[i]
             code = solutions[f"{body.problem_id}.{i + 1}"]
             if not code or code == _OUT_OF_CONTEXT:
-                return False
+                status = "out_of_context" if code == _OUT_OF_CONTEXT else "empty"
+                return False, {}, {}, _step_output(i, status, False) if record else None, _step_exit({})
             sanitized = [sanitize_test(tc) for tc in sub_step["test_cases"]]
             program = build_test_program(code, h5_path, sub_step["step_number"], sanitized)
-            async with self._semaphore:
-                result = await loop.run_in_executor(None, run_substep, program, self.config.timeout_secs)
-            return bool(result["passed"])
+            per_environment = {}
+            per_environment_errors = {}
+            attempts: List[tuple[str, dict]] = []
+            for name, executable in grading_interpreters:
+                if record:
+                    call = partial(
+                        run_substep,
+                        program,
+                        self.config.timeout_secs,
+                        executable,
+                        output_tail_chars=self.config.output_tail_chars,
+                    )
+                else:
+                    call = partial(run_substep, program, self.config.timeout_secs, executable)
+                async with self._semaphore:
+                    if self.config.sandbox:
+                        result = await run_sandbox_substep(
+                            program,
+                            config=self.config.sandbox,
+                            python_executable=executable,
+                            timeout_secs=self.config.timeout_secs,
+                            test_data_path=h5_path,
+                            test_data_md5=self.config.test_data_md5,
+                            output_tail_chars=self.config.output_tail_chars if record else 2000,
+                        )
+                    else:
+                        result = await loop.run_in_executor(None, call)
+                per_environment[name] = bool(result["passed"])
+                attempts.append((name, result))
+                if result["error"]:
+                    per_environment_errors[name] = result["error"]
+                if result.get("infrastructure_error"):
+                    raise RuntimeError(
+                        "SciCode grading infrastructure failure for "
+                        f"problem {body.problem_id}, step {sub_step['step_number']}, "
+                        f"environment {name}:\n{result['error']}"
+                    )
+                if per_environment[name] and not self.config.run_all_grading_interpreters:
+                    break
+            passed = any(per_environment.values())
+            # The run that decided the step: the environment that passed under the OR rule, else the last tried.
+            name, result = next(((n, r) for n, r in attempts if r["passed"]), attempts[-1])
+            output = _step_output(i, "executed", passed, result, code=code, environment=name) if record else None
+            return passed, per_environment, per_environment_errors, output, _step_exit(result)
 
-        step_results = list(await asyncio.gather(*[_run_substep(i) for i in scored]))
+        tasks = [asyncio.create_task(_run_substep(i)) for i in scored]
+        try:
+            evaluated_steps = list(await asyncio.gather(*tasks))
+        except BaseException:
+            # A failed request must not leave sibling sandboxes running after its caller retries.
+            # Canceling a local executor await cannot stop its subprocess or release its permit safely.
+            if self.config.sandbox:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        step_results = [passed for passed, _, _, _, _ in evaluated_steps]
+        step_environment_results = [per_environment for _, per_environment, _, _, _ in evaluated_steps]
+        step_environment_errors = [per_environment_errors for _, _, per_environment_errors, _, _ in evaluated_steps]
+        step_outputs = [output for _, _, _, output, _ in evaluated_steps] if record else None
+        scored_step_ids = [body.sub_steps[i]["step_number"] for i in scored]
         num_passed = sum(step_results)
         all_passed = num_passed == len(scored)
 
@@ -148,8 +385,16 @@ class ScicodeResourcesServer(SimpleResourcesServer):
             num_steps_total=len(scored),
             problem_accuracy=all_passed,
             subtask_accuracy=num_passed / len(scored),
+            scored_step_ids=scored_step_ids,
+            step_environment_results=step_environment_results,
+            step_environment_errors=step_environment_errors,
+            step_outputs=step_outputs,
+            step_exits=[step_exit for _, _, _, _, step_exit in evaluated_steps],
         )
 
 
 if __name__ == "__main__":
     ScicodeResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ScicodeResourcesServer.run_webserver()  # noqa: F401

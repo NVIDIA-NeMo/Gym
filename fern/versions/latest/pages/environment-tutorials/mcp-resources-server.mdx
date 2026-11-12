@@ -66,7 +66,7 @@ from typing import Any, Optional
 from fastapi import FastAPI, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
@@ -74,7 +74,8 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 def _weather_sentence(city: str) -> str:
@@ -142,6 +143,9 @@ class ExampleMCPWeatherResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     ExampleMCPWeatherResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ExampleMCPWeatherResourcesServer.run_webserver()  # noqa: F401
 ```
 
 ### Turn it on
@@ -190,6 +194,28 @@ The pattern behind the two query-parameter rows: anything FastAPI would read fro
 
 Beyond signatures, startup also refuses: **non-Gym middleware** installed on the app (direct dispatch would silently skip it); **multiple parameterized catch-all routes**; a tool name outside `[A-Za-z0-9_-]+`; and a server that **already serves `/mcp`** (a hand-rolled MCP mount conflicts with the auto-exposed one).
 
+### Return images from a tool
+
+A tool can return images next to its JSON reply. List them under `tool_output_images`. Each entry is a `ToolOutputImage`: a base64 `data:` URL (PNG, JPEG, GIF or WebP) and an optional `label`.
+
+```python
+from nemo_gym.core import TOOL_OUTPUT_IMAGES_KEY, ToolOutputImage
+
+async def rotate(self, body: RotateRequest) -> dict:
+    image_url = "data:image/png;base64," + rotated_png_base64
+    return {"ok": True, TOOL_OUTPUT_IMAGES_KEY: [ToolOutputImage(image_url=image_url, label="Image 2").model_dump()]}
+```
+
+Who reads the key, and what the model gets:
+
+| Reader | What the model gets |
+|---|---|
+| The `/mcp` endpoint | The rest of the reply as text, then each label and image as MCP image content. A result with images has no `structuredContent` unless the tool declares an output schema. |
+| `simple_agent` (HTTP tools) | The rest of the reply as the tool output, then each image in a user message after the turn's tool outputs. |
+| An agent that does not read the key, such as `simple_agent_with_compaction` | The whole reply as text, base64 data included. |
+
+A reply without the key, or with `null`, has no images. A malformed list is an error of the tool. Each image is checked as prompt images are (`MediaFile`): the base64 must be valid and hold a PNG, JPEG, GIF or WebP image. The `data:` URL then names the type the content has, so a JPEG labeled `image/png` reaches the model as `image/jpeg`. An agent that puts the images inside its tool output, such as Codex, needs `inline_tool_output_images: true` on `vllm_model`; with the default setting, `vllm_model` refuses such a request.
+
 ---
 
 ## Wiring the agent (Claude Code)
@@ -222,6 +248,7 @@ The shipped `resources_servers/workplace_assistant` stays byte-identical — the
 
 ```python
 # resources_servers/workplace_assistant/app_mcp.py
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.workplace_assistant.app import WorkbenchResourcesServer
 from resources_servers.workplace_assistant.utils import get_tools
 
@@ -237,6 +264,9 @@ class MCPWorkbenchResourcesServer(WorkbenchResourcesServer):
 
 if __name__ == "__main__":
     MCPWorkbenchResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = MCPWorkbenchResourcesServer.run_webserver()  # noqa: F401
 ```
 
 (For `workplace_assistant`, `harvested` is empty — its only non-reserved POST route is the catch-all — but keeping `harvested +` makes the override correct for servers that mix typed routes with a dispatcher.)

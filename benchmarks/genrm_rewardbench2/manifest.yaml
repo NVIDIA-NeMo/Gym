@@ -1,0 +1,28 @@
+name: genrm_rewardbench2
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: rlhf
+description: GenRM judge evaluation on RewardBench 2 best-of-n response sets
+modality: text
+licensing: ODC-BY-1.0
+authors:
+- Daniel Egert
+reward:
+  range: [0.0, 1.0]
+  higher_is_better: true
+determinism: stochastic
+resources_server: genrm_eval
+agent_server: simple_agent
+model_server: policy_model
+datasets:
+  - name: genrm_rewardbench2
+    type: benchmark
+    jsonl_fpath: benchmarks/genrm_rewardbench2/data/rewardbench2_validation.jsonl
+    prepare_script: benchmarks/genrm_rewardbench2/prepare.py
+    prompt_config: null
+    num_repeats: 1
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

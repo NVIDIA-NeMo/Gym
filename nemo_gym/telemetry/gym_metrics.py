@@ -35,7 +35,27 @@ default stops at ten seconds and a sandbox start routinely takes a minute.
 ``gym.sandbox.create_retry_total`` (counter): one per create attempt a provider retried.
 Retrying is provider-internal, so each provider that retries records it from its own loop.
 
-All four carry ``nemo.gym.sandbox.provider``.
+``gym.sandbox.transfer_duration_ms`` (histogram): wall-clock of one file transfer into or out of a sandbox,
+including the seed files ``AsyncSandbox.start()`` writes after the provider returns the sandbox.
+It carries ``nemo.gym.sandbox.transfer.direction`` (``upload`` or ``download``)
+and ``nemo.gym.sandbox.transfer.outcome`` (``ok``, ``error`` or ``cancelled``).
+Sidecar downloads are not counted.
+
+``gym.sandbox.transfer_bytes_total`` (counter, bytes): the size of each regular file a transfer moved successfully,
+by direction.
+
+All six carry ``nemo.gym.sandbox.provider``.
+
+Server startup
+--------------
+``gym.server.startup_stage_duration_ms`` (histogram): one stage of one server's own startup, recorded by the process that ran it.
+``nemo.gym.startup.stage`` names the stage, and ``nemo.gym.server.worker`` marks a Uvicorn worker of a multi-worker server.
+Each point also carries ``nemo.gym.server.name`` and ``nemo.gym.server.type``.
+Stages are contiguous, so one process's stages add up to the time from its start until it accepts connections.
+A server process starts when the supervisor spawns it, and a worker starts when its main process hands off to Uvicorn.
+The same stages are spans under the ``startup`` span group.
+There is no supervisor-side total, because the supervisor only learns that a server is ready from a periodic health poll.
+That total would be these stages plus polling delay.
 
 HTTP connection pool
 --------------------
@@ -45,15 +65,105 @@ Queued redirect hops, aiohttp reconnects, and Gym retries each record separate s
 Connection attempts that acquire a slot immediately do not record a queue-duration histogram sample.
 Bounded attributes identify the binding connector limit, queue outcome, and destination server.
 
+``gym.http.connection_pool.connect_duration_ms`` (histogram): time to open one new connection, including DNS, TCP, and TLS setup.
+Reused connections record nothing, so the count is the number of connections the pool had to open.
+A run that opens connections throughout, rather than only at its start, is losing them, for example to keep-alive timeouts.
+``nemo.gym.http.connection_pool.connect_outcome`` is ``ok`` or ``failed``.
+
 ``gym.http.connection_pool.connect_total`` (observable counter): all connection attempts
 (``connect()`` calls), including attempts that later fail or are abandoned.
 Compare its value with the queue-duration histogram count to calculate the queued fraction.
+
+Rollout outcomes
+----------------
+``gym.rollout.completed_total`` (counter): one per rollout attempt the collection driver finished
+handling, recorded (for the collection driver) after the recovery store accepts the saved outcome. An attempt is one dispatch of
+one row in one collection run; a retry on a later resume run is another attempt, and an HTTP-level
+re-send of ``/run`` inside one dispatch is not. Two producers record it. The collection driver is
+``run_from_config`` (``gym eval run`` with serving): ``--no-serve`` initialises no telemetry, and ``run_examples``
+callers, reverification and the GDPVal multistage driver do not call the recorder. ``TaskRunner.run_task``, the
+in-process API, also records each rollout outcome it returns, without a recovery-store write: for it ``failed``
+means the outcome has a failure (labeled with its kind only), ``scored`` a reward and no failure, and ``unscored``
+neither. ``gym.rollout.rewarded_total`` counts only the finite rewards of scored rollouts, masked ones included.
+
+``nemo.gym.rollout.outcome`` is ``scored`` (main output, including masked, forced-zero and supported
+unscored completions), ``failed`` (saved failures, including kill-shaped) or ``omitted`` (saved
+intentional omissions, including terminal skips and bare no-persist replies). The historical
+``scored`` label does not guarantee a measured reward. Rows drained by the dispatch budget never
+ran and are not counted. Reused cached results do not increment the counter. Request errors count
+only when failure routing saves them: an unavailable server uses class agent_request_failed,
+while an agent that ran and failed uses agent_run_error (including HTTP 500). Otherwise the
+request error aborts collection and is not counted. Coverage comes from the output files.
+
+Attributes include ``nemo.gym.rollout.dispatch.name`` (the environment server, or the agent
+when rows name no environment server) and, on attempts that carry a failure class,
+``nemo.gym.failure_class``, ``nemo.gym.failure_kind`` (registered or ``<server>:<kind>``
+namespaced, any other value recorded as ``unregistered``) and ``nemo.gym.failure_type`` (exception
+class name). Labels come from the dispatch's original routing fields, before persistence maps
+kinds to sidecar classes. Older legacy producers retain their routing class and exception type;
+these two attributes remain producer-controlled, as on main, and must use stable category names.
+A missing producer kind adds no kind label, even when the saved record uses a class as its fallback.
+Native failures and the legacy Environment Server adapter route by the shared kind, bucketed when
+it also supplies the class. The adapter previously used environment_server_failed without a kind
+label; it now labels failures like native episodes. Free-text kinds and reasons are never promoted
+to class labels, but arbitrary strings supplied directly as legacy class/type fields are retained.
+
+Rollout rewards
+---------------
+``gym.rollout.rewarded_total`` (counter): one per ``scored`` attempt that carries a numeric reward,
+recorded with the outcome counter; a result without one is unscored, not a zero. Rewards are
+environment-defined floats: binary, partial credit, or negative penalties.
+``nemo.gym.rollout.reward.range`` sorts each one into ``negative``, ``zero``, ``partial`` (strictly
+between 0 and 1), ``full`` (exactly 1) or ``above_one``. Also carries ``nemo.gym.rollout.dispatch.name``
+and ``nemo.gym.rollout.masked`` (the result's ``mask_sample``), so masked rewards can be left out as
+the aggregate metrics leave them out. A live view of the run, not its score: benchmark metrics such
+as pass@k come from ``/aggregate_metrics``.
+
+Rollout health
+--------------
+The trajectory-level checks of the rollout health report, evaluated as each rollout finishes.
+``gym.rollout.health_verdict_total`` (counter): one per evaluated rollout, by ``nemo.gym.health.verdict``
+(``healthy``, ``unhealthy`` or ``unobserved``, as in the report) and ``nemo.gym.rollout.outcome``
+(``scored`` or ``failed``; the post-run report reads scored rollouts only).
+``gym.rollout.health_flagged_total`` (counter): one per rollout *and* check with at least one finding,
+by ``nemo.gym.health.check`` (a check id from the health-check registry) and ``nemo.gym.rollout.outcome``, so a
+check's count is the number of rollouts it flagged, not the number of findings. Checks in ``health_check_ignored_checks`` are not evaluated.
+
+Partial-rollout checkpoints
+---------------------------
+``gym.checkpoint.operation_duration_ms`` (histogram): wall-clock of one checkpoint operation.
+``nemo.gym.checkpoint.operation`` is a participant's control operation (``prepare``, ``commit``, ``restore``,
+``resume``, ``retire``, ``forget``, or ``release``), ``lease_reopen`` for one attempt to reopen a participant whose
+lease expired,
+or ``coordinate.<operation>`` for one call the controller makes to every participant.
+It also carries ``nemo.gym.checkpoint.participant_kind`` (``controller`` for coordination) and ``outcome``
+(``ok`` or ``error``).
+
+``gym.checkpoint.records_total`` / ``gym.checkpoint.bytes_total`` (counters): the records a participant wrote at
+commit or restored, and the bytes of the records file it wrote or read, by ``nemo.gym.checkpoint.operation`` and
+``nemo.gym.checkpoint.participant_kind``.
+A commit counts once its write finishes, and a restore counts once it succeeds, so a retried call counts nothing again.
+
+``gym.checkpoint.control_errors_total`` (counter): control calls that failed, by ``nemo.gym.checkpoint.error_code``,
+the ``code`` of the error in the reply, such as ``checkpoint_deadline_exceeded``.
+Each failed call to a participant's control routes counts once.
+Data-plane requests refused because of a checkpoint are not counted.
+
+``gym.checkpoint.events_total`` (counter): things that change a checkpoint's outcome without failing a call,
+by ``nemo.gym.checkpoint.event``:
+
+- ``lease_expired``: a participant's lease ran out before its controller resumed it,
+  so the participant reopens on its own.
+  Counted once per checkpoint, with the participant kind and phase.
+  Each attempt to reopen is a ``lease_reopen`` operation.
+- ``prepare_not_ready``: a prepare reached its deadline with blockers.
+- ``generation_cut``: one in-flight model call's cut, with its disposition.
 """
 
 import logging
 import threading
-from collections.abc import Callable, Sequence
-from typing import Any, Optional
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from typing import Any, Literal, Optional
 
 
 logger = logging.getLogger(__name__)
@@ -63,11 +173,52 @@ SANDBOX_ACTIVE_INSTRUMENT = "gym.sandbox.active"
 SANDBOX_STARTUP_INSTRUMENT = "gym.sandbox.startup_duration_ms"
 SANDBOX_EXEC_INSTRUMENT = "gym.sandbox.exec_duration_ms"
 SANDBOX_CREATE_RETRY_INSTRUMENT = "gym.sandbox.create_retry_total"
+SANDBOX_TRANSFER_DURATION_INSTRUMENT = "gym.sandbox.transfer_duration_ms"
+SANDBOX_TRANSFER_BYTES_INSTRUMENT = "gym.sandbox.transfer_bytes_total"
+SANDBOX_TRANSFER_DIRECTION_ATTRIBUTE = "nemo.gym.sandbox.transfer.direction"
+SANDBOX_TRANSFER_OUTCOME_ATTRIBUTE = "nemo.gym.sandbox.transfer.outcome"
+SandboxTransferDirection = Literal["upload", "download"]
+SandboxTransferOutcome = Literal["ok", "error", "cancelled"]
+SERVER_STARTUP_STAGE_INSTRUMENT = "gym.server.startup_stage_duration_ms"
+SERVER_NAME_ATTRIBUTE = "nemo.gym.server.name"
+SERVER_TYPE_ATTRIBUTE = "nemo.gym.server.type"
+STARTUP_STAGE_ATTRIBUTE = "nemo.gym.startup.stage"
+WORKER_ATTRIBUTE = "nemo.gym.server.worker"
 HTTP_CONNECTION_POOL_QUEUE_DURATION_INSTRUMENT = "gym.http.connection_pool.queue_duration_ms"
 HTTP_CONNECTION_POOL_CONNECT_INSTRUMENT = "gym.http.connection_pool.connect_total"
+HTTP_CONNECTION_POOL_CONNECT_DURATION_INSTRUMENT = "gym.http.connection_pool.connect_duration_ms"
+HTTP_CONNECTION_POOL_CONNECT_OUTCOME_ATTRIBUTE = "nemo.gym.http.connection_pool.connect_outcome"
 HTTP_CONNECTION_POOL_QUEUE_CONSTRAINT_ATTRIBUTE = "nemo.gym.http.connection_pool.queue_constraint"
 HTTP_CONNECTION_POOL_QUEUE_OUTCOME_ATTRIBUTE = "nemo.gym.http.connection_pool.queue_outcome"
 HTTP_DESTINATION_SERVER_NAME_ATTRIBUTE = "nemo.gym.http.destination.server.name"
+RUN_METRIC_PREFIX = "gym.run."
+RUN_ID_ATTRIBUTE = "nemo.gym.run.id"
+RUN_INFO_INSTRUMENT = "gym.run.info"
+# The failure class in `coverage/failed/<class>`.
+RUN_METRIC_BUCKET_ATTRIBUTE = "nemo.gym.run.bucket"
+RUN_METRIC_UNREGISTERED_BUCKET = "unregistered"
+# Failure classes outside the registered failure kinds that still name a bounded bucket.
+_RUN_METRIC_EXTRA_BUCKETS = frozenset({"skipped", "unknown"})
+ROLLOUT_COMPLETED_INSTRUMENT = "gym.rollout.completed_total"
+ROLLOUT_OUTCOME_ATTRIBUTE = "nemo.gym.rollout.outcome"
+FAILURE_CLASS_ATTRIBUTE = "nemo.gym.failure_class"
+FAILURE_KIND_ATTRIBUTE = "nemo.gym.failure_kind"
+FAILURE_TYPE_ATTRIBUTE = "nemo.gym.failure_type"
+DISPATCH_NAME_ATTRIBUTE = "nemo.gym.rollout.dispatch.name"
+ROLLOUT_REWARDED_INSTRUMENT = "gym.rollout.rewarded_total"
+REWARD_RANGE_ATTRIBUTE = "nemo.gym.rollout.reward.range"
+ROLLOUT_MASKED_ATTRIBUTE = "nemo.gym.rollout.masked"
+UNREGISTERED_FAILURE_KIND = "unregistered"
+CHECKPOINT_OPERATION_INSTRUMENT = "gym.checkpoint.operation_duration_ms"
+CHECKPOINT_RECORDS_INSTRUMENT = "gym.checkpoint.records_total"
+CHECKPOINT_BYTES_INSTRUMENT = "gym.checkpoint.bytes_total"
+CHECKPOINT_EVENTS_INSTRUMENT = "gym.checkpoint.events_total"
+CHECKPOINT_CONTROL_ERRORS_INSTRUMENT = "gym.checkpoint.control_errors_total"
+#: Every checkpoint span and metric attribute is named under this prefix.
+CHECKPOINT_ATTRIBUTE_PREFIX = "nemo.gym.checkpoint."
+CHECKPOINT_OPERATION_ATTRIBUTE = f"{CHECKPOINT_ATTRIBUTE_PREFIX}operation"
+CHECKPOINT_KIND_ATTRIBUTE = f"{CHECKPOINT_ATTRIBUTE_PREFIX}participant_kind"
+CHECKPOINT_ERROR_CODE_ATTRIBUTE = f"{CHECKPOINT_ATTRIBUTE_PREFIX}error_code"
 
 #: Milliseconds. Provisioning a remote sandbox takes tens of seconds and a long command can run
 #: for minutes; the SDK's default boundaries end at 10 s and would put most of both in +Inf.
@@ -84,6 +235,47 @@ SANDBOX_DURATION_BOUNDARIES_MS: tuple[float, ...] = (
     300_000,
     600_000,
     1_800_000,
+)
+
+#: Milliseconds.
+#: Copying a small file into a local container takes tens of milliseconds, while a large file to a remote sandbox
+#: can take minutes, so the boundaries start lower than the lifecycle ones.
+SANDBOX_TRANSFER_DURATION_BOUNDARIES_MS: tuple[float, ...] = (
+    10,
+    25,
+    50,
+    100,
+    250,
+    500,
+    1_000,
+    2_500,
+    5_000,
+    10_000,
+    30_000,
+    60_000,
+    120_000,
+    300_000,
+    600_000,
+)
+
+#: Milliseconds.
+#: A cold venv install can run for minutes and a local model load for longer, so the boundaries run to an hour.
+#: Init stages of a warm server fall in the lowest buckets.
+SERVER_STARTUP_BOUNDARIES_MS: tuple[float, ...] = (
+    100,
+    250,
+    500,
+    1_000,
+    2_500,
+    5_000,
+    10_000,
+    30_000,
+    60_000,
+    120_000,
+    300_000,
+    600_000,
+    1_800_000,
+    3_600_000,
 )
 
 HTTP_CONNECTION_POOL_QUEUE_DURATION_BOUNDARIES_MS: tuple[float, ...] = (
@@ -156,12 +348,16 @@ def _record_histogram(
         logger.debug("nemo-lens: failed to record %s", name, exc_info=True)
 
 
-def _record_counter(name: str, description: str, attributes: dict[str, Any], amount: int = 1) -> None:
+def _record_counter(
+    name: str, description: str, attributes: dict[str, Any], amount: int = 1, *, unit: str = "1"
+) -> None:
     meter = _meter()
     if meter is None:
         return
     try:
-        instrument = _get_or_create(meter, name, lambda: meter.create_counter(name, unit="1", description=description))
+        instrument = _get_or_create(
+            meter, name, lambda: meter.create_counter(name, unit=unit, description=description)
+        )
         instrument.add(amount, attributes=attributes)
     except Exception:
         logger.debug("nemo-lens: failed to record %s", name, exc_info=True)
@@ -224,6 +420,59 @@ def record_sandbox_create_retry(*, provider: str) -> None:
     )
 
 
+def record_sandbox_transfer(
+    duration_ms: float,
+    *,
+    provider: str,
+    direction: SandboxTransferDirection,
+    outcome: SandboxTransferOutcome,
+    size_bytes: int | None,
+) -> None:
+    """Record one file transfer's wall-clock and, when it succeeded, the bytes it moved."""
+    attributes = {SANDBOX_PROVIDER_ATTRIBUTE: provider, SANDBOX_TRANSFER_DIRECTION_ATTRIBUTE: direction}
+    _record_histogram(
+        SANDBOX_TRANSFER_DURATION_INSTRUMENT,
+        "ms",
+        "Wall-clock time to move one file into or out of a sandbox.",
+        duration_ms,
+        {**attributes, SANDBOX_TRANSFER_OUTCOME_ATTRIBUTE: outcome},
+        boundaries=SANDBOX_TRANSFER_DURATION_BOUNDARIES_MS,
+    )
+    if size_bytes is not None:
+        _record_counter(
+            SANDBOX_TRANSFER_BYTES_INSTRUMENT,
+            "Bytes of files moved into or out of sandboxes.",
+            attributes,
+            size_bytes,
+            unit="By",
+        )
+
+
+def _server_attributes(server_name: str, server_type: Optional[str]) -> dict[str, Any]:
+    attributes: dict[str, Any] = {SERVER_NAME_ATTRIBUTE: server_name}
+    if server_type:
+        attributes[SERVER_TYPE_ATTRIBUTE] = server_type
+    return attributes
+
+
+def record_server_startup_stage(
+    duration_ms: float, *, stage: str, server_name: str, server_type: Optional[str], worker: bool = False
+) -> None:
+    """Record one stage of one server's own startup, from the process that ran it.
+
+    ``worker`` is true for a Uvicorn worker of a multi-worker server.
+    A worker's stages are timed separately from its main process's.
+    """
+    _record_histogram(
+        SERVER_STARTUP_STAGE_INSTRUMENT,
+        "ms",
+        "Wall-clock time of one stage of a server process's startup.",
+        duration_ms,
+        _server_attributes(server_name, server_type) | {STARTUP_STAGE_ATTRIBUTE: stage, WORKER_ATTRIBUTE: worker},
+        boundaries=SERVER_STARTUP_BOUNDARIES_MS,
+    )
+
+
 def record_http_connection_pool_queue_duration(
     duration_ms: float,
     *,
@@ -244,6 +493,51 @@ def record_http_connection_pool_queue_duration(
         },
         boundaries=HTTP_CONNECTION_POOL_QUEUE_DURATION_BOUNDARIES_MS,
     )
+
+
+def record_http_connection_pool_connect_duration(duration_ms: float, *, outcome: str, server_name: str) -> None:
+    """Record the setup time of one new pooled connection."""
+    _record_histogram(
+        HTTP_CONNECTION_POOL_CONNECT_DURATION_INSTRUMENT,
+        "ms",
+        "Time to open one new connection for the aiohttp pool, including DNS, TCP, and TLS setup.",
+        duration_ms,
+        {HTTP_CONNECTION_POOL_CONNECT_OUTCOME_ATTRIBUTE: outcome, HTTP_DESTINATION_SERVER_NAME_ATTRIBUTE: server_name},
+        boundaries=HTTP_CONNECTION_POOL_QUEUE_DURATION_BOUNDARIES_MS,
+    )
+
+
+def record_run_summary(summary: Mapping[str, float], *, run_id: Optional[str]) -> None:
+    """Record a finished run's coverage and retry counts as gauges, one per key, under its run id.
+
+    ``coverage/scored`` becomes ``gym.run.coverage.scored``. ``coverage/failed/<class>`` becomes
+    ``gym.run.coverage.failed`` with the class as the bucket attribute. A class outside the registered failure kinds
+    is counted under ``unregistered``, so the attribute stays bounded. ``run_id`` is left off for a merge of several
+    shards; the job's ``nemo.run.id`` resource attribute identifies it.
+    """
+    meter = _meter()
+    if meter is None:
+        return
+    from nemo_gym.core.failure_kinds import FAILURE_KINDS
+
+    buckets = FAILURE_KINDS | _RUN_METRIC_EXTRA_BUCKETS
+    run: dict[str, Any] = {RUN_ID_ATTRIBUTE: run_id} if run_id else {}
+    points: dict[tuple[str, Optional[str]], float] = {}
+    for key, value in summary.items():
+        parts = key.split("/", 2)
+        bucket = None
+        if len(parts) > 2:
+            bucket = parts[2] if parts[2] in buckets else RUN_METRIC_UNREGISTERED_BUCKET
+        name = RUN_METRIC_PREFIX + ".".join(parts[:2])
+        points[(name, bucket)] = points.get((name, bucket), 0) + value
+    points[(RUN_INFO_INSTRUMENT, None)] = 1  # One series per finished run, for dashboards to join the gauges on.
+    for (name, bucket), value in points.items():
+        attributes = run if bucket is None else {**run, RUN_METRIC_BUCKET_ATTRIBUTE: bucket}
+        try:
+            gauge = _get_or_create(meter, name, lambda name=name: meter.create_gauge(name, unit="1"))
+            gauge.set(value, attributes=attributes)
+        except Exception:
+            logger.debug("nemo-lens: failed to record %s", name, exc_info=True)
 
 
 def register_http_connection_pool_connect_counter(snapshot: Callable[[], dict[str, int]]) -> None:
@@ -278,7 +572,155 @@ def register_http_connection_pool_connect_counter(snapshot: Callable[[], dict[st
         logger.debug("nemo-lens: failed to register %s", HTTP_CONNECTION_POOL_CONNECT_INSTRUMENT, exc_info=True)
 
 
+#: Milliseconds. Most operations take milliseconds; commit and restore at tens of thousands of rollouts take seconds.
+CHECKPOINT_DURATION_BOUNDARIES_MS: tuple[float, ...] = (1, 5, 10, 50, 100, 500, 1_000, 5_000, 10_000, 30_000, 120_000)
+
+
+def record_checkpoint_operation(duration_ms: float, *, operation: str, kind: str, outcome: str) -> None:
+    """Record one checkpoint operation's wall-clock, by operation, participant kind, and outcome."""
+    _record_histogram(
+        CHECKPOINT_OPERATION_INSTRUMENT,
+        "ms",
+        "Wall-clock time of one partial-rollout checkpoint operation.",
+        duration_ms,
+        {CHECKPOINT_OPERATION_ATTRIBUTE: operation, CHECKPOINT_KIND_ATTRIBUTE: kind, "outcome": outcome},
+        boundaries=CHECKPOINT_DURATION_BOUNDARIES_MS,
+    )
+
+
+def record_checkpoint_volume(*, operation: str, kind: str, records: int, size_bytes: int) -> None:
+    """Count the records a participant wrote at commit or restored, and the bytes of the records file."""
+    attributes = {CHECKPOINT_OPERATION_ATTRIBUTE: operation, CHECKPOINT_KIND_ATTRIBUTE: kind}
+    _record_counter(
+        CHECKPOINT_RECORDS_INSTRUMENT, "Checkpoint records written at commit or restored.", attributes, records
+    )
+    _record_counter(
+        CHECKPOINT_BYTES_INSTRUMENT,
+        "Bytes of checkpoint records files written at commit or read at restore.",
+        attributes,
+        size_bytes,
+        unit="By",
+    )
+
+
+def record_checkpoint_control_error(code: str) -> None:
+    """Count one control call that failed, by the error code of its reply."""
+    _record_counter(
+        CHECKPOINT_CONTROL_ERRORS_INSTRUMENT,
+        "Partial-rollout checkpoint control calls that failed, by error code.",
+        {CHECKPOINT_ERROR_CODE_ATTRIBUTE: code},
+    )
+
+
+def record_checkpoint_event(event: str, amount: int = 1, **attributes: str) -> None:
+    """Count a checkpoint event (``lease_expired``, ``prepare_not_ready``, ``generation_cut``)."""
+    _record_counter(
+        CHECKPOINT_EVENTS_INSTRUMENT,
+        "Events that change a partial-rollout checkpoint's outcome without failing a call.",
+        {
+            f"{CHECKPOINT_ATTRIBUTE_PREFIX}event": event,
+            **{f"{CHECKPOINT_ATTRIBUTE_PREFIX}{name}": value for name, value in attributes.items()},
+        },
+        amount,
+    )
+
+
+def record_rollout_completed(
+    outcome: str,
+    *,
+    dispatch_name: str,
+    failure_class: str | None = None,
+    failure_kind: str | None = None,
+    failure_type: str | None = None,
+) -> None:
+    """Count one finished rollout attempt in ``gym.rollout.completed_total``."""
+    attributes: dict[str, Any] = {ROLLOUT_OUTCOME_ATTRIBUTE: outcome, DISPATCH_NAME_ATTRIBUTE: dispatch_name}
+    if failure_class:
+        attributes[FAILURE_CLASS_ATTRIBUTE] = failure_class
+    if failure_kind:
+        attributes[FAILURE_KIND_ATTRIBUTE] = failure_kind
+    if failure_type:
+        attributes[FAILURE_TYPE_ATTRIBUTE] = failure_type
+    _record_counter(
+        ROLLOUT_COMPLETED_INSTRUMENT, "Rollout attempts the driver finished handling, by outcome.", attributes
+    )
+
+
+def _reward_range(reward: float) -> str:
+    if reward < 0:
+        return "negative"
+    if reward == 0:
+        return "zero"
+    if reward < 1:
+        return "partial"
+    if reward == 1:
+        return "full"
+    return "above_one"
+
+
+def record_rollout_reward(reward: float, *, dispatch_name: str, masked: bool) -> None:
+    """Count one scored attempt in ``gym.rollout.rewarded_total`` by the range its reward falls in."""
+    _record_counter(
+        ROLLOUT_REWARDED_INSTRUMENT,
+        "Scored rollout attempts that carry a reward, by reward range.",
+        {
+            DISPATCH_NAME_ATTRIBUTE: dispatch_name,
+            ROLLOUT_MASKED_ATTRIBUTE: masked,
+            REWARD_RANGE_ATTRIBUTE: _reward_range(reward),
+        },
+        unit="{rollout}",
+    )
+
+
 def _reset_for_testing() -> None:
     """Drop cached instruments. Test-only."""
     with _INSTRUMENT_LOCK:
         _INSTRUMENTS.clear()
+
+
+ROLLOUT_HEALTH_VERDICT_INSTRUMENT = "gym.rollout.health_verdict_total"
+ROLLOUT_HEALTH_FLAGGED_INSTRUMENT = "gym.rollout.health_flagged_total"
+HEALTH_VERDICT_ATTRIBUTE = "nemo.gym.health.verdict"
+HEALTH_CHECK_ATTRIBUTE = "nemo.gym.health.check"
+HEALTH_CHECKS_ATTRIBUTE = "nemo.gym.health.checks"
+
+
+def record_rollout_health(verdict: str, *, outcome: str, flagged_checks: Iterable[str]) -> None:
+    """Count one health-evaluated rollout and each distinct check that flagged it."""
+    _record_counter(
+        ROLLOUT_HEALTH_VERDICT_INSTRUMENT,
+        "Rollouts evaluated by the trajectory health checks, by verdict.",
+        {HEALTH_VERDICT_ATTRIBUTE: verdict, ROLLOUT_OUTCOME_ATTRIBUTE: outcome},
+    )
+    for check in sorted(set(flagged_checks)):
+        _record_counter(
+            ROLLOUT_HEALTH_FLAGGED_INSTRUMENT,
+            "Rollouts flagged by a trajectory health check.",
+            {HEALTH_CHECK_ATTRIBUTE: check, ROLLOUT_OUTCOME_ATTRIBUTE: outcome},
+        )
+
+
+def record_sandbox_resource_sample(values: dict[str, Any], attributes: dict[str, Any]) -> None:
+    """Export execd snapshots as gauges; timestamped raw observations remain on resource spans."""
+    from nemo_gym.telemetry.setup import is_metrics_exporter_active
+
+    if not is_metrics_exporter_active():
+        return
+    meter = _meter()
+    if meter is None:
+        return
+    for field, unit in (
+        ("cpu_count", "{cpu}"),
+        ("cpu_used_percentage", "%"),
+        ("memory_total_mib", "MiBy"),
+        ("memory_used_mib", "MiBy"),
+    ):
+        value = values.get("nemo.gym.sandbox.sample." + field)
+        if value is None:
+            continue
+        name = "gym.sandbox." + field
+        try:
+            gauge = _get_or_create(meter, name, lambda name=name, unit=unit: meter.create_gauge(name, unit=unit))
+            gauge.set(value, attributes=attributes)
+        except Exception:
+            logger.debug("Could not export sandbox resource gauge", exc_info=True)

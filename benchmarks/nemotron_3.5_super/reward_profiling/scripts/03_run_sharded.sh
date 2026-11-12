@@ -155,7 +155,7 @@ fi
 
 # Work a shard has left, defined exactly as Gym defines it.
 #
-# This MUST match rollout_collection.py:1213-1216, which runs
+# This MUST match `RolloutCollectionHelper._load_from_cache` in `nemo_gym/rollouts/rollout_collection.py`, which runs
 #   inputs - (successes | terminal | maxed_out)
 # where `terminal` and `maxed_out` come from rollouts_failures.jsonl and are deliberately never
 # retried. Counting only successes -- which this did -- means any rollout that goes terminal (a

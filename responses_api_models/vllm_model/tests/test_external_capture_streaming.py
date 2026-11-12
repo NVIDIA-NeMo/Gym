@@ -12,24 +12,27 @@ import pytest
 from aiohttp import ClientResponseError
 from fastapi.testclient import TestClient
 
-from nemo_gym import chat_streaming, responses_streaming
-from nemo_gym.anthropic_converter import AnthropicConverter
-from nemo_gym.base_responses_api_model import _reconstruct_streamed_response
-from nemo_gym.server_utils import ServerClient
-from nemo_gym.token_id_capture.adapters.vllm import VLLMCaptureAdapter
-from nemo_gym.token_id_capture.lineage import FileLineageStore
-from nemo_gym.token_id_capture.records import UNCOMMITTED_CALL_REASON
-from nemo_gym.token_id_capture.sink import current_capture_context
-from nemo_gym.token_id_capture.staging import resolve_terminal, select_terminal_call
-from nemo_gym.token_id_capture.staging.capture import RolloutTokenCapture
-from nemo_gym.token_id_capture.staging.rebuild import verify_and_linearize
-from nemo_gym.token_id_capture.staging.records import (
+from nemo_gym.client import ServerClient
+from nemo_gym.models import AnthropicConverter, chat_streaming, responses_streaming
+from nemo_gym.models.model_call_capture import _reconstruct_streamed_response
+from nemo_gym.models.token_capture import (
+    ENGINE_REFUSED_CALL_REASON,
+    UNCOMMITTED_CALL_REASON,
+    FileLineageStore,
+    VLLMCaptureAdapter,
+    current_capture_context,
+    resolve_terminal,
+)
+from nemo_gym.models.token_capture.staging import (
     WORKER_MISSING_COMMIT_COORDS_REASON,
     CaptureAdmission,
     RolloutManifest,
     RolloutReceipt,
+    RolloutTokenCapture,
     StagedCallBaseSnapshot,
     StageResult,
+    select_terminal_call,
+    verify_and_linearize,
 )
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 from responses_api_models.vllm_model_with_compaction.app import VLLMModelWithCompaction
@@ -48,6 +51,7 @@ class _Worker:
         self.reasoning = False
         self.reasoning_only = False
         self.refusal = False
+        self.finish_reason = "stop"
         self.capture = RolloutTokenCapture(sink=self, weight_version_fn=lambda: 7, adapter=VLLMCaptureAdapter())
 
     def stage(self, record, *, attachments=None):
@@ -72,7 +76,7 @@ class _Worker:
             "choices": [
                 {
                     "index": 0,
-                    "finish_reason": "stop",
+                    "finish_reason": self.finish_reason,
                     "message": {
                         "role": "assistant",
                         "content": f"answer {turn}",
@@ -130,7 +134,7 @@ def make_harness(tmp_path, monkeypatch):
                 "external_staging": True,
                 "external_staging_backend": backend,
                 "rebuild_response": False,
-                "lineage_store": "nemo_gym.token_id_capture.lineage:FileLineageStore",
+                "lineage_store": "nemo_gym.models.token_capture.lineage:FileLineageStore",
                 "lineage_store_kwargs": {"root": str(root)},
             }
         }
@@ -254,6 +258,23 @@ async def test_codex_compacted_messages_reach_backend_and_evaluation_capture(mak
 
 
 @pytest.mark.parametrize("dialect", DIALECTS)
+async def test_the_ledger_row_records_why_the_served_response_stopped(make_harness, dialect):
+    # The worker stopped at its output budget. Each dialect serves that differently (a chat
+    # ``finish_reason``, a Responses ``incomplete_details``, an Anthropic ``stop_reason``), and
+    # the ledger row records the one chat-vocabulary reason behind all of them, so a rollout
+    # rebuilt from staged records can report the same truncation verdict as a local capture.
+    h = make_harness(dialect)
+    h.worker.finish_reason = "length"
+
+    messages = await _request(h.app, _path(dialect), _body(dialect, stream=False))
+
+    assert messages[0]["status"] == 200
+    manifest = RolloutManifest.model_validate(await h.ledger.manifest("r1"))
+    (record,) = manifest.records
+    assert record.finish_reason == "length"
+
+
+@pytest.mark.parametrize("dialect", DIALECTS)
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("evaluation", [False, True])
 async def test_external_capture_routes(make_harness, dialect, stream, evaluation):
@@ -269,6 +290,7 @@ async def test_external_capture_routes(make_harness, dialect, stream, evaluation
             return
         manifest = RolloutManifest.model_validate(await h.ledger.manifest("r1"))
         assert len(manifest.records) == 1 and not manifest.failures
+        assert manifest.records[0].finish_reason == "stop"
         assert h.worker.context.committed
 
     messages = await _request(h.app, _path(dialect), _body(dialect, stream), check_send)
@@ -292,7 +314,7 @@ async def test_external_capture_routes(make_harness, dialect, stream, evaluation
         manifest = client.get(url, headers={"Authorization": "Bearer test-control-token"}).json()
     record = manifest["records"][0]
     receipt = RolloutReceipt(
-        rollout_id="r1",
+        capture_key="r1",
         manifest=[record],
         terminal_model_call_id=record["model_call_id"],
         terminal_selection="declared",
@@ -369,7 +391,7 @@ async def test_synthetic_completion_leaves_call_uncommitted(
         assert manifest.failures[0].model_call_id != record.model_call_id
         assert selection.terminal_model_call_id == record.model_call_id
         receipt = RolloutReceipt(
-            rollout_id="r1",
+            capture_key="r1",
             manifest=manifest.records,
             terminal_model_call_id=selection.terminal_model_call_id,
             terminal_selection="heuristic",
@@ -411,6 +433,31 @@ async def test_worker_completion_without_coordinates_still_fails_closed(make_har
         WORKER_MISSING_COMMIT_COORDS_REASON,
         UNCOMMITTED_CALL_REASON,
     ]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("backend", ["vllm_worker", "megatron_worker"])
+async def test_a_propagated_refusal_under_worker_custody_is_a_definite_ledger_failure(
+    make_harness, monkeypatch, backend, stream
+):
+    # The engine refused the call before the worker could stage anything, so the ledger row names
+    # that definite outcome instead of the custody sweep's ambiguous uncommitted-call row, and the
+    # sweep does not add a second row for the same call. Codex and OpenCode stream by default; the
+    # Responses route buffers the stream, so the refusal is the same HTTP 400 before any event.
+    h = make_harness("responses", backend=backend, propagate_context_overflow_errors=True)
+    h.model.setup_exception_middleware(h.app)
+    error = ClientResponseError(MagicMock(real_url="http://worker/v1/chat/completions"), (), status=400)
+    error.response_content = b'{"error":{"message":"maximum context length","code":400}}'
+    monkeypatch.setattr(h.worker, "create_chat_completion", AsyncMock(side_effect=error))
+
+    messages = await _request(h.app, _path("responses"), _body("responses", stream))
+
+    assert messages[0]["status"] == 400
+    payload = json.loads(b"".join(message.get("body", b"") for message in messages))
+    assert payload["error"]["code"] == "context_length_exceeded"
+    manifest = RolloutManifest.model_validate(await h.ledger.manifest("r1"))
+    assert manifest.records == []
+    assert [failure.reason for failure in manifest.failures] == [ENGINE_REFUSED_CALL_REASON]
 
 
 @pytest.mark.parametrize("override", ["extra_body", "sampling_overrides"])
@@ -536,7 +583,7 @@ async def test_two_call_continuation_from_served_sse(make_harness, dialect, cont
     assert child.response_id == second["id"]
     assert h.finalize.await_count == 2
     receipt = RolloutReceipt(
-        rollout_id="r1",
+        capture_key="r1",
         manifest=manifest.records,
         terminal_model_call_id=child.model_call_id,
         terminal_selection="declared",

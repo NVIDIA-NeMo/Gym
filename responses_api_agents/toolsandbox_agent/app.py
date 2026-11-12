@@ -29,10 +29,9 @@ import aiohttp
 from pydantic import ConfigDict, Field, ValidationError
 from tenacity import retry, stop_after_attempt, wait_exponential_jitter
 
-from nemo_gym.base_resources_server import BaseRunRequest
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -40,7 +39,11 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseInput,
     NeMoGymResponseOutputItem,
     NeMoGymResponseOutputMessage,
+    NeMoGymResponseUsage,
+    accumulate_response_usage,
 )
+from nemo_gym.server_runtime import BaseRunRequest
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.toolsandbox.schemas import (
     ToolSandboxNeMoGymResponse,
     ToolSandboxSeedSessionResponse,
@@ -89,7 +92,6 @@ def _assistant_text(messages: List[NeMoGymResponseOutputMessage]) -> str:
 
 
 class ToolSandboxAgent(SimpleResponsesAPIAgent):
-    ray_enabled = False
     config: ToolSandboxAgentConfig
 
     def update_agent_state(
@@ -124,6 +126,7 @@ class ToolSandboxAgent(SimpleResponsesAPIAgent):
         env_id = seed.env_id
 
         model_response: NeMoGymResponse | None = None
+        usage: NeMoGymResponseUsage | None = None
         agent_state_history: list[NeMoGymResponseInput] = []
         all_messages: list[NeMoGymResponseOutputItem] = []
         model_server_cookies = None
@@ -153,6 +156,7 @@ class ToolSandboxAgent(SimpleResponsesAPIAgent):
                 except ValidationError as e:
                     logger.warning(f"Error validating model response: {e!r}.")
                     break
+                usage = accumulate_response_usage(usage, model_response.usage)
 
                 model_output = model_response.output
                 fn_calls: List[NeMoGymResponseFunctionToolCall] = [
@@ -207,6 +211,8 @@ class ToolSandboxAgent(SimpleResponsesAPIAgent):
             "group_id": str(req.task_idx),
             "contains_transitions": self.config.return_transitions,
             "output": agent_state_history if self.config.return_transitions else all_messages,
+            # The base response is the last model call; usage covers every call in the episode.
+            "usage": usage,
         }
         return ToolSandboxNeMoGymResponse.model_validate(model_response.model_dump() | output_overrides)
 
@@ -227,3 +233,6 @@ class ToolSandboxAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     ToolSandboxAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ToolSandboxAgent.run_webserver()  # noqa: F401

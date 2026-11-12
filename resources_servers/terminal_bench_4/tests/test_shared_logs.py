@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from nemo_gym.sandbox import SandboxSpec
+from nemo_gym.sandbox import PLACEMENT_GROUP_KEY, SandboxSpec
 from resources_servers.terminal_bench_4 import shared_logs as module
 from resources_servers.terminal_bench_4.collection import collect
 from resources_servers.terminal_bench_4.shared_logs import SharedLogs
@@ -201,6 +201,28 @@ async def test_partial_initialization_and_failed_delete_still_stop_helper(tmp_pa
     assert failed.cleanup_errors and not failed.closed
 
 
+async def test_failed_teardown_is_retried_without_a_stopped_helper(tmp_path, monkeypatch):
+    logs, helper, _ = shared(tmp_path, monkeypatch)
+    await logs.start()
+    helper.stop.side_effect = [RuntimeError("provider unavailable"), None]
+    with pytest.raises(ExceptionGroup, match="cleanup failed"):
+        await logs.stop()
+    assert not Path(logs.root).exists() and not logs.closed
+    await logs.stop()
+    await logs.stop()
+    assert helper.stop.await_count == 2 and logs.closed
+    # Removal failed but the helper stopped: a retry cannot run EFS commands through it, nor stop it again.
+    failed, helper, _ = shared(tmp_path, monkeypatch)
+    await failed.start()
+    failed.python = AsyncMock(side_effect=RuntimeError("EFS unavailable"))
+    with pytest.raises(ExceptionGroup, match="cleanup failed"):
+        await failed.stop()
+    await failed.stop()
+    failed.python.assert_awaited_once()
+    helper.stop.assert_awaited_once()
+    assert failed.closed and failed.cleanup_errors
+
+
 async def test_live_workload_mount_is_retained_on_failed_teardown(tmp_path, monkeypatch):
     logs, helper, _ = shared(tmp_path, monkeypatch)
     await logs.start()
@@ -320,6 +342,7 @@ def test_logs_helper_uses_task_deployment_and_independent_role_mounts(
     assert cfg["opensandbox"]["connection"]["domain"] == pool + ".invalid"
     assert cfg["opensandbox"]["connection"]["api_key"] == pool.upper() + "-credential"
     assert spec.metadata["nemo-gym.nvidia.com/resource-pool"] == pool
+    assert spec.metadata[PLACEMENT_GROUP_KEY] == env.build_spec().metadata[PLACEMENT_GROUP_KEY]
     assert spec.resources.gpu is None and not spec.env
     assert env.provider_config["opensandbox"]["connection"]["domain"] == pool + ".invalid"
     env.shared_logs = logs

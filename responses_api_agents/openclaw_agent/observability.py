@@ -9,9 +9,9 @@ from math import isfinite
 from pathlib import Path
 from typing import Any
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import NeMoGymResponseInputItem
-from nemo_gym.rollout_observability import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import NeMoGymResponseInputItem
+from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
     ContextCompactionObservation,
@@ -184,7 +184,7 @@ def build_openclaw_observation_tree(
             conversation,
             events,
             transcript_available=any(event.get("type") == "message" for event in events),
-            prefer_native_session_id=False,
+            prefer_openclaw_session_id=False,
             model_ref=model_ref,
         )
         combined.gaps.extend(gap for gap in bundle.gaps if gap.code != "subagent_hierarchy_unavailable")
@@ -254,11 +254,12 @@ def build_openclaw_observations(
     events: Iterable[dict[str, Any]],
     *,
     transcript_available: bool,
-    prefer_native_session_id: bool = True,
+    prefer_openclaw_session_id: bool = True,
+    capture_correlated: bool = False,
     model_ref: ModelServerRef | None = None,
 ) -> AgentObservationBundle:
     events = list(events)
-    native_session_id = next(
+    openclaw_session_id = next(
         (
             event.get("id")
             for event in events
@@ -269,8 +270,8 @@ def build_openclaw_observations(
         ),
         None,
     )
-    if prefer_native_session_id:
-        invocation_id = native_session_id or invocation_id
+    if prefer_openclaw_session_id:
+        invocation_id = openclaw_session_id or invocation_id
     conversation = list(conversation)
     invocation = AgentInvocation(invocation_id=invocation_id, conversation=conversation)
     bundle = AgentObservationBundle(
@@ -278,7 +279,7 @@ def build_openclaw_observations(
         records=[invocation],
         gaps=[
             ObservationGap(code="subagent_hierarchy_unavailable"),
-            ObservationGap(code="model_call_ownership_unavailable"),
+            *([] if capture_correlated else [ObservationGap(code="model_call_ownership_unavailable")]),
             ObservationGap(code="context_compaction_unavailable"),
         ],
     )

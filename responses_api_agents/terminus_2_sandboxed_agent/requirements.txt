@@ -1,2 +1,0 @@
--e nemo-gym[dev,sandbox] @ ../../
-harbor==0.22.0

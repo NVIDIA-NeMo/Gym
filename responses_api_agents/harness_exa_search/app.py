@@ -13,11 +13,10 @@ from typing import Any
 from fastapi import Body, Request
 from pydantic import ConfigDict, Field, SecretStr
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import get_first_server_config_dict
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.client import get_response_json, raise_for_status, trace_context_path_segment
+from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_first_server_config_dict
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxEndpoint,
@@ -25,9 +24,11 @@ from nemo_gym.sandbox import (
     SandboxSpec,
     SupportsSandboxEndpoint,
     create_provider,
+    resolve_provider_config,
+    resolve_provider_metadata,
 )
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.harness_agent.app import _FABRIC_ADAPTERS, resolve_agent
 
 
@@ -172,8 +173,16 @@ class HarnessExaSearchResponse(BaseVerifyResponse):
 
 
 class HarnessExaSearchAgent(SimpleResponsesAPIAgent):
-    ray_enabled = False
     config: HarnessExaSearchConfig
+
+    def _upstream_model_url(self, request: Request) -> str:
+        """The model URL the relay forwards to, built per run.
+
+        The relay posts with a plain aiohttp session and the harness behind it sends no traceparent,
+        so the URL carries the rollout prefix and this run's span (see ``apply_rollout_prefix``).
+        """
+        base = (self.config.sandbox_model_base_url or self._model_url).rstrip("/")
+        return f"{base}{self.url_path_for_request('', request).rstrip('/')}{trace_context_path_segment()}"
 
     def model_post_init(self, context: Any) -> None:
         self._agent_types = resolve_agent(self.config.agent)
@@ -210,9 +219,7 @@ class HarnessExaSearchAgent(SimpleResponsesAPIAgent):
         )
         if values:
             raise ValueError(f"unknown sandbox_spec keys: {sorted(values)}")
-        upstream_model_url = (self.config.sandbox_model_base_url or self._model_url).rstrip(
-            "/"
-        ) + self.url_path_for_request("", request).rstrip("/")
+        upstream_model_url = self._upstream_model_url(request)
         agent_kwargs = dict(self.config.agent_kwargs)
         if adapter := _FABRIC_ADAPTERS.get(self.config.agent):
             agent_kwargs.setdefault("adapter_id", adapter)
@@ -315,3 +322,6 @@ class HarnessExaSearchAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     HarnessExaSearchAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = HarnessExaSearchAgent.run_webserver()  # noqa: F401

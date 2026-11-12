@@ -22,8 +22,9 @@ import gymnasium as gym
 from fastapi import HTTPException
 from pydantic import Field
 
-from nemo_gym.base_resources_server import BaseResourcesServerConfig
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core import NeMoGymResponse
+from nemo_gym.server_runtime import BaseResourcesServerConfig
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.gymnasium import GymnasiumServer, extract_text
 
 
@@ -50,7 +51,6 @@ class TALESSessionState:
 
 
 class TALESResourcesServer(GymnasiumServer):
-    ray_enabled = False
     config: TALESResourcesServerConfig
     session_id_to_state: Dict[str, TALESSessionState] = Field(default_factory=dict)
 
@@ -160,3 +160,6 @@ class TALESResourcesServer(GymnasiumServer):
 
 if __name__ == "__main__":
     TALESResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = TALESResourcesServer.run_webserver()  # noqa: F401

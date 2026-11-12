@@ -631,7 +631,7 @@ model-specific and do not change defaults for other runners.
 Proxy policy belongs to the Gym OSWorld adapter; VM setup belongs to the pinned
 OSWorld `nv-gym` runtime. The integration lines are independent Git refs in
 different repositories. Gym connects them only through the immutable OSWorld
-commit in `responses_api_agents/osworld_agent/requirements.txt`. That OSWorld
+commit in `responses_api_agents/osworld_agent/pyproject.toml`. That OSWorld
 commit merges upstream main `83e85344` and retains the `nv-gym` integration
 overlay.
 
@@ -639,7 +639,7 @@ overlay.
 
 | Consumer workflow | Required OSWorld version |
 | --- | --- |
-| Gym OSWorld benchmark | No manual checkout. The agent package installs the exact SHA from `responses_api_agents/osworld_agent/requirements.txt`. |
+| Gym OSWorld benchmark | No manual checkout. The agent package installs the exact SHA from `responses_api_agents/osworld_agent/pyproject.toml`. |
 | Direct OSWorld, plain Docker/VMware, no proxy-required tasks | Upstream xlang OSWorld main is sufficient; this adapter's pre-fix baseline was `83e8534451ba8b3ab6477448ef3f0a8e563f05be`. |
 | Direct OSWorld with `provider_name=remote_docker` | `JeffPengCoder/OSWorld` `nv-gym`, pinned to `f32ab2b74e3ea66e6a8eb0d87876a12ce93904d5` or a reviewed successor that preserves the selected task corpus. |
 | Direct OSWorld with proxy-required tasks | The same `nv-gym` pinned SHA; set `PROXY_CONFIG_FILE` and construct `DesktopEnv(enable_proxy=True)`. |

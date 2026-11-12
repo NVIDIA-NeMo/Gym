@@ -87,10 +87,12 @@ Spin up with a judge model and prompt:
 gym env start \
   --resources-server equivalence_llm_judge \
   --model-type openai_model \
-  +equivalence_llm_judge.resources_servers.equivalence_llm_judge.judge_responses_create_params.max_output_tokens=256 \
+  +equivalence_llm_judge.resources_servers.equivalence_llm_judge.judge_responses_create_params.max_output_tokens=8192 \
   +equivalence_llm_judge.resources_servers.equivalence_llm_judge.judge_system_message="You are a careful arbiter." \
   "+equivalence_llm_judge.resources_servers.equivalence_llm_judge.judge_prompt_template='<|Problem|>\n{question}\n\n<|Gold|>\n{expected_answer}\n\n<|Prediction|>\n{generated_answer}\n'"
 ```
+
+The judge is the policy model (`configs/equivalence_llm_judge.yaml` sets `judge_model_server.name: policy_model`). The command gives the judge 8192 output tokens because a reasoning model can spend thousands of tokens reasoning before it writes the `[[A=B]]`/`[[A!=B]]` verdict, and a judge reply with no verdict scores 0.
 
 Then query via any agent; verification happens with `/verify` on this server when evaluating rollouts.
 

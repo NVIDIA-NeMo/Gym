@@ -41,10 +41,12 @@ retries on any criterion raises ``JudgeError`` for the *whole row*, which
 ``all_pass`` and ``mean_criterion_pass`` alike, not just the former. Given
 schema-constrained decoding, exhaustion should be rare.
 
-``reward`` is the fraction of criteria passed, matching
+By default ``reward`` is the fraction of criteria passed, matching
 ``mean_criterion_pass`` (upstream: ``mean_criteria``). The strict response-level
 ``all_pass`` score (1.0 only when every criterion passes) is reported alongside
-it, and ``compute_metrics`` surfaces both.
+it, and ``compute_metrics`` surfaces both. For training, ``reward_mode`` can make
+the reward all-pass or a weighted mixture of the two; the rubric metrics are
+reported the same way in every mode.
 """
 
 from __future__ import annotations
@@ -54,30 +56,43 @@ import json
 import re
 from contextlib import nullcontext
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
-from typing import Any, ClassVar, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
+    NeMoGymChatCompletion,
+    NeMoGymChatCompletionCreateParamsNonStreaming,
+    NeMoGymResponse,
+)
+from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
+    observe_llm_judge_grading,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError, call_judge
-from nemo_gym.openai_utils import (
-    NeMoGymChatCompletion,
-    NeMoGymChatCompletionCreateParamsNonStreaming,
-    NeMoGymResponse,
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import (
+    JUDGE_FAILURES,
+    JudgeError,
+    call_judge,
+    is_judge_failure,
+    record_parsed_judge_verdict,
 )
-from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
 
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
+
+
+# What ``reward`` is: the fraction of criteria passed (the benchmark's default), all-pass, or
+# (1 - mixed_reward_alpha) * fraction passed + mixed_reward_alpha * all-pass.
+RewardMode = Literal["mean_criteria", "strict_pass", "mixed"]
 
 
 class GdpPdfConfig(BaseResourcesServerConfig):
@@ -93,6 +108,11 @@ class GdpPdfConfig(BaseResourcesServerConfig):
     judge_chat_create_params: NeMoGymChatCompletionCreateParamsNonStreaming
 
     judge_prompt_template_fpath: str = "prompt_templates/judge.txt"
+
+    # Training reward. Evaluation keeps the default; all_pass and mean_criterion_pass are
+    # reported in every mode.
+    reward_mode: RewardMode = "mean_criteria"
+    mixed_reward_alpha: float = Field(default=0.5, ge=0.0, le=1.0)
 
     # Additional attempts after the first when the judge output fails to
     # parse; 5 total matches upstream's MAX_RETRIES=4.
@@ -131,6 +151,7 @@ class GdpPdfVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
     verifier_metadata: Optional[dict[str, Any]] = None
+    reward_mode: RewardMode = "mean_criteria"
     num_criteria: int = 0
     num_criteria_passed: int = 0
     all_pass: float = 0.0
@@ -231,7 +252,6 @@ def _criterion_passes(score: Decimal) -> bool:
 
 
 class GdpPdfResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: GdpPdfConfig
 
     def model_post_init(self, __context: Any) -> None:
@@ -262,25 +282,38 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
             return self._build_response(body, evaluations)
 
         task_prompt = str(meta.get("prompt", ""))
-        evaluations = await asyncio.gather(
-            *(
-                self._judge_criterion(criterion=c, generated_answer=generated, task_prompt=task_prompt)
-                for c in criteria
-            )
-        )
-        return self._build_response(body, list(evaluations))
 
-    @staticmethod
-    def _build_response(body: GdpPdfVerifyRequest, evaluations: List[CriterionEvaluation]) -> GdpPdfVerifyResponse:
+        async def grade() -> GdpPdfVerifyResponse:
+            evaluations = await asyncio.gather(
+                *(
+                    self._judge_criterion(criterion=c, generated_answer=generated, task_prompt=task_prompt)
+                    for c in criteria
+                )
+            )
+            return self._build_response(body, list(evaluations))
+
+        return await observe_llm_judge_grading(grade)
+
+    def _build_response(
+        self, body: GdpPdfVerifyRequest, evaluations: List[CriterionEvaluation]
+    ) -> GdpPdfVerifyResponse:
         num_passed = sum(1 for e in evaluations if e.passed)
         total = len(evaluations)
         mean_criterion_pass = num_passed / total
+        all_pass = 1.0 if num_passed == total else 0.0
+        reward = mean_criterion_pass
+        if self.config.reward_mode == "strict_pass":
+            reward = all_pass
+        elif self.config.reward_mode == "mixed":
+            alpha = self.config.mixed_reward_alpha
+            reward = (1 - alpha) * mean_criterion_pass + alpha * all_pass
         return GdpPdfVerifyResponse(
             **body.model_dump(),
-            reward=mean_criterion_pass,
+            reward=reward,
+            reward_mode=self.config.reward_mode,
             num_criteria=total,
             num_criteria_passed=num_passed,
-            all_pass=1.0 if num_passed == total else 0.0,
+            all_pass=all_pass,
             mean_criterion_pass=mean_criterion_pass,
             criterion_evaluations=evaluations,
         )
@@ -325,9 +358,9 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
                         json=params,
                         response_model=NeMoGymChatCompletion,
                     )
-                except JudgeError as e:
-                    # A transport/HTTP failure is not a parse failure -- don't
-                    # retry it here, let judge_failsafe route the row.
+                except JUDGE_FAILURES as e:
+                    if not is_judge_failure(e):
+                        raise
                     print(f"[gdp_pdf] judge HTTP error: {e}", flush=True)
                     raise
 
@@ -343,6 +376,7 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
                 last_error = e
                 continue
 
+            record_parsed_judge_verdict()
             evaluation.score = str(score)
             evaluation.rationale = rationale
             evaluation.passed = _criterion_passes(score)
@@ -403,3 +437,6 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     GdpPdfResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = GdpPdfResourcesServer.run_webserver()  # noqa: F401

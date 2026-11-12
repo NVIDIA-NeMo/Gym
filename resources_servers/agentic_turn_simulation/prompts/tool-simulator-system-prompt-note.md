@@ -1,0 +1,1 @@
+The agent's system prompt, the instructions its harness gave it, is between <agent_system_prompt> and </agent_system_prompt> (a long one is shortened in the middle). What it states about the agent's environment (the date, the machine, the tools) holds for every output you return.

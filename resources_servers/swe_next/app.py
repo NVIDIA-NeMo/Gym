@@ -39,20 +39,25 @@ from typing import Any
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.config import get_global_config_dict
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    SandboxResources,
+    SandboxSpec,
+    cpu_cap_env,
+    resolve_provider_config,
+    resolve_provider_metadata,
+)
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    ResourcesSeedSessionRequest,
-    ResourcesSeedSessionResponse,
+    SimpleResourcesServer,
 )
-from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.sandbox.utils import cpu_cap_env
-from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.swe_next.verification import (
     VerificationInputs,
     VerificationResult,
@@ -67,7 +72,6 @@ from resources_servers.swebench.patch_capture import (
     capture_model_patch,
     prepare_git_for_commits,
 )
-from resources_servers.swebench.sandbox_sessions import SandboxSessionResourcesServer
 
 
 GRADING_ARTIFACTS = (
@@ -180,8 +184,7 @@ class SWENextVerifyResponse(BaseVerifyResponse):
     model_patch: str | None = None
 
 
-class SWENextResourcesServer(SandboxSessionResourcesServer):
-    ray_enabled = False
+class SWENextResourcesServer(SimpleResourcesServer):
     config: SWENextResourcesServerConfig
 
     def model_post_init(self, context: Any, /) -> None:
@@ -283,32 +286,16 @@ class SWENextResourcesServer(SandboxSessionResourcesServer):
                 drop_sections=drop_patch_sections,
             )
         finally:
-            await self._release_task_sandbox(session_id, original_sandbox)
+            await self._stop_sandbox(original_sandbox)
 
-    async def seed_session(
-        self, request: Request, body: SWENextSeedSessionRequest | ResourcesSeedSessionRequest
-    ) -> SWENextSeedSessionResponse | ResourcesSeedSessionResponse:
-        """Start the instance's image so an agent can work in it.
-
-        An Environment Server seeds a typed session and gets the sandbox back as ``sandbox_access``; an
-        agent's ``/run`` seeds with the row and gets the sandbox handle.
-        """
-        if isinstance(body, ResourcesSeedSessionRequest):
-            return await self.seed_task_sandbox_session(request, body, SWENextInstanceRequest)
+    async def seed_session(self, request: Request, body: SWENextSeedSessionRequest) -> SWENextSeedSessionResponse:
+        """Start the instance's image so an agent can work in it."""
         session_id = request.session[SESSION_ID_KEY]
         await self._stop_sandbox(self._session_id_to_sandbox.pop(session_id, None))
-        await self._start_task_sandbox(session_id, body)
-        return SWENextSeedSessionResponse(
-            sandbox_handle=str(self._session_id_to_sandbox[session_id]._handle.sandbox_id)
-        )
-
-    async def _start_task_sandbox(self, session_id: str, body: SWENextInstanceRequest) -> str:
-        """Start the instance's image so an agent can work in it."""
-        self._forget_task_sandbox_state(session_id)
+        self._session_id_to_pristine_untracked.pop(session_id, None)
+        self._session_id_to_base_commit.pop(session_id, None)
 
         sandbox = await self._create_sandbox(body)
-        # Own the sandbox before preparing it, so a failed seed can still stop it.
-        self._session_id_to_sandbox[session_id] = sandbox
         await hide_grading_artifacts(sandbox, body.workdir)
         await self._init_git_repo(sandbox, body.workdir)
         if self.config.apply_anti_cheating:
@@ -321,11 +308,8 @@ class SWENextResourcesServer(SandboxSessionResourcesServer):
         self._session_id_to_pristine_untracked[session_id] = await self._pristine_untracked_files(
             sandbox, body.workdir
         )
-        return body.workdir
-
-    def _forget_task_sandbox_state(self, session_id: str) -> None:
-        self._session_id_to_pristine_untracked.pop(session_id, None)
-        self._session_id_to_base_commit.pop(session_id, None)
+        self._session_id_to_sandbox[session_id] = sandbox
+        return SWENextSeedSessionResponse(sandbox_handle=str(sandbox._handle.sandbox_id))
 
     async def verify(self, request: Request, body: SWENextVerifyRequest) -> SWENextVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
@@ -334,7 +318,6 @@ class SWENextResourcesServer(SandboxSessionResourcesServer):
         if self.config.is_verifying_golden_patch:
             capture = PatchCapture.static(body.patch, mode, "golden")
         else:
-            self._claim_task_sandbox(session_id)
             base_commit = self._session_id_to_base_commit.pop(session_id, "")
             if not base_commit:
                 capture = PatchCapture.static("", mode, "none")

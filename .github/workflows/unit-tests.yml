@@ -17,6 +17,11 @@ name: Unit tests
 on:
   workflow_call:
     inputs:
+      checkout-ref:
+        description: Exact revision selected by the caller; empty keeps the event default
+        type: string
+        required: false
+        default: ""
       base-ref:
         description: Base commit or ref used to classify changes
         required: false
@@ -36,10 +41,15 @@ jobs:
       run_servers: ${{ steps.changes.outputs.run_servers }}
       docs_only: ${{ steps.changes.outputs.docs_only }}
       server_all_changed_files: ${{ steps.changes.outputs.server_all_changed_files }}
+      # Every run that classifies no changes runs the full suite, and the routing test with it.
+      run_session_routing_e2e: >-
+        ${{ steps.session-routing-changes.outputs.any_changed == 'true'
+        || (inputs.base-ref == '' && github.event_name != 'pull_request') }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: ${{ inputs.checkout-ref }}
           submodules: 'recursive'
           fetch-depth: 0
 
@@ -48,20 +58,48 @@ jobs:
         uses: ./.github/actions/classify-changes
         with:
           base-ref: ${{ inputs.base-ref || github.event.pull_request.base.sha || '' }}
+          head-sha: ${{ inputs.checkout-ref }}
           force-run-all: ${{ inputs.base-ref == '' && github.event_name != 'pull_request' }}
 
-  # Core library unit tests (run once on a full run) + the changed-servers path. The full
-  # server suite is sharded into the parallel `server-suite` matrix below.
+      # The multi-worker session routing test starts real servers, so it runs only when the routing,
+      # or the server code it wires into, changes.
+      - name: Detect session routing changes
+        id: session-routing-changes
+        if: inputs.base-ref != '' || github.event_name == 'pull_request'
+        uses: step-security/changed-files@3dbe17c78367e7d60f00d78ae6781a35be47b4a1 # v45.0.1
+        with:
+          base_sha: ${{ inputs.base-ref || github.event.pull_request.base.sha || '' }}
+          sha: ${{ inputs.checkout-ref || github.sha }}
+          files: |
+            nemo_gym/server_runtime/request_handling/session_routing.py
+            nemo_gym/server_runtime/base_server.py
+            nemo_gym/utils/server_process.py
+            nemo_gym/client/**
+            nemo_gym/agents/base_responses_api_agent.py
+            nemo_gym/server_runtime/base_resources_server.py
+            nemo_gym/server_runtime/mcp_auto_exposure.py
+            resources_servers/interactive_browser/**
+            tests/e2e/session_routing/**
+
+  # Balance files across four jobs, each running four pytest workers.
   test:
-    name: Test
+    name: Core tests (shard ${{ matrix.shard }})
     needs: detect
     if: needs.detect.outputs.run_full == 'true' || needs.detect.outputs.run_servers == 'true'
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    runs-on: nemo-ci-aws-cpu-4-16
     timeout-minutes: 45
+    env:
+      NEMO_GYM_TEST_DATA_ROOT: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1
+      NLTK_DATA: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1/nltk_data
     steps:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: ${{ inputs.checkout-ref }}
           submodules: 'recursive'
 
       - name: Reclaim runner disk
@@ -77,23 +115,141 @@ jobs:
 
       - name: Install system test dependencies
         timeout-minutes: 20
-        run: |
-          for i in 1 2 3 4; do
-            timeout 5m sudo bash -c "apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates" && exit 0
-            echo "apt-get attempt $i/4 failed or timed out after 5m; retrying"
-          done
-          exit 1
+        run: bash scripts/ci/install_test_dependencies.sh
 
-      # Unconditional (not gated on run_full) and merged into one step, matching
-      # full-test-suite.yml's "Test" step, so the coverage gate below runs on every PR.
-      - name: Core + sandbox unit tests (coverage gate)
+      - name: Check shared test-data inventory
+        run: python3 scripts/ci/check_test_data.py --nltk-cache "$HOME/.cache/gym-test-data"
+
+      - name: Core unit tests
+        env:
+          COVERAGE_FILE: results/.coverage.core-${{ matrix.shard }}
+          GYM_CI_JUNIT_DIR: results/core-${{ matrix.shard }}
+        run: ./scripts/ci/core_unit_tests.sh "${{ matrix.shard }}" 4
+
+      - name: Upload core coverage and durations
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gym-core-coverage-${{ matrix.shard }}
+          path: |
+            results/.coverage.core-${{ matrix.shard }}
+            results/core-${{ matrix.shard }}/core.xml
+          include-hidden-files: true
+          if-no-files-found: error
+
+  sandbox-tests:
+    name: Sandbox tests
+    needs: detect
+    if: needs.detect.outputs.run_full == 'true' || needs.detect.outputs.run_servers == 'true'
+    runs-on: nemo-ci-aws-cpu-4-16
+    timeout-minutes: 60
+    env:
+      NEMO_GYM_TEST_DATA_ROOT: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1
+      NLTK_DATA: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1/nltk_data
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.checkout-ref }}
+          submodules: 'recursive'
+
+      - name: Reclaim runner disk
+        run: ./scripts/ci/reclaim_runner_disk.sh
+
+      - name: Cache uv dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-
+
+      - name: Install system test dependencies
+        timeout-minutes: 20
+        run: bash scripts/ci/install_test_dependencies.sh
+
+      - name: Check shared test-data inventory
+        run: python3 scripts/ci/check_test_data.py --nltk-cache "$HOME/.cache/gym-test-data"
+
+      - name: Sandbox unit tests
+        env:
+          COVERAGE_FILE: results/.coverage.sandbox
         run: |
-          ./scripts/ci/core_unit_tests.sh
           source ./scripts/ci/setup_dev.sh
-          uv sync --extra dev --extra sandbox --extra openshell --extra mlflow --extra wandb
-          source .venv/bin/activate
-          pytest --cov=. --cov-append --cov-report=term-missing \
-            --cov-fail-under="$(python3 scripts/ci/cov_fail_under.py)" --durations=10 -m sandbox
+          uv sync --extra dev --extra ray --extra sandbox --extra openshell --extra mlflow --extra wandb
+          pytest --cov=. --cov-report= --cov-fail-under=0 --durations=10 -m sandbox
+
+      - name: Upload sandbox coverage
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gym-core-coverage-sandbox
+          path: results/.coverage.sandbox
+          include-hidden-files: true
+          if-no-files-found: error
+
+  core-coverage:
+    name: Combined core coverage
+    needs: [test, sandbox-tests]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.checkout-ref }}
+
+      - name: Cache uv dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-
+
+      - name: Download coverage from every test job
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: gym-core-coverage-*
+          path: results/core-coverage
+          merge-multiple: true
+
+      - name: Enforce combined coverage gate
+        run: |
+          source ./scripts/ci/setup_dev.sh
+          python3 scripts/ci/combine_core_coverage.py results/core-coverage
+
+  changed-server-tests:
+    name: Changed server tests
+    needs: detect
+    if: needs.detect.outputs.run_servers == 'true'
+    runs-on: nemo-ci-aws-cpu-4-16
+    timeout-minutes: 45
+    env:
+      NEMO_GYM_TEST_DATA_ROOT: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1
+      NLTK_DATA: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1/nltk_data
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.checkout-ref }}
+          submodules: 'recursive'
+
+      - name: Reclaim runner disk
+        run: ./scripts/ci/reclaim_runner_disk.sh
+
+      - name: Cache uv dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-
+
+      - name: Install system test dependencies
+        timeout-minutes: 20
+        run: bash scripts/ci/install_test_dependencies.sh
+
+      - name: Check shared test-data inventory
+        run: python3 scripts/ci/check_test_data.py --nltk-cache "$HOME/.cache/gym-test-data"
 
       # The changed-server optimization is specific to GitHub pull requests; internal
       # GitLab merge requests always run the full eight-shard server suite.
@@ -129,13 +285,81 @@ jobs:
             exit 1
           fi
 
+  # Preserve the existing required check name; fail closed on missing or failed work.
+  test-result:
+    name: Test
+    timeout-minutes: 45
+    needs: [detect, test, sandbox-tests, core-coverage, changed-server-tests]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Aggregate core, coverage, and changed-server results
+        env:
+          DETECT_RESULT: ${{ needs.detect.result }}
+          RUN_FULL: ${{ needs.detect.outputs.run_full }}
+          RUN_SERVERS: ${{ needs.detect.outputs.run_servers }}
+          CORE_RESULT: ${{ needs.test.result }}
+          SANDBOX_RESULT: ${{ needs.sandbox-tests.result }}
+          COVERAGE_RESULT: ${{ needs.core-coverage.result }}
+          SERVERS_RESULT: ${{ needs.changed-server-tests.result }}
+        run: |
+          [[ "$DETECT_RESULT" == success ]] || exit 1
+          if [[ "$RUN_FULL" == true || "$RUN_SERVERS" == true ]]; then
+            [[ "$CORE_RESULT" == success && "$SANDBOX_RESULT" == success && "$COVERAGE_RESULT" == success ]] || exit 1
+          fi
+          if [[ "$RUN_SERVERS" == true ]]; then
+            [[ "$SERVERS_RESULT" == success ]] || exit 1
+          fi
+
+  # Real server processes with several uvicorn workers, which the unit tests above do not start.
+  session-routing-e2e:
+    name: Session routing end-to-end
+    needs: detect
+    if: needs.detect.outputs.run_session_routing_e2e == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.checkout-ref }}
+          submodules: 'recursive'
+
+      - name: Cache uv dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-
+
+      # The two-worker interactive_browser test runs the server from its own virtual environment,
+      # with a headless Chromium, and skips without them. `gym env test` builds and keeps that environment.
+      - name: Prepare interactive_browser
+        run: |
+          source ./scripts/ci/setup_dev.sh
+          gym env test --resources-server interactive_browser
+          resources_servers/interactive_browser/.venv/bin/python -m playwright install --with-deps chromium
+
+      - name: Multi-worker session routing end-to-end test
+        env:
+          NEMO_GYM_MULTIWORKER_E2E: "1"
+          # Ray's socket paths must stay under the AF_UNIX length limit.
+          RAY_TMPDIR: /tmp
+        run: |
+          source ./scripts/ci/setup_dev.sh
+          pytest tests/e2e/session_routing
+
   # Full server suite, split across NUM_SHARDS parallel runners. Only runs on a full run.
   server-suite:
     name: Server suite (shard ${{ matrix.shard }})
     needs: detect
     if: needs.detect.outputs.run_full == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+    runs-on: nemo-ci-aws-cpu-4-16
+    timeout-minutes: 60
+    env:
+      NEMO_GYM_TEST_DATA_ROOT: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1
+      NLTK_DATA: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1/nltk_data
     strategy:
       fail-fast: false
       matrix:
@@ -144,6 +368,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: ${{ inputs.checkout-ref }}
           submodules: 'recursive'
 
       - name: Reclaim runner disk
@@ -159,15 +384,21 @@ jobs:
 
       - name: Install system test dependencies
         timeout-minutes: 20
-        run: |
-          for i in 1 2 3 4; do
-            timeout 5m sudo bash -c "apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates" && exit 0
-            echo "apt-get attempt $i/4 failed or timed out after 5m; retrying"
-          done
-          exit 1
+        run: bash scripts/ci/install_test_dependencies.sh
+
+      - name: Check shared test-data inventory
+        run: python3 scripts/ci/check_test_data.py --nltk-cache "$HOME/.cache/gym-test-data"
 
       - name: Server tests (shard ${{ matrix.shard }}/${{ env.NUM_SHARDS }})
         run: ./scripts/ci/server_tests.sh "${{ matrix.shard }}" "${{ env.NUM_SHARDS }}"
+
+      - name: Upload server worker logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gym-server-worker-logs-${{ matrix.shard }}
+          path: results/server-workers
+          if-no-files-found: warn
 
   # Single aggregated gate for the sharded server suite — make this a required check
   # (in addition to "Test") instead of the individual shard jobs. `always()` so it also

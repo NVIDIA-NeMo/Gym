@@ -7,8 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import NeMoGymAsyncOpenAI, ServerClient
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 from responses_api_models.vllm_model_with_compaction.app import (
     VLLMContextCompactionResponseCreateParams,
@@ -16,7 +15,7 @@ from responses_api_models.vllm_model_with_compaction.app import (
 )
 
 
-def _make_model() -> VLLMModelWithCompaction:
+def _make_model(**config_overrides: Any) -> VLLMModelWithCompaction:
     config = VLLMModelConfig(
         host="0.0.0.0",
         port=8080,
@@ -29,11 +28,17 @@ def _make_model() -> VLLMModelWithCompaction:
         request_prompt_and_generation_token_ids=True,
         uses_reasoning_parser=False,
         uses_interleaved_reasoning=False,
+        **config_overrides,
     )
     return VLLMModelWithCompaction(
         config=config,
         server_client=MagicMock(spec=ServerClient, global_config_dict={}),
     )
+
+
+def test_rejects_forward_unvalidated_reasoning_effort() -> None:
+    with pytest.raises(ValueError, match="does not support forward_unvalidated_reasoning_effort"):
+        _make_model(forward_unvalidated_reasoning_effort=True)
 
 
 def test_tokenize_route_is_non_generating() -> None:
@@ -80,6 +85,57 @@ def test_context_compaction_conversion_keeps_prefix_out_of_shared_schema() -> No
 
     assert "required_prefix_token_ids" not in standard_body.model_dump()
     assert chat_params.required_prefix_token_ids == [10, 11]
+
+
+@pytest.mark.parametrize("drop_unrepresentable_request_fields", [False, True])
+def test_compaction_endpoint_honors_the_unrepresentable_fields_switch(
+    drop_unrepresentable_request_fields: bool,
+) -> None:
+    # The compaction server converts through the same shared converter as the plain vLLM server,
+    # so the switch governs its conversion too: off, a field with no Chat Completions
+    # representation refuses the request; on, the reporting-only field is dropped, the request
+    # succeeds, and the exact prefix still travels with the converted request.
+    model = _make_model(drop_unrepresentable_request_fields=drop_unrepresentable_request_fields)
+    captured_kwargs: dict[str, Any] = {}
+
+    async def mock_create_chat_completion(**kwargs):
+        captured_kwargs.update(kwargs)
+        return {
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "dummy_model",
+            "prompt_token_ids": [10, 11, 12],
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "token_ids": [13],
+                    "message": {"role": "assistant", "content": "ok", "tool_calls": None},
+                    "logprobs": {
+                        "content": [{"token": "token_id:13", "logprob": -0.1, "bytes": None, "top_logprobs": []}]
+                    },
+                }
+            ],
+        }
+
+    mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+    mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+    model._clients = [mock_client]
+    client = TestClient(model.setup_webserver())
+    request = {"input": "hi", "include": ["reasoning.encrypted_content"], "required_prefix_token_ids": [10, 11]}
+
+    if not drop_unrepresentable_request_fields:
+        with pytest.raises(NotImplementedError, match="include"):
+            client.post("/v1/responses", json=request)
+        mock_client.create_chat_completion.assert_not_awaited()
+        return
+
+    response = client.post("/v1/responses", json=request)
+
+    assert response.status_code == 200
+    assert "include" not in captured_kwargs
+    assert captured_kwargs["required_prefix_token_ids"] == [10, 11]
 
 
 def test_plain_responses_endpoint_forwards_exact_prefix() -> None:
@@ -194,3 +250,40 @@ def test_tokenize_endpoint_forwards_exact_prefix_without_sampling() -> None:
     assert captured_kwargs["required_prefix_token_ids"] == [10, 11]
     assert "logprobs" not in captured_kwargs
     assert "return_token_ids" not in captured_kwargs
+
+
+@pytest.mark.parametrize(
+    ("finish_reason", "recorded"),
+    [("stop", "stop"), ("tool_calls", "tool_calls"), ("length", "max_output_tokens")],
+)
+async def test_responses_note_the_finish_reason_for_the_model_call_record(
+    finish_reason, recorded, monkeypatch
+) -> None:
+    from types import SimpleNamespace
+
+    from nemo_gym.core import NeMoGymChatCompletion, NeMoGymChatCompletionMessage, NeMoGymChoice
+    from nemo_gym.trajectory import build_model_call_record
+
+    model = _make_model()
+    completion = NeMoGymChatCompletion(
+        id="chatcmpl-test",
+        created=1,
+        model="dummy_model",
+        object="chat.completion",
+        choices=[
+            NeMoGymChoice(
+                index=0,
+                finish_reason=finish_reason,
+                message=NeMoGymChatCompletionMessage(role="assistant", content="ok", tool_calls=[]),
+            )
+        ],
+    )
+    monkeypatch.setattr(VLLMModelWithCompaction, "chat_completions", AsyncMock(return_value=completion))
+    request = MagicMock(state=SimpleNamespace())
+
+    response = await model.responses(
+        request, VLLMContextCompactionResponseCreateParams(input="hi", required_prefix_token_ids=[1])
+    )
+
+    exchange = {"response": response.model_dump(mode="json"), **request.state.nemo_gym_model_execution}
+    assert build_model_call_record(exchange, call_index=0).finish_reason == recorded

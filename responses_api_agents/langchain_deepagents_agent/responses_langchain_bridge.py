@@ -51,8 +51,8 @@ from langchain_core.runnables import ensure_config
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import Field
 
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseOutputText, accumulate_response_usage
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseOutputText, accumulate_response_usage
 
 
 def _text(content: Any) -> str:
@@ -230,7 +230,7 @@ class GymResponsesChatModel(BaseChatModel):
         raise NotImplementedError("GymResponsesChatModel is async-only; use ainvoke/astream_events.")
 
     def bind_tools(self, tools, *, tool_choice=None, **kwargs):
-        # Gym's FunctionToolParam (nemo_gym/openai_utils.py, a passthrough of the real OpenAI Responses
+        # Gym's FunctionToolParam (nemo_gym/client/openai_client.py, a passthrough of the real OpenAI Responses
         # API type) requires "strict" as a present-but-nullable field — omitting it entirely fails
         # request validation ("Field required"), confirmed by actually running this against a live
         # model server. convert_to_openai_tool()'s "function" dict doesn't include it by default.

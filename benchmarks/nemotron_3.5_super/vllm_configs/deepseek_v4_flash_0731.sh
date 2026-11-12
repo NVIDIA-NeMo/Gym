@@ -28,22 +28,20 @@ VLLM_COMMON_ARGS=(
     --data-parallel-size-local 1
     --tensor-parallel-size 4
     --api-server-count 1
-    --attention_config.use_fp4_indexer_cache True
+    --attention-config '{"indexer_kv_dtype":"mxfp4"}'
     --moe-backend deep_gemm_mega_moe
     --speculative-config '{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"greedy"}'
 )
-PREFILL_KV_TRANSFER_CONFIG='{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}'
-DECODE_KV_TRANSFER_CONFIG='{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}'
 
 VLLM_PREFILL_ARGS=(
-    --kv-transfer-config "$PREFILL_KV_TRANSFER_CONFIG"
-    --max-num-batched-tokens 33920
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}'
+    --max-num-batched-tokens 131072
     --max-num-seqs 1024
 )
 VLLM_DECODE_ARGS=(
-    --kv-transfer-config "$DECODE_KV_TRANSFER_CONFIG"
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}'
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
     --max-cudagraph-capture-size 2048
-    --max-num-batched-tokens 33920
+    --max-num-batched-tokens 32768
     --max-num-seqs 1024
 )

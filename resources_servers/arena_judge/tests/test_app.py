@@ -17,16 +17,17 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from pytest import approx, fixture
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    NgFailureEvent,
 )
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.verification import is_judge_failure
 from resources_servers.arena_judge.app import (
     ArenaJudgeConfig,
     ArenaJudgeServer,
@@ -163,7 +164,7 @@ class TestExtractOutputText:
         assert ArenaJudgeServer._extract_response_output_text(response) == ""
 
     def test_chat_completion_extracts_content(self) -> None:
-        from nemo_gym.openai_utils import NeMoGymChatCompletion
+        from nemo_gym.core import NeMoGymChatCompletion
 
         completion = NeMoGymChatCompletion.model_validate(_make_chat_completion("judge verdict text"))
         assert ArenaJudgeServer._extract_chat_completion_text(completion) == "judge verdict text"
@@ -309,7 +310,7 @@ class TestArenaJudgeServer:
         server_mock.post = AsyncMock(side_effect=RuntimeError("judge timeout"))
         server = ArenaJudgeServer(config=config, server_client=server_mock)
 
-        with pytest.raises(JudgeError):
+        with pytest.raises(NgFailureEvent) as failure:
             await server.verify(
                 ArenaJudgeVerifyRequest(
                     responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
@@ -319,6 +320,7 @@ class TestArenaJudgeServer:
                     category="hard_prompt",
                 )
             )
+        assert is_judge_failure(failure.value)
 
     @pytest.mark.asyncio
     async def test_unknown_category_falls_back_to_default(self, config: ArenaJudgeConfig) -> None:
@@ -526,7 +528,7 @@ class TestComputeAndKeyMetrics:
 
 class TestExtractChatCompletionEdgeCases:
     def test_no_choices_returns_empty(self) -> None:
-        from nemo_gym.openai_utils import NeMoGymChatCompletion
+        from nemo_gym.core import NeMoGymChatCompletion
 
         completion = NeMoGymChatCompletion.model_validate(
             {

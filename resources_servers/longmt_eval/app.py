@@ -25,7 +25,7 @@ import ray
 from fastapi import FastAPI
 from pydantic import PrivateAttr
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,

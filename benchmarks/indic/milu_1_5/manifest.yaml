@@ -1,0 +1,31 @@
+name: indic/milu_1_5
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: knowledge
+description: Zero-shot generated-answer evaluation on the multilingual MILU-1.5 benchmark
+modality: text
+licensing: CC-BY-4.0
+authors:
+- anushaknvidia
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: mcqa
+agent_server: simple_agent
+datasets:
+- name: milu_1_5
+  type: benchmark
+  jsonl_fpath: benchmarks/indic/milu_1_5/data/milu_1_5_benchmark.jsonl
+  prepare_script: benchmarks/indic/milu_1_5/prepare.py
+  prompt_config: benchmarks/indic/milu_1_5/prompts/default.yaml
+  num_repeats: 1
+model_server: policy_model
+grading_mode: boxed_and_normalized
+canonical_split: benchmark
+standard_prompt_config: benchmarks/indic/milu_1_5/prompts/default.yaml
+lifecycle: active

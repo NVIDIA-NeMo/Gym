@@ -50,4 +50,4 @@ Load references only when the user needs that detail:
 
 - Treat `gym eval profile` as the reward profiling step; rollout collection does not write reward profile files.
 - Run strict profiling by default. If rollout collection stopped early, use `++allow_partial_rollouts=True` to profile completed rollouts and drop original input rows with no completed rollout.
-- Trust the target checkout's CLI help and `nemo_gym/reward_profile.py` over memory if flags differ.
+- Trust the target checkout's CLI help and `nemo_gym/metrics/reward_profile.py` over memory if flags differ.
