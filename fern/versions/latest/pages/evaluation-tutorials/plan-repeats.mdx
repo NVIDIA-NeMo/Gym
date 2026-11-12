@@ -18,15 +18,17 @@ One repeat is one complete pass over a fixed benchmark task population. Supply t
 
 ## 1. Define the decision before collecting results
 
-Start with one model and one benchmark. Assume a complete-pass SD of one score point for both checkpoints. Choose these planning settings:
+Start with one model and one benchmark. Assume a complete-pass SD of one score point for both checkpoints. The goal is to establish non-inferiority: the candidate's quality loss is smaller than the amount you agreed to tolerate. Choose these inputs before running the experiment:
 
-| Setting | Value | Meaning |
+| Planning input | Example value | Meaning in this example |
 | --- | --- | --- |
-| Acceptable loss | 1 point | Establish that the true candidate-minus-baseline change is above −1 point. |
-| Assumed true change | 0 points | Forecast equal baseline and candidate quality. |
-| Target analytic power | 80% | Target an 80% chance of establishing the chosen non-inferiority claim under the planning model. |
-| One-sided significance level | 5% | Use the lower bound of a two-sided 90% Welch interval for the final decision. |
-| Distinct candidate checkpoints | 1 | Compare one candidate with the baseline; this is separate from repeat count. |
+| Acceptable quality loss (margin) | 1 point | Agree that a true loss of 1 point or more is unacceptable. Confirm acceptable quality only when the confidence interval rules out that loss. |
+| Assumed true score difference | 0 points | Plan repeats assuming the candidate and baseline truly have the same average score. The difference is candidate minus baseline. |
+| Chance of confirming acceptable quality (target analytic power) | 80% | If the checkpoints truly have equal average scores, aim for about 80 out of 100 experiments to confirm that the candidate loses less than 1 point. |
+| False acceptance at the loss boundary (one-sided significance level) | 5% | Now assume the candidate is truly 1 point worse than baseline. At the nominal test level, about 5 out of 100 experiments could mistakenly confirm acceptable quality because of random variation. |
+| Number of candidate checkpoints | 1 | Plan one candidate-versus-baseline comparison. The planner chooses how many complete passes to collect for each checkpoint. |
+
+Power and false acceptance describe repeated experiments under different assumed true differences, using the supplied SDs. They are planning probabilities, not the probability that a particular candidate is good. For this one-sided 5% test, confirm acceptable quality when the lower endpoint of the two-sided 90% Welch interval is strictly above −1 point.
 
 Copy the complete single-benchmark example:
 
