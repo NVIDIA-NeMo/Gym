@@ -215,6 +215,23 @@ def _compaction_settings(harness: str, scenario: Scenario) -> DictConfig:
             },
         },
         "pi": {"harness_overrides": context},
+        "kilocode": {
+            "harness_overrides": {
+                **context,
+                "kilo_config": {"compaction": {"auto": True}},
+            },
+            "probe_overrides": {
+                "responses": [
+                    *[
+                        {"kind": "tool", "input_tokens": 500, "output_tokens": 8}
+                        for _ in range(scenario.tool_steps - 1)
+                    ],
+                    {"kind": "tool", "input_tokens": 27000, "output_tokens": 8},
+                    {"kind": "summary", "input_tokens": 500, "output_tokens": 11},
+                    {"kind": "final", "input_tokens": 100, "output_tokens": 8},
+                ],
+            },
+        },
         "codex": {
             "harness_overrides": {
                 "model_context_window": 32768,
