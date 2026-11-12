@@ -41,7 +41,7 @@ def wait_for(path):
         time.sleep(0.01)
 
 
-def launch(tmp_path, script, timeout=SUPERVISOR_TIMEOUT_SECONDS, env=None):
+def launch(tmp_path, script, timeout=SUPERVISOR_TIMEOUT_SECONDS, env=None, path_prefix=()):
     """Stage ``script`` as Pi's CLI exactly as an activation does, then start it under the supervisor."""
     shutil.copyfile(HARNESS_RUNNER_SCRIPT, tmp_path / HARNESS_RUNNER_FILE)
     state = PiSandboxSession(
@@ -49,7 +49,11 @@ def launch(tmp_path, script, timeout=SUPERVISOR_TIMEOUT_SECONDS, env=None):
         session=SandboxSession(sandbox=LocalFiles(), session_dir=str(tmp_path), workdir=str(tmp_path), harness="Pi"),
         runtime="/unused",
     )
-    command = asyncio.run(state.stage_activation(command=["bash", "-c", script], env=env or {}, prompt="task input"))
+    command = asyncio.run(
+        state.stage_activation(
+            command=["bash", "-c", script], env=env or {}, prompt="task input", path_prefix=path_prefix
+        )
+    )
     return subprocess.Popen(
         ["bash", str(SUPERVISOR_SCRIPT), "--timeout", str(timeout), "--cleanup-timeout", str(CLEANUP_TIMEOUT_SECONDS)]
         + ["--stop-file", str(tmp_path / "stop.request"), "--receipt", str(tmp_path / "cleanup.json")]
@@ -97,6 +101,21 @@ def test_capture_stdin_and_environment(tmp_path, monkeypatch):
     assert recorded_at > 0
     assert event == {"prompt": "task input", "inherited": "inherited", "override": "new"}
     assert set(json.loads((tmp_path / "runtime.json").read_text())) == {"hostname", "pid"}
+
+
+def test_path_prefix_reaches_the_tools_pi_runs(tmp_path, monkeypatch):
+    tools = tmp_path / "preinstalled tools"
+    tools.mkdir()
+    (tools / "pi-test-tool").write_text("#!/bin/sh\necho preinstalled\n")
+    (tools / "pi-test-tool").chmod(0o755)
+    monkeypatch.setenv("PATH", f"/sandbox/bin:{os.environ['PATH']}")
+    # Pi runs its tools in a child shell, which must find the preinstalled tool and the sandbox's own commands.
+    script = 'printf \'{"tool": "%s", "path": "%s"}\' "$(bash -c pi-test-tool)" "$PATH"'
+    summary = result(tmp_path, launch(tmp_path, script, path_prefix=[str(tools), "/opt/other"]))
+    assert summary["return_code"] == 0
+    _, event = json.loads((tmp_path / "events.jsonl").read_text())
+    assert event["tool"] == "preinstalled"
+    assert event["path"] == f"{tools}:/opt/other:{os.environ['PATH']}"
 
 
 @pytest.mark.parametrize("ending", ["natural", "timeout", "cancel"])

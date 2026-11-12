@@ -119,6 +119,9 @@ installing one. A runtime that is missing or runs another version refuses the se
 The Node runtime, Pi package, and private `PI_CODING_AGENT_DIR` are outside the task repository.
 Task HOME and XDG directories are preserved for tools and verification. Pi's
 Node is addressed by absolute path; it does not replace the task's Python or Node on PATH.
+Sandbox sessions reject `env` overrides, so a tool the image or a mount holds outside the default PATH,
+such as `rg` where restricted egress blocks downloads, is reached through `sandbox_path_prefix`: its
+directories come first on PATH for Pi and every command Pi runs, in every activation.
 Sandbox sessions bound each bash command and advise the agent to search repository/local
 dependency directories rather than shared mounts. This returns control after a stalled tool;
 the separate `timeout` still bounds the whole agent episode. Installer errors include both
@@ -308,6 +311,8 @@ detail, not a separate endpoint or a setup step users must run.
 - `sandbox_install_timeout_seconds`: sandbox runtime installation timeout (default 600)
 - `sandbox_runtime_dir`: absolute sandbox path of a preinstalled runtime to use instead of installing one
   (default none)
+- `sandbox_path_prefix`: sandbox directories put first on PATH for Pi and the tools it runs in every
+  activation, ahead of the sandbox's own PATH (default none)
 - `network_access`: egress of a sandbox the agent creates: `inherit` (default, the provider's network),
   `model_only`, or `model_and_tools`; OpenSandbox only
 - `sandbox_bash_timeout_seconds`: maximum runtime of each sandbox bash tool call (default 900);

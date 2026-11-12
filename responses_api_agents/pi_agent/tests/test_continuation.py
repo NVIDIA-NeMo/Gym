@@ -34,6 +34,7 @@ from responses_api_agents.pi_agent.tests.test_sandbox import (  # noqa: F401  (s
     setup,
     staged,
     staged_attachments,
+    staged_path,
 )
 
 
@@ -157,6 +158,30 @@ def test_later_activation_resumes_the_saved_conversation_with_its_own_images(set
     # Each activation's response carries that activation's own observations.
     assert root_invocations(first.json()["_ng_agent_observations"]) == [(1, "completed", None, True)]
     assert root_invocations(second.json()["_ng_agent_observations"]) == [(2, "completed", None, True)]
+
+
+def test_every_activation_puts_the_path_prefix_first(setup):
+    agent, sandbox = setup
+    agent.config.sandbox_path_prefix = ["/mnt/tools/bin"]
+    paths = []
+    run = sandbox.run
+
+    async def record_run(command, **kwargs):
+        result = await run(command, **kwargs)
+        paths.append((sandbox.directory, staged_path(sandbox)))
+        return result
+
+    sandbox.launch.side_effect = record_run
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=continuation_seed()).json()["agent_session_id"]
+        for index in (1, 2):
+            response = activate(client, index, {"input": f"turn {index}"})
+            assert response.status_code == 200, response.text
+        assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
+
+    # Each activation stages its own runner parameters, in its own directory.
+    assert [path for _, path in paths] == ["/mnt/tools/bin:/sandbox/bin"] * 2
+    assert len({directory for directory, _ in paths}) == 2
 
 
 def test_activation_decodes_its_images_once(setup, monkeypatch):

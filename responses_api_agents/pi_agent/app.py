@@ -696,6 +696,13 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
             "installing one."
         ),
     )
+    sandbox_path_prefix: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Directories inside the sandbox put first on `PATH` for Pi and the tools it runs in every activation of a "
+            "sandbox session, such as preinstalled tools outside the image's default `PATH`."
+        ),
+    )
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     sandbox_bash_timeout_seconds: int = Field(default=900, gt=0)
     sandbox_mcp_timeout_seconds: float = Field(
@@ -1121,6 +1128,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                         close_timeout=self.config.session_close_timeout_seconds,
                         files=files,
                         deadline=deadline if deadline is not None else monotonic() + timeout,
+                        path_prefix=self.config.sandbox_path_prefix,
                     )
                 except TimeoutError:
                     # The supervisor stops Pi at the deadline, and execute returns. If the provider's exec limit
