@@ -53,7 +53,18 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY
 from nemo_gym.client import SESSION_ID_KEY, get_server_url
 from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
-from nemo_gym.core import AGENT_TIMEOUT, JUDGE_FAILED, SESSION_EXPIRED, SESSION_LOST, EpisodeId, TaskId
+from nemo_gym.core import (
+    AGENT_LIMIT,
+    AGENT_TIMEOUT,
+    JUDGE_FAILED,
+    MODEL_CONTEXT_LIMIT,
+    SESSION_EXPIRED,
+    SESSION_LOST,
+    EpisodeId,
+    FailureClass,
+    OutcomeAction,
+    TaskId,
+)
 from nemo_gym.environment import is_deliverable
 from nemo_gym.rollouts import NG_TERMINAL_KEY
 from nemo_gym.sandbox import AsyncSandbox, DirectSandboxConnection, SandboxAccess
@@ -561,9 +572,39 @@ def _permanent_judge_failure(
     )
 
 
-# The agent ran out of wall time. With the agent's answer kept, this is the model's result: never run again and left
-# out of the fit (`is_answered_agent_deadline`). Without one it is retried like any other timeout.
-_AGENT_TIMEOUT = {NG_FAILURE_CLASS_KEY: AGENT_TIMEOUT, "failure_kind": AGENT_TIMEOUT, "mask_sample": True}
+# The agent ran out of wall time: the model's result, with no deliverable to judge. The row is not masked. In comparison
+# mode it is scored as a loss against every reference (`_no_deliverable_loss`), so it stays in the denominator and the
+# Elo fit; in rubric mode it is a zero. It keeps no outcome action, so recovery still runs a timeout whose window held a
+# server-side fault again (`is_infrastructure_agent_timeout`) and settles a clean one as the model's final result.
+_AGENT_TIMEOUT = {
+    "failure_kind": AGENT_TIMEOUT,
+    "failure_outcome_attribution": FailureClass.MODEL,
+    "failure_reason": "The agent ran out of wall time before it delivered",
+}
+
+# The ``judge_response.manual_imputation`` values of a row scored as a loss without a judgment.
+_IMPUTED_LOSS_KINDS = frozenset({"eval_missing_as_loss", "model_failure_as_loss"})
+
+# Stop reasons the agent reports when the model itself ended the run without a deliverable.
+_MODEL_STOP_FAILURE_KINDS = {
+    "context_limit": MODEL_CONTEXT_LIMIT,
+    "max_iterations": AGENT_LIMIT,
+    "max_turns": AGENT_LIMIT,
+}
+
+
+def _model_stop_failure(body: "GDPValVerifyRequest") -> Optional[Dict[str, Any]]:
+    """The row fields of a run the model ended itself (context or turn limit); None for any other stop."""
+    kind = _MODEL_STOP_FAILURE_KINDS.get((body.response.metadata or {}).get("stop_reason"))
+    if kind is None:
+        return None
+    return {
+        "failure_kind": kind,
+        "failure_outcome_action": OutcomeAction.COUNT_AS_ZERO,
+        "failure_outcome_attribution": FailureClass.MODEL,
+        "failure_reason": f"The agent stopped without a deliverable ({kind})",
+    }
+
 
 # judge_deliverables=false saves the deliverables without judging them, so the row is masked under this kind.
 JUDGING_DISABLED = "gdpval:judging_disabled"
@@ -1078,6 +1119,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
     async def verify(self, request: Request, body: GDPValVerifyRequest) -> GDPValVerifyResponse:
         body, masked = await resolve_deliverables(self, request, body)
         if masked is not None:
+            if self.config.reward_mode == "comparison" and not masked.get("mask_sample"):
+                return await self._verify_comparison(body, model_failure=masked)
             return GDPValVerifyResponse(**body.model_dump(), verify_mode=self.config.reward_mode, **masked)
         if self.config.reward_mode == "comparison":
             return await self._verify_comparison(body)
@@ -1214,7 +1257,52 @@ class GDPValResourcesServer(SimpleResourcesServer):
             for msg in errors[:5]:
                 LOGGER.warning("preconvert %s: %s", label, msg)
 
-    async def _verify_comparison(self, body: GDPValVerifyRequest) -> GDPValVerifyResponse:
+    def _no_deliverable_loss(
+        self,
+        body: GDPValVerifyRequest,
+        ref_dirs_by_id: Dict[str, List[Path]],
+        imputation: str,
+        failure_fields: Optional[Dict[str, Any]] = None,
+    ) -> GDPValVerifyResponse:
+        """A row with no deliverable, scored as every comparison trial lost against every reference."""
+        per_reference = {
+            ref_id: {
+                "wins": 0,
+                "losses": self.config.num_comparison_trials * len(dirs),
+                "ties": 0,
+                "reference_elo": self._references[ref_id].elo,
+                "ref_repeat_count": len(dirs),
+            }
+            for ref_id, dirs in ref_dirs_by_id.items()
+        }
+        total_losses = sum(counts["losses"] for counts in per_reference.values())
+        return GDPValVerifyResponse(
+            **body.model_dump(),
+            reward=0.0,
+            verify_mode="comparison",
+            judge_response={
+                "manual_imputation": imputation,
+                "per_reference": per_reference,
+                "total_wins": 0,
+                "total_losses": total_losses,
+                "total_ties": 0,
+                "total_judged": total_losses,
+                "total_invalid": 0,
+                "ref_errors": {},
+            },
+            win=False,
+            loss=True,
+            tie=False,
+            total_wins=0,
+            total_losses=total_losses,
+            total_ties=0,
+            per_reference=per_reference,
+            **{key: value for key, value in (failure_fields or {}).items() if key != "reward"},
+        )
+
+    async def _verify_comparison(
+        self, body: GDPValVerifyRequest, *, model_failure: Optional[Dict[str, Any]] = None
+    ) -> GDPValVerifyResponse:
         from openai import OpenAI
 
         from resources_servers.gdpval.comparison import (
@@ -1273,46 +1361,22 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 **_gdpval_failure(REFERENCE_MISSING_FAILURE_CLASS, terminal=True),
             )
 
+        if model_failure is not None:
+            # The model delivered nothing (it ran out of time): a battle it lost against every reference, never a
+            # masked row, so the pairwise fit keeps it.
+            return self._no_deliverable_loss(body, ref_dirs_by_id, "model_failure_as_loss", model_failure)
+
         if eval_task_dir is None or not task_attempted(str(eval_task_dir)):
             print(f"[gdpval] eval deliverable missing for task {body.task_id}", flush=True)
+            model_stop = _model_stop_failure(body)
+            if model_stop is not None:
+                return self._no_deliverable_loss(body, ref_dirs_by_id, "model_failure_as_loss", model_stop)
             if (
                 self.config.count_eval_missing_as_loss
                 and body.stage_index == 1
                 and body.task_id in self.config.missing_eval_task_ids
             ):
-                per_reference = {
-                    ref_id: {
-                        "wins": 0,
-                        "losses": self.config.num_comparison_trials * len(dirs),
-                        "ties": 0,
-                        "reference_elo": self._references[ref_id].elo,
-                        "ref_repeat_count": len(dirs),
-                    }
-                    for ref_id, dirs in ref_dirs_by_id.items()
-                }
-                total_losses = sum(counts["losses"] for counts in per_reference.values())
-                return GDPValVerifyResponse(
-                    **body.model_dump(),
-                    reward=0.0,
-                    verify_mode="comparison",
-                    judge_response={
-                        "manual_imputation": "eval_missing_as_loss",
-                        "per_reference": per_reference,
-                        "total_wins": 0,
-                        "total_losses": total_losses,
-                        "total_ties": 0,
-                        "total_judged": total_losses,
-                        "total_invalid": 0,
-                        "ref_errors": {},
-                    },
-                    win=False,
-                    loss=True,
-                    tie=False,
-                    total_wins=0,
-                    total_losses=total_losses,
-                    total_ties=0,
-                    per_reference=per_reference,
-                )
+                return self._no_deliverable_loss(body, ref_dirs_by_id, "eval_missing_as_loss")
             if self.config.strict_comparison_trials:
                 raise RuntimeError(f"strict comparison trial contract failed for task {body.task_id}: eval_missing")
             # Terminal for the same reason as reference_missing above: a
@@ -1998,7 +2062,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     judge_response = vr.get("judge_response")
                     if (
                         isinstance(judge_response, dict)
-                        and judge_response.get("manual_imputation") == "eval_missing_as_loss"
+                        and judge_response.get("manual_imputation") in _IMPUTED_LOSS_KINDS
                     ):
                         imputed.append(vr)
                     elif sum(_votes(vr)) > 0:
