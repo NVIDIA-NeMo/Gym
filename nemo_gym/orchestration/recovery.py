@@ -44,6 +44,7 @@ reports a run as complete while an identity is terminal, missing or unknown.
 import hashlib
 import math
 import os
+import re
 import time
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -368,6 +369,15 @@ def failed_judge_jobs_blocking(
     ):
         return None
     return ids
+
+
+# What ``failed_judge_jobs_stop`` says, read back by the operator verdict: the jobs, where to read them, and whether
+# they can be acknowledged.
+_FAILED_JUDGE_JOBS = re.compile(
+    rf"the last {JUDGE_JOB_FAILURE_BOUND} judge-only job\(s\) \((?P<ids>.*?)\) ended without settling a saved answer; "
+    r"read their receipts and logs under (?P<where>.*?) before another is queued(?P<unacknowledgeable>; a job without "
+    r"an id cannot be acknowledged)?"
+)
 
 
 def failed_judge_jobs_stop(ids: Sequence[str | None], where: str) -> str:
@@ -1532,7 +1542,14 @@ def decide_recovery(
                         )
                     )
                 )
-                + f"; {EXTEND_ATTEMPTS_HINT}",
+                + f"; {EXTEND_ATTEMPTS_HINT}"
+                # More attempts alone would stop again on a spent budget of the chain, so name every one now.
+                + (
+                    f"; a resume of them would also stop, as {' and '.join(spent)}: raise every spent budget in "
+                    "one call"
+                    if (spent := _spent_chain_budgets(budget))
+                    else ""
+                ),
             )
         if counts.get(IdentityState.MASKED):
             return decision(
@@ -1602,10 +1619,33 @@ def decide_recovery(
 _INFRA_BUDGET_USED_PREFIX = "the stored infra-retry budget is used"
 _ATTEMPTS_USED_TOKEN = "used every attempt since the last resubmit"
 _WALLTIME_USED_TOKEN = "the stored walltime budget is used"
+# A refused or stopped recovery records none of the extensions it asked for, so the next one must ask again.
+_NOT_RECORDED_TOKEN = "asked in this call is not recorded, as nothing was queued: ask it again in the same call"
+
 _EXTEND_RETRIES_SCOPE = (
     "--extend-retries raises infra retries only; it does not raise the per-identity attempt cap "
     "(max_rollout_attempts={cap})"
 )
+
+
+def _spent_chain_budgets(budget: RecoveryBudget) -> list[str]:
+    """The stored infra-retry and walltime budgets a resume would stop on, as their stop texts."""
+    spent = []
+    if (
+        budget.max_infra_retries is not None
+        and budget.infra_retries_used is not None
+        and budget.infra_retries_used >= budget.max_infra_retries
+    ):
+        spent.append(f"{_INFRA_BUDGET_USED_PREFIX} ({budget.infra_retries_used} of {budget.max_infra_retries})")
+    # A chain stops once less than a minute of its walltime remains.
+    if (
+        budget.walltime_capped
+        and budget.walltime_used_s is not None
+        and budget.max_walltime_s is not None
+        and budget.max_walltime_s - budget.walltime_used_s < 60
+    ):
+        spent.append(f"{_WALLTIME_USED_TOKEN} ({budget.walltime_used_s:g} of {budget.max_walltime_s:g} s)")
+    return spent
 
 
 def omission_summary(evidence: Iterable[IdentityEvidence]) -> str:
@@ -2338,6 +2378,17 @@ def _decide_from_collected(
             "records, as no allocation stored it"
         )
         decision = decision.model_copy(update={"reason": f"{decision.reason}; {derived}"})
+    if decision.action == RecoveryAction.STOP and _budget_extensions(decision.reason):
+        # A stop on one spent budget records no extension this call asked for: name each, so the next call keeps it.
+        asked = (
+            (f"--extend-attempts {extend_attempts}", extend_attempts and _ATTEMPTS_USED_TOKEN not in decision.reason),
+            (
+                f"--extend-retries {extend_retries}",
+                extend_retries and _INFRA_BUDGET_USED_PREFIX not in decision.reason,
+            ),
+        )
+        if notes := [f"{flag} {_NOT_RECORDED_TOKEN}" for flag, unrecorded in asked if unrecorded]:
+            decision = decision.model_copy(update={"reason": "; ".join([decision.reason, *notes])})
     if unknown:
         decision = decision.model_copy(update={"reason": f"{decision.reason}\n{UNKNOWN_BUDGET_HINT}"})
     return decision
@@ -5967,13 +6018,11 @@ def gate_summary_from_collected(
 
 
 def _rejudged_after_judge_failure(
-    decision: RecoveryDecision, collected: CollectedEvidence, only: set[Identity] | None = None
+    decision: RecoveryDecision, collected: CollectedEvidence, only: set[Identity]
 ) -> tuple[set[Identity], Counter]:
-    """The scored identities with a saved judge failure (their answer was judged again), and the HTTP statuses of it.
-    ``only`` limits it to those identities."""
-    scored = set(decision.identities.get(IdentityState.SCORED.value, []))
-    if only is not None:
-        scored &= only
+    """The scored identities among ``only`` with a saved judge failure (their answer was judged again), and the HTTP
+    statuses of it."""
+    scored = set(decision.identities.get(IdentityState.SCORED.value, [])) & only
     found: set[Identity] = set()
     statuses: Counter = Counter()
     for row in collected.failures or []:
@@ -6001,18 +6050,13 @@ def unverified_cause(
     trials = trial_population(_health_view(decision))
     unobserved_ids: set[Identity] = set()
     counts = trial_counts(decision, collected, unobserved_ids) or {}
-    # Judge history only explains rows whose grading is still unresolved; a recovered one is not the current cause.
-    rejudged, statuses = _rejudged_after_judge_failure(
-        decision, collected, unobserved_ids if trial_reason.startswith("trial: UNOBSERVED") else None
-    )
-    # An explicit zero is evidence, not absence: only a missing count falls back to the unrecorded estimate.
-    unrecorded = counts.get("unobserved")
-    if unrecorded is None:
-        unrecorded = max(trials - counts.get("verifier_recorded", 0), 0)
-    if rejudged and trial_reason.startswith(("trial: UNOBSERVED", "trial: UNVERIFIED, known failures")):
+    # Judge history only explains rows whose grading is still unresolved (the unobserved ones); a recovered one is not
+    # the current cause, so on the lower-bound path, where nothing is unobserved, it never names the judge.
+    rejudged, statuses = _rejudged_after_judge_failure(decision, collected, unobserved_ids)
+    if rejudged and trial_reason.startswith("trial: UNOBSERVED"):
         why = ", ".join(f"{status} from the judge model server" for status in sorted(statuses)) or "judge failed"
         reason = f"{len(rejudged)} of {trials} rows were re-judged after a judge failure ({why})"
-        if unrecorded:
+        if unrecorded := counts.get("unobserved", 0):
             reason += f"; {unrecorded} rows have no recorded grading"
         return {"kind": "judge_rejudged", "reason": reason}
     if trial_reason.startswith("trial: UNOBSERVED"):
@@ -6083,27 +6127,35 @@ def _verdict(state: str, reason: str, action: str) -> dict[str, str]:
 
 def _flagged_everything(
     gate_task: Mapping[str, Any], decision: RecoveryDecision, expected: int
-) -> tuple[str, str, int] | None:
-    """``(what, check, flagged)`` when rollout quality flags every rollout, else None."""
+) -> tuple[str, str] | None:
+    """``(what, flagged)`` when rollout quality flags every rollout or every task, else None; ``flagged`` counts in
+    the unit of the check."""
     issues = ((gate_task.get("rollout_quality") or {}).get("issues")) or {}
     tasks = len({identity[0] for identities in decision.identities.values() for identity in identities})
     if expected and issues.get("rollout_ended_on_failed_model_call", 0) >= expected:
-        return "every rollout ended on a failed model call", "rollout_ended_on_failed_model_call", expected
+        check = "rollout_ended_on_failed_model_call"
+        return "every rollout ended on a failed model call", f"{expected} of {expected} rollouts flagged {check}"
     if tasks and issues.get("task_no_successful_model_calls", 0) >= tasks:
-        return "no task had a successful model call", "task_no_successful_model_calls", expected
+        check = "task_no_successful_model_calls"
+        return "no task had a successful model call", f"{tasks} of {tasks} tasks flagged {check}"
     return None
 
 
 def _budget_extensions(reason: str) -> list[str]:
-    """The explicit operator options that continue a run whose STOP names a spent operational budget, else []."""
-    options = []
-    if _ATTEMPTS_USED_TOKEN in reason:
-        options.append("--extend-attempts N")
-    if _INFRA_BUDGET_USED_PREFIX in reason:
-        options.append("--extend-retries N")
-    if _WALLTIME_USED_TOKEN in reason:
-        options.append("--max-walltime HH:MM:SS --walltime-reason TEXT")
-    return options
+    """The explicit operator options that continue a run whose STOP names a spent operational budget, else []: each
+    spent budget, and each extension the stopped call asked for but did not record, so one call carries them all."""
+    notes = reason.split("; ")
+    options = {
+        "--extend-attempts N": _ATTEMPTS_USED_TOKEN in reason,
+        "--extend-retries N": _INFRA_BUDGET_USED_PREFIX in reason,
+        "--max-walltime HH:MM:SS --walltime-reason TEXT": _WALLTIME_USED_TOKEN in reason,
+    }
+    if not any(options.values()):
+        return []
+    for option in ("--extend-attempts N", "--extend-retries N"):
+        flag = option.split()[0]
+        options[option] |= any(n.startswith(f"{flag} ") and n.endswith(_NOT_RECORDED_TOKEN) for n in notes)
+    return [option for option, needed in options.items() if needed]
 
 
 def _refusal_verdict(refusal: Mapping[str, Any]) -> dict[str, str]:
@@ -6158,6 +6210,21 @@ def operator_verdict(
         return _refusal_verdict(scheduler_refusal)
     if decision.action == RecoveryAction.UNKNOWN:
         return _verdict("unknown", f"nothing was decided: {decision.reason}", "inspect again once the reader runs")
+    if decision.action in (RecoveryAction.REVERIFY, RecoveryAction.STOP) and (
+        blocked := _FAILED_JUDGE_JOBS.search(decision.reason)
+    ):
+        # The judge-only job is refused until the failed ones are read and, where they can be, acknowledged.
+        read = f"read their receipts and logs under {blocked['where']}"
+        return _verdict(
+            "needs_action",
+            f"the last {JUDGE_JOB_FAILURE_BOUND} judge-only jobs ({blocked['ids']}) ended without settling a saved "
+            "answer, so recovery queues no other until they are read and acknowledged",
+            f"{read}; a job without an id cannot be acknowledged, so no further judge-only job is allowed and no "
+            "recovery command is known"
+            if blocked["unacknowledgeable"]
+            else f"{read}, then `gym eval resubmit --recover {ACKNOWLEDGE_JUDGE_JOBS_FLAGS} TEXT` allows one more "
+            "judge-only job",
+        )
     open_text = ", ".join(f"{counts[s]} {s.value}" for s in _OPEN_STATES if counts.get(s))
     if decision.action == RecoveryAction.FRESH_RESTART:
         return _verdict("needs_action", f"the run saved no task inventory ({decision.reason})", _SUBMIT_AGAIN)
@@ -6179,12 +6246,25 @@ def operator_verdict(
                 f"{wait} then {_RECOVER} (quota)",
             )
         if extensions := _budget_extensions(decision.reason):
+            counted, walltime = any(e.endswith(" N") for e in extensions), "--max-walltime" in extensions[-1]
+            choices = {(True, False): "N is", (False, True): "the walltime is"}.get(
+                (counted, walltime), "N and the walltime are"
+            )
             return _verdict(
                 "needs_action",
                 f"recovery stopped with {open_text or 'no way to continue'}: {decision.reason[:160]}",
                 f"your decision: continue the saved run (completed work is kept) with `gym eval resubmit --recover "
-                f"{' '.join(extensions)}`; N and the walltime are yours to choose"
+                f"{' '.join(extensions)}`; {choices} yours to choose"
                 + ("; every spent budget named must be raised in the same call" if len(extensions) > 1 else ""),
+            )
+        if UNKNOWN_BUDGET_HINT in decision.reason:
+            # The planner's supported way on: an explicit, journaled budget that fills only the unknown counters.
+            return _verdict(
+                "needs_action",
+                f"recovery stopped with {open_text or 'no way to continue'}: {decision.reason.splitlines()[0][:160]}",
+                "your decision: continue the saved run (completed work is kept) with an explicit budget, "
+                "`gym eval resubmit --recover --max-walltime HH:MM:SS --walltime-reason TEXT [--extend-retries N]`; "
+                "the walltime and N are yours to choose, and it is refused while a job of the run is pending or running",
             )
         thing = next((name for token, name in _STOP_CAUSES if token in decision.reason), None)
         if thing is None:
@@ -6206,17 +6286,23 @@ def operator_verdict(
         if health.get("status") == "FAIL":
             faults = health.get("evaluation") or {}
             kinds = ", ".join(f"{k} {v}" for k, v in (faults.get("kinds") or {}).items())
+            # Over the trials, not the expected samples: an accepted omission is no trial.
             return _verdict(
                 "needs_action",
-                f"{faults.get('count')} of {expected} trials failed on the evaluation side ({kinds})",
+                f"{faults.get('count')} of {health.get('trials', expected)} trials failed on the evaluation side ({kinds})",
                 f"fix the failing infrastructure then {_SUBMIT_AGAIN}",
             )
-        if decision.complete and errors and all(str(e).startswith("score unavailable") for e in errors):
+        unread = [e for e in errors if str(e).startswith("score unavailable")]
+        if decision.complete and errors and len(unread) == len(errors):
             return _verdict("unknown", "no score was read", "inspect again with --score-agent and --score-key")
+        # A known failure dominates an unread score listed before it.
+        known = next((str(e) for e in errors if not str(e).startswith("score unavailable")), None)
         return _verdict(
             "needs_action",
-            str(errors[0])[:200] if errors else "the gate failed",
-            f"fix the configuration or producer the first error names then {_SUBMIT_AGAIN}",
+            (known[:200] + ("; the score was not read either" if unread else ""))
+            if known
+            else (str(errors[0])[:200] if errors else "the gate failed"),
+            f"fix the configuration or producer that error names then {_SUBMIT_AGAIN}",
         )
     if not decision.complete or decision.action != RecoveryAction.NOOP:
         return _verdict(
@@ -6246,11 +6332,9 @@ def operator_verdict(
     if status != "SUCCESS" or (gate_task.get("evaluation_health") or {}).get("status") != "PASS":
         return _verdict("unknown", "the gate states no SUCCESS with run health PASS", "inspect again")
     if flagged := _flagged_everything(gate_task, decision, expected):
-        what, check, count = flagged
+        what, count = flagged
         return _verdict(
-            "accept",
-            f"accepted by contract; {what}: check the served configuration",
-            f"read rollout quality: {count} of {expected} rollouts flagged {check}",
+            "accept", f"accepted by contract; {what}: check the served configuration", f"read rollout quality: {count}"
         )
     omitted = gate_task.get("omitted_samples") or 0
     reason = (

@@ -135,15 +135,28 @@ def test_without_a_budget_unknown_accounting_stops_as_before_and_names_the_optio
     job_dir = _unknown_run(tmp_path)
     before = _accounting(job_dir)
 
+    continuation = (
+        "your decision: continue the saved run (completed work is kept) with an explicit budget, "
+        "`gym eval resubmit --recover --max-walltime HH:MM:SS --walltime-reason TEXT [--extend-retries N]`; "
+        "the walltime and N are yours to choose, and it is refused while a job of the run is pending or running"
+    )
     for out in (inspect_recovery(*_handle(job_dir)), recover(*_handle(job_dir))):
         assert (out.decision.action.value, out.dispatched) == ("stop", None)
         assert out.decision.reason == f"{UNKNOWN_BUDGET_REASON}\n{UNKNOWN_BUDGET_HINT}"
         assert out.decision.operator_continuation is None
+        # The verdict keeps the supported continuation instead of a fresh submit that would rerun the scored row.
+        assert out.operator_verdict == {
+            "state": "needs_action",
+            "reason": f"recovery stopped with 1 missing: {UNKNOWN_BUDGET_REASON}",
+            "action": continuation,
+        }
+        assert out.gate_task["operator_verdict"] == out.operator_verdict
     # More retries without a walltime and its reason are not an operator budget.
     extended = recover(*_handle(job_dir), extend_retries=1)
     assert (extended.decision.action.value, extended.dispatched) == ("stop", None)
     assert extended.decision.reason.startswith(UNKNOWN_BUDGET_REASON)
     assert extended.decision.reason.endswith(UNKNOWN_BUDGET_HINT)
+    assert extended.operator_verdict["action"] == continuation
     assert _accounting(job_dir) == before and not (slurm_bin / "env").exists()
 
 

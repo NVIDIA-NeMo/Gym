@@ -15,6 +15,7 @@
 """The operator verdict: accept, needs_action or unknown, and an UNVERIFIED that names its cause."""
 
 from nemo_gym.orchestration.recovery import (
+    CollectedEvidence,
     IdentityEvidence,
     IdentityState,
     RecoveryAction,
@@ -89,7 +90,29 @@ def test_accept_names_a_run_where_no_task_had_a_successful_model_call():
         verdict["reason"]
         == "accepted by contract; no task had a successful model call: check the served configuration"
     )
-    assert verdict["action"] == "read rollout quality: 8 of 8 rollouts flagged task_no_successful_model_calls"
+    assert verdict["action"] == "read rollout quality: 8 of 8 tasks flagged task_no_successful_model_calls"
+
+
+def test_a_task_level_finding_counts_tasks_not_rollouts():
+    identities = {IdentityState.SCORED.value: [(task, rollout) for task in range(4) for rollout in range(2)]}
+    decision = RecoveryDecision(
+        action=RecoveryAction.NOOP,
+        reason="every identity is scored",
+        expected=8,
+        counts={IdentityState.SCORED: 8},
+        identities=identities,
+        evidence=[],
+    )
+    task = {
+        "status": "SUCCESS",
+        "expected_samples": 8,
+        "errors": [],
+        "evaluation_health": {"status": "PASS"},
+        "rollout_quality": {"verdicts": None, "issues": {"task_no_successful_model_calls": 4}},
+    }
+    verdict = operator_verdict(task, decision)
+    assert verdict["state"] == "accept"
+    assert verdict["action"] == "read rollout quality: 4 of 4 tasks flagged task_no_successful_model_calls"
 
 
 def test_some_flagged_rollouts_are_a_signal_not_a_reason_to_change_the_verdict():
@@ -97,6 +120,24 @@ def test_some_flagged_rollouts_are_a_signal_not_a_reason_to_change_the_verdict()
     collected.quality["issues"]["rollout_ended_on_failed_model_call"] = 5
     verdict, _, _ = _verdict(collected)
     assert verdict["state"] == "accept" and verdict["action"] == "none"
+
+
+def test_evaluation_side_failures_count_over_the_trials_not_over_accepted_omissions():
+    from nemo_gym.artifacts.run_artifacts import ACCEPTED_STAGE_OMISSION
+
+    run = _ready(_run(97, settled={"model_transport_error": 3})).model_dump()
+    for index in range(100, 105):
+        omitted = {"_ng_task_index": index, "_ng_rollout_index": 0, "_ng_collected_task_id": str(index)}
+        omitted[ACCEPTED_STAGE_OMISSION] = {"stage_index": 1, "tolerate_unresolved": True}
+        run["materialized"].append(omitted)
+        run["managed_selection"].append(
+            {"identity": [index, 0], "attempts": 0, "max_attempts": 3, "pending": False, "reserved": True}
+        )
+    run["quality"]["artifacts"]["expected"] = 105
+    verdict, task, decision = _verdict(CollectedEvidence.model_validate(run))
+    assert decision.counts[IdentityState.OMITTED] == 5 and task["expected_samples"] == 105
+    assert task["evaluation_health"]["status"] == "FAIL" and task["evaluation_health"]["trials"] == 100
+    assert verdict["reason"] == "3 of 100 trials failed on the evaluation side (model_transport_error 3)"
 
 
 def test_evaluation_side_failures_over_the_limit_need_action():
@@ -265,8 +306,13 @@ def test_an_unread_score_with_a_failed_summary_validity_is_not_score_only_unknow
     collected = _run(100)
     collected.quality["artifacts"]["healthy"] = False
     verdict, task, _ = _verdict(collected)
-    assert any(e.startswith("score unavailable") for e in task["errors"]) and len(task["errors"]) > 1
-    assert verdict["state"] == "needs_action"
+    assert task["errors"][0].startswith("score unavailable") and task["errors"][1] == "summary validity failed"
+    # The known summary failure is the dominant cause, not the unread score listed before it.
+    assert verdict == {
+        "state": "needs_action",
+        "reason": "summary validity failed; the score was not read either",
+        "action": "fix the configuration or producer that error names then `gym eval submit` again",
+    }
 
 
 def _spent(reason, counts):
@@ -365,9 +411,31 @@ def _two_rows():
 def test_an_explicit_zero_unobserved_count_is_not_a_missing_grading_count():
     collected = _two_rows()
     collected.failures = [_judge_failure(0, 401)]
-    decision, _, task = _gate(collected)
-    cause = task.get("unverified_cause")
-    assert cause is not None and "no recorded grading" not in cause["reason"]
+    verdict, task, _ = _verdict(collected)
+    assert task["trial_counts"]["unobserved"] == 0
+    assert "known failures are a lower bound" in task["evaluation_health"]["detail"]
+    assert task["unverified_cause"] == {
+        "kind": "zero_rewards_unprovable",
+        "reason": "failures recorded only as zero rewards cannot be ruled out over 2 rows",
+    }
+    assert verdict == {
+        "state": "unknown",
+        "reason": "unverified without a known cause: failures recorded only as zero rewards cannot be ruled out "
+        "over 2 rows",
+        "action": "report the run as unverified; no operator action is known",
+    }
+
+
+def test_recovered_judge_history_does_not_change_the_lower_bound_cause_or_action():
+    # Both rows have bound grading, so nothing is unobserved: the judge failure on task 0 has recovered.
+    without = _verdict(_two_rows())
+    collected = _two_rows()
+    collected.failures = [_judge_failure(0, 401)]
+    with_history = _verdict(collected)
+    assert with_history[1]["unverified_cause"] == without[1]["unverified_cause"]
+    assert with_history[1]["unverified_cause"]["kind"] == "zero_rewards_unprovable"
+    assert with_history[0] == without[0] and with_history[0]["state"] == "unknown"
+    assert "judge" not in with_history[0]["action"]
 
 
 def test_recovered_judge_history_does_not_displace_an_unrelated_current_cause():
@@ -387,3 +455,51 @@ def test_recovered_judge_history_does_not_displace_an_unrelated_current_cause():
         "reason": "1 of 2 rows were re-judged after a judge failure (401 from the judge model server); "
         "1 rows have no recorded grading",
     }
+
+
+def _spent_attempts_and_retries(tmp_path):
+    """One scored and one exhausted rollout of a Store run whose infra-retry budget is used (3 of 3)."""
+    from nemo_gym.orchestration.recovery import select_managed_evidence
+    from tests.unit_tests.orchestration.test_managed_recovery_selection import collect, prepare_managed
+
+    prepare_managed(tmp_path, "exhausted", n=2)
+    (tmp_path / ".gym_infra_retries").write_text("3\n")
+    return select_managed_evidence(collect(tmp_path), tmp_path)
+
+
+def _budget_verdict(collected, **options):
+    from nemo_gym.orchestration.recovery import decide_from_collected, gate_summary_from_collected
+
+    decision = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False, **options)
+    task = gate_summary_from_collected(decision, collected, max_unhealthy_fraction=None, mlflow_status="none")
+    return decision, operator_verdict(task, decision)
+
+
+def test_spent_attempts_and_infra_retries_name_both_extensions_at_every_stop(tmp_path):
+    collected = _spent_attempts_and_retries(tmp_path)
+    both = "`gym eval resubmit --recover --extend-attempts N --extend-retries N`"
+    # The first stop already names both budgets; following its advice with either flag alone stops again, and that
+    # stop keeps naming the flag the call asked for, which nothing recorded.
+    for options in ({}, {"extend_attempts": 1}, {"extend_retries": 1}):
+        decision, verdict = _budget_verdict(collected, **options)
+        assert decision.action == RecoveryAction.STOP, options
+        assert verdict["state"] == "needs_action" and both in verdict["action"], (options, verdict)
+        assert "same call" in verdict["action"] and "walltime" not in verdict["action"]
+        assert "`gym eval submit`" not in verdict["action"]
+    # Both in one call continue the saved run: the scored row is kept and only the exhausted one runs again.
+    decision, verdict = _budget_verdict(collected, extend_attempts=1, extend_retries=1)
+    assert decision.action == RecoveryAction.RESUBMIT and decision.counts == {"scored": 1, "retryable": 1}
+    assert verdict["action"] == "`gym eval resubmit --recover` now"
+
+
+def test_spent_attempts_alone_still_name_only_the_attempt_extension(tmp_path):
+    from nemo_gym.orchestration.recovery import select_managed_evidence
+    from tests.unit_tests.orchestration.test_managed_recovery_selection import collect, prepare_managed
+
+    prepare_managed(tmp_path, "exhausted", n=2)
+    decision, verdict = _budget_verdict(select_managed_evidence(collect(tmp_path), tmp_path))
+    assert decision.action == RecoveryAction.STOP
+    assert verdict["action"] == (
+        "your decision: continue the saved run (completed work is kept) with "
+        "`gym eval resubmit --recover --extend-attempts N`; N is yours to choose"
+    )
