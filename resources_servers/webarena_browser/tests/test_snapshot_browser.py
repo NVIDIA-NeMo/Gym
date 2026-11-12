@@ -9,9 +9,17 @@ from playwright.async_api import Route as AsyncRoute
 from playwright.async_api import async_playwright
 from playwright.sync_api import Browser, sync_playwright
 
-from nemo_gym.web import EvaluatorInfrastructureError, snapshot_target_key
+from nemo_gym.web import (
+    EvaluatorInfrastructureError,
+    VisualBrowserEvaluationContext,
+    WebObservation,
+    snapshot_target_key,
+)
+from nemo_gym.web.evaluation_collision import build_collision_plans
+from resources_servers.webarena_browser.evaluators import WebArenaTaskEvaluator
 from resources_servers.webarena_browser.reference_evaluation import classic_evaluation as classic
 from resources_servers.webarena_browser.reference_evaluation import eval_snapshots as snapshots
+from resources_servers.webarena_browser.tests.test_contract import _config, _webarena_task
 
 
 CASES = [
@@ -163,5 +171,112 @@ async def test_async_snapshot_absence_real_delta_and_invalid_selector() -> None:
                     snapshots.build_snapshot_context(plan, broken, broken)
             finally:
                 await context.close()
+        finally:
+            await browser.close()
+
+
+@pytest.mark.parametrize(
+    "before_html,after_html,expected",
+    [
+        ("saved", "saved", 0),
+        ("saved", "saved unrelated", 0),
+        ("saved", "saved saved", 1),
+        ("", "saved", 1),
+        ("", "other", 0),
+    ],
+)
+def test_public_collision_scoring_with_real_captures(chromium, monkeypatch, before_html, after_html, expected):
+    monkeypatch.setattr("time.sleep", lambda seconds: None)
+    target = {
+        "url": "http://snapshot.test/page",
+        "locator": "document.body.innerText",
+        "required_contents": {"must_include": ["saved"]},
+    }
+    config = {"eval": {"eval_types": ["program_html"], "program_html": [target]}}
+    plan = build_collision_plans([{"id": 1, **config}, {"id": 2, **config}])[0]
+    task = _webarena_task(original_metadata=config, task_kwargs={"collision_plan": plan})
+    state = {"html": before_html}
+    context = chromium.new_context()
+    try:
+        context.route(
+            "http://snapshot.test/**", lambda route: route.fulfill(content_type="text/html", body=state["html"])
+        )
+        page = context.new_page()
+        page.goto(target["url"])
+        browser_context = VisualBrowserEvaluationContext(page=page, browser_context=context, evidence=())
+        evaluator = WebArenaTaskEvaluator(config=_config())
+        evaluator.prepare(task=task, observation=WebObservation(), browser_context=browser_context)
+        state["html"] = after_html
+        result = evaluator.evaluate(
+            task=task, observation=WebObservation(), final_answer="done", browser_context=browser_context
+        )
+        assert result.valid_sample
+        assert result.reward == expected
+    finally:
+        context.close()
+
+
+@pytest.mark.parametrize("name,locator,html,expected", CASES, ids=[case[0] for case in CASES])
+def test_sync_final_dom_absence_and_match_in_real_browser(chromium, name, locator, html, expected):
+    context = chromium.new_context()
+    try:
+        page = context.new_page()
+        page.set_content('<main><span class="cover-status"></span></main>')
+        config = {
+            "eval": {
+                "eval_types": ["program_html"],
+                "program_html": [
+                    {"url": "last", "locator": locator, "required_contents": {"must_include": [expected]}}
+                ],
+            }
+        }
+        assert classic.evaluate_classic_task_sync(config, {}, page)[0] == 0
+        page.set_content(html)
+        assert classic.evaluate_classic_task_sync(config, {}, page)[0] == 1
+    finally:
+        context.close()
+
+
+@pytest.mark.parametrize("locator", ["document.querySelector('[').outerText", "document.body.notAFunction()"])
+def test_sync_invalid_final_dom_in_real_browser_is_inconclusive(chromium, locator):
+    context = chromium.new_context()
+    try:
+        page = context.new_page()
+        page.set_content("<main/>")
+        config = {
+            "eval": {
+                "eval_types": ["program_html"],
+                "program_html": [
+                    {"url": "last", "locator": locator, "required_contents": {"must_include": ["saved"]}}
+                ],
+            }
+        }
+        with pytest.raises(EvaluatorInfrastructureError):
+            classic.evaluate_classic_task_sync(config, {}, page)
+    finally:
+        context.close()
+
+
+@pytest.mark.asyncio
+async def test_async_final_dom_absence_match_and_invalid_scripts_in_real_browser():
+    async with async_playwright() as playwright:
+        executable = playwright.chromium.executable_path
+        if not Path(executable).is_file():
+            pytest.skip("Real-browser regression tests require the qualified Chromium bundle")
+        browser = await playwright.chromium.launch(executable_path=executable, headless=True, args=["--no-sandbox"])
+        try:
+            page = await browser.new_page()
+            for _, locator, html, expected in CASES:
+                target = {"url": "last", "locator": locator, "required_contents": {"must_include": [expected]}}
+                config = {"eval": {"eval_types": ["program_html"], "program_html": [target]}}
+                await page.set_content('<main><span class="cover-status"></span></main>')
+                assert (await classic.evaluate_classic_task(config, {}, page))[0] == 0
+                await page.set_content(html)
+                assert (await classic.evaluate_classic_task(config, {}, page))[0] == 1
+            for locator in ["document.querySelector('[').outerText", "document.body.notAFunction()"]:
+                target = {"url": "last", "locator": locator, "required_contents": {"must_include": ["saved"]}}
+                config = {"eval": {"eval_types": ["program_html"], "program_html": [target]}}
+                with pytest.raises(EvaluatorInfrastructureError):
+                    await classic.evaluate_classic_task(config, {}, page)
         finally:
             await browser.close()

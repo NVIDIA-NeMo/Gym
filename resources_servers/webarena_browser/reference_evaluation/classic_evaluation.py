@@ -34,6 +34,25 @@ from .site_config import DEFAULT_CREDENTIALS
 
 logger = logging.getLogger(__name__)
 
+_JS_STRING = r"""(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')"""
+_DOM_READ = re.compile(
+    rf"\.(?:querySelector|getAttribute)\(\s*{_JS_STRING}\s*\)"
+    r"|\.(?:lastChild|firstElementChild|outerText|innerText|textContent)\b"
+)
+
+
+def _program_html_expression(locator: str) -> str:
+    """Read absent optional nodes as empty while preserving actual DOM errors."""
+    expression = f"() => {locator}"
+    if not locator.startswith("document.querySelector("):
+        return expression
+    suffix = locator.removeprefix("document")
+    reads = list(_DOM_READ.finditer(suffix))
+    if not reads or "".join(read.group() for read in reads) != suffix:
+        return expression
+    safe_locator = "document" + "".join("?." + read.group()[1:] for read in reads)
+    return f'() => ({safe_locator}) ?? ""'
+
 
 def _clean_answer(answer: Any) -> str:
     text = "" if answer is None else str(answer)
@@ -663,59 +682,45 @@ def reddit_get_post_url(url: str) -> str:
 
 
 async def gitlab_get_project_memeber_role(page, account_name: str) -> str:
-    try:
-        account_idx = await page.evaluate(
-            f"""(() => {{
-                const elements = document.querySelectorAll("td[data-label='Account'] span.gl-avatar-labeled-sublabel");
-                let index = -1;
-
-                for(let i = 0; i < elements.length; i++) {{
-                    if(elements[i].outerText === '@{account_name}') {{
-                        index = i;
-                        break;
-                    }}
-                }}
-
-                return index;
-            }})()"""
+    account_idx = await page.evaluate(
+        """
+        (accountName) => {
+            const elements = document.querySelectorAll("td[data-label='Account'] span.gl-avatar-labeled-sublabel");
+            for (let i = 0; i < elements.length; i++) {
+                if (elements[i].outerText === `@${accountName}`) return i;
+            }
+            return -1;
+        }
+        """,
+        account_name,
+    )
+    return str(
+        await page.evaluate(
+            '(idx) => document.querySelectorAll("td.col-max-role span")[idx]?.outerText || ""',
+            account_idx,
         )
-        return str(
-            await page.evaluate(
-                f"""(() => {{
-                return document.querySelectorAll("td.col-max-role span")[{account_idx}].outerText;
-            }})()"""
-            )
-        )
-    except Exception:
-        return ""
+    )
 
 
 def gitlab_get_project_memeber_role_sync(page, account_name: str) -> str:
-    try:
-        account_idx = page.evaluate(
-            f"""(() => {{
-                const elements = document.querySelectorAll("td[data-label='Account'] span.gl-avatar-labeled-sublabel");
-                let index = -1;
-
-                for(let i = 0; i < elements.length; i++) {{
-                    if(elements[i].outerText === '@{account_name}') {{
-                        index = i;
-                        break;
-                    }}
-                }}
-
-                return index;
-            }})()"""
+    account_idx = page.evaluate(
+        """
+        (accountName) => {
+            const elements = document.querySelectorAll("td[data-label='Account'] span.gl-avatar-labeled-sublabel");
+            for (let i = 0; i < elements.length; i++) {
+                if (elements[i].outerText === `@${accountName}`) return i;
+            }
+            return -1;
+        }
+        """,
+        account_name,
+    )
+    return str(
+        page.evaluate(
+            '(idx) => document.querySelectorAll("td.col-max-role span")[idx]?.outerText || ""',
+            account_idx,
         )
-        return str(
-            page.evaluate(
-                f"""(() => {{
-                return document.querySelectorAll("td.col-max-role span")[{account_idx}].outerText;
-            }})()"""
-            )
-        )
-    except Exception:
-        return ""
+    )
 
 
 async def _eval_helper_expression(expr: str, page) -> Any:
@@ -771,9 +776,11 @@ def _score_program_html_required(required: dict[str, Any], selected_element: Any
     return score
 
 
-def _order_delta_urls(eval_context: dict[str, Any] | None) -> list[str]:
-    if not eval_context:
-        return []
+def _order_delta_urls(eval_context: dict[str, Any] | None) -> list[str] | None:
+    """Return None without an order capture, or its authoritative delta URLs."""
+    adapters = ((eval_context or {}).get("collision_plan") or {}).get("snapshot_adapters") or {}
+    if "shopping_orders" not in adapters:
+        return None
     order_delta = (eval_context.get("deltas") or {}).get("shopping_orders") or {}
     urls = []
     for bucket in ("added", "changed"):
@@ -787,23 +794,27 @@ def _order_delta_urls(eval_context: dict[str, Any] | None) -> list[str]:
 def _review_delta_values(
     expr: Any,
     eval_context: dict[str, Any] | None,
-) -> list[str]:
+) -> list[str] | None:
+    """Return None for an unplanned SKU; an empty planned delta is conclusive."""
     if not eval_context:
-        return []
+        return None
     calls = extract_helper_calls(expr)
     if not calls:
-        return []
+        return None
     call = calls[0]
     helper_name = call["name"]
     if helper_name not in {
         "shopping_get_sku_latest_review_author",
         "shopping_get_sku_latest_review_rating",
     }:
-        return []
+        return None
     args = call.get("args") or []
     if not args or args[0] is None:
-        return []
+        return None
     sku = str(args[0])
+    adapters = ((eval_context.get("collision_plan") or {}).get("snapshot_adapters")) or {}
+    if sku not in (adapters.get("shopping_reviews") or {}).get("skus", []):
+        return None
     sku_delta = ((eval_context.get("deltas") or {}).get("shopping_reviews") or {}).get(sku, {})
     values = []
     for bucket in ("added", "changed"):
@@ -820,10 +831,15 @@ def _review_delta_values(
 def _program_html_snapshot_records(
     target: dict[str, Any],
     eval_context: dict[str, Any] | None,
-) -> list[dict[str, Any]]:
+) -> list[dict[str, Any]] | None:
+    """Distinguish unplanned targets from planned captures with no new records."""
     if not eval_context:
-        return []
+        return None
     key = snapshot_target_key(target)
+    adapters = ((eval_context.get("collision_plan") or {}).get("snapshot_adapters")) or {}
+    specs = (adapters.get("program_html") or {}).get("targets", [])
+    if not any(spec.get("key") == key for spec in specs):
+        return None
     program_delta = (eval_context.get("deltas") or {}).get("program_html") or {}
     records = []
     for bucket in ("added", "changed"):
@@ -840,15 +856,29 @@ def _score_program_html_snapshot_records(
 ) -> float:
     score = 0.0
     for record in records:
-        delta_value = str(record.get("delta_value") or "").strip()
-        if delta_value:
-            score = max(score, _score_program_html_required(required, delta_value))
-
         full_value = str(record.get("value") or "")
         before_value = str(record.get("before_value") or "")
-        if full_value and _score_program_html_required(required, full_value) > _score_program_html_required(
-            required, before_value
-        ):
+        before_score = _score_program_html_required(required, before_value)
+        delta_value = str(record.get("delta_value") or "").strip()
+        if delta_value:
+            # A line diff can repeat an existing match when unrelated text on
+            # that line changes. Require genuinely new matching content; a new
+            # copy of the required text still counts as an addition.
+            fresh_match = before_score == 0
+            if not fresh_match and "must_include" in required:
+                before_text = _clean_answer(html.unescape(before_value))
+                after_text = _clean_answer(html.unescape(full_value))
+                fresh_match = all(
+                    any(
+                        after_text.count(_clean_answer(part)) > before_text.count(_clean_answer(part))
+                        for part in content.split(" |OR| ")
+                    )
+                    for content in required["must_include"]
+                )
+            if fresh_match:
+                score = max(score, _score_program_html_required(required, delta_value))
+
+        if full_value and _score_program_html_required(required, full_value) > before_score:
             score = max(score, _score_program_html_required(required, full_value))
     return score
 
@@ -864,19 +894,17 @@ async def _program_html_target(target: dict, page, eval_context: dict[str, Any] 
         target.get("locator"),
     )
     snapshot_records = _program_html_snapshot_records(target, eval_context)
-    if snapshot_records:
+    if snapshot_records is not None:
         target_score = _score_program_html_snapshot_records(
             target["required_contents"],
             snapshot_records,
         )
         logger.info("program_html snapshot-delta score=%s", target_score)
-        if target_score:
-            return target_score
-        logger.info("program_html snapshot-delta failed; falling back to final page check")
+        return target_score
 
     if any(call["name"] == "shopping_get_latest_order_url" for call in extract_helper_calls(target_url)):
         candidate_urls = _order_delta_urls(eval_context)
-        if candidate_urls:
+        if candidate_urls is not None:
             target_score = 0.0
             for candidate_url in candidate_urls:
                 candidate_target = {**target, "url": candidate_url}
@@ -888,8 +916,10 @@ async def _program_html_target(target: dict, page, eval_context: dict[str, Any] 
             return target_score
 
     review_values = _review_delta_values(target.get("locator"), eval_context)
-    if review_values:
-        return max(_score_program_html_required(target["required_contents"], value) for value in review_values)
+    if review_values is not None:
+        return max(
+            (_score_program_html_required(target["required_contents"], value) for value in review_values), default=0.0
+        )
 
     if isinstance(target_url, str) and target_url.startswith("func:"):
         target_url = await _eval_helper_expression(target_url, page)
@@ -907,15 +937,9 @@ async def _program_html_target(target: dict, page, eval_context: dict[str, Any] 
         selected_element = await page.content()
     elif locator.startswith("document.") or locator.startswith("[...document."):
         if "prep_actions" in target:
-            try:
-                for prep_action in target["prep_actions"]:
-                    await page.evaluate(f"() => {prep_action}")
-            except Exception:
-                logger.debug("Classic eval prep_actions failed", exc_info=True)
-        try:
-            selected_element = str(await page.evaluate(f"() => {locator}") or "")
-        except Exception:
-            selected_element = ""
+            for prep_action in target["prep_actions"]:
+                await page.evaluate(f"() => {prep_action}")
+        selected_element = str(await page.evaluate(_program_html_expression(locator)) or "")
     elif locator.startswith("func:"):
         selected_element = str(await _eval_helper_expression(locator, page))
     else:
@@ -972,19 +996,17 @@ def _program_html_target_sync(target: dict, page, eval_context: dict[str, Any] |
         target.get("locator"),
     )
     snapshot_records = _program_html_snapshot_records(target, eval_context)
-    if snapshot_records:
+    if snapshot_records is not None:
         target_score = _score_program_html_snapshot_records(
             target["required_contents"],
             snapshot_records,
         )
         logger.info("program_html snapshot-delta score=%s", target_score)
-        if target_score:
-            return target_score
-        logger.info("program_html snapshot-delta failed; falling back to final page check")
+        return target_score
 
     if any(call["name"] == "shopping_get_latest_order_url" for call in extract_helper_calls(target_url)):
         candidate_urls = _order_delta_urls(eval_context)
-        if candidate_urls:
+        if candidate_urls is not None:
             target_score = 0.0
             for candidate_url in candidate_urls:
                 candidate_target = {**target, "url": candidate_url}
@@ -996,8 +1018,10 @@ def _program_html_target_sync(target: dict, page, eval_context: dict[str, Any] |
             return target_score
 
     review_values = _review_delta_values(target.get("locator"), eval_context)
-    if review_values:
-        return max(_score_program_html_required(target["required_contents"], value) for value in review_values)
+    if review_values is not None:
+        return max(
+            (_score_program_html_required(target["required_contents"], value) for value in review_values), default=0.0
+        )
 
     if isinstance(target_url, str) and target_url.startswith("func:"):
         target_url = _eval_helper_expression_sync(target_url, page)
@@ -1018,15 +1042,9 @@ def _program_html_target_sync(target: dict, page, eval_context: dict[str, Any] |
         selected_element = page.content()
     elif locator.startswith("document.") or locator.startswith("[...document."):
         if "prep_actions" in target:
-            try:
-                for prep_action in target["prep_actions"]:
-                    page.evaluate(f"() => {prep_action}")
-            except Exception:
-                logger.debug("Classic eval prep_actions failed", exc_info=True)
-        try:
-            selected_element = str(page.evaluate(f"() => {locator}") or "")
-        except Exception:
-            selected_element = ""
+            for prep_action in target["prep_actions"]:
+                page.evaluate(f"() => {prep_action}")
+        selected_element = str(page.evaluate(_program_html_expression(locator)) or "")
     elif locator.startswith("func:"):
         selected_element = str(_eval_helper_expression_sync(locator, page))
     else:

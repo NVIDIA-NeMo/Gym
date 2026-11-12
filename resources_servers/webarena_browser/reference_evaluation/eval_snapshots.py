@@ -14,7 +14,6 @@ import difflib
 import hashlib
 import json
 import logging
-import re
 from collections import defaultdict
 from typing import Any
 
@@ -22,33 +21,17 @@ import httpx
 
 from nemo_gym.web import EvaluatorInfrastructureError
 
-from .classic_evaluation import _shopping_get_auth_token, _site_url
+from .classic_evaluation import (
+    _program_html_expression,
+    _shopping_get_auth_token,
+    _site_url,
+    gitlab_get_project_memeber_role,
+    gitlab_get_project_memeber_role_sync,
+)
 from .navigation import goto
 
 
 logger = logging.getLogger(__name__)
-
-_JS_STRING = r"""(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')"""
-_DOM_READ = re.compile(
-    rf"\.(?:querySelector|getAttribute)\(\s*{_JS_STRING}\s*\)"
-    r"|\.(?:lastChild|firstElementChild|outerText|innerText|textContent)\b"
-)
-
-
-def _program_html_snapshot_expression(locator: str) -> str:
-    """Capture absent DOM nodes as empty without hiding browser or script errors."""
-    expression = f"() => {locator}"
-    if not locator.startswith("document.querySelector("):
-        return expression
-    suffix = locator.removeprefix("document")
-    reads = list(_DOM_READ.finditer(suffix))
-    if not reads or "".join(read.group() for read in reads) != suffix:
-        return expression
-    # These locators read optional profile fields, empty wishlists, and other
-    # content that a mutation task can create. Only a missing node is empty;
-    # invalid selectors, disconnected pages, and arbitrary expressions still fail.
-    safe_locator = "document" + "".join("?." + read.group()[1:] for read in reads)
-    return f'() => ({safe_locator}) ?? ""'
 
 
 def _stable_key(record: dict[str, Any], preferred_keys: tuple[str, ...]) -> str:
@@ -223,24 +206,7 @@ async def _get_query_text(page, selector: str) -> str:
 
 async def _gitlab_member_role(page, account_name: str) -> str:
     try:
-        account_idx = await page.evaluate(
-            """
-            (accountName) => {
-                const elements = document.querySelectorAll("td[data-label='Account'] span.gl-avatar-labeled-sublabel");
-                for (let i = 0; i < elements.length; i++) {
-                    if (elements[i].outerText === `@${accountName}`) return i;
-                }
-                return -1;
-            }
-            """,
-            account_name,
-        )
-        return str(
-            await page.evaluate(
-                '(idx) => document.querySelectorAll("td.col-max-role span")[idx]?.outerText || ""',
-                account_idx,
-            )
-        )
+        return await gitlab_get_project_memeber_role(page, account_name)
     except Exception as exc:
         raise EvaluatorInfrastructureError("Browser snapshot capture failed") from exc
 
@@ -303,7 +269,7 @@ async def _select_program_html_snapshot(target: dict[str, Any], page) -> str:
         return str(await page.content())
     if locator.startswith("document.") or locator.startswith("[...document."):
         try:
-            return str(await page.evaluate(_program_html_snapshot_expression(locator)) or "")
+            return str(await page.evaluate(_program_html_expression(locator)) or "")
         except Exception as exc:
             raise EvaluatorInfrastructureError("Browser snapshot capture failed") from exc
     if locator.startswith("lambda:"):
@@ -496,24 +462,7 @@ def _get_query_text_sync(page, selector: str) -> str:
 
 def _gitlab_member_role_sync(page, account_name: str) -> str:
     try:
-        account_idx = page.evaluate(
-            """
-            (accountName) => {
-                const elements = document.querySelectorAll("td[data-label='Account'] span.gl-avatar-labeled-sublabel");
-                for (let i = 0; i < elements.length; i++) {
-                    if (elements[i].outerText === `@${accountName}`) return i;
-                }
-                return -1;
-            }
-            """,
-            account_name,
-        )
-        return str(
-            page.evaluate(
-                '(idx) => document.querySelectorAll("td.col-max-role span")[idx]?.outerText || ""',
-                account_idx,
-            )
-        )
+        return gitlab_get_project_memeber_role_sync(page, account_name)
     except Exception as exc:
         raise EvaluatorInfrastructureError("Browser snapshot capture failed") from exc
 
@@ -551,7 +500,7 @@ def _select_program_html_snapshot_sync(target: dict[str, Any], page) -> str:
         return str(page.content())
     if locator.startswith("document.") or locator.startswith("[...document."):
         try:
-            return str(page.evaluate(_program_html_snapshot_expression(locator)) or "")
+            return str(page.evaluate(_program_html_expression(locator)) or "")
         except Exception as exc:
             raise EvaluatorInfrastructureError("Browser snapshot capture failed") from exc
     if locator.startswith("lambda:"):
