@@ -64,11 +64,14 @@ from nemo_gym.models import (
     SimpleResponsesAPIModel,
     VLLMConverter,  # noqa: F401  # re-exported for importers of this module
     VLLMConverterResponsesToChatCompletionsState,  # noqa: F401
+    add_dynamo_gym_extras,
     context_overflow_error_fields,
     is_propagated_refusal,
     make_external_capture_handler,
     note_generation_backend,
     note_generation_request,
+    pop_dynamo_call_result,
+    split_dynamo_capture_refusal,
     split_responses_input_output_items,  # noqa: F401
     start_model_execution,
     validate_framework_context_options,
@@ -78,21 +81,16 @@ from nemo_gym.models.model_call_capture import note_finish_reason
 from nemo_gym.models.token_capture import (
     CAPTURE_REFUSAL_HEADER,
     CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
+    TOKEN_FIELDS,
     CaptureAdmissionError,
     CaptureContext,
     CaptureInputError,
-    TOKEN_FIELDS,
     capture_engine_refusal,
     current_capture_context,
     reset_token_sink,
     resolve_parent,
     set_token_sink,
     token_capture_config,
-)
-from nemo_gym.models.token_capture.external_capture import (
-    add_dynamo_gym_extras,
-    pop_dynamo_call_result,
-    split_dynamo_capture_refusal,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_models.vllm_model.tar_audio import TarAudioReader, resolve_archive_path, validate_relative_path

@@ -19,14 +19,14 @@ import nemo_gym.models.base_responses_api_model
 import nemo_gym.server_runtime.base_server
 from nemo_gym.client import NeMoGymAsyncOpenAI, ServerClient
 from nemo_gym.core import SSE_KEEPALIVE, NeMoGymResponseCreateParamsNonStreaming, current_rollout_id
-from nemo_gym.models import is_responses_lifecycle_chunk
-from nemo_gym.models.model_call_capture import _CaptureMiddleware, _reconstruct_streamed_response
-from nemo_gym.models.token_capture import CAPTURE_REFUSAL_HEADER, NG_CAPTURE_FIELD, NG_COMMIT_COORDS_FIELD
-from nemo_gym.models.token_capture.external_capture import (
+from nemo_gym.models import (
     DYNAMO_GYM_EXTRAS_ANNOTATION_PREFIX,
     DYNAMO_SESSION_ID_HEADER,
     dynamo_capture_refusal_suffix,
+    is_responses_lifecycle_chunk,
 )
+from nemo_gym.models.model_call_capture import _CaptureMiddleware, _reconstruct_streamed_response
+from nemo_gym.models.token_capture import CAPTURE_REFUSAL_HEADER, NG_CAPTURE_FIELD, NG_COMMIT_COORDS_FIELD
 from nemo_gym.models.token_capture.staging import (
     INVALID_COMMIT_COORDS_REASON,
     CaptureAdmission,
