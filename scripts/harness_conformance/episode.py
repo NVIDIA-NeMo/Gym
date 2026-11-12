@@ -193,10 +193,10 @@ def _base_settings(harness: str, directory: Path, timeout: float) -> DictConfig:
     )
 
 
-def _context_control_settings(harness: str, scenario: Scenario) -> DictConfig:
-    """Settings and ordinary replies shared by the context control and compaction scenarios."""
+def _compaction_settings(harness: str, scenario: Scenario) -> DictConfig:
+    """Harness overrides and scripted replies for the compaction scenario."""
     steps = scenario.tool_steps + 4
-    context = {"context_window": 65536, "max_output_tokens": 8192}
+    context = {"context_window": 32768, "max_output_tokens": 8192}
     settings = {
         "simple": {"harness_overrides": {"max_steps": steps}},
         "opencode": {
@@ -205,6 +205,7 @@ def _context_control_settings(harness: str, scenario: Scenario) -> DictConfig:
                 "responses": [
                     {"kind": "tool", "input_tokens": 500, "output_tokens": 8},
                     {"kind": "tool", "input_tokens": 27000, "output_tokens": 8},
+                    {"kind": "summary", "input_tokens": 500, "output_tokens": 11},
                     *[
                         {"kind": "tool", "input_tokens": 500, "output_tokens": 8}
                         for _ in range(scenario.tool_steps - 2)
@@ -219,7 +220,7 @@ def _context_control_settings(harness: str, scenario: Scenario) -> DictConfig:
         "hermes": {
             "harness_overrides": {
                 "compression_enabled": True,
-                "context_length": 65536,
+                "context_length": 32768,
                 "compression_threshold": 0.5,
                 "max_turns": steps,
             },
@@ -230,6 +231,7 @@ def _context_control_settings(harness: str, scenario: Scenario) -> DictConfig:
                         for _ in range(scenario.tool_steps - 1)
                     ],
                     {"kind": "tool", "input_tokens": 27000, "output_tokens": 8},
+                    {"kind": "summary", "input_tokens": 500, "output_tokens": 11},
                     {"kind": "final", "input_tokens": 100, "output_tokens": 8},
                 ],
             },
@@ -239,7 +241,7 @@ def _context_control_settings(harness: str, scenario: Scenario) -> DictConfig:
         "terminus_2_sandboxed": {
             "harness_overrides": {
                 "max_turns": steps,
-                "enable_summarize": False,
+                "enable_summarize": True,
                 "model_context_limit": 32768,
             },
         },
@@ -247,32 +249,11 @@ def _context_control_settings(harness: str, scenario: Scenario) -> DictConfig:
     return OmegaConf.create(settings)
 
 
-def _compaction_settings(harness: str, settings: DictConfig) -> DictConfig:
-    """Override the control settings to trigger compaction and supply its summary."""
-    responses = settings.get("probe_overrides", {}).get("responses", [])
-    summary = {"kind": "summary", "input_tokens": 500, "output_tokens": 11}
-    return OmegaConf.create(
-        {
-            "opencode": {
-                "harness_overrides": {"context_window": 32768},
-                "probe_overrides": {"responses": [*responses[:2], summary, *responses[2:]]},
-            },
-            "pi": {"harness_overrides": {"context_window": 32768}},
-            "hermes": {
-                "harness_overrides": {"context_length": 32768},
-                "probe_overrides": {"responses": [*responses[:-1], summary, *responses[-1:]]},
-            },
-            "terminus_2_sandboxed": {"harness_overrides": {"enable_summarize": True}},
-        }.get(harness, {})
-    )
-
-
 def _settings(harness: str, directory: Path, timeout: float, scenario: Scenario | None = None) -> DictConfig:
     settings = _base_settings(harness, directory, timeout)
-    if scenario is not None and scenario.compaction is not None:
-        settings = OmegaConf.merge(settings, _context_control_settings(harness, scenario))
-        if scenario.compaction:
-            settings = OmegaConf.merge(settings, _compaction_settings(harness, settings))
+    scenario_settings = {"context_compaction": _compaction_settings}.get(getattr(scenario, "name", None))
+    if scenario_settings is not None:
+        settings = OmegaConf.merge(settings, scenario_settings(harness, scenario))
     return settings
 
 

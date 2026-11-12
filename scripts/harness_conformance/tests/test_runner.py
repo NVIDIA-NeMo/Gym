@@ -112,9 +112,8 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_
         getattr(module, HARNESSES[harness]).model_fields["config"].annotation.model_validate(agent)
 
 
-@pytest.mark.parametrize("compaction", [False, True])
-def test_compaction_overrides_preserve_tool_timeout(tmp_path, compaction):
-    scenario = dataclasses.replace(SCENARIO["context_compaction"], compaction=compaction, tool_steps=9)
+def test_compaction_overrides_preserve_tool_timeout(tmp_path):
+    scenario = dataclasses.replace(SCENARIO["context_compaction"], tool_steps=9)
     ports = {"policy_model": 10001, "probe_resources": 10002, "probe_agent": 10003, "probe_environment": 10004}
     config = _config("miniswe_sandboxed", tmp_path, ports, 12, use_agent_sessions=True, scenario=scenario)
     agent = config["probe_agent"]["responses_api_agents"]["miniswe_sandboxed_agent"]
@@ -409,8 +408,24 @@ def test_rewritten_ids_require_openclaw_and_matching_replayed_call(tmp_path, pro
 @pytest.mark.parametrize("compaction", [True, False])
 @pytest.mark.parametrize("harness,tool_steps,low_usage", [("opencode", 2, 500), ("hermes", 14, 1000)])
 def test_compaction_is_scripted_independently_of_request_text(tmp_path, compaction, harness, tool_steps, low_usage):
-    scenario = dataclasses.replace(SCENARIO["context_compaction"], compaction=compaction, tool_steps=tool_steps)
+    scenario = dataclasses.replace(
+        SCENARIO["context_compaction"],
+        name="context_compaction" if compaction else "no_compaction",
+        compaction=compaction,
+        tool_steps=tool_steps,
+    )
     settings = _settings(harness, tmp_path, 30, scenario)
+    if not compaction:
+        # This comparison is test-only; its replies are independent of compaction settings.
+        settings["probe_overrides"] = {
+            "responses": [
+                *[
+                    {"kind": "tool", "input_tokens": usage, "output_tokens": 8}
+                    for usage in [low_usage] * (tool_steps - 1) + [27000]
+                ],
+                {"kind": "final", "input_tokens": 100, "output_tokens": 8},
+            ]
+        }
     probe = Probe(scenario, tmp_path, harness=harness, **settings.probe_overrides)
     messages = [{"role": "user", "content": "Any task wording"}]
     body = {"model": "conformance-model", "messages": messages, "tools": [TOOL]}
