@@ -521,8 +521,9 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         Shutdown cancels the running ``/run`` requests and does not wait for them, so a second cancellation can
         interrupt an episode's cleanup partway. Cleanups are idempotent, so this runs each one that has not
         finished, under its episode's rollout. They all start at once, so a sandbox stop does not wait behind a
-        call to a Gym server that is shutting down too. The sweep waits ``cleanup_timeout_seconds`` in all, and
-        logs each episode whose cleanup it could not confirm.
+        call to a Gym server that is shutting down too; a cleanup that needs another one to finish first awaits that
+        one's ``CleanupHandle``. The sweep waits ``cleanup_timeout_seconds`` in all, and logs each episode whose
+        cleanup it could not confirm.
         """
 
         async def finish(cleanup: CleanupContext, entry: _CleanupEntry) -> None:
