@@ -123,6 +123,11 @@ def _build_segale_actor_class(actors_per_gpu: int = 1, use_extra_gpu: bool = Fal
         def __init__(self, gpu_idx: int, comet_model: str, comet_batch_size: int, embed_batch_size: int) -> None:
             from scoring_process import ScoringProcess
 
+            if not scoring_python.is_file():
+                raise RuntimeError(
+                    f"LongMT scoring interpreter is unavailable on this Ray node: {scoring_python}; "
+                    "mount the scoring cache and its interpreter at the same paths on every node"
+                )
             self._scorer = ScoringProcess(
                 scoring_python,
                 Path(__file__).parent / "scoring" / "worker.py",

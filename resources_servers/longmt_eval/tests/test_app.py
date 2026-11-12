@@ -77,7 +77,8 @@ def _make_request(
 
 @pytest.mark.parametrize("compute_segale", [False, True])
 def test_reverify_mode_is_stateless(compute_segale: bool) -> None:
-    server = _make_server(compute_segale=compute_segale)
+    with patch.object(LongmtEvalServer, "_ensure_actors"):
+        server = _make_server(compute_segale=compute_segale)
     with patch.object(LongmtEvalServer, "_ensure_actors") as ensure_actors:
         with TestClient(server.setup_webserver()) as client:
             response = client.get("/reverify_mode")
@@ -514,7 +515,20 @@ class TestBuildSegaleActorClass:
 
 
 class TestActorStartup:
-    def test_failed_startup_releases_actors_and_can_retry(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_provisions_before_serving(self) -> None:
+        with patch.object(LongmtEvalServer, "_ensure_actors") as initialize:
+            _make_server(compute_segale=True)
+            initialize.assert_called_once()
+        with patch.object(LongmtEvalServer, "_ensure_actors") as initialize:
+            _make_server(compute_segale=False)
+            initialize.assert_not_called()
+
+    def test_startup_failure_prevents_server_creation(self) -> None:
+        with patch.object(LongmtEvalServer, "_ensure_actors", side_effect=RuntimeError("setup failed")):
+            with pytest.raises(RuntimeError, match="setup failed"):
+                _make_server(compute_segale=True)
+
+    def test_failed_startup_releases_actors_without_retries(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import app
         import segale_actor
 
@@ -523,18 +537,102 @@ class TestActorStartup:
         actor.ping.remote.return_value = ping
         factory = MagicMock()
         factory.remote.return_value = actor
-        monkeypatch.setattr(segale_actor, "_build_segale_actor_class", lambda **kw: factory)
+        build = MagicMock(return_value=factory)
+        monkeypatch.setattr(segale_actor, "_build_segale_actor_class", build)
         monkeypatch.setattr(app.ray, "wait", lambda *a, **kw: ([], [ping]))
         killed = []
         monkeypatch.setattr(app.ray, "kill", killed.append)
-        server = _make_server(compute_segale=True, comet_num_shards=1)
+        server = _make_server(comet_num_shards=1)
         server.config.actors_per_gpu = 1
         with pytest.raises(RuntimeError, match="0/1"):
             server._ensure_actors()
         assert killed == [actor]
-        assert not server._actors_init_attempted
-        monkeypatch.setattr(app.ray, "wait", lambda *a, **kw: ([ping], []))
-        monkeypatch.setattr(app.ray, "get", lambda _: True)
-        server._ensure_actors()
-        assert server._actors_init_attempted
-        assert server._segale_actors == [actor]
+        with pytest.raises(RuntimeError, match="restart the server"):
+            server._ensure_actors()
+        build.assert_called_once()
+
+    def test_partial_creation_failure_releases_existing_actors(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import app
+        import segale_actor
+
+        actor = MagicMock()
+        factory = MagicMock()
+        factory.remote.side_effect = [actor, RuntimeError("creation failed")]
+        monkeypatch.setattr(segale_actor, "_build_segale_actor_class", lambda **kw: factory)
+        killed = []
+        monkeypatch.setattr(app.ray, "kill", killed.append)
+        with pytest.raises(RuntimeError, match="creation failed"):
+            _make_server(compute_segale=True)
+        assert killed == [actor]
+
+
+@pytest.mark.parametrize("failure", ["unavailable", "exception", "error_result"])
+async def test_scoring_failures_are_masked_without_reprovisioning(failure: str) -> None:
+    server = _make_server()
+    server.config.compute_segale = True
+
+    async def score() -> dict:
+        if failure == "exception":
+            raise TimeoutError("worker timeout")
+        return {"error": "non-finite score"}
+
+    with patch.object(LongmtEvalServer, "_ensure_actors") as initialize:
+        with patch.object(
+            LongmtEvalServer, "_dispatch", side_effect=lambda *a: None if failure == "unavailable" else score()
+        ):
+            result = await server.verify(_make_request("hello", "bonjour"))
+    initialize.assert_not_called()
+    assert result.mask_sample is True
+    assert result.evaluation_completed is False
+    assert result.failure_kind == "verifier_error"
+    assert result.segale_error == result.failure_reason
+    assert server.compute_metrics([[result.model_dump()]]) == {}
+
+
+async def test_successful_scoring_remains_unmasked() -> None:
+    server = _make_server()
+    server.config.compute_segale = True
+
+    async def score() -> dict:
+        return {"comet_qe": 0.8, "total_seg": 2, "misaligned_seg": 0}
+
+    with patch.object(LongmtEvalServer, "_dispatch", side_effect=lambda *args: score()):
+        result = await server.verify(_make_request("hello", "bonjour"))
+    assert result.reward == 0.8
+    assert result.evaluation_completed is True
+    assert result.mask_sample is False
+    assert result.failure_kind is None
+    assert result.segale_error is None
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_actor_pool_reuse_and_dispatch_order(monkeypatch: pytest.MonkeyPatch, partial: bool) -> None:
+    import app
+    import segale_actor
+
+    actors = [MagicMock(name=f"actor-{i}") for i in range(4)]
+    pings = [actor.ping.remote.return_value for actor in actors]
+    factory = MagicMock()
+    factory.remote.side_effect = actors
+    build = MagicMock(return_value=factory)
+    monkeypatch.setattr(segale_actor, "_build_segale_actor_class", build)
+    monkeypatch.setattr(app.ray, "wait", lambda *a, **kw: (pings[:3] if partial else pings, []))
+
+    def get(ping: object) -> None:
+        if partial and ping is pings[1]:
+            raise RuntimeError("actor initialization failed")
+
+    monkeypatch.setattr(app.ray, "get", get)
+    killed = []
+    monkeypatch.setattr(app.ray, "kill", killed.append)
+    server = _make_server(comet_num_shards=2)
+    server.config.actors_per_gpu = 2
+    server.config.use_extra_gpu = False
+    server._ensure_actors()
+    server._ensure_actors()
+    build.assert_called_once()
+    assert factory.remote.call_count == 4
+    expected = [actors[0], actors[2]] if partial else [actors[0], actors[2], actors[1], actors[3]]
+    assert killed == ([actors[1], actors[3]] if partial else [])
+    for actor in expected * 2:
+        assert server._dispatch("source", "translation", "fr_FR") is actor.score.remote.return_value

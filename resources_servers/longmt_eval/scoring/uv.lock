@@ -2,6 +2,16 @@ version = 1
 revision = 5
 requires-python = "==3.12.*"
 
+[manifest]
+constraints = [
+    { name = "certifi", specifier = ">=2026.10.19" },
+    { name = "grpcio", specifier = ">=1.84.1,!=1.85.0rc1" },
+    { name = "msgpack", specifier = ">=1.2.1" },
+    { name = "protobuf", specifier = "==4.25.9" },
+    { name = "pyarrow", specifier = ">=25.0.1" },
+    { name = "transformers", specifier = ">=4.17,<5" },
+]
+
 [[package]]
 name = "absl-py"
 version = "2.5.1"

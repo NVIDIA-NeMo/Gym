@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 from packaging.requirements import Requirement
-from scripts.component_locks import POLICY_KEYS, expected_policy, managed_projects, uses_gym
+from scripts.component_locks import POLICY_KEYS, expected_policy, managed_projects, uses_gym, uses_shared_policy
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -51,21 +51,22 @@ def test_component_uv_policy_matches_root_with_declared_exceptions() -> None:
     """Reject drift in copied constraints, exclusions, overrides, and sources."""
     baseline = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["uv"]
     for project in managed_projects():
-        if project == ROOT or not uses_gym(project):
+        if project == ROOT or not uses_shared_policy(project):
             continue
         actual = tomllib.loads((project / "pyproject.toml").read_text())["tool"]["uv"]
         assert actual["required-version"] == baseline["required-version"], str(project)
         for key in POLICY_KEYS:
             assert actual.get(key, []) == expected_policy(project)[key], f"{project}: {key}"
-        for name, source in baseline.get("sources", {}).items():
-            assert actual.get("sources", {}).get(name) == source, f"{project}: source {name}"
+        if uses_gym(project):
+            for name, source in baseline.get("sources", {}).items():
+                assert actual.get("sources", {}).get(name) == source, f"{project}: source {name}"
 
 
 def test_locks_satisfy_shared_security_floors() -> None:
     """Check locked versions against the shared floors and explicit component exceptions."""
     failures = []
     for project in managed_projects():
-        if project != ROOT and not uses_gym(project):
+        if project != ROOT and not uses_shared_policy(project):
             continue
         requirements = [Requirement(value) for value in expected_policy(project)["constraint-dependencies"]]
         floors = {requirement.name: requirement.specifier for requirement in requirements}
@@ -129,6 +130,7 @@ def test_longmt_scoring_dependencies_are_isolated() -> None:
     scorer = wrapper / "scoring"
     assert uses_gym(wrapper)
     assert not uses_gym(scorer)
+    assert uses_shared_policy(scorer)
     assert scorer in managed_projects()
     wrapper_lock = tomllib.loads((wrapper / "uv.lock").read_text())
     scorer_lock = tomllib.loads((scorer / "uv.lock").read_text())
@@ -140,3 +142,25 @@ def test_longmt_scoring_dependencies_are_isolated() -> None:
     assert {"segale", "laser-encoders", "ersatz", "unbabel-comet"}.isdisjoint(wrapper_names)
     assert {"segale", "laser-encoders", "ersatz", "unbabel-comet"} <= scorer_names
     assert {"nemo-gym", "ray"}.isdisjoint(scorer_names)
+
+
+def test_standalone_scorer_inherits_floors_without_gym_overrides() -> None:
+    scorer = ROOT / "resources_servers/longmt_eval/scoring"
+    policy = expected_policy(scorer)
+    assert "certifi>=2026.10.19" in policy["constraint-dependencies"]
+    assert "transformers>=4.17,<5" in policy["constraint-dependencies"]
+    assert "protobuf==4.25.9" in policy["constraint-dependencies"]
+    assert policy["override-dependencies"] == []
+    assert policy["exclude-dependencies"] == []
+
+
+def test_component_lock_check_rejects_standalone_policy_drift(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scripts import component_locks
+
+    scorer = ROOT / "resources_servers/longmt_eval/scoring"
+    policy = expected_policy(scorer)
+    policy["constraint-dependencies"] = ["transformers>=5.17.0"]
+    monkeypatch.setattr(component_locks, "expected_policy", lambda project: policy)
+    _, code, message = component_locks.check_project(scorer, update=False)
+    assert code == 1
+    assert "Shared uv policy differs" in message

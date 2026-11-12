@@ -94,10 +94,13 @@ for W&B logging.
 
 ## SEGALE actor pool
 
-`_ensure_actors()` is called lazily on the first `verify()` request. It spawns
-`comet_num_shards × actors_per_gpu` Ray actors, pings them all within 300s,
-and drops any that fail init. Requests are round-robined across the live pool
-under a threading lock.
+When `compute_segale=true`, `model_post_init()` provisions the scoring environment
+and initializes actors before the HTTP server becomes ready. It spawns
+`comet_num_shards × actors_per_gpu` Ray actors, pings them within 300 seconds,
+and drops any that fail initialization. If none are ready, startup fails and
+releases the actors; fix the reported cause and restart the server. Requests do
+not repeat provisioning or actor creation. Requests are round-robined across
+the live pool under a threading lock.
 
 ### Deployment modes
 
@@ -222,8 +225,12 @@ COMETKiwi. GPU assignment is inherited from the actor; models stay loaded across
 documents. JSON-lines requests cross the process boundary, not Python objects
 or Ray tasks. No Python 3.12 process joins Gym's Ray cluster.
 
-On first use, `setup_scoring.py` installs `scoring/uv.lock` using `uv sync --locked
---python 3.12` into a lock-specific directory under Gym's `cache_dir/longmt-scoring`.
+During server startup, `setup_scoring.py` installs `scoring/uv.lock` using
+`uv sync --locked --managed-python --python 3.12` into a lock-specific directory
+under Gym's `cache_dir/longmt-scoring`. `UV_PYTHON_INSTALL_DIR` points to that
+directory's `python/` subdirectory, so the venv's interpreter is also on shared
+storage rather than linked to a host-only system Python. The setup lock wait and
+installation each have a 30-minute limit; import validation has a two-minute limit.
 Installations are serialized and marked ready only after imports pass. Changes
 to the lock select a new directory. No changes to Gym's Python requirements,
 server venv selection, or other environments are needed. `compute_segale=false`
@@ -247,10 +254,55 @@ preparation remains separate (see the cache configuration above).
 
 Worker output goes to the actor logs, including model-loading progress and
 per-document phase timings. The client logs a heartbeat every 30 seconds and
-terminates a worker after 30 minutes without a complete response. Malformed
-responses, worker crashes, and timeouts surface as `segale_error`; they must not
-be interpreted as translation-quality scores. Actor shutdown terminates its
-worker; a parent watchdog also releases the worker if Ray kills the actor.
+terminates a worker after 30 minutes without a complete response, including time
+spent transmitting the request. Nonblocking pipe writes prevent a worker that
+stops reading from bypassing this deadline. Malformed
+responses, worker crashes, and timeouts terminate and reap that subprocess. The
+next document starts a fresh worker and reloads the models; the failed document
+is not silently retried. Ordinary scorer exceptions and non-finite results
+return a per-document error without terminating the worker. Explicit actor
+shutdown closes the worker permanently; a parent watchdog releases it if Ray
+kills the actor.
 
-The scoring math and reward schema are unchanged. Both the wrapper environment
-and the Python 3.12 scoring environment have their own dependency lockfile.
+Failed scoring returns `segale_error`, `evaluation_completed=false`,
+`mask_sample=true`, and `failure_kind=verifier_error`. The required `reward=0.0`
+is a placeholder, not a measured translation score. Gym's quality metrics and
+LongMT aggregation exclude it; retain the failed document for explicit scoring
+retry. Successful results set `evaluation_completed=true` and remain unmasked.
+
+The scoring math is unchanged. Both environments have their own lockfile.
+The standalone scorer participates in the component security-floor checks, with
+explicit Transformers 4.x and protobuf 4.25.9 compatibility exceptions in
+`scripts/component-lock-policy.json`. These exceptions retain the validated
+COMET stack; they are not a claim that older dependencies meet the root security
+policy. The wrapper follows the root policy without scoring-specific exceptions.
+
+### Saved-translation verification
+
+`REVERIFY_MODE=STATELESS` permits `gym eval reverify` to score an existing source
+and completed translation without an earlier agent session. This declaration is
+separate from Python isolation: it does not change how a translation is graded.
+
+### Tests and CI coverage
+
+From the Gym root, run the server suite with `gym env test --resources-server longmt_eval`.
+The subprocess tests automatically obtain a bare managed Python 3.12 via `uv`;
+`LONGMT_TEST_PYTHON` can select an existing interpreter for offline tests. They
+run the real `scoring/worker.py` with a stub scorer, including NaN, exceptions,
+timeouts, crashes, recovery, and stdout isolation, without model downloads.
+
+Dependency-specific tests in `tests/test_scorer.py` skip when their scoring
+libraries are absent from the Python 3.13 server environment. The separate
+**LongMT Python 3.12 scoring tests** CI job runs all of them against the locked
+scorer environment on a CPU runner. Required imports fail that job instead of
+silently skipping tests. To run the same check locally:
+
+```bash
+PYTHONPATH=resources_servers/longmt_eval LONGMT_SCORER_TESTS_REQUIRED=1 \
+  uv run --locked --project resources_servers/longmt_eval/scoring --python 3.12 --with pytest==9.0.3 \
+  python -m pytest -c /dev/null -p no:cacheprovider --confcutdir=resources_servers/longmt_eval/tests \
+  resources_servers/longmt_eval/tests/test_scorer.py -v -rs
+```
+
+These tests exercise weights-only checkpoint loading and download races using
+small fixtures; GPU scoring still needs a separate smoke run.

@@ -17,6 +17,11 @@ def test_install_is_locked_and_idempotent(tmp_path: Path, monkeypatch: pytest.Mo
 
     def run(argv: list[str], **kwargs: object) -> None:
         calls.append(argv)
+        assert "--managed-python" in argv
+        assert kwargs["timeout"] == 1800
+        assert (
+            Path(kwargs["env"]["UV_PYTHON_INSTALL_DIR"]).parent == Path(kwargs["env"]["UV_PROJECT_ENVIRONMENT"]).parent
+        )
         target = Path(kwargs["env"]["UV_PROJECT_ENVIRONMENT"]) / "bin/python"
         target.parent.mkdir(parents=True)
         target.touch()
@@ -51,3 +56,19 @@ def test_override_is_validated_without_install(tmp_path: Path, monkeypatch: pyte
     monkeypatch.setattr(setup_scoring, "validate_python", validated.append)
     assert setup_scoring.ensure_scoring_python(tmp_path / "cache") == target
     assert validated == [target] and not (tmp_path / "cache").exists()
+
+
+def test_setup_lock_wait_is_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LONGMT_SCORING_PYTHON", raising=False)
+    monkeypatch.setattr(setup_scoring, "PROJECT", tmp_path)
+    (tmp_path / "uv.lock").write_text("lock")
+    times = iter([0.0, 1801.0])
+    monkeypatch.setattr(setup_scoring.time, "monotonic", lambda: next(times))
+
+    def locked(*args: object) -> None:
+        raise BlockingIOError("another installer holds the lock")
+
+    monkeypatch.setattr(setup_scoring.fcntl, "flock", locked)
+    with pytest.raises(TimeoutError, match="setup lock timed out"):
+        setup_scoring.ensure_scoring_python(tmp_path / "cache")
+    assert not list((tmp_path / "cache").glob("*/ready"))

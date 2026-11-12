@@ -1230,3 +1230,33 @@ esac
     if lock_status == 0:
         expected.append(f"sync --extra dev{offline}")
     assert capture.read_text().splitlines() == expected
+
+
+@pytest.mark.parametrize(
+    ("required", "result", "success"),
+    [
+        ("true", "success", True),
+        ("true", "failure", False),
+        ("true", "cancelled", False),
+        ("true", "skipped", False),
+        ("false", "skipped", True),
+        ("false", "failure", False),
+    ],
+)
+def test_longmt_scoring_is_in_ci_aggregate(required: str, result: str, success: bool) -> None:
+    jobs = yaml.safe_load(UNIT_TEST_WORKFLOW.read_text())["jobs"]
+    aggregate = jobs["test-result"]
+    assert "longmt-scoring" in aggregate["needs"]
+    step = aggregate["steps"][0]
+    assert step["env"]["RUN_LONGMT"] == "${{ " + jobs["longmt-scoring"]["if"] + " }}"
+    assert step["env"]["LONGMT_RESULT"] == "${{ needs.longmt-scoring.result }}"
+    env = dict(
+        os.environ,
+        DETECT_RESULT="success",
+        RUN_FULL="false",
+        RUN_SERVERS="false",
+        RUN_LONGMT=required,
+        LONGMT_RESULT=result,
+    )
+    completed = subprocess.run(["bash", "-c", step["run"]], env=env, timeout=10)
+    assert (completed.returncode == 0) is success

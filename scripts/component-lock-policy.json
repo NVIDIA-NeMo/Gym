@@ -19,9 +19,12 @@
       "cryptography"
     ]
   },
-  "resources_servers/longmt_eval": {
+  "resources_servers/longmt_eval/scoring": {
+    "standalone": true,
+    "reason": "Python 3.12 SEGALE/COMET 2.2.7 environment: Transformers 4.x compatibility and protobuf 4.25.9 retained from the validated scoring stack. These are explicit compatibility exceptions, not a claim that older versions meet the root security floor.",
     "constraint-dependencies": [
-      "numpy>=2.1"
+      "transformers>=4.17,<5",
+      "protobuf==4.25.9"
     ]
   },
   "resources_servers/nemo_user_sim": {

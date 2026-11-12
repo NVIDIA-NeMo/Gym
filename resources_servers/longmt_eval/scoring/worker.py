@@ -41,11 +41,12 @@ def main() -> None:
             try:
                 LOG.info("Starting document scoring")
                 result = scorer.score(**json.loads(line))
+                payload = json.dumps(result, ensure_ascii=False, allow_nan=False)
                 LOG.info("Completed document scoring")
             except Exception as exc:
                 LOG.exception("Document scoring failed")
-                result = {"error": f"{type(exc).__name__}: {exc}"}
-            responses.write(json.dumps(result, ensure_ascii=False, allow_nan=False) + "\n")
+                payload = json.dumps({"error": f"{type(exc).__name__}: {exc}"})
+            responses.write(payload + "\n")
 
 
 if __name__ == "__main__":

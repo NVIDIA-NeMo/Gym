@@ -3,12 +3,20 @@
 """Scoring dependency tests, also runnable directly in the Python 3.12 environment."""
 
 import gzip
+import importlib
 import io
 import os
 import urllib.request
 from pathlib import Path
 
 import pytest
+
+
+@pytest.fixture(scope="module", autouse=True)
+def require_scoring_dependencies_in_ci() -> None:
+    if os.environ.get("LONGMT_SCORER_TESTS_REQUIRED") == "1":
+        for name in ("torch", "ersatz.split", "laser_encoders.download_models", "comet"):
+            importlib.import_module(name)
 
 
 class TestErsatzWeightsOnlyLoad:

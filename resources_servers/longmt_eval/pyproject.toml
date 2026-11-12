@@ -15,8 +15,6 @@ constraint-dependencies = [
     "msgpack>=1.2.1",
     "pyarrow>=25.0.1",
     "transformers>=5.17.0",
-    # The Gym/Ray wrapper uses Python 3.13; keep NumPy 1.x in the 3.12 scorer only.
-    "numpy>=2.1",
 ]
 override-dependencies = [
     "spacy>=3.8.13",

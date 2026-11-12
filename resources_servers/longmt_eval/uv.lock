@@ -15,7 +15,6 @@ constraints = [
     { name = "certifi", specifier = ">=2026.10.19" },
     { name = "grpcio", specifier = ">=1.84.1,!=1.85.0rc1" },
     { name = "msgpack", specifier = ">=1.2.1" },
-    { name = "numpy", specifier = ">=2.1" },
     { name = "pyarrow", specifier = ">=25.0.1" },
     { name = "transformers", specifier = ">=5.17.0" },
 ]

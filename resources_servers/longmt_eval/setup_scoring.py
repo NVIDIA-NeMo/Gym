@@ -9,6 +9,7 @@ import hashlib
 import logging
 import os
 import subprocess
+import time
 from pathlib import Path
 
 
@@ -23,19 +24,43 @@ def ensure_scoring_python(cache: Path) -> Path:
         python = Path(override).absolute()
         validate_python(python)
         return python
-    fingerprint = hashlib.sha256((PROJECT / "uv.lock").read_bytes()).hexdigest()
+    fingerprint = hashlib.sha256(b"managed-python-v1\0" + (PROJECT / "uv.lock").read_bytes()).hexdigest()
     root = cache / fingerprint[:16]
     root.mkdir(parents=True, exist_ok=True)
     python = root / ".venv" / "bin" / "python"
     with (root / "setup.lock").open("w") as handle:
         LOG.info("Waiting for LongMT scoring setup lock: %s", root)
-        fcntl.flock(handle, fcntl.LOCK_EX)
+        deadline = time.monotonic() + 1800
+        while True:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"LongMT scoring setup lock timed out: {root}")
+                LOG.info("LongMT scoring setup still waiting for lock: %s", root)
+                time.sleep(10)
         marker = root / "ready"
         if not marker.exists():
             LOG.info("Installing locked Python 3.12 scoring environment at %s", root)
             subprocess.run(
-                ["uv", "sync", "--locked", "--no-dev", "--python", "3.12", "--project", str(PROJECT)],
-                env={**os.environ, "UV_PROJECT_ENVIRONMENT": str(root / ".venv")},
+                [
+                    "uv",
+                    "sync",
+                    "--locked",
+                    "--no-dev",
+                    "--managed-python",
+                    "--python",
+                    "3.12",
+                    "--project",
+                    str(PROJECT),
+                ],
+                env={
+                    **os.environ,
+                    "UV_PROJECT_ENVIRONMENT": str(root / ".venv"),
+                    "UV_PYTHON_INSTALL_DIR": str(root / "python"),
+                },
+                timeout=1800,
                 check=True,
             )
             validate_python(python)
@@ -60,6 +85,7 @@ def validate_python(python: Path) -> None:
         ],
         env=env,
         check=True,
+        timeout=120,
     )
 
 

@@ -25,6 +25,7 @@ import ray
 from fastapi import FastAPI
 from pydantic import PrivateAttr
 
+from nemo_gym.core import VERIFIER_ERROR
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
@@ -128,6 +129,7 @@ class LongmtEvalVerifyRequest(LongmtEvalRunRequest, BaseVerifyRequest):
 
 class LongmtEvalVerifyResponse(LongmtEvalVerifyRequest, BaseVerifyResponse):
     generation: str
+    evaluation_completed: bool = True
     comet_qe: Optional[float] = None
     lang_fidelity: Optional[float] = None
     total_seg: int = 0
@@ -150,12 +152,21 @@ class LongmtEvalServer(SimpleResourcesServer):
     _actor_idx: int = PrivateAttr(default=0)
     _actors_init_attempted: bool = PrivateAttr(default=False)
 
+    def model_post_init(self, context: Any) -> None:
+        super().model_post_init(context)
+        if self.config.compute_segale:
+            LOG.info("Provisioning LongMT scorer and initializing GPU actors before serving requests")
+            self._ensure_actors()
+
     def setup_webserver(self) -> FastAPI:
         return super().setup_webserver()
 
     def _ensure_actors(self) -> None:
         if self._actors_init_attempted:
+            if not self._segale_actors:
+                raise RuntimeError("LongMT actor startup failed; restart the server after fixing the cause")
             return
+        self._actors_init_attempted = True
         self._actor_lock = threading.Lock()
 
         from segale_actor import _build_segale_actor_class
@@ -165,18 +176,23 @@ class LongmtEvalServer(SimpleResourcesServer):
             use_extra_gpu=self.config.use_extra_gpu,
         )
         n = max(1, self.config.comet_num_shards * self.config.actors_per_gpu)
-        actors = [
-            actor_cls.remote(
-                gpu_idx=i,
-                comet_model=self.config.comet_model,
-                comet_batch_size=self.config.comet_batch_size,
-                embed_batch_size=self.config.embed_batch_size,
-            )
-            for i in range(n)
-        ]
-
-        pings = [a.ping.remote() for a in actors]
-        ready, _ = ray.wait(pings, num_returns=n, timeout=300.0)
+        actors = []
+        try:
+            for i in range(n):
+                actors.append(
+                    actor_cls.remote(
+                        gpu_idx=i,
+                        comet_model=self.config.comet_model,
+                        comet_batch_size=self.config.comet_batch_size,
+                        embed_batch_size=self.config.embed_batch_size,
+                    )
+                )
+            pings = [a.ping.remote() for a in actors]
+            ready, _ = ray.wait(pings, num_returns=n, timeout=300.0)
+        except Exception:
+            for actor in actors:
+                ray.kill(actor)
+            raise
 
         live: List[Any] = []
         for actor, fut in zip(actors, pings):
@@ -235,9 +251,6 @@ class LongmtEvalServer(SimpleResourcesServer):
             return None
 
     async def verify(self, body: LongmtEvalVerifyRequest) -> LongmtEvalVerifyResponse:
-        if self.config.compute_segale:
-            self._ensure_actors()
-
         raw = body.response.output_text or ""
         if self.config.assert_no_reasoning:
             _assert_no_reasoning(raw)
@@ -251,18 +264,29 @@ class LongmtEvalServer(SimpleResourcesServer):
         if not self.config.compute_segale:
             return LongmtEvalVerifyResponse(**base, reward=0.0)
 
+        def failed(reason: str) -> LongmtEvalVerifyResponse:
+            return LongmtEvalVerifyResponse(
+                **base,
+                reward=0.0,
+                segale_error=reason,
+                evaluation_completed=False,
+                mask_sample=True,
+                failure_kind=VERIFIER_ERROR,
+                failure_reason=reason,
+            )
+
         fut = self._dispatch(body.text, generation, body.target_language)
         if fut is None:
-            return LongmtEvalVerifyResponse(**base, reward=0.0, segale_error="actor_unavailable")
+            return failed("actor_unavailable")
 
         try:
             result: Dict = await fut
         except Exception as exc:
             LOG.exception("SegaleActor.score failed for doc_id=%s", body.doc_id)
-            return LongmtEvalVerifyResponse(**base, reward=0.0, segale_error=str(exc))
+            return failed(str(exc))
 
         if result.get("error"):
-            return LongmtEvalVerifyResponse(**base, reward=0.0, segale_error=result["error"])
+            return failed(result["error"])
 
         comet_qe = result["comet_qe"]
         # comet_qe is the mean COMETKiwi score over all valid (non-sentinel)
@@ -282,7 +306,11 @@ class LongmtEvalServer(SimpleResourcesServer):
         by_lang: Dict[str, List] = defaultdict(list)
         for task_rollouts in tasks:
             for rollout in task_rollouts:
-                if rollout.get("generation"):
+                if (
+                    rollout.get("generation")
+                    and not rollout.get("mask_sample")
+                    and rollout.get("evaluation_completed") is not False
+                ):
                     by_lang[rollout.get("target_language", "")].append(rollout)
 
         metrics: Dict = {}

@@ -14,6 +14,19 @@ dependencies = [
 ]
 [tool.uv]
 package = false
+required-version = ">=0.13.4"
+# Shared security floors, with documented COMET compatibility exceptions in
+# scripts/component-lock-policy.json. Gym/Ray runtime exclusions do not apply here.
+constraint-dependencies = [
+    "grpcio>=1.84.1,!=1.85.0rc1",
+    "certifi>=2026.10.19",
+    "msgpack>=1.2.1",
+    "pyarrow>=25.0.1",
+    "transformers>=4.17,<5",
+    "protobuf==4.25.9",
+]
+override-dependencies = []
+exclude-dependencies = []
 [tool.uv.workspace]
 members = []
 
