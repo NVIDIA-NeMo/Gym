@@ -1553,18 +1553,17 @@ async def test_a_task_lookup_slower_than_the_default_leaves_the_episode_the_defa
     assert await server.episode_timeout_seconds(request_for(task)) == pytest.approx(server._episode_bound_s(task))
 
 
-SLOW_SEED_STEPS = LONG_STEPS.replace("timeout_sec = 0.3", "timeout_sec = 0.5")
+SLOW_SEED_STEPS = LONG_STEPS.replace("timeout_sec = 0.3", "timeout_sec = 1.0")
 
 
 async def test_a_seed_slower_than_the_ready_timeout_leaves_the_turns_their_budget(tmp_path, monkeypatch):
     """Round 24 (G11 review): the derived deadline was `sandbox_ready_timeout_s` plus the post-seed budget and
     opens at the request, while the seed's own bounds are larger (the create grace, pull retries, a sidecar's
     start), so a seed longer than one ready timeout ate the final turns' budget and the episode died with the base
-    server's generic timeout, retried and never scored. The bound now covers the seed's own: a seed of 3.5 s on a
-    ready timeout of 1 s leaves two turns of 0.2 s their 2 s budget (round 32: the turns take 0.2 s, not 0.5 s;
-    round 36: the steps budget 0.5 s each for the agent and the verifier, not 0.3 s, so the two turns leave the
-    verifier runs and the filesystem work 1.6 s of headroom where 0.8 s expired on a loaded CI node, and the seed
-    is slower still, so the episode outlives the former bound by a margin)."""
+    server's generic timeout, retried and never scored. The bound now covers the seed's own: a seed of 5.5 s on a
+    ready timeout of 1 s leaves two turns of 0.2 s their 4 s budget. Each step budgets 1 s for the agent and 1 s
+    for the verifier, leaving the verifier runs and filesystem work 3.6 s of headroom on a loaded CI node. The
+    seed alone exceeds the former nominal bound of 5 s, so the larger turn budgets preserve the regression."""
     server, task, sandbox, _ = multi_turn_server(
         tmp_path,
         monkeypatch,
@@ -1583,7 +1582,7 @@ async def test_a_seed_slower_than_the_ready_timeout_leaves_the_turns_their_budge
     create = server._create_sandbox
 
     async def slow_create(task, workdir, *, episode_key=None):
-        await asyncio.sleep(3.5)
+        await asyncio.sleep(5.5)
         return await create(task, workdir, episode_key=episode_key)
 
     monkeypatch.setattr(server, "_create_sandbox", slow_create)
@@ -1596,9 +1595,9 @@ async def test_a_seed_slower_than_the_ready_timeout_leaves_the_turns_their_budge
     elapsed = time.monotonic() - started
     assert response.failure is None, response.failure
     assert [turn.name for turn in response.result.turns] == ["plan", "build"] and response.result.reward == 1.0
-    # The episode outlived the former bound (one ready timeout plus the turns, 3 s) because the seed alone took
-    # 3.5 s of it; the whole bound (`_episode_bound_s`) still has the turns' 2 s after the seed's 76 s.
-    assert elapsed >= 3.9 > server._task_budget_s(task) == pytest.approx(3.0)
+    # The episode outlived the former bound (one ready timeout plus the turns, 5 s) because the seed alone took
+    # 5.5 s of it; the whole bound (`_episode_bound_s`) still has the turns' 4 s after the seed's 76 s.
+    assert elapsed >= 5.9 > server._task_budget_s(task) == pytest.approx(5.0)
 
 
 async def test_without_enforcement_a_multi_step_task_longer_than_the_default_is_refused_naming_the_setting(

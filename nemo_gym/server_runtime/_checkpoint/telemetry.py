@@ -8,7 +8,7 @@ Both cost nothing when telemetry is off.
 A checkpoint is rare, so every control operation gets a span:
 
 - ``gym.checkpoint.<operation>`` on each participant, for ``prepare``, ``commit``, ``restore``, ``resume``,
-  ``retire``, and ``forget``,
+  ``retire``, ``forget``, and ``release``,
   and ``gym.checkpoint.lease_reopen`` for each attempt to reopen a participant whose lease expired.
   Child spans time the parts that grow with the live set: ``wait_ready``, ``export``,
   ``write``, ``read``, and ``install``.

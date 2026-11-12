@@ -24,6 +24,7 @@ class SSE:
             None,
             None,
         )
+        self.repetition: dict[str, str] = {}
 
     def event(self, data: str) -> bool:
         if data == "[DONE]":
@@ -60,6 +61,12 @@ class SSE:
                     if not isinstance(part, str):
                         raise ValueError("Unsupported stream field")
                     self.message[key] = self.message.get(key, "") + part
+            for field, marker in (
+                ("native_finish_reason", "repetition"),
+                ("stop_reason", "repetition_detected"),
+            ):
+                if choice.get(field) == marker:
+                    self.repetition[field] = marker
             if choice.get("finish_reason") is not None:
                 if self.finish is not None and self.finish != choice["finish_reason"]:
                     raise ValueError("Contradictory terminal reasons")
@@ -72,7 +79,7 @@ class SSE:
         result = {
             **self.meta,
             "object": "chat.completion",
-            "choices": [{"index": 0, "message": self.message, "finish_reason": self.finish}],
+            "choices": [{"index": 0, "message": self.message, "finish_reason": self.finish, **self.repetition}],
         }
         if self.usage is not None:
             result["usage"] = self.usage
@@ -100,7 +107,12 @@ def replay_sse(path: Path, *, require_done: bool = False) -> dict:
 def delivered(response: dict) -> dict:
     """Reject incomplete, native-action, and reasoning-only deliveries."""
     choices = response["choices"]
-    if len(choices) != 1 or choices[0]["finish_reason"] != "stop":
+    if (
+        len(choices) != 1
+        or choices[0]["finish_reason"] != "stop"
+        or choices[0].get("native_finish_reason") == "repetition"
+        or choices[0].get("stop_reason") == "repetition_detected"
+    ):
         raise ValueError("Incomplete delivery")
     message = choices[0]["message"]
     fields = judge.response_fields(message)

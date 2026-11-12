@@ -77,8 +77,15 @@ def format_row(row: dict, boxed_letter_format: bool = False) -> dict:
             {
                 "role": "system",
                 "content": (
-                    "You are a scientific reasoning agent. "
-                    "Think step by step, then place your final answer inside <answer></answer> tags. "
+                    "You are a scientific reasoning agent. Think step by step, then place your final\n"
+                    "answer inside <answer></answer> tags.\n\n"
+                    "Put all reasoning before the tags. The tags must contain only the answer itself:\n"
+                    "no explanation, no units, no markdown, no backticks, no bold, and no surrounding\n"
+                    "sentence.\n\n"
+                    "The answer is normally a SMILES string. Give one answer, including any required\n"
+                    "salt components; do not list alternative candidates.\n"
+                    "If asked for a synthesis route, give a reaction SMILES as reactants>reagents>products.\n"
+                    "If asked to name a reaction, give the reaction name alone.\n\n"
                     "For example: <answer>CCO</answer>"
                 ),
             },

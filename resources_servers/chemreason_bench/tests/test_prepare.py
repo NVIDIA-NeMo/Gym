@@ -244,3 +244,52 @@ class TestRowContract:
     def test_pinned_revision_is_a_full_sha(self):
         assert len(P.GITHUB_REVISION) == 40
         assert P.PROMPTS_URL.startswith(f"https://raw.githubusercontent.com/{P.GITHUB_REPO}/{P.GITHUB_REVISION}/")
+
+
+class TestTaskTypeSubset:
+    def test_select_task_types_accepts_python_and_hydra_spellings(self):
+        assert P.select_task_types(None) is None
+        assert P.select_task_types(("ordering", "rationalization")) == ("ordering", "rationalization")
+        assert P.select_task_types("ordering,rationalization") == ("ordering", "rationalization")
+        assert P.select_task_types("[step_completion, step_validation]") == ("step_completion", "step_validation")
+
+    @pytest.mark.parametrize("task_types", ["", [], "Ordering", ["step_completion", "nope"]])
+    def test_select_task_types_rejects_unknown_or_empty_selections(self, task_types):
+        with pytest.raises(ValueError, match="task_types"):
+            P.select_task_types(task_types)
+
+    def test_task_types_filters_after_the_protocol_selection(self, stub_fetch, tmp_path):
+        rows = _prepare(tmp_path, protocol="gen", task_types="step_validation,rationalization")
+
+        assert sorted(r["task_type"] for r in rows) == ["rationalization", "step_validation"]
+        assert {r["protocol"] for r in rows} == {"gen"}
+
+    def test_task_types_without_protocol_keeps_both_protocols_of_a_dual_family(self, stub_fetch, tmp_path):
+        rows = _prepare(tmp_path, task_types=["step_validation"])
+
+        assert sorted(r["protocol"] for r in rows) == ["gen", "lm"]
+
+    def test_empty_protocol_task_type_intersection_raises_and_preserves_the_file(self, stub_fetch, tmp_path):
+        """`rationalization` has no lm rows: an empty selection must not truncate a prepared file."""
+        out = tmp_path / "chemreason.jsonl"
+        out.write_text("sentinel\n", encoding="utf-8")
+
+        for task_types in (["rationalization"], ["step_completion"]):
+            with pytest.raises(ValueError, match="No rows match"):
+                P.prepare(protocol="lm", task_types=task_types, output_fpath=out)
+            assert out.read_text(encoding="utf-8") == "sentinel\n"
+
+    def test_mixed_selection_with_one_lm_capable_family_writes_that_family(self, stub_fetch, tmp_path):
+        rows = _prepare(tmp_path, protocol="lm", task_types=["rationalization", "step_validation"])
+
+        assert [(r["task_type"], r["protocol"]) for r in rows] == [("step_validation", "lm")]
+
+    def test_task_types_still_passes_the_count_gate_on_the_full_corpus(self, stub_fetch, tmp_path):
+        """The gate checks what was downloaded, not the subset, so a short download still fails."""
+        trimmed = [r for r in _load("prompts.jsonl") if r["task_type"] != "ordering"]
+        answers = _load("answers.jsonl")
+        stub_fetch[P.PROMPTS_URL] = trimmed
+        stub_fetch[P.ANSWERS_URL] = answers
+
+        with pytest.raises(ValueError, match="expected 6 instances"):
+            _prepare(tmp_path, protocol="gen", task_types="rationalization")

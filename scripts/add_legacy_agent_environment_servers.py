@@ -165,8 +165,8 @@ def needs_environment_server(instance: dict) -> bool:
     # An omitted binding can inherit Resources and must still migrate.
     if agent_type in AGENT_SESSION_AGENT_TYPES and resources_server is None:
         return False
-    # Stirrup and Copilot run only in agent sessions and have no /run for a legacy relay to call.
-    if agent_type in ("stirrup_agent", "copilot_agent"):
+    # Stirrup, Copilot, Droid and OpenHands run only in agent sessions and have no /run for a legacy relay to call.
+    if agent_type in ("stirrup_agent", "copilot_agent", "droid_agent", "openhands_agent"):
         return False
     return bool(agent.get("entrypoint") or instance.get("_inherit_from"))
 

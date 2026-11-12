@@ -775,8 +775,13 @@ def validate_environment(
     config_path: str | Path | None = None,
     *,
     sync: bool = False,
+    validate_datasets: bool = True,
 ) -> EnvironmentValidationReport:
-    """Validate a manifest without probing services or runtime output paths."""
+    """Validate a manifest without probing services or runtime output paths.
+
+    Component CI may disable dataset checks to exercise committed verifier fixtures
+    without downloading a workload's full benchmark or training dataset.
+    """
     resolved_manifest_path = Path(manifest_path).expanduser().resolve()
     manifest = load_manifest(resolved_manifest_path)
     resolved_config_path = (
@@ -823,6 +828,7 @@ def validate_environment(
                 dataset, standard_prompt_config=manifest.standard_prompt_config, prompt_source=manifest.prompt_source
             )
             for dataset in manifest.datasets
+            if validate_datasets
         )
     if synchronized:
         _write_manifest_atomically(resolved_manifest_path, manifest)

@@ -91,6 +91,28 @@ IFEval, IFBench, inverse instruction following, VerifIF, jailbreak resistance, o
 **Other**
 ASR (LibriSpeech, WER), machine translation (WMT, FLORES-200), VLM benchmarks, Arena Hard pairwise judging, and speculative-decoding throughput.
 
+## HealthBench and HealthBench Professional
+
+These clinical-response benchmarks use the shared HealthBench rubric verifier and an independent judge model. They are experimental integrations. See the [HealthBench README](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/healthbench/README.md) and [HealthBench Professional README](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/healthbench_professional/README.md) for dataset provenance, judge settings, and scoring details.
+
+Prepare each dataset before running it. The smoke config routes Nemotron Lightning policy calls and independent judge calls through the NVIDIA inference gateway. It selects GPT-4.1 for HealthBench; Professional selects GPT-5.4 with low judge reasoning effort in its benchmark config. Set `NVIDIA_API_KEY` for this example, or provide your own model and judge settings with `++judge_base_url`, `++judge_api_key`, and `++judge_model_name`.
+
+```bash
+gym eval prepare --benchmark healthbench
+gym eval prepare --benchmark healthbench_professional
+
+gym eval run --benchmark healthbench \
+  --config benchmarks/healthbench/configs/nemotron-lightning-smoke.yaml \
+  --split benchmark --output results/healthbench/rollouts.jsonl
+
+gym eval run --benchmark healthbench_professional \
+  --config benchmarks/healthbench/configs/nemotron-lightning-smoke.yaml \
+  --split benchmark --output results/healthbench_professional/rollouts.jsonl \
+  ++smoke_judge_model_name=azure/openai/gpt-5.4
+```
+
+HealthBench Full is the default. Pass `--config benchmarks/healthbench/configs/consensus.yaml` or `--config benchmarks/healthbench/configs/hard.yaml` to both prepare and run for the corresponding subset. The headline aggregate metric is `overall_score` for HealthBench and `overall_score_length_adjusted` for Professional. `mean/reward` is a bounded Gym reward, not the published benchmark score. Judge failures are masked and reduce scored coverage; report that coverage with every score.
+
 ## Benchmarks Whose Data You Stage
 
 A few benchmarks declare a protocol over a dataset that cannot ship with Gym. Their `prepare_script` copies a file you stage yourself and fails when you have not given it one, so a run never scores a partial or stale set.

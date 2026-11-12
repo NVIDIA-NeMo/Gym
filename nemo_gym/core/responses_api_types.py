@@ -1270,6 +1270,14 @@ NeMoGymChatCompletionOutputMessage: TypeAlias = Annotated[
 class NeMoGymChoice(Choice):
     message: NeMoGymChatCompletionOutputMessage
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_repetition_finish_reason(cls, value: Any) -> Any:
+        """Retain vLLM's repetition cause while using the SDK's stop category."""
+        if isinstance(value, dict) and value.get("finish_reason") == "repetition":
+            return {**value, "finish_reason": "stop", "native_finish_reason": "repetition"}
+        return value
+
 
 class NeMoGymChatCompletion(ChatCompletion):
     choices: List[NeMoGymChoice]

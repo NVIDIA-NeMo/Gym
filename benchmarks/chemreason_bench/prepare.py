@@ -30,7 +30,7 @@ import json
 import sys
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Union
 
 
 OUTPUT_FPATH = Path(__file__).absolute().parent / "data" / "chemreason_bench_benchmark.jsonl"
@@ -310,11 +310,32 @@ def _format_row(
     return row
 
 
+def select_task_types(task_types: Optional[Union[str, Iterable[str]]]) -> Optional[tuple]:
+    """Normalize a task-family selection; ``None`` keeps every family.
+
+    Accepts a Python iterable or the string forms Hydra passes through
+    ``prepare_script_args`` (``a,b`` or ``[a,b]``). An unknown or empty selection
+    is an error rather than an empty dataset.
+    """
+    if task_types is None:
+        return None
+    if isinstance(task_types, str):
+        task_types = task_types.strip("[]").split(",")
+    selected = tuple(dict.fromkeys(task_type.strip() for task_type in task_types))
+    unknown = sorted(set(selected) - set(EXPECTED_BY_TASK))
+    if not selected or unknown:
+        raise ValueError(
+            f"task_types must be a non-empty selection from {sorted(EXPECTED_BY_TASK)}, got {task_types!r}"
+        )
+    return selected
+
+
 def prepare(
     limit: Optional[int] = None,
     protocol: Optional[str] = None,
     top_logprobs: int = DEFAULT_LM_TOP_LOGPROBS,
     output_fpath: Path = OUTPUT_FPATH,
+    task_types: Optional[Union[str, Iterable[str]]] = None,
 ) -> Path:
     """Fetch both upstream files, join on ``task_id``, and write the Gym JSONL.
 
@@ -325,6 +346,12 @@ def prepare(
     ``prepare`` directly from ``prepare_script_args``: argparse never runs, and a
     silently ignored ``protocol=Gen`` would write a full corpus that reads like a
     subset was requested.
+
+    ``task_types`` keeps only the named families after the protocol selection.
+    Like ``protocol``, it writes a deliberate subset, not the published scored
+    population, to ``output_fpath``; when that is the default path, prepare with
+    ``use_cached_prepared_benchmarks=false`` or pass a separate path so a stale
+    file is never reused.
     """
     if limit is not None and limit <= 0:
         raise ValueError(f"limit must be a positive integer, got {limit!r}")
@@ -332,6 +359,7 @@ def prepare(
         raise ValueError(f"top_logprobs must be a positive integer, got {top_logprobs!r}")
     if protocol is not None and protocol not in ("gen", "lm"):
         raise ValueError(f"protocol must be 'gen' or 'lm', got {protocol!r}")
+    selected_task_types = select_task_types(task_types)
 
     print(f"Downloading {GITHUB_REPO} @ {GITHUB_REVISION[:7]} ...")
     prompts = _fetch_jsonl(PROMPTS_URL)
@@ -381,6 +409,16 @@ def prepare(
     else:
         rows = rows + lm_rows
 
+    if selected_task_types is not None:
+        rows = [row for row in rows if row["task_type"] in selected_task_types]
+        if not rows:
+            # e.g. protocol="lm" with a family that has no lm rows: writing would
+            # truncate an existing prepared file and report success.
+            raise ValueError(
+                f"No rows match protocol={protocol!r} and task_types={list(selected_task_types)!r}; "
+                "the existing dataset file is left untouched"
+            )
+        print(f"  --task-type {list(selected_task_types)}: {len(rows)} instances, NOT the scored population")
     if limit is not None:
         rows = rows[:limit]
         print(f"  --limit {limit}: writing a deliberate subset, NOT the scored population")
@@ -416,10 +454,18 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         default=None,
         help="Write only the first N instances. For smoke tests; not a scored population.",
     )
+    parser.add_argument(
+        "--task-type",
+        action="append",
+        choices=sorted(EXPECTED_BY_TASK),
+        default=None,
+        help="Keep only this task family; repeat for several. Pair with --output; not a scored population.",
+    )
+    parser.add_argument("--output", type=Path, default=OUTPUT_FPATH, help="Where to write the JSONL.")
     # Validate arguments before the fetch, so a bad value fails fast rather than
     # after several megabytes have been pulled.
     args = parser.parse_args(list(argv) if argv is not None else None)
-    prepare(limit=args.limit, protocol=args.protocol)
+    prepare(limit=args.limit, protocol=args.protocol, output_fpath=args.output, task_types=args.task_type)
     return 0
 
 

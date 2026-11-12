@@ -42,15 +42,20 @@ abbreviated SHA, or no ref) still needs the network, because `uv` must fetch to 
 
 ## Shared server-test data
 
-IFBench source and NLTK resources live under
+IFBench source, NLTK resources, and the FLORES-200 SentencePiece tokenizer live under
 `s3://nemo-ci-storage-31ff58e3-a555-4c8b-ad91-c453ce311bbd/nemo-fw/TestData/nemo_gym/v1/`.
 GitHub test jobs use the existing `nemo-ci-aws-cpu-4-16` ARC runner pool, which already mounts
 that bucket read-only at `/mnt/s3-data-ro`. Jobs set `NEMO_GYM_TEST_DATA_ROOT` to
 `/mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1`, set `NLTK_DATA` to its `nltk_data` child, and
-run `scripts/ci/check_test_data.py`. The preflight requires 14 nonempty files and the pinned
-IFBench revision before tests start. Its `--nltk-cache` option copies the NLTK resources into a
+run `scripts/ci/check_test_data.py`. The preflight requires 15 nonempty files, the pinned
+IFBench revision, and the tokenizer's pinned SHA-256 before tests start.
+Its `--nltk-cache` option copies the NLTK resources into a
 private cache and exports that path for the job: NLTK 3.10 refuses foreign-UID or writable shared
-trees. Missing packages can download into the private cache. Compiler and browser dependencies
+trees. It also exports `SACREBLEU` pointing to the bundle's `sacrebleu` directory.
+Native CI workers derive the same path from `NEMO_GYM_TEST_DATA_ROOT`.
+SacreBLEU reads `sacrebleu/models/flores200sacrebleuspm` directly from the read-only mount,
+so WMT tests do not fetch the model through its external download URL.
+Missing NLTK packages can download into the private cache. Compiler and browser dependencies
 are installed by `install_test_dependencies.sh`; the S3 mount is supplied by ARC.
 
 TF-States owns recurring S3 → GCS → Singapore GCS transfers. Its existing `gpu-datasets-sync`
@@ -62,17 +67,23 @@ an absent Gym subtree.
 These declarations require artifact seeding, infrastructure apply, and a pod-launcher release
 before they can supply a running job.
 
-Prepare the bundle locally while online:
+Prepare the bundle locally while online, supplying a previously downloaded FLORES-200 model:
 
 ```bash
 uv run --no-project --with 'nltk>=3.10.0' --with regex --with defusedxml \
-  python scripts/ci/seed_test_data.py cache/gym-test-data/v1
+  python scripts/ci/seed_test_data.py cache/gym-test-data/v1 \
+    --sacrebleu-model "$HOME/.sacrebleu/models/flores200sacrebleuspm"
 (cd cache/gym-test-data/v1 && sha256sum --strict -c SHA256SUMS)
 ```
 
 Upload all files beneath that directory to the S3 prefix, with `SHA256SUMS` last. Preserve the
 relative paths across both GCS mirrors and the dataset export. Use a new versioned prefix for
 future incompatible bundles and update consumers together.
+
+The tokenizer must have SHA-256
+`14bb8dfb35c0ffdea7bc01e56cea38b9e3d5efcdcb9c251d6b40538e1aab555a`.
+Seeding rejects a different file before preparing the bundle. When extending an existing v1
+bundle, publish the model and its manifest entry before rolling out the stricter inventory.
 
 For a supplied filesystem tree, set `NEMO_GYM_TEST_DATA_ROOT` to the versioned root and `NLTK_DATA`
 to its `nltk_data` child. IFBench copies mounted source into its private `.ifbench` cache before
