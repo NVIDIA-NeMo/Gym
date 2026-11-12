@@ -16,6 +16,7 @@ import os
 import shlex
 import shutil
 import tempfile
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
@@ -38,6 +39,9 @@ from resources_servers.gdpval.preconvert import (
 
 
 LOGGER = logging.getLogger(__name__)
+# One LibreOffice run, and every run of one rollout together (the default of sandbox_render_budget_s).
+RENDER_TIMEOUT_S = 150
+DEFAULT_RENDER_BUDGET_S = 600.0
 
 WORKDIR = "/root"
 
@@ -107,6 +111,7 @@ async def collect_deliverables(
     workdir: Optional[str] = None,
     *,
     render_libreoffice_command: Optional[Sequence[str]] = None,
+    render_budget_s: float = DEFAULT_RENDER_BUDGET_S,
 ) -> None:
     """Copy the submitted files, the finish arguments and the reference files into ``task_dir``.
 
@@ -127,7 +132,7 @@ async def collect_deliverables(
         (staging / persisted_layout.FINISH_PARAMS_FILE).write_text(json.dumps(finish_params, indent=2, default=str))
         await asyncio.to_thread(shutil.copytree, reference_dir, staging, dirs_exist_ok=True)
         if render_libreoffice_command:
-            await render_office_in_sandbox(sandbox, staging, render_libreoffice_command)
+            await render_office_in_sandbox(sandbox, staging, render_libreoffice_command, budget_s=render_budget_s)
         await asyncio.to_thread(_make_group_readable, staging)
         await asyncio.to_thread(shutil.rmtree, task_dir, ignore_errors=True)
         await asyncio.to_thread(staging.rename, task_dir)
@@ -139,30 +144,43 @@ async def collect_deliverables(
         raise
 
 
-async def render_office_in_sandbox(sandbox: AsyncSandbox, directory: Path, libreoffice_command: Sequence[str]) -> None:
+async def render_office_in_sandbox(
+    sandbox: AsyncSandbox,
+    directory: Path,
+    libreoffice_command: Sequence[str],
+    *,
+    budget_s: float = DEFAULT_RENDER_BUDGET_S,
+) -> None:
     """Write the injective ``<name>.pdf`` sidecar beside every Office file under ``directory``.
 
     LibreOffice runs in the task sandbox rather than in the server, so the server neither needs LibreOffice nor
     renders model-written files itself. The steps mirror :func:`preconvert.convert_to_pdf`: a whitespace-free
     name, the ``ns0`` package fix and one OOXML round-trip retry. A file that cannot be rendered keeps no sidecar
-    and is judged as the server would judge it without LibreOffice.
+    and is judged as the server would judge it without LibreOffice. ``budget_s`` bounds the whole rendering, so
+    files that hang LibreOffice cannot hold /verify for long: the files left when it runs out are not rendered.
     """
-    for path in sorted(p for p in directory.rglob("*") if p.is_file() and p.suffix.lower() in OFFICE_EXTENSIONS):
+    deadline = time.monotonic() + budget_s
+    paths = sorted(p for p in directory.rglob("*") if p.is_file() and p.suffix.lower() in OFFICE_EXTENSIONS)
+    for index, path in enumerate(paths):
         if sidecar_pdf(path).exists():
             continue
+        if time.monotonic() >= deadline:
+            left = [p.name for p in paths[index:] if not sidecar_pdf(p).exists()]
+            LOGGER.warning("Sandbox render budget of %ss used up; not rendering %s", budget_s, left)
+            return
         with tempfile.TemporaryDirectory(prefix="gdpval-sandbox-render-") as local:
             first = Path(local) / _safe_basename(path.name)
             if _ooxml_has_ns0_prefix(path):
                 await asyncio.to_thread(_normalize_ooxml_zip, path, first)
             else:
                 await asyncio.to_thread(shutil.copy2, path, first)
-            error = await _render_one(sandbox, first, sidecar_pdf(path), libreoffice_command)
+            error = await _render_one(sandbox, first, sidecar_pdf(path), libreoffice_command, deadline)
             if error and path.suffix.lower() in OOXML_EXTENSIONS:
                 retry = Path(local) / "retry" / first.name
                 retry.parent.mkdir()
                 try:
                     await asyncio.to_thread(roundtrip_ooxml_copy, path, retry)
-                    error = await _render_one(sandbox, retry, sidecar_pdf(path), libreoffice_command)
+                    error = await _render_one(sandbox, retry, sidecar_pdf(path), libreoffice_command, deadline)
                 except Exception as exc:
                     error = f"{error}; round-trip retry failed: {exc!r}"
         if error:
@@ -170,7 +188,7 @@ async def render_office_in_sandbox(sandbox: AsyncSandbox, directory: Path, libre
 
 
 async def _render_one(
-    sandbox: AsyncSandbox, source: Path, output_pdf: Path, libreoffice_command: Sequence[str]
+    sandbox: AsyncSandbox, source: Path, output_pdf: Path, libreoffice_command: Sequence[str], deadline: float
 ) -> Optional[str]:
     """Render ``source`` to ``output_pdf`` in the sandbox; return the error, or None on success.
 
@@ -185,7 +203,10 @@ async def _render_one(
             return f"mkdir failed: {prepared.stderr}"
         await sandbox.upload(source, str(remote_source))
         argv = libreoffice_pdf_argv(remote_source, remote / "out", remote / "profile", libreoffice_command)
-        result = await sandbox.exec(shlex.join(argv), timeout_s=150)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return "sandbox render budget used up"
+        result = await sandbox.exec(shlex.join(argv), timeout_s=min(RENDER_TIMEOUT_S, remaining))
         # A timed-out or otherwise inconclusive run may still have written a partial PDF; never accept it.
         if result.error_type is not None:
             return f"LibreOffice execution failed ({result.error_type}): {(result.stderr or '').strip()[-300:]}"

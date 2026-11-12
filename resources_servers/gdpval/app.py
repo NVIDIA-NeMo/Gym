@@ -88,6 +88,7 @@ from resources_servers.gdpval.s3_references import S3ReferenceCache, is_s3_uri
 from resources_servers.gdpval.scoring import SCORING_ERROR_KEY, is_permanent_judge_error
 from resources_servers.gdpval.task_data import TaskData
 from resources_servers.gdpval.task_sandbox import (
+    DEFAULT_RENDER_BUDGET_S,
     WORKDIR,
     GDPValSandboxConfig,
     collect_deliverables,
@@ -328,6 +329,9 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     # Without libreoffice_command, comparison mode then converts nothing on the host: references must
     # carry their PDFs. The agent controls that sandbox, so it can forge its own renders; see the README.
     sandbox_libreoffice_command: Optional[List[str]] = Field(default=None, min_length=1)
+    # Seconds that sandbox rendering may take per rollout, all files together. A run of LibreOffice is
+    # capped at 150 s; files left when the budget runs out are judged without a render.
+    sandbox_render_budget_s: float = Field(default=DEFAULT_RENDER_BUDGET_S, gt=0)
     # Where /verify caches the tasks of s3:// reference deliverables; None uses a directory under the temp dir.
     reference_cache_dir: Optional[str] = None
 
@@ -942,6 +946,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 task_dir,
                 self._sandbox_workdir,
                 render_libreoffice_command=self.config.sandbox_libreoffice_command,
+                render_budget_s=self.config.sandbox_render_budget_s,
             )
             await self._release(session)
             session.deliverables_dir = str(task_dir)

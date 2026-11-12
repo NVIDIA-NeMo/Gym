@@ -6,6 +6,7 @@ import json
 import shlex
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -36,11 +37,12 @@ class FakeSandbox:
         self.upload_error = upload_error
         self.cleanup_error = cleanup_error
         self.conversions: list[list[str]] = []
+        self.conversion_timeouts: list[float] = []
 
     def local(self, remote: str) -> Path:
         return self.root / remote.lstrip("/")
 
-    async def exec(self, command: str, **_) -> SandboxExecResult:
+    async def exec(self, command: str, *, timeout_s: float, **_) -> SandboxExecResult:
         argv = shlex.split(command)
         if argv[:2] == ["mkdir", "-p"]:
             self.local(argv[2]).mkdir(parents=True)
@@ -50,6 +52,7 @@ class FakeSandbox:
             shutil.rmtree(self.local(argv[2]), ignore_errors=True)
         else:
             self.conversions.append(argv)
+            self.conversion_timeouts.append(timeout_s)
             if self.failures:
                 self.failures -= 1
                 return SandboxExecResult(stdout="", stderr="source file could not be loaded", return_code=0)
@@ -164,6 +167,35 @@ async def test_a_failed_scratch_cleanup_keeps_the_render(tmp_path):
     await task_sandbox.render_office_in_sandbox(sandbox, staging, ["libreoffice"])
 
     assert (staging / "plan.xlsx.pdf").exists()
+
+
+async def test_files_left_when_the_render_budget_runs_out_are_not_rendered(tmp_path, monkeypatch, caplog):
+    staging = tmp_path / "staging"
+    _workbook(staging / "a.xlsx")
+    _workbook(staging / "b.xlsx")
+    sandbox = FakeSandbox(tmp_path / "sandbox")
+    # Each reading of the clock is 100 s later: the first file renders, then the 250 s budget is gone.
+    clock = iter(range(0, 10_000, 100))
+    monkeypatch.setattr(task_sandbox, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+
+    await task_sandbox.render_office_in_sandbox(sandbox, staging, ["libreoffice"], budget_s=250)
+
+    assert (staging / "a.xlsx.pdf").exists()
+    assert not (staging / "b.xlsx.pdf").exists()
+    # The run got only what was left of the budget (250 - 200 s), not the full per-run cap.
+    assert sandbox.conversion_timeouts == [50]
+    assert "budget of 250s used up; not rendering ['b.xlsx']" in caplog.text
+
+
+async def test_a_run_gets_no_more_than_the_budget_left(tmp_path):
+    staging = tmp_path / "staging"
+    _workbook(staging / "plan.xlsx")
+    sandbox = FakeSandbox(tmp_path / "sandbox")
+
+    await task_sandbox.render_office_in_sandbox(sandbox, staging, ["libreoffice"], budget_s=30)
+
+    assert (staging / "plan.xlsx.pdf").exists()
+    assert 0 < sandbox.conversion_timeouts[0] <= 30
 
 
 @pytest.mark.parametrize("render", [None, ["libreoffice"]])

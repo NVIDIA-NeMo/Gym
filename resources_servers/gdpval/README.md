@@ -69,7 +69,9 @@ To render in the task sandbox instead, set `sandbox_libreoffice_command: [libreo
 `containers/Dockerfile` has LibreOffice and the fonts. Before `/verify` stops the sandbox, it renders every collected
 Office file, submitted or a task input under `reference_files/`, to a `<name>.pdf` sidecar there. The server then
 needs no LibreOffice: startup skips the install and its check, and both modes judge the sidecars. A file that fails to
-render, or whose render does not finish cleanly, gets no sidecar and is judged as it would be without LibreOffice. Use
+render, or whose render does not finish cleanly, gets no sidecar and is judged as it would be without LibreOffice.
+Rendering one rollout's files takes at most `sandbox_render_budget_s` (default 600) in all, and one LibreOffice run at
+most 150 s; files left when the budget runs out are judged without a render too. Use
 this when the server runs without root, or should not open model-written Office files with LibreOffice itself.
 
 In comparison mode the server then converts nothing, even when the host has LibreOffice. Comparison references are
