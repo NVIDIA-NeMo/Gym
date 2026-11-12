@@ -47,6 +47,26 @@ def test_external_media_is_not_a_complete_payload(record):
     assert verdict(record, "TE-7") == "not_fulfilled"
 
 
+@pytest.mark.parametrize("chat", [False, True])
+def test_image_parameter_schema_is_not_an_unresolved_image(record, chat):
+    request = record["ng_trajectory"]["model_calls"][0]["request"]
+    function = {
+        "name": "vision_analyze",
+        "parameters": {"type": "object", "properties": {"image_url": {"type": "string"}}},
+    }
+    request["tools"] = [{"type": "function", "function": function} if chat else {"type": "function", **function}]
+    before = json.dumps(record, sort_keys=True)
+    assert verdict(record, "TE-7") == "fulfilled"
+    assert json.dumps(record, sort_keys=True) == before
+    request["input"] = [{"type": "input_image", "image_url": "https://example.invalid/missing.png"}]
+    assert verdict(record, "TE-7") == "not_fulfilled"
+
+
+def test_parameter_schema_exception_does_not_hide_opaque_response_content(record):
+    record["ng_trajectory"]["model_calls"][0]["response"]["encrypted_content"] = "opaque"
+    assert verdict(record, "TE-7") == "not_fulfilled"
+
+
 def test_payload_removal_fails_even_with_complete_conversation(record):
     record["ng_trajectory"]["model_calls"][0]["request"] = None
     assert verdict(record, "TE-4") == "not_fulfilled"
