@@ -102,8 +102,9 @@ async def observe_llm_judge_grading(calculate: Callable[[], Awaitable[T]]) -> T:
     """Execute a reviewed async LLM-judge grading once and record its actual result in the active invocation.
 
     The judge replies parsed by ``call_judge`` during ``calculate`` become the operation's dependencies. It completes
-    only when every judge reply was identified, at least one was, the call site marked every reply with
-    ``record_parsed_judge_verdict`` and the result binds; otherwise it stays unknown. Errors propagate unchanged.
+    only when every judge reply was identified and accounted for, at least one accepted verdict was parsed, and
+    the result binds. Rejected, retried replies remain dependencies but cannot substitute for accepted verdicts.
+    Errors propagate unchanged.
     """
     invocation = _active_verifier.get()
     operation = GradingOperationObservation(operation_id=f"grade-{uuid4().hex}", kind="llm_judge", dependencies=[])
@@ -129,7 +130,9 @@ async def observe_llm_judge_grading(calculate: Callable[[], Awaitable[T]]) -> T:
         operation.result_binding_sha256 = None
     complete = (
         bool(grading.dependencies)
-        and len(grading.parsed_dependencies) == len(grading.dependencies)
+        and bool(grading.parsed_dependencies)
+        and len(grading.parsed_dependencies | grading.rejected_dependencies) == len(grading.dependencies)
+        and not grading.parsed_dependencies & grading.rejected_dependencies
         and not grading.unidentified_calls
     )
     operation.outcome = "completed" if complete and operation.result_binding_sha256 is not None else "unknown"
