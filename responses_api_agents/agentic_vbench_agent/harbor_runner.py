@@ -38,6 +38,33 @@ TRAINING_MODES = ("plain", "compaction", "subagent", "compaction_subagent")
 # also keeps OpenCode compaction on, so a parent or child whose context fills
 # is rewritten and trains as compaction segments of its own session.
 SUBAGENT_MODES = ("subagent", "compaction_subagent")
+# OpenCode's built-in subagents. In subagent mode exactly one child agent is exposed to the
+# task tool; the built-ins not chosen as that child are disabled so the tool description
+# lists one delegate.
+OPENCODE_BUILTIN_SUBAGENTS = ("general", "explore", "scout")
+# The child agent of the AgenticVBench subagent SFT traces (SDG pilot mode, 2026-10-21):
+# a report-only media analyst capped at 10 steps. Its description is what the task tool
+# shows the primary agent; the SFT system prompts list it verbatim, so an RL run that
+# starts from those checkpoints exposes the same child.
+SFT_ANALYST_SUBAGENT = {
+    "name": "analyst",
+    "steps": 10,
+    "description": (
+        "Video/audio analysis subagent. Give it ONE self-contained analysis goal on the materials under "
+        "/workspace/materials (e.g. describe and timestamp the shots of a set of clips, read on-screen text, "
+        "find a cut/glitch/duplicated span, measure loudness or noise, transcribe a span). It inspects media with "
+        "ffmpeg/ffprobe/python and reports findings with exact timestamps; it must not write anything under "
+        "/workspace/output. Several analysts can run in parallel on independent goals; call task again with the "
+        "task_id it returned to ask the same analyst a follow-up that builds on what it already found."
+    ),
+    "prompt": (
+        "You are an analysis subagent with a budget of at most 10 tool calls. Complete exactly the analysis goal you "
+        "were given using ffmpeg/ffprobe/python and image reads (prefer a few targeted calls over exhaustive scans), "
+        "then stop and report precise timestamps, counts and quotes with the evidence you used, stating uncertainty. "
+        "Never write under /workspace/output; only report."
+    ),
+}
+_AGENT_NAME = re.compile(r"[a-z][a-z0-9-]*")
 
 # Optional per-task runtime spec (``<task>/avb_runtime.json``): episode-local MCP servers for
 # OpenCode and read-only host bind mounts of shared data. Written by task converters that need
@@ -111,6 +138,9 @@ def job_config(
     subagent_max_active: int | None = None,
     delegation_prompt: str | None = None,
     subagent_prompt: str | None = None,
+    subagent_name: str = "general",
+    subagent_description: str | None = None,
+    subagent_steps: int | None = None,
     runtime: dict | None = None,
 ) -> dict:
     """Create a single-attempt Harbor job using OpenCode's compatible provider.
@@ -135,8 +165,13 @@ def job_config(
     OpenCode's side model call that names the session. ``delegation_prompt`` adds
     a run-level instruction to the primary agent without modifying the pinned
     benchmark prompt; it is valid only when the subagent tool is enabled.
-    ``subagent_prompt`` gives the depth-one ``general`` child a run-level
-    instruction, independently of the primary agent's delegation instruction.
+    ``subagent_prompt`` gives the depth-one child a run-level instruction,
+    independently of the primary agent's delegation instruction. ``subagent_name``
+    is the one child the task tool exposes (OpenCode's ``general`` by default; the
+    other built-in subagents are disabled), ``subagent_description`` is what the task
+    tool shows the primary agent about it, and ``subagent_steps`` caps the child's
+    turns (the parent's ``max_turns`` when unset). ``SFT_ANALYST_SUBAGENT`` holds the
+    values the AgenticVBench subagent SFT traces were generated with.
     ``runtime`` (see ``load_runtime_spec``) adds episode-local MCP servers to OpenCode, allowed
     for the primary agent and any child, and read-only bind mounts to the task environment.
     """
@@ -201,6 +236,18 @@ def job_config(
             raise ValueError("Subagent prompt must not be empty")
         if not subagents_enabled:
             raise ValueError("Subagent prompt requires subagents")
+    if subagent_description is not None:
+        subagent_description = subagent_description.strip()
+        if not subagent_description:
+            raise ValueError("Subagent description must not be empty")
+        if not subagents_enabled:
+            raise ValueError("Subagent description requires subagents")
+    if subagent_steps is not None and (type(subagent_steps) is not int or subagent_steps < 1):
+        raise ValueError("subagent_steps must be null (the parent's max_turns) or a positive int")
+    if subagent_steps is not None and not subagents_enabled:
+        raise ValueError("Subagent steps require subagents")
+    if not _AGENT_NAME.fullmatch(subagent_name) or subagent_name in ("build", "plan", "title", "task"):
+        raise ValueError(f"Invalid subagent name {subagent_name!r}: lower-case identifier, not a primary agent")
     if subagents_enabled:
         if subagent_max_depth != 1:
             raise ValueError("Subagent training requires depth-one delegation (subagent_max_depth=1)")
@@ -224,20 +271,24 @@ def job_config(
     # permission is explicit ``allow``: OpenCode 1.14.39's non-interactive CLI
     # auto-replies only to permission requests owned by the root session, so an
     # ``ask`` from a child otherwise leaves the child and its waiting parent
-    # deadlocked until Harbor's wall-clock timeout. Only ``general`` is exposed as
-    # a child, matching the reference harness, and its explicit task denial is the
-    # depth-one boundary.
+    # deadlocked until Harbor's wall-clock timeout. One child is exposed to the
+    # task tool (the other built-ins are disabled), and its explicit task denial is
+    # the depth-one boundary.
     if subagents_enabled:
         opencode_config["permission"] = {"*": "allow", "task": "allow"}
         if delegation_prompt is not None:
             agents.setdefault("build", {})["prompt"] = delegation_prompt
-        agents["general"] = {
+        steps = subagent_steps if subagent_steps is not None else max_turns
+        agents[subagent_name] = {
             "mode": "subagent",
             "permission": {"*": "allow", "task": "deny"},
-            **({"steps": max_turns} if max_turns is not None else {}),
+            **({"steps": steps} if steps is not None else {}),
+            **({"description": subagent_description} if subagent_description is not None else {}),
             **({"prompt": subagent_prompt} if subagent_prompt is not None else {}),
         }
-        agents["explore"] = {"disable": True}
+        for name in OPENCODE_BUILTIN_SUBAGENTS:
+            if name != subagent_name:
+                agents[name] = {"disable": True}
     else:
         opencode_config["permission"] = {"task": "deny"}
     if agents:
@@ -658,7 +709,23 @@ def main() -> None:
     parser.add_argument(
         "--subagent-prompt",
         default=None,
-        help="Instruction for depth-one general children (subagent mode only)",
+        help="Instruction for the depth-one child (subagent mode only)",
+    )
+    parser.add_argument(
+        "--subagent-name",
+        default="general",
+        help="The one child agent the task tool exposes (subagent mode only; other built-ins are disabled)",
+    )
+    parser.add_argument(
+        "--subagent-description",
+        default=None,
+        help="What the task tool shows the primary agent about the child (subagent mode only)",
+    )
+    parser.add_argument(
+        "--subagent-steps",
+        type=int,
+        default=None,
+        help="Turn cap of the child (subagent mode only; the parent's --max-turns when unset)",
     )
     args = parser.parse_args()
     if importlib.metadata.version("harbor") != "0.6.6":
@@ -720,6 +787,9 @@ def main() -> None:
             subagent_max_active=args.subagent_max_active,
             delegation_prompt=args.delegation_prompt,
             subagent_prompt=args.subagent_prompt,
+            subagent_name=args.subagent_name,
+            subagent_description=args.subagent_description,
+            subagent_steps=args.subagent_steps,
             runtime=runtime,
         )
     )

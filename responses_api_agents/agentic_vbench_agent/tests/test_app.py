@@ -183,6 +183,9 @@ async def test_policy_server_endpoint_and_served_model(tmp_path: Path, monkeypat
         opencode_subagents_enabled=True,
         opencode_delegation_prompt=delegation_prompt,
         opencode_subagent_prompt=subagent_prompt,
+        opencode_subagent_name="analyst",
+        opencode_subagent_description="Media analyst.",
+        opencode_subagent_steps=10,
         opencode_tool_output_max_lines=400,
         opencode_tool_output_max_bytes=8192,
     )
@@ -215,6 +218,9 @@ async def test_policy_server_endpoint_and_served_model(tmp_path: Path, monkeypat
     assert "--subagents" in command
     assert command[command.index("--delegation-prompt") + 1] == delegation_prompt
     assert command[command.index("--subagent-prompt") + 1] == subagent_prompt
+    assert command[command.index("--subagent-name") + 1] == "analyst"
+    assert command[command.index("--subagent-description") + 1] == "Media analyst."
+    assert command[command.index("--subagent-steps") + 1] == "10"
     assert command[command.index("--tool-output-max-lines") + 1] == "400"
     assert command[command.index("--tool-output-max-bytes") + 1] == "8192"
     assert "--max-turns" not in command
@@ -437,6 +443,8 @@ def test_training_config_resolves_from_environment(monkeypatch: pytest.MonkeyPat
     assert config.opencode_tool_output_max_lines == 400 and config.opencode_tool_output_max_bytes == 8192
     assert config.opencode_delegation_prompt is None
     assert config.opencode_subagent_prompt is None
+    assert config.opencode_subagent_name == "general"
+    assert config.opencode_subagent_description is None and config.opencode_subagent_steps is None
     assert config.benchmark_root is None and config.credentials_file is None
     monkeypatch.setenv("AGENTIC_VBENCH_DELEGATION_PROMPT", "You may delegate suitable subtasks.")
     prompted = OmegaConf.to_container(

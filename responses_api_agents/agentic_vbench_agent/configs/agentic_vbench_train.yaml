@@ -59,8 +59,13 @@ agentic_vbench_agent:
       # Recipe-level instruction: preserves the verbatim benchmark prompt while
       # making the initial subagent smoke reliably exercise task delegation.
       opencode_delegation_prompt: ${oc.env:AGENTIC_VBENCH_DELEGATION_PROMPT,null}
-      # Independent child instruction; the general child cannot delegate again.
+      # Independent child instruction; the child cannot delegate again.
       opencode_subagent_prompt: ${oc.env:AGENTIC_VBENCH_SUBAGENT_PROMPT,null}
+      # The one child the task tool exposes, its tool description and turn cap. The
+      # subagent SFT traces used analyst / SFT_ANALYST_SUBAGENT description / 10.
+      opencode_subagent_name: ${oc.env:AGENTIC_VBENCH_SUBAGENT_NAME,general}
+      opencode_subagent_description: ${oc.env:AGENTIC_VBENCH_SUBAGENT_DESCRIPTION,null}
+      opencode_subagent_steps: ${oc.env:AGENTIC_VBENCH_SUBAGENT_STEPS,null}
       train_compaction_summaries: ${oc.env:AGENTIC_VBENCH_TRAIN_COMPACTION_SUMMARIES,true}
       capture_proxy_host: ${oc.env:AGENTIC_VBENCH_CAPTURE_PROXY_HOST,null}
       datasets:

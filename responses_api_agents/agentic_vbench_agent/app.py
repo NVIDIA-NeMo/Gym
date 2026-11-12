@@ -116,9 +116,15 @@ class AgenticVBenchConfig(BaseResponsesAPIAgentConfig):
     # Optional primary-agent instruction used by the dedicated subagent-training
     # recipe. It does not alter the benchmark prompt or verifier metadata.
     opencode_delegation_prompt: str | None = None
-    # Optional instruction for the depth-one ``general`` child. Keeping this
-    # separate avoids asking a child whose task tool is denied to delegate.
+    # Optional instruction for the depth-one child. Keeping this separate avoids
+    # asking a child whose task tool is denied to delegate.
     opencode_subagent_prompt: str | None = None
+    # The one child the task tool exposes, what the tool says about it and its turn
+    # cap (the parent's max_turns when null). The AgenticVBench subagent SFT traces
+    # used harbor_runner.SFT_ANALYST_SUBAGENT: name "analyst", 10 steps.
+    opencode_subagent_name: str = "general"
+    opencode_subagent_description: str | None = None
+    opencode_subagent_steps: int | None = None
     # Address the task container uses to reach this server's capture proxy; derived
     # from the route to the policy server when unset.
     capture_proxy_host: str | None = None
@@ -388,6 +394,12 @@ class AgenticVBenchAgent(SimpleResponsesAPIAgent):
                 command.extend(["--delegation-prompt", self.config.opencode_delegation_prompt])
             if self.config.opencode_subagent_prompt is not None:
                 command.extend(["--subagent-prompt", self.config.opencode_subagent_prompt])
+            if self.config.opencode_subagents_enabled:
+                command.extend(["--subagent-name", self.config.opencode_subagent_name])
+            if self.config.opencode_subagent_description is not None:
+                command.extend(["--subagent-description", self.config.opencode_subagent_description])
+            if self.config.opencode_subagent_steps is not None:
+                command.extend(["--subagent-steps", str(self.config.opencode_subagent_steps)])
             try:
                 exit_code = await run_process(command, output, runtime, self._current_environment())
             except asyncio.CancelledError:

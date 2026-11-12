@@ -669,7 +669,77 @@ def test_job_config_subagent_mode_configures_depth_one_children(tmp_path):
         "prompt": child_prompt,
     }
     assert opencode["agent"]["explore"] == {"disable": True}
+    assert opencode["agent"]["scout"] == {"disable": True}
     assert opencode["agent"]["build"] == {"steps": 32, "prompt": prompt}
+
+
+def test_job_config_subagent_mode_exposes_the_sft_analyst_child(tmp_path):
+    analyst = harbor_runner.SFT_ANALYST_SUBAGENT
+    cfg = harbor_runner.job_config(
+        task_path=tmp_path,
+        output=tmp_path / "out",
+        runtime_root=tmp_path / "rt",
+        model="m",
+        endpoint="http://10.0.0.1:8000/v1",
+        context_tokens=65536,
+        output_tokens=8192,
+        backend="remote",
+        max_turns=32,
+        training_mode="subagent",
+        subagents_enabled=True,
+        compaction_auto=False,
+        compaction_prune=False,
+        subagent_name=analyst["name"],
+        subagent_description=analyst["description"],
+        subagent_prompt=analyst["prompt"],
+        subagent_steps=analyst["steps"],
+    )
+    agents = cfg["agents"][0]["kwargs"]["opencode_config"]["agent"]
+    # The task tool lists exactly one delegate, described as in the SFT system prompts.
+    assert agents["analyst"] == {
+        "mode": "subagent",
+        "permission": {"*": "allow", "task": "deny"},
+        "steps": 10,
+        "description": analyst["description"],
+        "prompt": analyst["prompt"],
+    }
+    assert {name: agents[name] for name in ("general", "explore", "scout")} == {
+        name: {"disable": True} for name in ("general", "explore", "scout")
+    }
+    # No primary-agent instruction: the SFT traces carry none.
+    assert agents["build"] == {"steps": 32}
+    assert "Several analysts can run in parallel" in analyst["description"]
+    assert analyst["prompt"].startswith("You are an analysis subagent with a budget of at most 10 tool calls.")
+
+
+def test_job_config_validates_the_child_agent_settings(tmp_path):
+    common = dict(
+        task_path=tmp_path,
+        output=tmp_path / "out",
+        runtime_root=tmp_path / "rt",
+        model="m",
+        endpoint="http://10.0.0.1:8000/v1",
+        context_tokens=65536,
+        output_tokens=8192,
+        backend="remote",
+        training_mode="subagent",
+        subagents_enabled=True,
+        compaction_auto=False,
+        compaction_prune=False,
+    )
+    with pytest.raises(ValueError, match="Invalid subagent name"):
+        harbor_runner.job_config(**common, subagent_name="build")
+    with pytest.raises(ValueError, match="Invalid subagent name"):
+        harbor_runner.job_config(**common, subagent_name="Media Analyst")
+    with pytest.raises(ValueError, match="must not be empty"):
+        harbor_runner.job_config(**common, subagent_description=" ")
+    with pytest.raises(ValueError, match="positive int"):
+        harbor_runner.job_config(**common, subagent_steps=0)
+    off = {**common, "training_mode": None, "subagents_enabled": False}
+    with pytest.raises(ValueError, match="requires subagents"):
+        harbor_runner.job_config(**off, subagent_description="A child")
+    with pytest.raises(ValueError, match="require subagents"):
+        harbor_runner.job_config(**off, subagent_steps=10)
 
 
 def test_job_config_subagent_mode_rejects_compaction_and_mismatched_flags(tmp_path):
