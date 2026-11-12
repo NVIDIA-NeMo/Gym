@@ -1,0 +1,74 @@
+# boxd sandbox provider config.
+#
+# `sandbox` is the instance name an agent references via `sandbox_provider: sandbox`;
+# the child key `boxd` selects the provider class and its value is passed to the
+# provider constructor.
+#
+# Every shipped provider config binds the same name `sandbox`, so swapping providers is
+# swapping this config path (no agent edit):
+#
+#   gym env start \
+#     --config responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml \
+#     --config nemo_gym/sandbox/providers/boxd/configs/boxd.yaml \
+#     --config responses_api_models/vllm_model/configs/vllm_model.yaml
+#
+# Requires the SDK: `pip install 'nemo-gym[sandbox]'` (or `pip install 'boxd>=0.3.1'`).
+#
+# Each sandbox is one boxd machine. With SandboxSpec.image set, the image runs as a
+# container on the machine's Docker daemon and commands run inside it. Without an
+# image, commands run on the machine itself (Ubuntu 24.04, user `boxd` with sudo).
+#
+# `default_metadata` (optional) is merged into every sandbox's spec metadata
+# (SandboxSpec.metadata), which becomes machine labels; an agent's own
+# sandbox_spec.metadata overrides it.
+sandbox:
+  default_metadata:
+    sandbox-api: boxd
+  boxd:
+    connection:
+      # Leave api_key unset: the SDK reads BOXD_API_KEY (or BOXD_TOKEN) from the
+      # environment, so the key never appears in a resolved or dumped config.
+      # Organization and region (fra or nyc); null uses the key's organization and
+      # the SDK default region.
+      org: ${oc.env:BOXD_ORG,null}
+      region: ${oc.env:BOXD_REGION,null}
+    create:
+      # Start machines from a boxd snapshot, e.g. one with task images already pulled.
+      # SandboxSpec.provider_options.from_snapshot overrides it per sandbox.
+      from_snapshot: null
+      # Machine size when SandboxSpec.resources names no cpu or memory_mib. Sizes:
+      # 1 vCPU / 4G, 2 / 8G, 4 / 16G, 8 / 32G. null uses the organization's default.
+      # A resources request picks the smallest size that holds it.
+      vcpu: null
+      memory: null
+      # Isolated machines cannot reach other machines of the organization and hold
+      # no boxd credentials. Keep this on for model-written code.
+      isolated: true
+      # Seconds without network traffic before standby; 0 keeps the machine running
+      # through long CPU-only commands.
+      auto_suspend_timeout: 0
+      name_prefix: nemo-gym-
+      labels: {}
+      # Boot deadline when SandboxSpec.ready_timeout_s is unset.
+      ready_timeout_s: 180.0
+      # `docker pull` deadline for SandboxSpec.image.
+      image_pull_timeout_s: 1200.0
+      # Pull even when the machine already has the image (for example from a snapshot).
+      always_pull: false
+    exec:
+      # Fallback only when timeout_s=None; AsyncSandbox.exec() passes its own default.
+      default_timeout_s: 180.0
+      # Container shell; null uses bash when the image has it, else sh.
+      shell: null
+    operations:
+      # Retries for transport failures of status, delete and file calls. Machine
+      # creation and commands are never retried.
+      retries: 2
+      retry_delay_s: 1.0
+      retry_max_delay_s: 10.0
+    # Job attribution merged into every machine's labels (team / user / workload / run),
+    # so `boxd.machines.list(labels=...)` finds a run's machines. See the E2B config for
+    # how unset fields are detected.
+    attribution:
+      enabled: true
+      key_prefix: nemo-gym.nvidia.com/
