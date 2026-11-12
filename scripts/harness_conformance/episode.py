@@ -246,6 +246,19 @@ def _compaction_settings(harness: str, scenario: Scenario) -> DictConfig:
                 ],
             },
         },
+        "openclaw": {
+            "harness_overrides": {"context_window": 131072, "max_output_tokens": 8192},
+            "probe_overrides": {
+                "context_window": 131072,
+                "command_padding_chars": 12000,
+                "responses": [
+                    *[{"kind": "tool", "input_tokens": 500, "output_tokens": 8} for _ in range(scenario.tool_steps)],
+                    {"kind": "context_overflow"},
+                    {"kind": "summary", "input_tokens": 500, "output_tokens": 11},
+                    {"kind": "final", "input_tokens": 100, "output_tokens": 8},
+                ],
+            },
+        },
         "codex": {
             "harness_overrides": {
                 "model_context_window": 32768,

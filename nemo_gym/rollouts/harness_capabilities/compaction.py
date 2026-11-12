@@ -3,6 +3,7 @@
 
 """Compaction evidence compared with a controlled provider's independent witness."""
 
+import json
 from collections import Counter
 
 from nemo_gym.models.chat_completions_converter import message_content_to_text
@@ -39,14 +40,17 @@ def inspect_compaction(
     helper_ids = fixture.get("response_ids")
     summary = fixture.get("summary")
     attempts = _objects((witness or {}).get("attempts"))
-    expected_ids = [_mapping(a.get("response")).get("id") for a in attempts]
+    successful = [a for a in attempts if isinstance(a.get("status_code"), int) and 200 <= a["status_code"] < 300]
+    failed = [a for a in attempts if isinstance(a.get("status_code"), int) and a["status_code"] >= 400]
+    expected_ids = [_mapping(a.get("response")).get("id") for a in successful]
     available = (
         record is not None
         and isinstance(helper_ids, list)
         and all(isinstance(value, str) and value for value in helper_ids)
         and isinstance(summary, str)
         and bool(summary)
-        and bool(attempts)
+        and bool(successful)
+        and len(successful) + len(failed) == len(attempts)
         and all(isinstance(value, str) and value for value in expected_ids)
     )
     helper_ids = helper_ids if available else []
@@ -68,6 +72,46 @@ def inspect_compaction(
                 applies=applies,
                 depends_on=depends_on,
             )
+        )
+
+    if failed:
+
+        def failed_exchanges_retained() -> bool:
+            # Errors need no provider response ID. Require the real captured
+            # exchange and preserve each unknown token count as unknown.
+            def key(request, status, response, counts):
+                return json.dumps([request, status, response, counts], sort_keys=True)
+
+            fields = ("tokens_in", "tokens_out", "tokens_reasoning", "tokens_total", "cached_tokens")
+            prescribed = Counter()
+            for index, attempt in enumerate(failed):
+                call = build_model_call_record(attempt, call_index=index)
+                prescribed[
+                    key(
+                        attempt["request"],
+                        attempt["status_code"],
+                        attempt["response"],
+                        [getattr(call, field) for field in fields],
+                    )
+                ] += 1
+            retained = Counter(
+                key(
+                    call.get("request"),
+                    metadata.get("status_code"),
+                    call.get("response"),
+                    [_mapping(call.get("token_stats")).get(field) for field in fields],
+                )
+                for call in calls
+                if isinstance((metadata := _mapping(call.get("response_metadata"))).get("status_code"), int)
+                and metadata["status_code"] >= 400
+            )
+            return prescribed == retained
+
+        check(
+            "failed_calls_retained",
+            failed_exchanges_retained,
+            "$.ng_trajectory.model_calls",
+            "recovered errors must retain their exchanges and reported or unknown usage",
         )
 
     check(
@@ -155,11 +199,19 @@ def inspect_compaction(
 
     def usage_retained() -> bool:
         calls = [build_model_call_record(attempt, call_index=index) for index, attempt in enumerate(attempts)]
-        counts = [(call.tokens_in, call.tokens_out) for call in calls]
-        if any(type(value) is not int or value < 0 for pair in counts for value in pair):
-            return False
-        prompt = sum(pair[0] for pair in counts)
-        completion = sum(pair[1] for pair in counts)
+        counts = []
+        for call in calls:
+            pair = (call.tokens_in, call.tokens_out)
+            if any(value is None for value in pair):
+                if call.status_code is None or call.status_code < 400:
+                    return False
+                # Aggregate the measured subtotal, never assign usage to the error.
+                gaps = _objects(_mapping((record or {}).get("ng_agent_observations")).get("gaps"))
+                if not any(gap.get("code") == "model_call_usage_unavailable" for gap in gaps):
+                    return False
+            counts.append(pair)
+        prompt = sum(pair[0] for pair in counts if pair[0] is not None)
+        completion = sum(pair[1] for pair in counts if pair[1] is not None)
         usage = _mapping(_mapping((record or {}).get("response")).get("usage"))
         return (usage.get("input_tokens"), usage.get("output_tokens"), usage.get("total_tokens")) == (
             prompt,
@@ -171,6 +223,6 @@ def inspect_compaction(
         "usage_retained",
         usage_retained,
         "$.response.usage",
-        "aggregate usage must include every witnessed policy and compaction call exactly once",
+        "aggregate usage must include reported policy and compaction usage exactly once; unknown error usage needs a gap",
     )
     return results.dump()

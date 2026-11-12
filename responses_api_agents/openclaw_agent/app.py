@@ -77,6 +77,12 @@ from nemo_gym.core import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
 )
+from nemo_gym.models import CaptureStore
+from nemo_gym.rollouts import (
+    await_model_call_capture_quiescence,
+    model_call_capture_dirs_from_config,
+    read_available_model_call_records,
+)
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,
@@ -100,6 +106,7 @@ from responses_api_agents.openclaw_agent.observability import (
     build_openclaw_observation_tree,
     build_openclaw_observations,
     discover_openclaw_session_tree,
+    reconcile_openclaw_calls,
 )
 from responses_api_agents.openclaw_agent.sandbox import _SANDBOX_PATH_CHECK, OpenClawSandboxSession
 from responses_api_agents.openclaw_agent.setup_openclaw import ensure_openclaw
@@ -1272,6 +1279,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 prefer_openclaw_session_id=False,
                 capture_correlated=capture_correlated,
                 model_ref=self.config.model_server,
+                runtime_log=artifacts.get("stderr.log", ""),
             )
             # Sandbox sessions disable child agents, so there is exactly one invocation.
             state.observations.gaps = [
@@ -1285,6 +1293,22 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 source=OPENCLAW_OBSERVATION_SOURCE,
                 gaps=[ObservationGap(code="observation_capture_failed"), *gaps],
             )
+        if capture_correlated and self.config.model_server is not None:
+            try:
+                capture_dirs = model_call_capture_dirs_from_config(self.server_client.global_config_dict)
+                if capture_dirs:
+                    rollout_id = state.request.episode_id.capture_key
+                    await await_model_call_capture_quiescence(rollout_id, capture_dirs)
+                    calls, _ = await asyncio.to_thread(
+                        read_available_model_call_records, CaptureStore(capture_dirs[0], create=False), rollout_id
+                    )
+                    calls = [call for call in calls if call.model_ref == self.config.model_server]
+                    state.observations, usage = reconcile_openclaw_calls(state.observations, calls)
+                    if usage is not None:
+                        response.usage = usage
+            except Exception:
+                LOG.warning("Could not reconcile OpenClaw captured calls", exc_info=True)
+                state.observations.gaps.append(ObservationGap(code="model_call_reconciliation_failed"))
         if (
             result
             and (

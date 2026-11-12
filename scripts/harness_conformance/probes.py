@@ -605,8 +605,44 @@ class Probe:
         return app
 
 
-class OpenClawProbe(Probe):
+@dataclass
+class ContextOverflowProbe(Probe):
+    """Return a prescribed context-limit error without consuming a successful reply."""
+
+    context_window: int = 32768
+
+    async def model(self, request: Request) -> JSONResponse | StreamingResponse:
+        index = len(self.attempts)
+        if index >= len(self.responses) or self.responses[index]["kind"] != "context_overflow":
+            return await super().model(request)
+        body = await request.json()
+        self._observe_tool_results(body)
+        payload = {
+            "error": {
+                "message": f"This model's maximum context length is {self.context_window} tokens. However, you requested {self.context_window + 10000} tokens.",
+                "type": "invalid_request_error",
+                "code": "context_length_exceeded",
+            }
+        }
+        self.attempts.append(
+            {"attempt_id": f"attempt-{index}", "request": body, "response": payload, "status_code": 400}
+        )
+        self.save()
+        return JSONResponse(payload, status_code=400)
+
+
+@dataclass
+class OpenClawProbe(ContextOverflowProbe):
     """Match OpenClaw replay IDs while retaining the original captured identities."""
+
+    command_padding_chars: int = 0
+
+    def _tool(self, body: dict) -> tuple[str, dict, dict]:
+        name, arguments, namespaces = super()._tool(body)
+        if self.command_padding_chars:
+            # Real history, without exhausting OpenClaw's tool-output budget.
+            arguments["command"] += " # " + "x" * self.command_padding_chars
+        return name, arguments, namespaces
 
     def _accepted_result_ids(self, call: dict, history: list) -> set[str]:
         result_ids = super()._accepted_result_ids(call, history)
@@ -714,7 +750,7 @@ class NOOAProbe(Probe):
 
 
 @dataclass
-class PiProbe(Probe):
+class PiProbe(ContextOverflowProbe):
     tool_output_chars: int = 20000
 
     def _tool(self, body: dict) -> tuple[str, dict, dict]:
@@ -723,22 +759,3 @@ class PiProbe(Probe):
         # for summarization; reporting large usage alone cannot create that history.
         arguments["command"] = f"head -c {self.tool_output_chars} /dev/zero | tr '\\0' x; " + arguments["command"]
         return name, arguments, namespaces
-
-    async def model(self, request: Request) -> JSONResponse | StreamingResponse:
-        index = len(self.attempts)
-        if index >= len(self.responses) or self.responses[index]["kind"] != "context_overflow":
-            return await super().model(request)
-        body = await request.json()
-        self._observe_tool_results(body)
-        payload = {
-            "error": {
-                "message": "This model's maximum context length is 32768 tokens. However, you requested 40000 tokens.",
-                "type": "invalid_request_error",
-                "code": "context_length_exceeded",
-            }
-        }
-        self.attempts.append(
-            {"attempt_id": f"attempt-{index}", "request": body, "response": payload, "status_code": 400}
-        )
-        self.save()
-        return JSONResponse(payload, status_code=400)
