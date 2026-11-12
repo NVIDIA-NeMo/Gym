@@ -54,7 +54,7 @@ async def test_real_gym_schema_preserves_reasoning_and_rejects_unexecuted_action
         )
 
     monkeypatch.setattr(VLLMModel, "chat_completions", upstream)
-    monkeypatch.setattr("nemo_gym.config.get_global_config_dict", dict)
+    monkeypatch.setattr("nemo_gym.config.global_config.get_global_config_dict", dict)
     config = VLLMModelConfig(
         host="127.0.0.1",
         port=8080,
@@ -105,7 +105,7 @@ async def test_effective_outbound_super_sampling_overrides_client_defaults(
 ):
     from starlette.requests import Request
 
-    monkeypatch.setattr("nemo_gym.config.get_global_config_dict", dict)
+    monkeypatch.setattr("nemo_gym.config.global_config.get_global_config_dict", dict)
     config = VLLMModelConfig(
         host="127.0.0.1",
         port=8080,
@@ -199,7 +199,7 @@ async def test_oversized_batches_have_bounded_retries_and_retained_provider_evid
 
     monkeypatch.setattr(VLLMModel, "chat_completions", upstream)
     monkeypatch.setattr(
-        "nemo_gym.config.get_global_config_dict",
+        "nemo_gym.config.global_config.get_global_config_dict",
         lambda: {"model_call_capture_dir": str(tmp_path)},
     )
     config = VLLMModelConfig(

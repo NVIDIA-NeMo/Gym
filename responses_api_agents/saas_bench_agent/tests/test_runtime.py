@@ -135,7 +135,7 @@ def test_browser_worker_grades_live_state_and_always_stops(
 def test_gym_preparation_and_collection_use_same_dataset(tmp_path, monkeypatch, harness):
     from omegaconf import OmegaConf
 
-    from nemo_gym.config.global_config import GlobalConfigDictParser
+    from nemo_gym.config import GlobalConfigDictParser
     from nemo_gym.environment.benchmark_preparation import (
         _multiprocess_benchmark_prepare_fn,
         datasets_to_prepare,

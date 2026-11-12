@@ -25,11 +25,12 @@ from nemo_gym.agents import (
 )
 from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
 from nemo_gym.core import (
+    AGENT_RUN_ERROR,
+    VERIFIER_ERROR,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     maybe_rollout_id_from_run_body,
 )
-from nemo_gym.core.failure_kinds import AGENT_RUN_ERROR, VERIFIER_ERROR
 from nemo_gym.server_runtime import (
     BaseRunRequest,
     BaseVerifyResponse,
