@@ -4,12 +4,13 @@ description: >
   Onboard a model for NeMo Gym evaluations and compose the complete eval config: the vLLM policy
   service, its wiring as the policy, the reasoning toggle, and each benchmark's own config from
   Gym's `benchmarks/<name>/`, then validate and smoke it. Use when a new model or checkpoint has to
-  be evaluated in Gym and no eval config exists yet; once the config is in hand, run it with
-  run-and-babysit-eval. Not for adding a benchmark (use add-benchmark). Triggered by: "add a model",
-  "new checkpoint", "serve this model in Gym", "model config", "vllm config", "enable thinking",
-  "reasoning parser", "tool call parser", "compare two models fairly", "eval config", "where does
-  the benchmark config come from", "run evaluations on model Y on benchmark Z with serving params
-  X".
+  be evaluated in Gym and no eval config exists yet, including a quantized export (NVFP4, FP8) of a
+  model that also runs in BF16. run-and-babysit-eval follows this skill itself when it is asked to
+  run a model that has no config yet, and runs the config this skill writes. Not for adding a
+  benchmark (use add-benchmark). Triggered by: "add a model", "new checkpoint", "serve this model in
+  Gym", "model config", "vllm config", "enable thinking", "reasoning parser", "tool call parser",
+  "compare two models fairly", "eval config", "where does the benchmark config come from", "add an
+  NVFP4 variant", "serve the quantized checkpoint with the BF16 settings".
 ---
 
 # Add a Model Config to Gym
@@ -395,7 +396,7 @@ file may have changed since, and overrides mean nothing without it.
 | --- | --- |
 | The benchmark config: data, split, prompts, task limits. | Tensor, pipeline, data and expert parallelism; `number_of_instances`. |
 | Sampling settings the benchmark sets, and `num_repeats`. | `--max-num-seqs`, `--gpu-memory-utilization`, client concurrency. |
-| Weight quantization, `--dtype` and `--kv-cache-dtype` (or record each difference as part of the model). | |
+| Weight quantization, `--dtype` and `--kv-cache-dtype` (or record each difference as part of the model; a quantized export: section 9). | |
 | The judge model and the grading config. | Ports, container image, node layout. |
 | The benchmark's token budgets and timeouts. | `--max-model-len`, as long as it holds the benchmark's longest prompt plus its output budget. |
 | A reasoning switch the benchmark sets, and the Gym commit that scores the run. | |
@@ -409,6 +410,48 @@ not the deployment: record them with the results, because they change the output
 check treats the same split: a setting named as operational (timeouts, retries, ports,
 concurrency, paths, tracking) resumes with a warning, and any other changed setting refuses the
 resume and is named.
+
+## 9. A quantized variant
+
+A quantized export (NVFP4, FP8 or another format) of a model you also evaluate in BF16 is served with the
+BF16 config, except for the fields quantization requires. Anything else that moves makes the comparison
+with BF16 invalid. The quantization settings belong to the export: they come from its `config.json`, its
+`hf_quant_config.json` and the serving recipe that ships with it (a `vllm serve` command or its release
+notes), and whoever produced the export owns them. A deployment fix goes into the BF16 config, so both
+runs get it; never only into the quantized one.
+
+1. Check that the export came from the BF16 checkpoint before you write anything: `config.json` matches
+   the BF16 one outside `quantization_config`, and a few tensors the export keeps unquantized
+   (`exclude_modules` in `hf_quant_config.json`, such as the embeddings or `lm_head`) are byte-identical
+   to the BF16 checkpoint's. Record what you compared.
+2. Copy the BF16 config and change only these fields, each with a comment naming its source:
+   - `model` (and its mount): the export.
+   - `served_model_name`: built from the model's name without its precision suffix, `<model>-nvfp4` and
+     never `<model>-bf16-nvfp4`, so the two runs never merge.
+   - The KV-cache and state-cache dtypes (`--kv-cache-dtype`, a hybrid model's Mamba cache dtypes), only
+     where the export's serving recipe sets them. With no serving recipe, add none and ask the export's
+     owner for it. Never copy cache flags from another model's config: an uncited flag is a guess.
+3. Keep everything else as in BF16: the benchmark settings (section 8, left column), the parallelism, the
+   parsers, the chat template, `--max-model-len`, `--max-num-seqs`, `--gpu-memory-utilization`, the image,
+   `env`, the client and `driver.gym_install.ref`. Do not add `--quantization`: vLLM detects a quantized
+   export. If the export ships its own chat template, diff it against the BF16 one, serve the BF16 one and
+   report the difference to the export's owner. A slower load raises `health_check.timeout_seconds` in the
+   BF16 config, so both runs keep one limit.
+4. Resolve both (`gym eval submit --config <file> --resolve-only`) and diff them: only the fields of step 2
+   may differ. Run both at the same Gym commit with the same `num_repeats`, and keep the policy timeout on
+   the model (run-and-babysit-eval, section 6). Repeat the diff after any change to the BF16 config.
+5. Tag both runs so they pair in MLflow: `run.mlflow_run_tags` with the precision and an id the two runs
+   share, for example `{precision: nvfp4, pair_id: <id>}`. The served name is not the pairing tag.
+6. Carry the export's provenance. Model Optimizer's PTQ with MLflow tracking leaves `.experiment.json` in
+   the checkpoint directory. When it is there, the quantized run takes its `experiment_name` as
+   `run.mlflow_experiment_name` (unless the requester names another experiment) and its `run_name`,
+   `run_id` and `run_url` as the tags `modelopt_run_name`, `modelopt_run_id` and `modelopt_run_url` in
+   `run.mlflow_run_tags`. Its `tracking_uri` and `experiment_id` belong to the PTQ's tracking server: do not
+   copy them. No file (or a Hub checkpoint) means there is nothing to carry.
+
+The smoke (section 6) of the quantized config reads the same fields as the BF16 one: a difference in the
+model's own faults (`evaluation_health.model.kinds`, `failures.response_failures.by_cause`) between the two
+smokes belongs to the export or its serving recipe, and goes to the export's owner.
 
 ## What this skill does not do
 
@@ -426,3 +469,5 @@ resume and is named.
 - [ ] The smoke run completes, and its health and answers look right.
 - [ ] The resolved config shows the intended served name, parallelism, parsers and reasoning switch.
 - [ ] Nothing in the "keep identical" column differs from the run you compare against.
+- [ ] A quantized variant's resolved config differs from the BF16 one only in the fields of section 9,
+  step 2, and both runs carry the pairing tags (and the `modelopt_*` tags when `.experiment.json` exists).
