@@ -256,17 +256,3 @@ visual_agent:
         image: ???
         workdir: /testbed
         ttl_s: 18000
-policy_model:
-  responses_api_models:
-    vllm_model:
-      entrypoint: app.py
-      return_token_id_information: false
-      uses_reasoning_parser: true
-      chat_template_kwargs:
-        truncate_history_thinking: false
-      uses_interleaved_reasoning: true
-      sampling_overrides:
-        max_tokens: null
-        max_completion_tokens: null
-      extra_body: null
-      propagate_context_overflow_errors: true

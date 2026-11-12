@@ -217,6 +217,10 @@ class ToolRewardVerifier:
     _answer_block_separator: ClassVar[str] = ""
 
     async def verify(self, body):
+        result = await super().verify(self._grading_body(body))
+        return self._apply_tool_rewards(body, result)
+
+    def _grading_body(self, body):
         original = body.response
         scoring = original.model_dump(mode="json")
         scoring["output"] = [
@@ -238,8 +242,7 @@ class ToolRewardVerifier:
                 ],
             }
         ]
-        result = await super().verify(body.model_copy(update={"response": type(original).model_validate(scoring)}))
-        return self._apply_tool_rewards(body, result)
+        return body.model_copy(update={"response": type(original).model_validate(scoring)})
 
     def _apply_tool_rewards(self, body, result):
         """Return the final Resources-owned grade before the shared observer records it."""

@@ -33,6 +33,7 @@ visual_environment:
   environment_servers:
     single_agent_turn:
       entrypoint: app.py
+      cleanup_timeout_seconds: 180
       resources_server:
         type: resources_servers
         name: opencode_multimodal_benchmarks

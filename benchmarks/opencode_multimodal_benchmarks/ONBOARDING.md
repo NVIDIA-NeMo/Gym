@@ -62,6 +62,23 @@ compaction, and uses OpenCode’s native final-answer note at the step limit. Th
 settings can be overridden. Match the serving model's context and image capacity
 to your run, and configure sampling and concurrency explicitly.
 
+### Policy adapter selection
+
+The common OpenCode recipes do not select a policy implementation. Supply
+`--model-type openai_model` for a hosted adapter, or `--model-type vllm_model`
+for a vLLM-compatible adapter. With `vllm_model`, also include
+`benchmarks/opencode_multimodal_benchmarks/opencode_eval_vllm.yaml` in
+`config_paths`. This evaluation-only overlay preserves reasoning history,
+uses interleaved reasoning, disables token-ID capture, clears per-call output
+token overrides, and propagates context-overflow errors. Do not include it
+with `openai_model`.
+
+Training profiles continue to select
+`responses_api_models/vllm_model/configs/vllm_model_for_training.yaml`,
+which enables `return_token_id_information`; they must not import the
+evaluation-only vLLM overlay.
+
+
 ### Configure the judge
 
 The evaluation profile routes judging through the `visual_judge` Gym model server.

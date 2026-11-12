@@ -378,3 +378,50 @@ def test_required_judge_route_accepts_a_configured_model(model_type, monkeypatch
     )
     assert server.config.judge_server == "visual_judge"
     client.post.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["native", "direct"])
+@pytest.mark.parametrize("finish_reason", ["stop", "length", "content_filter"])
+async def test_unusable_judge_completion_cannot_become_a_grade(route, finish_reason, monkeypatch):
+    from resources_servers.opencode_multimodal_benchmarks import app as module
+
+    payload = {
+        "id": "judge",
+        "object": "chat.completion",
+        "created": 1,
+        "model": "judge",
+        "choices": [{"index": 0, "finish_reason": finish_reason, "message": {"role": "assistant", "content": "A"}}],
+    }
+    http = MagicMock(status=200)
+    http.read = AsyncMock(return_value=json.dumps(payload).encode())
+    http.json = AsyncMock(return_value=payload)
+    http.__aenter__ = AsyncMock(return_value=http)
+    http.__aexit__ = AsyncMock(return_value=None)
+    client = MagicMock(spec=ServerClient)
+    client.post = AsyncMock(return_value=http)
+    monkeypatch.setenv("TEST_JUDGE_KEY", "test-only")
+    transport = AsyncMock(return_value=http)
+    monkeypatch.setattr(module, "request", transport)
+    server = VisualBenchmarksServer(
+        config=VisualBenchmarksConfig(
+            name="visual",
+            host="localhost",
+            port=1,
+            entrypoint="app.py",
+            judge_model="judge",
+            judge_attempts=1,
+            judge_server="judge" if route == "native" else None,
+            judge_endpoint="https://judge.invalid/v1/chat/completions" if route == "direct" else None,
+            judge_api_key_env="TEST_JUDGE_KEY",
+        ),
+        server_client=client,
+    )
+    body = request("VStarBench", "the fuzzy feline")
+    original = body.model_dump(mode="json")
+    if finish_reason == "stop":
+        assert (await server.verify(body)).reward == 1
+    else:
+        with pytest.raises(JudgeError, match="Unusable visual judge reply"):
+            await server.verify(body)
+    assert body.model_dump(mode="json") == original

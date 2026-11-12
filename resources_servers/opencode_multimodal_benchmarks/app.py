@@ -154,7 +154,9 @@ class VisualBenchmarksServer(VisualVerifier, SimpleResourcesServer):
                                 response_model=NeMoGymChatCompletion,
                                 max_attempts=1,
                             )
-                        content = completion.choices[0].message.content
+                        choice = completion.choices[0]
+                        finish_reason = choice.finish_reason
+                        content = choice.message.content
                     else:
                         response = await request(
                             "POST",
@@ -168,7 +170,11 @@ class VisualBenchmarksServer(VisualVerifier, SimpleResourcesServer):
                             if response.status != 200:
                                 raise JudgeHTTPError(response.status)
                             value = await response.json()
-                        content = value["choices"][0]["message"]["content"]
+                        choice = value["choices"][0]
+                        finish_reason = choice.get("finish_reason")
+                        content = choice["message"]["content"]
+                    if finish_reason in {"length", "content_filter"}:
+                        raise JudgeError(f"Unusable visual judge reply: finish_reason={finish_reason}")
                     if content is not None and not isinstance(content, str):
                         raise JudgeError("Visual judge content must be a string or null")
                     return content or ""
