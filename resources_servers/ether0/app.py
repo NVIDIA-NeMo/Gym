@@ -23,7 +23,6 @@ ensure_ether0()
 
 from ether0.model_prompts import extract_answer_loose  # noqa: E402
 from ether0.models import RewardFunctionInfo  # noqa: E402
-from ether0.rewards import EVAL_FUNCTIONS  # noqa: E402
 
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
@@ -33,6 +32,7 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from resources_servers.ether0.graders import EVAL_FUNCTIONS  # noqa: E402
 
 
 logger = logging.getLogger(__name__)
