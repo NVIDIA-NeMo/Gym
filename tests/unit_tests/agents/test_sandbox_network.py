@@ -156,7 +156,7 @@ restrict_sandbox_network(
     network_access=sys.argv[1],
     provider=SimpleNamespace(name="opensandbox"),
     model_base_url="http://model.example:8000/v1?key=model-secret",
-    tool_urls=["https://user:tool-secret@tools.example/mcp/path?q=1"],
+    tool_urls=["https://user:tool-secret@tools.example/mcp/path?q=1"],  # pragma: allowlist secret
 )
 """
 
