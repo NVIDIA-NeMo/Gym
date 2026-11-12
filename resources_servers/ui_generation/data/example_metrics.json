@@ -35,5 +35,9 @@
         "Min": 0.0,
         "Max": 0.0,
         "Standard deviation": 0.0
+    },
+    "task_id": {
+        "unique_count": 5,
+        "total_count": 5
     }
 }

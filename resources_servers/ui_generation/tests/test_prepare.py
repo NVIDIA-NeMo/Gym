@@ -33,8 +33,9 @@ def test_prompt_tasks_become_rows_with_the_answer_kept_from_the_model(tmp_path: 
     (row,) = read_rows(prepare_module.prepare(source, tmp_path / "out.jsonl"))
 
     assert row == {
+        "task_id": "a",
         "responses_create_params": {"input": [{"role": "user", "content": "Make a page that says hello."}]},
-        "verifier_metadata": {"reference_answer": ANSWER, "id": "a", "category": "html"},
+        "verifier_metadata": {"reference_answer": ANSWER, "category": "html"},
     }
 
 
@@ -62,10 +63,18 @@ def test_an_explicit_reference_keeps_every_message_in_the_prompt(tmp_path: Path)
     assert row["responses_create_params"]["input"] == messages
 
 
+def test_a_final_assistant_message_and_a_reference_answer_are_refused_together(tmp_path: Path) -> None:
+    # The final assistant message would otherwise stay in the policy's prompt next to the reference.
+    messages = [{"role": "user", "content": "Make a page."}, {"role": "assistant", "content": ANSWER}]
+    source = write_tasks(tmp_path / "tasks.jsonl", [{"messages": messages, "reference_answer": ANSWER}])
+    with pytest.raises(prepare_module.TaskFormatError, match="conflicts with 'reference_answer'"):
+        prepare_module.prepare(source, tmp_path / "out.jsonl")
+
+
 def test_limit_keeps_the_first_tasks(tmp_path: Path) -> None:
     tasks = [{"id": str(i), "prompt": f"Page {i}", "reference_answer": ANSWER} for i in range(4)]
     output = prepare_module.prepare(write_tasks(tmp_path / "tasks.jsonl", tasks), tmp_path / "out.jsonl", limit=2)
-    assert [row["verifier_metadata"]["id"] for row in read_rows(output)] == ["0", "1"]
+    assert [row["task_id"] for row in read_rows(output)] == ["0", "1"]
 
 
 @pytest.mark.parametrize(
@@ -107,7 +116,9 @@ def test_the_committed_examples_are_rows_prepare_writes(tmp_path: Path) -> None:
     committed = REPOSITORY_ROOT / "resources_servers/ui_generation/data/example.jsonl"
     rows = read_rows(committed)
     tasks = [
-        {"prompt": row["responses_create_params"]["input"][0]["content"]} | row["verifier_metadata"] for row in rows
+        {"id": row["task_id"], "prompt": row["responses_create_params"]["input"][0]["content"]}
+        | row["verifier_metadata"]
+        for row in rows
     ]
     converted = prepare_module.prepare(write_tasks(tmp_path / "tasks.jsonl", tasks), tmp_path / "example.jsonl")
     assert converted.read_text() == committed.read_text()

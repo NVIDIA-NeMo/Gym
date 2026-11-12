@@ -3,10 +3,15 @@
 
 import asyncio
 import json
+from types import SimpleNamespace
+from typing import Optional
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiohttp import ClientResponseError
 from fastapi.testclient import TestClient
+from pydantic import BaseModel, ConfigDict, Field
+from pydantic_core import PydanticUndefined
 
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
@@ -21,12 +26,14 @@ from ..app import (
     VERIFIER_FIXTURE,
     UiGenerationResourcesServer,
     UiGenerationResourcesServerConfig,
+    UiGenerationVerifierMetadata,
     UiGenerationVerifyRequest,
     final_answer_text,
+    judge_prompt,
     parse_judge_completion,
-    prompt_text,
     validate_verdict,
 )
+from ..task_data import TaskData
 from ..verifier_fixture import fixture_judge_reply
 
 
@@ -75,11 +82,14 @@ def reasoning(text: str) -> dict:
     return {"id": "rs", "type": "reasoning", "summary": [{"type": "summary_text", "text": text}]}
 
 
-def make_request(response: NeMoGymResponse | None = None, input_messages=None) -> UiGenerationVerifyRequest:
+def make_request(
+    response: NeMoGymResponse | None = None, input_messages=None, **create_params
+) -> UiGenerationVerifyRequest:
     return UiGenerationVerifyRequest.model_validate(
         {
             "responses_create_params": {
-                "input": input_messages or [{"role": "user", "content": "Build a page. Use NextJS in one tsx file."}]
+                "input": input_messages or [{"role": "user", "content": "Build a page. Use NextJS in one tsx file."}],
+                **create_params,
             },
             "response": (response or policy_response(message(CANDIDATE))).model_dump(),
             "verifier_metadata": {"id": "task-1", "reference_answer": REFERENCE, "category": "nextjs"},
@@ -100,7 +110,7 @@ def make_server(**config) -> UiGenerationResourcesServer:
     return UiGenerationResourcesServer(config=server_config, server_client=MagicMock(spec=ServerClient))
 
 
-def completion(content: str, finish_reason: str = "stop") -> NeMoGymChatCompletion:
+def completion(content: str, finish_reason: str = "stop", **message_fields) -> NeMoGymChatCompletion:
     return NeMoGymChatCompletion.model_validate(
         {
             "id": "judge-1",
@@ -108,7 +118,11 @@ def completion(content: str, finish_reason: str = "stop") -> NeMoGymChatCompleti
             "created": 0,
             "model": "judge",
             "choices": [
-                {"index": 0, "finish_reason": finish_reason, "message": {"role": "assistant", "content": content}}
+                {
+                    "index": 0,
+                    "finish_reason": finish_reason,
+                    "message": {"role": "assistant", "content": content, **message_fields},
+                }
             ],
         }
     )
@@ -152,18 +166,59 @@ def test_the_judge_request_carries_the_rubric_and_the_case_as_json() -> None:
     assert server.config.judge_chat_completions_create_params.messages == []
 
 
-def test_the_prompt_joins_every_user_message() -> None:
-    request = make_request(
-        input_messages=[
-            {"role": "system", "content": "You write UIs."},
-            {"role": "user", "content": "Part one."},
-            {"role": "user", "content": [{"type": "input_text", "text": "Part two."}]},
-        ]
-    )
-    assert prompt_text(request) == "Part one.\n\nPart two."
-    as_string = request.model_copy(update={"responses_create_params": request.responses_create_params.model_copy()})
+def test_a_single_user_message_is_the_prompt_as_text() -> None:
+    assert judge_prompt(make_request()) == "Build a page. Use NextJS in one tsx file."
+    multipart = [{"role": "user", "content": [{"type": "input_text", "text": "Baue eine Seite – mit Zähler."}]}]
+    assert judge_prompt(make_request(input_messages=multipart)) == "Baue eine Seite – mit Zähler."
+    as_string = make_request()
     as_string.responses_create_params.input = "Just this."
-    assert prompt_text(as_string) == "Just this."
+    assert judge_prompt(as_string) == "Just this."
+
+
+def test_the_judge_sees_the_whole_conversation_with_roles_in_order() -> None:
+    conversation = [
+        {"role": "system", "content": "Use plain HTML only; no React."},
+        {"role": "user", "content": "Part one."},
+        {"role": "user", "content": [{"type": "input_text", "text": "Part two."}]},
+    ]
+    assert judge_prompt(make_request(input_messages=conversation)) == [
+        {"role": "system", "content": "Use plain HTML only; no React."},
+        {"role": "user", "content": "Part one."},
+        {"role": "user", "content": "Part two."},
+    ]
+
+
+def test_earlier_assistant_code_reaches_the_judge_with_the_edit_request() -> None:
+    conversation = [
+        {"role": "user", "content": "Build a counter."},
+        {"role": "assistant", "content": "```html\n<button id=c>0</button>\n```"},
+        {"role": "user", "content": "Make the button blue."},
+    ]
+    assert judge_prompt(make_request(input_messages=conversation)) == conversation
+
+
+def test_request_instructions_come_first_as_a_system_message() -> None:
+    request = make_request(instructions="Answer with one HTML file.")
+    assert judge_prompt(request) == [
+        {"role": "system", "content": "Answer with one HTML file."},
+        {"role": "user", "content": "Build a page. Use NextJS in one tsx file."},
+    ]
+
+
+def test_verify_sends_the_conversation_and_keeps_the_reference_separate() -> None:
+    server = make_server()
+    server.server_client.post = AsyncMock(return_value=fixture_judge_reply(json.dumps(verdict())))
+    conversation = [
+        {"role": "system", "content": "Use plain HTML only; no React."},
+        {"role": "user", "content": "Build a counter."},
+    ]
+
+    asyncio.run(server.verify(make_request(input_messages=conversation)))
+
+    sent = json.loads(server.server_client.post.await_args.kwargs["json"].messages[1]["content"])
+    assert sent["prompt"] == conversation
+    assert sent["original_guideline"] == REFERENCE
+    assert REFERENCE not in json.dumps(sent["prompt"])
 
 
 def test_the_candidate_is_the_last_assistant_message_without_reasoning() -> None:
@@ -176,12 +231,38 @@ def test_the_candidate_is_the_last_assistant_message_without_reasoning() -> None
     assert final_answer_text(policy_response(reasoning("only thoughts"))) == ""
 
 
+def test_consecutive_leading_reasoning_blocks_are_removed() -> None:
+    answer = "<think>plan</think>\n<thinking>more</thinking>\n```html\n<p>ok</p>\n```"
+    assert final_answer_text(policy_response(message(answer))) == "```html\n<p>ok</p>\n```"
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "```js\nconst open = '<think>'; const label = 'kept'; const close = '</think>';\n```",
+        "Here it is.\n\n```html\n<script>const tag = '<think>x</think>';</script>\n```",
+    ],
+)
+def test_think_tags_inside_the_answer_reach_the_judge_unchanged(code: str) -> None:
+    assert final_answer_text(policy_response(message("<think>plan</think>" + code))) == code
+    server = make_server()
+    server.server_client.post = AsyncMock(return_value=fixture_judge_reply(json.dumps(verdict())))
+
+    asyncio.run(server.verify(make_request(policy_response(message(code)))))
+
+    sent = json.loads(server.server_client.post.await_args.kwargs["json"].messages[1]["content"])
+    assert sent["candidate_answer"] == code
+
+
 @pytest.mark.parametrize(
     "content",
     [
         json.dumps(verdict()),
         "```json\n" + json.dumps(verdict(), indent=2) + "\n```",
         "  ```\n" + json.dumps(verdict()) + "\n```\n",
+        "```JSON\n" + json.dumps(verdict()) + "\n```",
+        "Here is my verdict:\n\n```json\n" + json.dumps(verdict()) + "\n```",
+        "```json\n" + json.dumps(verdict()) + "\n```\nDone.",
     ],
 )
 def test_a_valid_verdict_parses_bare_or_fenced(content: str) -> None:
@@ -198,12 +279,19 @@ def test_a_leading_think_block_is_the_judge_reasoning() -> None:
     assert judge_reasoning == "weigh it"
 
 
+def test_separate_reasoning_content_wins_over_an_inline_think_block() -> None:
+    reply = completion("<think>inline</think>" + json.dumps(verdict()), reasoning_content="from the parser")
+    parsed, judge_reasoning = parse_judge_completion(reply)
+    assert parsed == verdict()
+    assert judge_reasoning == "from the parser"
+
+
 @pytest.mark.parametrize(
     "content,finish_reason,error",
     [
         (json.dumps(verdict()), "length", "finish_length"),
         ("The code is good. Score 4.", "stop", "invalid_json"),
-        ("```json\n" + json.dumps(verdict()) + "\n``` trailing", "stop", "invalid_json"),
+        ("Verdict:\n```json\n{not json}\n```", "stop", "invalid_json"),
         ("<think>never closed " + json.dumps(verdict()), "stop", "invalid_json"),
         (json.dumps([verdict()]), "stop", "invalid_schema"),
     ],
@@ -347,9 +435,8 @@ def test_a_judge_outage_is_retried_then_masks_the_row(monkeypatch) -> None:
 def test_a_rate_limited_judge_call_is_retried(monkeypatch) -> None:
     monkeypatch.setattr("nemo_gym.verification.judge._judge_retry_wait_s", lambda attempt: 0)
     server = make_server()
-    server.server_client.post = AsyncMock(
-        side_effect=[ConnectionError("reset"), fixture_judge_reply(json.dumps(verdict()))]
-    )
+    rate_limited = ClientResponseError(SimpleNamespace(real_url="http://judge"), (), status=429)
+    server.server_client.post = AsyncMock(side_effect=[rate_limited, fixture_judge_reply(json.dumps(verdict()))])
 
     result = asyncio.run(server.verify(make_request()))
 
@@ -438,3 +525,43 @@ def test_metrics_report_mean_scores_per_category() -> None:
         "html/mean/quality_score": 3.0,
         "html/mean/reward": 0.75,
     }
+
+
+# Runtime-consumed fields that the task-data schema and the verify request model both declare.
+SHARED_VERIFIER_FIELDS = ("reference_answer", "category")
+
+
+def _contract(model: type[BaseModel]) -> dict:
+    fields = {
+        name: (info.annotation, info.is_required(), info.default)
+        for name, info in model.model_fields.items()
+        if name in SHARED_VERIFIER_FIELDS
+    }
+    return {"fields": fields, "extra": model.model_config.get("extra")}
+
+
+def test_the_task_data_schema_matches_the_verifier_metadata_model() -> None:
+    assert _contract(TaskData) == _contract(UiGenerationVerifierMetadata)
+    assert _contract(TaskData) == {
+        "fields": {"reference_answer": (str, True, PydanticUndefined), "category": (Optional[str], False, None)},
+        "extra": "allow",
+    }
+    # Both accept an omitted category and extra metadata.
+    row = {"reference_answer": REFERENCE, "source": "made-up"}
+    assert TaskData.model_validate(row).category is None
+    assert UiGenerationVerifierMetadata.model_validate(row).category is None
+
+
+def test_the_drift_check_catches_a_one_sided_change() -> None:
+    class CategoryRequired(BaseModel):
+        model_config = ConfigDict(extra="allow")
+        reference_answer: str
+        category: str = Field()
+
+    class ExtraForbidden(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        reference_answer: str
+        category: Optional[str] = None
+
+    for drifted in (CategoryRequired, ExtraForbidden):
+        assert _contract(drifted) != _contract(UiGenerationVerifierMetadata)

@@ -1,11 +1,13 @@
 # ui_generation resources server
 
-Grades a generated UI answer with an LLM judge. The judge reads the user prompt, the
-task's reference answer and the policy's final answer, and scores only the code inside
+Grades a generated UI answer with an LLM judge. The judge reads the task as the policy
+saw it, the task's reference answer and the policy's final answer, and scores only the code inside
 fenced code blocks of the policy's answer. Nothing is executed or rendered.
 
 ## Input schema
 
+- `task_id` (optional, top level): the stable task identifier Gym uses for resume and
+  for comparing runs. Rows without one get a positional id.
 - `responses_create_params.input`: the task's prompt messages. The reference answer is
   not in the input.
 - `verifier_metadata` (required):
@@ -13,7 +15,10 @@ fenced code blocks of the policy's answer. Nothing is executed or rendered.
     guideline, not a required target.
   - `category` (optional): a task label, such as the target stack; metrics report mean
     scores per category.
-  - `id` (optional): the task identifier.
+  - Extra fields are allowed and ignored.
+
+`task_data.py` declares the same verifier fields as the request model in `app.py`; a test
+fails when the two drift apart.
 
 `environments/ui_generation/prepare.py` writes these rows from a simple task file; see
 the [environment README](../../environments/ui_generation/README.md).
@@ -26,12 +31,18 @@ the [environment README](../../environments/ui_generation/README.md).
 2. Otherwise the judge gets the rubric in `prompts/judge.yaml` as the system message and
    one user message holding
    `json.dumps({"prompt": ..., "original_guideline": ..., "candidate_answer": ...}, ensure_ascii=False)`
-   (the keys the rubric names). The prompt joins every user message with a blank line;
-   `original_guideline` is the reference answer; the candidate is the last assistant
-   message without its reasoning.
+   (the keys the rubric names). `prompt` is the task as the policy saw it: the text of
+   the one user message when that is all the policy got, otherwise the whole
+   conversation in order as `{"role", "content"}` messages (request-level
+   `instructions` first, as a `system` message), so system constraints and code from
+   earlier assistant turns reach the judge. `original_guideline` is the reference
+   answer and never part of `prompt`. The candidate is the last assistant message
+   without its leading `<think>` blocks; think-tag text anywhere else, such as a string
+   literal in the code, is kept as is.
 3. The verdict counts only when the judge finished (`finish_reason == "stop"`) and its
-   reply, after an optional leading `<think>` block and an optional ```` ```json ```` fence,
-   is one JSON object matching the rubric's schema exactly (`schema_version`
+   reply, after an optional leading `<think>` block, is one JSON object matching the
+   rubric's schema exactly, either bare or in a ```` ```json ```` fence (any case, prose
+   around the fence ignored) (`schema_version`
    `ui-code-judge-v1`, integer scores 0-4, `execution_verified: false`).
 4. Any other reply (invalid JSON, invalid schema, a judge cut off at its token cap) or a
    failed judge call is a judge failure: the row is masked (`mask_sample: true`,
@@ -76,8 +87,18 @@ Use a judge from a different model family than the policy where possible.
 | `judge_max_attempts` | 4 | Attempts per judge request for retryable failures |
 | `reward_score` | `quality` | `quality`, `prompt_adherence`, `mean` or `min` |
 
-The judge needs a context long enough for the prompt, the reference answer and the
-candidate answer together; full single-file apps can run to tens of thousands of tokens.
+### Judge context length
+
+The judge's context must hold the rubric (about 1k tokens), the prompt, the reference
+answer and the candidate answer, plus its own output budget (`max_tokens`, 65,536 by
+default, reasoning included). With the policy's documented `--max-output-tokens 65536`
+the candidate alone can reach 65,536 tokens, so these defaults need a judge context of
+at least 65,536 + 65,536 + 1k plus the prompt and reference: about 160k tokens for
+typical tasks. A judge with a shorter context rejects the longest answers (a 400, or a
+reply cut off at `finish_reason: length`); those rows are masked rather than scored, so
+they drop out of the metrics and the training signal. With a smaller judge, lower the
+policy's `max_output_tokens` or the judge's `max_tokens` so the sum fits, and watch the
+masked-row count (`judge_failed`) in the aggregate metrics.
 
 ## Tests
 

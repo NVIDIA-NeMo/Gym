@@ -31,13 +31,15 @@ One JSON object per line, in either shape:
 | Field | Type | Required | Meaning |
 |---|---|---|---|
 | `prompt` | string | one of `prompt`/`messages` | The user request |
-| `messages` | list of `{"role": "system"\|"user"\|"assistant", "content": string}` | one of `prompt`/`messages` | The conversation; a final assistant message is the reference answer unless `reference_answer` is given |
-| `reference_answer` | string | yes, unless `messages` ends with an assistant message | A good answer, usually Markdown with fenced code; shown to the judge only |
-| `id` | string | no | Unique task identifier |
+| `messages` | list of `{"role": "system"\|"user"\|"assistant", "content": string}` | one of `prompt`/`messages` | The conversation; a final assistant message is the reference answer and is removed from the prompt |
+| `reference_answer` | string | yes, unless `messages` ends with an assistant message (then it must be absent) | A good answer, usually Markdown with fenced code; shown to the judge only |
+| `id` | string | no | Unique task identifier; written as the row's top-level `task_id`, Gym's stable task identity for resume and run comparison |
 | `category` | string | no | Task label, such as the target stack; metrics report it |
 
 Prompt messages need nonempty string content and at least one user message. Lines with
-a duplicate `id`, no reference answer or an unknown role are refused. `--id-field` and
+a duplicate `id`, no reference answer, an unknown role, or both a final assistant
+message and `reference_answer` are refused, so an answer never stays in the policy's
+prompt. `--id-field` and
 `--category-field` read the id and label from other fields, including nested ones
 (`--category-field meta.stack`); `--limit N` converts only the first N tasks.
 
@@ -55,7 +57,11 @@ pass it to `gym eval run --input`, or add it as a `train`/`validation` dataset (
 - Model-visible input: the task's prompt messages, unchanged, with no added system
   prompt. No tools.
 - The reference answer goes to `verifier_metadata.reference_answer` only.
-- The verifier reads the policy's last assistant message, without reasoning.
+- The judge sees the same task the policy saw: the user prompt, or the whole
+  role-labelled conversation (system messages, earlier assistant turns, request-level
+  instructions) when there is more than one message.
+- The verifier reads the policy's last assistant message, without its leading
+  reasoning blocks.
 - Nothing is built, executed or rendered: the judge reads the code.
 
 ## Run
@@ -92,6 +98,9 @@ gym eval run --no-serve --environment ui_generation --model-type vllm_model --ag
   judge reply without a schema-valid verdict masks the row (`judge_failed`).
 - Use a judge from a different model family than the policy: a judge tends to prefer
   answers of its own family.
+- With the run command above (policy `--max-output-tokens 65536`) and the judge's default
+  `max_tokens` of 65,536, the judge needs about 160k tokens of context; a shorter one
+  masks the longest answers. See the scorer README's "Judge context length".
 - Determinism: stochastic (sampled policy and judge).
 
 ## Licensing information

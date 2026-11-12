@@ -11,11 +11,14 @@ Each input line is one task in one of two shapes:
                   {"role": "assistant", "content": "```tsx\\n...\\n```"}]}
 
 - ``prompt`` (string) is the user request. Alternatively ``messages`` (a list of ``{"role", "content"}``
-  with roles ``system``, ``user`` or ``assistant`` and nonempty string content) holds the conversation; its
-  final assistant message is taken as the reference answer unless ``reference_answer`` is given.
+  with roles ``system``, ``user`` or ``assistant`` and nonempty string content) holds the conversation. When
+  it ends with an assistant message, that message is the reference answer and leaves the prompt; otherwise
+  ``reference_answer`` must be given. A task with both is refused, so an answer never stays in the policy's
+  prompt.
 - ``reference_answer`` (string) is a good answer to the task, usually Markdown with fenced code. The judge
   uses it as a guideline; it is never shown to the policy.
-- ``id`` (string, optional) must be unique when present. ``category`` (string, optional) labels the task,
+- ``id`` (string, optional) must be unique when present; it becomes the row's top-level ``task_id``, the
+  stable task identity Gym uses for resume and for comparing runs (rows without one get positional ids). ``category`` (string, optional) labels the task,
   for example by stack; metrics report mean scores per category. ``--id-field`` and ``--category-field``
   read them from other fields, including nested ones (``meta.stack``).
 
@@ -58,7 +61,9 @@ def convert_task(row: dict, line_number: int, *, id_field: str = "id", category_
         if not isinstance(messages, list) or not all(isinstance(m, dict) for m in messages):
             raise TaskFormatError(f"line {line_number}: 'messages' must be a list of objects")
         messages = [{"role": m.get("role"), "content": m.get("content")} for m in messages]
-        if reference is None and messages and messages[-1]["role"] == "assistant":
+        if messages and messages[-1]["role"] == "assistant":
+            if reference is not None:
+                raise TaskFormatError(f"line {line_number}: final assistant message conflicts with 'reference_answer'")
             reference = messages.pop()["content"]
     if not all(m["role"] in ROLES for m in messages):
         raise TaskFormatError(f"line {line_number}: message roles must be one of {ROLES}")
@@ -69,14 +74,18 @@ def convert_task(row: dict, line_number: int, *, id_field: str = "id", category_
     if not isinstance(reference, str) or not reference.strip():
         raise TaskFormatError(f"line {line_number}: missing reference answer")
 
-    metadata: dict[str, Any] = {"reference_answer": reference}
+    labels: dict[str, str] = {}
     for key, path in (("id", id_field), ("category", category_field)):
         value = _field(row, path)
         if value is not None:
             if not isinstance(value, str) or not value:
                 raise TaskFormatError(f"line {line_number}: '{path}' must be a nonempty string")
-            metadata[key] = value
-    return {"responses_create_params": {"input": messages}, "verifier_metadata": metadata}
+            labels[key] = value
+    metadata: dict[str, Any] = {"reference_answer": reference}
+    if "category" in labels:
+        metadata["category"] = labels["category"]
+    task_id = {"task_id": labels["id"]} if "id" in labels else {}
+    return task_id | {"responses_create_params": {"input": messages}, "verifier_metadata": metadata}
 
 
 def prepare(
@@ -102,7 +111,7 @@ def prepare(
             if not isinstance(task, dict):
                 raise TaskFormatError(f"line {line_number}: expected a JSON object")
             row = convert_task(task, line_number, id_field=id_field, category_field=category_field)
-            task_id = row["verifier_metadata"].get("id")
+            task_id = row.get("task_id")
             if task_id is not None:
                 if task_id in seen:
                     raise TaskFormatError(f"line {line_number}: duplicate id {task_id!r}")

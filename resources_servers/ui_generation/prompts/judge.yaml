@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# UI code judge rubric, sent verbatim as the judge's system message. tests/test_app.py pins its SHA-256 so an
-# edit is deliberate.
+# UI code judge rubric, sent verbatim as the judge's system message. tests/test_app.py checks that its verdict
+# example matches the schema the parser enforces and that it names the case keys the server sends.
 system: |
   Assess the code in the candidate answer against the user prompt. Judge only
   the code inside fenced code blocks (``` ... ```) of the candidate answer, and
@@ -40,5 +40,11 @@ system: |
 
   The scores above show types only; choose each score from 0 through 4.
   The input is a JSON object with keys "prompt", "original_guideline", and
-  "candidate_answer". Source IDs and condition labels are attached by the
-  caller after parsing, not inferred or echoed by the judge.
+  "candidate_answer". "prompt" is either the user prompt as a string or, when
+  the task has more context, the whole conversation the candidate was given:
+  a list of messages in order, each with "role" and "content". Constraints in
+  system messages apply to the candidate answer as much as user requests do,
+  and code in earlier assistant messages is the code a later user request
+  refers to. The candidate answers the final user message. Source IDs and
+  condition labels are attached by the caller after parsing, not inferred or
+  echoed by the judge.

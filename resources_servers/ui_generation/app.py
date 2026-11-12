@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """UI generation resources server: an LLM judge grades the code blocks of a generated UI answer.
 
-The judge reads the user prompt, the task's reference answer (a guideline, never shown to the policy) and
-the policy's final answer, and returns one JSON verdict that scores ``prompt_adherence`` and ``quality``
+The judge reads the task as the policy saw it (the user prompt, or the whole role-labelled conversation when
+there is more than one message or request-level instructions), the task's reference answer (a guideline,
+never shown to the policy) and the policy's final answer, and returns one JSON verdict that scores ``prompt_adherence`` and ``quality``
 from 0 to 4. Only the code inside fenced blocks is judged; nothing is executed or rendered.
 
 A verdict counts only when the judge finished (``finish_reason == "stop"``) and its JSON matches the
@@ -52,9 +53,9 @@ VERDICT_KEYS = frozenset(
     }
 )
 MAX_SCORE = 4
-_FENCE_RE = re.compile(r"^```(?:json)?\s*\n(.*)\n```$", re.DOTALL)
+# A fenced block in a judge reply: an optional (any-case) json tag, the body, then the closing fence on its own line.
+_FENCE_RE = re.compile(r"```[ \t]*(?:json)?[ \t]*\n(.*?)\n[ \t]*```", re.DOTALL | re.IGNORECASE)
 _LEADING_THINK_RE = re.compile(r"^\s*<think(?:ing)?>(.*?)</think(?:ing)?>", re.DOTALL)
-_THINK_BLOCK_RE = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL)
 _DEFAULT_JUDGE_PROMPT_PATH = Path(__file__).parent / "prompts" / "judge.yaml"
 
 RewardScore = Literal["quality", "prompt_adherence", "mean", "min"]
@@ -157,17 +158,23 @@ def parse_judge_completion(completion: NeMoGymChatCompletion) -> tuple[dict[str,
     if think:
         reasoning = reasoning or think.group(1).strip()
         content = content[think.end() :]
-    text = content.strip()
-    fenced = _FENCE_RE.match(text)
-    if fenced:
-        text = fenced.group(1).strip()
-    try:
-        verdict = json.loads(text)
-    except json.JSONDecodeError as error:
-        raise JudgeError(f"invalid_json: {error}") from error
+    verdict = _verdict_json(content.strip())
     if error := validate_verdict(verdict):
         raise JudgeError(f"invalid_schema: {error}")
     return verdict, reasoning
+
+
+def _verdict_json(text: str) -> Any:
+    """The reply's JSON: the whole text, else the first fenced block that parses (prose around it is ignored)."""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as error:
+        for fenced in _FENCE_RE.finditer(text):
+            try:
+                return json.loads(fenced.group(1))
+            except json.JSONDecodeError:
+                continue
+        raise JudgeError(f"invalid_json: {error}") from error
 
 
 def _text_of(content: object) -> str:
@@ -178,21 +185,42 @@ def _text_of(content: object) -> str:
     return ""
 
 
-def prompt_text(body: BaseVerifyRequest) -> str:
-    """The user prompt the judge sees: every user message, joined by a blank line."""
-    params_input = body.responses_create_params.input
-    if isinstance(params_input, str):
-        return params_input
-    messages = [m.model_dump() if isinstance(m, BaseModel) else m for m in params_input]
-    return "\n\n".join(_text_of(m.get("content")) for m in messages if m.get("role") == "user")
+def judge_prompt(body: BaseVerifyRequest) -> str | list[dict[str, str]]:
+    """The task as the policy saw it, for the judge's ``prompt`` key.
+
+    A task that is one user message (or a plain string input) and no request-level ``instructions`` is that
+    text. Anything else is the whole conversation in order, as ``{"role", "content"}`` messages, so the judge
+    sees every constraint and every piece of earlier code the policy saw: ``instructions`` first as a
+    ``system`` message (where the model server puts them), then each message with its role. The reference
+    answer is never part of it.
+    """
+    params = body.responses_create_params
+    params_input = params.input
+    items = [{"role": "user", "content": params_input}] if isinstance(params_input, str) else params_input
+    messages = [
+        {"role": m["role"], "content": _text_of(m.get("content"))}
+        for m in (m.model_dump() if isinstance(m, BaseModel) else m for m in items)
+        if isinstance(m, dict) and isinstance(m.get("role"), str)
+    ]
+    if params.instructions:
+        messages.insert(0, {"role": "system", "content": params.instructions})
+    if len(messages) == 1 and messages[0]["role"] == "user":
+        return messages[0]["content"]
+    return messages
 
 
 def final_answer_text(response: NeMoGymResponse) -> str:
-    """The policy's final answer: its last assistant message, without reasoning."""
+    """The policy's final answer: its last assistant message, without leading reasoning blocks.
+
+    Only complete ``<think>`` blocks at the very start are removed; think-tag text anywhere else (for example
+    a string literal in the submitted code) is part of the answer and reaches the judge unchanged.
+    """
     for item in reversed(response.output):
         if getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant":
             text = "".join(getattr(part, "text", None) or "" for part in item.content)
-            return _THINK_BLOCK_RE.sub("", text).strip()
+            while think := _LEADING_THINK_RE.match(text):
+                text = text[think.end() :]
+            return text.strip()
     return ""
 
 
@@ -210,7 +238,7 @@ class UiGenerationResourcesServer(SimpleResourcesServer):
         return super().model_post_init(context)
 
     def judge_request(
-        self, prompt: str, reference: str, candidate: str
+        self, prompt: str | list[dict[str, str]], reference: str, candidate: str
     ) -> NeMoGymChatCompletionCreateParamsNonStreaming:
         """The rubric as system message and the case as one JSON user message, with the keys the rubric names."""
         case = {"prompt": prompt, "original_guideline": reference, "candidate_answer": candidate}
@@ -263,7 +291,7 @@ class UiGenerationResourcesServer(SimpleResourcesServer):
         if not candidate:
             return self._scored(body, 0, 0, failure_reason="empty_final_answer")
 
-        request = self.judge_request(prompt_text(body), body.verifier_metadata.reference_answer, candidate)
+        request = self.judge_request(judge_prompt(body), body.verifier_metadata.reference_answer, candidate)
 
         async def grade() -> UiGenerationVerifyResponse:
             async with self._judge_semaphore:
