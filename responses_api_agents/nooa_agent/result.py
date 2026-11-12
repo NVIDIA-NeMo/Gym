@@ -22,6 +22,8 @@ def set_response_lifecycle(
     if reason in {
         NOOATerminationReason.POLICY_BUDGET_EXCEEDED,
         NOOATerminationReason.INVALID_POLICY_OUTPUT,
+        NOOATerminationReason.CODE_RETRIES_EXHAUSTED,
+        NOOATerminationReason.RESULT_VALIDATION_EXHAUSTED,
         NOOATerminationReason.MAX_ITERATIONS_EXCEEDED,
         NOOATerminationReason.MAX_OUTPUT_TOKENS_EXCEEDED,
         NOOATerminationReason.LOOP_DETECTED,

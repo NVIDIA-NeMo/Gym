@@ -72,6 +72,46 @@ async def test_sandbox_session_forwards_configured_context_window(setup) -> None
     sandbox.disconnect.assert_awaited_once()
 
 
+async def test_sandbox_session_delivers_configured_settings_before_activation(setup, tmp_path) -> None:
+    instance, sandbox, _, _ = setup
+    source = tmp_path / "settings.yaml"
+    source.write_text("atom:\n  summarization:\n    policy: none\n")
+    instance.config.settings_file = source
+    await instance.seed_agent_session(request(), seed(sandbox_access=access()))
+    runner = instance._require_agent_session("session").runner
+    assert runner.settings_file == source
+    assert sandbox.files[runner.directory + "/settings.yaml"] == source.read_text()
+    assert not runner.session.launch_started
+    await close(instance)
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()
+
+
+@pytest.mark.parametrize("failure", ["missing", "encoding", "upload", "cancelled"])
+async def test_settings_setup_failure_retains_borrowed_connection_for_close(setup, tmp_path, failure) -> None:
+    instance, sandbox, _, _ = setup
+    source = tmp_path / "settings.yaml"
+    instance.config.settings_file = source
+    expected = FileNotFoundError
+    if failure == "encoding":
+        source.write_bytes(b"\xff")
+        expected = UnicodeDecodeError
+    elif failure in ("upload", "cancelled"):
+        source.write_text("atom: {}")
+        expected = asyncio.CancelledError if failure == "cancelled" else OSError
+        sandbox.upload = AsyncMock(side_effect=expected("controlled settings transfer failure"))
+    with pytest.raises(expected):
+        await instance.seed_agent_session(request(), seed(sandbox_access=access()))
+    state = instance._session_records["session"].state
+    assert state.runner.sandbox is sandbox and not state.runner.session.launch_started
+    with pytest.raises(HTTPException, match="closing"):
+        instance._require_agent_session("session")
+    sandbox.disconnect.assert_not_awaited()
+    await close(instance)
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()
+
+
 async def test_offline_runtime_failure_never_activates_or_destroys_borrowed_sandbox(setup) -> None:
     instance, sandbox, staging, connect = setup
     instance.config.runtime_wheelhouse = Path("/prepared/nooa")

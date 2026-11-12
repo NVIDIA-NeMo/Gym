@@ -5,6 +5,7 @@
 import asyncio
 import logging
 from dataclasses import replace
+from pathlib import Path
 from shlex import quote
 from uuid import uuid4
 
@@ -37,6 +38,7 @@ class SandboxNOOARunner:
         model_server_name: str,
         max_policy_calls: int | None,
         context_window: int | None = None,
+        settings_file: Path | None = None,
         timeout: float = 21600,
         close_timeout: float = 30,
     ) -> None:
@@ -47,6 +49,7 @@ class SandboxNOOARunner:
         self.model_server_name = model_server_name
         self.max_policy_calls = max_policy_calls
         self.context_window = context_window
+        self.settings_file = settings_file
         self.timeout = timeout
         self.close_timeout = close_timeout
         # Construct before prepare so failed setup can release the borrowed client.
@@ -72,6 +75,9 @@ class SandboxNOOARunner:
         result = await self.sandbox.exec(f"mkdir -p {quote(self.directory)}", cwd="/", timeout_s=30)
         if result.return_code != 0 or result.error_type:
             raise RuntimeError("Could not prepare NOOA session directory")
+        if self.settings_file is not None:
+            settings = await asyncio.to_thread(self.settings_file.read_text, encoding="utf-8")
+            await upload_text(self.sandbox, path=f"{self.directory}/settings.yaml", text=settings)
 
     async def _stage_activation(self, request: NOOARunRequest) -> SandboxCommand:
         payload = SandboxInput(
@@ -83,16 +89,17 @@ class SandboxNOOARunner:
             context_window=self.context_window,
         )
         await upload_text(self.sandbox, path=f"{self.directory}/input.json", text=payload.model_dump_json())
-        return SandboxCommand(
-            argv=[
-                self.python,
-                "-I",
-                "-m",
-                "responses_api_agents.nooa_agent.sandbox_entrypoint",
-                f"{self.directory}/input.json",
-                f"{self.directory}/result.json",
-            ],
-        )
+        argv = [
+            self.python,
+            "-I",
+            "-m",
+            "responses_api_agents.nooa_agent.sandbox_entrypoint",
+            f"{self.directory}/input.json",
+            f"{self.directory}/result.json",
+        ]
+        if self.settings_file is not None:
+            argv = ["env", f"NEMO_OO_SETTINGS={self.directory}/settings.yaml", *argv]
+        return SandboxCommand(argv=argv)
 
     async def run(self, request: NOOARunRequest) -> NOOARunResult:
         """Execute once, preserving evidence without allowing it to override failure."""

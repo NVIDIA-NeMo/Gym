@@ -1533,13 +1533,16 @@ def test_finalize_honors_an_explicit_terminal_key(tmp_path):
     assert attribution["method"] == "explicit" and attribution["chain"] == "delivered"
 
 
-def test_finalize_honors_a_declared_terminal_response_id(tmp_path):
+@pytest.mark.parametrize("location", ["result", "metadata"])
+def test_finalize_honors_a_declared_terminal_response_id(tmp_path, location):
     result = {
         "_ng_rollout_id": "t0-r0",
         "response": {"id": "", "model": "m", "object": "response", "output": []},
         TERMINAL_RESPONSE_ID_KEY: "resp_2",
         "reward": 1.0,
     }
+    if location == "metadata":
+        result["response"]["metadata"] = {TERMINAL_RESPONSE_ID_KEY: result.pop(TERMINAL_RESPONSE_ID_KEY)}
     built = _delivery_case(tmp_path, result)
     assert built[MASK_SAMPLE_KEY] is False
     attribution = result[TOKEN_CAPTURE_KEY]["terminal_attribution"]
@@ -1547,6 +1550,25 @@ def test_finalize_honors_a_declared_terminal_response_id(tmp_path):
     assert attribution["call_id"] == "call2"
 
 
+def test_result_terminal_declaration_takes_precedence_over_response_metadata(tmp_path):
+    result = {
+        "_ng_rollout_id": "t0-r0",
+        "response": {
+            "id": "",
+            "model": "m",
+            "object": "response",
+            "output": [],
+            "metadata": {TERMINAL_RESPONSE_ID_KEY: "resp_unknown"},
+        },
+        TERMINAL_RESPONSE_ID_KEY: "resp_2",
+        "reward": 1.0,
+    }
+    built = _delivery_case(tmp_path, result)
+    assert built[MASK_SAMPLE_KEY] is False
+    assert result[TOKEN_CAPTURE_KEY]["terminal_attribution"]["call_id"] == "call2"
+
+
+@pytest.mark.parametrize("location", ["result", "metadata"])
 @pytest.mark.parametrize("with_aux", [False, True])
 @pytest.mark.parametrize(
     ("declared_response_id", "reason"),
@@ -1557,7 +1579,7 @@ def test_finalize_honors_a_declared_terminal_response_id(tmp_path):
     ids=["uncaptured-id", "conflicting-id"],
 )
 def test_finalize_masks_when_the_declared_response_id_is_unconfirmed(
-    tmp_path: Path, with_aux: bool, declared_response_id: str, reason: str
+    tmp_path: Path, with_aux: bool, declared_response_id: str, reason: str, location: str
 ) -> None:
     result = {
         "_ng_rollout_id": "t0-r0",
@@ -1568,6 +1590,8 @@ def test_finalize_masks_when_the_declared_response_id_is_unconfirmed(
         TERMINAL_RESPONSE_ID_KEY: declared_response_id,
         "reward": 1.0,
     }
+    if location == "metadata":
+        result["response"]["metadata"] = {TERMINAL_RESPONSE_ID_KEY: result.pop(TERMINAL_RESPONSE_ID_KEY)}
     built = _delivery_case(tmp_path, result, with_aux=with_aux)
     # A declaration the records cannot confirm never falls back to weaker witnesses.
     assert built[MASK_SAMPLE_KEY] is True

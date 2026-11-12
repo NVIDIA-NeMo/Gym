@@ -595,8 +595,8 @@ async def test_real_codeact_output_limit_is_gradable_and_preserves_model_evidenc
     )
     assert result.termination_reason is NOOATerminationReason.MAX_OUTPUT_TOKENS_EXCEEDED
     assert result.trajectory.invocations[0].status == "incomplete"
-    assert runner._server_client.post.await_count == 3
-    assert len(result.trajectory.turns) == 3
+    assert runner._server_client.post.await_count == 1
+    assert len(result.trajectory.turns) == 1
     assert all(turn.model_calls[0].response_id == "truncated" for turn in result.trajectory.turns)
 
 
@@ -612,8 +612,6 @@ async def test_generation_error_without_output_limit_or_with_transport_failure_i
         response["incomplete_details"] = {"reason": "max_output_tokens"}
     responses = [FakeHTTPResponse(response)]
     failure = ConnectionError("model unavailable")
-    if transport_failure:
-        responses.append(failure)
     runner._server_client.post = AsyncMock(side_effect=responses)
 
     async def invoke(agent, request):
@@ -624,10 +622,9 @@ async def test_generation_error_without_output_limit_or_with_transport_failure_i
         except OutputTokenLimitExceeded:
             pass
         if transport_failure:
-            try:
-                await agent.llm.acall([{"role": "user", "content": "again"}])
-            except ConnectionError:
-                pass
+            # The latched output limit prevents another policy request. An
+            # independent harness transport failure must still stay a failure.
+            raise failure
         raise GenerationError("arbitrary generation failure")
 
     runner._invocation_adapter = invoke
@@ -640,7 +637,8 @@ async def test_generation_error_without_output_limit_or_with_transport_failure_i
         )
     assert caught.value.result.termination_reason is None
     assert caught.value.result.model_status_code is None
-    assert isinstance(caught.value.__cause__, GenerationError)
+    assert isinstance(caught.value.__cause__, ConnectionError if transport_failure else GenerationError)
+    assert runner._server_client.post.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -748,7 +746,9 @@ async def test_model_rejection_preserves_original_provider_error(
         )
     )
 
-    assert runner._server_client.post.await_count == (3 if wrapped else 1) * (3 if status == 429 else 1)
+    assert runner._server_client.post.await_count == (3 if wrapped else 1) * (
+        3 if status in {408, 429, 500, 502, 503, 504} else 1
+    )
     root = next(item for item in result.trajectory.invocations if item.parent_invocation_id is None)
     assert root.status == "failed"
     assert root.error_type == ("GenerationError" if wrapped else "ClientResponseError")

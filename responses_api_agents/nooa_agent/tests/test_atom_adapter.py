@@ -1,0 +1,229 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""Atom through the NOOA adapter: the config resolves, the adapter hands over the task, Atom runs."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+import yaml
+
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseFunctionToolCall
+from nemo_gym.models.token_capture import TokenEntry, resolve_terminal
+from nemo_gym.server_runtime import SingleAgentTurnResult
+from responses_api_agents.nooa_agent.atom_adapter import invoke_atom
+from responses_api_agents.nooa_agent.config import NOOAAgentConfig, NOOAInvocationConfig
+from responses_api_agents.nooa_agent.invocation import validate_invocation
+from responses_api_agents.nooa_agent.result import finalize_run_result
+from responses_api_agents.nooa_agent.runner import InProcessNOOARunner, NOOARunRequest
+from responses_api_agents.nooa_agent.tests.test_gym_llm import FakeHTTPResponse, model_response
+
+
+ROOT = Path(__file__).resolve().parents[3]
+atom_gym = pytest.importorskip("nooa_atom.gym", reason="nooa-atom not installed in this venv")
+
+
+def atom_config() -> NOOAAgentConfig:
+    configs_dir = ROOT / "responses_api_agents/nooa_agent/configs"
+    base = yaml.safe_load((configs_dir / "nooa_agent.yaml").read_text())["nooa_agent"]["responses_api_agents"][
+        "nooa_agent"
+    ]
+    atom = yaml.safe_load((configs_dir / "nooa_atom_agent.yaml").read_text())["nooa_atom_agent"][
+        "responses_api_agents"
+    ]["nooa_agent"]
+    merged = {**base, **atom, "nooa": {**base["nooa"], **atom["nooa"]}}
+    return NOOAAgentConfig(name="nooa", host="127.0.0.1", port=9000, **merged)
+
+
+def test_atom_config_resolves_the_harness_and_adapter():
+    config = atom_config()
+    agent_class, adapter = validate_invocation(config.nooa)
+    assert agent_class is atom_gym.AtomHarness and adapter is invoke_atom
+    assert config.nooa.init_kwargs == {"turn_method": "handle_batch"}
+
+
+@pytest.mark.asyncio
+async def test_adapter_hands_the_latest_user_message_to_atom():
+    agent = SimpleNamespace(solve=AsyncMock(return_value="result"))
+    request = NeMoGymResponseCreateParamsNonStreaming(
+        input=[{"role": "system", "content": "preamble"}, {"role": "user", "content": "fix the bug"}]
+    )
+    assert await invoke_atom(agent, request) == "result"
+    agent.solve.assert_awaited_once_with("fix the bug")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("turn_method", ["handle_batch", "handle_orchestrate"])
+async def test_atom_runs_through_the_runner_with_a_scripted_model(tmp_path: Path, monkeypatch, turn_method: str):
+    """The real Atom session, Gym's model client as its only model, one scripted python_cell that finishes."""
+    workdir = tmp_path / "task"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+    config = atom_config()
+    invocation = NOOAInvocationConfig.model_validate(
+        config.nooa.model_dump()
+        | {"init_kwargs": {"turn_method": turn_method, "sessions_dir": str(tmp_path / "sessions")}}
+    )
+    code = (
+        "open('hello.txt', 'w').write('hello gym')\n"
+        "return_result(Done(explanation='wrote the file', result=TaskResult("
+        "solution_description='created hello.txt', evidence='file exists', how_to_verify='cat hello.txt', "
+        "report='done')))"
+    )
+    calls: list[dict] = []
+
+    async def post(**kwargs):
+        calls.append(kwargs)
+        index = len(calls) - 1
+        output = NeMoGymResponseFunctionToolCall(
+            id=f"function-{index}", call_id=f"call-{index}", name="python_cell", arguments=json.dumps({"code": code})
+        )
+        return FakeHTTPResponse(model_response(output, response_id=f"response-{index}"))
+
+    runner = InProcessNOOARunner(
+        invocation=invocation,
+        server_client=SimpleNamespace(post=post),
+        model_server_name=config.model_server.name,
+        max_policy_calls=3,
+    )
+    result = await runner.run(
+        NOOARunRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input="Create hello.txt containing 'hello gym', then finish."
+            ),
+            model_url_path="/v1/responses",
+            task_id="atom-task",
+            rollout_id="atom-rollout",
+        )
+    )
+    assert result.termination_reason is None, result.termination_error
+    assert result.return_value.solution_description == "created hello.txt"
+    assert (workdir / "hello.txt").read_text() == "hello gym"  # Atom's cell ran in the task directory
+    assert len(calls) == 1  # one model call finished the task
+    # The harness carried Gym's hooks into Atom's session loop: the executed cell is observed.
+    tools = {call.tool_name for call in result.trajectory.tool_calls}
+    assert "python_cell" in tools, tools
+    response, observations = finalize_run_result(result)
+    assert response.status == "completed"
+    assert response.metadata == {"terminal_response_id": "response-0"}, [
+        (item.invocation_id, item.parent_invocation_id, [call.response_id for call in item.model_calls])
+        for item in result.trajectory.invocations
+    ]
+    # The synthetic verifier message remains non-trainable. The declaration identifies
+    # the model call separately; it does not invent tokens for the structured return.
+    assert sorted(gap.code for gap in observations.gaps) == [
+        "non_trainable_terminal_output",
+        "public_assistant_metadata_unavailable",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_adapter_unwraps_atoms_turn_failure_to_the_strategy_error():
+    """The runner classifies CodeAct stops and model rejections by the error the strategy raised;
+    Atom's session wraps it, so the adapter hands the original back."""
+    from nooa.errors import GenerationError
+    from nooa_atom.session.session import TurnFailedError
+
+    original = GenerationError("LLM API error after 3 retries")
+
+    async def failing(task: str):
+        try:
+            raise original
+        except GenerationError as error:
+            raise TurnFailedError(str(error)) from error
+
+    agent = SimpleNamespace(solve=failing)
+    with pytest.raises(GenerationError) as info:
+        await invoke_atom(agent, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    assert info.value is original
+
+    async def other(task: str):
+        raise RuntimeError("not a turn failure")
+
+    with pytest.raises(RuntimeError):
+        await invoke_atom(SimpleNamespace(solve=other), NeMoGymResponseCreateParamsNonStreaming(input="task"))
+
+
+@pytest.mark.asyncio
+async def test_atom_root_and_child_sessions_route_through_gym(tmp_path: Path, monkeypatch):
+    """A root that delegates: the child is its own model-calling session, both share Gym's client and
+    cookies, and the child's result flows back into the root's. Ported from Elisa Martinez Abad's #5178."""
+    monkeypatch.chdir(tmp_path)
+    config = atom_config()
+    code = [
+        "child = await Subagent('offline child').run('return child evidence')\n"
+        "return_result(Done(explanation='root', result=TaskResult(solution_description='root', "
+        "evidence=child.evidence, how_to_verify='offline', report='native root and child')))",
+        "return_result(Done(explanation='child', result=TaskResult(solution_description='child', "
+        "evidence='native child evidence', how_to_verify='offline', report='child')))",
+    ]
+    calls: list[dict] = []
+    captured: list[TokenEntry] = []
+
+    async def post(**kwargs):
+        calls.append(kwargs)
+        assert len(calls) <= 2
+        out = NeMoGymResponseFunctionToolCall(
+            id=f"f{len(calls)}",
+            call_id=f"c{len(calls)}",
+            name="python_cell",
+            arguments=json.dumps({"code": code[len(calls) - 1]}),
+        )
+        captured.append(
+            TokenEntry(
+                capture_key="atom",
+                model_call_id=f"model-call-{len(calls)}",
+                response_id=f"r{len(calls)}",
+                prompt_token_ids=[1],
+                generation_token_ids=[len(calls)],
+                generation_log_probs=[-0.1],
+                output_items=[out.model_dump(mode="json")],
+                token_item_index=0,
+            )
+        )
+        return FakeHTTPResponse(model_response(out, response_id=f"r{len(calls)}"))
+
+    runner = InProcessNOOARunner(
+        invocation=NOOAInvocationConfig.model_validate(
+            config.nooa.model_dump()
+            | {"init_kwargs": {"turn_method": "handle_orchestrate", "sessions_dir": str(tmp_path / "sessions")}}
+        ),
+        server_client=SimpleNamespace(post=post),
+        model_server_name="policy",
+        max_policy_calls=2,
+        context_window=1048576,
+    )
+    result = await runner.run(
+        NOOARunRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input="offline native fixture", max_output_tokens=131072
+            ),
+            model_url_path="/fixture/v1/responses",
+            model_cookies={"session": "fixture"},
+        )
+    )
+    assert result.return_value.solution_description == "root"
+    assert result.return_value.evidence == "native child evidence"
+    assert result.termination_reason is None
+    response, _ = finalize_run_result(result)
+    assert response.metadata == {"terminal_response_id": "r1"}, [
+        (item.invocation_id, item.parent_invocation_id, [call.response_id for call in item.model_calls])
+        for item in result.trajectory.invocations
+    ]
+    assert len(calls) == len(result.trajectory.turns) == 2
+    assert len({turn.invocation_id for turn in result.trajectory.turns}) == 2
+    # Synthetic capture records exercise the real witness join against Atom's exact
+    # projected output and serialized environment result, including the final fallback.
+    wire = SingleAgentTurnResult(
+        responses_create_params={"input": "fixture"}, response=response, reward=1.0
+    ).model_dump(mode="json")
+    attribution = resolve_terminal(captured, wire["response"], declared_response_id=wire["terminal_response_id"])
+    assert attribution.attributed and attribution.method == "declared"
+    assert attribution.model_call_id == "model-call-1"
+    assert all(call["server_name"] == "policy" and call["url_path"] == "/fixture/v1/responses" for call in calls)
+    assert all(call["json"].max_output_tokens == 131072 for call in calls)
+    assert all(call["cookies"]["session"] == "fixture" for call in calls)
