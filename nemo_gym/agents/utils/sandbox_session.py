@@ -174,6 +174,11 @@ class SandboxSession[Artifacts]:
         )
 
     @property
+    def root_dir(self) -> str:
+        """Directory the session started in, which outlives the per-activation ``session_dir`` of ``begin_activation``."""
+        return self._session_root or self.session_dir
+
+    @property
     def stop_request_path(self) -> str:
         """Marker path an adapter may pass to its harness for cancellation diagnostics."""
         return f"{self.session_dir}/{STOP_REQUEST_FILE}"
@@ -507,7 +512,7 @@ class SandboxSession[Artifacts]:
                         async with asyncio.timeout(timeout):
                             await remove_session_directory(
                                 self.sandbox,
-                                session_dir=self._session_root or self.session_dir,
+                                session_dir=self.root_dir,
                                 workdir=self.workdir,
                                 timeout=timeout,
                                 harness=self.harness,
@@ -529,7 +534,7 @@ class SandboxSession[Artifacts]:
                 if self.execution_oom is None:
                     await remove_session_directory(
                         self.sandbox,
-                        session_dir=self._session_root or self.session_dir,
+                        session_dir=self.root_dir,
                         workdir=self.workdir,
                         timeout=timeout,
                         harness=self.harness,
