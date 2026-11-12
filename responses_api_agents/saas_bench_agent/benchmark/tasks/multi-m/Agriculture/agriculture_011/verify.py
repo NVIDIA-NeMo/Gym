@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: CC-BY-4.0
 # Source: https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/multi-m/Agriculture/agriculture_011/verify.py
 # Copyright: SaaS-Bench Authors; see bundled licenses.
-# Vendored for native benchmark evaluation; original behavior retained.
+# Adaptation: register the shipped Drupal collation for database reads; task checks unchanged.
 """Verify actual FarmOS image evidence and the Grocy handoff for agriculture_011."""
 
 import base64
@@ -77,12 +77,14 @@ def docker_exec(container: str, *args: str, timeout: int = 30) -> tuple[int, str
 
 def farmos_query(sql: str) -> list[dict]:
     php = (
+        "require '/opt/drupal/vendor/autoload.php';"
         "$db=new PDO('sqlite:" + FARMOS_DB + "');"
+        "$db->sqliteCreateCollation('NOCASE_UTF8',['Drupal\\Component\\Utility\\Unicode','strcasecmp']);"
         "$db->setAttribute(PDO::ATTR_ERRMODE,PDO::ERRMODE_EXCEPTION);"
         "$s=$db->query($argv[1]);"
         "echo json_encode($s->fetchAll(PDO::FETCH_ASSOC));"
     )
-    rc, out, err = docker_exec(FARMOS_CONTAINER, "php", "-r", php, "--", sql)
+    rc, out, err = docker_exec(FARMOS_CONTAINER, "php", "-d", "display_errors=stderr", "-r", php, "--", sql)
     if rc != 0:
         raise RuntimeError(f"FarmOS query failed: {err.strip()[:300]}")
     return json.loads(out) if out.strip() else []

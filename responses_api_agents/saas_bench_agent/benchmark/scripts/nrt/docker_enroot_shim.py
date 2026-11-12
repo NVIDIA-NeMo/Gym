@@ -3,7 +3,7 @@
 # Source: https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/scripts/nrt/docker_enroot_shim.py
 # Copyright: SaaS-Bench Authors; see bundled licenses.
 # Vendored for native benchmark evaluation; original behavior retained.
-"""Minimal ``docker exec`` / ``docker cp`` compatibility for Enroot verifies.
+"""Minimal ``docker exec`` / ``docker cp`` / start-time inspection compatibility for Enroot verifies.
 
 Task verify scripts invoke ``docker exec`` to inspect files or databases.
 On GPU nodes the Enroot backend records PIDs under ``$SAAS_ENROOT_STATE_DIR``.
@@ -23,6 +23,7 @@ directories are gone and ``psql`` is found via ``/usr/bin`` / ``/usr/lib/postgre
 
 from __future__ import annotations
 
+import datetime
 import os
 import shutil
 import subprocess
@@ -204,6 +205,27 @@ def resolve_exec_pids(container: str) -> tuple[int, int] | str:
     return keeper, app
 
 
+def docker_inspect(args: list[str]) -> int:
+    """Expose only the live service start time required by stock audits."""
+    if len(args) != 3 or args[0] not in {"--format", "-f"} or args[1].replace(" ", "") != "{{.State.StartedAt}}":
+        return die("supported inspect usage: docker inspect --format '{{.State.StartedAt}}' CONTAINER")
+    resolved = resolve_exec_pids(args[2])
+    if isinstance(resolved, str):
+        return die(resolved)
+    _, app_pid = resolved
+    try:
+        # Kernel process birth is stable across inspections. Never substitute
+        # the audit time: the verifier needs the task-start stock boundary.
+        stat = Path(f"/proc/{app_pid}/stat").read_text()
+        ticks = int(stat[stat.rfind(")") + 2 :].split()[19])
+        boot = next(int(line.split()[1]) for line in Path("/proc/stat").read_text().splitlines() if line.startswith("btime "))
+        started = datetime.datetime.fromtimestamp(boot + ticks / os.sysconf("SC_CLK_TCK"), datetime.timezone.utc)
+    except (OSError, ValueError, IndexError, StopIteration) as exc:
+        return die(f"cannot read service start time: {exc}", 1)
+    print(started.isoformat(timespec="microseconds").replace("+00:00", "Z"))
+    return 0
+
+
 def docker_exec(args: list[str]) -> int:
     env_values: list[str] = []
     interactive = False
@@ -252,7 +274,12 @@ def docker_exec(args: list[str]) -> int:
     # SQLCMD resolves resource files through /proc/self/exe, which requires
     # membership in the target PID namespace as well as its root filesystem.
     sqlcmd = Path(args[0]).name == "sqlcmd"
-    namespace_flags = ["--pid", "--root", "--wd"] if sqlcmd else ["--wd=/"]
+    # PHP must start inside the service root too. A host-root cwd becomes
+    # unreachable after namespace entry and causes shell/PHP startup failures.
+    # Resolve a directory FD to the target root before switching namespaces;
+    # unlike the service cwd, this remains valid if its work directory is gone.
+    rooted = sqlcmd or Path(args[0]).name == "php"
+    namespace_flags = (["--pid"] if sqlcmd else []) + ["--root", f"--wd=/proc/{app_pid}/root"] if rooted else ["--wd=/"]
     payload = ["env", *runtime_env, *env_values, *args]
     inner = [
         "/bin/sh",
@@ -285,7 +312,9 @@ def docker_exec(args: list[str]) -> int:
 
 def main(argv: list[str]) -> int:
     if not argv:
-        return die("only `docker exec` and `docker cp` are supported")
+        return die("only `docker exec`, `docker cp` and start-time `docker inspect` are supported")
+    if argv[0] == "inspect":
+        return docker_inspect(argv[1:])
     if argv[0] == "cp":
         return docker_cp(argv[1:])
     if argv[0] != "exec":

@@ -307,9 +307,10 @@
       "source_path": "tasks/multi-m/Agriculture/agriculture_003/verify.py",
       "source_url": "https://gitlab-master.nvidia.com/pritamb/saas-bench/-/blob/31177a7a80040edf588388dd982af4b678d1e544/tasks/multi-m/Agriculture/agriculture_003/verify.py",
       "source_sha256": "79fe401b2e5323d6213252798cd99c53a1268545ad7e9f569e0d675d03ff48ba",
-      "vendored_sha256": "bca9c80dbd9e786da7d60ee07b3f91bb2bbd40c6135c17c3334670d47543a197",
+      "vendored_sha256": "5b120c812dacca085b793b9f03986e522eb7a4c96c56aa1c8fc9764d41758a03",
       "license": "CC-BY-4.0",
-      "python_ast_unchanged": true
+      "python_ast_unchanged": false,
+      "gym_adaptation": "Database connection registers NOCASE_UTF8 with the shipped Drupal Unicode::strcasecmp callback; PHP errors go to stderr. All task checks, queries, criteria, weights and judge prompts unchanged."
     },
     {
       "source_path": "tasks/multi-m/Agriculture/agriculture_007/verify.py",
@@ -323,9 +324,10 @@
       "source_path": "tasks/multi-m/Agriculture/agriculture_011/verify.py",
       "source_url": "https://gitlab-master.nvidia.com/pritamb/saas-bench/-/blob/31177a7a80040edf588388dd982af4b678d1e544/tasks/multi-m/Agriculture/agriculture_011/verify.py",
       "source_sha256": "fc961efc440b9b2e03789a37e109ef23e27987000e6b4b90e2e00f85837ffccc",
-      "vendored_sha256": "0aa6e5feb82d420baa9b178bf8fee2272b1aaf261defde3e8d9a84fb2d7dceca",
+      "vendored_sha256": "c5793175f376dd08b6cdfbcab375ed1ab7fdd07ab737a8ad248ee14346974114",
       "license": "CC-BY-4.0",
-      "python_ast_unchanged": true
+      "python_ast_unchanged": false,
+      "gym_adaptation": "Database connection registers NOCASE_UTF8 with the shipped Drupal Unicode::strcasecmp callback; PHP errors go to stderr. All task checks, queries, criteria, weights and judge prompts unchanged."
     },
     {
       "source_path": "tasks/multi-m/Agriculture/agriculture_012/verify.py",
@@ -347,9 +349,10 @@
       "source_path": "tasks/multi-m/Agriculture/agriculture_016/verify.py",
       "source_url": "https://gitlab-master.nvidia.com/pritamb/saas-bench/-/blob/31177a7a80040edf588388dd982af4b678d1e544/tasks/multi-m/Agriculture/agriculture_016/verify.py",
       "source_sha256": "bb83efbb9a088e91a043053aa0dbde76c2b0ba81988f34f43c39418fcaf2da0a",
-      "vendored_sha256": "c2f7c1a6872676a3cb509cc6609662737def1835c1d6ad1213405bd784ecbf17",
+      "vendored_sha256": "c581f652c00bffad0831634731a257d28e30af44e647f4a25edbd107abad2865",
       "license": "CC-BY-4.0",
-      "python_ast_unchanged": true
+      "python_ast_unchanged": false,
+      "gym_adaptation": "Database connection registers NOCASE_UTF8 with the shipped Drupal Unicode::strcasecmp callback; PHP errors go to stderr. All task checks, queries, criteria, weights and judge prompts unchanged."
     },
     {
       "source_path": "tasks/multi-m/Agriculture/agriculture_020/verify.py",
@@ -379,9 +382,10 @@
       "source_path": "tasks/multi-m/Agriculture/agriculture_031/verify.py",
       "source_url": "https://gitlab-master.nvidia.com/pritamb/saas-bench/-/blob/31177a7a80040edf588388dd982af4b678d1e544/tasks/multi-m/Agriculture/agriculture_031/verify.py",
       "source_sha256": "4be322707ce7df1138460bc324b4695d14e64626a1f6d460b8ee902c04233de6",
-      "vendored_sha256": "f103221b1518a1a7c8f07eedb923ac22b7902fc172867ba0346674ee901a6467",
+      "vendored_sha256": "9fe58d4f10950550a758a95553ecd8fd01c8922b53acd03320ffeb04efc70dec",
       "license": "CC-BY-4.0",
-      "python_ast_unchanged": true
+      "python_ast_unchanged": false,
+      "gym_adaptation": "Database connection registers NOCASE_UTF8 with the shipped Drupal Unicode::strcasecmp callback; PHP errors go to stderr. All task checks, queries, criteria, weights and judge prompts unchanged."
     },
     {
       "source_path": "tasks/multi-m/Agriculture/agriculture_038/verify.py",
@@ -1155,10 +1159,11 @@
       "source_path": "scripts/nrt/docker_enroot_shim.py",
       "source_url": "https://gitlab-master.nvidia.com/pritamb/saas-bench/-/blob/31177a7a80040edf588388dd982af4b678d1e544/scripts/nrt/docker_enroot_shim.py",
       "source_sha256": "9e5cf567d5f71a0302bea9b93833d015bf26b61ff90e959a67fc0ab4174c949a",
-      "vendored_sha256": "5e86cbe756cf1c354ce8e153fcd3e8dcab220a883765cc584af815ac2f7c68a1",
+      "vendored_sha256": "5280fdf07eb5b7d5c593644c10d7cf354185fb2aa9c50fe935cf56ea8e04fea0",
       "license": "Apache-2.0",
       "python_ast_unchanged": false,
-      "adaptation": "SQLCMD enters target PID namespace and root to load its resources; other command behavior unchanged"
+      "adaptation": "SQLCMD enters target PID namespace and root to load its resources; other command behavior unchanged",
+      "gym_adaptation": "Live service process start-time inspection for stock audits; PHP and SQLCMD exec enter a stable target-root working directory. Task criteria and weights unchanged."
     },
     {
       "source_path": "scripts/nrt/setup_podman_runtime.sh",

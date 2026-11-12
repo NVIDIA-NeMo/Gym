@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: CC-BY-4.0
 # Source: https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/multi-m/Agriculture/agriculture_031/verify.py
 # Copyright: SaaS-Bench Authors; see bundled licenses.
-# Vendored for native benchmark evaluation; original behavior retained.
+# Adaptation: register the shipped Drupal collation for database reads; task checks unchanged.
 """Verifier for agriculture_031: visual recipe -> stock -> farm traceability."""
 
 import base64
@@ -123,14 +123,16 @@ def grocy_query(sql: str) -> list[dict]:
 def farmos_query(sql: str) -> list[dict]:
     encoded = base64.b64encode(sql.encode()).decode()
     php = (
+        "require '/opt/drupal/vendor/autoload.php';"
         "$sql=base64_decode('" + encoded + "');"
         "$db=new SQLite3('" + FARMOS_DB + "');"
+        "$db->createCollation('NOCASE_UTF8',['Drupal\\Component\\Utility\\Unicode','strcasecmp']);"
         "$result=$db->query($sql);"
         "if($result===false){fwrite(STDERR,$db->lastErrorMsg());exit(2);}"
         "$rows=[];while($row=$result->fetchArray(SQLITE3_ASSOC)){$rows[]=$row;}"
         "echo json_encode($rows);"
     )
-    rc, stdout, stderr = docker_exec(FARMOS_CONTAINER, "php", "-r", php)
+    rc, stdout, stderr = docker_exec(FARMOS_CONTAINER, "php", "-d", "display_errors=stderr", "-r", php)
     if rc != 0:
         raise RuntimeError(f"FarmOS query failed: {stderr.strip()}")
     return json.loads(stdout) if stdout.strip() else []
