@@ -14,7 +14,7 @@ import psutil
 import pytest
 from fastapi.testclient import TestClient
 from scripts.harness_conformance.episode import HARNESSES, _config, _settings
-from scripts.harness_conformance.provider import OpenClawProbe, Probe
+from scripts.harness_conformance.probes import OpenClawProbe, Probe
 from scripts.harness_conformance.runner import _fingerprint, inspect_episode, main, run_process, run_suite
 from scripts.harness_conformance.scenarios import SCENARIOS, Scenario
 

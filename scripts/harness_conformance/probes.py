@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Controlled Chat/Responses endpoints and private episode witnesses."""
+"""Shared conformance probe and harness-specific probe implementations."""
 
 import asyncio
 import json
@@ -26,6 +26,7 @@ from nemo_gym.models import (
     synthesize_chat_completion_sse,
     synthesize_responses_sse,
 )
+from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, register_provider
 from nemo_gym.server_runtime import (
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
@@ -628,3 +629,116 @@ class OpenClawProbe(Probe):
                 ):
                     result_ids.add(replay_id)
         return result_ids
+
+
+@dataclass
+class NOOAProbe(Probe):
+    """Seed and close the sandbox through Resources; NOOA runs its ordinary borrower path."""
+
+    sandbox: AsyncSandbox | None = field(default=None, init=False)
+    native_tool_calls: list[dict] = field(default_factory=list, init=False)
+
+    def __post_init__(self) -> None:
+        from .nooa import BorrowableLocalProvider
+
+        super().__post_init__()
+        register_provider("conformance_local", BorrowableLocalProvider, override=True)
+
+    def save(self) -> None:
+        super().save()
+        path = self.directory / "witness.json"
+        witness = json.loads(path.read_text())
+        witness["native_tool_calls"] = self.native_tool_calls
+        path.write_text(json.dumps(witness, indent=2) + "\n")
+
+    def _observe_tool_results(self, body: dict) -> None:
+        super()._observe_tool_results(body)
+        # CodeActV2 acknowledges a cell first and reports its execution in a later
+        # user-side PythonOutput event. Witness the feedback the model actually sees.
+        execution_path = self.directory / "native_executions.jsonl"
+        executions = (
+            [json.loads(line) for line in execution_path.read_text().splitlines()] if execution_path.exists() else []
+        )
+        scripted_ids = {call["id"] for call in self.tool_calls}
+        if self.finish_call:
+            scripted_ids.add(self.finish_call["id"])
+        calls = {
+            item["call_id"]: item
+            for item in body.get("input", [])
+            if isinstance(item, dict) and item.get("type") == "function_call"
+        }
+        self.native_tool_calls = []
+        for execution in executions:
+            if execution["id"] in scripted_ids:
+                continue
+            request = calls.get(execution["id"], {})
+            self.native_tool_calls.append({**execution, "name": request.get("name"), "outputs": []})
+        for call in self.tool_calls + self.native_tool_calls:
+            outputs = [
+                item["content"]
+                for item in body.get("input", [])
+                if isinstance(item, dict)
+                and item.get("role") == "user"
+                and isinstance(item.get("content"), str)
+                and f"PythonOutput(tool_call_id={call['id']!r}," in item["content"]
+            ]
+            if outputs:
+                call["outputs"] = outputs
+                call["result_seen"] = any(call["token"] in output for output in outputs) if "token" in call else True
+
+    async def seed_sandbox(self) -> dict:
+        from .nooa import BorrowableLocalProvider, install_observer
+
+        if self.sandbox is None:
+            if (self.directory / "native_executions.jsonl").exists():
+                raise FileExistsError("NOOA execution witness must belong to a fresh episode")
+            self.sandbox = AsyncSandbox(
+                BorrowableLocalProvider(concurrency=1), SandboxSpec(workdir=str(self.directory / "workspace"))
+            )
+            await self.sandbox.start()
+            await install_observer(self.sandbox)
+        return {
+            "sandbox_access": {
+                "connection": {
+                    "kind": "direct",
+                    "provider_config_ref": "probe_sandbox",
+                    "descriptor": await self.sandbox.serialize(),
+                },
+                "workdir": str(self.directory / "workspace"),
+            }
+        }
+
+    async def close_sandbox(self) -> None:
+        if self.sandbox is not None:
+            await self.sandbox.stop()
+
+
+@dataclass
+class PiProbe(Probe):
+    tool_output_chars: int = 20000
+
+    def _tool(self, body: dict) -> tuple[str, dict, dict]:
+        name, arguments, namespaces = super()._tool(body)
+        # Pi retains 20k estimated tokens. Real output makes older history eligible
+        # for summarization; reporting large usage alone cannot create that history.
+        arguments["command"] = f"head -c {self.tool_output_chars} /dev/zero | tr '\\0' x; " + arguments["command"]
+        return name, arguments, namespaces
+
+    async def model(self, request: Request) -> JSONResponse | StreamingResponse:
+        index = len(self.attempts)
+        if index >= len(self.responses) or self.responses[index]["kind"] != "context_overflow":
+            return await super().model(request)
+        body = await request.json()
+        self._observe_tool_results(body)
+        payload = {
+            "error": {
+                "message": "This model's maximum context length is 32768 tokens. However, you requested 40000 tokens.",
+                "type": "invalid_request_error",
+                "code": "context_length_exceeded",
+            }
+        }
+        self.attempts.append(
+            {"attempt_id": f"attempt-{index}", "request": body, "response": payload, "status_code": 400}
+        )
+        self.save()
+        return JSONResponse(payload, status_code=400)

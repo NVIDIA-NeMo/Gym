@@ -10,8 +10,7 @@ from dataclasses import replace
 import pytest
 from fastapi.testclient import TestClient
 from scripts.harness_conformance.episode import _settings
-from scripts.harness_conformance.pi import PiProbe
-from scripts.harness_conformance.provider import ANSWER, Probe
+from scripts.harness_conformance.probes import ANSWER, PiProbe, Probe
 from scripts.harness_conformance.scenarios import SCENARIOS
 
 
