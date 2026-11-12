@@ -3,16 +3,20 @@
 """Resources-owned, supervised execution of the existing read-only shell."""
 
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from shlex import quote
+from time import monotonic
 from uuid import uuid4
 
 from nemo_gym.agents import SandboxCommand, SandboxPythonRuntime, SandboxSession
 from nemo_gym.sandbox import read_text, upload_text
 
+
+LOG = logging.getLogger(__name__)
 
 _RUNTIME = SandboxPythonRuntime(harness="browsecomp-shell", requirements=("regex",), import_check="import regex")
 _RUNNER = f"{_RUNTIME.directory}/shell_runner.py"
@@ -47,6 +51,10 @@ class BrowsecompShellSandbox:
     """One Resources session owns its shell sandbox and immutable page copies."""
 
     session: SandboxSession[str]
+    resources_session_id: str = ""
+    started_at: float | None = None
+    bash_calls: int = 0
+    _stop_logged: bool = False
     ready: bool = False
     uploaded_pages: set[str] = field(default_factory=set)
 
@@ -94,6 +102,7 @@ class BrowsecompShellSandbox:
         """Copy new retrieved pages, then interpret the command only inside the sandbox."""
         if not self.ready:
             raise RuntimeError("BrowseComp shell setup has not completed")
+        self.bash_calls += 1
         directory = f"{self.session.session_dir.rsplit('/calls/', 1)[0]}/calls/{uuid4().hex}"
         await self.session.begin_activation(session_dir=directory, timeout=close_timeout)
 
@@ -140,4 +149,26 @@ class BrowsecompShellSandbox:
 
     async def close(self, *, timeout: float) -> None:
         """Confirm termination and stop the owned sandbox; a failed stop remains retryable."""
-        await self.session.close(timeout=timeout)
+        sandbox = self.session.sandbox
+        provider, sandbox_id = sandbox.provider_name, sandbox.sandbox_id
+        status = "ok"
+        try:
+            await self.session.close(timeout=timeout)
+        except BaseException as error:
+            status = f"failed:{type(error).__name__}"
+            raise
+        finally:
+            if not self._stop_logged:
+                lifetime = monotonic() - self.started_at if self.started_at is not None else -1.0
+                LOG.info(
+                    "[browsecomp][sandbox_stop] role=resources session=%s provider=%s id=%s "
+                    "status=%s lifetime_s=%.3f bash_calls=%d pages=%d",
+                    self.resources_session_id,
+                    provider,
+                    sandbox_id,
+                    status,
+                    lifetime,
+                    self.bash_calls,
+                    len(self.uploaded_pages),
+                )
+                self._stop_logged = status == "ok"

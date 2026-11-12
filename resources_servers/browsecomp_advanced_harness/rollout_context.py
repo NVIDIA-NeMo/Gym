@@ -22,11 +22,16 @@ solves the same attribution problem for provider retry counts.
 
 from __future__ import annotations
 
+import logging
 import threading
 from contextvars import ContextVar, Token
 from time import time
-from typing import Any, Dict, Optional
+from typing import Dict, Optional
 
+from fastapi import Request
+
+
+LOG = logging.getLogger(__name__)
 
 ROLLOUT_ID_HEADER = "X-Rollout-Id"
 UNKNOWN_ROLLOUT_ID = "-"
@@ -53,9 +58,13 @@ def current_rollout_id() -> str:
     return _ROLLOUT_ID.get()
 
 
-def rollout_id_from_request(request: Any) -> str:
+def rollout_id_from_request(request: Request) -> str:
     """Header first, session id second, placeholder last."""
-    headers = getattr(request, "headers", None) or {}
+    try:
+        headers = getattr(request, "headers", None) or {}
+    except KeyError:
+        # In-process callers may provide a minimal ASGI scope without headers.
+        headers = {}
     rid = None
     getter = getattr(headers, "get", None)
     if getter is not None:
@@ -112,7 +121,7 @@ def format_phase_totals(totals: Dict[str, float]) -> str:
     return " ".join(f"{p}={totals.get(f'{p}_s', 0.0):.2f}s/{int(totals.get(f'{p}_n', 0))}" for p in phases)
 
 
-def log_line(tag: str, t: Optional[float] = None, **kv: Any) -> None:
+def log_line(tag: str, t: Optional[float] = None, **kv: object) -> None:
     """Print one telemetry line carrying the rollout id and an ABSOLUTE timestamp.
 
     The timestamp matters as much as the id: harness prints have never had one,
@@ -125,7 +134,7 @@ def log_line(tag: str, t: Optional[float] = None, **kv: Any) -> None:
         if v is None:
             continue
         parts.append(f"{k}={v:.3f}" if isinstance(v, float) else f"{k}={v}")
-    print(" ".join(parts), flush=True)
+    LOG.info(" ".join(parts))
 
 
 def reset_all() -> None:

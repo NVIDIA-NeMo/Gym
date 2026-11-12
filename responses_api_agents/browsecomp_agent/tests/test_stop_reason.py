@@ -17,10 +17,15 @@
 import json
 from unittest.mock import AsyncMock, MagicMock
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.browsecomp_agent.app import BrowsecompAgent
-from responses_api_agents.browsecomp_agent.tests.test_app import _make_config, _make_fn_call, _make_model_response, _make_msg
+from responses_api_agents.browsecomp_agent.tests.test_app import (
+    _make_config,
+    _make_fn_call,
+    _make_model_response,
+    _make_msg,
+)
 
 
 async def _run(config_kwargs: dict, model_turn: dict):

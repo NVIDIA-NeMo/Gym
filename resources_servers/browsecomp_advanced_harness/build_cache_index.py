@@ -31,6 +31,7 @@ import os
 import re
 import sys
 from multiprocessing import Pool
+from os import PathLike
 
 from resources_servers.browsecomp_advanced_harness.search_cache import INDEX_BASE, INDEX_DIR
 from resources_servers.browsecomp_advanced_harness.sqlite_fuzzy_index import (
@@ -68,7 +69,7 @@ def _scan_subdir(subdir):
     return norms
 
 
-def build_index(cache_root, workers=1, tokenizer=DEFAULT_TOKENIZER):
+def build_index(cache_root: str | PathLike[str], *, workers: int = 1, tokenizer: str = DEFAULT_TOKENIZER) -> int:
     """Scan the search tree and (re)write the base index. Returns #norms.
 
     Writes BOTH artifacts, in this order:
@@ -102,7 +103,7 @@ def build_index(cache_root, workers=1, tokenizer=DEFAULT_TOKENIZER):
     return len(norms)
 
 
-def build_master_from_text_index(cache_root, tokenizer=DEFAULT_TOKENIZER):
+def build_master_from_text_index(cache_root: str | PathLike[str], *, tokenizer: str = DEFAULT_TOKENIZER) -> int:
     """Rebuild ONLY master.db, from the existing .txt index. Returns #norms.
 
     The full build_index rescans every entry under search/ (430k+ JSON files,
@@ -127,7 +128,7 @@ def build_master_from_text_index(cache_root, tokenizer=DEFAULT_TOKENIZER):
     return build_master_db(master_db_path(cache_root), norms, tokenizer=tokenizer)
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("cache_root")
     parser.add_argument("--workers", type=int, default=32)

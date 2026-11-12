@@ -37,8 +37,8 @@ def _cache(tmp_path, matched, read_returns) -> SearchCache:
     return c
 
 
-def _one_line(capsys):
-    lines = [ln for ln in capsys.readouterr().out.splitlines() if "[cache][fuzzy]" in ln]
+def _one_line(caplog):
+    lines = [ln for ln in caplog.text.splitlines() if "[cache][fuzzy]" in ln]
     assert len(lines) == 1, f"expected exactly one fuzzy line, got {lines}"
     m = LINE.search(lines[0])
     assert m, f"line does not match the span format: {lines[0]}"
@@ -46,45 +46,45 @@ def _one_line(capsys):
 
 
 class TestEveryOutcomeIsLogged:
-    def test_hit_is_logged(self, tmp_path, capsys) -> None:
+    def test_hit_is_logged(self, tmp_path, caplog) -> None:
         cache = _cache(tmp_path, matched="widget review", read_returns={"results": []})
 
         assert cache._fuzzy_lookup("widget reviews") is not None
 
-        assert _one_line(capsys).group("status") == "hit"
+        assert _one_line(caplog).group("status") == "hit"
 
-    def test_miss_is_logged(self, tmp_path, capsys) -> None:
+    def test_miss_is_logged(self, tmp_path, caplog) -> None:
         # Previously silent: the function returned before reaching the print.
         cache = _cache(tmp_path, matched=None, read_returns=None)
 
         assert cache._fuzzy_lookup("nothing like this") is None
 
-        assert _one_line(capsys).group("status") == "miss"
+        assert _one_line(caplog).group("status") == "miss"
 
-    def test_stale_index_entry_is_logged(self, tmp_path, capsys) -> None:
+    def test_stale_index_entry_is_logged(self, tmp_path, caplog) -> None:
         # The index matched but the entry is gone or corrupt. Also previously
         # silent, and the one outcome that pays the FTS5 cost twice.
         cache = _cache(tmp_path, matched="widget review", read_returns=None)
 
         assert cache._fuzzy_lookup("widget reviews") is None
 
-        assert _one_line(capsys).group("status") == "stale"
+        assert _one_line(caplog).group("status") == "stale"
 
 
 class TestTheLineIsASpan:
-    def test_t_is_an_absolute_epoch(self, tmp_path, capsys) -> None:
+    def test_t_is_an_absolute_epoch(self, tmp_path, caplog) -> None:
         cache = _cache(tmp_path, matched=None, read_returns=None)
         before = time()
 
         cache._fuzzy_lookup("q")
 
-        t = float(_one_line(capsys).group("t"))
+        t = float(_one_line(caplog).group("t"))
         # A perf_counter value is small (seconds since an arbitrary origin); an
         # epoch is ~1.7-1.8e9. This is the check that catches a monotonic leak.
         assert t > 1_700_000_000, f"t={t} is not an absolute epoch"
         assert before - 1 <= t <= time() + 1
 
-    def test_t_is_the_start_not_the_end(self, tmp_path, capsys) -> None:
+    def test_t_is_the_start_not_the_end(self, tmp_path, caplog) -> None:
         # If t were stamped at the END, [t, t+dur] would draw the span in the
         # wrong place -- shifted right by its own duration.
         cache = _cache(tmp_path, matched=None, read_returns=None)
@@ -92,7 +92,7 @@ class TestTheLineIsASpan:
         cache._fuzzy_lookup("q")
         after = time()
 
-        m = _one_line(capsys)
+        m = _one_line(caplog)
         t, dur = float(m.group("t")), float(m.group("dur"))
         # log_line formats floats as %.3f, so t is rounded to the millisecond and
         # can round UP past `after` on a fast lookup. Compare with a 1ms slack;
@@ -101,18 +101,18 @@ class TestTheLineIsASpan:
         assert t + dur <= after + 0.5
         assert t >= before - 0.5
 
-    def test_rid_is_carried(self, tmp_path, capsys) -> None:
+    def test_rid_is_carried(self, tmp_path, caplog) -> None:
         cache = _cache(tmp_path, matched=None, read_returns=None)
 
         cache._fuzzy_lookup("q")
 
         # No rollout in scope here, so the sentinel; the point is the field exists.
-        assert _one_line(capsys).group("rid")
+        assert _one_line(caplog).group("rid")
 
 
 class TestPhaseAccountingUnchanged:
     @pytest.mark.parametrize("matched,read_returns", [("m", {"results": []}), (None, None), ("m", None)])
-    def test_record_phase_fires_on_every_outcome(self, tmp_path, capsys, monkeypatch, matched, read_returns) -> None:
+    def test_record_phase_fires_on_every_outcome(self, tmp_path, caplog, monkeypatch, matched, read_returns) -> None:
         import resources_servers.browsecomp_advanced_harness.search_cache as sc
 
         seen = []
@@ -123,3 +123,8 @@ class TestPhaseAccountingUnchanged:
 
         assert [n for n, _ in seen] == ["cache_fuzzy"]
         assert seen[0][1] >= 0.0
+
+
+@pytest.fixture(autouse=True)
+def _log_level(caplog) -> None:
+    caplog.set_level("INFO")

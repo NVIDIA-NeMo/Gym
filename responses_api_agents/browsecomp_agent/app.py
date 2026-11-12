@@ -15,6 +15,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import re
 import time
 import traceback
@@ -86,6 +87,9 @@ from responses_api_agents.browsecomp_agent.sandbox import (
     BrowsecompSandboxSession,
     SandboxIsolationError,
 )
+
+
+LOG = logging.getLogger(__name__)
 
 
 # Connection retries for the sandboxed loop's model, tool and token-count calls. Gym's client waits 0.5 s between
@@ -471,7 +475,16 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     self.config.sandbox_install_timeout_seconds + self.config.sandbox_runner_timeout_seconds + 600,
                 )
                 # Retain ownership before start: failed file delivery can also fail its automatic stop.
+                started = time.monotonic()
                 await sandbox.start(SandboxSpec(**spec))
+                state.started_at = time.monotonic()
+                LOG.info(
+                    "[browsecomp][sandbox_start] role=agent session=%s provider=%s id=%s start_s=%.3f",
+                    body.agent_session_id,
+                    sandbox.provider_name,
+                    sandbox.sandbox_id,
+                    state.started_at - started,
+                )
             await state.install_runtime(timeout=self.config.sandbox_install_timeout_seconds)
         except BaseException as error:
             try:

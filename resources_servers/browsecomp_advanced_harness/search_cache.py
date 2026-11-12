@@ -52,10 +52,16 @@ otherwise a rollout could plant answers for its GRPO siblings.
 
 import hashlib
 import json
+import logging
 import os
 import re
 import threading
+from collections.abc import Iterator
+from os import PathLike
 from time import perf_counter, time
+from typing import Literal
+
+from pydantic import JsonValue
 
 from resources_servers.browsecomp_advanced_harness.rollout_context import (
     current_rollout_id,
@@ -70,13 +76,17 @@ from resources_servers.browsecomp_advanced_harness.sqlite_fuzzy_index import (
 )
 
 
+LOG = logging.getLogger(__name__)
+CacheProvider = Literal["tavily", "exa"]
+SearchResults = list[dict[str, JsonValue]]
+
 _WS_RE = re.compile(r"\s+")
 
 INDEX_DIR = "index"
 INDEX_BASE = "search_norms.txt"  # written by build_cache_index.py (offline scan)
 
 
-def normalize_query(query):
+def normalize_query(query: str | None) -> str:
     """Lowercase, strip surrounding quotes, collapse whitespace."""
     q = (query or "").strip()
     # strip a single layer of matching surrounding quotes
@@ -86,7 +96,7 @@ def normalize_query(query):
     return q
 
 
-def normalize_url(url):
+def normalize_url(url: str | None) -> str:
     """Drop #fragment and a single trailing slash."""
     u = (url or "").strip()
     u = u.split("#", 1)[0]
@@ -100,14 +110,15 @@ class SearchCache:
 
     def __init__(
         self,
-        root,
-        normalize_queries=True,
-        fuzzy_threshold=None,
-        candidate_limit=DEFAULT_CANDIDATE_LIMIT,
-        tokenizer=DEFAULT_TOKENIZER,
-        verbose_phase_log=False,
-        read_only=False,
-    ):
+        root: str | PathLike[str] | None,
+        *,
+        normalize_queries: bool = True,
+        fuzzy_threshold: float | None = None,
+        candidate_limit: int = DEFAULT_CANDIDATE_LIMIT,
+        tokenizer: str = DEFAULT_TOKENIZER,
+        verbose_phase_log: bool = False,
+        read_only: bool = False,
+    ) -> None:
         """fuzzy_threshold: 0-1 similarity cutoff for SEARCH-only fuzzy matching
         (None = exact only). On an exact miss, the best token_sort_ratio match
         over the norms index is served if >= threshold. Serve-only: fuzzy hits
@@ -172,13 +183,13 @@ class SearchCache:
                 self._shard_path = os.path.join(index_dir, f"search_norms_{os.uname().nodename}_{os.getpid()}.txt")
 
     @property
-    def index_size(self):
+    def index_size(self) -> int:
         """Norms reachable by fuzzy matching: FTS5 master + this run's additions."""
         if self._fuzzy_index is None:
             return 0
         return self._fuzzy_index.master_count + self._fuzzy_index.local_count
 
-    def _unmerged_norms(self, index_dir):
+    def _unmerged_norms(self, index_dir: str) -> Iterator[str]:
         """Norms from the .txt index that master.db does not already contain.
 
         With no master (a cold cache root), that is the whole text index. With a
@@ -266,10 +277,7 @@ class SearchCache:
         if self.verbose_phase_log:
             log_line("[cache][get]", dur=elapsed_s, kind=kind)
         if elapsed_s > 0.5:
-            print(
-                f"[cache][slow] rid={current_rollout_id()} {kind} get took {elapsed_s:.2f}s",
-                flush=True,
-            )
+            LOG.info("[cache][slow] rid=%s %s get took %.2fs", current_rollout_id(), kind, elapsed_s)
 
     # ---- search -----------------------------------------------------------
     def _norm_q(self, query):
@@ -320,7 +328,7 @@ class SearchCache:
         )
         return obj
 
-    def get_search(self, query):
+    def get_search(self, query: str) -> tuple[CacheProvider, SearchResults] | None:
         """Return (provider, raw result list), or None on miss/disabled."""
         if not self.enabled:
             return None
@@ -354,7 +362,7 @@ class SearchCache:
             except OSError:
                 pass  # index is best-effort; the entry itself is already cached
 
-    def put_search(self, query, results, provider):
+    def put_search(self, query: str, results: SearchResults, provider: CacheProvider) -> None:
         if not self.enabled or self.read_only:
             return
         norm = self._norm_q(query)
@@ -365,7 +373,7 @@ class SearchCache:
             self._index_add(norm)
 
     # ---- browse / extract -------------------------------------------------
-    def get_extract(self, url):
+    def get_extract(self, url: str) -> tuple[CacheProvider, str] | None:
         """Return (provider, page content), or None on miss/disabled."""
         if not self.enabled:
             return None
@@ -380,7 +388,7 @@ class SearchCache:
         finally:
             self._time_add("browse", perf_counter() - _t0)
 
-    def put_extract(self, url, content, provider):
+    def put_extract(self, url: str, content: str, provider: CacheProvider) -> None:
         if not self.enabled or self.read_only:
             return
         norm = normalize_url(url)
@@ -389,11 +397,11 @@ class SearchCache:
         self._write("browse", norm, {"url": url, "norm": norm, "provider": provider, "content": content})
 
     # ---- stats ------------------------------------------------------------
-    def stats(self):
+    def stats(self) -> dict[str, int | float]:
         with self._lock:
             return dict(self._stats)
 
-    def stats_report(self):
+    def stats_report(self) -> dict[str, int | float]:
         """Stats dict enriched with totals + hit percentages."""
         s = self.stats()
         sh, sm = s["search_hits"], s["search_misses"]
@@ -406,7 +414,7 @@ class SearchCache:
             "browse_hit_pct": round(100.0 * bh / (bh + bm), 1) if (bh + bm) else 0.0,
         }
 
-    def summary_str(self):
+    def summary_str(self) -> str:
         """Compact one-line summary, e.g. 'cache: search 12/40 (30%), browse 7/10 (70%)'."""
         if not self.enabled:
             return ""

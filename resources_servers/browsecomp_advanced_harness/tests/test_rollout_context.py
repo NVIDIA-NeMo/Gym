@@ -111,15 +111,17 @@ def test_format_phase_totals_empty():
     assert RC.format_phase_totals({}) == "-"
 
 
-def test_log_line_includes_rollout_id_and_absolute_time(capsys):
+def test_log_line_includes_rollout_id_and_absolute_time(caplog):
     RC.set_rollout_id("r5")
+    caplog.set_level("INFO")
     RC.log_line("[browsecomp][judge]", t=1700000000.5, dur=2.25, status="success")
-    out = capsys.readouterr().out.strip()
+    out = caplog.records[-1].message
     assert out.startswith("[browsecomp][judge] rid=r5 t=1700000000.500")
     assert "dur=2.250" in out
     assert "status=success" in out
 
 
-def test_log_line_defaults_time_to_now(capsys):
+def test_log_line_defaults_time_to_now(caplog):
+    caplog.set_level("INFO")
     RC.log_line("[x]")
-    assert "t=" in capsys.readouterr().out
+    assert "t=" in caplog.text

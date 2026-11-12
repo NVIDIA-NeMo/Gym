@@ -25,7 +25,7 @@ from collections import defaultdict
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from pathlib import Path, PurePosixPath
-from time import time
+from time import monotonic, time
 from typing import Any, ClassVar, Dict, List, Optional
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -85,13 +85,13 @@ from resources_servers.browsecomp_advanced_harness.rollout_context import (
     rollout_id_from_request,
     set_rollout_id,
 )
-from resources_servers.browsecomp_advanced_harness.search_cache import SearchCache
 from resources_servers.browsecomp_advanced_harness.sandbox import (
     BrowsecompShellSandbox,
     SandboxIsolationError,
     ShellCommandTimedOut,
     shell_source_files,
 )
+from resources_servers.browsecomp_advanced_harness.search_cache import SearchCache
 from resources_servers.browsecomp_advanced_harness.shell_output import format_shell_output
 
 
@@ -1066,11 +1066,12 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             read_only=self.config.search_cache_read_only,
         )
         if self._search_cache.enabled:
-            print(
-                f"Search cache enabled at {cache_dir} "
-                f"(fuzzy={self.config.search_cache_fuzzy_threshold or 'off'}, "
-                f"read_only={self._search_cache.read_only}, "
-                f"index norms={self._search_cache.index_size})"
+            LOG.info(
+                "Search cache enabled at %s (fuzzy=%s, read_only=%s, index norms=%s)",
+                cache_dir,
+                self.config.search_cache_fuzzy_threshold or "off",
+                self._search_cache.read_only,
+                self._search_cache.index_size,
             )
 
         print(f"Excluded domains: {self._exclude_domains}")
@@ -1258,18 +1259,28 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         )
         config["files"] = (config.get("files") or {}) | shell_source_files()
         shell = BrowsecompShellSandbox(
+            resources_session_id=sid,
             session=SandboxSession(
                 sandbox=sandbox,
                 session_dir=f"/tmp/nemo-gym-browsecomp-shell/{uuid4().hex}",
                 workdir=config["workdir"],
                 harness="BrowseComp read-only shell",
                 owns_sandbox=True,
-            )
+            ),
         )
         # Store ownership before the first await, including a partially completed start.
         self._shell_sessions[sid] = shell
         try:
+            started = monotonic()
             await sandbox.start(SandboxSpec(**config))
+            shell.started_at = monotonic()
+            LOG.info(
+                "[browsecomp][sandbox_start] role=resources session=%s provider=%s id=%s start_s=%.3f",
+                sid,
+                sandbox.provider_name,
+                sandbox.sandbox_id,
+                shell.started_at - started,
+            )
             await shell.install(timeout=self.config.sandbox_install_timeout_seconds)
         except BaseException as error:
             try:
@@ -1715,7 +1726,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         async with self._locks.locked(request.session[SESSION_ID_KEY]):
             self._open_session_id(request)
             sid = request.session[SESSION_ID_KEY]
-            rid = self._session_rollout_ids.setdefault(sid, rollout_id_from_request(request))
+            rid = rollout_id_from_request(request)
+            if self._search_cache.enabled and self._fences.get(sid) is None:
+                rid = self._session_rollout_ids.setdefault(sid, rid)
             token = set_rollout_id(rid)
             try:
                 return await self._search(request, body)
@@ -1765,7 +1778,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         async with self._locks.locked(request.session[SESSION_ID_KEY]):
             self._open_session_id(request)
             sid = request.session[SESSION_ID_KEY]
-            rid = self._session_rollout_ids.setdefault(sid, rollout_id_from_request(request))
+            rid = rollout_id_from_request(request)
+            if self._search_cache.enabled and self._fences.get(sid) is None:
+                rid = self._session_rollout_ids.setdefault(sid, rid)
             token = set_rollout_id(rid)
             try:
                 return await self._browse(request, body)
@@ -1903,7 +1918,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         """
         async with self._locks.locked(request.session[SESSION_ID_KEY]):
             sid = request.session[SESSION_ID_KEY]
-            rid = self._session_rollout_ids.setdefault(sid, rollout_id_from_request(request))
+            rid = rollout_id_from_request(request)
+            if self._search_cache.enabled and self._fences.get(sid) is None:
+                rid = self._session_rollout_ids.setdefault(sid, rid)
             token = set_rollout_id(rid)
             try:
                 return await self._verify(request, body)
@@ -1976,7 +1993,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         # Verification may be retried; close owns releasing episode-session totals.
         if self._search_cache.enabled:
-            rid = self._session_rollout_ids[sid]
+            rid = self._session_rollout_ids.get(sid, rollout_id_from_request(request))
             LOG.info("[browsecomp][phases] rid=%s t=%.3f %s", rid, time(), format_phase_totals(peek_phase_totals(rid)))
             LOG.info("[cache] %s", self._search_cache.summary_str())
 

@@ -245,6 +245,7 @@ async def test_runner_process_uses_scoped_model_and_tool_urls(tmp_path: Path) ->
         assert result["runtime"]["pid"] == process.pid
         assert result["resources_cookies"] == {"harness": "after-tool"}
         assert result["response"]["output"][1]["output"] == "manifest.tsv\npages"
+        assert result["response"]["stop_reason"] == "answered"
         assert len(calls) == 2
     finally:
         if process is not None and process.returncode is None:
@@ -603,7 +604,10 @@ def test_the_sandbox_activation_clamps_its_deadline_and_fails_on_an_error_receip
     activation = BrowsecompAgent._sandbox_responses  # _agent() runs the loop on the host instead.
     payloads, timeouts = [], []
     receipts = [
-        {"response": _model_response(_message("Paris")), "resources_cookies": {"harness": "next-cookie"}},
+        {
+            "response": {**_model_response(_message("Paris")), "stop_reason": "answered"},
+            "resources_cookies": {"harness": "next-cookie"},
+        },
         {"error": "ConnectionError: The sandbox cannot connect to model:9001", "resources_cookies": {}},
     ]
 
@@ -626,6 +630,7 @@ def test_the_sandbox_activation_clamps_its_deadline_and_fails_on_an_error_receip
     reply = activate()
     assert reply.status_code == 200, reply.text
     assert reply.json()["output"][0]["content"][0]["text"] == "Paris"
+    assert reply.json()["stop_reason"] == "answered"
     # The task's own limit wins over the runner's, and the supervisor gets its grace on top.
     assert payloads[0]["config"]["rollout_timeout_s"] == 120 and timeouts == [150]
     assert payloads[0]["token_count_url"] is None

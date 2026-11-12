@@ -53,6 +53,8 @@ stays content-addressed, lock-free, and live-shared across nodes.
 import os
 import sqlite3
 import threading
+from collections.abc import Iterable
+from os import PathLike
 
 
 try:
@@ -91,16 +93,16 @@ DEFAULT_TOKENIZER = "unicode61"
 DEFAULT_CANDIDATE_LIMIT = 3000
 
 
-def master_db_path(cache_root):
+def master_db_path(cache_root: str | PathLike[str]) -> str:
     return os.path.join(cache_root, INDEX_DIR, MASTER_DB)
 
 
-def token_sorted(norm):
+def token_sorted(norm: str) -> str:
     """ratio(sorted_a, sorted_b) == token_sort_ratio(a, b), pre-sorted once."""
     return " ".join(sorted(norm.split()))
 
 
-def build_master_db(path, norms, tokenizer=DEFAULT_TOKENIZER):
+def build_master_db(path: str | PathLike[str], norms: Iterable[str], *, tokenizer: str = DEFAULT_TOKENIZER) -> int:
     """Build the FTS5 master from `norms`. Returns the deduped row count.
 
     Writes to a temp file and atomically renames, so readers never observe a
@@ -151,7 +153,14 @@ class SqliteFuzzyIndex:
     of the cross-node locking concerns that keep the master read-only.
     """
 
-    def __init__(self, root, threshold, candidate_limit=DEFAULT_CANDIDATE_LIMIT, tokenizer=DEFAULT_TOKENIZER):
+    def __init__(
+        self,
+        root: str | PathLike[str],
+        threshold: float,
+        *,
+        candidate_limit: int = DEFAULT_CANDIDATE_LIMIT,
+        tokenizer: str = DEFAULT_TOKENIZER,
+    ) -> None:
         if _rf_process is None:
             raise ImportError("fuzzy matching requested but rapidfuzz is not installed")
         self.root = str(root)
@@ -249,7 +258,7 @@ class SqliteFuzzyIndex:
             return self._candidates(self._local_db, norm)
 
     # ---- process-local tier ----------------------------------------------
-    def add(self, norm):
+    def add(self, norm: str) -> bool:
         """Record a norm cached by this process so it becomes matchable now.
 
         Returns True if it was new, so callers can skip a redundant shard write.
@@ -261,16 +270,16 @@ class SqliteFuzzyIndex:
             self._local_db.execute("INSERT INTO norms(norm) VALUES (?)", (norm,))
             return True
 
-    def add_many(self, norms):
+    def add_many(self, norms: Iterable[str]) -> None:
         for norm in norms:
             self.add(norm)
 
     @property
-    def local_count(self):
+    def local_count(self) -> int:
         return len(self._local_set)
 
     @property
-    def master_count(self):
+    def master_count(self) -> int:
         """Rows in the FTS5 master, or 0 if there is no usable master."""
         conn = self._conn()
         if conn is None:
@@ -281,7 +290,7 @@ class SqliteFuzzyIndex:
             return 0
 
     # ---- lookup ----------------------------------------------------------
-    def lookup(self, norm):
+    def lookup(self, norm: str) -> str | None:
         """Best token_sort_ratio match >= threshold over master + local, or None."""
         # Both tiers are indexed, so each returns at most candidate_limit rows —
         # the rescore set is bounded no matter how long the run goes.

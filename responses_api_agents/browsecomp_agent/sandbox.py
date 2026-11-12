@@ -6,9 +6,11 @@ import asyncio
 import functools
 import importlib.metadata
 import json
+import logging
 import os
 import re
 import tempfile
+import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +24,9 @@ from nemo_gym.agents import AgentSessionState, SandboxCommand, SandboxPythonRunt
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import read_text, upload_text
 from nemo_gym.server_runtime import DirectHTTPToolAccess
+
+
+LOG = logging.getLogger(__name__)
 
 
 # Most characters of upstream error text that an error message keeps; failure rows carry these messages.
@@ -78,6 +83,8 @@ class BrowsecompSandboxSession(AgentSessionState):
     session: SandboxSession[dict[str, JsonValue]]
     tool_access: DirectHTTPToolAccess | None
     resources_cookies: dict[str, str]
+    started_at: float | None = None
+    _stop_logged: bool = False
     task: asyncio.Task[NeMoGymResponse] | None = None
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
 
@@ -161,7 +168,28 @@ class BrowsecompSandboxSession(AgentSessionState):
 
     async def close(self, *, timeout: float) -> None:
         """Capture and release the sandbox before cancelling an HTTP activation waiter."""
-        await self.session.close(timeout=timeout)
+        sandbox = self.session.sandbox
+        provider, sandbox_id = sandbox.provider_name, sandbox.sandbox_id
+        status = "ok"
+        try:
+            await self.session.close(timeout=timeout)
+        except BaseException as error:
+            status = f"failed:{type(error).__name__}"
+            raise
+        finally:
+            if not self._stop_logged:
+                lifetime = time.monotonic() - self.started_at if self.started_at is not None else -1.0
+                event = "sandbox_stop" if self.session.owns_sandbox else "sandbox_disconnect"
+                LOG.info(
+                    "[browsecomp][%s] role=agent session=%s provider=%s id=%s status=%s lifetime_s=%.3f",
+                    event,
+                    self.request.agent_session_id,
+                    provider,
+                    sandbox_id,
+                    status,
+                    lifetime,
+                )
+                self._stop_logged = status == "ok"
         if self.task is not None and not self.task.done():
             self.task.cancel()
         if self.task is not None:
