@@ -18,10 +18,10 @@ OPENCODE_V2_VERSION = "2.2.7"
 # without an entry here cannot be downloaded into a sandbox; pin a binary with sandbox_executable_path instead.
 OPENCODE_RELEASE_SHA256 = {
     "2.2.7": {
-        "x64-baseline": "89a6cee227b54bc011179c528a5e63176032462b1a5e21723b616801cddc2ca7",
-        "x64-baseline-musl": "c1801a36bf61e03eafac8d7f4521a200e4d3cd76cf43b36621cb78b460b851ee",
-        "arm64": "c1682057f0815cb2abdd6e00305f1146ebaf1c167f0335cdb74ddc80008120e7",
-        "arm64-musl": "a03405f94ae02db7acb0870cf32030bab86460dc7faf524780e9cae305526b96",
+        "x64-baseline": "89a6cee227b54bc011179c528a5e63176032462b1a5e21723b616801cddc2ca7",  # pragma: allowlist secret
+        "x64-baseline-musl": "c1801a36bf61e03eafac8d7f4521a200e4d3cd76cf43b36621cb78b460b851ee",  # pragma: allowlist secret
+        "arm64": "c1682057f0815cb2abdd6e00305f1146ebaf1c167f0335cdb74ddc80008120e7",  # pragma: allowlist secret
+        "arm64-musl": "a03405f94ae02db7acb0870cf32030bab86460dc7faf524780e9cae305526b96",  # pragma: allowlist secret
     },
 }
 

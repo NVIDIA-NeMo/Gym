@@ -6,8 +6,7 @@ sandbox; without one, requests run locally. Invalid or closed sessions fail.
 Local `/run` requires a Resources binding; direct `/v1/responses` does not.
 
 The agent runs OpenCode 1.17.11 by default. `opencode_version: "2.2.7"` selects OpenCode 2 through the same
-adapter, and `configs/opencode2_agent.yaml` adds an `opencode2_agent` instance that does so; see
-[OpenCode 2](#opencode-2) for what differs.
+adapter; see [OpenCode 2](#opencode-2) for what differs.
 
 Training token-ID capture is off by default. Enable the agent's `token_id_capture`
 only when explicitly collecting training data; evaluation observability remains independent.
@@ -466,9 +465,17 @@ harness runner's `cd` sets it), so all three bind the session to the same direct
 OpenCode 2 is the rewrite of OpenCode that upstream (`anomalyco/opencode`) releases as 2.x: npm `@opencode/cli`
 and the `opencode-linux-*` assets of its GitHub releases, which the npm package `opencode-ai` (1.x) no longer
 tracks. Setting `opencode_version` to a 2.x release selects it; the adapter pins 2.2.7. `opencode_agent` keeps
-OpenCode 1.17.11 as its default, so existing configs run unchanged. `configs/opencode2_agent.yaml` adds an
-`opencode2_agent` instance with `opencode_version: "2.2.7"`; pair a benchmark with it, or set the version on the
-benchmark's own agent instance.
+OpenCode 1.17.11 as its default, so existing configs run unchanged. To run a recipe on OpenCode 2, set the version
+on its agent instance:
+
+```yaml
+opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      opencode_version: "2.2.7"
+```
+
+The version is a setting of `opencode_agent`, like the permission profile, not a separate agent variant.
 
 The session contract, the sandbox lifecycle, the settings and their checks are shared. What OpenCode 2 changed is
 handled in `opencode2/`:
