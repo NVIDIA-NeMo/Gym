@@ -18,7 +18,8 @@ MODEL_URL = (
     "https://huggingface.co/facebook/nllb-200-distilled-600M/resolve/"
     "f8d333a098d19b4fd9a8b18f94170487ad3f821d/sentencepiece.bpe.model"
 )
-MODEL_SHA256 = "14bb8dfb35c0ffdea7bc01e56cea38b9e3d5efcdcb9c251d6b40538e1aab555a"
+# Public artifact checksum, verified against Meta's LFS metadata.
+MODEL_SHA256 = "14bb8dfb35c0ffdea7bc01e56cea38b9e3d5efcdcb9c251d6b40538e1aab555a"  # pragma: allowlist secret
 MODEL_SIZE = 4_852_054
 MODEL_FILENAME = "flores200sacrebleuspm"
 
