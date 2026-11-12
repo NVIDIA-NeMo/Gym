@@ -242,7 +242,7 @@ Missing worker identity or exit diagnostics become `runtime_info_unavailable` or
 required; the adapter validates the captured terminal events without inventing an exit code.
 
 A sandbox session needs a matching episode and rollout identity. Without `continuation` in the seed, it
-supports one activation. Identical request retries join the running activation or replay its result;
+supports one activation, and Pi runs with `--no-session`, so it saves no conversation. Identical request retries join the running activation or replay its result;
 changed requests are rejected. A disconnected HTTP caller does not cancel Pi; session close owns cancellation.
 
 ### Multi-turn continuation
@@ -263,10 +263,17 @@ builds no trajectory record.
   activation therefore passes the first activation's system prompt. A later activation may repeat it or
   leave it out; a different one is rejected.
 - Each activation stages its prompt, supervisor and output in its own directory, under its own timeout,
-  which preparing the activation also spends. Its model calls send `x-session-id`
+  which preparing the activation, waiting for a runner slot and staging also spend. An activation whose
+  timeout runs out before Pi starts returns an `incomplete` response with no output, and its invocation
+  reports error type `timeout`. Pi's saved conversation is as the previous activation left it, so the
+  session can still be continued. Its model calls send `x-session-id`
   `<agent session ID>:activation-<index>`, the invocation ID its observations use, so the model server's
   capture correlates each call with its activation. Responses carry `activation_id` and
-  `harness_session_id` metadata.
+  `harness_session_id` metadata, and the activation's own observations in `_ng_agent_observations`.
+- Each activation's invocation reports its status, its duration, and an error type: `timeout` or
+  `cancelled` for a run stopped at its deadline or by close, `context_limit` for a run that reached the
+  model's context limit, `provider_error` for a model call error Pi reported, and `server_error` for any
+  other failure.
 - Close stops a running activation and returns every activation's observations in order, with
   `cleanup_confirmed`.
 - A turn stopped at its deadline can still be continued: when a stopped run leaves a tool call without

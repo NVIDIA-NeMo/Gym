@@ -22,7 +22,7 @@ from nemo_gym.agents import (
 )
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import MEDIA_DIRECTORY
-from nemo_gym.trajectory import AgentInvocation
+from responses_api_agents.pi_agent.app import PiAgent
 from responses_api_agents.pi_agent.tests.test_sandbox import (  # noqa: F401  (setup is a fixture)
     _http_server,
     _pinned_pi_package,
@@ -53,6 +53,15 @@ def activate(client, index: int, body: dict):
 
 def option(command: list[str], name: str) -> str:
     return command[command.index(name) + 1]
+
+
+def root_invocations(observations: dict) -> list[tuple]:
+    """Each root invocation's activation, status, error type and whether it reports a duration."""
+    return [
+        (r["activation_id"], r["status"], r["error_type"], r["duration_ms"] is not None)
+        for r in observations["records"]
+        if r["kind"] == "agent_invocation" and r["parent_invocation_id"] is None
+    ]
 
 
 def test_seed_declares_the_observations_pi_supports(setup):
@@ -145,6 +154,23 @@ def test_later_activation_resumes_the_saved_conversation_with_its_own_images(set
     ]
     assert {r["invocation_id"] for r in records if r["kind"] == "tool_call"} == set(invocation_ids)
     assert closed.json()["cleanup_confirmed"] is True
+    # Each activation's response carries that activation's own observations.
+    assert root_invocations(first.json()["_ng_agent_observations"]) == [(1, "completed", None, True)]
+    assert root_invocations(second.json()["_ng_agent_observations"]) == [(2, "completed", None, True)]
+
+
+def test_activation_decodes_its_images_once(setup, monkeypatch):
+    agent, _ = setup
+    validated = []
+    validate = PiAgent._validate_request
+    monkeypatch.setattr(
+        PiAgent, "_validate_request", lambda self, body: validated.append(body) or validate(self, body)
+    )
+    with TestClient(agent.setup_webserver()) as client:
+        client.post("/v1/agent_sessions", json=continuation_seed())
+        image = {"input": [{"role": "user", "content": [{"type": "input_text", "text": "Look."}, image_part(png(0))]}]}
+        assert activate(client, 1, image).status_code == 200
+    assert len(validated) == 1
 
 
 def test_image_input_stays_declared_after_a_turn_with_images(setup):
@@ -268,13 +294,27 @@ async def test_close_stops_the_running_activation(setup):
         await second
     sandbox.signal.assert_awaited_once()
     sandbox.disconnect.assert_awaited_once()
-    invocations = [r for r in closed.agent_observations.records if isinstance(r, AgentInvocation)]
-    assert [(r.activation_id, r.status) for r in invocations] == [(1, "completed"), (2, "incomplete")]
+    assert root_invocations(closed.agent_observations.model_dump(mode="json")) == [
+        (1, "completed", None, True),
+        (2, "incomplete", "cancelled", True),
+    ]
     interrupted = [gap for gap in closed.agent_observations.gaps if gap.code == "agent_activation_interrupted"]
     assert [gap.detail for gap in interrupted] == ["CancelledError"]
 
 
-async def test_activation_that_reaches_its_deadline_while_preparing_is_reported_at_close(setup):
+async def unstarted_activation_ends_incomplete_and_session_continues(agent, sandbox, session: dict) -> None:
+    """Activation 2, with a 0.2-second budget, ends incomplete without running Pi, and activation 3 still runs."""
+    late = NeMoGymResponseCreateParamsNonStreaming(input="two", metadata={AGENT_TIMEOUT_METADATA_KEY: "0.2"})
+    started = time.monotonic()
+    response = await asyncio.wait_for(agent.responses(http_request(session, 2), late), 2)
+    assert time.monotonic() - started < 2
+    assert (response.status, response.output) == ("incomplete", [])
+    assert response.metadata["activation_id"] == "2"
+    assert root_invocations(response.model_dump()["_ng_agent_observations"]) == [(2, "incomplete", "timeout", True)]
+    assert sandbox.launch.await_count == 1
+
+
+async def test_activation_whose_deadline_passes_while_preparing_ends_incomplete(setup):
     agent, sandbox = setup
     execute = sandbox.execute
 
@@ -287,19 +327,36 @@ async def test_activation_that_reaches_its_deadline_while_preparing_is_reported_
     session = {}
     await agent.seed_agent_session(http_request(session), AgentSeedSessionRequest.model_validate(continuation_seed()))
     await agent.responses(http_request(session, 1), NeMoGymResponseCreateParamsNonStreaming(input="one"))
-    late = NeMoGymResponseCreateParamsNonStreaming(input="two", metadata={AGENT_TIMEOUT_METADATA_KEY: "0.2"})
-    started = time.monotonic()
-    with pytest.raises(TimeoutError):
-        await agent.responses(http_request(session, 2), late)
-    assert time.monotonic() - started < 2
+    await unstarted_activation_ends_incomplete_and_session_continues(agent, sandbox, session)
+    third = await agent.responses(http_request(session, 3), NeMoGymResponseCreateParamsNonStreaming(input="three"))
+    assert third.status == "completed"
     closed = await agent.close_agent_session(
         http_request(session), AgentCloseSessionRequest(**close_body("pi-session"))
     )
-    assert sandbox.launch.await_count == 1
-    invocations = [r for r in closed.agent_observations.records if isinstance(r, AgentInvocation)]
-    assert [(r.activation_id, r.status) for r in invocations] == [(1, "completed"), (2, "incomplete")]
+    assert root_invocations(closed.agent_observations.model_dump(mode="json")) == [
+        (1, "completed", None, True),
+        (2, "incomplete", "timeout", True),
+        (3, "completed", None, True),
+    ]
     interrupted = [gap for gap in closed.agent_observations.gaps if gap.code == "agent_activation_interrupted"]
     assert [(gap.invocation_id, gap.detail) for gap in interrupted] == [("pi-session:activation-2", "TimeoutError")]
+
+
+async def test_activation_queued_past_its_deadline_ends_without_running_pi(setup):
+    agent, sandbox = setup
+    session = {}
+    await agent.seed_agent_session(http_request(session), AgentSeedSessionRequest.model_validate(continuation_seed()))
+    await agent.responses(http_request(session, 1), NeMoGymResponseCreateParamsNonStreaming(input="one"))
+    # Other sessions' runs hold every runner slot for longer than the activation's budget.
+    for _ in range(agent.config.concurrency):
+        await agent.sem.acquire()
+    try:
+        await unstarted_activation_ends_incomplete_and_session_continues(agent, sandbox, session)
+    finally:
+        for _ in range(agent.config.concurrency):
+            agent.sem.release()
+    third = await agent.responses(http_request(session, 3), NeMoGymResponseCreateParamsNonStreaming(input="three"))
+    assert third.status == "completed"
 
 
 def test_failed_activation_fences_the_next_one_until_close(setup):
@@ -310,8 +367,11 @@ def test_failed_activation_fences_the_next_one_until_close(setup):
         assert activate(client, 1, {"input": "one"}).status_code >= 500
         sandbox.result["return_code"] = 0
         assert activate(client, 2, {"input": "two"}).status_code == 409
-        assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        assert closed.status_code == 200
     sandbox.launch.assert_awaited_once()
+    # Pi's own events ended the run normally; its exit code makes the activation a failure.
+    assert root_invocations(closed.json()["agent_observations"]) == [(1, "failed", "server_error", True)]
 
 
 def test_one_activation_session_keeps_its_directory_and_single_activation(setup):
@@ -323,7 +383,9 @@ def test_one_activation_session_keeps_its_directory_and_single_activation(setup)
         assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
     payload = staged(sandbox)
     assert "activation-" not in sandbox.directory
-    assert option(payload["command"], "--session-dir") == f"{sandbox.directory}/pi-sessions"
+    # A session that never resumes saves no conversation.
+    assert "--no-session" in payload["command"]
+    assert "--session-dir" not in payload["command"] and "--session-id" not in payload["command"]
     sandbox.launch.assert_awaited_once()
 
 

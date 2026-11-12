@@ -9,6 +9,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from shlex import quote
+from time import monotonic
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -26,6 +27,18 @@ from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, Observa
 
 
 LOG = logging.getLogger(__name__)
+
+
+def interrupted_outcome(error: BaseException) -> tuple[str, str]:
+    """The invocation status and error type of an activation that raised before Pi finished.
+
+    A cancellation or a deadline stops work that may still be continued; any other error is a failure.
+    """
+    if isinstance(error, asyncio.CancelledError):
+        return "incomplete", "cancelled"
+    if isinstance(error, TimeoutError):
+        return "incomplete", "timeout"
+    return "failed", "server_error"
 
 
 class HarnessProcessInfo(BaseModel):
@@ -70,6 +83,18 @@ class PiSandboxSession(AgentSessionState):
     system_instructions: str | None = None
     # Whether an activation attached prompt images. Pi saves them in its conversation, which later turns resend.
     has_prompt_images: bool = False
+    # When the current activation started, so its invocation reports how long it ran. Set only in a continuation
+    # session, whose activations each spend their own budget.
+    activation_started: float | None = None
+    # The request _validate_agent_activation validated, with the result, so the activation decodes its images once.
+    validated_input: (
+        tuple[
+            NeMoGymResponseCreateParamsNonStreaming,
+            NeMoGymResponseCreateParamsNonStreaming,
+            list[MediaFile],
+        ]
+        | None
+    ) = field(default=None, repr=False)
     _activation_observations: dict[int, AgentObservationBundle] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -119,22 +144,36 @@ class PiSandboxSession(AgentSessionState):
             gaps=[gap for bundle in bundles for gap in bundle.gaps],
         )
 
-    def record_interrupted_activation(self, activation_id: int, error: BaseException) -> None:
-        """Report an activation that failed before its run left observations, without replacing any it left."""
+    @property
+    def activation_duration_ms(self) -> float | None:
+        """How long the current continuation activation has run, or None outside a continuation session."""
+        if self.activation_started is None:
+            return None
+        return (monotonic() - self.activation_started) * 1000
+
+    def record_interrupted_activation(self, activation_id: int, error: BaseException) -> AgentObservationBundle:
+        """Report an activation that failed before its run left observations, without replacing any it left.
+
+        Returns the activation's observations, whichever reported them.
+        """
         if activation_id in self._activation_observations:
-            return
+            return self._activation_observations[activation_id]
         self.activation_id = activation_id
-        cancelled = isinstance(error, (asyncio.CancelledError, TimeoutError))
+        status, error_type = interrupted_outcome(error)
         invocation = AgentInvocation(
             invocation_id=self.invocation_id,
             activation_id=activation_id,
             harness_session_id=self.harness_session_id,
-            status="incomplete" if cancelled else "failed",
+            status=status,
+            error_type=error_type,
+            duration_ms=self.activation_duration_ms,
         )
         gap = ObservationGap(
             code="agent_activation_interrupted", invocation_id=invocation.invocation_id, detail=type(error).__name__
         )
-        self.record_observations(AgentObservationBundle(source="pi", records=[invocation], gaps=[gap]))
+        observations = AgentObservationBundle(source="pi", records=[invocation], gaps=[gap])
+        self.record_observations(observations)
+        return observations
 
     async def read_text(self, name: str) -> str:
         """Read adapter output using file transfer."""
