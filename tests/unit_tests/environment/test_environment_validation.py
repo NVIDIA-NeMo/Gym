@@ -1010,6 +1010,25 @@ def test_harbor_backed_manifest_validates_its_harness_and_target(tmp_path: Path,
     assert resolve_config_servers(path.parent / "config.yaml") == (None, harness)
 
 
+def test_dataset_owner_does_not_apply_to_a_harbor_target(tmp_path: Path) -> None:
+    path = _harbor_asset(tmp_path, config_target="terminal_bench_4")
+    manifest = yaml.safe_load(path.read_text())
+    manifest["dataset_owner"] = "mini_swe_agent"
+    path.write_text(yaml.safe_dump(manifest), encoding="utf-8")
+    with pytest.raises(EnvironmentValidationError, match="dataset_owner does not apply to harbor_target"):
+        validate_environment(path)
+
+
+def test_a_harbor_target_only_an_include_sets_is_refused(tmp_path: Path) -> None:
+    path = _harbor_asset(tmp_path, config_target="terminal_bench_4")
+    config = path.parent / "config.yaml"
+    base = path.parent / "base.yaml"
+    base.write_text(config.read_text(), encoding="utf-8")
+    config.write_text(yaml.safe_dump({"config_paths": [str(base)]}), encoding="utf-8")
+    with pytest.raises(EnvironmentValidationError, match="set `harbor_target` in the benchmark file itself"):
+        validate_environment(path)
+
+
 def test_harbor_target_is_mirrored_from_the_config(tmp_path: Path) -> None:
     path = _harbor_asset(tmp_path, config_target="terminal_bench_4", manifest_target="terminal_bench_2_1")
     with pytest.raises(EnvironmentValidationError, match="harbor_target"):

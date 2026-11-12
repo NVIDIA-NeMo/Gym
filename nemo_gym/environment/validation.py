@@ -273,10 +273,9 @@ def _resolve_config_wiring(
     harbor_target = None
     if resolved.get(HARBOR_TARGET_KEY) is not None:
         # Harbor-backed: the config's one agent instance runs the target's tasks, the rows prepare writes.
-        if benchmark is None or benchmark.agent.instance_name not in by_instance:
-            raise EnvironmentValidationError(
-                f"{config_path} must set {HARBOR_TARGET_KEY} and its agent instance in the file itself."
-            )
+        if benchmark is None:
+            # harbor_benchmark refuses a target only an include sets; this covers one it could not read.
+            raise EnvironmentValidationError(f"{config_path} must set {HARBOR_TARGET_KEY} in the file itself.")
         harbor_target = benchmark.target
 
     # Datasets may live on a resources server (decoupled layout) or on an agent (legacy and

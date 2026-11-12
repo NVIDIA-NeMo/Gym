@@ -502,3 +502,16 @@ def test_harbor_target_replaces_the_datasets(backend: str, change: dict, valid: 
 
 def test_manifests_without_a_harbor_target_dump_as_before() -> None:
     assert "harbor_target" not in yaml.safe_load(dump_manifest(EnvironmentManifest.model_validate(_manifest())))
+
+
+@pytest.mark.parametrize("backend", ["pydantic", "schema"])
+def test_an_environment_without_a_target_needs_its_datasets(backend: str) -> None:
+    """Outside the benchmark-dataset rule: the schema's own `if/then`, which the field's `min_length` used to carry."""
+    raw = _manifest()
+    assert raw["kind"] == "environment" and "harbor_target" not in raw
+    raw["datasets"] = []
+    if backend == "schema":
+        assert not Draft202012Validator(manifest_json_schema()).is_valid(raw)
+    else:
+        with pytest.raises(ValidationError, match="datasets"):
+            EnvironmentManifest.model_validate(raw)

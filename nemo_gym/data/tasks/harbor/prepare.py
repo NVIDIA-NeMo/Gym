@@ -944,6 +944,19 @@ def resolve_agent(agent: str) -> AgentSelection:
     )
 
 
+def _includes_set_harbor_target(path: Path) -> bool:
+    """Whether a config that does not set ``harbor_target`` itself includes one that does. A config whose includes
+    cannot be loaded counts as not, so the composed-server path reports it as before."""
+    from nemo_gym.config.config_types import ConfigError
+    from nemo_gym.config.global_config import GlobalConfigDictParser
+
+    try:
+        _, closure = GlobalConfigDictParser().load_extra_config_paths([str(path.resolve())])
+    except (ConfigError, OSError, yaml.YAMLError):
+        return False
+    return any(HARBOR_TARGET_KEY in entry for entry in closure)
+
+
 @dataclass(frozen=True)
 class HarborBenchmark:
     """A benchmark config backed by a Harbor target: ``gym eval run --benchmark`` runs ``target`` with ``agent``."""
@@ -961,10 +974,13 @@ def harbor_benchmark(config_path: str | Path) -> HarborBenchmark | None:
     exactly one agent instance: the harness the benchmark runs by default, with its benchmark settings. The run
     config's agent inherits that instance, as it inherits the shipped config ``--agent`` names, so the instance
     is defined directly (an ``_inherit_from`` instance is refused: the run's agent would inherit an unresolved
-    source). Its own other top-level keys are the agent's ``benchmark_settings``, such as the shipped
-    ``harbor_environment_server`` instance's settings, which also apply to a harness ``--agent-type`` swaps in.
-    Another resources or environment server instance, in the file or any config it includes, would start beside
-    the taskset's and is refused.
+    source). The other top-level keys of the file and the configs it includes are the agent's
+    ``benchmark_settings``, such as the shipped ``harbor_environment_server`` instance's settings, which also apply
+    to a harness ``--agent-type`` swaps in; keys only a config that defines the agent instance contributes (the
+    harness's shipped config) stay with that harness. Another resources or environment server instance, in the file
+    or any config it includes, would start beside the taskset's and is refused. ``harbor_target`` is read from the
+    file itself: a config whose includes set it but which does not is refused, so a variant of a Harbor-backed
+    preset repeats it rather than falling through to the composed-server path.
     """
     from omegaconf import OmegaConf
 
@@ -977,7 +993,14 @@ def harbor_benchmark(config_path: str | Path) -> HarborBenchmark | None:
 
     path = Path(config_path)
     config = yaml.safe_load(path.read_text()) or {}
-    if not isinstance(config, dict) or HARBOR_TARGET_KEY not in config:
+    if not isinstance(config, dict):
+        return None
+    if HARBOR_TARGET_KEY not in config:
+        if config.get(CONFIG_PATHS_KEY_NAME) and _includes_set_harbor_target(path):
+            raise ValueError(
+                f"{path} includes a config that sets `{HARBOR_TARGET_KEY}`, but does not set it itself; set "
+                f"`{HARBOR_TARGET_KEY}` in the benchmark file itself (a variant of a Harbor-backed preset repeats it)"
+            )
         return None
     target = config[HARBOR_TARGET_KEY]
     if not isinstance(target, str) or not target.strip():
@@ -988,6 +1011,8 @@ def harbor_benchmark(config_path: str | Path) -> HarborBenchmark | None:
     except ConfigPathNotFoundError as error:
         raise ValueError(f"{path}: {error}") from error
     effective = OmegaConf.to_container(OmegaConf.merge(*closure), resolve=False)
+    # The file is merged last (an includer follows everything it pulled in).
+    included = [OmegaConf.to_container(entry, resolve=False) for entry in closure[:-1]]
     agents = [name for name, value in effective.items() if isinstance(value, dict) and "responses_api_agents" in value]
     if len(agents) != 1:
         raise ValueError(
@@ -1016,11 +1041,22 @@ def harbor_benchmark(config_path: str | Path) -> HarborBenchmark | None:
     if not isinstance(impls, dict) or len(impls) != 1:
         raise ValueError(f"{path} must define exactly one agent implementation under {agents[0]}")
     impl_name, impl_config = next(iter(impls.items()))
-    server_settings = config.get(ENVIRONMENT_SERVER_INSTANCE)
+    server_settings = effective.get(ENVIRONMENT_SERVER_INSTANCE)
     if server_settings is not None and not isinstance(server_settings, dict):
         raise ValueError(f"{path}: `{ENVIRONMENT_SERVER_INSTANCE}` must be a mapping of the server's settings")
+    # A key only the harness's shipped config sets (a config that also defines the agent instance) is the harness's,
+    # not the benchmark's; every other key, from the file or an include, travels with whichever harness runs.
+    harness_only = {
+        key
+        for entry in included
+        if agents[0] in entry
+        for key in entry
+        if key not in config and not any(key in other for other in included if agents[0] not in other)
+    }
     settings = {
-        key: value for key, value in config.items() if key not in (HARBOR_TARGET_KEY, CONFIG_PATHS_KEY_NAME, agents[0])
+        key: value
+        for key, value in effective.items()
+        if key not in (HARBOR_TARGET_KEY, CONFIG_PATHS_KEY_NAME, agents[0]) and key not in harness_only
     }
     return HarborBenchmark(
         config_path=path.resolve(),
