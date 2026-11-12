@@ -98,6 +98,7 @@ class ClaudeCodeSandboxSession(AgentSessionState):
 
     session: SandboxSession[ClaudeCodeArtifacts]
     runtime: str
+    sandbox_id: str | None = None
     task: asyncio.Task[NeMoGymResponse] | None = None
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
     runtime_info: HarnessProcessInfo | None = None

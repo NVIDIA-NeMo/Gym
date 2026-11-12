@@ -156,3 +156,21 @@ def test_compaction_checks_do_not_fall_back_to_duplicate_artifacts(compaction_ev
     record["ng_trajectory"]["invocations"][0]["conversation"] = []
     record["ng_agent_observations"]["records"][0]["model_calls"] = []
     assert {c["status"] for c in checks(record, witness).values()} == {"pass"}
+
+
+@pytest.mark.parametrize("truncate", [False, True])
+def test_compaction_preserves_complete_summary_inside_runtime_wrapper(compaction_evidence, truncate):
+    record, witness = compaction_evidence
+    summary = witness["compaction"]["summary"]
+    wrapped = "Continue from this summary:\n" + (summary[:-1] if truncate else summary) + "\nResume work."
+    record["ng_agent_observations"]["records"][-1]["summary"] = wrapped
+    record["ng_trajectory"]["model_calls"][2]["request"]["input"][-1]["content"] = wrapped
+    assert checks(record, witness)["compaction.summary_reuse"]["status"] == ("fail" if truncate else "pass")
+
+
+def test_compaction_usage_includes_messages_cache_reads_and_writes(compaction_evidence):
+    record, witness = compaction_evidence
+    witness["attempts"][1]["response"]["usage"].update(cache_read_input_tokens=3, cache_creation_input_tokens=2)
+    witness["attempts"][1]["response"]["usage"].pop("total_tokens")
+    record["response"]["usage"].update(input_tokens=32, total_tokens=44)
+    assert checks(record, witness)["compaction.usage_retained"]["status"] == "pass"

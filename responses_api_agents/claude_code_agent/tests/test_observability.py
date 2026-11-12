@@ -31,6 +31,7 @@ from nemo_gym.trajectory import (
 from responses_api_agents.claude_code_agent.app import ClaudeCodeAgent, ClaudeCodeAgentConfig
 from responses_api_agents.claude_code_agent.observability import (
     associate_claude_code_compaction_calls,
+    captured_claude_code_usage,
     extract_claude_code_observations,
 )
 from responses_api_agents.claude_code_agent.sandbox import ClaudeCodeArtifacts, ClaudeCodeSandboxSession
@@ -238,7 +239,7 @@ def test_extracts_explicit_compaction_markers(tmp_path: Path) -> None:
     bundle = extract_claude_code_observations(tmp_path, model_ref=MODEL_REF)
 
     [compaction] = _records(bundle, ContextCompactionObservation)
-    assert compaction.trigger == "auto"
+    assert compaction.trigger == "automatic"
     assert compaction.tokens_before == 1000
     assert compaction.tokens_after == 200
     assert compaction.summary == "summary"
@@ -490,7 +491,8 @@ async def test_adapter_associates_compaction_before_collection(tmp_path: Path, m
             return [], "fixture", {}
 
         monkeypatch.setattr(ClaudeCodeAgent, "_run_claude_code", run)
-        observations = (await instance._create_episode(body, rollout_id="0-0")).observations
+        episode = await instance._create_episode(body, rollout_id="0-0")
+        observations, response = episode.observations, episode.response
     else:
         archive_bytes = io.BytesIO()
         with tarfile.open(fileobj=archive_bytes, mode="w:gz") as archive:
@@ -509,9 +511,10 @@ async def test_adapter_associates_compaction_before_collection(tmp_path: Path, m
         )
         monkeypatch.setattr(ClaudeCodeSandboxSession, "execute", AsyncMock(return_value=artifacts))
         monkeypatch.setattr(ClaudeCodeAgent, "_resolve_call_base_url", lambda *args: None)
-        await instance._sandbox_response(state, body, prompt="Continue", system=None)
+        response = await instance._sandbox_response(state, body, prompt="Continue", system=None)
         observations = state.observations
 
+    assert (response.usage.input_tokens, response.usage.output_tokens) == (30, 6)
     [compaction] = _records(observations, ContextCompactionObservation)
     assert [reference.model_call_id for reference in compaction.model_calls] == ["call-compact"]
     record["ng_agent_observations"] = observations.model_dump(mode="json")
@@ -548,7 +551,7 @@ async def test_compaction_resolver_failure_preserves_generic_model_call_join(tmp
         "responses_api_agents.claude_code_agent.app.read_available_model_call_records",
         side_effect=RuntimeError,
     ):
-        observations = await _agent(tmp_path)._associate_compaction_calls(_compaction_bundle(), rollout_id="0-0")
+        observations = await _agent(tmp_path)._reconcile_captured_calls(_compaction_bundle(), rollout_id="0-0")
     record["ng_agent_observations"] = observations.model_dump(mode="json")
     merge_model_call_capture_into_record(record, [tmp_path])
 
@@ -572,7 +575,7 @@ async def test_adapter_requires_its_own_capture(tmp_path: Path, case: str) -> No
         for captured in (_captured_call("call-before", "msg-before"), call, _captured_call("call-after", "msg-after")):
             store.record("other" if case == "other_rollout" else "0-0", captured)
     bundle = _compaction_bundle()
-    associated = await instance._associate_compaction_calls(bundle, rollout_id="0-0")
+    associated = await instance._reconcile_captured_calls(bundle, rollout_id="0-0")
     assert associated == bundle
 
 
@@ -592,7 +595,7 @@ async def test_adapter_waits_for_claimed_capture_write(tmp_path: Path) -> None:
         store.clear_pending("0-0", "call-compact")
 
     associated, _ = await asyncio.gather(
-        _agent(tmp_path)._associate_compaction_calls(_compaction_bundle(), rollout_id="0-0"), finish_capture()
+        _agent(tmp_path)._reconcile_captured_calls(_compaction_bundle(), rollout_id="0-0"), finish_capture()
     )
     [compaction] = _records(associated, ContextCompactionObservation)
     assert [reference.model_call_id for reference in compaction.model_calls] == ["call-compact"]
@@ -669,3 +672,34 @@ def test_compaction_call_correlation_rejects_inexact_matches(case: str) -> None:
     [compaction] = _records(associated, ContextCompactionObservation)
     assert compaction.model_calls == []
     assert "compaction_model_call_reference_unavailable" in {gap.code for gap in associated.gaps}
+
+
+@pytest.mark.parametrize("broken", [None, "missing", "ambiguous", "unknown_usage"])
+def test_captured_usage_counts_owned_calls_once_including_cache(broken):
+    from nemo_gym.trajectory.model_call_record import build_model_call_record
+
+    exchanges = [
+        _captured_call("call-before", "msg-before"),
+        _captured_call("call-compact", "msg-compact", compact=True),
+        _captured_call("call-after", "msg-after"),
+        _captured_call("unrelated", "other"),
+    ]
+    for exchange in exchanges:
+        exchange["response"]["usage"].update(cache_read_input_tokens=3, cache_creation_input_tokens=2)
+    calls = [build_model_call_record(e, call_index=i) for i, e in enumerate(exchanges)]
+    bundle = associate_claude_code_compaction_calls(_compaction_bundle(), calls)
+    invocation = _records(bundle, AgentInvocation)[0]
+    invocation.model_calls.append(invocation.model_calls[0].model_copy())
+    if broken == "missing":
+        calls.pop(0)
+    elif broken == "ambiguous":
+        calls.append(calls[0].model_copy())
+    elif broken == "unknown_usage":
+        calls[1].tokens_in = None
+    usage = captured_claude_code_usage(bundle, calls)
+    if broken:
+        assert usage is None
+    else:
+        assert (usage.input_tokens, usage.output_tokens, usage.total_tokens) == (45, 6, 51)
+        assert usage.input_tokens_details.cached_tokens == 9
+        assert usage.output_tokens_details.reasoning_tokens is None

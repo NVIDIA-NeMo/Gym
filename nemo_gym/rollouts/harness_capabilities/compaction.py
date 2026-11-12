@@ -6,6 +6,7 @@
 from collections import Counter
 
 from nemo_gym.models.chat_completions_converter import message_content_to_text
+from nemo_gym.trajectory.model_call_record import build_model_call_record
 from nemo_gym.trajectory.trajectory_record import ContextCompactionObservation
 
 from .checker import _mapping, _objects, _resolve
@@ -105,7 +106,7 @@ def inspect_compaction(
     )
 
     def summary_reused() -> bool:
-        if events[0].get("summary") != summary or helper_ids[0] not in expected_ids:
+        if summary not in (events[0].get("summary") or "") or helper_ids[0] not in expected_ids:
             return False
         following = expected_ids[expected_ids.index(helper_ids[0]) + 1 :]
         if not following:
@@ -153,11 +154,8 @@ def inspect_compaction(
     )
 
     def usage_retained() -> bool:
-        usages = [_mapping(_mapping(a.get("response")).get("usage")) for a in attempts]
-        counts = [
-            (u.get("prompt_tokens", u.get("input_tokens")), u.get("completion_tokens", u.get("output_tokens")))
-            for u in usages
-        ]
+        calls = [build_model_call_record(attempt, call_index=index) for index, attempt in enumerate(attempts)]
+        counts = [(call.tokens_in, call.tokens_out) for call in calls]
         if any(type(value) is not int or value < 0 for pair in counts for value in pair):
             return False
         prompt = sum(pair[0] for pair in counts)
