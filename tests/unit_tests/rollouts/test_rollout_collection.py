@@ -74,11 +74,12 @@ from nemo_gym.config.global_config import (
     ATTEMPT_INDEX_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
+    SKIP_TOKEN_CAPTURE_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
 )
 from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
-from nemo_gym.core.episode_types import EpisodeId
+from nemo_gym.core.episode_types import BaseEpisodeRequest, EpisodeId
 from nemo_gym.core.failure_kinds import CANCELLED, KILL_SHAPED, PROVIDER_OOM_KILLED
 from nemo_gym.core.failure_records import FailureBoundary, FailureReport, SandboxFailureDetails
 from nemo_gym.core.failure_transport import FailureReportRow
@@ -7149,6 +7150,74 @@ class TestRolloutCollection:
             return validations
 
         assert await run(rows_per_agent=1) == await run(rows_per_agent=20)
+
+    async def test_run_from_config_does_not_finalize_a_row_that_skips_token_capture(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A validation row that skips capture made no captured calls, so it is neither rebuilt nor masked."""
+        global_config = {
+            "token_id_capture": {"enabled": True, "all_agents": True, "dir": str(tmp_path / "tokens")},
+            "agent": {"responses_api_agents": {"implementation": {}}},
+        }
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "get_global_config_dict", lambda: global_config)
+        server_client = MagicMock()
+        server_client.global_config_dict = OmegaConf.create(global_config)
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: server_client
+        )
+        finalized_splits: list[str] = []
+
+        async def finalize(result, token_source, **kwargs):
+            finalized_splits.append(result["split"])
+            return None
+
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "finalize_rollout_token_capture", finalize)
+
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                futures = []
+                for example in examples:
+                    future = Future()
+                    future.set_result(
+                        _CompletedRollout(
+                            row=example,
+                            result={"response": {"output": [], "usage": {}}, "split": example["split"]},
+                            rollout_latency_ms=None,
+                        )
+                    )
+                    futures.append(future)
+                return futures
+
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_bytes(
+            b"".join(
+                orjson.dumps(
+                    {
+                        "responses_create_params": {"input": []},
+                        AGENT_REF_KEY_NAME: {"name": "agent"},
+                        "split": split,
+                        **row_setting,
+                    }
+                )
+                + b"\n"
+                for split, row_setting in (
+                    ("train", {}),
+                    ("validation", {SKIP_TOKEN_CAPTURE_KEY_NAME: True}),
+                    # null, as a table writes for a row that does not set the column, counts as unset.
+                    ("unset", {SKIP_TOKEN_CAPTURE_KEY_NAME: None}),
+                )
+            )
+        )
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            resume_from_cache=False,
+            disable_aggregation=True,
+        )
+
+        await Helper().run_from_config(config)
+
+        assert finalized_splits == ["train", "unset"]
 
     async def test_run_from_config_requires_source_before_dispatch(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
@@ -16540,3 +16609,37 @@ def test_an_episode_request_carries_a_rows_sampling_values_beside_the_unchanged_
     assert body["task"] == {"task_id": row["task_id"], "task_input": row["task_input"]}
     # Gym-only evaluation sends exactly what it sent before.
     assert "model_sampling" not in _episode_request_body({k: v for k, v in row.items() if k != "_ng_model_sampling"})
+
+
+@pytest.mark.parametrize(
+    ("row_setting", "episode_setting"),
+    [
+        ({}, {}),
+        ({SKIP_TOKEN_CAPTURE_KEY_NAME: False}, {}),
+        ({SKIP_TOKEN_CAPTURE_KEY_NAME: None}, {}),
+        ({SKIP_TOKEN_CAPTURE_KEY_NAME: True}, {"skip_token_capture": True}),
+    ],
+)
+def test_an_episode_request_carries_a_rollout_that_skips_token_capture(
+    row_setting: dict, episode_setting: dict
+) -> None:
+    row = {
+        "task_id": {"taskset": "swe_pro", "task_id": "instance"},
+        "task_input": {"responses_create_params": {"input": "fix it"}},
+        TASK_INDEX_KEY_NAME: 3,
+        ROLLOUT_INDEX_KEY_NAME: 1,
+        **row_setting,
+    }
+
+    body = nemo_gym.rollouts.rollout_collection._episode_request_body(row)
+
+    assert body == {
+        "episode_id": {"rollout_id": "3-1", "attempt": 0},
+        "task": {"task_id": row["task_id"], "task_input": row["task_input"]},
+        **episode_setting,
+    }
+    # An Environment Server parses the body with its episode request model, which refuses unknown keys.
+    request = BaseEpisodeRequest[dict].model_validate(body)
+    assert request.skip_token_capture is bool(episode_setting)
+    # The model leaves the setting out when it is false, so a request that does not skip is unchanged.
+    assert ("skip_token_capture" in request.model_dump()) is bool(episode_setting)
