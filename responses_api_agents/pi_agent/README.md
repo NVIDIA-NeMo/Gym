@@ -6,7 +6,11 @@ verification, and cleanup. Pi borrows the sandbox and runs its own model/tool lo
 
 [configs/pi_agent.yaml](configs/pi_agent.yaml) is the default agent configuration. Benchmark
 and agent settings are independent; the run configuration connects them through the
-Environment Server. This harness is currently for evaluation; token IDs and logprobs are not wired up.
+Environment Server.
+
+Training token-ID capture is off by default. With `model_server`, model calls go to the Gym Model Server under
+the rollout's prefix, so capture needs only run-level `token_id_capture.enabled: true` and either the agent's
+`token_id_capture: true` or run-level `token_id_capture.all_agents: true`.
 
 ## Configure and run
 

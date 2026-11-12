@@ -40,6 +40,21 @@ it does not upload data or push code. To reuse a converted Gym dataset, pass
 Both paths validate metadata, nonempty prompts, and unique IDs before atomically
 replacing the output; failed preparation preserves existing output.
 
+### Level subsets
+
+`prepare()` accepts `levels` to keep only some of L1-L5 across all four domains. The
+filtered rows are written to the normal dataset path, so a run prepared this way
+evaluates the subset without any config change:
+
+```bash
+gym eval prepare --benchmark sciknoweval ++prepare_script_args.levels=[L3,L5]
+```
+
+The same filter is available as repeatable `--level` flags on
+`python -m benchmarks.sciknoweval.prepare`. L3 (reasoning) plus L5 (application)
+is 7,112 of the 28,392 questions. An unknown level is an error, not an empty file,
+and `levels` cannot be combined with an explicit `--input` file.
+
 ## Evaluate
 
 Save this model configuration outside the checkout (for example, at
