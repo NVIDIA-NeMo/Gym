@@ -26,5 +26,6 @@ gym env start \
 ```
 
 Machines are isolated by default, `stop()` deletes them, and `pause()`/`resume()` hibernate and
-wake them with memory kept. See `fern/versions/latest/pages/infrastructure/sandbox/boxd.mdx` for
+wake them with memory kept. boxd also deletes each machine when its lifetime ends (`ttl_s`, else
+`create.max_lifetime_s`, one hour by default), so a crashed run leaves nothing behind. See `fern/versions/latest/pages/infrastructure/sandbox/boxd.mdx` for
 every option, the resource mapping, timeouts and failure kinds.

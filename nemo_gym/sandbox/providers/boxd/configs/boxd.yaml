@@ -56,14 +56,19 @@ sandbox:
       image_pull_timeout_s: 1200.0
       # Pull even when the machine already has the image (for example from a snapshot).
       always_pull: false
+      # boxd deletes each machine this many seconds after creation, even if stop() never
+      # runs, so a crashed run leaves nothing behind. SandboxSpec.ttl_s overrides it per
+      # sandbox; null sets no lifetime. Raise it for work that takes longer.
+      max_lifetime_s: 3600.0
     exec:
       # Fallback only when timeout_s=None; AsyncSandbox.exec() passes its own default.
       default_timeout_s: 180.0
       # Container shell; null uses bash when the image has it, else sh.
       shell: null
     operations:
-      # Retries for transport failures of delete, connect and file calls. Machine
-      # creation and commands are never retried.
+      # Retries for transport failures of readiness, delete, connect, pause, resume and
+      # file calls. Machine creation is never retried, and a command that may have
+      # started is never run again.
       retries: 2
       retry_delay_s: 1.0
       retry_max_delay_s: 10.0
