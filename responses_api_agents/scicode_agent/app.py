@@ -47,6 +47,7 @@ from nemo_gym.agents import (
     Body,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.agents.utils.verify_call import masked_verify_failure, verify_with_transport_retry
 from nemo_gym.client import raise_for_status
 from nemo_gym.config import (
     ROLLOUT_INDEX_KEY_NAME,
@@ -60,6 +61,7 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseUsage,
+    NgFailureEvent,
     accumulate_response_usage,
 )
 from nemo_gym.data import PromptConfig, load_prompt_config
@@ -72,6 +74,7 @@ from nemo_gym.trajectory import (
     TrajectoryRecord,
     TrajectoryTurn,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 LOG = logging.getLogger(__name__)
@@ -347,14 +350,24 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
         verify_request_data["response"]["usage"] = usage.model_dump() if usage_complete else None
         verify_request_data["token_usage_version"] = TOKEN_USAGE_VERSION
         verify_request_data["step_usage"] = step_usage
-        verify_response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/verify",
-            json=verify_request_data,
-            cookies=cookies,
-        )
-        await raise_for_status(verify_response)
-        result = await verify_response.json()
+
+        async def verify() -> dict[str, Any]:
+            verify_response = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path="/verify",
+                json=verify_request_data,
+                cookies=cookies,
+            )
+            await raise_for_status(verify_response)
+            return await verify_response.json()
+
+        try:
+            result = await verify_with_transport_retry(
+                verify, server_client=self.server_client, server_name=self.config.resources_server.name
+            )
+        except NgFailureEvent as failure:
+            # The grader failed, not the model: keep the answer and mask the row with the typed failure.
+            result = masked_verify_failure(verify_request_data, failure)
         if trajectory is not None:
             # Prefilled/skipped subproblems are not model decisions.
             if trajectory.turns:
@@ -418,3 +431,6 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     ScicodeAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ScicodeAgent.run_webserver()  # noqa: F401

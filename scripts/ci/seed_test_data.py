@@ -21,15 +21,18 @@ import nltk  # isort: skip
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from scripts.ci.check_test_data import check_test_data  # noqa: E402
+from scripts.ci.check_test_data import SACREBLEU_MODEL, check_sacrebleu_model, check_test_data  # noqa: E402
 
 from resources_servers.ifbench.setup_ifbench import IFBENCH_COMMIT, IFBENCH_REPO, NLTK_RESOURCES  # noqa: E402
 
 
 def main() -> None:
+    """Seed source, language resources, and a checksum-verified local tokenizer."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path)
+    parser.add_argument("--sacrebleu-model", type=Path, required=True, help="Previously downloaded FLORES-200 model")
     args = parser.parse_args()
+    check_sacrebleu_model(args.sacrebleu_model)
     root = args.output.resolve()
     root.mkdir(parents=True, exist_ok=True)
     source = root / "ifbench" / IFBENCH_COMMIT
@@ -46,6 +49,9 @@ def main() -> None:
     for kind, resource in NLTK_RESOURCES.items():
         nltk.download(kind, download_dir=str(data), quiet=True, raise_on_error=True)
         nltk.data.find(resource)
+    model = root / SACREBLEU_MODEL
+    model.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(args.sacrebleu_model, model)
     manifest = root / "SHA256SUMS"
     files = sorted(path for path in root.rglob("*") if path.is_file() and path != manifest)
     checksums = []

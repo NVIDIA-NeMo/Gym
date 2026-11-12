@@ -35,7 +35,7 @@ def test_primary_document_derivations() -> None:
     assert parsed.dashed_accession == "0000320193-24-000123"
     assert parsed.document_path == "aapl-20240928.htm"
     assert parsed.document_basename == "aapl-20240928.htm"
-    assert parsed.flat_document == "aapl-20240928.htm"
+    assert parsed.cache_filename == "aapl-20240928.htm"
 
 
 @pytest.mark.parametrize(
@@ -61,7 +61,7 @@ def test_exhibit_below_the_accession_keeps_its_subpath() -> None:
     assert parsed is not None
     assert parsed.document_path == "exhibits/ex-21.htm"
     assert parsed.document_basename == "ex-21.htm"
-    assert parsed.flat_document == "exhibits_ex-21.htm"
+    assert parsed.cache_filename == "exhibits%2Fex-21.htm"
 
 
 def test_basename_is_percent_decoded_and_lowercased() -> None:
@@ -72,6 +72,43 @@ def test_basename_is_percent_decoded_and_lowercased() -> None:
     assert parsed is not None
     assert parsed.document_basename == "aapl report.htm"
     assert parsed.document_path == "AAPL%20Report.HTM"
+
+
+ACCESSION_URL = "https://www.sec.gov/Archives/edgar/data/320193/000032019324000123/"
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        ("exhibits/ex-21.htm", "exhibits_ex-21.htm"),
+        ("AAPL%20Report.HTM", "AAPL_20Report.HTM"),
+        ("AAPL%20Report.HTM", "AAPL Report.HTM"),
+        ("a+b.htm", "a_b.htm"),
+    ],
+)
+def test_distinct_documents_get_distinct_cache_filenames(first: str, second: str) -> None:
+    first_parsed = parse_sec_archives_url(ACCESSION_URL + first)
+    second_parsed = parse_sec_archives_url(ACCESSION_URL + second)
+
+    assert first_parsed is not None and second_parsed is not None
+    assert first_parsed.cache_filename != second_parsed.cache_filename
+    assert "/" not in first_parsed.cache_filename + second_parsed.cache_filename
+
+
+def test_cache_filename_ignores_query_fragment_and_slashes() -> None:
+    names = {
+        parse_sec_archives_url(ACCESSION_URL + suffix).cache_filename
+        for suffix in ("aapl-20240928.htm", "aapl-20240928.htm?x=1#top", "aapl-20240928.htm/")
+    }
+
+    assert names == {"aapl-20240928.htm"}
+
+
+def test_accession_directory_has_no_cache_filename() -> None:
+    parsed = parse_sec_archives_url(ACCESSION_URL)
+
+    assert parsed is not None
+    assert parsed.cache_filename == ""
 
 
 def test_accession_of_an_unexpected_length_is_left_alone() -> None:

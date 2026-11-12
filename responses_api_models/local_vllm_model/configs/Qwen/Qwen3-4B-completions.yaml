@@ -10,7 +10,7 @@ policy_model:
       model: Qwen/Qwen3-4B
       return_token_id_information: false
       # vLLM /v1/completions does not run the reasoning parser. <think>...</think>
-      # blocks (if the model emits them) come back inline; VLLMConverter extracts
+      # blocks (if the model emits them) come back inline; ChatCompletionsConverter extracts
       # them downstream.
       uses_reasoning_parser: false
       uses_interleaved_reasoning: false

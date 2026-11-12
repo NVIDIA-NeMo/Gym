@@ -1,0 +1,32 @@
+name: babyvision_opencode_question_only
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: other
+description: BabyVision visual-reasoning puzzles, question only, solved by OpenCode
+  with a Python image toolkit, GPT-judged final answers.
+modality: text, image
+licensing: MIT
+authors:
+- Danial MohseniTaheri
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: stochastic
+resources_server: visual_coding_opencode
+agent_server: opencode_agent
+datasets:
+- name: babyvision_opencode_question_only
+  type: benchmark
+  jsonl_fpath: benchmarks/babyvision_opencode_question_only/data/babyvision_opencode_question_only_benchmark.jsonl
+  prepare_script: benchmarks/babyvision_opencode_question_only/prepare.py
+  prepare_dependencies:
+  - pillow
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

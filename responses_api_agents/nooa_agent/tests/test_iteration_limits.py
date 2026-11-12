@@ -189,6 +189,7 @@ async def test_real_codeact_response_retains_partial_evidence_without_verificati
     try:
         response = await instance.responses(req, NeMoGymResponseCreateParamsNonStreaming(input="task"))
         assert_partial_evidence(response, scenario=scenario)
+        assert instance._require_agent_session("session").result.trajectory.invocations[0].status == "incomplete"
         assert "_ng_failure_class" not in response.model_dump(mode="json")
         assert len(model_calls) == 1
         assert not sentinel.exists()
@@ -226,8 +227,8 @@ async def test_real_codeact_environment_verifies_partial_response_once(
         assert len(model_calls) == 2
         assert verified == []
         assert _paths(client).count("/verify") == 0
-        receipt = next(iter(instance._closed_session_records.values())).close_response
-        assert NOOATerminationReason.INFRASTRUCTURE_ERROR in {gap.code for gap in receipt.agent_observations.gaps}
+        saved_reply = next(iter(instance._fenced_session_records.values())).close_response
+        assert NOOATerminationReason.INFRASTRUCTURE_ERROR in {gap.code for gap in saved_reply.agent_observations.gaps}
         return
     assert result.failure is None
     assert result.result.reward == 0.75
@@ -262,6 +263,7 @@ async def test_other_codeact_limits_and_unrecovered_outage_fail_agent_activation
             await instance.responses(req, NeMoGymResponseCreateParamsNonStreaming(input="task"))
         assert len(model_calls) == (2 if scenario == "model_outage" else 1)
         assert instance._require_agent_session("session").result.episode.response.output
+        assert instance._require_agent_session("session").result.trajectory.invocations[0].status == "failed"
     finally:
         receipt = await close(instance)
     gaps = {gap.code for gap in receipt.agent_observations.gaps}
@@ -332,8 +334,8 @@ async def test_codeact_cleanup_failure_after_iteration_exhaustion_skips_verifica
     assert len(model_calls) == 1
     assert "/verify" not in _paths(client)
     assert _paths(client)[-2:] == ["/v1/agent_sessions/close", "/close_session"]
-    receipt = next(iter(instance._closed_session_records.values())).close_response
-    gaps = {gap.code for gap in receipt.agent_observations.gaps}
+    saved_reply = next(iter(instance._fenced_session_records.values())).close_response
+    gaps = {gap.code for gap in saved_reply.agent_observations.gaps}
     assert NOOATerminationReason.INFRASTRUCTURE_ERROR in gaps
     assert NOOATerminationReason.MAX_ITERATIONS_EXCEEDED not in gaps
-    assert receipt.agent_observations.records
+    assert saved_reply.agent_observations.records

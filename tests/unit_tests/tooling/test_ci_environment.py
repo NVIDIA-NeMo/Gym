@@ -596,6 +596,23 @@ def test_full_test_suite_runs_on_schedule_and_dispatch_not_push() -> None:
     assert "push:" not in on_block
 
 
+def test_full_test_suite_pushes_images_only_from_main() -> None:
+    """Every ECR login and crane push is gated on exactly `refs/heads/main`."""
+    jobs = yaml.safe_load(FULL_TEST_WORKFLOW.read_text())["jobs"]
+    conditions = [jobs["offline-image"]["if"]]
+    for name, job in jobs.items():
+        for step in job.get("steps", []):
+            if name != "offline-image" and (
+                "amazon-ecr-login" in step.get("uses", "") or "crane" in step.get("run", "")
+            ):
+                conditions.append(step["if"])
+
+    assert len(conditions) == 3
+    for condition in conditions:
+        assert "github.ref == 'refs/heads/main'" in condition
+        assert condition.count("refs/") == 1, condition
+
+
 def test_notify_failure_respects_send_notification_input() -> None:
     guard = "(github.event_name != 'workflow_dispatch' || inputs.send_notification)"
     for workflow_file in (CICD_MAIN_WORKFLOW, FULL_TEST_WORKFLOW):
@@ -914,6 +931,117 @@ def test_runner_disk_reclamation_fails_fast_when_space_is_still_low(tmp_path: Pa
 def _write_executable(path: Path, contents: str) -> None:
     path.write_text(contents)
     path.chmod(0o755)
+
+
+@pytest.mark.parametrize(
+    "failure", ["none", "interrupted", "permanent", "download_timeout", "index_failure", "git_ppa_unavailable"]
+)
+def test_system_dependency_install_recovers_interrupted_configuration(tmp_path: Path, failure: str) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "calls"
+    installed = tmp_path / "installed"
+    _write_executable(bin_dir / "sudo", '#!/bin/sh\nexec "$@"\n')
+    _write_executable(
+        bin_dir / "timeout",
+        '#!/bin/sh\nshift\nexport INSTALL_TEST_BOUNDED=1\nexec "$@"\n',
+    )
+    _write_executable(
+        bin_dir / "dpkg",
+        """#!/bin/sh
+set -eu
+test "$DEBIAN_FRONTEND" = noninteractive
+test "$*" = '--configure -a'
+test "${INSTALL_TEST_BOUNDED:-0}" = 0
+rm -f "$INSTALL_TEST_STATE/interrupted"
+""",
+    )
+    _write_executable(
+        bin_dir / "apt-get",
+        """#!/bin/sh
+set -eu
+if test "$1" = update; then
+    test "$INSTALL_TEST_BOUNDED" = 1
+    echo update >> "$INSTALL_TEST_STATE/calls"
+    # Container APT update hooks may clear completed and partial downloads.
+    rm -f "$INSTALL_TEST_STATE/downloaded" "$INSTALL_TEST_STATE/partial"
+    if test "$INSTALL_TEST_FAILURE" = index_failure && ! test -f "$INSTALL_TEST_STATE/index-attempted"; then
+        touch "$INSTALL_TEST_STATE/index-attempted"
+        exit 100
+    fi
+    exit 0
+fi
+test "$1" = install
+test "$DEBIAN_FRONTEND" = noninteractive
+# An installed runner tool must not require its newer PPA candidate.
+if test "$INSTALL_TEST_FAILURE" = git_ppa_unavailable; then
+    case " $* " in
+        *' --no-upgrade '*) ;;
+        *) echo 'git-core PPA: 503 Service Unavailable' >&2; exit 100 ;;
+    esac
+fi
+case " $* " in
+    *' --download-only '*)
+        test "$INSTALL_TEST_BOUNDED" = 1
+        echo download >> "$INSTALL_TEST_STATE/calls"
+        if test "$INSTALL_TEST_FAILURE" = download_timeout && ! test -f "$INSTALL_TEST_STATE/partial"; then
+            touch "$INSTALL_TEST_STATE/partial"
+            exit 124
+        fi
+        touch "$INSTALL_TEST_STATE/downloaded"
+        exit 0
+        ;;
+esac
+# Package configuration must never run under the per-attempt network timeout.
+test "${INSTALL_TEST_BOUNDED:-0}" = 0
+test -f "$INSTALL_TEST_STATE/downloaded"
+case " $* " in *' --no-download '*) ;; *) exit 2 ;; esac
+echo install >> "$INSTALL_TEST_STATE/calls"
+if test "$INSTALL_TEST_FAILURE" = permanent; then exit 100; fi
+if test "$INSTALL_TEST_FAILURE" = interrupted && ! test -f "$INSTALL_TEST_STATE/attempted"; then
+    touch "$INSTALL_TEST_STATE/attempted" "$INSTALL_TEST_STATE/interrupted"
+    exit 100
+fi
+if test -f "$INSTALL_TEST_STATE/interrupted"; then
+    echo 'dpkg was interrupted' >&2
+    exit 100
+fi
+printf '%s\\n' "$@" > "$INSTALL_TEST_STATE/installed"
+""",
+    )
+    env = os.environ.copy()
+    env.update(
+        PATH=f"{bin_dir}:{env['PATH']}",
+        RUNNER_TEMP=str(tmp_path / "runner"),
+        GITHUB_ENV=str(tmp_path / "github-env"),
+        INSTALL_TEST_STATE=str(tmp_path),
+        INSTALL_TEST_FAILURE=failure,
+    )
+
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / "scripts" / "ci" / "install_test_dependencies.sh")],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+
+    if failure == "permanent":
+        assert result.returncode != 0
+        assert not installed.exists()
+        assert calls.read_text().splitlines().count("install") == 4
+    else:
+        assert result.returncode == 0, result.stderr
+        assert {"--no-install-recommends", "--no-upgrade", "build-essential", "ffmpeg"} <= set(
+            installed.read_text().splitlines()
+        )
+        assert not (tmp_path / "interrupted").exists()
+        assert calls.read_text().splitlines().count("install") == (2 if failure == "interrupted" else 1)
+    assert calls.read_text().splitlines().count("download") == (
+        4 if failure == "permanent" else 2 if failure in {"interrupted", "download_timeout"} else 1
+    )
+    assert calls.read_text().splitlines().count("update") == (2 if failure == "index_failure" else 1)
+    assert (tmp_path / "github-env").read_text() == f"UV_PYTHON_INSTALL_DIR={tmp_path}/runner/uv-python\n"
 
 
 def test_server_tests_propagates_absolute_cache_and_venv_roots(tmp_path: Path) -> None:

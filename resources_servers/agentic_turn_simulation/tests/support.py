@@ -9,6 +9,10 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+from aiohttp import ClientResponseError, RequestInfo
+from multidict import CIMultiDict
+from yarl import URL
+
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
@@ -43,7 +47,9 @@ Reply = MagicMock | Exception
 
 def http(payload: Any = None, *, status: int = 200, body: str = "") -> MagicMock:
     """An aiohttp-like response: get_response_json reads .read(); error paths read .content.read()."""
-    resp = MagicMock(status=status, cookies={})
+    resp = MagicMock(status=status, cookies={}, ok=status < 400)
+    info = RequestInfo(url=URL("http://x"), method="POST", headers=CIMultiDict(), real_url=URL("http://x"))
+    resp.raise_for_status = MagicMock(side_effect=ClientResponseError(info, (), status=status, headers=CIMultiDict()))
     resp.read = AsyncMock(return_value=json.dumps(payload if payload is not None else {}).encode())
     resp.content.read = AsyncMock(return_value=body.encode())
     return resp
@@ -51,7 +57,15 @@ def http(payload: Any = None, *, status: int = 200, body: str = "") -> MagicMock
 
 def chat(content: str | None, *, finish: str = "stop", **message: Any) -> MagicMock:
     return http(
-        {"choices": [{"finish_reason": finish, "message": {"role": "assistant", "content": content, **message}}]}
+        {
+            "id": "chatcmpl-1",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "m",
+            "choices": [
+                {"index": 0, "finish_reason": finish, "message": {"role": "assistant", "content": content, **message}}
+            ],
+        }
     )
 
 

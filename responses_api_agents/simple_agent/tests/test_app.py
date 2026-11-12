@@ -627,7 +627,7 @@ class TestApp:
             ),
         ],
     )
-    def test_unsupported_seed_is_refused_with_a_final_422(self, unsupported: dict, reason: str) -> None:
+    def test_unsupported_seed_is_refused_with_a_terminal_422(self, unsupported: dict, reason: str) -> None:
         server, _ = _make_agent(False)
         body = AgentSeedSessionRequest(
             agent_session_id="agent-session",
@@ -1474,7 +1474,7 @@ class TestApp:
         actual_usage_dict = actual_responses_dict["usage"]
         expected_usage_dict = {
             "input_tokens": 101,
-            "input_tokens_details": {"cached_tokens": 0},
+            "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": None},
             "output_tokens": 202,
             "output_tokens_details": {"reasoning_tokens": 0},
             "total_tokens": 303,
@@ -1913,7 +1913,9 @@ class TestCheckpointContinuation:
                 return _mock_response(_FINAL_RESPONSE)
             # Its verification would hold up a checkpoint, but nothing of a restart is in one.
             report = participant.readiness()
-            during_verify.append((report.ready, report.restarts, len(await participant.export(None))))
+            during_verify.append(
+                (report.ready, report.restarts, len(await participant.export(None, checkpoint_id="c")))
+            )
             return _mock_response(kwargs["json"] | {"reward": 1.0})
 
         server_client.post = AsyncMock(side_effect=post)
@@ -1976,7 +1978,7 @@ async def _session_after_two_activations() -> tuple[str, dict]:
     for question in ("first?", "second?"):
         assert client.post("/ng-rollout/rollout/v1/responses", json={"input": question}).status_code == 200
     session_id = seed.json()["agent_session_id"]
-    return session_id, (await server.export_agent_sessions([session_id]))[session_id]
+    return session_id, (await server.export_agent_sessions([session_id], checkpoint_id="c"))[session_id]
 
 
 async def _restore_and_activate(session_id: str, session: dict, boundary: dict | None) -> list[str]:
@@ -2134,7 +2136,7 @@ class TestCheckpointAcrossModelCalls:
         await _until(lambda: calls)
         # A second checkpoint while the restored activation waits on its model call.
         prepared = await controller.prepare(CheckpointRequest(**_checkpoint("c2")))
-        [record] = await participant.export(None)
+        [record] = await participant.export(None, checkpoint_id="c")
         await controller.resume(CheckpointRequest(**_checkpoint("c2")))
         reply.set()
         await asyncio.wait_for(activation, 5)
@@ -2169,7 +2171,7 @@ class TestCheckpointAcrossModelCalls:
         await asyncio.wait_for(held.wait(), 5)
         ready_with_the_reply = participant.ready()
         committed = await controller.commit(CommitRequest(**_checkpoint("c1", checkpoint_dir=str(tmp_path))))
-        [record] = await participant.export(None)
+        [record] = await participant.export(None, checkpoint_id="c")
         await controller.resume(CheckpointRequest(**_checkpoint("c1")))
         result = await asyncio.wait_for(activation, 5)
 
@@ -2206,7 +2208,7 @@ class TestCheckpointAcrossModelCalls:
         await asyncio.wait_for(reading_body.wait(), 5)
         # The agent server prepares after the headers arrived, while the body is still held.
         prepared = await controller.prepare(CheckpointRequest(**_checkpoint("c1") | {"deadline_ts": time.time() + 1}))
-        [record] = await participant.export(None)
+        [record] = await participant.export(None, checkpoint_id="c")
         await controller.resume(CheckpointRequest(**_checkpoint("c1")))
         model_server_resumed.set()
         result = await asyncio.wait_for(activation, 5)
@@ -2587,7 +2589,7 @@ async def test_an_activation_without_an_index_keeps_no_reply() -> None:
 async def test_a_restored_session_answered_with_its_reply_survives_a_commit_that_leaves_its_episode_out(
     tmp_path,
 ) -> None:
-    """The replayed reply claims the restored session for the live episode, so a commit no longer frees it."""
+    """The replayed reply claims the restored session for the live episode, so a commit no longer releases it."""
     server, server_client = _make_agent(False)
     request = await _restored_session(server, activations=1, boundary=None)
     participant = server.checkpoint_participant
@@ -2725,7 +2727,7 @@ async def test_a_close_cancelled_while_it_stops_the_activation_runs_the_cleanup_
     assert server.events.count("cleanup") == 1
 
 
-async def test_a_retire_that_frees_a_session_while_its_close_waits_leaves_no_receipt_behind(
+async def test_a_retire_that_releases_a_session_while_its_close_waits_leaves_no_fence_behind(
     monkeypatch: MonkeyPatch,
 ) -> None:
     server, server_client = _make_agent(False)
@@ -2758,7 +2760,7 @@ async def test_a_retire_that_frees_a_session_while_its_close_waits_leaves_no_rec
 
     assert retiring.done() and retiring.exception() is None
     assert isinstance(closing.exception(), StaleAttemptError)
-    assert _SESSION_ID not in server._session_records and _SESSION_ID not in server._closed_session_records
+    assert _SESSION_ID not in server._session_records and _SESSION_ID not in server._fenced_session_records
     assert seeded.agent_session_id == "other-session"
 
 
@@ -2872,7 +2874,7 @@ async def test_an_indexed_session_reply_and_its_replay_carry_no_trajectory_and_n
         replayed = await http.post(path, json={"input": "q"}, headers={AGENT_ACTIVATION_HEADER: "1"})
         # A caller that sends no index, such as the UserSim environment server, still reads the trajectory.
         unindexed = await http.post(path, json={"input": "q"})
-    exported = await server.export_agent_sessions([_SESSION_ID])
+    exported = await server.export_agent_sessions([_SESSION_ID], checkpoint_id="c")
 
     assert original.status_code == 200 and "_ng_trajectory" not in original.json()
     assert replayed.content == original.content
@@ -2893,7 +2895,7 @@ async def test_an_indexed_reply_is_kept_unserialized_until_a_replay_or_an_export
         original = await http.post(path, json={"input": "q"}, headers={AGENT_ACTIVATION_HEADER: "1"})
         kept = server._session_state(_SESSION_ID).completed_reply["response"]
         replayed = await http.post(path, json={"input": "q"}, headers={AGENT_ACTIVATION_HEADER: "1"})
-    exported = (await server.export_agent_sessions([_SESSION_ID]))[_SESSION_ID]["completed_reply"]
+    exported = (await server.export_agent_sessions([_SESSION_ID], checkpoint_id="c"))[_SESSION_ID]["completed_reply"]
 
     # The normal path keeps the response object; nothing is dumped until a replay or an export.
     assert isinstance(kept, NeMoGymResponse)
@@ -2982,7 +2984,7 @@ class _WeatherResources(SimpleResourcesServer):
     async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
         return BaseVerifyResponse(**body.model_dump(), reward=1.0)
 
-    async def export_session_states(self, session_ids: list[str]) -> dict:
+    async def export_session_states(self, session_ids: list[str], *, checkpoint_id: str) -> dict:
         return {session_id: self.calls[session_id] for session_id in session_ids if session_id in self.calls}
 
     async def restore_session_states(self, states: dict) -> None:
@@ -3626,3 +3628,97 @@ async def test_an_unreadable_selected_failure_gets_no_resend_and_no_session_repl
         )
     assert client.post.await_count == 1
     assert caught.value.headers[FailureHeader.NAME] == value, "the original report travels on unchanged"
+
+
+def test_tool_output_images_reach_the_model_in_user_messages_after_the_turn_s_tool_outputs() -> None:
+    """A tool reply's images leave its function_call_output and follow all of the turn's outputs, as user messages."""
+    server, server_client = _make_agent(False)
+    image_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+
+    def model_reply(response_id: str, output: list[dict]) -> MagicMock:
+        return _mock_response(
+            {
+                "id": response_id,
+                "created_at": 0,
+                "model": "m",
+                "object": "response",
+                "output": output,
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+        )
+
+    def function_call(call_id: str, name: str) -> dict:
+        return {
+            "type": "function_call",
+            "id": f"fc_{call_id}",
+            "call_id": call_id,
+            "name": name,
+            "arguments": json.dumps({"image_index": 0}),
+            "status": "completed",
+        }
+
+    replies = {
+        # Some backends emit several calls in one turn even with parallel_tool_calls off.
+        "/v1/responses": [
+            model_reply("first", [function_call("call_1", "grayscale"), function_call("call_2", "invert")]),
+            _message_response("second"),
+        ],
+        "/grayscale": [
+            _mock_response(
+                content=json.dumps(
+                    {
+                        "ok": True,
+                        "new_image_index": 1,
+                        "tool_output_images": [{"image_url": image_url, "label": "Image 1"}],
+                    }
+                )
+            )
+        ],
+        "/invert": [_mock_response(content=json.dumps({"ok": False, "error": "no such image"}))],
+    }
+    server_client.post.side_effect = lambda *, url_path, **_: replies[url_path].pop(0)
+
+    response = TestClient(server.setup_webserver()).post(
+        "/v1/responses", json={"input": [{"role": "user", "content": "Look closer."}]}
+    )
+
+    assert response.status_code == 200, response.text
+    model_calls = [c.kwargs for c in server_client.post.call_args_list if c.kwargs["url_path"] == "/v1/responses"]
+    turn = [item.model_dump(exclude_none=True) for item in model_calls[1]["json"].input[1:]]
+    assert [(item["type"], item.get("call_id") or item.get("role")) for item in turn] == [
+        ("function_call", "call_1"),
+        ("function_call", "call_2"),
+        ("function_call_output", "call_1"),
+        ("function_call_output", "call_2"),
+        ("message", "user"),
+    ]
+    assert json.loads(turn[2]["output"]) == {"ok": True, "new_image_index": 1}
+    assert json.loads(turn[3]["output"]) == {"ok": False, "error": "no such image"}
+    assert turn[4]["content"] == [
+        {"type": "input_text", "text": "Image 1"},
+        {"type": "input_image", "image_url": image_url, "detail": "auto"},
+    ]
+    # The reply keeps the images too, so a trainer sees what the model saw.
+    assert response.json()["output"][-2]["content"][1]["image_url"] == image_url
+
+
+@pytest.mark.parametrize(
+    "tool_output",
+    ["grep: tool_output_images: No such file or directory", '{\n  "stdout": "tool_output_images"\n}'],
+)
+def test_a_tool_output_that_only_names_the_image_key_stays_unchanged(tool_output: str) -> None:
+    from responses_api_agents.simple_agent.app import _split_tool_output_images
+
+    assert _split_tool_output_images(tool_output) == (tool_output, [])
+
+
+def test_a_tool_output_with_images_keeps_the_json_format_of_a_reply_without_images() -> None:
+    from nemo_gym.core import TOOL_OUTPUT_IMAGES_KEY
+    from responses_api_agents.simple_agent.app import _split_tool_output_images
+
+    rest, images = _split_tool_output_images(
+        json.dumps({"ok": False, "error": "图像 index 7", TOOL_OUTPUT_IMAGES_KEY: None})
+    )
+    assert (rest, images) == ('{"ok":false,"error":"图像 index 7"}', [])

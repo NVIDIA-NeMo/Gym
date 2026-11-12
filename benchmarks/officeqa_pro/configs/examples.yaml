@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Five example questions. They use the same PDF corpus, prompt, sandbox and OpenCode harness as the benchmark.
+config_paths:
+- benchmarks/officeqa_pro/config.yaml
+officeqa_pro_workspace_root: benchmarks/officeqa_pro/data/example-runtime
+prepare_script_args:
+  examples: true
+  source_csv: null
+  output_fpath: benchmarks/officeqa_pro/data/example.jsonl
+officeqa_pro_resources_server:
+  resources_servers:
+    officeqa:
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: benchmarks/officeqa_pro/data/example.jsonl
+        prepare_script: benchmarks/officeqa_pro/prepare.py
+        num_repeats: 1
+        taskset: officeqa_pro_examples
+        license: Apache 2.0
+environment_server_routes:
+  officeqa_pro_examples: officeqa_pro_environment_server

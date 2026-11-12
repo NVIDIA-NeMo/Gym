@@ -29,6 +29,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.workplace_assistant.utils import get_tools, is_correct
 
 
@@ -190,7 +191,7 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
         finally:
             self.session_id_to_tool_env.pop(session_id, None)
 
-    async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
+    async def export_session_states(self, session_ids: list[str], *, checkpoint_id: str) -> dict[str, JsonValue]:
         # A session verify already discarded, for example because it raised, is left out.
         tool_envs = {
             session_id: self.session_id_to_tool_env[session_id]
@@ -221,3 +222,6 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     WorkbenchResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = WorkbenchResourcesServer.run_webserver()  # noqa: F401

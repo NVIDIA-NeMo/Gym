@@ -1012,6 +1012,8 @@ async def test_run_routes_rollout_5xx_to_transient_failure_sidecar_contract() ->
     assert result_payload[NG_FAILURE_CLASS_KEY] == TRANSIENT_FAILURE_CLASS
     assert result_payload["error_class"] == TRANSIENT_FAILURE_CLASS
     assert result_payload["error_stage"] == "rollout"
+    assert result_payload["failure_kind"] == "agent_route_failed"
+    assert result_payload["failure_reason"].startswith("rollout failed: ")
     assert "503" in result_payload["error_message"]
     assert result.mask_sample is True
     assert "instance_config" not in result.model_dump()
@@ -1070,6 +1072,8 @@ async def test_run_routes_seed_rate_limit_to_transient_failure_sidecar_contract(
 
     assert result_payload[NG_FAILURE_CLASS_KEY] == TRANSIENT_FAILURE_CLASS
     assert result_payload["error_stage"] == "seed_session"
+    assert result_payload["failure_kind"] == "environment_server_failed"
+    assert result_payload["failure_reason"].startswith("seed_session failed: ")
     assert "429" in result_payload["error_message"]
     assert result.mask_sample is True
     assert agent.server_client.post.await_count == 1
@@ -1100,6 +1104,8 @@ async def test_run_routes_verify_5xx_to_transient_failure_sidecar_contract() -> 
 
     assert result_payload[NG_FAILURE_CLASS_KEY] == TRANSIENT_FAILURE_CLASS
     assert result_payload["error_stage"] == "verify"
+    assert result_payload["failure_kind"] == "environment_server_failed"
+    assert result_payload["failure_reason"].startswith("verify failed: ")
     assert "502" in result_payload["error_message"]
     assert result.mask_sample is True
     assert agent.server_client.post.await_count == 4
@@ -1217,4 +1223,5 @@ async def test_responses_sums_policy_usage_and_details_across_calls(second_usage
 
     model_response = await agent.responses(RequestStub(), Response(), body)
 
+    expected = expected | {"input_tokens_details": expected["input_tokens_details"] | {"cache_write_tokens": None}}
     assert model_response.usage.model_dump(mode="json") == expected

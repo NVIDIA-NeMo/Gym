@@ -22,6 +22,7 @@ single-chain policy. An unconfirmed declaration masks the rollout instead.
 """
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -77,7 +78,13 @@ def _tool_call_item(call_id: str) -> dict:
 
 
 def _tool_call_entry(
-    call_id: str, prompt: list[int], gen: list[int], tool_call_id: str, *, chat: bool = False
+    call_id: str,
+    prompt: list[int],
+    gen: list[int],
+    tool_call_id: str,
+    *,
+    chat: bool = False,
+    parent_call_id: str | None = None,
 ) -> TokenEntry:
     """An entry whose recorded output is one tool call: a Responses ``function_call`` item, or with
     ``chat`` the chat form, where the call is nested in the assistant message's ``tool_calls``."""
@@ -104,7 +111,8 @@ def _tool_call_entry(
         output_items=[item],
         token_item_index=0,
     )
-    stamp_lineage(entry, None, parent_resolution=ParentResolutionStatus.ROOT)
+    status = ParentResolutionStatus.RESOLVED if parent_call_id else ParentResolutionStatus.ROOT
+    stamp_lineage(entry, parent_call_id, parent_resolution=status)
     return entry
 
 
@@ -402,6 +410,156 @@ def test_a_mutated_echo_matches_nothing():
     assert not att.attributed and "no_content_match" in att.reason
 
 
+@pytest.mark.parametrize(("served_tool", "attributed"), [("exec_command", True), ("apply_patch", False)])
+def test_tool_id_reading_counts_an_unavailable_tool_placeholder_under_its_served_name(served_tool, attributed):
+    # A transcript can end on a call OpenCode echoes as its `invalid` tool because it does not offer the tool the
+    # model called. The tool-ID reading matches it to the served call it names, and only to that one. The item-ID
+    # witness reads the same placeholder by its served call id.
+    a = _entry("a", [1, 2], [3], text="plan")
+    b = _tool_call_entry("b", [1, 2, 3, 4], [5], "chatcmpl-tool-b")
+    placeholder = {
+        "type": "function_call",
+        "call_id": "chatcmpl-tool-b",
+        "name": "invalid",
+        "arguments": json.dumps(
+            {"tool": served_tool, "error": f"Model tried to call unavailable tool '{served_tool}'."}
+        ),
+        "status": "completed",
+    }
+    response = {
+        "output": [
+            _assistant_item("plan"),
+            {"type": "function_call_output", "call_id": "earlier", "output": "ok"},
+            placeholder,
+        ]
+    }
+    verdict = resolve_terminal([a, b], response)
+    if attributed:
+        assert (verdict.model_call_id, verdict.method) == ("b", "item_id")
+        assert "corroborated_by=content_tool_ids" in verdict.reason
+    else:
+        assert not verdict.attributed
+        assert "item_id_content_mismatch" in verdict.reason and "no_content_match" in verdict.reason
+
+
+def _mixed_turn_entry(call_id: str, prompt: list[int], gen: list[int]) -> TokenEntry:
+    """An entry whose output calls a tool OpenCode does not offer and, in the same turn, `invalid` itself."""
+    entry = TokenEntry(
+        capture_key="r",
+        model_call_id=call_id,
+        prompt_token_ids=prompt,
+        generation_token_ids=gen,
+        generation_log_probs=[-0.1] * len(gen),
+        output_items=[
+            {"type": "function_call", "call_id": "x", "name": "exec_command", "arguments": '{"cmd": "ls"}'},
+            {
+                "type": "function_call",
+                "call_id": "y",
+                "name": "invalid",
+                "arguments": json.dumps({"tool": "read", "error": "bad"}),
+            },
+        ],
+        token_item_index=0,
+    )
+    stamp_lineage(entry, None, parent_resolution=ParentResolutionStatus.ROOT)
+    return entry
+
+
+@pytest.mark.parametrize("distinct_sibling", [False, True])
+def test_tool_id_reading_reads_each_placeholder_in_a_mixed_turn_on_its_own(distinct_sibling):
+    # OpenCode echoes the exec_command call as its placeholder, and the model's own `invalid` call with rewritten
+    # arguments. Only reading the first one matches the served turn.
+    a = _entry("a", [1, 2], [3], text="plan")
+    entries = [a, _mixed_turn_entry("b", [1, 2, 3, 4], [5])]
+    if distinct_sibling:
+        entries.append(_mixed_turn_entry("c", [1, 2, 3, 4], [6]))
+    echoed = [
+        {
+            "type": "function_call",
+            "call_id": "x",
+            "name": "invalid",
+            "arguments": json.dumps({"tool": "exec_command", "error": "unavailable"}),
+            "status": "completed",
+        },
+        {
+            "type": "function_call",
+            "call_id": "y",
+            "name": "invalid",
+            "arguments": json.dumps({"tool": "read", "error": "rewritten"}),
+            "status": "completed",
+        },
+    ]
+    response = {
+        "output": [_assistant_item("plan"), {"type": "function_call_output", "call_id": "earlier", "output": "ok"}]
+        + echoed
+    }
+    verdict = resolve_terminal(entries, response)
+    if distinct_sibling:
+        # Two different token sequences match the same turn and the same last call id, so both witnesses abstain.
+        assert not verdict.attributed
+        assert "tool_ids_ambiguous" in verdict.reason and "item_id_ambiguous" in verdict.reason
+    else:
+        # The item-ID witness reads the last placeholder as the model's own `invalid` call.
+        assert (verdict.model_call_id, verdict.method) == ("b", "item_id")
+        assert "corroborated_by=content_tool_ids" in verdict.reason
+
+
+def _calls_entry(call_id: str, gen: list[int], calls: list[dict]) -> TokenEntry:
+    entry = TokenEntry(
+        capture_key="r",
+        model_call_id=call_id,
+        prompt_token_ids=[1, 2, 3, 4],
+        generation_token_ids=gen,
+        generation_log_probs=[-0.1] * len(gen),
+        output_items=calls,
+        token_item_index=0,
+    )
+    stamp_lineage(entry, None, parent_resolution=ParentResolutionStatus.ROOT)
+    return entry
+
+
+def _placeholder_call(call_id: str, error: str) -> dict:
+    return {
+        "type": "function_call",
+        "call_id": call_id,
+        "name": "invalid",
+        "arguments": json.dumps({"tool": "read", "error": error}),
+    }
+
+
+@pytest.mark.parametrize("calls", [6, 7])
+def test_tool_id_reading_abstains_unless_every_placeholder_reading_was_compared(calls):
+    # Six placeholders: the turn matches `b` (all read) and `c` (only the first read), so the reading abstains.
+    # Seven: the readings are not all tried, so the reading abstains rather than pick from some of them.
+    # The item-ID witness reads only the last call, whose placeholder it reads both ways.
+    ids = [f"t{index}" for index in range(calls)]
+    read = {"type": "function_call", "name": "read", "arguments": "{}"}
+    entries = [
+        _entry("a", [1, 2], [3], text="plan"),
+        _calls_entry("b", [5], [read | {"call_id": call_id} for call_id in ids]),
+    ]
+    if calls == 6:
+        entries.append(
+            _calls_entry("c", [6], [read | {"call_id": ids[0]}] + [_placeholder_call(i, "bad") for i in ids[1:]])
+        )
+    echoed = [_placeholder_call(call_id, "rewritten") | {"status": "completed"} for call_id in ids]
+    response = {
+        "output": [_assistant_item("plan"), {"type": "function_call_output", "call_id": "earlier", "output": "ok"}]
+        + echoed
+    }
+    verdict = resolve_terminal(entries, response)
+    if calls == 6:
+        # `b` and `c` both recorded the last call's id, under names the placeholder can stand for.
+        assert not verdict.attributed
+        assert "tool_ids_ambiguous" in verdict.reason and "item_id_ambiguous" in verdict.reason
+        # The same six-call turn with only `b` captured is attributed to it.
+        assert resolve_terminal(entries[:2], response).model_call_id == "b"
+    else:
+        # The tool-ID reading still abstains, so nothing corroborates the item-ID witness.
+        assert (verdict.model_call_id, verdict.method) == ("b", "item_id")
+        assert "no_content_match" in verdict.reason and "corroborated_by" not in verdict.reason
+
+
 def test_no_response_object_abstains():
     att = resolve_terminal(_chain_entries(), None)
     assert not att.attributed and "no_response_object" in att.reason
@@ -591,6 +749,193 @@ def test_item_id_with_different_content_does_not_attribute():
     verdict = resolve_terminal([a], response)
     assert not verdict.attributed
     assert "item_id_content_mismatch" in verdict.reason
+
+
+def _opencode_tool_part(call_id: str, tool: str, tool_input: dict, *, error: str | None = None) -> list[dict]:
+    """The call and result items Gym's opencode_agent emits for one tool part of an OpenCode session export."""
+    status = "completed" if error is None else "incomplete"
+    call = {
+        "type": "function_call",
+        "id": None,
+        "call_id": call_id,
+        "name": tool,
+        "arguments": json.dumps(tool_input),
+        "status": status,
+        "namespace": None,
+    }
+    result = {
+        "type": "function_call_output",
+        "id": None,
+        "call_id": call_id,
+        "output": error or "ok",
+        "status": status,
+    }
+    return [call, result]
+
+
+def _unavailable_tool_part(call_id: str, served_tool: str) -> list[dict]:
+    """A call OpenCode echoes as its `invalid` tool, with that tool's error as the result."""
+    return _opencode_tool_part(call_id, "invalid", {"tool": served_tool, "error": "unavailable"}, error="unavailable")
+
+
+@pytest.mark.parametrize(("served_tool", "attributed"), [("exec_command", True), ("apply_patch", False)])
+def test_item_id_witness_reads_a_final_unavailable_tool_placeholder_followed_by_its_error(served_tool, attributed):
+    """The session ends on a call to a tool OpenCode does not offer and that call's error. The placeholder keeps
+    the served call id, so the item-ID witness names the served call when the placeholder names its tool, and the
+    auxiliary root no longer masks the rollout. No other witness can: the response id was minted by the agent
+    server, and the content readings skip a transcript that ends in a tool result."""
+    a = _entry("a", [1, 2], [3], text="plan")
+    b = _tool_call_entry("b", [1, 2, 3, 4], [5], "chatcmpl-tool-b", parent_call_id="a")
+    aux = _entry("aux", [90, 91], [92], text="A Title", response_id="resp_aux", created_at=1.0)
+    response = {
+        "id": "resp_minted_by_the_agent_server",
+        "output": [
+            _assistant_item("plan", item_id="msg_minted"),
+            *_unavailable_tool_part("chatcmpl-tool-b", served_tool),
+        ],
+    }
+    verdict = resolve_terminal([a, b, aux], response)
+    built = _assemble("r", [a, b, aux], "prefix_merging", "m", verified_response=response)
+    if attributed:
+        assert (verdict.model_call_id, verdict.method) == ("b", "item_id")
+        assert built[MASK_SAMPLE_KEY] is False
+        assert built["metrics"]["terminal_attribution"]["chain"] == "delivered"
+        delivered = [i for i in built["rebuilt_response"]["output"] if i.get("generation_token_ids")]
+        assert [i["generation_token_ids"] for i in delivered] == [[3], [5]]
+    else:
+        assert not verdict.attributed and "item_id_content_mismatch" in verdict.reason
+        assert built[MASK_SAMPLE_KEY] is True
+
+
+@pytest.mark.parametrize(
+    ("recorded_name", "recorded_arguments", "attributed"),
+    [
+        ("read", '{"filePath": "a"}', True),
+        # The model called `invalid` itself, and OpenCode rewrote the error it passed.
+        ("invalid", json.dumps({"tool": "read", "error": "bad"}), True),
+        ("write", '{"filePath": "a"}', False),
+    ],
+)
+def test_item_id_witness_reads_a_placeholder_ending_a_turn_with_interleaved_results(
+    recorded_name, recorded_arguments, attributed
+):
+    # OpenCode emits a two-call turn as call/result pairs, so the turn's model-authored items are not contiguous.
+    a = _entry("a", [1, 2], [3], text="plan")
+    b = _calls_entry(
+        "b",
+        [5],
+        [
+            {"type": "function_call", "call_id": "x", "name": "exec_command", "arguments": '{"cmd": "ls"}'},
+            {"type": "function_call", "call_id": "y", "name": recorded_name, "arguments": recorded_arguments},
+        ],
+    )
+    response = {
+        "output": [
+            _assistant_item("plan"),
+            *_opencode_tool_part("x", "exec_command", {"cmd": "ls"}),
+            *_unavailable_tool_part("y", "read"),
+        ]
+    }
+    verdict = resolve_terminal([a, b], response)
+    if attributed:
+        assert (verdict.model_call_id, verdict.method) == ("b", "item_id")
+    else:
+        assert not verdict.attributed and "item_id_content_mismatch" in verdict.reason
+
+
+@pytest.mark.parametrize(
+    ("sibling_name", "sibling_arguments", "sibling_gen", "expected"),
+    [
+        ("exec_command", '{"cmd": "ls"}', [6], None),
+        # A recorded `invalid` call that equals the placeholder still pools with the served-name reading.
+        ("invalid", json.dumps({"tool": "exec_command", "error": "unavailable"}), [6], None),
+        # Token-identical retries are one delivered chain.
+        ("exec_command", '{"cmd": "ls"}', [5], "b"),
+    ],
+)
+def test_item_id_witness_pools_both_placeholder_readings_before_deciding(
+    sibling_name, sibling_arguments, sibling_gen, expected
+):
+    a = _entry("a", [1, 2], [3], text="plan")
+    b = _tool_call_entry("b", [1, 2, 3, 4], [5], "chatcmpl-tool-b")
+    sibling = _calls_entry(
+        "c",
+        sibling_gen,
+        [
+            {
+                "type": "function_call",
+                "call_id": "chatcmpl-tool-b",
+                "name": sibling_name,
+                "arguments": sibling_arguments,
+            }
+        ],
+    )
+    response = {"output": [_assistant_item("plan"), *_unavailable_tool_part("chatcmpl-tool-b", "exec_command")]}
+    verdict = resolve_terminal([a, b, sibling], response)
+    assert verdict.model_call_id == expected
+    if expected is None:
+        assert "item_id_ambiguous" in verdict.reason
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"tool": "exec_command", "error": "unavailable", "detail": "extra"},
+        {"tool": "exec_command", "error": 5},
+        {"tool": "exec_command"},
+    ],
+)
+def test_item_id_witness_compares_an_invalid_call_without_the_placeholder_shape_strictly(arguments):
+    a = _entry("a", [1, 2], [3], text="plan")
+    b = _tool_call_entry("b", [1, 2, 3, 4], [5], "chatcmpl-tool-b")
+    response = {
+        "output": [
+            _assistant_item("plan"),
+            *_opencode_tool_part("chatcmpl-tool-b", "invalid", arguments, error="unavailable"),
+        ]
+    }
+    verdict = resolve_terminal([a, b], response)
+    assert not verdict.attributed and "item_id_content_mismatch" in verdict.reason
+
+
+def test_item_id_witness_compares_a_placeholder_strictly_when_an_earlier_call_used_its_id():
+    """Without its arguments, a placeholder whose call id the transcript already used could name the earlier call
+    when the final call was not captured, which would train a chain that lacks the real terminal turn."""
+    a = _tool_call_entry("a", [1, 2], [3], "call_0")
+    response = {
+        "output": [
+            *_opencode_tool_part("call_0", "exec_command", {"cmd": "ls"}),
+            *_unavailable_tool_part("call_0", "exec_command"),
+        ]
+    }
+    verdict = resolve_terminal([a], response)
+    assert not verdict.attributed and "item_id_content_mismatch" in verdict.reason
+
+
+def test_item_id_witness_compares_a_placeholder_strictly_when_reasoning_follows_it():
+    """A reasoning item after the placeholder's error came from a later call whose only output was reasoning, so
+    the placeholder does not name the terminal call."""
+    a = _entry("a", [1, 2], [3], text="plan")
+    b = _tool_call_entry("b", [1, 2, 3, 4], [5], "chatcmpl-tool-b", parent_call_id="a")
+    response = {
+        "output": [
+            _assistant_item("plan"),
+            *_unavailable_tool_part("chatcmpl-tool-b", "exec_command"),
+            {"type": "reasoning", "id": "rs_c", "summary": [], "content": [{"type": "reasoning_text", "text": "hm"}]},
+        ]
+    }
+    verdict = resolve_terminal([a, b], response)
+    assert not verdict.attributed and "item_id_content_mismatch" in verdict.reason
+
+
+def test_item_id_witness_placeholder_check_reads_only_the_last_calls_own_fields():
+    # The strict comparison never reads a call's `tool_calls`, and the placeholder check must not either:
+    # resolve_terminal never raises.
+    a = _entry("a", [1, 2], [3], text="plan")
+    b = _tool_call_entry("b", [1, 2, 3, 4], [5], "chatcmpl-tool-b", parent_call_id="a")
+    response = {"output": [_assistant_item("plan"), {**_tool_call_item("chatcmpl-tool-b"), "tool_calls": 5}]}
+    verdict = resolve_terminal([a, b], response)
+    assert (verdict.model_call_id, verdict.method) == ("b", "item_id")
 
 
 def test_unattributed_aux_call_masks_and_picks_the_wrong_root():

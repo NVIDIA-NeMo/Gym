@@ -11,7 +11,13 @@ import pytest
 from pydantic import ValidationError
 
 from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
-from nemo_gym.core import AGENT_LIMIT, MODEL_REQUEST_ERROR, MODEL_TRANSPORT_ERROR, PROVIDER_UNAVAILABLE
+from nemo_gym.core import (
+    AGENT_INVALID_OUTPUT,
+    AGENT_LIMIT,
+    MODEL_REQUEST_ERROR,
+    MODEL_TRANSPORT_ERROR,
+    PROVIDER_UNAVAILABLE,
+)
 from resources_servers.critpt_custom_grader.submission import (
     FinishRequest,
     Submission,
@@ -21,6 +27,7 @@ from resources_servers.critpt_custom_grader.submission import (
 
 
 SOURCE = "def solve(value):\n    return value + 1"
+ABC_SHA256 = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"  # pragma: allowlist secret
 
 
 def _finish(answer=SOURCE, *, call_id="finish-1"):
@@ -56,13 +63,16 @@ def _outcome(kind, *, status_code=None):
     return {AGENT_OUTCOME_METADATA_KEY: AgentOutcome(failure_kind=kind, status_code=status_code).model_dump_json()}
 
 
+def _failed_compaction(output=None, **extra):
+    """The response of an episode the agent ended because every context-compaction summary was unusable."""
+    metadata = {**_outcome(AGENT_INVALID_OUTPUT), "stop_reason": "compaction_failed"}
+    return _response(output, status="failed", metadata=metadata, **extra)
+
+
 def test_acknowledgement_binds_exact_answer_bytes_and_contains_no_answer_text():
     body = FinishRequest(reason="done", derivation="example", answer="abc")
     acknowledgement = finish_acknowledgement(body)
-    assert json.loads(acknowledgement) == {
-        "protocol": "critpt-finish-v1",
-        "answer_sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
-    }
+    assert json.loads(acknowledgement) == {"protocol": "critpt-finish-v1", "answer_sha256": ABC_SHA256}
     assert finish_acknowledgement(body.model_copy(update={"reason": "checked"})) == acknowledgement
     assert finish_acknowledgement(body.model_copy(update={"answer": "abc\n"})) != acknowledgement
 
@@ -245,6 +255,7 @@ def test_an_incomplete_acknowledgement_is_not_a_completed_submission(field):
         _response(status="incomplete", metadata={"stop_reason": "max_turns"}),
         _response(status="incomplete", incomplete_details={"reason": "max_output_tokens"}),
         _response(status="failed", metadata={**_outcome(AGENT_LIMIT), "stop_reason": "max_turns"}),
+        _failed_compaction(),
     ],
 )
 def test_completed_no_answers_and_explicit_response_budget_exhaustion_score_zero(response):
@@ -285,6 +296,8 @@ def test_content_filter_does_not_override_explicit_failure_metadata(metadata):
         _response(status="failed", metadata=_outcome(MODEL_REQUEST_ERROR, status_code=422)),
         _response(metadata=_outcome(MODEL_TRANSPORT_ERROR)),
         _response(metadata={"stop_reason": "max_turns"}, error={"code": "server_error", "message": "unavailable"}),
+        _failed_compaction(error={"code": "server_error", "message": "unavailable"}),
+        _response(metadata=_outcome(AGENT_INVALID_OUTPUT)),
     ],
 )
 def test_failures_and_unexplained_or_wall_time_incompletion_are_unscorable(response):
@@ -311,3 +324,7 @@ def test_interruption_evidence_overrides_an_earlier_acknowledged_answer(stop_rea
 def test_a_limit_cannot_be_used_to_accept_a_contradictory_acknowledged_finish():
     response = _response(_finish(), status="incomplete", metadata={"stop_reason": "max_turns"})
     assert extract_finish_source(response) == Submission(None, "submission_invalid", False)
+
+
+def test_a_failed_compaction_cannot_be_used_to_accept_a_contradictory_acknowledged_finish():
+    assert extract_finish_source(_failed_compaction(_finish())) == Submission(None, "submission_invalid", False)

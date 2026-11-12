@@ -72,6 +72,8 @@ def optimization_request(text, subtask="logp", src="CCO"):
         ("[PRODUCT_CONSTRUCTION]\nPredicted SMILES: CCCC\nAnswer: CCCC", "CCCC", 1.0),
         ('Step 3 [PRODUCT_CONSTRUCTION]: PREDICTED_SMILES("CCCC")\nAnswer: CCCC', "CCCC", 1.0),
         ("[PRODUCT_CONSTRUCTION]\nPredicted SMILES: CCO\nAnswer: CCO", "CCO", 0.0),
+        ("[PRODUCT_CONSTRUCTION]\nPredicted SMILES: CCCC\nAnswer: CCO", "CCO", 0.0),
+        ("[PRODUCT_CONSTRUCTION]\nPredicted SMILES: CCCC", None, 0.0),
         ("[PRODUCT_CONSTRUCTION]\nPredicted SMILES: invalid\nAnswer: invalid", "invalid", 0.0),
         ("I cannot answer.", None, 0.0),
         ("Answer: CCCC", None, 0.0),
@@ -126,6 +128,47 @@ async def test_optimization_layer3_does_not_inherit_gold(optimization_server):
         assert result.scoring_error is None, result.failure_reason
         assert result.reward == 0 and result.layer3_step_score == 0
         assert result.layer3_type1 is None and result.layer3_type2 is None
+    finally:
+        optimization_server.config.run_layer3 = False
+
+
+async def test_optimization_claims_describe_the_model_product(optimization_server):
+    text = """[PRODUCT_CONSTRUCTION]
+Predicted SMILES: Clc1ccccc1
+Answer: Clc1ccccc1
+Step 1 [SCAFFOLD_IDENTIFICATION]: SCAFFOLD_SMILES("c1ccccc1")
+Step 2 [EDIT_PLAN]: EDIT_PLAN(remove="O"; add="Cl")
+Step 3 [PRODUCT_CONSTRUCTION]: PREDICTED_SMILES("Clc1ccccc1")
+Step 4 [SCAFFOLD_PRESERVATION]: SCAFFOLD_PRESERVED(yes)
+Step 5 [FG_CHANGE_VERIFICATION]: FG_CHANGE_CONSISTENT(yes)
+Answer: Clc1ccccc1"""
+    body = optimization_request(text, src="Oc1ccccc1")
+    # The reference removes the ring; the model correctly keeps it.
+    body.verifier_metadata.upstream_record["step4_scaffold_claimed"] = "no"
+    optimization_server.config.run_layer3 = True
+    try:
+        result = await optimization_server.verify(body)
+        assert result.scoring_error is None, result.failure_reason
+        assert result.reward == 1
+        for step in ("step2_editplan", "step4_preserved", "step5_fg"):
+            assert result.optimization_metrics[f"layer3_{step}_match"] is True
+
+        body.response = response(text.replace('remove="O"; add="Cl"', 'remove="N"; add="Br"'))
+        result = await optimization_server.verify(body)
+        assert result.optimization_metrics["layer3_step2_editplan_match"] is False
+        assert result.optimization_metrics["layer3_step5_fg_match"] is False
+
+        # A true 'no' claim also earns credit, and final answers cannot be
+        # rescued by valid Part A or Part B intermediate predictions.
+        body.response = response(
+            text.replace("Clc1ccccc1", "CCCC").replace("SCAFFOLD_PRESERVED(yes)", "SCAFFOLD_PRESERVED(no)")
+        )
+        result = await optimization_server.verify(body)
+        assert result.optimization_metrics["layer3_step4_preserved_match"] is True
+        body.response = response(text.rsplit("Answer:", 1)[0] + "Answer: invalid")
+        result = await optimization_server.verify(body)
+        assert result.reward == 0
+        assert result.optimization_metrics["layer3_step3_product_match"] == 0
     finally:
         optimization_server.config.run_layer3 = False
 

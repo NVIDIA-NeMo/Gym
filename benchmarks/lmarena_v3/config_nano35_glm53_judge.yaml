@@ -1,0 +1,8 @@
+# Same as config_nano35_gemini38flash_judge.yaml but using GLM-5.3 as judge.
+config_paths:
+  - benchmarks/lmarena_v3/config_nano35_gemini38flash_judge.yaml
+
+judge_model:
+  responses_api_models:
+    vllm_model:
+      model: nvidia/zai-org/glm-5.3

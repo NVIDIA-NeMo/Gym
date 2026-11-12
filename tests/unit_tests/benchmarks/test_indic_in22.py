@@ -233,11 +233,11 @@ def test_manifest_is_discoverable_under_its_catalog_path(monkeypatch: pytest.Mon
 def test_gen_and_conv_compose_with_separate_preparation(config_names, monkeypatch, tmp_path) -> None:
     import importlib
 
-    from nemo_gym.cli.eval import _datasets_to_prepare
+    from nemo_gym.environment.benchmark_preparation import datasets_to_prepare
     from nemo_gym.environment.manifest import load_manifest
 
     config = _resolve_cli_config(config_names)
-    datasets = _datasets_to_prepare(OmegaConf.create(config))
+    datasets = datasets_to_prepare(OmegaConf.create(config))
     assert {dataset.name for dataset in datasets} == {"in22_gen", "in22_conv"}
     manifest = load_manifest(BENCHMARK_DIR / "manifest.yaml")
     assert manifest.canonical_split == "benchmark"

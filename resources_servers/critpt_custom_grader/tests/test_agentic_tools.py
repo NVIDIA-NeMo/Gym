@@ -3,21 +3,23 @@
 """Offline execution lifecycle tests; commands run only in the test provider's temporary directories."""
 
 import asyncio
-import importlib
-import importlib.util
 import shlex
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
-from nemo_gym.core import EpisodeId, TaskId
+from nemo_gym.client import ServerClient
+from nemo_gym.core import SESSION_EXPIRED, EpisodeId, TaskId
 from nemo_gym.sandbox import SandboxExecResult, SandboxHandle, SandboxSpec, SandboxStatus
 from nemo_gym.server_runtime import (
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
     ResourcesSessionConflictError,
     ResourcesSessionLostError,
+    check_resources_session_contract,
 )
+from resources_servers.critpt_custom_grader import agentic_tools
 
 
 class DirectoryProvider:
@@ -82,9 +84,7 @@ class DirectoryProvider:
 
 @pytest.fixture
 def api():
-    name = "resources_servers.critpt_custom_grader.agentic_tools"
-    assert importlib.util.find_spec(name) is not None, "offline execution session helper is not implemented"
-    return importlib.import_module(name)
+    return agentic_tools
 
 
 def seed(session="s1", *, task="one", episode="r1", data=None):
@@ -175,6 +175,38 @@ async def test_close_before_seed_and_wrong_episode_are_fenced(make_sessions):
     await sessions.shutdown()
 
 
+def test_execution_sessions_follow_the_resources_session_contract(make_sessions):
+    from resources_servers.critpt_custom_grader import app as adapter
+
+    sessions, provider = make_sessions()
+    config = adapter.CritPtCustomGraderConfig(
+        host="127.0.0.1",
+        port=8000,
+        name="synthetic-grader",
+        entrypoint="app.py",
+        sandbox_spec={"image": "example/grader:test"},
+        startup_probe=False,
+        answer_source="finish_tool",
+        agentic_execution={"sandbox_provider": "execution", "sandbox_spec": {"image": "synthetic:fixture"}},
+    )
+    server = adapter.CritPtCustomGraderServer(config=config, server_client=MagicMock(spec=ServerClient))
+    # Startup builds the sessions inside the lifespan, which the contract check does not run.
+    server._agentic_sessions = sessions
+    task = {
+        "problem_id": "synthetic-1",
+        "reference_source": "def solve(value):\n    return value\n",
+        "entrypoint": "solve",
+        "test_cases": [{"input": [1], "output": "synthetic"}],
+    }
+    check_resources_session_contract(
+        server.setup_webserver(),
+        seed("contract-session", data=task),
+        keeps_state=True,
+        holds_state=lambda resources_session_id: resources_session_id in sessions._sessions,
+    )
+    assert len(provider.created) == 2 and not provider.live
+
+
 async def test_failed_stop_remains_retryable_but_cannot_execute_or_reseed(make_sessions):
     sessions, provider = make_sessions()
     await sessions.seed(seed())
@@ -263,6 +295,16 @@ async def test_command_limit_is_repairable_and_capacity_is_bounded(make_sessions
     await sessions.shutdown()
 
 
+async def test_command_that_outgrows_one_exec_argument_is_repairable(make_sessions):
+    sessions, _ = make_sessions()
+    await sessions.seed(seed())
+    # Within max_command_bytes, but shell-quoting its 60,000 single quotes outgrows one exec argument.
+    result = await sessions.execute("s1", "printf %s " + "''" * 30000)
+    assert "<error_kind>invalid_argument</error_kind>" in result
+    assert "<exit_code>0</exit_code>" in await sessions.execute("s1", "true")
+    await sessions.shutdown()
+
+
 @pytest.mark.parametrize(
     "provider,options",
     [
@@ -275,6 +317,8 @@ async def test_command_limit_is_repairable_and_capacity_is_bounded(make_sessions
             {"network_policy": {"defaultAction": "deny", "egress": [{"action": "allow", "target": "*"}]}},
         ),
         ({"e2b": {"create": {"allow_internet_access": True}}}, {}),
+        ({"e2b": {"create": {"allow_internet_access": False, "network": {"allow_out": ["192.0.2.10"]}}}}, {}),
+        ({"e2b": {"create": {"allow_internet_access": False, "custom_extension_params": {"cache": "all"}}}}, {}),
     ],
 )
 def test_egress_enabled_or_unverified_provider_is_rejected(api, provider, options):
@@ -340,8 +384,9 @@ async def test_expired_session_is_closed_instead_of_reused(api, make_sessions, m
     monkeypatch.setattr(api.time, "monotonic", lambda: now[0])
     await sessions.seed(seed())
     now[0] += 22000
-    with pytest.raises(ResourcesSessionLostError, match="expired"):
+    with pytest.raises(ResourcesSessionLostError, match="expired") as lost:
         await sessions.execute("s1", "true")
+    assert lost.value.detail["failure_kind"] == SESSION_EXPIRED
     assert not provider.live
     with pytest.raises(ResourcesSessionConflictError):
         await sessions.seed(seed())
@@ -426,6 +471,19 @@ async def test_expired_idle_session_with_failed_cleanup_keeps_its_capacity_slot(
     assert provider.live == {"1"}
     await sessions.seed(seed("s2", episode="r2"))
     assert provider.live == {"2"}
+    await sessions.shutdown()
+
+
+async def test_stopped_session_without_a_close_releases_its_capacity_slot(make_sessions):
+    sessions, provider = make_sessions(max_sessions=1)
+    provider.create_failure = True
+    with pytest.raises(RuntimeError, match="create"):
+        await sessions.seed(seed())
+    provider.create_failure = False
+    await sessions.seed(seed("s2", episode="r2"))
+    assert provider.live == {"1"}
+    with pytest.raises(ResourcesSessionConflictError, match="closed"):
+        await sessions.seed(seed())
     await sessions.shutdown()
 
 

@@ -360,3 +360,32 @@ def test_docs_only_gate_needs_successful_detection_but_no_tests():
         ["bash", "-c", command], env={"DETECT_RESULT": "success", "RUN_FULL": "false", "RUN_SERVERS": "false"}
     )
     assert completed.returncode == 0
+
+
+def test_migration_modules_have_weights_and_span_runner_shards():
+    """The expensive migration suite must remain schedulable as separate files."""
+    files = [
+        "tests/unit_tests/tooling/test_add_legacy_agent_environment_servers.py",
+        *sorted(
+            path.relative_to(ROOT).as_posix()
+            for path in (ROOT / "tests/unit_tests/tooling").glob("test_agent_environment_*.py")
+        ),
+    ]
+    durations = json.loads(DURATIONS_PATH.read_text())["files"]
+    assert len(files) > 4
+    assert all(file in durations for file in files)
+    # Other expensive suites can fill a runner first; the migration suite must
+    # span runners, not occupy every runner in the full inventory.
+    assignments = partition_files(list(durations), durations, 4)
+    assert len({assignments[file] for file in files}) > 1
+    assert set(partition_files(files, durations, 4).values()) == set(range(4))
+
+
+def test_migration_script_instances_do_not_share_patchable_state(tmp_path, monkeypatch):
+    from tests.helpers.agent_environment_migration import load_migration
+
+    first, second = load_migration(), load_migration()
+    original_root = second.RESOURCES_SERVERS_ROOT
+    monkeypatch.setattr(first, "RESOURCES_SERVERS_ROOT", tmp_path)
+    assert first.main.__globals__["RESOURCES_SERVERS_ROOT"] == tmp_path
+    assert second.main.__globals__["RESOURCES_SERVERS_ROOT"] == original_root

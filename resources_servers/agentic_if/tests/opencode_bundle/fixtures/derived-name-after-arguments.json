@@ -1,0 +1,127 @@
+{
+ "case": "derived-name-after-arguments",
+ "kind": "gateway",
+ "notes": "",
+ "spec": {
+  "schema_version": 1,
+  "harness": "opencode",
+  "task_backend": "swe",
+  "tools": {
+   "tool_descriptions": {},
+   "tool_parameter_descriptions": {},
+   "tool_interfaces": {}
+  },
+  "workspace_files": {},
+  "events": [],
+  "checks": [],
+  "provenance": {}
+ },
+ "params": {
+  "input": [
+   {
+    "content": "Fix it",
+    "role": "user",
+    "type": "message"
+   }
+  ],
+  "parallel_tool_calls": true,
+  "tool_choice": "auto",
+  "tools": []
+ },
+ "calls": [
+  {
+   "headers": {
+    "x-session-id": "root",
+    "x-opencode-assistant-message-id": "a1"
+   },
+   "opencode_request": {
+    "stream": true,
+    "messages": [
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ]
+   },
+   "upstream_reply": {
+    "sse_events": [
+     {
+      "id": "c1",
+      "choices": [
+       {
+        "index": 0,
+        "delta": {
+         "tool_calls": [
+          {
+           "index": 0,
+           "id": "x",
+           "type": "function",
+           "function": {
+            "name": "bash",
+            "arguments": "{"
+           }
+          }
+         ]
+        }
+       }
+      ]
+     },
+     {
+      "id": "c1",
+      "choices": [
+       {
+        "index": 0,
+        "delta": {
+         "tool_calls": [
+          {
+           "index": 0,
+           "function": {
+            "name": "more",
+            "arguments": "}"
+           }
+          }
+         ]
+        }
+       }
+      ]
+     }
+    ],
+    "sse_wire": "data: {\"id\": \"c1\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"id\": \"x\", \"type\": \"function\", \"function\": {\"name\": \"bash\", \"arguments\": \"{\"}}]}}]}\r\n\r\ndata: {\"id\": \"c1\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {\"name\": \"more\", \"arguments\": \"}\"}}]}}]}\r\n\r\ndata: [DONE]\r\n\r\n"
+   },
+   "returned": null,
+   "error": "ValueError: function name continued after arguments started",
+   "outgoing_request": {
+    "stream": true,
+    "messages": [
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ],
+    "tools": []
+   },
+   "opencode_request_unchanged": true
+  }
+ ],
+ "observations": [
+  {
+   "source": "model",
+   "session_id": "root",
+   "assistant_message_id": "a1",
+   "request": {
+    "stream": true,
+    "messages": [
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ],
+    "tools": []
+   },
+   "execution_tools": {}
+  }
+ ],
+ "issues": [
+  "ValueError"
+ ]
+}

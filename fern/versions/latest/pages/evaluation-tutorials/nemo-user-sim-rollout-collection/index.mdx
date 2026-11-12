@@ -5,7 +5,7 @@ position: 6
 ---
 
 <Info>
-**Goal:** Generate the 14-task NeMo User Sim validation set, run one conversation with the assistant you want
+**Goal:** Generate a 14-task English NeMo User Sim validation set, run one conversation with the assistant you want
 to evaluate, and confirm that the rollout contains a conversation and score.
 </Info>
 
@@ -13,7 +13,7 @@ to evaluate, and confirm that the rollout contains a conversation and score.
 NeMo Gym runs each scenario through your configured assistant and uses NeMo User Sim's evaluation components
 inside the Resources Server to score the assistant's responses and tool choices.
 
-Each task exercises one NeMo User Sim [probe](https://github.com/NVIDIA-NeMo/UserSim/blob/a5f676bf6dc5a73914c8a0860f97c10dd2c214ee/docs/probes.md):
+Each task exercises one NeMo User Sim [probe](https://github.com/NVIDIA-NeMo/UserSim/blob/main/docs/probes.md):
 a scenario family, such as `tool_calling` or `financial_services`, that decides what the simulated User does and
 how the Assistant is scored. The task's `probe_type` names its probe.
 
@@ -63,8 +63,9 @@ run commands from the repository root:
 source .venv/bin/activate
 ```
 
-NeMo User Sim samples personas from Nemotron-Personas version 0.0.2 on NGC. Preparation reads `en_US.parquet` from
-Data Designer's managed-assets directory and rejects any file whose SHA-256 differs from the pinned version. The
+NeMo User Sim samples personas from Nemotron-Personas on NGC, one dataset per locale. This tutorial prepares only
+`en_US` (version 0.0.2, 1.3 GB). It reads `en_US.parquet` from Data Designer's
+managed-assets directory and rejects any file whose SHA-256 differs from the pinned version. The
 default directory, `~/.data-designer/managed-assets/`, is also where `data-designer download personas` stores its
 own release, so point preparation at a dedicated directory:
 
@@ -144,12 +145,12 @@ export SUPPORT_MODEL_API_KEY="<your-api-key>"
 Ask Gym to run the validation dataset's declared preparation script:
 
 ```bash
-gym eval prepare --config environments/nemo_user_sim/config.yaml
+gym eval prepare --config environments/nemo_user_sim/config.yaml "++prepare_script_args.locales=[en_US]"
 ```
 
 The script runs the pinned NeMo User Sim materializer in an isolated dependency environment and writes
-`environments/nemo_user_sim/data/nemo_user_sim.jsonl`. Its 14 deterministic rows contain one task for each
-built-in probe. NeMo User Sim resolves the persona, scenario, tools, seed, trajectory identity, and provenance
+`environments/nemo_user_sim/data/nemo_user_sim.jsonl`. Its 14 rows contain one `en_US` task for each built-in
+probe. NeMo User Sim resolves the persona, scenario, tools, seed, trajectory identity, and provenance
 before rollout collection begins.
 
 Confirm that all probe tasks were generated and inspect them:
@@ -161,8 +162,25 @@ jq '.resolved_row | {
 }' environments/nemo_user_sim/data/nemo_user_sim.jsonl
 ```
 
+Without `locales`, preparation builds the full validation set: 56 tasks in `en_US`, `de_DE`, `ja_JP`, and
+`hi_Deva_IN`, which cover Latin, Japanese, and Devanagari scripts. The first run downloads about 10 GB of persona
+datasets and takes about 15 minutes; later runs reuse the cached files:
+
+```bash
+gym eval prepare --config environments/nemo_user_sim/config.yaml
+```
+
+To choose locales yourself, list them, for example `"++prepare_script_args.locales=[en_US,ja_JP]"`. Each locale
+downloads its own persona dataset (0.3 to 4.5 GB) the first time you ask for it. A Slurm or Kubernetes job that runs
+preparation downloads the files again unless `DATA_DESIGNER_MANAGED_ASSETS_PATH` points at storage that outlasts the
+job.
+
+The supported locales are `de_DE`, `en_GB`, `en_IN`, `en_SG`, `en_US`, `fr_FR`, `hi_Deva_IN`, `hi_Latn_IN`, `ja_JP`,
+`ko_KR`, and `pt_BR`. Each locale adds one task per probe, except that `financial_services` has no `en_SG` or `pt_BR`
+tasks.
+
 When it seeds a session, the Resources Server validates required fields, the pinned NeMo User Sim revision, and
-the Nemotron-Personas version (`"0.0.2"`, or `"synthetic"` for the committed example rows), and rejects guarded
+the Nemotron-Personas version pinned for the row's locale (or `"synthetic"` for the committed example rows), and rejects guarded
 health rows. It stores a digest of the resolved row (`resolved_row`) and compares it during verification, proving
 that the resolved row did not change during the episode.
 

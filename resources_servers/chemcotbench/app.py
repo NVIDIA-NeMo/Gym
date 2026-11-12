@@ -11,6 +11,7 @@ from typing import Any, ClassVar
 from fastapi import FastAPI
 from pydantic import Field, PrivateAttr
 
+from nemo_gym.core import VERIFIER_ERROR
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
@@ -18,6 +19,7 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import VerifierFixture
 from resources_servers.chemcotbench.scoring_pool import ScoringPool, ScoringWorkerError
 from resources_servers.chemcotbench.setup_molopt import ensure_molopt_runtime
@@ -28,6 +30,8 @@ from resources_servers.chemcotbench.verifier_fixture import create_server, invok
 
 THINK_BLOCK = re.compile(r"<(think|thinking)\b[^>]*>.*?(?:</\1\s*>|$)", re.I | re.S)
 THINK_END = re.compile(r"</(?:think|thinking)\s*>", re.I)
+# Scoring was turned off by configuration, so nothing failed; the masked zero is not a measurement.
+SCORING_DISABLED = "chemcotbench:scoring_disabled"
 
 
 class ChemCoTBenchResourcesServerConfig(BaseResourcesServerConfig):
@@ -118,6 +122,7 @@ class ChemCoTBenchResourcesServer(SimpleResourcesServer):
                 **body.model_dump(),
                 reward=0.0,
                 mask_sample=True,
+                failure_kind=SCORING_DISABLED,
                 scoring_error="molopt_disabled",
                 failure_reason="Enable enable_molopt to score molecular optimization tasks",
             )
@@ -143,6 +148,7 @@ class ChemCoTBenchResourcesServer(SimpleResourcesServer):
                 **body.model_dump(),
                 reward=0.0,
                 mask_sample=True,
+                failure_kind=VERIFIER_ERROR,
                 scoring_error="timeout",
                 failure_reason="ChemCoTBench upstream scoring timed out",
             )
@@ -151,6 +157,7 @@ class ChemCoTBenchResourcesServer(SimpleResourcesServer):
                 **body.model_dump(),
                 reward=0.0,
                 mask_sample=True,
+                failure_kind=VERIFIER_ERROR,
                 scoring_error=error.code if isinstance(error, ScoringWorkerError) else "upstream_error",
                 failure_reason=str(error)[-2000:],
             )
@@ -159,6 +166,7 @@ class ChemCoTBenchResourcesServer(SimpleResourcesServer):
                 **body.model_dump(),
                 reward=0.0,
                 mask_sample=True,
+                failure_kind=VERIFIER_ERROR,
                 scoring_error="invalid_result",
                 failure_reason=f"Invalid upstream scorer result: {type(error).__name__}",
             )
@@ -174,3 +182,6 @@ VERIFIER_FIXTURE = VerifierFixture(
 
 if __name__ == "__main__":
     ChemCoTBenchResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ChemCoTBenchResourcesServer.run_webserver()  # noqa: F401

@@ -33,6 +33,13 @@ class CheckpointSettings(BaseModel):
         description="How long past a control call's deadline a participant stays closed without hearing from "
         "the controller before it resumes on its own.",
     )
+    state_dir: Optional[str] = Field(
+        default=None,
+        description="Directory where servers record external state their checkpoints keep, such as sandbox "
+        "snapshots, so a later release can delete it, in this process or after a crash. It must be on a filesystem "
+        "every restart of the server can read, outside anything the controller deletes, and the same across "
+        "restarts. Required by servers that checkpoint sandboxes.",
+    )
 
     @model_validator(mode="after")
     def require_token_when_enabled(self) -> Self:

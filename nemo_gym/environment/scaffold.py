@@ -10,6 +10,7 @@ import keyword
 import re
 import tomllib
 from dataclasses import dataclass
+from importlib.metadata import version
 from os.path import relpath
 from pathlib import Path
 from textwrap import dedent
@@ -857,10 +858,14 @@ def _gym_checkout_root(root: Path) -> Path | None:
 
 def _requirements(directory: Path, checkout_root: Path | None) -> str:
     project_name = "gym-" + directory.name.replace("_", "-")
+    gym_dependency = "nemo-gym[dev]"
+    if checkout_root is None:
+        # Generated code uses the installed Gym API, including APIs not yet on PyPI.
+        gym_dependency += f"=={version('nemo-gym')}"
     text = (
         _license_header()
         + f'\n[project]\nname = "{project_name}"\nversion = "0.0.0"\n'
-        + 'requires-python = ">=3.13.14"\ndependencies = ["nemo-gym[dev]"]\n'
+        + f'requires-python = ">=3.13.14"\ndependencies = [{json.dumps(gym_dependency)}]\n'
         + "\n[tool.uv]\npackage = false\n"
     )
     metadata_path = PARENT_DIR / "pyproject.toml"

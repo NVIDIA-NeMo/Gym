@@ -9,11 +9,12 @@ import pytest
 from pydantic import ValidationError
 
 from nemo_gym.client import ServerClient
+from resources_servers.critpt_custom_grader import runner
 from resources_servers.critpt_custom_grader.app import CritPtCustomGraderConfig, CritPtCustomGraderServer
-from resources_servers.critpt_custom_grader.execution import Grader, build_compare_job, build_run_job
+from resources_servers.critpt_custom_grader.execution import ExecutionPolicy, Grader, build_compare_job, build_run_job
 from resources_servers.critpt_custom_grader.reference_cache import ReferenceCache
 from resources_servers.critpt_custom_grader.runner import validate_job
-from resources_servers.critpt_custom_grader.task_data import TaskData
+from resources_servers.critpt_custom_grader.task_data import TaskData, validate_semantic_registry
 from resources_servers.critpt_custom_grader.tests.support import (
     CANDIDATE,
     VALUE,
@@ -233,8 +234,91 @@ async def test_cached_semantic_preflight_still_uploads_validator_for_candidate_c
     ]
 
 
-def test_default_compare_job_keeps_its_existing_shape():
+def test_compare_job_without_a_validator_has_no_semantic_fields():
     job = build_compare_job(make_task(), "candidate", [VALUE, VALUE], "nonce123", make_policy())
     assert "semantic_validator" not in job
     assert set(job["cases"][0]) == {"observed", "expected", "policy"}
     assert validate_job(job, "compare") is None
+
+
+def semantic_compare_job():
+    return build_compare_job(
+        semantic_task(),
+        "candidate",
+        [VALUE, VALUE],
+        "nonce123",
+        make_policy(),
+        semantic_validator=validate_semantic_registry(REGISTRY)["synthetic"],
+        validator_source_path="/work/semantic123-comparator/validator_source.py",
+    )
+
+
+def test_semantic_compare_job_passes_the_runner_shape_check():
+    job = semantic_compare_job()
+    assert job["semantic_validator"] == {
+        "source_path": "/work/semantic123-comparator/validator_source.py",
+        "entrypoint": "validate",
+    }
+    assert set(job["cases"][0]) == {"observed", "expected", "policy", "inputs", "validator_config"}
+    assert validate_job(job, "compare") is None
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        pytest.param(lambda job: job.update(semantic_validator=None), id="validator-not-a-mapping"),
+        pytest.param(lambda job: job["semantic_validator"].update(timeout_s=1), id="validator-extra-key"),
+        pytest.param(lambda job: job["semantic_validator"].update(source_path="relative.py"), id="relative-path"),
+        pytest.param(lambda job: job["semantic_validator"].update(source_path="/" + "x" * 1024), id="long-path"),
+        pytest.param(lambda job: job["semantic_validator"].update(entrypoint="../load"), id="entrypoint"),
+        pytest.param(lambda job: job["cases"][0].pop("inputs"), id="missing-inputs"),
+        pytest.param(lambda job: job["cases"][0].pop("validator_config"), id="missing-config"),
+        pytest.param(lambda job: job["cases"][0]["inputs"].update(extra=[]), id="inputs-extra-key"),
+        pytest.param(lambda job: job["cases"][0]["inputs"].update(kwargs={"not-a-name": {}}), id="keyword-name"),
+        pytest.param(lambda job: job["cases"][0].update(validator_config=[]), id="config-not-a-mapping"),
+        pytest.param(lambda job: job["cases"][0].update(validator_config={"value": "x" * 16385}), id="config-size"),
+    ],
+)
+def test_runner_refuses_a_malformed_semantic_compare_job(damage):
+    job = semantic_compare_job()
+    damage(job)
+    assert validate_job(job, "compare") == "invalid_job"
+
+
+def test_runner_refuses_validator_inputs_on_a_compare_job_that_names_no_validator():
+    job = build_compare_job(make_task(), "candidate", [VALUE, VALUE], "nonce123", make_policy())
+    job["cases"][0]["inputs"] = {"args": [], "kwargs": {}}
+    assert validate_job(job, "compare") == "invalid_job"
+
+
+def test_configured_validators_raise_the_minimum_job_timeout_and_no_validators_keep_it():
+    policy = ExecutionPolicy()
+    minimum = policy.minimum_job_timeout_s()
+    with_validators = policy.minimum_job_timeout_s(semantic_validators=True)
+    assert with_validators > minimum
+    assert config({}, execution={"job_timeout_s": minimum}).execution.job_timeout_s == minimum
+    assert config(REGISTRY, execution={"job_timeout_s": with_validators}).execution.job_timeout_s == with_validators
+    with pytest.raises(ValidationError, match="semantic_validators"):
+        config(REGISTRY, execution={"job_timeout_s": minimum})
+
+
+def test_only_a_compare_job_that_names_a_validator_may_exceed_the_job_byte_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "JOB_BYTES_LIMIT", 64)
+    monkeypatch.setattr(runner, "SEMANTIC_JOB_BYTES_LIMIT", 128)
+    path = tmp_path / "job.json"
+
+    def read(job, size, mode=runner.COMPARE_MODE):
+        data = json.dumps(job).encode()
+        path.write_bytes(data + b" " * (size - len(data)))  # valid JSON whitespace reaches the exact size
+        return runner._read_job(str(path), mode)
+
+    semantic, plain = {"semantic_validator": {}}, {"cases": []}
+    assert read(semantic, 128) == semantic
+    assert read(plain, 64) == plain
+    for job, size, mode in (
+        (semantic, 129, runner.COMPARE_MODE),
+        (plain, 65, runner.COMPARE_MODE),
+        (semantic, 65, runner.RUN_MODE),
+    ):
+        with pytest.raises(runner.RunnerError):
+            read(job, size, mode)

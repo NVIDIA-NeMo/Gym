@@ -1,10 +1,17 @@
 ---
 title: "Compare Results"
-description: "Compare evaluation runs, inspect score changes, and interpret confidence intervals for candidate-minus-baseline differences."
+description: "Compare evaluation runs and aggregate normalized benchmark scores with unpaired Welch confidence intervals."
 position: 6
 ---
 
-Use `gym eval compare` to compare a baseline evaluation with one candidate. The report shows metric deltas, confidence intervals, and which tasks changed from passing to failing or the reverse. Use it to evaluate a model, quantization method, prompt, or harness change.
+# Compare Results
+
+Use `gym eval compare` to compare a baseline evaluation with one candidate. The report shows metric deltas, confidence intervals, and which tasks changed from passing to failing or the reverse. Use it to evaluate a model, quantization method, prompt, or harness change. Use `gym eval compare-suite` to combine benchmarks within each model and across a model–benchmark matrix.
+
+| Goal | Command | Confidence level |
+| --- | --- | --- |
+| Inspect one benchmark's metrics and task changes | `gym eval compare --baseline ... --candidates ...` | 95% by default; adjustable |
+| Aggregate selected benchmarks and models | `gym eval compare-suite --suite suite.yaml` | 90% by default; adjustable |
 
 ## Prepare Comparable Runs
 
@@ -53,6 +60,35 @@ The command prints key metrics and writes:
 The JSON report records the selected delta confidence level in the top-level `confidence_level` field, for example `0.90`.
 
 Without `--output-dir`, reports are written beside the candidate's rollout file. Repeating the command in the same output directory replaces the report files. See the [CLI Reference](/main/reference/cli-commands#gym-eval-compare) for aggregate-file overrides and all options.
+
+### Pool independent runs
+
+Use `--baseline-runs` and `--candidate-runs` to combine independent collections of the same benchmark into one comparison:
+
+```bash
+gym eval compare \
+    --baseline-runs results/baseline-1/rollouts.jsonl,results/baseline-2/rollouts.jsonl \
+    --candidate-runs results/candidate-1/rollouts.jsonl,results/candidate-2/rollouts.jsonl,results/candidate-3/rollouts.jsonl \
+    --output-dir results/pooled-comparison
+```
+
+Two baseline runs of eight repeats contribute **16 baseline observations**; three candidate runs of eight repeats contribute **24 candidate observations**. NeMo Gym concatenates the repeat estimates and calculates one Welch interval for candidate minus baseline. Each repeat has equal weight, so a run with more repeats contributes more observations. NeMo Gym does not average run means or combine existing interval endpoints. Local repeat indices may restart at zero in each source.
+
+Either side can stay a single run: use `--baseline` with `--candidate-runs`, or `--baseline-runs` with `--candidates`. Choose one input option per side. `--baseline-runs-agg-metrics` supplies aggregate-file overrides in baseline source order; `--candidates-agg-metrics` also accepts overrides in `--candidate-runs` order. Use `--baseline-agents` and `--candidate-agents` for agent selectors in the corresponding source order. A singular `--baseline-agent NAME` applies the same agent to every baseline source; use `--baseline-agents` when those names differ.
+
+Use a dedicated `--output-dir`, as in the example, to keep pooled reports separate from per-run reports. Without it, the last source in `--candidate-runs` determines the output directory. Reordering those sources changes that directory, and writing there replaces any existing `compare_report.*` files.
+
+Metrics other than completion-token accounting must have finite numeric values in every scored repeat of every contributing source; missing estimates in a scored repeat are errors. Token-only rows with no scored task observations are excluded from quality samples. Quality repeat counts describe the scored samples, while source provenance also records the stored repeat rows.
+
+Completion-token metrics use their available repeat observations, even when token accounting is absent from some repeats or an entire source. Notes identify those sources and local repeat indices. Their observation counts can therefore differ from quality repeat counts. A present malformed or nonfinite value still causes an error; missing accounting does not become a zero measurement.
+
+Every source needs stored repeat-level estimates for the quality metrics being compared. Current single-repeat aggregates contain no quality repeat estimates, including when only one repeat has scored tasks. Collect at least two scored repeats per source and regenerate aggregation before pooling those runs. Whole-run metrics such as pass@k cannot supply missing repeat observations. Each pooled side's separate 95% interval is recomputed from its concatenated repeat sample.
+
+In `compare_report.json`, a pooled baseline or candidate's top-level `rollouts_jsonl_fpath` and `aggregate_metrics_fpath` identify its first source for compatibility. The ordered `sources` list is authoritative for the complete collection, selected agents, and per-source counts; the comparison statistics describe the combined samples. Source files are read without modification.
+
+<Note>
+Pool independent collections with the same dataset, task ordering, limit, scoring settings, and configuration within each side. A copy, symlink, resumed history, or re-aggregation of the same observations does not provide additional independent repeats. Gym rejects reused source identities where artifact paths reveal the duplication; it cannot establish independence or identical experimental settings from aggregate files alone.
+</Note>
 
 ## Read the Report
 
@@ -114,6 +150,204 @@ This is a statement about the method over repeated evaluations. It does not assi
 Using the lower end of the two-sided 95% CI in this example for either decision above corresponds to a **one-sided test at the 2.5% significance level**. If the true difference were exactly the -2 pp acceptable-loss cutoff, about 2.5% of repeated evaluations would incorrectly place the lower bound above -2 pp. At a true difference of zero, about 2.5% would incorrectly place it above zero and support improvement. These rates change when you select a different confidence level.
 
 These are long-run false-positive rates at the specified cutoff, not the probability that this particular candidate fails a criterion. They rely on the Welch method's assumptions: repeat scores are independent within each run, and the baseline and candidate repeat sets are independent of each other. The t approximation must also be appropriate for the repeat-score distributions, especially with few repeats; approximately normal repeat scores support that approximation. The interval describes variation from rerunning the evaluated task set; it does not account for sampling a new set of questions. If those assumptions fail, the actual error rates can differ.
+
+## Compare a benchmark suite
+
+`gym eval compare-suite` calculates one score difference per model–benchmark pair, one aggregate per model, and one overall aggregate. Configure a baseline and a candidate side for each included pair. Either side accepts one run or a list of independent runs whose repeat estimates are pooled.
+
+Save a manifest such as `suite.yaml`:
+
+```yaml
+schema_version: 1
+benchmarks:
+  birdbench:
+    metrics:
+      - name: mean/reward
+  mmlu-redux:
+    metrics:
+      - name: mean/strict_boxed_reward
+        low: 0
+        high: 1
+        higher_is_better: true
+      - name: mean/normalized_reward
+        low: 0
+        high: 1
+        higher_is_better: true
+models:
+  model-a:
+    birdbench:
+      baseline:
+        rollouts: runs/model-a/birdbench/baseline/rollouts.jsonl
+      candidate:
+        rollouts: runs/model-a/birdbench/candidate/rollouts.jsonl
+    mmlu-redux:
+      baseline:
+        rollouts: runs/model-a/mmlu-redux/baseline/rollouts.jsonl
+      candidate:
+        rollouts: runs/model-a/mmlu-redux/candidate/rollouts.jsonl
+  model-b:
+    birdbench:
+      baseline:
+        rollouts: runs/model-b/birdbench/baseline/rollouts.jsonl
+      candidate:
+        rollouts: runs/model-b/birdbench/candidate/rollouts.jsonl
+    mmlu-redux:
+      baseline:
+        rollouts: runs/model-b/mmlu-redux/baseline/rollouts.jsonl
+      candidate:
+        rollouts: runs/model-b/mmlu-redux/candidate/rollouts.jsonl
+```
+
+Paths are relative to the YAML file. Model names are report labels; each model's candidate is compared with that model's baseline. Include only the model–benchmark pairs you intend to measure; a complete rectangular matrix is not required.
+
+This example uses MCQA's existing dual scoring for MMLU-Redux. Collect both sides with the resources-server override `mmlu-redux_mcqa_resources_server.resources_servers.mcqa.grading_mode=boxed_and_normalized` to record both selected reward metrics. Selecting a metric in the suite YAML does not compute a missing metric.
+
+```bash
+gym eval compare-suite \
+    --suite suite.yaml \
+    --output-dir results/suite
+
+# Recalculate the interval at a different confidence level using the same data.
+gym eval compare-suite \
+    --suite suite.yaml \
+    --confidence-level 0.95 \
+    --output-dir results/suite-95
+```
+
+`--confidence-level` accepts a fraction strictly between zero and one; the default is `0.90`. The separate `gym eval compare` command defaults to 95% difference intervals. For `compare-suite`, sources and aggregate-entry selection come from the YAML. See the [CLI reference](/main/reference/cli-commands#gym-eval-compare-suite) for all command options.
+
+### Source options
+
+Each `baseline` or `candidate` mapping supports:
+
+| Field | Meaning |
+| --- | --- |
+| `rollouts` | Required run identity. Gym discovers its aggregate-metrics and materialized-input companion files. |
+| `agent` | Optional selector matching an aggregate entry's `agent_ref.name`. This is usually the agent name; entries for several environment servers sharing an agent can use server names as labels. |
+| `environment_server` | Optional selector matching an aggregate entry's `_ng_environment_server`. Use the server's configuration instance name. Older aggregate files can lack this field. |
+
+Aggregate metrics must be available as the rollout file's companion; materialized inputs are optional, but planned coverage remains unverified when they are missing. Symlinked rollout files use the same companion-aware path resolution as `gym eval compare`, rejecting conflicting companion locations. Suite sources do not support separate aggregate-metrics or materialized-input paths.
+
+Either side can also be a nonempty list of these mappings. For example, replace a model–benchmark pair with:
+
+```yaml
+baseline:
+  - rollouts: runs/baseline-1/rollouts.jsonl
+  - rollouts: runs/baseline-2/rollouts.jsonl
+candidate:
+  - rollouts: runs/candidate-1/rollouts.jsonl
+  - rollouts: runs/candidate-2/rollouts.jsonl
+  - rollouts: runs/candidate-3/rollouts.jsonl
+```
+
+Gym pools the selected repeat estimates within each side before computing that cell's mean, sample variance, and Welch interval. Eight repeats in each source give 16 baseline and 24 candidate observations. A single mapping can be paired with a list, and source repeat counts can differ. Adding runs increases the repeat sample size; it does not increase the cell's benchmark or overall weight. Reports retain every source's paths, local repeat indices, coverage, and saved failure counts when available.
+
+Selection happens independently for every baseline and candidate source. If neither selector is set, the aggregate must contain exactly one entry. If a selector is set, exactly one entry must match; when both are set, that entry must match both. Missing or ambiguous matches are errors that list the available choices.
+
+For example, baseline and candidate may use different environment servers and agents for the same benchmark:
+
+```yaml
+baseline:
+  rollouts: runs/birdbench/baseline/rollouts.jsonl
+  agent: bird_sql_agent
+  environment_server: birdbench_simple_env
+candidate:
+  rollouts: runs/birdbench/candidate/rollouts.jsonl
+  agent: bird_hermes_agent
+  environment_server: birdbench_hermes_env
+```
+
+Gym retains both identities from the selected entry. To verify planned coverage, rows stamped with `_ng_environment_server` are matched to that server; unstamped rows use `agent_ref.name` when available. This supports inputs containing both taskset-routed and agent-routed rows without counting another server's planned tasks. Server and agent names need not match between baseline and candidate; their task coverage and selected metrics must still be comparable.
+
+Referencing the same run and selected aggregate entry more than once is rejected because this method assumes independent source observations.
+
+## Normalize metrics and preserve benchmark weights
+
+Every selected metric needs theoretical lower and upper bounds and a score direction. For `mean/reward`, Gym reads `reward.range` and `higher_is_better` from the named benchmark's manifest. Other metrics need explicit `low`, `high`, and `higher_is_better` values. A complete explicit definition overrides manifest metadata.
+
+Metric bounds and directions are defined once per benchmark and shared across all models. The report's metric normalization table lists each benchmark's metric definitions once.
+
+Bounds must be finite, with `high > low`. They describe the metric's possible values, not the smallest and largest values observed in these runs. Values outside the declared bounds are errors.
+
+For every metric value in a repeat, Gym calculates:
+
+```text
+normalized = 100 * (raw - low) / (high - low)
+```
+
+For a lower-is-better metric, it then uses `100 - normalized`, so positive candidate-minus-baseline deltas consistently favor the candidate. For example, accuracy `0.8` with bounds `[0,1]` becomes `80`; an error rate `0.2` with the same bounds and `higher_is_better: false` also becomes `80`.
+
+Aggregation proceeds in this order:
+
+1. Average a benchmark's normalized metrics equally **within each repeat**.
+2. Calculate each side's mean and sample variance (divisor `n - 1`) from these composite repeat scores.
+3. Weight eligible benchmarks equally within each model.
+4. Weight eligible model–benchmark pairs equally in the overall result.
+
+MMLU-Redux therefore has the same benchmark weight as BirdBench in the example, despite having two selected metrics. Averaging metrics before estimating variance preserves their covariance within a repeat. The number of metrics and number of tasks do not become additional independent repeat observations.
+
+For a sparse matrix, a model with more included benchmarks contributes more cells to the overall result. The overall calculation uses equal cell weights rather than equal model weights.
+
+## Understand the confidence interval
+
+Suite comparison uses an **unpaired Welch interval for a fixed-suite mean delta**. Each cell's estimated delta is:
+
+```text
+delta = candidate_mean - baseline_mean
+```
+
+Its estimated variance is the sum of each side's sample variance divided by that side's repeat count. The aggregate adds these variances using squared cell weights and uses Welch–Satterthwaite effective degrees of freedom for its Student-t interval.
+
+The numerical method, including normalization and metric averaging, is isolated in `nemo_gym/eval/comparison/statistics/unpaired_welch_fixed_suite.py`. The [NIST two-sample t-test reference](https://www.itl.nist.gov/div898/handbook/eda/section3/eda353.htm) and [coverage-factor guidance](https://www.nist.gov/pml/nist-technical-note-1297/nist-tn-1297-appendix-b-coverage-factors) describe the independent-sample and effective-degrees-of-freedom calculations.
+
+<Note>
+The interval quantifies repeat uncertainty for the fixed selected benchmarks, models, and task sets. It assumes independent repeats within each side, independent baseline/candidate collections, and independent cell estimates. It does not include uncertainty from sampling different benchmarks or models. Shared conditions or genuinely paired samples can require covariance terms beyond this method.
+</Note>
+
+A positive delta favors the candidate. An interval containing zero does not demonstrate a change at the selected confidence level; it also does not prove equivalence or an acceptable regression margin. Inspect individual benchmark results alongside the aggregate, because positive and negative deltas can cancel.
+
+Confidence intervals are not clipped to the score bounds. A constant-score cell retains its weight; when total empirical variance is zero, suite comparison reports the point estimate and zero SE with an unavailable interval and degrees of freedom.
+
+## Check exclusions and coverage
+
+`gym eval compare-suite` requires stored `repeat_level_metrics`. If the field is missing, regenerate aggregation; this command does not reconstruct repeat statistics from embedded rollout summaries.
+
+A repeat with no scored tasks can still contain token-usage accounting. When such a token-only row lacks a selected quality metric, suite comparison preserves the accounting in the source aggregate and omits the repeat from quality estimates, without assigning a zero score. The report lists the unscored repeat indices, warns about incomplete coverage, and suppresses affected confidence intervals. If a token-usage metric itself is selected, its available repeat observations remain usable.
+
+Each side needs at least two repeats with estimates for the selected metrics, counting across its sources when pooling. If either side has fewer, Gym excludes the entire model–benchmark pair with a warning. Remaining eligible cells receive recomputed equal weights. The requested suite, exclusions, and effective weights are recorded; no eligible cells is an error.
+
+Every selected metric must be present in every included repeat. Gym does not silently remove missing metric values or change metric weights between repeats.
+
+Recorded task sets must agree across repeats, constituent sources, and sides. When materialized inputs are available, Gym also verifies planned coverage for each source. Without those inputs, planned coverage remains unverified; recorded coverage checks cannot prove that a task absent from every completed result was collected. Known incomplete or inconsistent coverage suppresses affected confidence intervals while retaining descriptive results. Pooling does not hide incomplete coverage in one source.
+
+## Read saved failure counts
+
+Suite comparison automatically reads `<stem>_coverage.json` beside `<stem>.jsonl` when present; collection and aggregation with `merge_shards=true` write this companion. Metrics-only aggregation (`merge_shards=false`) writes `<stem>_aggregate_coverage.json`, which suite comparison does not read. The comparison uses the saved failure counts and available zero-count fields without scanning rollout records or reconstructing retries from failure logs. No additional flag is needed. Positive counts add a short warning, for example:
+
+```text
+llama31-8b/birdbench candidate: Saved failures (entire rollout file): 3 (3 scored as zero, 0 not in the score; context_length_exceeded=3).
+```
+
+These counts are a saved snapshot for the **entire rollout file**, including every agent and benchmark in that file. Each warning appears once per file and lists all model/benchmark/role usages. Per-source JSON entries can refer to the same summary; count each file once when combining cells. The snapshot does not establish the current health of the trajectories.
+
+When recorded, `failures_counted_as_zero` becomes JSON `counts.counted_as_zero`: the warning splits failures into those already scored as zero and those not in the score. Schema-2 `final_zeros` becomes `counts.final_zeros` and records settled policy zeros. If only this narrower count is available, the warning reports final policy zeros and labels any remainder as other failures with unknown score inclusion. Without either field, score inclusion remains unknown; the total failure count is still reported.
+
+Missing coverage files leave failure counts unknown without a warning. An existing file with unavailable, unreadable, or malformed counts produces a brief unavailable warning. Counts of zero produce no warning. Failure reporting does not change scores, weights, coverage decisions, or confidence intervals. Per-source JSON `failures` records the `source` path, `scope`, `counts`, and any `unavailable_reason`.
+
+For pooled sides, Gym reads each constituent's snapshot and labels warnings with its source number. Each entry in `sources` retains its own `failures`; the pooled summary's `failures` is `null`, because a saved count describes one entire rollout file. Counts are not added into a synthetic pooled snapshot, including when different agents select the same file.
+
+## Read the reports
+
+`gym eval compare-suite` writes these files to `--output-dir`, defaulting to the YAML file's directory:
+
+| File | Contents |
+| --- | --- |
+| `suite_compare_report.md` | Candidate and baseline scores, per-model and overall deltas (`candidate - baseline`), intervals for delta, effective membership, metric scales, source runs, coverage notes, and saved failure warnings. |
+| `suite_compare_report.json` | Raw/scaled repeat metrics, composite scores, repeat counts, means, `delta` (`candidate - baseline`), variances, SE, effective degrees of freedom, variance contributions, saved failure counts, and provenance. |
+
+The suite JSON report has its own versioned format with `"schema_version": "1"`. Its filename identifies the report type; it has no `level` field. For a pooled side, representative path and identity fields such as `rollouts`, `aggregate_metrics`, `materialized_inputs`, and `agent` come from its first source. Use that side's ordered `sources` list for complete per-source provenance; its repeat scores, coverage, and statistics describe the combined collection.
+
+Use `--report-format md`, `json`, or `both` (default). After quantifying the differences, use [Diagnose Results](/main/evaluation/diagnose-results) to investigate task-level causes and possible improvements.
 
 <Cards>
 

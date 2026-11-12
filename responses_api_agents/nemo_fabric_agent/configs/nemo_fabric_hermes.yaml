@@ -6,6 +6,7 @@ nemo_fabric_hermes:
   responses_api_agents:
     nemo_fabric_agent:
       adapter_id: nvidia.fabric.hermes
+      adapter_project: hermes_env
       model_provider: anthropic
       harness_settings:
         reasoning_config:

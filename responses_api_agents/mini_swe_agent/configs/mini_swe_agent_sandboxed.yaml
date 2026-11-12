@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# mini-SWE 2.4.6 in the task sandbox, through agent sessions. The Environment Server binds the benchmark: its
+# Resources Server lends the sandbox (sandbox_access), or this agent starts one from sandbox_provider. The step
+# limit and command timeout follow the Terminal Bench 4 profile (Artificial Analysis settings).
+# sessions_app.py serves agent sessions without Ray; for the SWE-Gym /run path, use mini_swe_agent.yaml.
+mini_swe_agent:
+  responses_api_agents:
+    mini_swe_agent:
+      entrypoint: sessions_app.py
+      num_workers: 1
+      resources_server: null
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
+      concurrency: 32
+      step_limit: 500
+      step_timeout: 30
+      sandbox_install_timeout_seconds: 900
+      # The longest run; a task's own agent timeout can only shorten it.
+      sandbox_runner_timeout_seconds: 28800
+      session_close_timeout_seconds: 60
+      # Only for an agent-owned sandbox, when the Resources Server supplies no sandbox_access.
+      sandbox_provider: null
+      sandbox_config: {}

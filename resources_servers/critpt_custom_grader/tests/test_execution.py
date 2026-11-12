@@ -258,16 +258,22 @@ def test_job_deadline_budget_counts_every_awaited_bound():
         "cleanup_timeout_s": 4.0,
     }
     policy = make_policy(**fields)
-    # Two runs and two comparisons at deadline plus two margins, three creates, the 29 file transfers (uploads, size
-    # probes and downloads, including the semantic helper and optional validator source) at transfer plus grace,
-    # and three stops.
-    expected = 2 * (100 + 30) + 2 * (10 + 30) + 3 * 2 + 29 * (3 + 5) + 3 * 4
-    assert execution._JOB_TRANSFERS == 29
-    assert policy.minimum_job_timeout_s() == expected == 590
+    # Two runs and two comparisons at deadline plus two margins, three creates, the 27 file transfers (uploads, size
+    # probes and downloads) at transfer plus grace, and three stops.
+    expected = 2 * (100 + 30) + 2 * (10 + 30) + 3 * 2 + 27 * (3 + 5) + 3 * 4
+    assert execution._JOB_TRANSFERS == 27
+    assert policy.minimum_job_timeout_s() == expected == 574
     assert policy.effective_job_timeout_s() == expected
     assert make_policy(job_timeout_s=float(expected), **fields).effective_job_timeout_s() == expected
     with pytest.raises(ValidationError):
         make_policy(job_timeout_s=expected - 1.0, **fields)
+    # With semantic validators configured, a job uploads the validation module and the validator source as well.
+    semantic = expected + 2 * (3 + 5)
+    assert execution._SEMANTIC_JOB_TRANSFERS == 2
+    assert policy.minimum_job_timeout_s(semantic_validators=True) == semantic == 590
+    assert policy.effective_job_timeout_s(semantic_validators=True) == semantic
+    explicit = make_policy(job_timeout_s=float(expected), **fields)
+    assert explicit.effective_job_timeout_s(semantic_validators=True) == expected
 
 
 # --- job flow ----------------------------------------------------------------------------------- #
@@ -395,7 +401,7 @@ async def test_passing_candidate_scores_one_and_cleans_all_domains():
     assert sorted(provider.closed) == sorted(provider.sandboxes) and len(provider.closed) == 3
 
 
-@pytest.mark.parametrize("semantic, comparator_transfers, total_transfers", [(False, 12, 28), (True, 13, 29)])
+@pytest.mark.parametrize("semantic, comparator_transfers, total_transfers", [(False, 11, 27), (True, 13, 29)])
 async def test_transfer_budget_matches_the_transfers_a_job_performs(semantic, comparator_transfers, total_transfers):
     task = make_task()
     registry = {}
@@ -414,9 +420,9 @@ async def test_transfer_budget_matches_the_transfers_a_job_performs(semantic, co
     for transfer in provider.upload_file.call_args_list + provider.download_file.call_args_list:
         per_domain[provider.sandboxes[transfer.args[0].sandbox_id]["domain"]] += 1
     assert per_domain == {"reference": 8, "comparator": comparator_transfers, "candidate": 8}
-    assert sum(per_domain.values()) == total_transfers
-    # The policy reserves the optional validator-source upload even for an expected-value-only job.
-    assert total_transfers + (0 if semantic else 1) == execution._JOB_TRANSFERS
+    # Only a job for a task that selects a validator uploads the validation module and the validator source.
+    budget = execution._JOB_TRANSFERS + (execution._SEMANTIC_JOB_TRANSFERS if semantic else 0)
+    assert sum(per_domain.values()) == total_transfers == budget
 
 
 @pytest.mark.parametrize("code", runner.SOURCE_ERROR_CODES)
@@ -1215,7 +1221,7 @@ async def test_a_failed_create_stops_the_job_and_creates_nothing_after_it():
 
 async def test_a_job_past_its_deadline_is_unscorable_and_every_domain_is_stopped(monkeypatch):
     candidate_run, entered = entered_hang()
-    monkeypatch.setattr(ExecutionPolicy, "effective_job_timeout_s", lambda self: 2.0)
+    monkeypatch.setattr(ExecutionPolicy, "effective_job_timeout_s", lambda self, **_: 2.0)
     grader, provider = make_grader({**happy_script(), ("exec", "candidate"): candidate_run})
     result = await grader.grade(make_task(), CANDIDATE)
     assert entered.is_set()  # the deadline fell inside the candidate run, after every domain was created

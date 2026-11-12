@@ -43,15 +43,20 @@ def _browsers_dir() -> pathlib.Path:
         return pathlib.Path.home() / "Library" / "Caches" / "ms-playwright"
     if sys.platform == "win32":
         return pathlib.Path(os.environ.get("LOCALAPPDATA", "")) / "ms-playwright"
-    return pathlib.Path.home() / ".cache" / "ms-playwright"
+    return pathlib.Path(os.environ.get("XDG_CACHE_HOME") or pathlib.Path.home() / ".cache") / "ms-playwright"
 
 
 def _executable_present() -> bool:
-    """True when a Chromium build is already installed.
+    """True when a Chromium build is installed completely.
 
     Reads the cache directory rather than asking Playwright: `sync_playwright()`
     would answer too, but it starts the Node driver and refuses to run inside a
     running event loop -- which is where a resources server calls this from.
+
+    Playwright writes `INSTALLATION_COMPLETE` into a browser's directory last. With
+    several workers, another worker may be installing right now, and its executable
+    can exist before the rest of the build is unpacked; without the marker this
+    process runs `playwright install`, which waits on Playwright's own install lock.
     """
     root = _browsers_dir()
     if not root.is_dir():
@@ -59,7 +64,7 @@ def _executable_present() -> bool:
     return any(
         any(d.rglob(name))
         for d in root.glob("chromium*")
-        if d.is_dir()
+        if d.is_dir() and (d / "INSTALLATION_COMPLETE").is_file()
         for name in ("chrome-headless-shell", "headless_shell", "chrome")
     )
 

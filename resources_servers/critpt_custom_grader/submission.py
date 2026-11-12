@@ -11,7 +11,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
-from nemo_gym.core import AGENT_LIMIT
+from nemo_gym.core import AGENT_INVALID_OUTPUT, AGENT_LIMIT
 
 
 _PROTOCOL = "critpt-finish-v1"
@@ -83,7 +83,9 @@ def _object(text: str) -> dict[str, Any]:
 def _termination(response: dict[str, Any]) -> Submission | None:
     """Preserve failure evidence before considering a source or a scored no-answer.
 
-    Declared response-budget exhaustion or an explicit content-filter outcome establishes a no-answer attempt.
+    Declared response-budget exhaustion or an explicit content-filter outcome establishes a no-answer attempt, and
+    so does a failed response the agent classified as unusable model output (``agent_invalid_output``, such as
+    Stirrup's ``compaction_failed``): the default outcome policy grades it as the model's result and never retries it.
     A wall deadline, cancellation, provider failure or undifferentiated limit does not. HTTP model rejection codes
     alone likewise do not distinguish a model refusal from a request/configuration fault.
     """
@@ -98,7 +100,7 @@ def _termination(response: dict[str, Any]) -> Submission | None:
             outcome = AgentOutcome.model_validate(_object(metadata[AGENT_OUTCOME_METADATA_KEY]))
         except (ValueError, TypeError, RecursionError):
             return _INVALID
-        if outcome.failure_kind != AGENT_LIMIT:
+        if outcome.failure_kind not in (AGENT_LIMIT, AGENT_INVALID_OUTPUT):
             return _INCOMPLETE
     if response.get("error") or metadata.get("stop_reason") in ("cancelled", "wall_time"):
         return _INCOMPLETE
@@ -106,6 +108,8 @@ def _termination(response: dict[str, Any]) -> Submission | None:
     details = response.get("incomplete_details")
     if status == "completed":
         return _INCOMPLETE if outcome is not None or details else None
+    if status == "failed" and outcome is not None and outcome.failure_kind == AGENT_INVALID_OUTPUT:
+        return _NO_ANSWER
     if status == "incomplete" or (status == "failed" and outcome is not None):
         if metadata.get("stop_reason") == "max_turns" or (
             type(details) is dict and details.get("reason") in ("max_output_tokens", "content_filter")

@@ -16,7 +16,6 @@
 
 import json
 import logging
-import re
 from importlib import import_module
 from os import getenv
 from typing import Any, Literal, Optional, Union, Unpack
@@ -38,8 +37,6 @@ from nemo_gym.client.http_client import (
 )
 from nemo_gym.config.config_types import (
     ROLLOUT_PATH_PREFIX,
-    TOKEN_CAPTURE_PATH_SEGMENT,
-    TRACE_CONTEXT_PATH_SEGMENT,
     BaseServerConfig,
     HeadServerUnreachableError,
 )
@@ -49,12 +46,18 @@ from nemo_gym.config.global_config import (
     get_first_server_config_dict,
     get_global_config_dict,
 )
+from nemo_gym.core.correlation import TRACEPARENT_PATTERN, CorrelationContext, encode
 from nemo_gym.core.episode_context import (
     VERIFIER_INVOCATION_HEADER,
     current_rollout_id,
     current_verifier_invocation_id,
     maybe_rollout_id_from_run_body,
     note_verifier_model_request,
+)
+from nemo_gym.core.model_call_sampling import (
+    current_model_sampling_segment,
+    model_sampling_path_segment,
+    with_model_sampling_segment,
 )
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 from nemo_gym.telemetry.setup import is_trace_exporter_active
@@ -245,6 +248,14 @@ class ServerClient(BaseModel):
                     VERIFIER_INVOCATION_HEADER: verifier_invocation_id,
                 }
 
+        if server_entry is not None and (
+            "responses_api_models" in server_entry or "responses_api_agents" in server_entry
+        ):
+            # A generation call made while handling a rollout carries its sampling segment, after any rollout prefix:
+            # a model call, and a call to an agent (such as an agent's call to its own /v1/responses), whose model
+            # calls then carry it too.
+            url_path = with_model_sampling_segment(url_path, current_model_sampling_segment())
+
         return await request(
             method=method,
             url=f"{base_url}{url_path}",
@@ -254,7 +265,7 @@ class ServerClient(BaseModel):
             # A /run starts an episode attempt, so with checkpointing it is never sent twice.
             # A dropped connection usually means the server's worker died mid-episode.
             # Sending it again would run the attempt a second time,
-            # and the first run's sessions on other servers would never be freed: the second run replies,
+            # and the first run's sessions on other servers would never be released: the second run replies,
             # so the controller never retires the attempt.
             _resend_after_disconnect=_resend_after_disconnect
             and not (self.checkpoint_enabled() and url_path == "/run"),
@@ -341,10 +352,6 @@ class ServerClient(BaseModel):
 SESSION_ID_KEY = "session_id"
 
 
-# A W3C ``traceparent``, version 00, the only form the propagator writes.
-_TRACEPARENT_PATTERN = r"00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}"
-
-
 def get_server_url(server_name: str) -> str:
     global_config_dict = get_global_config_dict()
 
@@ -360,8 +367,7 @@ def rollout_path_prefix(rollout_id: Optional[str], *, token_capture: bool = Fals
     """Return the leading model-server path prefix for a rollout, if available."""
     if not rollout_id:
         return ""
-    capture_segment = f"/{TOKEN_CAPTURE_PATH_SEGMENT}" if token_capture else ""
-    return f"/{ROLLOUT_PATH_PREFIX}/{rollout_id}{capture_segment}"
+    return encode(CorrelationContext(capture_key=rollout_id, token_capture=token_capture))
 
 
 def trace_context_path_segment() -> str:
@@ -376,25 +382,39 @@ def trace_context_path_segment() -> str:
     carrier: dict[str, str] = {}
     inject_trace_context(carrier)
     traceparent = carrier.get("traceparent", "")
-    if not re.fullmatch(_TRACEPARENT_PATTERN, traceparent):
+    if not TRACEPARENT_PATTERN.fullmatch(traceparent):
         return ""
-    return f"/{TRACE_CONTEXT_PATH_SEGMENT}/{traceparent}"
+    return encode(CorrelationContext(trace_parent=traceparent))
 
 
 def apply_rollout_prefix(
-    base_url: str, rollout_id: Optional[str], *, token_capture: bool = False, trace_context: bool = True
+    base_url: str,
+    rollout_id: Optional[str],
+    *,
+    token_capture: bool = False,
+    trace_context: bool = True,
+    model_sampling: Optional[str] = None,
 ) -> str:
-    """Append the rollout prefix and, while traces export, the current span's trace context to a model-server root URL.
+    """Append the rollout prefix, the current span's trace context while traces export, and the model sampling
+    segment to a model-server root URL.
 
     Every caller hands the result to a client Gym does not instrument (a harness in a sandbox, a
     third-party client library), which is why the trace context travels in the URL here; Gym's own
     clients send the ``traceparent`` header instead and use ``url_path_for_run``.
 
-    The span named is the one current when the URL is built, so pass ``trace_context=False`` for a
-    URL that is built once and reused across rollouts (a cached client): otherwise every later
-    rollout's calls would be parented to the first one's span.
+    The sampling segment is ``model_sampling`` when given, otherwise the current request's
+    (``nemo_gym.core.model_call_sampling``) when ``trace_context`` is set. It precedes the trace segment, in the
+    order ``nemo_gym.core.correlation`` reads.
+
+    The span and the sampling named are the ones current when the URL is built, so pass
+    ``trace_context=False`` for a URL that is built once and reused across rollouts (a cached
+    client): otherwise every later rollout's calls would be parented to the first one's span and
+    sampled with its values.
     """
     prefix = rollout_path_prefix(rollout_id, token_capture=token_capture) if rollout_id else ""
+    # An explicit segment always applies; the current request's only to a URL built for this rollout.
+    current = current_model_sampling_segment() if trace_context else None
+    prefix += model_sampling_path_segment(model_sampling if model_sampling is not None else current)
     if trace_context:
         prefix += trace_context_path_segment()
     if not prefix:

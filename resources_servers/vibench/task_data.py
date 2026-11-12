@@ -26,7 +26,7 @@ class TaskData(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     app: str = Field(
-        description="ViBench app directory under prds/, e.g. 'wedding'. Names the task with artifact.",
+        description="ViBench app directory under v1/prds/ (prds/ before ViBench 2.0), e.g. 'wedding'.",
         json_schema_extra={"consumed_by": ["verify", "metrics", "provenance"]},
     )
     artifact: str = Field(

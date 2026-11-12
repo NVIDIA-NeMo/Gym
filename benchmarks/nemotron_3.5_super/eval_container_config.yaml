@@ -69,9 +69,9 @@ swebench_multilingual_opencode_sandboxed_agent:
   responses_api_agents:
     opencode_sandboxed_agent:
       datasets: []
-deepswe_opencode_sandboxed_agent:
+deepswe_opencode_agent:
   responses_api_agents:
-    opencode_sandboxed_agent:
+    opencode_agent:
       datasets: []
 terminal_bench_2_1_terminus_2_sandboxed_agent:
   responses_api_agents:

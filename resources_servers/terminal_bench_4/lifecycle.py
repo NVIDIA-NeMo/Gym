@@ -55,7 +55,7 @@ class Session:
     slots: Any = None
     config: Any = None
     persist: Callable = field(default=lambda: None, repr=False)
-    # Environment Server sessions: the seed request, the SandboxAccess response or the HTTP
+    # Episode sessions: the seed request, the SandboxAccess response or the HTTP
     # error the seed replays, and the first verify body (retries must repeat it exactly).
     resources_request: Any = None
     resources_response: Any = None
@@ -143,6 +143,7 @@ async def prepare_session(session, loader):
         session.session_id + "__verifier__trial",
         session.directory,
         verifier=True,
+        placement_group=session.environment.placement_group,
     )
     if session.config.environment.efs_logs_host_path:
         session.shared_logs = SharedLogs(session.environment)

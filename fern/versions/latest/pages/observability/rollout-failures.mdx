@@ -1,11 +1,11 @@
 ---
 title: Failure observations
-description: Boundary failures, their explicit causes and the failure report, without changing outcome policy.
+description: Failure evidence, explicit causes, reports and shared outcome policies.
 ---
 
 Gym records an observed failure as one `NgFailureEvent` exception. The same object
 is raised and serialized with `to_record()`; `from_record()` reconstructs it. It names the boundary that observed it (`model`, `harness`,
-`agent`, `resources_server`, `environment` or `collection`), its kind, stage, HTTP
+`agent`, `sandbox`, `resources_server`, `environment` or `collection`), its kind, stage, HTTP
 status and the event ID of its explicit cause. Existing handlers, outcome policy,
 retry budgets and scoring remain in control.
 
@@ -24,6 +24,84 @@ The flow for one failure:
    path for callers whose retry or routing logic depends on `ClientResponseError`.
 5. Collection saves the report beside the existing result or failure record
    (`_ng_failure_events`, `_ng_failure_id`).
+
+## Policy by execution stage
+
+`FailureStage` in [failure_kinds.py](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/core/failure_kinds.py)
+is the shared vocabulary for failure events, sandbox observations and outcome policies. Use `stage`, including
+in sandbox observations; do not introduce a separate `phase` vocabulary. Task preparation uses `seed`;
+preparing or running a verifier uses `verification`. Preserve the originating stage when forwarding a failure:
+an agent failure caught by a verifier still belongs to `agent`. Leave the stage unset when it is unknown.
+
+`FailureClass` and `FailureClassificationConfig` in `failure_kinds.py` define one configurable classification:
+`model`, `evaluation` (including infrastructure), or `unknown`. Classification interprets observed evidence;
+it does not change the event or prescribe a retry, score or health verdict.
+
+`StageOutcomePolicyConfig` selects rules by stage, then checks HTTP status, failure kind, failure class and
+the default action, in that order. The caller establishes the failure's origin and sandbox ownership before applying these rules;
+a provider cannot infer them. Unknown ownership must not enter the agent OOM policy.
+
+The shared defaults are:
+
+| Admitted failure | Action | Class |
+| --- | --- | --- |
+| Confirmed OOM in the agent's assigned sandbox during `agent` execution | `count_as_zero` | `model` |
+| Confirmed OOM during `seed` | `retry` | `evaluation` |
+| Inconclusive verification attempt, including confirmed OOM | `retry` | `evaluation` |
+| Verification failure reporting cancellation, shutdown, a SIGTERM interruption or lost worker (`kill_shaped`) or rejected credentials | `fail` ungraded | `evaluation` |
+| OOM without an established stage or ownership | `fail` ungraded | `unknown` |
+
+Other failures use the shared classification defaults and the selected stage's action rules. For example, a
+sandbox-create timeout is `evaluation`; class alone does not authorize a retry.
+
+A `retry` decision never authorizes replaying an uncertain command. The caller retains its retry safety checks
+and existing attempt/deadline budget; exhaustion stays ungraded. Task cancellation continues to propagate. Verification rules apply to inconclusive attempts,
+not ordinary verifier scores. `count_as_zero` ends the episode without retry and includes its zero in the denominator.
+
+Policies are configurable. This fragment is a `StageOutcomePolicyConfig` value; place it under the consuming
+server's field of that type. It overrides the agent OOM action without replacing the other stages:
+
+```yaml
+by_stage:
+  agent:
+    by_failure_kind:
+      provider_oom_killed: fail
+```
+
+This override fails ungraded while retaining the `model` classification. To change the classification,
+set `classification` in the same `StageOutcomePolicyConfig` value:
+
+```yaml
+classification:
+  by_stage:
+    agent:
+      by_failure_kind:
+        provider_oom_killed: unknown
+```
+
+This configures the shared mapper for this boundary. Other boundaries have their own configuration;
+readers of an applied result preserve its recorded class. Each stage can also select actions through
+`by_failure_class`, for example `{evaluation: retry}` where that boundary supports retry.
+Partial overrides retain unspecified defaults. Changing an action does not change the class.
+
+`choose_stage_outcome` returns an `OutcomeDecision` containing the selected `action` and its shared
+`FailureClass` in `attribution`. Keep the applied action and class available with the final result and
+attempt identity. DeepSWE uses `failure_outcome_action` and `failure_outcome_attribution` on its result
+for these choices, including after save/reload. Results and failure events remain separate:
+a completed result can carry failures recovered along the way, without becoming a failed result.
+Provider-operation retry policies remain separate from episode decisions.
+
+## Recovered failures
+
+Before retrying a failed operation, call `observe_failure(error)` from `nemo_gym.core`.
+It adds the event and its explicit causes to the current request's failure log, so the reply can carry
+them even when a later attempt succeeds. It does not raise, choose an outcome action or mark the request
+failed. Outside a request capture scope it does nothing.
+
+Reports deduplicate events by `event_id`; count each ID once across saved reports. A recovered failure
+remains diagnostic evidence and does not by itself change a successful result, score or health assessment.
+
+## Causes and transport
 
 An environment uses `handled_episode_failure(...)` with event fields, its local
 `terminal` decision and separate partial evidence. It returns an `NgFailureEvent`;

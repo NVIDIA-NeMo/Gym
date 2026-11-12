@@ -27,7 +27,6 @@ import logging
 import math
 from dataclasses import dataclass
 from time import time
-from typing import Any
 from uuid import uuid4
 
 from fastapi import Body, HTTPException, Request
@@ -61,7 +60,7 @@ from nemo_gym.sandbox import (
     exec_as_root,
     resolve_provider_config,
 )
-from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 LOGGER = logging.getLogger(__name__)
@@ -131,11 +130,6 @@ class OracleAgent(SimpleResponsesAPIAgent):
         """
         return True
 
-    def model_post_init(self, context: Any, /) -> None:
-        super().model_post_init(context)
-        if self.config.num_workers not in (None, 1):
-            raise ValueError("Process-local oracle sessions require num_workers=1")
-
     # -- sessions --------------------------------------------------------------------------
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> OracleSession:
@@ -176,7 +170,7 @@ class OracleAgent(SimpleResponsesAPIAgent):
     def _session_for(self, request: Request) -> OracleSession:
         session_id = self._agent_session_id_from_request(request)
         if session_id is None:
-            raise HTTPException(404, "Unknown oracle agent session; seed it first")
+            raise HTTPException(404, "No seeded oracle agent session for this request")
         state = self._require_agent_session(session_id)
         if not isinstance(state, OracleSession):
             raise TypeError("Expected an oracle agent session state")
@@ -360,9 +354,9 @@ class OracleAgent(SimpleResponsesAPIAgent):
             ),
         )
 
-    async def run(self, body: BaseRunRequest = Body()) -> BaseVerifyResponse:
-        raise HTTPException(501, "The oracle agent runs only through an environment server, not the legacy /run route")
-
 
 if __name__ == "__main__":
     OracleAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = OracleAgent.run_webserver()  # noqa: F401

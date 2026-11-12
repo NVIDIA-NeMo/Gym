@@ -42,7 +42,7 @@ Responses API shape
 -------------------
 Rows are Responses-API-native, like every other Gym resources server.
 ``simple_agent`` POSTs them to ``/v1/responses`` on the model server, which
-runs ``ResponsesConverter`` to reach ``/chat/completions``, so the chat shape
+runs ``ChatCompletionsConverter`` to reach ``/chat/completions``, so the chat shape
 is reconstructed downstream rather than stored.
 
 * ``input`` — pre-canned tool turns are ``function_call`` /
@@ -229,7 +229,7 @@ def _tool_call_openai(tool: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[
 
     # Responses API typed input items, matching the rest of the Gym benchmarks.
     # Upstream's chat shape (``assistant`` with ``tool_calls`` + ``role: "tool"``)
-    # is reconstructed downstream by ``ResponsesConverter``.
+    # is reconstructed downstream by ``ChatCompletionsConverter``.
     #
     # The result is keyed off the *call's* id rather than ``raw_tool_return["id"]``
     # so the pair can never drift apart. Upstream ships them identical for all

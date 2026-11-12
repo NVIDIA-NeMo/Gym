@@ -1,0 +1,141 @@
+---
+title: "Evaluate Visual Coding with OpenCode"
+description: "Run BabyVision with OpenCode in a sandbox session, with a Python image toolkit and a GPT judge."
+position: 7
+---
+
+The `visual_coding_opencode` environment answers a question about an image over as many tool turns as the model needs. OpenCode runs each task in its own sandbox, whose shell has Python with pillow, numpy, scipy and opencv, so the model can crop, measure and plot the image and then look at what it made. A GPT judge grades the final `\boxed{}` answer against the gold answer.
+
+This tutorial runs the BabyVision benchmark (388 visual-reasoning puzzles) on it.
+
+## What This Tutorial Runs
+
+| Component | Value |
+|---|---|
+| Resources server | `resources_servers/visual_coding_opencode` |
+| Environment config | `resources_servers/visual_coding_opencode/configs/visual_coding_opencode.yaml` |
+| Agent | `opencode_agent` (OpenCode 1.17.11) in a sandbox session, behind the `single_agent_turn_legacy` Environment Server |
+| Sandbox | One per task, lent by the resources server; it reaches only the policy model server |
+| Benchmarks | `babyvision_opencode`, `babyvision_opencode_question_only` |
+| Tasks | 388 BabyVision puzzles |
+| Score (`reward` field) | `1.0` when the judge's verdict is `equivalent`, otherwise `0.0` |
+
+The two benchmarks have the same puzzles and answers:
+
+- `babyvision_opencode` puts a visual-reasoning instruction before each question (look first, use code when the answer needs precision).
+- `babyvision_opencode_question_only` sends the image and the bare question, without the instruction, for models trained on OpenCode's own system prompt.
+
+## Prerequisites
+
+Complete [Installation](/get-started/installation). Then check the following:
+
+- **A vision-language policy.** The policy endpoint must accept image input, because the puzzle image is attached to the first user message and OpenCode's `read` tool returns the model's crops and plots as images.
+- **Access to Hugging Face, or a local copy of the data.** `prepare.py` downloads BabyVision from [`UnipatAI/BabyVision`](https://huggingface.co/datasets/UnipatAI/BabyVision) (MIT license) at a pinned revision and checks the file's SHA-256.
+- **An OpenAI API key for the judge**, in `OPENAI_API_KEY`. The judge defaults to `gpt-4o-mini` on the OpenAI API.
+- **The sandbox image.** Build it from `resources_servers/visual_coding_opencode/sandbox_image/Dockerfile` and set `VISUAL_CODING_OPENCODE_SANDBOX_IMAGE` to it. It holds the Python image toolkit, OpenCode 1.17.11 under `/opt/opencode/bin` and OpenCode's plugin dependencies, each pinned by its SHA-256 in the config, because the sandbox cannot download them.
+- **A sandbox provider.** The config uses [OpenSandbox](/main/infrastructure/sandbox/opensandbox): set `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY`.
+- **A host address the sandbox can reach.** OpenCode in the sandbox calls the policy model server by address. The config sets `use_absolute_ip`, and only the policy model server advertises this host's address. Every other Gym server, the judge included, sets the address `127.0.0.1`, so the sandbox cannot reach it. Under NeMo RL, the head server is the exception: see [Train on the Environment](#train-on-the-environment).
+
+<Note>
+
+The model's shell commands run in the task's sandbox, not on the agent host. The sandbox can reach only the policy model server's host, on every port. This keeps the model off the internet only on an OpenSandbox server that enforces egress at the IP layer (`dns+nft`).
+
+</Note>
+
+## Prepare the Data
+
+Prepare the benchmark. `prepare.py` downloads the 388 BabyVision tasks from Hugging Face:
+
+```bash
+gym eval prepare --benchmark babyvision_opencode
+```
+
+On a host without internet access, download [the pinned parquet file](https://huggingface.co/datasets/UnipatAI/BabyVision/resolve/849cbeea2b1d00ad334e9e1e2b49a1960c9ff3f3/data/train-00000-of-00001.parquet) elsewhere and set `BABYVISION_PARQUET` to it first.
+
+Use `--benchmark babyvision_opencode_question_only` for the question-only variant.
+
+## Run the Benchmark
+
+The values below are examples. Set them to your policy endpoint and model.
+
+```bash
+: "${OPENAI_API_KEY:?Set OPENAI_API_KEY for the judge.}"
+export POLICY_BASE_URL=http://localhost:8000/v1
+export POLICY_API_KEY=EMPTY
+export POLICY_MODEL=my-vision-model
+
+gym eval run \
+    --model-type vllm_model \
+    --benchmark babyvision_opencode \
+    ++output_jsonl_fpath=results/benchmarks/babyvision_opencode.jsonl \
+    ++split=benchmark \
+    ++reuse_existing_data_preparation=true \
+    ++policy_base_url="${POLICY_BASE_URL}" \
+    ++policy_api_key="${POLICY_API_KEY}" \
+    ++policy_model_name="${POLICY_MODEL}"
+```
+
+The metric is `mean/reward`: judged accuracy over the 388 puzzles. Each task stops after 1800 seconds. A run that stops before its final answer, by timeout, output cap or context limit, scores `0`. The config turns off automatic compaction, so token capture can join every model call. It sets no step limit.
+
+To use another judge, point it at any OpenAI-compatible endpoint with `++visual_coding_opencode_judge_base_url=...` and `++visual_coding_opencode_judge_model_name=...`.
+
+<Note>
+
+vLLM can send every message's `content` to the chat template as a list of parts. Some templates print that list's Python representation into assistant and tool turns, and the model then copies it into its answers. If rollouts show text like `[{'type': 'text', ...}]`, serve the model with a chat template that joins list-shaped `content` into text.
+
+</Note>
+
+## Read the Results
+
+Each rollout carries the judge's verdict and reason and the extracted answer next to `reward`. The judge sees the question text, the gold answer, the extracted answer and the end of the model's text, but not the image. A response without a final answer scores `0`, and so does a run that does not complete, without a judge call. A judge failure (a failed call, or a reply without a valid verdict) is not a score: the row comes back masked (`failure_kind: judge_failed`).
+
+See [Aggregate Metrics](/evaluation/aggregate-metrics) for the summary files a run writes.
+
+## How a Task Runs
+
+The Environment Server runs each task as an agent session:
+
+1. It seeds the resources server, which starts the task's sandbox from `sandbox_config` and lends it to the agent. With `sandbox_network_access: model_only`, the sandbox's egress rule allows only the host of `sandbox_model_server`.
+2. It opens an `opencode_agent` session in that sandbox. The agent uploads the puzzle image into the session and attaches it with `opencode run --file`; the model entry declares image input, so `read` also returns images.
+3. OpenCode works in the sandbox until it answers, the context fills or the task times out. The resources server grades the answer.
+4. It closes the session, and the resources server stops the sandbox.
+
+The sandbox settings are on the resources server:
+
+```yaml
+visual_coding_opencode:
+  resources_servers:
+    visual_coding_opencode:
+      sandbox_provider: sandbox
+      sandbox_config:
+        image: ${oc.env:VISUAL_CODING_OPENCODE_SANDBOX_IMAGE,null}
+        ttl_s: 7200
+        resources: {cpu: 2, memory_mib: 8192}
+      sandbox_workdir: /workspace
+      sandbox_network_access: model_only
+      sandbox_model_server:
+        type: responses_api_models
+        name: policy_model
+```
+
+Without `sandbox_provider`, the resources server lends no sandbox; the agent then needs a `sandbox_provider` of its own.
+
+## Train on the Environment
+
+Gym's token capture records each model call of the session with its token IDs and log-probabilities, so the same config serves RL training. See [Training on External Agent Harnesses](/tutorials/training-tutorials/external-agent-harnesses).
+
+The crops and plots that OpenCode's `read` returns are images added between model calls. On NeMo RL's single controller, the vLLM worker stages them, so training sees them. Gym's local capture records them only with #5837. Saved rollouts keep the prompt image, but not the images that `read` returns: their tool outputs keep only text.
+
+<Note>
+
+Under NeMo RL, the sandbox can reach Gym's head server. NeMo RL sets the head server's host to the node address, which is the policy host whose every port `model_only` opens. The head server's `/global_config_dict_yaml` returns the merged config, including any key passed literally. Other environments' servers in an RL blend that do not set `127.0.0.1` get the node address too. Allowing only the model server's port needs a change in Gym's core.
+
+</Note>
+
+## Reference
+
+The component READMEs have the details:
+
+- [Visual coding resources server](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/visual_coding_opencode/README.md): the judge prompt, scoring rules, the lent sandbox and BabyVision data checks.
+- [OpenCode agent](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/opencode_agent/README.md): sandbox sessions, prompt images and the session options.
+- [BabyVision benchmark](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/babyvision_opencode/README.md): the prompt format and data preparation.

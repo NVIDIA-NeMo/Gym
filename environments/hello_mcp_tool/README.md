@@ -4,7 +4,7 @@ Hello MCP Tool lets you give an agent a tool it needs for a task without changin
 
 ## Concept
 
-A task can declare required tools through the Model Context Protocol (MCP). NeMo Gym checks that the selected agent and sandbox can provide those tools before the run starts. MCP gives tasks a standard way to describe and connect them.
+A task can declare required tools through the Model Context Protocol (MCP). NeMo Gym refuses each episode to an agent that cannot provide those tools, rather than run it without them. MCP gives tasks a standard way to describe and connect them.
 
 For definitions of task, software environment, sandbox, verifier, and reward, see [Terms used in these examples](../hello_world/README.md#terms-used-in-these-examples).
 
@@ -19,15 +19,11 @@ For definitions of task, software environment, sandbox, verifier, and reward, se
 ## Run it
 
 ```bash
-export OPENAI_API_KEY="<api-key>"
-
-gym eval run environments/hello_mcp_tool \
-  --agent opencode \
-  --model openai/gpt-5 \
-  --sandbox docker
+gym eval run environments/hello_mcp_tool --agent miniswe_sandboxed_agent --sandbox docker \
+  --model-type openai_model --model <model> --model-url <url> --model-api-key <key>
 ```
 
-The command uses OpenCode because it can work with files and tools in the task sandbox while keeping model choice separate. It uses Docker for a simple local sandbox. You can replace either one with another compatible agent or sandbox provider.
+The command uses mini-SWE because it starts the task's `stdio` MCP server inside the sandbox. A harness that does not, such as OpenCode, is refused this task. It uses Docker for a simple local sandbox, which you can replace with another sandbox provider.
 
 ## Validate it
 
@@ -35,18 +31,31 @@ Every task ships a `solution/` (a `solve.sh` here; the parameterized dataset shi
 row instead). The oracle plays it through the task's verifier and expects reward 1:
 
 ```bash
-gym dataset validate environments/hello_mcp_tool --sandbox opensandbox
+gym dataset validate environments/hello_mcp_tool --sandbox docker
 ```
+
+On a cluster, pass `--sandbox opensandbox` instead, and set `builds.repository` to a registry the sandboxes can pull
+from, because this task's Dockerfile needs a build (see "Harbor image builds" in
+`fern/versions/latest/pages/reference/configuration.mdx`).
 
 ## Check the result
 
-TODO: After runtime integration is available, add the literal successful CLI output and identify the exact result fields and artifacts a user should inspect to verify the score.
+`gym dataset validate` ends with one line per task:
+
+```text
+task_id	status	reward	verify_s	network
+hello_mcp_tool [repeat 0]	oracle solved	1.0	1.2	public
+```
+
+The task passed when its line reads `oracle solved` and reward `1.0`; the command then exits 0.
+
+Each command writes its results to its own folder: `results/harbor/validation/hello_mcp_tool/` for validate and `results/harbor/hello_mcp_tool/` for the agent run. In either folder, `rollouts_run_summary.json` lists each task's `status` and `reward`, and the paths of its verifier logs, where `reward.txt` and `test-stdout.txt` show what `tests/test.sh` wrote.
 
 ## Other examples
 
 ### Tasks and datasets
 
-- [Hello World](../hello_world/README.md): Define one self-contained directory task.
+- [Hello World](../hello_world/README.md): Define one self-contained task folder.
 - [Hello Dataset](../hello_dataset/README.md): Run multiple distinct tasks as one dataset.
 
 ### Python scoring

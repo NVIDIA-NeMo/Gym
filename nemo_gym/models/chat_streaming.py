@@ -32,8 +32,8 @@ Only the SSE envelope is synthesized -- there is no true token-by-token streamin
 sends keepalive comments while the backend computes, then emits the complete answer. Backend
 failures after the stream starts become terminal SSE errors. External staging stores training
 tokens separately; token ids and training logprobs are not carried in the ``chat.completion.chunk``
-schema. A client that does not set ``stream_options.include_usage``
-gets no usage chunk, so a model-call record reconstructed from this stream will lack token counts.
+schema. A client that does not set ``stream_options.include_usage`` gets no usage chunk, so the
+dispatch hands the backend's usage to model-call capture directly.
 """
 
 import json
@@ -112,10 +112,11 @@ def _choice_deltas(index: int, choice: dict[str, Any]) -> Iterator[dict[str, Any
     """Yield the ``chat.completion.chunk`` choice deltas for one completed choice.
 
     A role delta opens the choice; reasoning, content, refusal, and tool-call deltas follow (each emitted
-    only when present); a terminal delta carries the ``finish_reason``. Splitting the message this
-    way keeps every field a client tracks (role, reasoning, content, refusal, tool-call name/arguments,
-    finish reason) in the delta position that client expects, even though it is a single logical
-    chunk sequence rather than incremental tokens.
+    only when present); a terminal delta carries the ``finish_reason`` and optional provider
+    ``native_finish_reason`` and ``stop_reason`` metadata.
+    Splitting the message this way keeps every field a client tracks (role, reasoning, content, refusal,
+    tool-call name/arguments, finish and stop reasons) in the delta position that client expects, even
+    though it is a single logical chunk sequence rather than incremental tokens.
     """
     message = choice.get("message") or {}
     finish_reason = choice.get("finish_reason")
@@ -149,7 +150,11 @@ def _choice_deltas(index: int, choice: dict[str, Any]) -> Iterator[dict[str, Any
             )
         yield {"index": index, "delta": {"tool_calls": delta_tool_calls}, "finish_reason": None}
 
-    yield {"index": index, "delta": {}, "finish_reason": finish_reason}
+    terminal = {"index": index, "delta": {}, "finish_reason": finish_reason}
+    for field in ("stop_reason", "native_finish_reason"):
+        if choice.get(field) is not None:
+            terminal[field] = choice[field]
+    yield terminal
 
 
 def synthesize_chat_completion_sse(completion: dict[str, Any], include_usage: bool = False) -> Iterator[str]:

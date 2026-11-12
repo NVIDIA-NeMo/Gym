@@ -71,4 +71,4 @@ class TestApp:
         server.session_id_to_counter["live"] = 3
 
         # Made-up state for the dropped session would restore a wrong counter.
-        assert await server.export_session_states(["live", "dropped"]) == {"live": {"count": 3}}
+        assert await server.export_session_states(["live", "dropped"], checkpoint_id="c") == {"live": {"count": 3}}

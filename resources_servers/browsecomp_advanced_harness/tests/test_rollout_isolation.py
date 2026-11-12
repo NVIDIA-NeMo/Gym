@@ -42,6 +42,7 @@ import app as harness  # noqa: E402
 class _Stub:
     def __init__(self):
         self._bash_semaphore = asyncio.Semaphore(8)
+        self.config = types.SimpleNamespace(allow_host_execution=True)
 
 
 def run_bash(keystrokes, workspace, duration=10.0):

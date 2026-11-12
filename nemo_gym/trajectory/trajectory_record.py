@@ -17,6 +17,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    SerializationInfo,
     SerializerFunctionWrapHandler,
     ValidationError,
     field_validator,
@@ -25,10 +26,19 @@ from pydantic import (
 )
 
 from nemo_gym.config.config_types import ModelServerRef
-from nemo_gym.core.failure_kinds import validate_failure_kind
+from nemo_gym.core.failure_kinds import FailureStage, validate_failure_kind
 from nemo_gym.core.failure_records import FailureReport
 from nemo_gym.core.failure_transport import ModelOperationObservation
+from nemo_gym.core.operation_timing import OperationTiming
 from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseInputItem
+from nemo_gym.trajectory.model_call_record import tool_request_evidence
+from nemo_gym.trajectory.trajectory_format import (
+    canonical_tool_record,
+    project_bundle_v1,
+    project_trajectory_v1,
+    reject_v2_fields,
+    validate_failure_events,
+)
 
 
 if TYPE_CHECKING:
@@ -36,6 +46,7 @@ if TYPE_CHECKING:
 
 
 NG_AGENT_OBSERVATIONS_KEY = "ng_agent_observations"
+NG_AGENT_SANDBOX_OBSERVATION_KEY = "ng_agent_sandbox_observation"
 # The producer trajectory slot: a harness's own turns, forwarded on a result and replaced by the
 # collector's canonical projection.
 NG_TRAJECTORY_KEY = "ng_trajectory"
@@ -101,6 +112,8 @@ class TrajectoryResponseMetadata(ObservationModel):
 
 class TrajectoryModelCall(ObservationModel):
     model_call_id: Optional[str] = None
+    agent_instance: Optional[str] = Field(default=None, min_length=1)
+    clock_domain: Optional[str] = Field(default=None, min_length=1)
     client_session_id: Optional[str] = None
     client_assistant_message_id: Optional[str] = None
     started_at: Optional[float] = None
@@ -114,6 +127,7 @@ class TrajectoryModelCall(ObservationModel):
 
 class TrajectoryTurn(ObservationModel):
     invocation_id: str
+    agent_instance: Optional[str] = Field(default=None, min_length=1)
     activation_id: Optional[int] = Field(
         default=None,
         ge=1,
@@ -161,6 +175,7 @@ class AgentInvocation(ObservationModel):
 
     kind: Literal["agent_invocation"] = "agent_invocation"
     invocation_id: str
+    agent_instance: Optional[str] = Field(default=None, min_length=1)
     activation_id: Optional[int] = Field(
         default=None,
         ge=1,
@@ -317,11 +332,23 @@ def exclude_verifier_model_calls(
 
 
 class ToolCallObservation(ObservationModel):
-    """Timing observed for one tool call at an Agent-owned boundary."""
+    """Raw tool evidence; span and parent IDs are local to its producer until imported."""
 
     kind: Literal["tool_call"] = "tool_call"
     invocation_id: str
     tool_call_id: str
+    agent_instance: Optional[str] = Field(default=None, min_length=1)
+    span_id: Optional[str] = Field(default=None, min_length=1)
+    native_tool_call_id: Optional[str] = None
+    parent_span_id: Optional[str] = None
+    model_call_id: Optional[str] = None
+    failure_id: Optional[str] = None
+    timings: list[OperationTiming] = Field(default_factory=list)
+    # Adapter input for exact joins and stable imported identity. Kept in observation bundles.
+    producer_id: Optional[str] = Field(default=None, min_length=1)
+    model_call_ref: Optional[ModelCallRef] = None
+    source_message_id: Optional[str] = None
+    source_model_ref: Optional[ModelServerRef] = None
     sandbox_id: Optional[str] = Field(
         default=None,
         description="Enclosing sandbox instance, shared by concurrent calls; not per-call resource attribution.",
@@ -338,19 +365,53 @@ class ToolCallObservation(ObservationModel):
     def validate_timing(self) -> "ToolCallObservation":
         if self.started_at is not None and self.completed_at is not None and self.completed_at < self.started_at:
             raise ValueError("completed_at must not precede started_at")
+        boundaries = [timing.boundary for timing in self.timings]
+        if len(boundaries) != len(set(boundaries)):
+            raise ValueError("a tool attempt has at most one measurement per boundary")
         return self
 
 
 class TrajectoryToolCall(ToolCallObservation):
-    """Tool observation enriched with the model-visible output in a trajectory record."""
+    """Canonical tool attempt with qualified span IDs and model-visible output.
+
+    Unlike raw ToolCallObservation inputs, these IDs have already crossed the import
+    boundary and must remain unchanged on replay.
+    """
 
     output: Optional[Any] = None
+
+
+def tool_parent_cycles(tools: Iterable[ToolCallObservation]) -> set[tuple[str | None, str]]:
+    """Return only cycle members in the same-instance tool-parent relation."""
+    parents = {
+        (tool.agent_instance, tool.span_id): (tool.agent_instance, tool.parent_span_id)
+        for tool in tools
+        if tool.span_id is not None and tool.parent_span_id is not None
+    }
+    visited = set()
+    cyclic = set()
+    for start in parents:
+        path = []
+        positions = {}
+        current = start
+        while current in parents and current not in visited:
+            if current in positions:
+                cyclic.update(path[positions[current] :])
+                break
+            positions[current] = len(path)
+            path.append(current)
+            current = parents[current]
+        visited.update(path)
+    return cyclic
 
 
 class SandboxObservation(ObservationModel):
     """Outcome and lifetime resource usage reported by a sandbox-owning harness."""
 
     kind: Literal["sandbox"] = "sandbox"
+    stage: FailureStage | None = Field(
+        default=None, description="Originating execution stage, when known to the caller."
+    )
     role: Literal["agent", "verifier", "environment"]
     provider: Optional[str] = None
     sandbox_id: Optional[str] = None
@@ -369,6 +430,10 @@ class SandboxObservation(ObservationModel):
     )
     resource_usage_source: Optional[str] = None
     error_type: Optional[str] = None
+    error_message: Optional[str] = None
+    failure_id: Optional[str] = Field(
+        default=None, description="Canonical failure event in the request failure report."
+    )
     observed_client_interval_s: Optional[float] = Field(
         default=None,
         ge=0,
@@ -430,7 +495,18 @@ class ObservationGap(ObservationModel):
 
     code: str
     invocation_id: Optional[str] = None
+    agent_instance: Optional[str] = None
+    span_id: Optional[str] = None
     detail: Optional[str] = None
+
+    def matches_tool(self, tool: ToolCallObservation) -> bool:
+        """A supplied owner constrains the span; missing ownership never selects between matches."""
+        return (
+            self.span_id is not None
+            and self.span_id == tool.span_id
+            and (self.invocation_id is None or self.invocation_id == tool.invocation_id)
+            and (self.agent_instance is None or self.agent_instance == tool.agent_instance)
+        )
 
 
 AgentObservationRecord = Annotated[
@@ -442,12 +518,34 @@ AgentObservationRecord = Annotated[
 class AgentObservationBundle(ObservationModel):
     """Normalized observations returned by one Agent Server for one rollout."""
 
+    schema_version: Literal["1.0", "2.0"] = "1.0"
     source: str
     records: list[AgentObservationRecord] = Field(
         default_factory=list,
         description="Unordered typed records; list position does not imply execution order.",
     )
     gaps: list[ObservationGap] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def decode_version(cls, value: Any) -> Any:
+        if isinstance(value, dict) and value.get("schema_version", "1.0") == "1.0":
+            reject_v2_fields(value.get("records", []))
+        return value
+
+    @model_serializer(mode="wrap")
+    def serialize_version(self, handler: SerializerFunctionWrapHandler):
+        result = handler(self)
+        if self.schema_version == "1.0":
+            return project_bundle_v1(result)
+        if "records" in result:
+            result["records"] = [
+                canonical_tool_record(record, include_join_evidence=True)
+                if record.get("kind") == "tool_call"
+                else record
+                for record in result["records"]
+            ]
+        return result
 
     @model_validator(mode="after")
     def validate_identity(self) -> "AgentObservationBundle":
@@ -475,7 +573,7 @@ class AgentObservationBundle(ObservationModel):
 
 
 class TrajectoryRecord(ObservationModel):
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["1.0", "2.0"] = "1.0"
     task_id: str
     rollout_id: str
     invocations: list[AgentInvocation] = Field(default_factory=list)
@@ -483,7 +581,50 @@ class TrajectoryRecord(ObservationModel):
     turns: list[TrajectoryTurn] = Field(default_factory=list)
     model_calls: list[TrajectoryModelCall] = Field(default_factory=list)
     tool_calls: list[TrajectoryToolCall] = Field(default_factory=list)
+    failure_events: dict[str, dict[str, Any]] = Field(default_factory=dict)
     gaps: list[ObservationGap] = Field(default_factory=list)
+
+    @property
+    def capture_key(self) -> str:
+        """The attempt-qualified episode identity (called rollout_id in v1)."""
+        return self.rollout_id
+
+    @model_validator(mode="before")
+    @classmethod
+    def decode_identity(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        if value.get("schema_version", "1.0") == "1.0":
+            reject_v2_fields(
+                [*value.get("tool_calls", []), *value.get("invocations", []), *value.get("model_calls", [])]
+            )
+            if value.get("failure_events"):
+                raise ValueError("failure_events requires trajectory schema 2.0")
+        if "capture_key" not in value:
+            return value
+        if value.get("schema_version") != "2.0":
+            raise ValueError("capture_key requires trajectory schema 2.0")
+        if "rollout_id" in value and value["rollout_id"] != value["capture_key"]:
+            raise ValueError("conflicting capture_key and rollout_id aliases")
+        result = dict(value)
+        result["rollout_id"] = result.pop("capture_key")
+        return result
+
+    @model_serializer(mode="wrap")
+    def serialize_version(self, handler: SerializerFunctionWrapHandler, info: SerializationInfo):
+        result = handler(self)
+        if self.schema_version == "1.0":
+            # The result writer coordinates both envelopes before either loses join evidence.
+            if info.context and info.context.get("defer_v1_projection"):
+                return result
+            return project_trajectory_v1(result)
+        if "rollout_id" in result:
+            result["capture_key"] = result.pop("rollout_id")
+        if "tool_calls" in result:
+            result["tool_calls"] = [
+                canonical_tool_record(tool, include_join_evidence=False) for tool in result["tool_calls"]
+            ]
+        return result
 
     @model_validator(mode="after")
     def validate_identity(self) -> "TrajectoryRecord":
@@ -493,6 +634,78 @@ class TrajectoryRecord(ObservationModel):
         model_call_ids = [call.model_call_id for call in self.model_calls if call.model_call_id]
         if len(model_call_ids) != len(set(model_call_ids)):
             raise ValueError("model_call_id must be unique within a trajectory")
+        if self.schema_version == "2.0":
+            identities = [(tool.agent_instance, tool.span_id) for tool in self.tool_calls]
+            if any(tool.span_id is None for tool in self.tool_calls) or len(identities) != len(set(identities)):
+                raise ValueError("v2 tool attempts require unique span identities")
+            if tool_parent_cycles(self.tool_calls):
+                raise ValueError("tool parent spans must not contain cycles")
+            for gap in self.gaps:
+                if gap.span_id is not None and sum(gap.matches_tool(tool) for tool in self.tool_calls) != 1:
+                    raise ValueError("attempt-scoped gap must resolve to one retained tool with consistent ownership")
+            validate_failure_events(self.failure_events)
+            calls = {call.model_call_id: call for call in self.model_calls if call.model_call_id}
+            owners: dict[str, set[str | None]] = defaultdict(set)
+            for invocation in self.invocations:
+                owners[invocation.invocation_id].add(invocation.agent_instance)
+                for reference in invocation.model_calls:
+                    candidates = (
+                        [calls[reference.model_call_id]]
+                        if reference.model_call_id in calls
+                        else []
+                        if reference.model_call_id is not None
+                        else self.model_calls
+                    )
+                    matches = [
+                        candidate
+                        for candidate in candidates
+                        if (
+                            reference.model_ref is None or candidate.response_metadata.model_ref == reference.model_ref
+                        )
+                        and (
+                            reference.response_id is None
+                            or candidate.response_metadata.response_id == reference.response_id
+                        )
+                    ]
+                    call = matches[0] if len(matches) == 1 else None
+                    if (
+                        call is not None
+                        and invocation.agent_instance is not None
+                        and call.agent_instance is not None
+                        and call.agent_instance != invocation.agent_instance
+                    ):
+                        raise ValueError("model call and owning invocation have different agent instances")
+            for item in [*self.tool_calls, *self.turns]:
+                known = owners.get(item.invocation_id, set())
+                if (
+                    item.agent_instance is not None
+                    and known
+                    and None not in known
+                    and item.agent_instance not in known
+                ):
+                    raise ValueError("record and owning invocation have different agent instances")
+            for tool in self.tool_calls:
+                if tool.parent_span_id is not None and (tool.agent_instance, tool.parent_span_id) not in identities:
+                    raise ValueError("parent_span_id must resolve to an attempt of the same agent instance")
+                if tool.failure_id is not None and tool.failure_id not in self.failure_events:
+                    raise ValueError("tool failure_id must resolve in failure_events")
+                if tool.model_call_id is not None:
+                    call = calls.get(tool.model_call_id)
+                    if call is None:
+                        raise ValueError("tool model_call_id must resolve to one captured call")
+                    evidence = tool_request_evidence(
+                        call.response,
+                        status_code=call.response_metadata.status_code,
+                        response_status=call.response_metadata.response_status,
+                    )
+                    if not evidence.permits_link(tool.native_tool_call_id or tool.tool_call_id):
+                        raise ValueError("requesting model response does not establish this tool request")
+                    if (
+                        tool.agent_instance is not None
+                        and call.agent_instance is not None
+                        and tool.agent_instance != call.agent_instance
+                    ):
+                        raise ValueError("tool and requesting model call have different agent instances")
         keys: set[tuple[str, int]] = set()
         for turn in self.turns:
             if turn.task_id != self.task_id or turn.rollout_id != self.rollout_id:
@@ -587,7 +800,11 @@ def join_assistant_message_calls(
         candidates[0].model_calls.append(
             ModelCallRef(model_call_id=call.model_call_id, model_ref=call.model_ref, response_id=call.response_id)
         )
-    result.gaps = list({(gap.code, gap.invocation_id, gap.detail): gap for gap in result.gaps}.values())
+    result.gaps = list(
+        {
+            (gap.code, gap.agent_instance, gap.invocation_id, gap.span_id, gap.detail): gap for gap in result.gaps
+        }.values()
+    )
     return result, projected
 
 
@@ -800,7 +1017,11 @@ def join_agent_model_calls(
                     detail=f"capture:{call.model_call_id or call.response_id or 'unknown'}:call_index={call.call_index}",
                 )
             )
-    result.gaps = list({(gap.code, gap.invocation_id, gap.detail): gap for gap in result.gaps}.values())
+    result.gaps = list(
+        {
+            (gap.code, gap.agent_instance, gap.invocation_id, gap.span_id, gap.detail): gap for gap in result.gaps
+        }.values()
+    )
     return result
 
 

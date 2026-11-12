@@ -20,7 +20,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass
 from time import monotonic, perf_counter, time
-from typing import Any
+from typing import Any, ClassVar
 from uuid import uuid4
 
 from aiohttp import ClientResponseError
@@ -53,6 +53,7 @@ from nemo_gym.agents import (
     confirmed_policy_response_timeout,
     failure_outcome_policy,
 )
+from nemo_gym.agents.agent_outcome import POLICY_TIMEOUT_OPERATION, policy_timeout_failure
 from nemo_gym.client import get_response_json, raise_for_status, rollout_path_prefix
 from nemo_gym.client import request as http_request
 from nemo_gym.config import (
@@ -66,8 +67,10 @@ from nemo_gym.core import (
     AGENT_RUN_ERROR,
     MODEL_POLICY_RESPONSE_TIMEOUT,
     MODEL_REQUEST_ERROR,
+    TOOL_OUTPUT_IMAGES_KEY,
     EpisodeId,
     FailureBoundary,
+    FailureClassificationConfig,
     FailureHeader,
     FailureReportRow,
     NeMoGymEasyInputMessage,
@@ -80,8 +83,10 @@ from nemo_gym.core import (
     NeMoGymResponseUsage,
     NgFailureEvent,
     RequestFailureLog,
+    ToolOutputImage,
     accumulate_response_usage,
     report_for_current_request,
+    split_tool_output_images,
 )
 from nemo_gym.rollouts.health.timeouts import TimeoutEvent
 from nemo_gym.server_runtime import (
@@ -198,18 +203,11 @@ class _LegacyLoopReply:
 class SimpleAgentOutcomePolicyConfig(OutcomePolicyConfig):
     """The legacy /run boundary can retry or stop; it has no output to verify after a timeout."""
 
+    supported_actions: ClassVar[frozenset[OutcomeAction]] = frozenset(
+        {OutcomeAction.RETRY, OutcomeAction.FAIL, OutcomeAction.COUNT_AS_ZERO}
+    )
+    classification: FailureClassificationConfig = Field(default_factory=FailureClassificationConfig)
     default_action: OutcomeAction = OutcomeAction.RETRY
-
-    @model_validator(mode="after")
-    def require_run_actions(self) -> "SimpleAgentOutcomePolicyConfig":
-        """Reject grading actions this failure-only boundary cannot execute."""
-        if OutcomeAction.VERIFY in [
-            self.default_action,
-            *self.by_failure_kind.values(),
-            *self.by_status_code.values(),
-        ]:
-            raise ValueError("SimpleAgent /run outcome policy does not support verify")
-        return self
 
 
 class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
@@ -255,10 +253,6 @@ class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
         policy["by_failure_kind"] = rules | {MODEL_POLICY_RESPONSE_TIMEOUT: action}
         value["outcome_policy"] = policy
         return value
-
-
-# The classified policy-request timeout whose outcome the legacy /run boundary selects.
-POLICY_TIMEOUT_OPERATION = "agent.policy_request"
 
 
 def _selected_model_body_failure(error: ClientResponseError) -> bool:
@@ -388,7 +382,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             resources_cookies=dict(direct_access.cookies) if direct_access is not None else None,
         )
 
-    async def export_agent_sessions(self, session_keys: list[str]) -> dict[str, dict[str, JsonValue]]:
+    async def export_agent_sessions(
+        self, session_keys: list[str], *, checkpoint_id: str
+    ) -> dict[str, dict[str, JsonValue]]:
         return {session_key: self._export_agent_session(session_key) for session_key in session_keys}
 
     def _export_agent_session(self, session_key: str) -> dict[str, JsonValue]:
@@ -442,7 +438,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
     async def retire_agent_session(self, session_key: str) -> None:
         self._legacy_replies.pop(session_key, None)
-        self._free_session(session_key)
+        self._release_retired_session(session_key)
 
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         if not isinstance(state, SimpleAgentSessionState):
@@ -593,18 +589,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 except ClientResponseError as error:
                     if _selected_model_body_failure(error) or _selected_failure_unknown(error):
                         raise  # The reply's report travels on unchanged; it is not another session chance.
-                    failure = None
-                    if _policy_request_timed_out(error):
-                        report = FailureHeader.decode(error.headers)
-                        final = report.events[report.failure_id]
-                        failure = NgFailureEvent(
-                            boundary=FailureBoundary.AGENT,
-                            failure_kind=MODEL_POLICY_RESPONSE_TIMEOUT,
-                            failure_reason="Policy model request timed out on every attempt",
-                            operation=POLICY_TIMEOUT_OPERATION,
-                            operation_id=final.operation_id,
-                        )
-                        failure.__cause__ = error
+                    failure = policy_timeout_failure(error)
                     if not in_session:
                         if failure is not None:
                             raise failure from error
@@ -740,6 +725,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 await commit_boundary()
 
             all_fn_calls = [o for o in model_response.output if o.type == "function_call"]
+            tool_images: list[ToolOutputImage] = []
             for output_function_call in all_fn_calls:
                 if collect_trajectory:
                     started_at = time()
@@ -781,7 +767,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                             json=parsed_arguments,
                             cookies=resources_server_cookies,
                         )
-                    tool_output = (await api_response.content.read()).decode()
+                    tool_output, images = _split_tool_output_images((await api_response.content.read()).decode())
+                    tool_images.extend(images)
                     resources_server_cookies = dict(resources_server_cookies or {})
                     resources_server_cookies.update(_cookies(api_response))
                     if collect_trajectory:
@@ -812,6 +799,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                         output=tool_output,
                     )
                 )
+
+            # Images follow all of the turn's tool outputs, one user message each.
+            new_outputs.extend(_tool_image_message(image) for image in tool_images)
 
             if collect_trajectory and all_fn_calls:
                 turns[-1].step_count = len(tool_records)
@@ -1034,7 +1024,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
     def _model_timeout_row(self, failure: NgFailureEvent, *, elapsed_s: float) -> dict[str, Any]:
         """Translate a recorded timeout and the boundary's policy into existing Collection failure fields."""
-        action = failure_outcome_policy(failure, config=self.config.outcome_policy)
+        action = failure_outcome_policy(
+            failure, config=self.config.outcome_policy, classification=self.config.outcome_policy.classification
+        )
         report = report_for_current_request(failure)
         return {
             "_ng_failure_class": AGENT_RUN_ERROR,
@@ -1317,6 +1309,28 @@ def _cookies(response: Any) -> dict[str, str]:
 
 
 _ROLLOUT_PREFIX_SUFFIX = re.compile(rf"/{re.escape(ROLLOUT_PATH_PREFIX)}/[^/]+$")
+
+
+def _split_tool_output_images(tool_output: str) -> tuple[str, list[ToolOutputImage]]:
+    """Move the images out of a JSON tool reply, so the tool output keeps only the rest of the reply."""
+    if TOOL_OUTPUT_IMAGES_KEY not in tool_output:
+        return tool_output, []
+    try:
+        payload = json.loads(tool_output)
+    except json.JSONDecodeError:
+        return tool_output, []
+    if not isinstance(payload, dict) or TOOL_OUTPUT_IMAGES_KEY not in payload:
+        return tool_output, []
+    rest, images = split_tool_output_images(payload)
+    # The JSON format FastAPI sends, so the text matches a reply without images and the MCP tool result.
+    return json.dumps(rest, ensure_ascii=False, separators=(",", ":")), images
+
+
+def _tool_image_message(image: ToolOutputImage) -> NeMoGymEasyInputMessage:
+    """Show one tool image to the model as a user message, after its label."""
+    content = [{"type": "input_text", "text": image.label}] if image.label else []
+    content.append({"type": "input_image", "image_url": image.image_url, "detail": "auto"})
+    return NeMoGymEasyInputMessage(type="message", role="user", content=content)
 
 
 def _tools_base_url(tool_access: DirectHTTPToolAccess, resources_prefix: str) -> str:

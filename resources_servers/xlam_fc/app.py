@@ -15,6 +15,7 @@
 import json
 from typing import Any, Dict, List
 
+from fastapi import FastAPI
 from pydantic import Field
 
 from nemo_gym.server_runtime import (
@@ -23,6 +24,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 class XlamFcResourcesServerConfig(BaseResourcesServerConfig):
@@ -42,6 +44,20 @@ class XlamFcVerifyResponse(BaseVerifyResponse):
 
 class XlamFcResourcesServer(SimpleResourcesServer):
     config: XlamFcResourcesServerConfig
+
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+        # The dataset's tools are not executable here: the task is to predict the right call, which verify grades
+        # against expected_answers. Acknowledge any tool call so the model never sees a 404 for a tool it was told
+        # to use (NVBug 6900453: every tool reply was {"detail":"Not Found"} and the model's retries scored 0).
+        app.post("/{tool_name}")(self.acknowledge_tool_call)
+        return app
+
+    async def acknowledge_tool_call(self, tool_name: str) -> Dict[str, str]:
+        return {
+            "status": "ok",
+            "message": f"{tool_name} call recorded. xlam_fc grades tool calls against the dataset; tools are not executed.",
+        }
 
     @staticmethod
     def _normalize_arguments(arguments: Any) -> Dict[str, Any]:
@@ -123,3 +139,6 @@ class XlamFcResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     XlamFcResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = XlamFcResourcesServer.run_webserver()  # noqa: F401

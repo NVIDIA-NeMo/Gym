@@ -12,8 +12,9 @@ from unittest.mock import AsyncMock, MagicMock, Mock
 
 import orjson
 import pytest
-from aiohttp import ClientPayloadError
+from aiohttp import ClientPayloadError, ClientResponseError
 
+from nemo_gym.agents.utils.verify_call import masked_verify_failure, verify_route_failure
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.core.failure_transport import FailureReportRow
 from nemo_gym.core.typed_exceptions import NgFailureEvent, agent_route_failure, failure_report_for
@@ -61,6 +62,17 @@ def verify_transport_masked(task: int = 0) -> dict:
         response=ANSWER,
         **_route_failure_fields(ClientPayloadError("Response payload is not completed")),
     )
+
+
+def verify_http_error_masked(task: int = 0) -> dict:
+    """The row an agent returns from /run when the verifier answered 500: the saved answer, masked by the agent's helper."""
+    error = ClientResponseError(
+        MagicMock(real_url="http://verifier/verify"), (), status=500, message="Internal Server Error"
+    )
+    failure = verify_route_failure(error, operation_id="op", attempt=1)
+    failure.__cause__ = error
+    row = masked_verify_failure({"response": ANSWER}, failure)
+    return ident(task, **row, **{k: v for k, v in _route_failure_fields(error).items() if k.startswith("_ng")})
 
 
 def verifier_unmeasurable(task: int = 0) -> dict:
@@ -138,6 +150,13 @@ def test_the_selector_takes_judge_and_verify_transport_masks_and_ungraded_result
     # No saved answer, or a failures-sidecar row: never selected here.
     assert reverification_cause(saved_row_evidence(verify_transport_masked() | {"response": None})) is None
     assert reverification_cause(saved_row_evidence(verify_transport_masked() | {"_ng_failure_class": "x"})) is None
+
+
+def test_a_masked_verify_http_error_with_a_saved_answer_is_selected() -> None:
+    row = verify_http_error_masked()
+
+    assert row["failure_kind"] == "judge_failed" and row["mask_sample"] is True
+    assert reverification_cause(saved_row_evidence(row)) == "judge"
 
 
 def test_a_saved_grading_record_artifact_or_settlement_is_recorded_grading() -> None:
@@ -329,6 +348,17 @@ async def test_a_verify_transport_masked_result_is_reverified_and_settled_at_com
     assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 0
 
 
+async def test_a_masked_verify_http_error_is_settled_by_verify_alone(tmp_path, verifier) -> None:
+    output = _run(tmp_path, [verify_http_error_masked()])
+    (identity,) = due_judge_failures(output)
+
+    assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 1
+
+    assert verifier["posted"] == [("rs", "/verify")]  # the saved answer graded again; no policy call
+    settled = _selected(output)[0][identity]
+    assert settled["reward"] == 1.0 and not settled.get("mask_sample") and settled["response"] == ANSWER
+
+
 async def test_an_ungraded_result_is_reverified_and_one_with_a_grading_artifact_is_not(tmp_path, verifier) -> None:
     output = _run(tmp_path, [ungraded(0), ungraded(1, judge_response="A")])
     assert len(due_judge_failures(output)) == 1  # the row with a saved grading artifact is not due
@@ -336,6 +366,100 @@ async def test_an_ungraded_result_is_reverified_and_one_with_a_grading_artifact_
     assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 1
     rewards = sorted(row["reward"] for row in _selected(output)[0].values())
     assert rewards == [0.5, 1.0] and len(verifier["posted"]) == 1
+
+
+def _asked_a_model(row: dict, metadata: dict | None, **extra) -> dict:
+    """``row``'s verifier asked one model, whose call the row saved with ``metadata`` (None: no call saved)."""
+    trajectory = row["ng_trajectory"]
+    trajectory["verifier_invocations"][0]["model_calls"] = [{"model_call_id": "judge-0"}]
+    if metadata is not None:
+        trajectory["model_calls"] = [{"model_call_id": "judge-0", "response_metadata": metadata}]
+    return row | extra
+
+
+ANSWERED = {"status_code": 200, "response_status": "completed"}
+TEXT_ANSWER = ANSWER | {
+    "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "42"}]}]
+}
+
+
+async def test_a_result_the_judge_answered_without_a_grading_record_is_not_graded_again(tmp_path, verifier) -> None:
+    """A verifier that does not observe its judge records no grading however often it is asked again; a grade the
+    judge gave is never replaced, so the pass leaves the row as saved: no second judge call, no second row."""
+    output = _run(tmp_path, [_asked_a_model(ungraded(0), ANSWERED), ungraded(1)])
+    before = output.read_bytes()
+
+    assert len(due_judge_failures(output)) == 1  # only the row whose verifier asked no model
+    assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 1
+    rows = [json.loads(line) for line in output.read_bytes().splitlines()]
+    assert len(rows) == 3 and len({logical_rollout_id(row) for row in rows}) == 2
+    assert output.read_bytes().startswith(before) and len(verifier["posted"]) == 1
+    assert due_judge_failures(output) == []
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"status_code": 504, "response_status": None},
+        {"status_code": 500, "response_status": "failed"},
+        {"status_code": None, "response_status": None},
+        {"status_code": 200, "response_status": "incomplete"},
+        None,
+    ],
+    ids=["timeout", "server_error", "no_response", "incomplete", "call_not_saved"],
+)
+async def test_a_result_scored_after_every_judge_call_failed_is_graded_again(tmp_path, verifier, metadata) -> None:
+    output = _run(tmp_path, [_asked_a_model(ungraded(0), metadata)])
+    assert len(due_judge_failures(output)) == 1
+    assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 1
+
+
+async def test_one_answered_judge_call_among_failed_ones_keeps_the_grade(tmp_path) -> None:
+    row = _asked_a_model(ungraded(0), {"status_code": 504, "response_status": None})
+    row["ng_trajectory"]["verifier_invocations"][0]["model_calls"].append({"model_call_id": "judge-1"})
+    row["ng_trajectory"]["model_calls"].append({"model_call_id": "judge-1", "response_metadata": ANSWERED})
+    assert due_judge_failures(_run(tmp_path, [row])) == []
+
+
+async def test_a_result_naming_a_judge_error_is_graded_again_even_after_a_200(tmp_path) -> None:
+    row = _asked_a_model(ungraded(0), ANSWERED, failure_kind="judge_invalid")
+    assert len(due_judge_failures(_run(tmp_path, [row]))) == 1
+
+
+@pytest.mark.parametrize(
+    "finish",
+    ["length", "content_filter"],
+)
+async def test_a_chat_judge_reply_cut_at_its_cap_is_graded_again(tmp_path, finish) -> None:
+    """FrontierScience's non-research verifier saves no verdict, reward 0.0 and a clean invalid flag on a cut reply."""
+    metadata = {"status_code": 200, "response_status": None, "dialect": "chat", "finish_reason": finish}
+    row = _asked_a_model(
+        ungraded(0), metadata, verdict=None, reward=0.0, invalid_judge_response=False, response=TEXT_ANSWER
+    )
+    assert len(due_judge_failures(_run(tmp_path, [row]))) == 1
+
+
+async def test_a_chat_judge_reply_that_stopped_normally_keeps_the_grade(tmp_path) -> None:
+    metadata = {"status_code": 200, "response_status": None, "dialect": "chat", "finish_reason": "stop"}
+    row = _asked_a_model(
+        ungraded(0), metadata, verdict=None, reward=0.0, invalid_judge_response=False, response=TEXT_ANSWER
+    )
+    assert due_judge_failures(_run(tmp_path, [row])) == []
+
+
+async def test_a_partial_reward_with_a_saved_judge_error_message_is_graded_again(tmp_path) -> None:
+    """Finance Agent V2: an answered judge call, reward 0.5 and a nonempty judge_error for unresolved criteria."""
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    row = _asked_a_model(ungraded(0), ANSWERED, reward=0.5, judge_error="criteria 2, 3 unresolved")
+    assert len(due_judge_failures(_run(tmp_path / "a", [row]))) == 1
+    empty = _asked_a_model(ungraded(0), ANSWERED, reward=0.5, judge_error="")
+    assert due_judge_failures(_run(tmp_path / "b", [empty])) == []
+
+
+async def test_an_invalid_judge_response_inside_the_rubric_facts_is_graded_again(tmp_path) -> None:
+    row = _asked_a_model(ungraded(0), ANSWERED, rubric_score=0.0, scoring_threshold=1.0, invalid_judge_response=True)
+    assert len(due_judge_failures(_run(tmp_path, [row]))) == 1
 
 
 async def test_a_reverification_that_fails_again_leaves_the_saved_result_as_it_was(tmp_path, verifier) -> None:
@@ -350,6 +474,56 @@ async def test_a_reverification_that_fails_again_leaves_the_saved_result_as_it_w
     assert list(selected.values())[0]["mask_sample"] is True
     assert store.manifest.pending_rejudge == {}  # the admission is withdrawn, so a later pass may try again
     assert len(due_judge_failures(output)) == 1
+
+
+async def test_a_result_scored_in_a_separate_rescoring_output_is_still_settled_into_its_run(
+    tmp_path, verifier, monkeypatch
+) -> None:
+    """A rescore of the run into a separate output (``gym eval reverify`` on a managed run) scores the saved answer
+    there and leaves the run as it was; the run's own settle still grades that answer and settles it, once."""
+    import nemo_gym.eval.rollout_reverification as reverify
+    from nemo_gym.rollouts.rollout_records import RUN_ID_KEY, materialized_path_for, read_records
+
+    monkeypatch.setattr(reverify, "get_exporters", list)
+    output = _run(tmp_path, [verify_transport_masked()])
+    (identity,) = due_judge_failures(output)
+    run_bytes = output.read_bytes()
+    rescored = tmp_path / "rescored" / "rollouts.jsonl"
+    await reverify.RolloutReverificationHelper().run_from_config(
+        reverify.RolloutReverificationConfig(
+            materialized_inputs_jsonl_fpath=str(materialized_path_for(output)),
+            rollouts_jsonl_fpath=str(output),
+            output_jsonl_fpath=str(rescored),
+            disable_aggregation=True,
+            upload_rollouts=False,
+        )
+    )
+    [row] = list(read_records(rescored))
+    assert row["reward"] == 1.0 and row["response"] == ANSWER and RUN_ID_KEY not in row
+    assert row["_ng_reverification_source_run_id"] == RolloutStore.read(output).manifest.run_id
+    # The rescoring output is a separate grading artifact: the run itself is untouched and still due.
+    assert output.read_bytes() == run_bytes and due_judge_failures(output) == [due_judge_failures(output)[0]]
+
+    assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 1
+
+    settled = _selected(output)[0][identity]
+    assert settled["reward"] == 1.0 and not settled.get("mask_sample") and settled["response"] == ANSWER
+    assert "_ng_reverification_source_run_id" not in settled
+    assert due_judge_failures(output) == [] and list(read_records(rescored)) == [row]
+
+    # Settlement changed the grade but kept the same attempt and answer. Its separate re-score stays reusable.
+    posted = list(verifier["posted"])
+    await reverify.RolloutReverificationHelper().run_from_config(
+        reverify.RolloutReverificationConfig(
+            materialized_inputs_jsonl_fpath=str(materialized_path_for(output)),
+            rollouts_jsonl_fpath=str(output),
+            output_jsonl_fpath=str(rescored),
+            resume_from_cache=True,
+            disable_aggregation=True,
+            upload_rollouts=False,
+        )
+    )
+    assert verifier["posted"] == posted and list(read_records(rescored)) == [row]
 
 
 async def test_an_unsupported_verifier_is_never_asked_to_reverify(tmp_path, verifier) -> None:

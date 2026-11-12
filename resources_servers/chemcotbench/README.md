@@ -25,22 +25,38 @@ The resources server invokes the upstream parser and three layer evaluators in a
 
 - **Reward / Layer 1:** binary final-answer correctness, using verdict precedence (`layer1_top1_acc`, `layer1_exact_match`, then `layer1_top1_acc_strict`). Optimization uses upstream `layer1_outcome`: positive improvement for single-property tasks and the upstream per-property improvement thresholds for dual-property tasks.
 - **Yield and temperature predictions:** Layer 1 is 1 only when the absolute error is strictly less than 0.5 in the dataset's numeric units; an error of exactly 0.5 fails. MAE remains available separately.
-- **Condition ranking:** Layer 1 checks only the first-ranked option against the reference first option. The rest of the ranking affects the separate NDCG/MRR diagnostics, not the binary reward.
+- **Condition ranking:** A complete final permutation is required. Layer 1 compares its first option with the maximum recorded yield, accepting ties; recorded yields also replace the incorrectly shuffled gold rankings in Type II. Type I checks the reasoning, preference/ranking/final consistency, and condition-field differences. Type II omits the reaction-class comparison when the reference is the unavailable `OTHER` label. NDCG uses average ordinal relevance for tied yields; MRR accepts any tied best option. Original data and incomplete reaction inputs are preserved.
 - **Layer 2:** reasoning-template adherence and self-consistency, retained as `layer2_state_score`.
 - **Layer 3 Type I:** chemical intermediate-state verification, retained as `layer3_type1`.
 - **Layer 3 Type II:** reference-state field matching, retained as `layer3_type2`, with matched/total counts.
 
+Component recommendation grades the final SMILES in Layer 1 and compares complete fragment sets in Type II,
+using each subtask's actual parsed fields. Type I requires final/intermediate consistency and the applicable
+verifier gates. For reagents, exact valid reference matches receive the upstream-documented waiver for
+heuristic slot/class checks (S3/S6/S8); charge balance and the other gates remain required. Solvent proticity
+checks both O–H and N–H groups. The heteroatom-fraction polarity heuristic is informational, since it is not
+a polarity measurement and solvent-mixture proportions are unspecified.
+
 Optimization has a different upstream evaluator interface: its Layer 2 score is retained in `layer2_state_score`, its reference-reasoning score in `layer3_step_score`, and its deltas, threshold results, similarity, and detailed layer metrics in `optimization_metrics`. The unrelated Layer 3 Type I/II fields remain null for optimization. Predictions are parsed separately from reference fields so missing outputs cannot inherit gold intermediate states.
+
+Optimization Layer 1 grades the parsed final answer, requiring a parsed product field but never falling back
+to its value. Layer 3 checks the model's edit plan and scaffold/FG claims against its own intermediate product;
+it no longer compares those claims with a different reference transformation. Edit checks reuse the upstream
+fragment-count direction heuristic (at least one claimed direction must be supported), which is not a complete
+proof of a local molecular edit. Steps 1 and 3 retain reference Tanimoto similarity; step 3 additionally requires
+final/intermediate agreement. Thus the step score still measures reference similarity as well as correctness.
+Dual-property improvement thresholds are retained for benchmark compatibility, although the released prompts
+do not state them. Non-improving reference targets and other data defects are not rewritten by these fixes.
 
 Subtask-specific MAE, Tanimoto, FTS, NDCG, and MRR values are retained when upstream supplies them. Missing metrics remain null; unrelated subtask metrics are not substituted for each other. A correct final answer need not pass every Layer 3 check, including for some released reference traces.
 
-Empty, unparseable, and incorrect model answers receive zero and remain unmasked. Think/thinking blocks are stripped before parsing. Scorer timeouts, worker failures, and invalid scorer results return a placeholder zero with `mask_sample: true`, retaining `scoring_error` and `failure_reason`. Gym excludes these unavailable measurements from quality metrics and reports them in masked-rollout coverage. No extra answer-format fallback is added to the upstream parser.
+Empty, unparseable, and incorrect model answers receive zero and remain unmasked. Think/thinking blocks are stripped before parsing. Scorer timeouts, worker failures, and invalid scorer results return a placeholder zero with `mask_sample: true` and `failure_kind: verifier_error`, retaining `scoring_error` and `failure_reason`. Gym excludes these unavailable measurements from quality metrics and reports them in masked-rollout coverage. No extra answer-format fallback is added to the upstream parser.
 
 ## Setup and run
 
 On first startup the server downloads its pinned source checkout and, when Layer 3 is enabled, the released reference data. Code revision: `dcd35470de4096a1b10ee9ed6f072bcee983a9cc`. Dataset revision: `f0bb2fb00c97cb3257294a639e28f960f2da157e`. Existing task families use Gym's RDKit and scikit-learn. Optimization uses an isolated Python 3.11 environment with PyTDC 0.4.1, RDKit 2022.9.5, NumPy 1.26.4, and scikit-learn 1.2.2 (see `molopt/pyproject.toml` and `molopt/uv.lock`), because the legacy pretrained oracles are incompatible with Gym's Python 3.13 dependency set. With `enable_molopt: true` (default), startup uses `uv` to install that environment under `.molopt/`, downloads the three PyTDC pretrained models there, and checks that each model can score a molecule. Successful setup is cached; it does not change Gym's installed packages.
 
-To reuse existing files, set `repo_path` and `data_dir` in the `chemcotbench.resources_servers.chemcotbench` config. The data directory must contain `manifest.json`. Other verifier options are `run_layer3` (default true), `max_concurrency` (4), and `timeout_seconds` (120). Disabling Layer 3 leaves its scores null. Set `molopt_python` and `oracle_dir` to reuse an existing compatible optimization runtime and oracle cache. `enable_molopt: false` skips its setup for runs limited to other families; submitted optimization tasks then return `scoring_error: molopt_disabled` with `mask_sample: true`.
+To reuse existing files, set `repo_path` and `data_dir` in the `chemcotbench.resources_servers.chemcotbench` config. The data directory must contain `manifest.json`. Other verifier options are `run_layer3` (default true), `max_concurrency` (4), and `timeout_seconds` (120). Disabling Layer 3 leaves its scores null. Set `molopt_python` and `oracle_dir` to reuse an existing compatible optimization runtime and oracle cache. `enable_molopt: false` skips its setup for runs limited to other families; submitted optimization tasks then return `scoring_error: molopt_disabled` with `mask_sample: true` and `failure_kind: chemcotbench:scoring_disabled`.
 
 Scoring keeps up to `max_concurrency` worker processes across both Python runtimes.
 Workers start lazily and retain imported chemistry modules and Layer 3 reference

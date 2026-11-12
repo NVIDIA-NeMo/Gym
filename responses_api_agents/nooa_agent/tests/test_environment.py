@@ -176,12 +176,12 @@ async def test_resource_client_error_feedback_allows_correction_and_verification
     assert outbound.await_args_list[0].kwargs["cookies"] == {"resource": "seed"}
     assert outbound.await_args_list[1].kwargs["cookies"] == {"resource": "seed", "session": "feedback"}
     assert _paths(client)[-3:] == ["/v1/agent_sessions/close", "/verify", "/close_session"]
-    receipt = next(iter(instance._closed_session_records.values())).close_response
-    assert receipt.resources_cookies == {"resource": "seed", "session": "corrected"}
-    assert client.post.call_args_list[-2].kwargs["cookies"] == receipt.resources_cookies
-    assert client.post.call_args_list[-1].kwargs["cookies"] == receipt.resources_cookies
+    saved_reply = next(iter(instance._fenced_session_records.values())).close_response
+    assert saved_reply.resources_cookies == {"resource": "seed", "session": "corrected"}
+    assert client.post.call_args_list[-2].kwargs["cookies"] == saved_reply.resources_cookies
+    assert client.post.call_args_list[-1].kwargs["cookies"] == saved_reply.resources_cookies
     observations = response.result.ng_agent_observations
-    assert observations == receipt.agent_observations
+    assert observations == saved_reply.agent_observations
     assert {gap.code for gap in observations.gaps} == {"non_trainable_terminal_output"}
     tools = [record for record in observations.records if isinstance(record, ToolCallObservation)]
     assert [(tool.status, tool.error_type) for tool in tools] == [("failed", f"http_{status}"), ("completed", None)]
@@ -217,10 +217,10 @@ async def test_swallowed_resource_failure_still_skips_verification_and_closes_wi
     assert outbound.await_args_list[1].kwargs["cookies"] == expected_retry_cookies
     assert "/verify" not in _paths(client)
     assert _paths(client)[-2:] == ["/v1/agent_sessions/close", "/close_session"]
-    receipt = next(iter(instance._closed_session_records.values())).close_response
-    assert receipt.resources_cookies == {"resource": "seed", "session": "corrected"}
-    assert client.post.call_args_list[-1].kwargs["cookies"] == receipt.resources_cookies
-    observations = receipt.agent_observations
+    saved_reply = next(iter(instance._fenced_session_records.values())).close_response
+    assert saved_reply.resources_cookies == {"resource": "seed", "session": "corrected"}
+    assert client.post.call_args_list[-1].kwargs["cookies"] == saved_reply.resources_cookies
+    observations = saved_reply.agent_observations
     assert NOOATerminationReason.INFRASTRUCTURE_ERROR in {gap.code for gap in observations.gaps}
     tools = [record for record in observations.records if isinstance(record, ToolCallObservation)]
     error_type = "ClientResponseError" if isinstance(failure, int) else "ClientConnectionError"
@@ -287,8 +287,8 @@ async def test_failed_nooa_activation_skips_verification_and_closes_with_evidenc
     assert response.result is None
     assert "/verify" not in _paths(client)
     assert _paths(client)[-2:] == ["/v1/agent_sessions/close", "/close_session"]
-    receipt = next(iter(instance._closed_session_records.values())).close_response
-    assert NOOATerminationReason.INFRASTRUCTURE_ERROR in {gap.code for gap in receipt.agent_observations.gaps}
+    saved_reply = next(iter(instance._fenced_session_records.values())).close_response
+    assert NOOATerminationReason.INFRASTRUCTURE_ERROR in {gap.code for gap in saved_reply.agent_observations.gaps}
 
 
 @pytest.mark.parametrize("cancel", [False, True], ids=["episode-timeout", "caller-cancellation"])
@@ -326,12 +326,12 @@ async def test_interrupted_nooa_episode_stops_execution_without_verification(
     assert stopped.is_set()
     assert "/verify" not in _paths(client)
     assert _paths(client)[-2:] == ["/v1/agent_sessions/close", "/close_session"]
-    receipt = next(iter(instance._closed_session_records.values())).close_response
-    assert NOOATerminationReason.CANCELLED in {gap.code for gap in receipt.agent_observations.gaps}
+    saved_reply = next(iter(instance._fenced_session_records.values())).close_response
+    assert NOOATerminationReason.CANCELLED in {gap.code for gap in saved_reply.agent_observations.gaps}
     if cancel:
         assert partial.termination_reason is NOOATerminationReason.CANCELLED
         projected_response, observations = finalize_run_result(partial)
         assert projected_response.status == "cancelled"
         assert projected_response.error is None
         assert projected_response.output == partial.episode.response.output
-        assert observations == receipt.agent_observations
+        assert observations == saved_reply.agent_observations

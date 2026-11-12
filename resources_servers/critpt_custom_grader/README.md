@@ -80,12 +80,13 @@ else stays unrecognised rather than guessed at.
 Rows carry `responses_create_params` (the prompt) and the task fields, either flat, under `verifier_metadata`, or
 under `task_data`. Task fields: `problem_id`, `reference_source` (alias `reference_code`), `entrypoint` (alias
 `entry`), optional `reference_entrypoint`, `test_cases` (alias `testcases`), optional `problem` (the statement, read
-for accuracy promises), `code_template`, `uuid`, `rtol`/`atol`, per-leaf `tolerances`, `input_conversions`. Test
+for accuracy promises), `code_template`, `uuid`, `rtol`/`atol`, per-leaf `tolerances`, `input_conversions`, optional
+`semantic_validator` (see [Semantic answer validators](#semantic-answer-validators)). Test
 cases are `{"args": [...], "kwargs": {...}, "expected": {"kind": "value", "value": <wire>}}` or
 `{"expected": {"kind": "exception"}}`; legacy `{"input": [...], "output": ...}` cases are converted. Values travel in
 a tagged wire format (`critpt-value-v1`) that keeps integers and decimals exact; `data/example.jsonl` holds synthetic
-rows. Framework row keys (`agent_ref`, `task_source`, every `_ng_*` key) are stripped before validation; any other
-unknown key is a task-data defect.
+rows. Framework row keys (`agent_ref`, `task_source`, the `failure_report` of a verify request, every `_ng_*` key) are
+stripped before validation; any other unknown key is a task-data defect.
 
 ## Running it
 
@@ -121,12 +122,16 @@ The recipe uses three kinds of sandbox, all created through Gym's sandbox API:
   persist during one episode; each command starts a fresh shell. No grading task data is uploaded to this sandbox.
 - Verification retains separate reference, candidate and comparison sandboxes. It grades only the submitted
   `finish.answer`; working files and `finish.derivation` are not inputs to grading. The saved response can be
-  verified again after all generation-session cleanup has completed.
+  verified again after the episode's agent session and resources session are closed.
 
 The shipped OpenSandbox policy denies all execution and grading egress. The provider must enforce that policy; a
 prompt instruction alone is insufficient. The execution manager rejects providers and configurations for which it
 cannot establish an offline policy. Orchestration needs network access to Gym and the model, so applying an egress
 ban to the orchestration sandbox would break inference and tool routing.
+
+A server with `agentic_execution` runs with one worker: its execution sandboxes have not been exercised with several
+workers, so startup refuses `num_workers` above 1. Without `agentic_execution` the server can run with several
+workers; `max_concurrent_jobs` and the in-memory reference cache then apply to each worker.
 
 #### Runtime and model configuration
 
@@ -152,7 +157,7 @@ export CRITPT_AGENTIC_EXECUTION_IMAGE='<registry>/<path>/execution@sha256:<diges
 export CRITPT_AGENTIC_ORCHESTRATION_IMAGE='<registry>/<path>/orchestration@sha256:<digest>'
 ```
 
-The grading image is the existing `runtime/Dockerfile`. The orchestration image must support the existing
+The grading image is a build of `runtime/Dockerfile`. The orchestration image must support the
 [Stirrup sandbox setup](../../responses_api_agents/stirrup_agent/README.md); it may be the same scientific image,
 but runs as a separate sandbox with its own network policy. Stirrup installs the version used by the agent server
 during setup. Record that resolved version and the Gym commit with the image digests.
@@ -173,20 +178,28 @@ Validate the resolved request on each model endpoint before collecting results.
 Gym sizes each call's output budget from estimated prompt tokens and context capacity, with the configured
 completion buffer, minimum and cap. This is a per-call budget; it does not impose a cumulative episode token limit.
 
-For vLLM endpoints that expose `/tokenize`, set `fit_completion_to_context: true` in the `vllm_model` block to
-measure the fully rendered prompt on the selected backend before generation. To use the full available output
-budget, set Stirrup's `min_completion_tokens` equal to `max_completion_tokens_cap`, using the model's supported
-output capacity. The adapter then sends the smaller of that requested cap and the exact remaining context; a
-smaller per-request output limit still applies. This mode preserves the conversation, reasoning settings and turn
-limit. Tokenization failures, exhausted context and rejected model requests remain errors, rather than empty
-completions that consume turns and become misleading no-answer scores. It requires a vLLM chat-completions
-endpoint; see the [model adapter's configuration](../../responses_api_models/vllm_model/README.md).
+The recipe sets Stirrup's `context_overflow_recovery: true`. When the model server rejects a request with the error
+code `context_length_exceeded`, Stirrup then removes the latest completed turn and sends the request again instead of
+ending the episode. The rejection has to reach the agent, so the model server must be configured for it:
 
-Stirrup recognizes explicit HTTP context-limit errors and applies its existing bounded recovery: it can remove
-the latest completed turn and retry compaction while preserving the original task and prior summary boundary.
-This changes retained history and may add model calls; it does not lower the output budget or disable thinking.
-If that recovery cannot preserve progress, the episode still fails. See the
-[agent's recovery contract](../../responses_api_agents/stirrup_agent/README.md#dynamic-max_completion_tokens-sizing).
+- With Gym's `vllm_model`, set `propagate_context_overflow_errors: true` and `refit_output_budget_to_prompt: true`.
+  The first returns the engine's refusal instead of an empty, length-capped completion. The second answers a prompt
+  and output budget that overflow together by sending the call once more with the budget the context window leaves,
+  so a turn is removed only for a prompt that alone fills the window. That option is described for agents that do
+  not compact; it suits Stirrup too, because Stirrup starts compaction from its own token accounting, not from the
+  refusal, and a prompt that alone fills the window still returns the rejection its recovery uses. Each refitted
+  call shows one refused request (HTTP 400) before the resend; that is expected.
+- With `openai_model`, include 400 in `propagate_upstream_http_status_codes`. By default that adapter answers an
+  upstream 400 with HTTP 500, which Stirrup does not read as a context overflow.
+
+To request the model's full output capacity on every call, set Stirrup's `min_completion_tokens` equal to
+`max_completion_tokens_cap`; a call whose prompt and budget then overflow together is refitted as above.
+
+Recovery changes the retained history and adds model calls; it does not lower the output budget or disable thinking.
+A removed turn is refunded against the 50-turn limit, so only the agent's wall-clock limit
+(`sandbox_runner_timeout_seconds`) limits repeated recovery. When no completed turn is left to remove, the episode
+ends with the model server's rejection. See the
+[agent's recovery contract](../../responses_api_agents/stirrup_agent/README.md#context-overflow-recovery).
 AA's exact overflow policy remains unpublished, so this recovery is not a claim of identical AA behavior.
 
 Start the synthetic example after supplying a model overlay and the provider connection variables:
@@ -213,13 +226,30 @@ dataset's `prompt_config` when supplying a different prompt through registered d
 The model can call `code_exec(cmd)` and `finish(reason, derivation, answer)`. `finish` is terminal only when the
 resources server accepts it. Verification requires the matching successful tool acknowledgement and its answer
 digest in the saved trajectory. A rejected call, unrelated assistant text or code written during exploration is
-not an accepted submission. Saved trajectories remain verifiable after execution-session cleanup.
+not an accepted submission. Saved trajectories remain verifiable after the resources session is closed.
 
-There are at most 50 model-response turns. A completed episode that never submits an answer, an empty accepted
-answer, or normal turn-budget exhaustion scores zero. Provider failures and unknown incomplete outcomes remain
-unscorable, as do inconclusive verification failures. Preserve those categories and report incomplete coverage;
-do not silently count infrastructure failures as incorrect answers or regenerate legitimate no-answer outcomes.
-An explicit content-filter outcome with no answer also scores zero; ambiguous API rejections remain unscorable.
+In this mode the extraction rule of step 2 under [What it grades and how](#what-it-grades-and-how) does not apply.
+From the accepted `finish.answer` the grader takes the last fenced block whose info string is empty or `python`,
+else the whole answer, and strips surrounding whitespace; an answer that is empty after that scores zero
+(`candidate_no_answer`). A response that stopped at `max_output_tokens` with no error and no accepted `finish`
+is also `candidate_no_answer`, not `response_truncated`.
+
+The saved trajectory holds at most 50 model-response turns. A turn that context-overflow recovery removed is not
+counted, so an episode can make more model calls than that (see
+[Runtime and model configuration](#runtime-and-model-configuration)). A completed episode that never submits an
+answer, an empty accepted answer, or normal turn-budget exhaustion scores zero. So does an episode Stirrup ends
+because every context-compaction summary was unusable (`metadata.stop_reason: compaction_failed`, classified
+`agent_invalid_output`): it is the model's result, scored zero as `candidate_no_answer` and never regenerated.
+Provider failures, an episode stopped at the agent's wall-clock limit or cancelled (`metadata.stop_reason: wall_time`
+or `cancelled`) and unknown incomplete outcomes remain unscorable, as do inconclusive verification failures; the
+only exception is an undecided comparison that the operator opts to score as zero with
+`score_comparator_uncertain_as_incorrect`. Preserve those categories and report incomplete
+coverage; do not silently count infrastructure failures as incorrect answers or regenerate legitimate no-answer
+outcomes. An explicit content-filter outcome with no answer also scores zero; ambiguous API rejections remain
+unscorable. A request the model server rejects (HTTP 400, 413 or 422, such as a context overflow that recovery
+could not resolve) is one of those: the status alone does not tell a model outcome from a request or configuration
+fault, so the row is `response_incomplete`. That row is not terminal, so resuming the run generates the attempt
+again; a rejection that repeats on every attempt stays unscored and must be reported as incomplete coverage.
 
 Five repeats mean the mean of five independently scored attempts per task (mean pass@1), not credit when any one
 of five attempts succeeds. Keep the repeat count and denominator in the result report. Retry only infrastructure
@@ -284,6 +314,8 @@ critpt_custom_grader:
 The task selects the registered identifier with `semantic_validator: {id: plane_basis, config: {}}`. It still supplies
 a reference implementation and value expectations for its cases. Tasks cannot supply validator source, paths,
 entry points or execution limits. Omitting `semantic_validator` preserves the expected-value comparison policy.
+A row whose task selects an identifier the server has not registered is unscorable as `task_invalid` (terminal),
+answered before any sandbox starts; that refusal reflects the server's registry, not a preflight, so it is not cached.
 
 The validator receives the decoded observed value, stored expected value, original positional and keyword inputs,
 and its bounded JSON configuration. Input-conversion code is not run in the comparator: symbolic text remains an
@@ -293,11 +325,22 @@ automatically applied to it. Define any objective target, feasibility boundary a
 validator or configuration.
 
 Only the operator's selected source is delivered to the protected comparator sandbox. It runs in a fresh namespace
-for each case, within the existing resource limits and comparison deadlines; module initialization is included in
+for each case, within the comparator's resource limits and comparison deadlines; module initialization is included in
 that deadline. The same validator first checks the reference outputs. A rejected reference makes the task
 unscorable and prevents candidate execution. After a successful preflight, a candidate rejection scores zero.
 Validator exceptions, non-Boolean returns and timeouts remain unscorable, even if another case rejects the answer.
-Changing validator source, entry point or task configuration invalidates the reference-preflight cache.
+They also stay unscorable when `score_comparator_uncertain_as_incorrect` is set: the validator is operator code, so
+that option never turns its failure or timeout into a zero for the model. A validator should therefore return
+`False` for an answer of the wrong shape or type, as the example above does: raising leaves the row unscorable
+instead of scoring it zero.
+The validator registry is part of the reference-cache key: registering, changing or removing any validator
+invalidates the cached preflight of every task, including tasks that select none. Changing a task's `config`
+invalidates that task's entry.
+
+A job for a task that selects a validator uploads two more files to the comparator sandbox (the validation module
+and the validator source). With `semantic_validators` configured, startup therefore refuses an explicit
+`execution.job_timeout_s` that does not cover them: with the shipped limits the minimum rises from 9595 s to 9725 s,
+so raise the default recipe's 9700 s. A server with no validators configured is unaffected.
 
 These are task-authoring mechanisms, not a supplied implementation of any benchmark's hidden acceptance policy.
 
@@ -319,6 +362,15 @@ whatever the outcome. A failed check refuses to serve and names one of seven cat
 - `upload_unsupported`: the nested upload failed; the size command raised, timed out, or did not find the file and
   print plain digits; or the bounded download failed or returned other bytes.
 - `provider_exec`: only the `id -u` or the import-check command raised, or the host's bounded wait on it expired.
+
+`score_comparator_uncertain_as_incorrect: true` opts into scoring completed answers
+with `comparator_uncertain` as zero only after successful reference preflight and a completed
+candidate comparison reporting undecided symbolic/unordered equivalence or an exhausted
+per-case proof budget. The category is retained for separate reporting. Those rows are
+unmasked and do not trigger regeneration on resume. The default is false; reference/preflight
+uncertainty, invalid expectations, unsupported observations, comparator errors, and provider
+failures remain unscored in either mode. Unknown uncertainty reasons also remain unscored.
+Record this option in the evaluation protocol when comparing results.
 
 `startup_probe: false` skips the startup sandbox and its checks, but not the `image_missing` check. Gym gives every
 server `server_spinup_timeout_seconds` (default 600 s) to become ready and the probe's sandbox create counts against
@@ -373,8 +425,9 @@ could not tell such runtimes apart. Daytona also refuses a `snapshot_id` beside 
 E2B, map the image to its template with `create.template_map`.
 
 Network isolation is a provider setting. The sandbox runtime's hard limits must allow an `RLIMIT_FSIZE` of at least
-161,546,240 bytes and an `RLIMIT_NPROC` of at least `execution.max_processes`, which the runner sets on every task
-process; otherwise every run fails as `runner_error: limits` (non-terminal).
+156,303,360 bytes and an `RLIMIT_NPROC` of at least `execution.max_processes`, which the runner sets on every task
+process; otherwise every run fails as `runner_error: limits` (non-terminal). The comparison of a task that selects a
+semantic validator sets `RLIMIT_FSIZE` to 161,546,240 bytes instead, because its job file also carries the inputs.
 
 ### Configuration
 
@@ -384,6 +437,11 @@ process; otherwise every run fails as `runner_error: limits` (non-terminal).
 `compare_per_case_s`, `compare_timeout_s`, `create_timeout_s`, `transfer_timeout_s`, `exec_timeout_margin_s`,
 `job_timeout_s`, `cleanup_timeout_s`, `max_candidate_source_bytes`, `max_concurrent_jobs`), `comparison`
 (`default_rtol`, `default_atol`), `reference_cache_dir` (memory only when null) and `startup_probe`.
+`semantic_validators` registers operator validators (see [Semantic answer validators](#semantic-answer-validators)).
+The agentic recipe adds `answer_source` (`output_text`, the default, or `finish_tool`), `agentic_execution`
+(`sandbox_provider`, `sandbox_spec`, `command_timeout_s`, `provider_timeout_margin_s`, `max_command_bytes`,
+`max_output_bytes`, `max_sessions`, `create_timeout_s`, `close_timeout_s`) and `agentic_max_response_bytes` (see
+[Agentic code execution](#agentic-code-execution)).
 
 `sandbox_spec.files` maps an absolute sandbox path to text that the sandbox API uploads when a sandbox starts; every
 grading sandbox gets the same files, the candidate's included. `sandbox_spec.workdir` must exist in the image
@@ -423,24 +481,45 @@ grader call itself raised.
 
 | Status | Category | When |
 |---|---|---|
-| 413 | `request_limit` | the request body is larger than 10 MiB |
+| 413 | `request_limit` | the request body is larger than 10 MiB (in `finish_tool` mode: 8 MiB plus twice `agentic_max_response_bytes`, 72 MiB by default) |
 | 422 | `request_invalid` | not a JSON object, or a bad request shape (see below) |
 | 422 | `task_invalid` | `/seed_session` only: the task fields fail validation |
-| 503 | `server_not_ready` | `/verify` with the grader not running, once the request, task and source checks pass |
+| 422 | `session_identity_required` | `/seed_session` with `agentic_execution` only: the request is not an episode seed (it has no `resources_session_id`) |
+| 409 | `session_conflict` | `/seed_session` with `agentic_execution` only: the resources session is closed, its execution sandbox failed or expired, or its `resources_session_id` is bound to another episode or task |
+| 503 | `execution_unavailable` | `/seed_session` with `agentic_execution` only: the execution sandbox could not be created, `agentic_execution.max_sessions` is reached, or the server is shutting down |
+| 503 | `server_not_ready` | `/verify` with the grader not running, once the request, task and source checks pass; `/seed_session` with `agentic_execution` before startup has finished or after shutdown |
 
 A bad request shape is invalid prompt parameters, tools or `tool_choice`, or, on `/verify`, a `response` that is not a
 valid response. `responses_create_params` or `response` above 1 MiB, or beyond the JSON node, depth or type limits (an
-integer wider than 63 bits, a non-finite number), is `request_invalid` too; only a body above 10 MiB is
+integer wider than 63 bits, a non-finite number), is `request_invalid` too; only a body above the table's limit is
 `request_limit`. On `/verify` an invalid task is not an error status: it is a 200 row with category `task_invalid`,
 terminal. `server_not_ready` is answered only after the request, task and source checks have passed, so while the
 grader is not running (before startup finishes or after shutdown) an invalid task, an incomplete response or an
 unusable source still gets its 200 row.
 
+In `finish_tool` mode a saved trajectory holds every turn, so `response` may be as large as
+`agentic_max_response_bytes` (32 MiB by default, from 1 MiB to 128 MiB); `responses_create_params` stays at 1 MiB.
+`/finish` reads a body up to `agentic_max_response_bytes` and `/code_exec` one up to 1 MiB. Both answer a larger or
+malformed body with 422 and a category-only `detail` (`invalid_finish`, `invalid_code_exec`), which Stirrup returns
+to the model. `/code_exec` also answers 404 when the request names no resources session or the server holds no
+usable one for it (never seeded, closed or failed). That 404 carries Gym's lost-session body,
+`{"detail": {"failure_kind": ..., "message": ...}}`, whose `failure_kind` is `session_lost`, or `session_expired` on
+the call that finds the session past `agentic_execution.sandbox_spec.ttl_s`. It answers 503 with the category-only
+`detail` `execution_unavailable` when the execution sandbox or its provider fails to run the command, or while the
+server is not running (before startup has finished or after shutdown). Stirrup fails the run on either.
+`agentic_execution.max_command_bytes` and `max_output_bytes` bound one command and its captured output. A command
+above `max_command_bytes` (64 KiB by default, which is also its maximum), or whose shell-quoted form would not fit
+one exec argument (127 KiB), gets an `invalid_argument` tool result that the model can repair.
+
 Categories. Scored: `passed`, `response_truncated`, `candidate_mismatch`, `candidate_invalid_output`, `candidate_source_limit`,
 `candidate_source_error`, `candidate_timeout`, `candidate_exception`, `candidate_encoding_error`,
-`candidate_worker_abort`. Unscorable, terminal (`verifier_error`): `task_invalid` (a row that fails task
-validation, or a stored expectation or policy the comparator cannot represent) and `reference_mismatch` (the
-reference does not reproduce its own expectation). Unscorable, non-terminal (`provider_unavailable`, re-graded by
+`candidate_worker_abort` and, in `finish_tool` mode, `candidate_no_answer` (the episode ended without an accepted
+answer; see [Submission and accounting](#submission-and-accounting)). Unscorable, terminal (`verifier_error`):
+`task_invalid` (a row that fails task validation, a `semantic_validator` identifier the server has not registered,
+or a stored expectation or policy the comparator cannot represent), `reference_mismatch` (the reference does not
+reproduce its own expectation) and, in `finish_tool` mode,
+`submission_invalid` (the saved trajectory's finish evidence is malformed, ambiguous or contradicts how the episode
+ended). Unscorable, non-terminal (`provider_unavailable`, re-graded by
 `gym eval reverify`): `exec_user_unsupported` (the provider refused `execution.exec_user`), `reference_error`,
 `reference_timeout`, `comparator_uncertain`, `provider_create`, `provider_exec`, `transfer_limit`, `result_invalid`,
 `*_no_result`, `job_deadline`, `server_draining`, `execution_unknown`. No usable source: category
@@ -449,13 +528,14 @@ reference does not reproduce its own expectation). Unscorable, non-terminal (`pr
 The reference cache holds a passed preflight and exactly two refusals, `task_invalid` and `reference_mismatch`: facts
 about the task itself. Every other unscorable category describes the infrastructure or the configuration, so it is
 never cached. The key covers the task, the policy limits that reach the runner, the runtime files, the operator's
-`sandbox_spec.files` and `sandbox_spec.env`, the default tolerance and the runtime the reference ran in (the
-provider's class, the image, `execution.interpreter` and `execution.exec_user`), so an entry persisted under one
-provider or image is never read under another.
+`sandbox_spec.files` and `sandbox_spec.env`, the registered `semantic_validators`, the default tolerance and the
+runtime the reference ran in (the provider's class, the image, `execution.interpreter` and `execution.exec_user`),
+so an entry persisted under one provider or image is never read under another.
 
 ## Recovery
 
-The server is stateless (`/reverify_mode` is `stateless`). Non-terminal rows sit in `<rollouts>_failures.jsonl`, with
+Verification is stateless (`/reverify_mode` is `stateless`), also with `agentic_execution`: `/verify` reads only its
+request and never an execution sandbox. Non-terminal rows sit in `<rollouts>_failures.jsonl`, with
 one row per attempt. Take the latest attempt of each rollout that is not already in `<rollouts>.jsonl`, keep the
 `provider_unavailable` ones and re-grade them without a model call:
 
@@ -496,9 +576,10 @@ adversarial, read `accuracy_all`, which counts every unscorable row as not passe
 
 `gym env test --resources-server critpt_custom_grader +should_validate_data=true` runs the host-safe suites (codec,
 comparator, symbolic, runner, execution over an in-memory provider, the HTTP adapter, the config) and a real grade of
-the example rows through the `local` provider when the host is Linux, non-root and has procfs. The hostile runner suite
+the example rows and of a synthetic semantic-validator task through the `local` provider when the host is Linux,
+non-root and has procfs. The hostile runner suite
 runs deliberately hostile code: set `NG_CRITPT_RUNNER_REMOTE=1` only inside a disposable non-root sandbox with procfs,
-never on a shared host.
+never on a shared host; `tests/test_semantic_runner_remote.py` sits behind the same switch.
 
 ## Licensing
 

@@ -11,9 +11,9 @@ import yaml
 
 from benchmarks.indic.frontier_math import prepare as prep
 from benchmarks.indic.frontier_math.summarize import summarize
-from nemo_gym.cli.main import _asset_config_path
 from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.data.task_data import load_task_data_schema, validate_jsonl_rows
+from nemo_gym.environment.assets import asset_config_path
 from nemo_gym.environment.manifest import load_manifest
 from nemo_gym.environment.registry import _manifest_entry
 
@@ -55,7 +55,7 @@ def test_manifest_and_committed_requests() -> None:
     manifest = load_manifest(benchmark / "manifest.yaml")
     assert manifest.name == "indic/frontier_math"
     entry = _manifest_entry(benchmark.parents[1], benchmark / "manifest.yaml", "benchmark")
-    config_path = Path(_asset_config_path("benchmark", entry.name))
+    config_path = Path(asset_config_path("benchmark", entry.name))
     assert config_path == benchmark / "config.yaml"
     assert manifest.canonical_split == "benchmark"
     assert manifest.datasets[0].num_repeats == 1

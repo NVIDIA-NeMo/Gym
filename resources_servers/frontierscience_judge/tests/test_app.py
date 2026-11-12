@@ -21,6 +21,7 @@ from pytest import approx, fixture, mark, raises
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    NeMoGymChatCompletion,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
@@ -81,6 +82,14 @@ class TestParseJudgement:
 
 
 class TestParseRubricScore:
+    @mark.parametrize("score", ["0", "2.5", "7", "10", ".5"])
+    def test_numeric_only_response(self, score: str) -> None:
+        assert parse_rubric_score("\n " + score + " \n") == approx(float(score))
+
+    @mark.parametrize("text", ["11", "-1", "nan", "inf", "7/10", "Reasoning\n7", "7\nReasoning"])
+    def test_numeric_fallback_requires_one_bounded_score(self, text: str) -> None:
+        assert parse_rubric_score(text) is None
+
     @mark.parametrize(
         "verdict",
         [
@@ -533,7 +542,10 @@ class TestFrontierScienceJudgeServer:
         assert result.rubric_score_normalized == approx(0.7)
         assert not result.invalid_judge_response
 
-    async def test_verify_research_mode_fails_below_threshold(self, config: FrontierScienceJudgeConfig) -> None:
+    @mark.parametrize("judge_text,score", [("Rubric notes...\nVERDICT: 6.5", 6.5), ("0", 0)])
+    async def test_verify_research_mode_fails_below_threshold(
+        self, config: FrontierScienceJudgeConfig, judge_text: str, score: float
+    ) -> None:
         rubric_config = config.model_copy(deep=True)
         rubric_config.judge_mode = "research"
         rubric_config.judge_prompt_path = "resources_servers/frontierscience_judge/prompts/research_judge.yaml"
@@ -542,7 +554,7 @@ class TestFrontierScienceJudgeServer:
         server = FrontierScienceJudgeServer(config=rubric_config, server_client=server_mock)
 
         response_mock = AsyncMock()
-        response_mock.json = AsyncMock(return_value=self._make_judge_response("Rubric notes...\nVERDICT: 6.5"))
+        response_mock.json = AsyncMock(return_value=self._make_judge_response(judge_text))
         response_mock.read = AsyncMock(return_value=orjson.dumps(response_mock.json.return_value))
         server_mock.post = AsyncMock(return_value=response_mock)
 
@@ -558,8 +570,8 @@ class TestFrontierScienceJudgeServer:
         result = await server.verify(request)
         assert result.reward == approx(0.0)
         assert result.verdict == "NO"
-        assert result.rubric_score == approx(6.5)
-        assert result.rubric_score_normalized == approx(0.65)
+        assert result.rubric_score == approx(score)
+        assert result.rubric_score_normalized == approx(score / 10)
 
     async def test_verify_research_mode_prompt_contains_rubric(self, config: FrontierScienceJudgeConfig) -> None:
         rubric_config = config.model_copy(deep=True)
@@ -693,9 +705,26 @@ class TestFrontierScienceJudgeServer:
         assert "no valid rubric score" in failure["_ng_failure_judge_error"]
         assert failure["response"] == request.response.model_dump(mode="json")
 
-    @mark.parametrize("finish_reason", ["length", "content_filter"])
-    async def test_research_rejects_incomplete_chat_grade(
-        self, config: FrontierScienceJudgeConfig, finish_reason: str
+    @mark.parametrize(
+        ("finish_reason", "extra_fields", "completed"),
+        [
+            ("length", {}, False),
+            ("content_filter", {}, False),
+            ("repetition", {}, False),
+            ("stop", {"native_finish_reason": "repetition"}, False),
+            ("stop", {"stop_reason": "repetition_detected"}, False),
+            ("stop", {"stop_reason": 0}, True),
+            ("stop", {"stop_reason": 11}, True),
+            ("stop", {"stop_reason": "stop_sequence"}, True),
+            ("stop", {"native_finish_reason": "provider_stop"}, True),
+        ],
+    )
+    async def test_research_chat_judge_requires_complete_verdict(
+        self,
+        config: FrontierScienceJudgeConfig,
+        finish_reason: str,
+        extra_fields: dict[str, str | int],
+        completed: bool,
     ) -> None:
         config.judge_mode = "research"
         config.use_chat_completions_for_judge = True
@@ -709,11 +738,22 @@ class TestFrontierScienceJudgeServer:
                 {"index": 0, "finish_reason": finish_reason, "message": {"role": "assistant", "content": "VERDICT: 7"}}
             ],
         }
+        payload["choices"][0].update(extra_fields)
+        [choice] = NeMoGymChatCompletion.model_validate(payload).choices
+        if finish_reason == "repetition":
+            assert choice.finish_reason == "stop"
+            assert choice.native_finish_reason == "repetition"
+        for key, value in extra_fields.items():
+            assert getattr(choice, key) == value
+            assert type(getattr(choice, key)) is type(value)
         response = AsyncMock()
         response.read = AsyncMock(return_value=orjson.dumps(payload))
         server.server_client.post = AsyncMock(return_value=response)
-        with raises(JudgeError, match="did not complete"):
-            await server._call_judge("prompt")
+        if completed:
+            assert await server._call_judge("prompt") == "VERDICT: 7"
+        else:
+            with raises(JudgeError, match="did not complete"):
+                await server._call_judge("prompt")
 
     @mark.parametrize("status", [None, "completed", "incomplete", "failed", "cancelled", "in_progress", "queued"])
     async def test_research_response_completion_status(self, config: FrontierScienceJudgeConfig, status) -> None:

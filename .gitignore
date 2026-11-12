@@ -235,16 +235,24 @@ env.yaml
 # Claude Code agent runtime artifacts
 **/.claude_node/
 
+# Install lock and install record of the Node.js toolchains that CLI agents install on first local use
+responses_api_agents/*/.*_node.lock
+responses_api_agents/*/.*_node.installed
+
 # cvdp generic agent provisioned harness deps (portable python/node + CLIs, built at runtime)
 responses_api_agents/cvdp_agent/deps/
 resources_servers/cvdp/data/gym_agentic_code_generation_no_commercial.jsonl
 resources_servers/cvdp/data/gym_cvdp_nonagentic_code_generation_no_commercial.jsonl
 
+# Node.js that codex_agent/setup_codex.py installs for local Codex and the launcher tests
+responses_api_agents/codex_agent/.codex_node/
+
 # Generated Terminal-Bench 4 dataset
 /benchmarks/terminal_bench_4/data/
 
 # The default pulled datasets folder before environments/harbor/ (see below); kept ignored for checkouts that
-# still hold datasets there (environment_servers/harbor/README.md, "Configuration and artifacts", says how to move them).
+# still hold datasets there. Move one with `mv datasets/<dataset> environments/harbor/<dataset>` before the next
+# fetch, or keep the old folder for every pull with NEMO_GYM_DATASETS_DIR=datasets.
 datasets/
 
 # Pulled Harbor datasets (nemo_gym/data/tasks/harbor/hub.py) land in environments/harbor/<dataset>/ next to the

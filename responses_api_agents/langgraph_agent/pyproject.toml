@@ -7,8 +7,8 @@ version = "0.0.0"
 requires-python = ">=3.13.14"
 dependencies = [
     "nemo-gym[dev]",
-    "langchain-core",
-    "langgraph",
+    "langchain-core==1.7.3",
+    "langgraph==1.2.18",
 ]
 
 [tool.uv]

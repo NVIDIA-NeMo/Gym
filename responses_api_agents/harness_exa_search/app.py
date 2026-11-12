@@ -28,6 +28,7 @@ from nemo_gym.sandbox import (
     resolve_provider_metadata,
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.harness_agent.app import _FABRIC_ADAPTERS, resolve_agent
 
 
@@ -321,3 +322,6 @@ class HarnessExaSearchAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     HarnessExaSearchAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = HarnessExaSearchAgent.run_webserver()  # noqa: F401

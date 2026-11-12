@@ -37,7 +37,7 @@ if TYPE_CHECKING:
         is_propagated_refusal,
     )
     from nemo_gym.models.chat_completions_converter import (
-        ResponsesConverter,
+        ChatCompletionsConverter,
         VLLMConverter,
         VLLMConverterResponsesToChatCompletionsState,
         chat_completion_usage_to_response_usage,
@@ -63,6 +63,8 @@ if TYPE_CHECKING:
         make_external_capture_handler,
         validate_framework_context_options,
     )
+    from nemo_gym.models.token_capture.harness_notes import HARNESS_NOTES
+    from nemo_gym.models.token_capture.harness_notes.base import HarnessNote
 
 
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
@@ -72,11 +74,13 @@ _PUBLIC_API = {
     "BaseResponsesAPIModelConfig": "base_responses_api_model",
     "Body": "base_responses_api_model",
     "CaptureStore": "model_call_capture",
+    "ChatCompletionsConverter": "chat_completions_converter",
     "ExternalCaptureHandler": "token_capture.external_capture",
+    "HARNESS_NOTES": "token_capture.harness_notes",
+    "HarnessNote": "token_capture.harness_notes.base",
     "ModelCallCaptureConfig": "model_call_capture",
     "PROPAGATED_REFUSAL_CODE_ATTRIBUTE": "base_responses_api_model",
     "PolicyModelParticipant": "_checkpoint",
-    "ResponsesConverter": "chat_completions_converter",
     "SimpleResponsesAPIModel": "base_responses_api_model",
     "VLLMConverter": "chat_completions_converter",
     "VLLMConverterResponsesToChatCompletionsState": "chat_completions_converter",

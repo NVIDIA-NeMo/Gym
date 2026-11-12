@@ -12,8 +12,9 @@ from fastapi import Request
 from omegaconf import OmegaConf
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
+from nemo_gym.core import JUDGE_FAILED, SESSION_LOST, VERIFIER_ERROR
 from nemo_gym.sandbox import SandboxExecResult, SandboxHandle
-from nemo_gym.server_runtime import ResourcesCloseSessionRequest
+from nemo_gym.server_runtime import ResourcesCloseSessionRequest, ResourcesSessionConflictError
 from resources_servers.swe_atlas_qa import app as module
 
 
@@ -163,6 +164,7 @@ async def test_verify_preserves_upstream_scores_and_stages_only_after_agent_clos
     assert result.num_unscored == 4 - scored
     assert result.all_rubrics_scored is (scored == 4)
     assert result.evaluation_completed and not result.mask_sample
+    assert result.failure_kind is None
     assert result.answer == "answer-placeholder"
     verifier = provider.close.await_args.args[0]
     assert verifier != agent
@@ -196,7 +198,8 @@ async def test_verify_masks_zero_scored_rubrics(server, body) -> None:
     await server.seed_session(_request(), body)
     result = await server.verify(_request(), body)
     assert result.reward == 0 and result.mask_sample and not result.evaluation_completed
-    assert result.failure_reason
+    assert result.failure_kind == JUDGE_FAILED
+    assert result.failure_reason == "SWE Atlas Q&A verification failed: RubricsUnscoredError"
     assert provider.close.await_count == 2
     assert not server._sessions and not server._sandboxes
 
@@ -212,6 +215,7 @@ async def test_missing_or_empty_answer_scores_zero_without_judge(server, body, a
         provider.answers[agent.sandbox_id] = answer
     result = await server.verify(_request(), body)
     assert result.reward == 0 and result.evaluation_completed and not result.mask_sample
+    assert result.failure_kind is None
     assert provider.create.await_count == 1
     provider.upload_file.assert_not_awaited()
     provider.close.assert_awaited_once_with(agent)
@@ -230,11 +234,20 @@ async def test_answer_probe_failure_masks_sample(server, body, return_code, erro
     provider.exec.return_value = SandboxExecResult(None, "runtime failed", return_code, error_type=error_type)
     result = await server.verify(_request(), body)
     assert result.reward == 0 and result.mask_sample and not result.evaluation_completed
+    assert result.failure_kind == VERIFIER_ERROR
     assert provider.create.await_count == 1
     provider.download_file.assert_not_awaited()
     provider.upload_file.assert_not_awaited()
     provider.close.assert_awaited_once_with(agent)
     assert not server._sessions
+
+
+async def test_verify_without_a_seeded_session_is_masked_as_lost(server, body) -> None:
+    result = await server.verify(_request(), body)
+    assert (result.reward, result.mask_sample, result.evaluation_completed) == (0.0, True, False)
+    assert (result.failure_kind, result.failure_reason) == (SESSION_LOST, "Task sandbox session is missing")
+    server._provider.exec.assert_not_awaited()
+    server._provider.create.assert_not_awaited()
 
 
 async def test_task_mismatch_closes_without_collecting_or_grading(server, body) -> None:
@@ -257,7 +270,10 @@ async def test_grader_failure_masks_sample_and_closes_both_sandboxes(server, bod
     ]
     result = await server.verify(_request(), body)
     assert result.reward == 0 and result.mask_sample and not result.evaluation_completed
-    assert result.failure_reason
+    assert (result.failure_kind, result.failure_reason) == (
+        VERIFIER_ERROR,
+        "SWE Atlas Q&A verification failed: RuntimeError",
+    )
     assert server._provider.close.await_count == 2
     assert not server._sessions
 
@@ -388,11 +404,142 @@ async def test_explicit_close_is_idempotent_and_blocks_late_seed(server, body, s
     close = ResourcesCloseSessionRequest(resources_session_id="session", episode_id={"rollout_id": "test"})
     for _ in range(2):
         assert (await server.close_resources_session(_request(cookie), close)).resources_session_id == "session"
-    with pytest.raises(ValueError, match="closed"):
+    with pytest.raises(ResourcesSessionConflictError, match="closed") as refused:
         await server.seed_session(_request(), body)
+    assert refused.value.status_code == 409
     assert server._provider.create.await_count == int(seeded)
     assert server._provider.close.await_count == int(seeded)
     assert not server._sessions and not server._sandboxes
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    now = [100.0]
+    monkeypatch.setattr("nemo_gym.server_runtime.base_resources_server.monotonic", lambda: now[0])
+    return now
+
+
+def _close_request(session_id: str = "session") -> ResourcesCloseSessionRequest:
+    return ResourcesCloseSessionRequest(resources_session_id=session_id, episode_id={"rollout_id": "test"})
+
+
+async def test_a_fence_expires_after_the_close_retry_window_and_locks_are_released(server, body, clock) -> None:
+    for session_id in ("first", "second"):
+        await server.seed_session(_request(session_id), body)
+        await server.close_resources_session(_request(session_id), _close_request(session_id))
+    window = server.config.session_close_retry_window_seconds
+    clock[0] += window - 0.001
+    with pytest.raises(ValueError, match="closed"):
+        await server.seed_session(_request("first"), body)
+
+    clock[0] += 0.001
+    # Once the window passes, the ID is new again and the fences are gone rather than kept forever.
+    seed = await server.seed_session(_request("first"), body)
+    assert seed.sandbox_descriptor == {"sandbox_id": "box-2"}
+    assert len(server._fences) == 0
+    assert not server._locks._locks
+
+
+async def test_a_verify_fence_expires_after_the_close_retry_window(server, body, clock) -> None:
+    await server.seed_session(_request(), body)
+    assert (await server.verify(_request(), body)).evaluation_completed
+    window = server.config.session_close_retry_window_seconds
+    clock[0] += window - 0.001
+    with pytest.raises(ValueError, match="closed"):
+        await server.seed_session(_request(), body)
+    clock[0] += 0.001
+    # box-0 was the task sandbox and box-1 the verifier, so the seed starts a new sandbox.
+    assert (await server.seed_session(_request(), body)).sandbox_descriptor == {"sandbox_id": "box-2"}
+    assert not server._locks._locks
+
+
+async def test_failed_verify_cleanup_keeps_the_session_refused_until_a_close_deletes_its_sandbox(
+    server, body, clock
+) -> None:
+    await server.seed_session(_request(), body)
+    handle = server._sessions["session"][1]
+    provider = server._provider
+    provider.close.side_effect = [RuntimeError("close unavailable"), None]
+    result = await server.verify(_request(), body)
+    assert result.mask_sample and result.failure_kind == VERIFIER_ERROR
+    window = server.config.session_close_retry_window_seconds
+
+    # The sandbox outlives the window, so the ID is never handed back to a new episode or graded again.
+    clock[0] += window + 1
+    with pytest.raises(ResourcesSessionConflictError, match="closed") as refused:
+        await server.seed_session(_request(), body)
+    assert refused.value.status_code == 409
+    calls = list(provider.mock_calls)
+    duplicate = await server.verify(_request(), body)
+    assert duplicate.mask_sample and duplicate.failure_kind == SESSION_LOST
+    assert provider.mock_calls == calls
+
+    # The window starts only once a close deletes the sandbox.
+    await server.close_resources_session(_request(), _close_request())
+    assert provider.close.await_args_list == [call(handle), call(handle)]
+    assert not server._sessions and not server._sandboxes and not server._cleanup_pending
+    clock[0] += window - 0.001
+    with pytest.raises(ValueError, match="closed"):
+        await server.seed_session(_request(), body)
+    clock[0] += 0.001
+    assert (await server.seed_session(_request(), body)).sandbox_descriptor == {"sandbox_id": "box-1"}
+
+
+async def test_a_seed_after_the_window_waits_for_verify_to_release_the_sandbox(server, body, clock) -> None:
+    await server.seed_session(_request(), body)
+    handle = server._sessions["session"][1]
+    provider = server._provider
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def close(closing: SandboxHandle) -> None:
+        entered.set()
+        await release.wait()
+        raise RuntimeError("close unavailable")
+
+    provider.close.side_effect = close
+    async with asyncio.timeout(2):
+        verify = asyncio.create_task(server.verify(_request(), body))
+        await entered.wait()
+        clock[0] += server.config.session_close_retry_window_seconds + 1
+        seed = asyncio.create_task(server.seed_session(_request(), body))
+        await asyncio.sleep(0)
+        assert not seed.done()
+        release.set()
+        result, seeded = await asyncio.gather(verify, seed, return_exceptions=True)
+    assert result.mask_sample and result.failure_kind == VERIFIER_ERROR
+    # The seed neither starts a second sandbox nor is overwritten by verify's cleanup.
+    assert isinstance(seeded, ValueError) and "closed" in str(seeded)
+    provider.create.assert_awaited_once()
+    assert server._sandboxes == {handle.sandbox_id: handle}
+    assert server._cleanup_pending == {"session": handle}
+
+
+async def test_a_close_during_verify_waits_and_retries_a_failed_delete(server, body) -> None:
+    await server.seed_session(_request(), body)
+    handle = server._sessions["session"][1]
+    provider = server._provider
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def fail_once(closing: SandboxHandle) -> None:
+        provider.close.side_effect = None
+        entered.set()
+        await release.wait()
+        raise RuntimeError("close unavailable")
+
+    provider.close.side_effect = fail_once
+    async with asyncio.timeout(2):
+        verify = asyncio.create_task(server.verify(_request(), body))
+        await entered.wait()
+        close = asyncio.create_task(server.close_resources_session(_request(), _close_request()))
+        await asyncio.sleep(0)
+        assert not close.done()
+        release.set()
+        result, closed = await asyncio.gather(verify, close)
+    assert result.failure_kind == VERIFIER_ERROR
+    # The close does not report success while the sandbox is still live; it deletes it and only then fences.
+    assert closed.resources_session_id == "session"
+    assert provider.close.await_args_list == [call(handle), call(handle)]
+    assert not server._sandboxes and not server._cleanup_pending and "session" in server._fences
 
 
 async def test_close_rejects_conflicting_active_cookie(server, body) -> None:
@@ -485,7 +632,7 @@ async def test_cancellation_during_close_waits_and_preserves_cleanup_state(serve
         assert server._sandboxes == {handle.sandbox_id: handle}
     else:
         assert not server._sessions and not server._sandboxes
-        assert "session" in server._closed_sessions
+        assert "session" in server._fences
         with pytest.raises(ValueError, match="closed"):
             await server.seed_session(_request(), body)
 
@@ -509,9 +656,11 @@ async def test_verify_delete_failure_allows_explicit_close_retry(server, body) -
     provider.close.side_effect = [RuntimeError("close unavailable"), None]
     result = await server.verify(_request(), body)
     assert result.reward == 0 and result.mask_sample and not result.evaluation_completed
+    assert result.failure_kind == VERIFIER_ERROR
     calls = list(provider.mock_calls)
     duplicate = await server.verify(_request(), body)
     assert duplicate.mask_sample and not duplicate.evaluation_completed
+    assert (duplicate.failure_kind, duplicate.failure_reason) == (SESSION_LOST, "Task sandbox session is missing")
     assert provider.mock_calls == calls
     assert provider.create.await_count == 1
     provider.upload_file.assert_not_awaited()
@@ -519,7 +668,7 @@ async def test_verify_delete_failure_allows_explicit_close_retry(server, body) -
     for _ in range(2):
         assert (await server.close_resources_session(_request(), close)).resources_session_id == "session"
     assert provider.close.await_args_list == [call(handle), call(handle)]
-    assert not server._sessions and not server._sandboxes
+    assert not server._sessions and not server._sandboxes and not server._cleanup_pending
 
 
 @pytest.mark.parametrize("phase", ["seed", "collect", "judge"])

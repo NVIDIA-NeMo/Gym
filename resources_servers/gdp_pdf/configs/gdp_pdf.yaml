@@ -15,8 +15,16 @@ gdp_pdf:
         name: judge_model
       judge_chat_create_params:
         messages: []
-        max_tokens: 1024
+        # Artificial Analysis grades GDP.pdf with GPT-5.6 Luna at medium reasoning effort. The token
+        # budget covers the judge's reasoning as well as its JSON verdict: at 1024 tokens the judge
+        # ran out before writing the verdict, and each such criterion failed the whole row.
+        reasoning_effort: medium
+        max_completion_tokens: 16384
       judge_prompt_template_fpath: prompt_templates/judge.txt
+      # Training reward only; evaluation keeps mean_criteria, and all_pass and
+      # mean_criterion_pass are reported in every mode.
+      reward_mode: mean_criteria  # mean_criteria | strict_pass | mixed
+      mixed_reward_alpha: 0.5  # mixed: (1 - alpha) * mean_criterion_pass + alpha * all_pass
       judge_max_attempts: 5
       # 500 rollouts x ~12.8 criteria/rollout is ~6,400 judge calls; at 64 concurrent
       # against the shared gpt-5.6-luna Azure deployment this sustained enough 429s to
@@ -46,6 +54,8 @@ gdp_pdf_simple_agent:
       image_format: png  # lossless; set jpeg to cut the base64 payload ~28% at the cost of artifacts
       jpeg_quality: 90
       strip_images_from_output: true
+      # Training only: mask attempts that end without a gradable answer (see the agent README).
+      mask_failed_attempts: false
       datasets:
       - name: example
         type: example

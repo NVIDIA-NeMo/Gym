@@ -395,6 +395,18 @@ class TestTolerantInterpolationParse:
         with pytest.raises(InterpolationResolutionError):
             self._resolve({"foo": "${oc.decode:'['}"})
 
+    def test_absolute_ip_configs_list_without_resolving_this_host(self, monkeypatch) -> None:
+        # Debian and Ubuntu map the hostname to 127.0.1.1, which a run with `use_absolute_ip` rejects.
+        # Listing must not look up the host at all, so sandbox benchmarks stay listed on those machines.
+        from unittest.mock import MagicMock
+
+        import nemo_gym.config.global_config as global_config
+
+        resolver = MagicMock(return_value="127.0.1.1")
+        monkeypatch.setattr(global_config, "gethostbyname", resolver)
+        assert self._resolve({"use_absolute_ip": True})["use_absolute_ip"] is True
+        resolver.assert_not_called()
+
 
 class TestReadConfigMetadata:
     def test_reads_domain_and_description_from_real_benchmark_config(self) -> None:

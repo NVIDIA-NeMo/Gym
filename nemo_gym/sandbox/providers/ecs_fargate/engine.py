@@ -104,7 +104,7 @@ class SandboxSpec:
     image: str
     workdir: str = "/workspace"
     env: dict[str, str] = field(default_factory=dict)
-    files: dict[str, str] = field(default_factory=dict)
+    files: dict[str, str | bytes] = field(default_factory=dict)
     entrypoint: str | None = None
     volumes: list[VolumeMount] = field(default_factory=list)
     environment_dir: str | None = None

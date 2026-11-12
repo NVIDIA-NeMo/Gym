@@ -16,18 +16,22 @@ import asyncio
 import inspect
 import json
 import signal
+import sys
 import tarfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
-from nemo_gym.client import ServerClient
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
+from nemo_gym.core import EpisodeId, TaskId
 from resources_servers.vibench.app import (
     PlanResult,
     VibenchResourcesServer,
     VibenchResourcesServerConfig,
+    VibenchSeedSessionRequest,
     VibenchVerifyRequest,
+    _BuildSession,
     add_evaluation_tags,
 )
 
@@ -39,8 +43,7 @@ def make_server(tmp_path: Path, **overrides) -> VibenchResourcesServer:
         entrypoint="",
         name="vibench_resources_server",
         vibench_repo_root=str(tmp_path),
-        artifact_dir=str(tmp_path / "artifacts"),
-        **overrides,
+        **({"sandbox_provider": "sandbox"} | overrides),
     )
     return VibenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
@@ -52,7 +55,6 @@ def make_verify_request(**overrides) -> VibenchVerifyRequest:
         "prd_files": ["prds/notes/prd/mvp.txt"],
         "test_plans": ["prds/notes/tests/mvp/test1.txt", "prds/notes/tests/mvp/test2.txt"],
         "asset_dirs": [],
-        "artifact_path": "/tmp/vibench-artifacts/app.tar",
         "test_assets_dir": None,
         "responses_create_params": {"input": [{"role": "user", "content": "build it"}]},
         "response": {
@@ -96,6 +98,26 @@ class TestPathResolution:
             server._resolve("../../etc/passwd")
 
 
+class TestVibenchPython:
+    def _venv_python(self, root: Path) -> Path:
+        python = root / ".venv" / "bin" / "python"
+        python.parent.mkdir(parents=True)
+        python.touch()
+        return python
+
+    def test_prefers_the_v1_venv(self, tmp_path):
+        self._venv_python(tmp_path)
+        v1_python = self._venv_python(tmp_path / "v1")
+        assert make_server(tmp_path)._vibench_python == str(v1_python)
+
+    def test_falls_back_to_the_root_venv(self, tmp_path):
+        python = self._venv_python(tmp_path)
+        assert make_server(tmp_path)._vibench_python == str(python)
+
+    def test_falls_back_to_the_gym_interpreter(self, tmp_path):
+        assert make_server(tmp_path)._vibench_python == sys.executable
+
+
 class TestArtifactUnpacking:
     """The tarball comes out of a box the model controlled, so its members are untrusted."""
 
@@ -127,23 +149,15 @@ class TestArtifactUnpacking:
         assert not (tmp_path / "escaped.txt").exists()
 
     @pytest.mark.asyncio
-    async def test_rejected_artifact_path_is_not_deleted(self, tmp_path):
-        """A rejected path must not be unlinked: deleting an unvalidated, agent-supplied
-        path is arbitrary file deletion, and the rejection branch used to do exactly that."""
+    async def test_an_unpackable_archive_is_a_build_failure(self, tmp_path):
         server = make_server(tmp_path)
-        victim = tmp_path / "IMPORTANT_FILE"
-        victim.write_text("do not delete")
+        archive = self._tar_with(tmp_path, "../escaped.txt")
+        _register_session(server, tmp_path, archive)
 
-        response = await server.verify(_FakeRequest(), make_verify_request(artifact_path=str(victim)))
+        response = await server.verify(_FakeRequest(), make_verify_request())
 
         assert response.build_failed is True
-        assert victim.exists(), "verify deleted a file outside artifact_dir"
-
-    def test_rejects_artifact_path_outside_artifact_dir(self, tmp_path):
-        server = make_server(tmp_path)
-        # A compromised agent must not be able to point the verifier at arbitrary host files.
-        with pytest.raises(ValueError):
-            server._resolve_artifact("/etc/passwd")
+        assert response.reward == 0.0
 
 
 class _FakeProc:
@@ -682,15 +696,112 @@ class TestGradeOneTestPlan:
         assert r.normalized_score == 0.0
 
 
+class TestLegacyRelay:
+    """vibench_agent's path: the seed returns the brief only, and verify grades a tarball in artifact_dir."""
+
+    @pytest.mark.asyncio
+    async def test_seed_returns_the_brief_and_starts_no_sandbox(self, tmp_path, monkeypatch):
+        server = make_server(tmp_path, sandbox_provider=None, artifact_dir=str(tmp_path / "artifacts"))
+        (tmp_path / "prds/notes/prd").mkdir(parents=True)
+        (tmp_path / "prds/notes/prd/mvp.txt").write_text("Build a notes app.")
+        (tmp_path / "prds/notes/assets").mkdir()
+
+        async def no_sandbox(*args, **kwargs):
+            raise AssertionError("the legacy relay seed must not start a sandbox")
+
+        monkeypatch.setattr(server, "_start_build_sandbox", no_sandbox)
+        body = VibenchSeedSessionRequest(
+            app="notes",
+            prd_files=["prds/notes/prd/mvp.txt"],
+            test_plans=["prds/notes/tests/mvp/test1.txt"],
+            asset_dirs=["prds/notes/assets", "prds/notes/missing"],
+        )
+
+        response = await server.seed_session(_FakeRequest(), body)
+
+        assert response.prd_text == "Build a notes app."
+        assert response.asset_paths == [str((tmp_path / "prds/notes/assets").resolve())]
+        assert server._sessions == {}
+
+    @pytest.mark.asyncio
+    async def test_grades_the_tarball_and_removes_it(self, tmp_path, monkeypatch):
+        server = make_server(tmp_path, sandbox_provider=None, artifact_dir=str(tmp_path / "artifacts"))
+        archive = TestArtifactUnpacking()._tar_with(tmp_path, "package.json")
+
+        def fake_unpack(artifact: Path, dest: Path):
+            assert artifact == archive.resolve()
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / "setup-environment.sh").write_text("#!/bin/bash\n")
+            (dest / "start-server.sh").write_text("#!/bin/bash\n")
+
+        async def fake_grade(app_dir, test_plan_rel, work_dir, test_assets_dir):
+            return PlanResult(
+                test_plan=Path(test_plan_rel).stem,
+                score=5,
+                full_points=10,
+                normalized_score=0.5,
+                steps_total=2,
+                steps_passed=1,
+                seeding_failed=False,
+                duration_s=1.0,
+            )
+
+        monkeypatch.setattr(server, "_unpack_artifact", fake_unpack)
+        monkeypatch.setattr(server, "_grade_one_test_plan", fake_grade)
+
+        # No live session: the tarball, not a lent sandbox, is what gets graded.
+        response = await server.verify(_FakeRequest(), make_verify_request(artifact_path=str(archive)))
+
+        assert response.reward == pytest.approx(0.5)
+        assert response.build_failed is False
+        assert response.mask_sample is not True
+        assert not archive.exists()
+
+    @pytest.mark.asyncio
+    async def test_no_tarball_is_a_build_failure_not_a_lost_session(self, tmp_path):
+        server = make_server(tmp_path, sandbox_provider=None, artifact_dir=str(tmp_path / "artifacts"))
+
+        response = await server.verify(_FakeRequest(), make_verify_request(artifact_path=None))
+
+        assert response.build_failed is True
+        assert response.reward == 0.0
+        assert response.mask_sample is not True
+
+    @pytest.mark.asyncio
+    async def test_rejected_artifact_path_is_not_deleted(self, tmp_path):
+        """A rejected path must not be unlinked: deleting an unvalidated, agent-supplied
+        path is arbitrary file deletion."""
+        server = make_server(tmp_path, artifact_dir=str(tmp_path / "artifacts"))
+        victim = tmp_path / "IMPORTANT_FILE"
+        victim.write_text("do not delete")
+
+        response = await server.verify(_FakeRequest(), make_verify_request(artifact_path=str(victim)))
+
+        assert response.build_failed is True
+        assert victim.exists(), "verify deleted a file outside artifact_dir"
+
+    def test_rejects_artifact_path_outside_artifact_dir(self, tmp_path):
+        server = make_server(tmp_path, artifact_dir=str(tmp_path / "artifacts"))
+        # A compromised agent must not be able to point the verifier at arbitrary host files.
+        with pytest.raises(ValueError):
+            server._resolve_artifact("/etc/passwd")
+
+    def test_rejects_any_artifact_path_without_artifact_dir(self, tmp_path):
+        server = make_server(tmp_path)
+        with pytest.raises(ValueError):
+            server._resolve_artifact(str(tmp_path / "app.tar"))
+
+
 class TestVerifyRewardAggregation:
-    """verify() is exercised with the sandbox and grading steps stubbed out; the Docker path
+    """verify() is exercised with the harvest and grading steps stubbed out; the Docker path
     is covered by the end-to-end smoke test in README.md, not by unit tests."""
 
     @pytest.mark.asyncio
     async def test_missing_artifact_scores_zero_and_flags_build_failure(self, tmp_path, monkeypatch):
         server = make_server(tmp_path)
+        _register_session(server, tmp_path, archive=None)
 
-        response = await server.verify(_FakeRequest(), make_verify_request(artifact_path=None))
+        response = await server.verify(_FakeRequest(), make_verify_request())
 
         assert response.reward == 0.0
         assert response.build_failed is True
@@ -758,7 +869,20 @@ class TestVerifyRewardAggregation:
 
 class _FakeRequest:
     def __init__(self, session_id: str = "session-1"):
-        self.session = {"session_id": session_id}
+        self.session = {SESSION_ID_KEY: session_id}
+
+
+def _register_session(server: VibenchResourcesServer, tmp_path: Path, archive: Path | None) -> None:
+    """A live session whose app was already harvested into ``archive`` (None: nothing came out)."""
+    server._sessions["session-1"] = _BuildSession(
+        episode_id=EpisodeId(rollout_id="0-0"),
+        task_id=TaskId(taskset="vibench:example", task_id="notes-mvp"),
+        sandbox=None,
+        scratch_dir=tmp_path / "scratch",
+        ready=True,
+        harvested=True,
+        archive=archive,
+    )
 
 
 def _stub_extraction(server: VibenchResourcesServer, monkeypatch) -> None:
@@ -769,5 +893,8 @@ def _stub_extraction(server: VibenchResourcesServer, monkeypatch) -> None:
         (dest / "setup-environment.sh").write_text("#!/bin/bash\n")
         (dest / "start-server.sh").write_text("#!/bin/bash\n")
 
+    # verify copies the harvested tarball before grading, so it has to exist; its content goes unread.
+    archive = server._repo_root / "app.tar"
+    archive.write_bytes(b"")
+    _register_session(server, server._repo_root, archive)
     monkeypatch.setattr(server, "_unpack_artifact", fake_unpack)
-    monkeypatch.setattr(server, "_resolve_artifact", lambda p: Path(p))

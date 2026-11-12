@@ -33,7 +33,6 @@ from nemo_gym.orchestration.recovery import (
     decide_from_collected,
     decide_recovery,
     failure_facts,
-    fault_class,
     fault_report,
     trial_faults,
 )
@@ -171,8 +170,6 @@ def test_a_sandbox_or_tool_server_failure_event_in_the_row_is_infrastructure() -
 
 def test_the_kind_is_gate_derived_and_evaluation_side() -> None:
     assert is_gate_derived(AGENT_TIMEOUT_INFRASTRUCTURE)
-    assert fault_class(AGENT_TIMEOUT_INFRASTRUCTURE) == "server"
-    assert fault_class("agent_timeout") == "model"
 
 
 @pytest.mark.parametrize("calls", [LAST_503, CONNECTION, PEER_DROP, LONG_FAULTS])
@@ -292,3 +289,38 @@ async def test_the_store_reopens_a_harbor_graded_zero_only_with_server_faults(
     else:
         assert store.pending() == [] and len(store.selected("success")) == 1
         assert decision.counts == {IdentityState.SCORED: 1} and decision.action == RecoveryAction.NOOP
+
+
+@pytest.mark.parametrize("stage,expected", [("agent", False), ("seed", True), ("verification", False), (None, False)])
+def test_timeout_materiality_uses_shared_stage_class_for_sandbox_evidence(stage, expected):
+    event = {"event_id": "oom", "boundary": "sandbox", "failure_kind": "provider_oom_killed", "stage": stage}
+    row = timeout_row(0, CLEAN, _ng_failure_events={"oom": event})
+    assert is_infrastructure_agent_timeout(row) is expected
+    assert event["failure_kind"] == "provider_oom_killed"
+    assert event["stage"] == stage
+
+
+def test_unregistered_provider_prefix_is_not_infrastructure_evidence():
+    event = {"event_id": "unknown", "boundary": "sandbox", "failure_kind": "provider_not_registered"}
+    row = timeout_row(0, CLEAN, _ng_failure_events={"unknown": event})
+    assert not is_infrastructure_agent_timeout(row)
+
+
+def test_materiality_uses_configured_class_without_widening_timeout_eligibility():
+    from nemo_gym.core.failure_kinds import FailureClassificationConfig
+
+    config = FailureClassificationConfig(
+        by_failure_kind={"model_server_error": "model", "model_policy_response_timeout": "evaluation"}
+    )
+    row = timeout_row(0, [call(0, 600, 503)])
+    assert is_infrastructure_agent_timeout(row)
+    assert not is_infrastructure_agent_timeout(row, classification=config)
+    timeout = {"failure_kind": "model_policy_response_timeout", "stage": "agent"}
+    assert not is_server_fault_call({"failure_events": [timeout]}, classification=config)
+
+
+@pytest.mark.parametrize("action", ["count_as_zero", "fail"])
+def test_applied_final_action_prevents_timeout_replay(action):
+    row = timeout_row(0, [call(0, 600, 503)])
+    row.update(failure_outcome_action=action, failure_outcome_attribution="evaluation")
+    assert not is_infrastructure_agent_timeout(row)

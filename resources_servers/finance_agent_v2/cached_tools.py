@@ -44,6 +44,7 @@ from finance_agent.tools import (
 )
 
 from resources_servers.sec_local_index.cache import ToolCache
+from resources_servers.sec_local_index.sec_urls import parse_sec_archives_url
 
 
 logger = logging.getLogger(__name__)
@@ -225,22 +226,16 @@ class CachedEDGARSearch(EDGARSearch):
 # ============================================================================
 
 
-# Matches a SEC EDGAR Archives *document* URL:
-#   https://www.sec.gov/Archives/edgar/data/<CIK>/<ACCESSION_NODASH>/<filename>
-_SEC_DOC_RE = re.compile(r"sec\.gov/Archives/edgar/data/(\d+)/([0-9A-Za-z]+)/(.+)$")
-
-
 class CachedParseHtmlPage(ParseHtmlPage):
     """ParseHtmlPage that caches parsed text for sec.gov filing URLs.
 
     Only SEC EDGAR Archives document URLs are cached (immutable per accession);
     every other URL falls through to the untouched upstream fetch+parse. The
-    on-disk layout is the corrected nested form (the V1 server used a flat
-    ``<accession>.txt`` filename, conflating a filing's multiple documents):
-        sec_filings/<cik_padded>/<accession_nodash>/<primary-doc-filename>.txt
+    on-disk layout is shared with the finance_sec_search server:
+        filings/<cik_padded>/<accession_nodash>/<percent-encoded-document>.txt
     """
 
-    _NAMESPACE = "sec_filings"
+    _NAMESPACE = "filings"
 
     def __init__(self, cache: ToolCache) -> None:
         super().__init__()
@@ -251,16 +246,10 @@ class CachedParseHtmlPage(ParseHtmlPage):
         self.read_sources[source] += 1
 
     def _doc_path(self, url: str) -> Optional[Path]:
-        clean = url.split("?", 1)[0].split("#", 1)[0]
-        m = _SEC_DOC_RE.search(clean)
-        if not m:
+        parsed = parse_sec_archives_url(url)
+        if parsed is None or not parsed.cache_filename:
             return None
-        cik = m.group(1).zfill(10)
-        accession = m.group(2)
-        filename = m.group(3).strip("/").replace("/", "_")
-        if not filename:
-            return None
-        return self._cache.path(self._NAMESPACE, cik, accession, f"{filename}.txt")
+        return self._cache.path(self._NAMESPACE, parsed.padded_cik, parsed.accession, f"{parsed.cache_filename}.txt")
 
     async def _parse_html_page(self, url: str) -> str:
         cache = self._cache

@@ -187,10 +187,20 @@ class TestHarnessFailures:
         result = _verify(_make_server(), "{}", **fields)
         assert result.harness_failure is True
         assert result.mask_sample is True
+        # The task row is invalid, which is not the model's failure; the status keeps the detail.
+        dumped = result.model_dump()
+        assert dumped["failure_kind"] == "chemreason_bench:invalid_task"
+        assert dumped["failure_reason"]
 
     def test_a_scored_row_is_not_masked(self):
         result = _verify(_make_server(), GOLD_REPLY["ordering"], task_type="ordering", ground_truth=GOLD["ordering"])
         assert result.mask_sample is False
+        assert result.failure_kind is None and result.failure_reason is None
+
+    def test_a_wrong_answer_is_not_a_failure(self):
+        result = _verify(_make_server(), "{}", task_type="ordering", ground_truth=GOLD["ordering"])
+        assert result.reward == 0.0 and result.harness_failure is False
+        assert result.mask_sample is False and result.failure_kind is None
 
     @pytest.mark.parametrize("bad", [None, [], "a string", 7, True])
     def test_ground_truth_wrong_type(self, bad):

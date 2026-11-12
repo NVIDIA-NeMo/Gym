@@ -60,7 +60,7 @@ def case(observed, expected, *, args=(), config=None):
 
 
 def compare(tmp_path, source, cases, *, role="candidate", **limits):
-    files = execution.COMPARATOR_FILES
+    files = execution.SEMANTIC_COMPARATOR_FILES
     lay_out(tmp_path, files=files)
     source_path = tmp_path / "validator_source.py"
     source_path.write_text(source)
@@ -142,7 +142,7 @@ def test_validator_namespace_is_fresh_for_every_case(tmp_path):
     assert statuses(result) == ["equal", "equal"]
 
 
-def test_semantic_validator_receives_inert_symbolic_and_legacy_carriers(tmp_path):
+def test_semantic_validator_receives_codec_text_carriers_unevaluated(tmp_path):
     source = """
 from critpt_grader_rt.codec import LegacyText, SymbolicText
 
@@ -156,6 +156,18 @@ def validate(*, observed, expected, args, kwargs, config):
         source,
         [case(SymbolicText("x + 1"), SymbolicText("1 + x"), args=(LegacyText("lambda: forbidden()"),))],
     )
+    assert statuses(result) == ["equal"]
+
+
+def test_semantic_compare_worker_gets_the_file_allowance_of_its_larger_job(tmp_path):
+    source = (
+        "import resource\n"
+        "def validate(*, observed, expected, args, kwargs, config):\n"
+        "    return resource.getrlimit(resource.RLIMIT_FSIZE) == (config['limit'], config['limit'])\n"
+    )
+    limit = runner.SEMANTIC_FILE_LIMIT_BYTES
+    assert limit == runner.SEMANTIC_JOB_BYTES_LIMIT == 161_546_240 > runner.FILE_LIMIT_BYTES
+    result = compare(tmp_path, source, [case(1, 1, config={"limit": limit})])
     assert statuses(result) == ["equal"]
 
 

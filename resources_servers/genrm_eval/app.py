@@ -112,7 +112,15 @@ class GenRMEvalResourcesServer(SimpleResourcesServer):
         return ranking
 
     def compute_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
-        return flatten_metrics(import_module(self.config.scoring_module).compute_metrics(tasks))
+        metrics = flatten_metrics(import_module(self.config.scoring_module).compute_metrics(tasks))
+        rows = [row for task in tasks for row in task]
+        if rows:
+            # Count output-limit hits even when a verdict was parseable.
+            metrics["max_token_reached_rate"] = sum(
+                ((row.get("response") or {}).get("incomplete_details") or {}).get("reason") == "max_output_tokens"
+                for row in rows
+            ) / len(rows)
+        return metrics
 
     def compute_repeat_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
         return self.compute_metrics(tasks)
@@ -121,6 +129,7 @@ class GenRMEvalResourcesServer(SimpleResourcesServer):
         keys = (
             self.config.metric_key,
             *self.config.additional_metric_keys,
+            "max_token_reached_rate",
             "median/response_tokens",
             "median/reasoning_tokens",
         )

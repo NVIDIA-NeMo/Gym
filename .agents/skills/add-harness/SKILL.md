@@ -46,11 +46,12 @@ Before moving on, confirm each of these in the code:
 - [ ] A seed the adapter cannot serve (a sandbox it cannot use, a required tool grant it never consumes) raises `AgentSeedRejectedError`; optional grants it does not use are skipped.
 - [ ] If the adapter supports MCP grants, it wires the episode URL and headers into the harness and enforces required-server readiness before inference. Follow [MCP grant integration](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#mcp-grant-integration), including runtimes that silently skip failed plugins. MCP access and sandbox ownership are independent decisions.
 - [ ] Close returns an `AgentObservationBundle`, with gaps for evidence the harness cannot report, even when activation failed.
-- [ ] Agent sessions run with `num_workers: 1`.
+- [ ] All agent-session state lives in the session, so several workers are safe; anything else overrides `multiple_workers_unsupported_reason()`.
 - [ ] A sandbox failure never falls back to running on the host.
+- [ ] An adapter that creates its own sandbox exposes `network_access` (`inherit`, `model_only`, `model_and_tools`) and passes the spec through `restrict_sandbox_network` before creating it. Settings it cannot enforce raise `AgentSeedRejectedError` (a final 422), and a restricted sandbox gets its runtime by upload or from a preinstalled `sandbox_runtime_dir`. See [Restrict the egress of an owned sandbox](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#restrict-the-egress-of-an-owned-sandbox).
 - [ ] Controls the harness does not support are rejected or documented, not silently dropped.
 - [ ] The harness's own files (configuration, history, caches) stay out of the task repository. Where the harness has no setting to move them, the README says what it writes under the task's home.
-- [ ] A sandbox runner that needs only the standard library is uploaded as `RUNNER_FILE` from `nemo_gym.agents.utils.sandbox_session` and launched by a `SandboxCommand` with `stdlib_runner=True`, as `codex_agent` does. It then runs under a neutral process name with no `.py` in its command line, so a `pkill python3` or `pkill -f '\.py'` in the task cannot stop it.
+- [ ] A CLI harness launches through the shared `harness_runner.sh` (`HARNESS_RUNNER_FILE` and `HARNESS_RUNNER_SCRIPT`) with `SandboxCommand(argv=...)`. A Python SDK shim uses an explicit interpreter from an adapter-managed runtime, such as `SandboxPythonRuntime`, rather than the task image's Python. See [Code layout](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#code-layout).
 - [ ] Only an error that ends the harness's run fails the response, by the harness's own rule at the pinned version. See [Convert outputs without silent loss](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#convert-outputs-without-silent-loss).
 - [ ] Usage is reported only when every model call has a usage record, with call references collected from every record the harness writes. Otherwise usage stays unknown, with a gap.
 
@@ -58,12 +59,13 @@ Before moving on, confirm each of these in the code:
 
 Cover the behaviors in [Runtime and compatibility](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#runtime-and-compatibility) that apply to your execution model. At minimum:
 
-- Each unsupported seed returns a final 422. Use `nemo_gym.agents.testing.agent_session_conformance.check_agent_seed_rejected`, as `responses_api_agents/hermes_agent/tests/test_app.py` does.
+- Each unsupported seed returns a terminal 422. Use `nemo_gym.agents.testing.agent_session_conformance.check_agent_seed_rejected`, as `responses_api_agents/hermes_agent/tests/test_app.py` does.
 - For MCP support, cover authenticated discovery and tool calls, required-server failure before inference, optional-server failure, name collisions, and cleanup. If enforcement depends on a plugin or hook, test a run where it does not load. Test each supported sandbox ownership path; a sandbox-only smoke does not validate MCP grants.
 - An activation runs the harness once. An activation for an unknown or closed session returns 409; a request with no session cookie takes the host path, if the adapter has one.
 - Close returns observations or gaps, and returns `resources_cookies` only when the session holds a Resources cookie jar.
 - Retries, cancellation, and termination, with every wait bounded. For a sandboxed harness, include a tool command that leaves a background process holding stdout open: the activation must still finish.
 - Output conversion: each error kind the harness tolerates leaves the response completed, and usage stays unknown when one model call has no usage record.
+- For an adapter that creates sandboxes: the policy each `network_access` value produces, including that skipped grants open no host; a 422 from `/v1/agent_sessions` for an explicit `network_policy` and for a provider without network policies, with no sandbox created and no session record left; and a borrowed session rejecting a restricted value before connecting.
 
 Check that each new test fails when you revert the behavior it covers. Run the adapter's tests in its own environment:
 
@@ -139,6 +141,8 @@ Read the rollouts, not the exit code:
 
 For a new harness or an upgrade that claims Terminal-Bench 2.1 support, complete the [TB 2.1 full evaluation](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#terminal-bench-21-full-evaluation) before merge. Run every task with 8 repeats at a pinned benchmark revision with a real model, and link the full results in the PR. This applies at every capability level; the small smoke run above and scripted probes do not satisfy it.
 
+For a benchmark graded on the model's own knowledge, such as HLE, run the pairing with `network_access: model_only` and check that an unrelated host is unreachable from the sandbox: open egress lets the harness look answers up.
+
 Then show a second compatible pairing through configuration changes alone. For an upgrade, compare before and after with the same model, tasks, prompts, sampling, limits, image, verifier, and concurrency.
 
 ## Step 6: Training (only if the capability level includes it)
@@ -155,6 +159,7 @@ A harness merges only when it passes these checks. Put the evidence in the PR.
 | Conformance | From the Observability level up, every applicable P0 check passes, or the PR explains why the probes do not apply. | `scripts/run_harness_conformance.py` report |
 | Real pairing | Each claimed pairing produces rewards on a real model and tasks; the agent closes before verification; cleanup runs. | `rollouts.jsonl`, failures sidecar, server logs |
 | TB 2.1 full evaluation | A new harness or upgrade claiming TB 2.1 support completes the [full evaluation](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#terminal-bench-21-full-evaluation), at every capability level. | Full run artifacts, per-task results, aggregate score, coverage and failure counts; before/after results for upgrades. |
+| Egress | An adapter that creates sandboxes enforces `network_access`, and a pairing on a benchmark graded on the model's own knowledge runs with `model_only`. | Unit tests, a `model_only` pairing run |
 | Health | Every `unhealthy` rollout has a stated cause in the PR: a harness limit, an infrastructure failure, or a bug that was fixed and rerun. Every `unobserved` count is explained by the capability level or a named missing input. | `quality_summary.json`, `gym eval health-check` |
 | Evidence | From the Observability level up, the saved rollouts pass the evidence check. At the Evaluation level they fail it by design: record the result and the gaps the close bundle declares. | `scripts/inspect_harness_conformance.py` |
 | Composition | A second pairing works through configuration alone. | Its run folder |

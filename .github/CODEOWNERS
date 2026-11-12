@@ -24,8 +24,8 @@
 # ── Enforced ──────────────────────────────────────────────────────────────
 .github/ @nvidia-nemo/automation
 docker/ @nvidia-nemo/automation
-pyproject.toml @nvidia-nemo/automation
-uv.lock @nvidia-nemo/automation
+/pyproject.toml @nvidia-nemo/automation
+/uv.lock @nvidia-nemo/automation
 
 # BioNeMo
 /benchmarks/larp* @nvidia-nemo/gym_bionemo @nvidia-nemo/gym_maintainers
@@ -44,54 +44,71 @@ uv.lock @nvidia-nemo/automation
 # before it, or the wildcard silently overrides it.
 
 # suggest: * @nvidia-nemo/gym_architects
-# suggest: docker/ @anwithk
 
 # Frontier Eval
-# suggest: /responses_api_agents/ @nvidia-nemo/gym_env_benchmarks
-# suggest: /resources_servers/ @nvidia-nemo/gym_env_benchmarks
-# suggest: /benchmarks/ @nvidia-nemo/gym_env_benchmarks
-# suggest: /environments/ @nvidia-nemo/gym_env_benchmarks
 # suggest: /nemo_gym/cli/ @nvidia-nemo/gym_env_benchmarks
-# suggest: /nemo_gym/environment/benchmarks.py @nvidia-nemo/gym_env_benchmarks
-# suggest: /nemo_gym/data/dataset_orchestrator.py @nvidia-nemo/gym_env_benchmarks
-# suggest: /nemo_gym/data/gitlab_utils.py @nvidia-nemo/gym_env_benchmarks
-# suggest: /nemo_gym/data/hf_utils.py @nvidia-nemo/gym_env_benchmarks
-# suggest: /nemo_gym/data/prompt.py @nvidia-nemo/gym_env_benchmarks
-# suggest: /nemo_gym/metrics/reward_profile.py @nvidia-nemo/gym_env_benchmarks
-# suggest: /nemo_gym/verification/judge.py @nvidia-nemo/gym_env_benchmarks
-# suggest: /nemo_gym/agents/skills.py @nvidia-nemo/gym_env_benchmarks
-# suggest: /nemo_gym/eval/rollout_reverification.py @nvidia-nemo/gym_env_benchmarks
 
 # Core-Arch + RL
-# suggest: /responses_api_models/ @nvidia-nemo/gym_core
-# suggest: /nemo_gym/server_runtime/base_server.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/client/openai_client.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/models/anthropic_utils.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/models/anthropic_converter.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/models/chat_completions_converter.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/server_runtime/base_resources_server.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/agents/base_responses_api_agent.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/models/base_responses_api_model.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/environment/registry.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/environment/agent_registry.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/rollouts/rollout_collection.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/telemetry/profiling.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/config/server_metadata.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/server_runtime/server_status.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/data/dataset_preparation.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/sandbox/ @nvidia-nemo/gym_core
-# suggest: /nemo_gym/models/chat_streaming.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/models/responses_streaming.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/environment/discovery.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/environment/model_registry.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/environment/resources_server_registry.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/server_runtime/mcp_auto_exposure.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/orchestration/ @nvidia-nemo/gym_core
-# suggest: /nemo_gym/server_runtime/request_handling/rollout_context.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/trajectory/trajectory_record.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/utils/decorators.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/utils/path_utils.py @nvidia-nemo/gym_core
 # suggest: /tests/ @nvidia-nemo/gym_core
+
+# Reviewer groups (one per package). Listed after the blocks above so they win
+# for these paths (last match wins); more specific paths come after the
+# directory they sit under.
+# suggest: /responses_api_agents/ @nvidia-nemo/gym_reviewers_agents
+# suggest: /nemo_gym/agents/ @nvidia-nemo/gym_reviewers_agents
+# suggest: /tests/unit_tests/agents/ @nvidia-nemo/gym_reviewers_agents
+
+# suggest: /nemo_gym/eval/ @nvidia-nemo/gym_reviewers_eval
+# suggest: /nemo_gym/metrics/ @nvidia-nemo/gym_reviewers_eval
+# suggest: /nemo_gym/artifacts/ @nvidia-nemo/gym_reviewers_eval
+# suggest: /tests/unit_tests/eval/ @nvidia-nemo/gym_reviewers_eval
+# suggest: /tests/unit_tests/metrics/ @nvidia-nemo/gym_reviewers_eval
+# suggest: /tests/unit_tests/artifacts/ @nvidia-nemo/gym_reviewers_eval
+
+# suggest: /responses_api_models/ @nvidia-nemo/gym_reviewers_model
+# suggest: /nemo_gym/models/ @nvidia-nemo/gym_reviewers_model
+# suggest: /tests/unit_tests/models/ @nvidia-nemo/gym_reviewers_model
+
+# suggest: /nemo_gym/orchestration/ @nvidia-nemo/gym_reviewers_orchestration
+# suggest: /tests/unit_tests/orchestration/ @nvidia-nemo/gym_reviewers_orchestration
+
+# suggest: /nemo_gym/rollouts/ @nvidia-nemo/gym_reviewers_rollouts
+# suggest: /nemo_gym/rollouts/harness_capabilities/ @nvidia-nemo/gym_reviewers_agents
+# suggest: /nemo_gym/trajectory/ @nvidia-nemo/gym_reviewers_rollouts
+# suggest: /tests/unit_tests/rollouts/ @nvidia-nemo/gym_reviewers_rollouts
+# suggest: /tests/unit_tests/trajectory/ @nvidia-nemo/gym_reviewers_rollouts
+
+# suggest: /nemo_gym/sandbox/ @nvidia-nemo/gym_reviewers_sandbox
+# suggest: /tests/unit_tests/sandbox/ @nvidia-nemo/gym_reviewers_sandbox
+
+# suggest: /nemo_gym/server_runtime/ @nvidia-nemo/gym_reviewers_server_runtime
+# suggest: /nemo_gym/client/ @nvidia-nemo/gym_reviewers_server_runtime
+# suggest: /nemo_gym/models/_checkpoint.py @nvidia-nemo/gym_reviewers_server_runtime
+# suggest: /nemo_gym/models/_checkpoint_workers.py @nvidia-nemo/gym_reviewers_server_runtime
+# suggest: /tests/unit_tests/server_runtime/ @nvidia-nemo/gym_reviewers_server_runtime
+# suggest: /tests/unit_tests/client/ @nvidia-nemo/gym_reviewers_server_runtime
+# suggest: /tests/e2e/checkpoint/ @nvidia-nemo/gym_reviewers_server_runtime
+# suggest: /tests/e2e/session_routing/ @nvidia-nemo/gym_reviewers_server_runtime
+
+# suggest: /nemo_gym/telemetry/ @nvidia-nemo/gym_reviewers_telemetry
+# suggest: /tests/unit_tests/telemetry/ @nvidia-nemo/gym_reviewers_telemetry
+
+# suggest: /nemo_gym/data/ @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/environment/ @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/verification/ @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/verifiers/ @nvidia-nemo/gym_env_benchmarks
+# suggest: /environment_servers/ @nvidia-nemo/gym_env_benchmarks
+# suggest: /resources_servers/ @nvidia-nemo/gym_env_benchmarks
+# suggest: /benchmarks/ @nvidia-nemo/gym_env_benchmarks
+# suggest: /environments/ @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemotron_recipes/ @nvidia-nemo/gym_env_benchmarks
+# suggest: /tests/unit_tests/data/ @nvidia-nemo/gym_env_benchmarks
+# suggest: /tests/unit_tests/environment/ @nvidia-nemo/gym_env_benchmarks
+# suggest: /tests/unit_tests/verification/ @nvidia-nemo/gym_env_benchmarks
+# suggest: /tests/unit_tests/benchmarks/ @nvidia-nemo/gym_env_benchmarks
 
 # Co-owned
 # suggest: /nemo_gym/__init__.py @nvidia-nemo/gym_core @nvidia-nemo/gym_env_benchmarks

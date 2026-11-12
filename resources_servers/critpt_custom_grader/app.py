@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """HTTP adapter over the sandbox-API grader, with optional per-episode execution tools.
 
-Standard SimpleResourcesServer routes. ``/verify`` and ``/seed_session`` bound the request body before parsing and
+Standard SimpleResourcesServer routes. ``/verify`` and ``/seed_session`` read the whole request body, refuse one larger
+than MAX_REQUEST_BYTES (in ``finish_tool`` mode, than the limit ``agentic_max_response_bytes`` gives), then parse and
 validate it inside the handler, so a malformed or oversized request answers a
 category-only error and never reaches core's body-logging validation handler. These two handlers never log request
 bodies, validation details, provider exceptions or task sources; the stock typed routes (``/close_session``,
@@ -57,15 +58,18 @@ from nemo_gym.server_runtime import (
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
+    ResourcesSessionLostError,
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.critpt_custom_grader.agentic_tools import (
     AgenticExecutionConfig,
     AgenticExecutionSessions,
     get_code_execution_params,
 )
 from resources_servers.critpt_custom_grader.execution import (
+    CANDIDATE_UNCERTAINTY_REASONS,
     CLEANUP_STATUSES,
     FAILED_CATEGORIES,
     UNSCORABLE_CATEGORIES,
@@ -102,10 +106,19 @@ _RESOLVED = frozenset({"deleted", "not_created"})
 _PYTHON_FENCE = re.compile(r"```python[ \t]*\r?\n(.*?)\r?\n```", re.DOTALL)
 _BARE_FENCE = re.compile(r"```[ \t]*\r?\n(.*?)\r?\n```", re.DOTALL)
 # Framework-owned row keys that are never task data: the routing keys nemo_gym/data/task_materialization.py strips
-# (agent_ref, task_source, skills_ref) and the keys rollout collection and reverify attach to a row. Every _ng_* key
-# is dropped too.
+# (agent_ref, task_source, skills_ref), the keys rollout collection and reverify attach to a row, and the
+# failure_report every /verify request carries (verification_failure_fields in nemo_gym/agents/agent_tools.py).
+# Every _ng_* key is dropped too.
 _FRAMEWORK_ROW_KEYS = frozenset(
-    {"agent_ref", "task_source", "skills_ref", "reuse_cached_deliverable", "deliverables_dir", "reference_ids"}
+    {
+        "agent_ref",
+        "task_source",
+        "skills_ref",
+        "reuse_cached_deliverable",
+        "deliverables_dir",
+        "reference_ids",
+        "failure_report",
+    }
 )
 _NG_FAILURE_CLASS_RESPONSE_INCOMPLETE = "critpt_custom_grader:response_incomplete"
 _NEEDS_REGENERATION_CATEGORIES = frozenset({"response_incomplete"})
@@ -169,6 +182,7 @@ class CritPtCustomGraderConfig(BaseResourcesServerConfig):
     semantic_validators: dict[str, SemanticValidatorDefinition] = Field(default_factory=dict)
     reference_cache_dir: str | None = None
     startup_probe: bool = True
+    score_comparator_uncertain_as_incorrect: bool = False
     answer_source: Literal["output_text", "finish_tool"] = "output_text"
     agentic_execution: AgenticExecutionConfig | None = None
     agentic_max_response_bytes: int = Field(default=33_554_432, ge=MAX_RESPONSE_BYTES, le=134_217_728, strict=True)
@@ -197,7 +211,8 @@ class CritPtCustomGraderConfig(BaseResourcesServerConfig):
         ``create_timeout_s`` bounds the provider's create and readiness wait plus two transfers: the spec's files and
         the workdir setup. The comparator sandbox lives for almost the whole job and its stop may follow the job
         deadline, so a set ``ttl_s`` (the provider-side backstop) must cover the job deadline plus one cleanup bound;
-        a null ``ttl_s`` leaves the lifetime to the provider's default.
+        a null ``ttl_s`` leaves the lifetime to the provider's default. With ``semantic_validators`` configured a job
+        makes two more comparator uploads, which the job deadline must cover too.
         """
         if self.agentic_execution is not None and self.answer_source != "finish_tool":
             raise ValueError("agentic_execution requires answer_source: finish_tool")
@@ -212,8 +227,16 @@ class CritPtCustomGraderConfig(BaseResourcesServerConfig):
                 f"execution.create_timeout_s ({self.execution.create_timeout_s:g}) must be at least "
                 f"sandbox_spec.ready_timeout_s + 2 * execution.transfer_timeout_s ({needed:g})"
             )
+        semantic = bool(self.semantic_validators)
+        minimum = self.execution.minimum_job_timeout_s(semantic_validators=semantic)
+        if semantic and self.execution.job_timeout_s is not None and self.execution.job_timeout_s < minimum:
+            raise ValueError(
+                f"execution.job_timeout_s ({self.execution.job_timeout_s:g}) must be at least {minimum:g} when "
+                "semantic_validators are configured"
+            )
         ttl = self.sandbox_spec.ttl_s
-        lifetime = self.execution.effective_job_timeout_s() + self.execution.cleanup_timeout_s
+        job_timeout_s = self.execution.effective_job_timeout_s(semantic_validators=semantic)
+        lifetime = job_timeout_s + self.execution.cleanup_timeout_s
         if ttl is not None and ttl < lifetime:
             raise ValueError(
                 f"sandbox_spec.ttl_s ({ttl:g}) must be at least the job deadline (execution.job_timeout_s, or its "
@@ -266,6 +289,7 @@ class CritPtVerifyResponse(BaseVerifyResponse):
     scored: bool
     category: str
     cleanup_status: str
+    candidate_uncertainty_reasons: tuple[str, ...] = ()
     sandbox_observations: list[dict[str, Any]] = Field(default_factory=list)
     failure_class: str | None = Field(default=None, alias="_ng_failure_class")
     failure_subcategory: str | None = Field(default=None, alias="_ng_failure_subcategory")
@@ -359,6 +383,13 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
     _provider: Any = PrivateAttr(default=None)
     _probe_info: dict = PrivateAttr(default_factory=dict)
     _agentic_sessions: AgenticExecutionSessions | None = PrivateAttr(default=None)
+
+    def multiple_workers_unsupported_reason(self) -> str | None:
+        # Like chartography and visual_coding_opencode, a server that holds per-episode sandboxes runs with one
+        # worker: execution sandboxes are not exercised with several workers. Without them nothing is kept per episode.
+        if self.config.agentic_execution is None:
+            return None
+        return "execution sandboxes are not exercised with several workers"
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -501,20 +532,13 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
     async def _read_json(
         self, request: Request, *, max_bytes: int | None = None
     ) -> tuple[dict | None, JSONResponse | None]:
-        limit = (
-            max_bytes
-            if max_bytes is not None
-            else (
-                2 * MAX_TASK_BYTES + 2 * self.config.agentic_max_response_bytes
-                if self.config.answer_source == "finish_tool"
-                else MAX_REQUEST_BYTES
-            )
-        )
-        body = bytearray()
-        async for chunk in request.stream():
-            if len(body) + len(chunk) > limit:
-                return None, _error("request_limit", 413)
-            body.extend(chunk)
+        if max_bytes is None:
+            max_bytes = MAX_REQUEST_BYTES
+            if self.config.answer_source == "finish_tool":
+                max_bytes = 2 * MAX_TASK_BYTES + 2 * self.config.agentic_max_response_bytes
+        body = await request.body()
+        if len(body) > max_bytes:
+            return None, _error("request_limit", 413)
         try:
             value = json.loads(body.decode("utf-8"))
         except (ValueError, UnicodeError, RecursionError):
@@ -568,7 +592,7 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
         return BaseSeedSessionResponse()
 
     async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
-        """Close by typed identity even when the caller lost its seed cookie."""
+        """Close the episode session the body names, even when the caller lost its seed cookie."""
         if self._agentic_sessions is not None:
             return await self._agentic_sessions.close(body)
         return await super().close_resources_session(body)
@@ -598,12 +622,13 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
             return JSONResponse({"detail": "execution_unavailable"}, status_code=503)
         session_id = request.session.get(SESSION_ID_KEY)
         if not isinstance(session_id, str) or not session_id:
-            return JSONResponse({"detail": "session_unavailable"}, status_code=404)
+            raise ResourcesSessionLostError("The request names no resources session")
         try:
             result = await self._agentic_sessions.execute(session_id, params.cmd)
             return JSONResponse(result)
-        except HTTPException as exc:
-            return JSONResponse({"detail": "session_unavailable"}, status_code=exc.status_code)
+        except HTTPException:
+            # A lost or expired resources session answers 404 through FastAPI, with the failure_kind in its detail.
+            raise
         except Exception as exc:
             logger.warning("execution tool failed (%s)", type(exc).__name__)
             return JSONResponse({"detail": "execution_unavailable"}, status_code=503)
@@ -619,6 +644,7 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
         terminal: bool = False,
         cleanup: str = "not_started",
         sandboxes: list[dict[str, Any]] | None = None,
+        candidate_uncertainty_reasons: tuple[str, ...] = (),
     ) -> CritPtVerifyResponse:
         if scored:
             failure_class = None
@@ -637,6 +663,7 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
             scored=scored,
             category=category,
             cleanup_status=cleanup,
+            candidate_uncertainty_reasons=candidate_uncertainty_reasons,
             sandbox_observations=sandboxes or [],
             failure_class=failure_class,
             failure_kind=failure_class,
@@ -673,8 +700,33 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
         if result.outcome == "unscorable" and result.reward is None and result.category in UNSCORABLE_CATEGORIES:
             failure_class, terminal = UNSCORABLE_CATEGORIES[result.category]
             if result.failure_class == failure_class and result.terminal is terminal:
+                if (
+                    self.config.score_comparator_uncertain_as_incorrect
+                    and counts_valid
+                    and result.cases_attempted == result.case_count
+                    and bool(result.candidate_uncertainty_reasons)
+                    and all(reason in CANDIDATE_UNCERTAINTY_REASONS for reason in result.candidate_uncertainty_reasons)
+                    and result.category == "comparator_uncertain"
+                    and body.response.get("status") == "completed"
+                    and body.response.get("output")
+                ):
+                    return self._response(
+                        body,
+                        task,
+                        result.category,
+                        scored=True,
+                        cleanup=cleanup,
+                        sandboxes=observations,
+                        candidate_uncertainty_reasons=result.candidate_uncertainty_reasons,
+                    )
                 return self._response(
-                    body, task, result.category, terminal=terminal, cleanup=cleanup, sandboxes=observations
+                    body,
+                    task,
+                    result.category,
+                    terminal=terminal,
+                    cleanup=cleanup,
+                    sandboxes=observations,
+                    candidate_uncertainty_reasons=result.candidate_uncertainty_reasons,
                 )
         return self._response(body, task, "execution_unknown", cleanup="unknown", sandboxes=observations)
 
@@ -784,3 +836,6 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     CritPtCustomGraderServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = CritPtCustomGraderServer.run_webserver()  # noqa: F401

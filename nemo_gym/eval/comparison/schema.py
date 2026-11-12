@@ -14,9 +14,9 @@
 # limitations under the License.
 """Config and result schema for `gym eval compare`.
 
-Every candidate-varying field is a list, positionally parallel to `ComparisonResult.candidates`.
-v0 only ever compares one candidate, but keeping the shape list-valued means lifting that
-restriction later is a behavior change rather than a schema change.
+Configuration lists follow source order, including agent selectors and aggregate overrides.
+Pooled candidate sources produce one result side; candidate-varying result fields follow
+`ComparisonResult.candidates`. Comparison currently supports one candidate side.
 """
 
 from pathlib import Path
@@ -39,7 +39,7 @@ MAX_FLIPS_SHOWN = 10
 
 
 class ComparisonConfig(BaseNeMoGymCLIConfig):
-    """Compare a baseline eval run against a candidate run.
+    """Compare baseline and candidate eval runs, optionally pooling independent collections.
 
     Reads only each run's `<stem>_aggregate_metrics.json`, derived from the rollouts JSONL path you
     pass, and writes `compare_report.md` and/or `compare_report.json`. The rollouts JSONL itself is
@@ -53,50 +53,75 @@ class ComparisonConfig(BaseNeMoGymCLIConfig):
     gym eval compare \
         --baseline outputs/run_a/rollouts.jsonl \
         --candidates outputs/run_b/rollouts.jsonl
+
+    gym eval compare \
+        --baseline-runs outputs/b1/rollouts.jsonl,outputs/b2/rollouts.jsonl \
+        --candidate-runs outputs/c1/rollouts.jsonl,outputs/c2/rollouts.jsonl
     ```
 
     To point at metrics files that do not follow the `<stem>_aggregate_metrics.json` convention,
-    set `baseline_aggregate_metrics_fpath` and `candidate_aggregate_metrics_fpaths`.
+    use --baseline-agg-metrics, --baseline-runs-agg-metrics and --candidates-agg-metrics
+    in the corresponding source order. Each pooled repeat is an equally weighted observation.
     """
 
-    baseline_rollouts_jsonl_fpath: str = Field(
+    baseline_rollouts_jsonl_fpath: Optional[str] = Field(
+        default=None,
         description="Baseline run's rollouts JSONL, as passed to `gym eval run --output`. Used to derive "
-        "`<stem>_aggregate_metrics.json`; the JSONL itself is not read."
+        "`<stem>_aggregate_metrics.json`; the JSONL itself is not read.",
     )
     candidate_rollouts_jsonl_fpaths: List[str] = Field(
-        min_length=1,
+        default_factory=list,
         description="Candidate runs' rollouts JSONL paths (comma-separated via --candidates).",
+    )
+    baseline_rollouts_jsonl_fpaths: Optional[List[str]] = Field(
+        default=None,
+        min_length=1,
+        description="Independent baseline runs to pool (--baseline-runs). Mutually exclusive with --baseline.",
+    )
+    pooled_candidate_rollouts_jsonl_fpaths: Optional[List[str]] = Field(
+        default=None,
+        min_length=1,
+        description="Independent candidate runs to pool as one candidate (--candidate-runs). "
+        "Mutually exclusive with --candidates.",
     )
     baseline_aggregate_metrics_fpath: Optional[str] = Field(
         default=None,
         description="Override for the baseline's aggregate-metrics JSON. Defaults to the "
         "`<stem>_aggregate_metrics.json` sibling of baseline_rollouts_jsonl_fpath.",
     )
+    baseline_aggregate_metrics_fpaths: Optional[List[str]] = Field(
+        default=None,
+        description="Aggregate-metrics overrides, one per --baseline-runs source in the same order.",
+    )
     candidate_aggregate_metrics_fpaths: Optional[List[str]] = Field(
         default=None,
         description="Overrides for the candidates' aggregate-metrics JSON files. When set, must have the "
-        "same length as candidate_rollouts_jsonl_fpaths.",
+        "same length and order as --candidates or --candidate-runs.",
     )
 
     agent_name: Optional[str] = Field(
         default=None,
         description="Agent to compare on every side. When unset, compares every agent name present in all "
-        "runs. Overridden per side by baseline_agent_name / candidate_agent_names.",
+        "runs. Overridden by baseline_agent_name, baseline_agent_names or candidate_agent_names.",
     )
     baseline_agent_name: Optional[str] = Field(
         default=None,
-        description="Agent to read from the baseline's metrics. Takes precedence over agent_name.",
+        description="Agent to read from every baseline source. Takes precedence over agent_name.",
+    )
+    baseline_agent_names: Optional[List[str]] = Field(
+        default=None,
+        description="Agent names, one per --baseline-runs source. Overrides baseline_agent_name and agent_name.",
     )
     candidate_agent_names: Optional[List[str]] = Field(
         default=None,
         description="Agent to read from each candidate's metrics, by position. When set, must have the same "
-        "length as candidate_rollouts_jsonl_fpaths. Takes precedence over agent_name.",
+        "length and order as --candidates or --candidate-runs. Takes precedence over agent_name.",
     )
 
     output_dirpath: Optional[str] = Field(
         default=None,
-        description="Directory to write the comparison report into. Defaults to the candidate rollouts "
-        "file's parent directory. Created if absent; existing report files are overwritten.",
+        description="Directory to write the comparison report into. Defaults to the last candidate source's "
+        "directory. Created if absent; existing report files are overwritten.",
     )
     report_format: ReportFormat = Field(
         default="both",
@@ -108,13 +133,29 @@ class ComparisonConfig(BaseNeMoGymCLIConfig):
         lt=1,
         allow_inf_nan=False,
         description="Confidence level for candidate-minus-baseline intervals, as a fraction between 0 and 1. "
-        "Baseline/candidate intervals remain the recorded 95% intervals.",
+        "Side intervals stay at 95% and are recomputed for pooled sides.",
     )
 
     @model_validator(mode="after")
     def _check_candidate_parallel_lists(self) -> "ComparisonConfig":
-        num_candidates = len(self.candidate_rollouts_jsonl_fpaths)
-        if num_candidates > MAX_CANDIDATES:
+        if (self.baseline_rollouts_jsonl_fpath is not None) == (self.baseline_rollouts_jsonl_fpaths is not None):
+            raise ValueError("Give exactly one of --baseline or --baseline-runs.")
+        if bool(self.candidate_rollouts_jsonl_fpaths) == (self.pooled_candidate_rollouts_jsonl_fpaths is not None):
+            raise ValueError("Give exactly one of --candidates or --candidate-runs.")
+        if self.baseline_rollouts_jsonl_fpaths is None:
+            if self.baseline_aggregate_metrics_fpaths is not None or self.baseline_agent_names is not None:
+                raise ValueError("baseline_aggregate_metrics_fpaths and baseline_agent_names require --baseline-runs.")
+        else:
+            if self.baseline_aggregate_metrics_fpath is not None:
+                raise ValueError("Use baseline_aggregate_metrics_fpaths with --baseline-runs.")
+            for field_name in ("baseline_aggregate_metrics_fpaths", "baseline_agent_names"):
+                value = getattr(self, field_name)
+                if value is not None and len(value) != len(self.baseline_rollouts_jsonl_fpaths):
+                    raise ValueError(
+                        f"{field_name} must have one entry per --baseline-runs source, in the same order."
+                    )
+        num_candidates = len(self.pooled_candidate_rollouts_jsonl_fpaths or self.candidate_rollouts_jsonl_fpaths)
+        if self.pooled_candidate_rollouts_jsonl_fpaths is None and num_candidates > MAX_CANDIDATES:
             raise ValueError(
                 f"{num_candidates} candidates were given, but comparing more than {MAX_CANDIDATES} candidate "
                 "is not supported yet. Give a single candidate run."
@@ -207,7 +248,7 @@ class AgentComparison(BaseModel):
 
 
 class RunFile(BaseModel):
-    """One run's parsed `*_aggregate_metrics.json`, indexed by agent name."""
+    """Parsed aggregates indexed by agent; pooled paths represent the first of authoritative `sources`."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -218,17 +259,35 @@ class RunFile(BaseModel):
     # The whole parsed payload. Typed `Any` so pydantic does not walk a multi-megabyte file, and
     # excluded so the report references the run rather than embedding its input.
     entries_by_agent: Dict[str, Any] = Field(default_factory=dict, exclude=True, repr=False)
+    sources: List["RunSource"] = Field(default_factory=list)
 
     @computed_field
     @property
     def label(self) -> str:
         """Short display name for the run: the directory its rollouts live in."""
+        if self.sources:
+            return f"pooled ({len(self.sources)} sources)"
         return self.rollouts_jsonl_fpath.parent.name or self.rollouts_jsonl_fpath.stem
 
     @computed_field
     @property
     def agent_names(self) -> List[str]:
         return sorted(self.entries_by_agent)
+
+
+class RunSource(BaseModel):
+    """An input artifact contributing independent repeats to a pooled side."""
+
+    model_config = ConfigDict(frozen=True)
+
+    rollouts_jsonl_fpath: Path
+    aggregate_metrics_fpath: Path
+    selected_agents: List[str] = Field(default_factory=list)
+    repeat_counts_by_agent: Dict[str, Optional[int]] = Field(
+        default_factory=dict, description="Recorded repeat rows, including accounting-only repeats."
+    )
+    scored_repeat_counts_by_agent: Dict[str, int] = Field(default_factory=dict)
+    task_counts_by_agent: Dict[str, int] = Field(default_factory=dict)
 
 
 class ComparisonResult(BaseModel):
@@ -243,7 +302,7 @@ class ComparisonResult(BaseModel):
         gt=0,
         lt=1,
         allow_inf_nan=False,
-        description="Confidence level of delta intervals. Baseline/candidate intervals are recorded at 95%.",
+        description="Confidence level of delta intervals. Side intervals stay at 95%, recomputed for pooled sides.",
     )
     baseline: RunFile
     candidates: List[RunFile]

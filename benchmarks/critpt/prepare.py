@@ -28,6 +28,11 @@ BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "critpt_benchmark.jsonl"
 
+HF_REPO_ID = "CritPt-Benchmark/CritPt"
+# Pinned for reproducibility: the dataset's problem text was revised upstream on 2026-10-22,
+# which moves scores. Bump deliberately and re-baseline when upstream changes.
+HF_REVISION = "37ecba7e9d00eda858d7be1adba19a38ba50e7a6"  # pragma: allowlist secret
+
 # Note: data/example.jsonl is a hand-curated repo artifact (5 problems spanning multiple
 # physics domains) committed under resources_servers/critpt/data/example.jsonl. It is
 # intentionally NOT regenerated here — running prepare() will not touch it.
@@ -36,8 +41,8 @@ OUTPUT_FPATH = DATA_DIR / "critpt_benchmark.jsonl"
 def prepare() -> Path:
     from datasets import load_dataset
 
-    print("Downloading CritPt-Benchmark/CritPt from HuggingFace...")
-    ds = load_dataset("CritPt-Benchmark/CritPt", split="train")
+    print(f"Downloading {HF_REPO_ID} (revision {HF_REVISION[:7]}) from HuggingFace...")
+    ds = load_dataset(HF_REPO_ID, split="train", revision=HF_REVISION)
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 

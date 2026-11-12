@@ -63,3 +63,16 @@ def snapshot(
                 source.backup(destination)
         except sqlite3.Error:
             LOG.exception("Failed to copy OpenCode observations")
+
+
+def stored_sessions(database: Path) -> list[dict[str, str | None]]:
+    """Every stored session's ID and parent ID, oldest first, as the owner's ``sessions.json`` lists them."""
+    with closing(sqlite3.connect(f"file:{database}?mode=ro", uri=True)) as source:
+        rows = source.execute("select id, parent_id from session order by time_created, id").fetchall()
+    return [{"id": session_id, "parent_id": parent_id} for session_id, parent_id in rows]
+
+
+def stored_message_ids(database: Path) -> list[str]:
+    """Every stored message's ID, oldest first."""
+    with closing(sqlite3.connect(f"file:{database}?mode=ro", uri=True)) as source:
+        return [row[0] for row in source.execute("select id from message order by time_created, id")]

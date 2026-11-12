@@ -44,5 +44,5 @@ venv_path="$(python -c 'import sys; print(sys.prefix) if sys.prefix != sys.base_
 echo "[excluded-deps] Syncing locked opt-in packages..."
 UV_PROJECT_ENVIRONMENT="${venv_path}" uv sync --locked --inexact \
     --project "${project_dir}" --python "${python_executable}" --no-dev
-"${python_executable}" -c 'import cv2, PyNvVideoCodec, torchcodec, torchvision, torchaudio, pycountry'
+"${python_executable}" -c 'import cv2, torchcodec, torchvision, torchaudio, pycountry'
 echo "[excluded-deps] Done."

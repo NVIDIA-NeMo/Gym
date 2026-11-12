@@ -24,7 +24,9 @@ from nemo_gym.rollouts.rollout_store import RolloutStore
 ANSWER = {"object": "response", "id": "resp_saved", "status": "completed", "output": []}
 
 
-def _run(tmp_path: Path, *, judge_failures: int, rollouts: int = 3) -> tuple[Path, list[dict]]:
+def _run(
+    tmp_path: Path, *, judge_failures: int, rollouts: int = 3, evidence: dict | None = None
+) -> tuple[Path, list[dict]]:
     """A managed run of ``rollouts`` rollouts: the first ``judge_failures`` failed to judge, the others scored 1.0."""
     rows = [{"_ng_task_index": i, "_ng_rollout_index": 0, "agent_ref": {"name": "agent"}} for i in range(rollouts)]
     source = tmp_path / "source.jsonl"
@@ -38,14 +40,18 @@ def _run(tmp_path: Path, *, judge_failures: int, rollouts: int = 3) -> tuple[Pat
         for index, row in enumerate(store.pending()):
             store.record_dispatch(row)
             if index < judge_failures:
-                failure = row | {
-                    "_ng_failure_class": "judge_failed",
-                    "_ng_failure_id": f"judge-{index}",
-                    "failure_kind": "judge_failed",
-                    "mask_sample": True,
-                    "reward": 0.0,
-                    "response": ANSWER,
-                }
+                failure = (
+                    row
+                    | {
+                        "_ng_failure_class": "judge_failed",
+                        "_ng_failure_id": f"judge-{index}",
+                        "failure_kind": "judge_failed",
+                        "mask_sample": True,
+                        "reward": 0.0,
+                        "response": ANSWER,
+                    }
+                    | (evidence or {})
+                )
                 store.record_outcome(failure)
                 failures.append(failure)
             else:
@@ -67,6 +73,46 @@ def _settle(output: Path, failure: dict, reward: float) -> None:
         }
         assert store.record_rejudgment(failure, result)
         store.close_rejudgment(logical_rollout_id(failure), pending.operation_id)
+
+
+def test_a_settled_row_keeps_the_evidence_of_the_judge_failure_it_settles(tmp_path):
+    evidence = {
+        "ng_perf": {"model_calls": 3, "total_tokens": 1200},
+        "_ng_elapsed_s": 12.5,
+        "ng_model_call_capture": {"calls": [{"model_call_id": "policy-0"}]},
+        "document_delivery": {"pages": 4},
+    }
+    output, [failure] = _run(tmp_path, judge_failures=1, evidence=evidence)
+    with RolloutStore.open_for_rejudgment(output) as store:
+        pending = store.admit_rejudgment(failure)
+        # What /verify returns: the grade and its own fields, none of the row's evidence.
+        result = {
+            "_ng_task_index": failure["_ng_task_index"],
+            "_ng_rollout_index": failure["_ng_rollout_index"],
+            "agent_ref": failure["agent_ref"],
+            "_ng_run_id": failure["_ng_run_id"],
+            "_ng_attempt_index": failure["_ng_attempt_index"],
+            "response": ANSWER,
+            "reward": 0.5,
+            "mask_sample": False,
+            "_ng_rejudged_failure_id": failure["_ng_failure_id"],
+            "_ng_rejudge_operation_id": pending.operation_id,
+            "_ng_rejudge_admitted_at": pending.admitted_at,
+        }
+        assert store.record_rejudgment(failure, result)
+        store.close_rejudgment(logical_rollout_id(failure), pending.operation_id)
+    settled = next(row for row in RolloutStore.read(output).selected("success") if row["reward"] == 0.5)
+    assert {key: settled[key] for key in evidence} == evidence
+    assert settled["mask_sample"] is False and "failure_kind" not in settled
+    assert not any(key.startswith("_ng_failure") for key in settled)
+    assert settled["_ng_rejudged_failure_observations"]["ng_perf"] == evidence["ng_perf"]
+
+
+async def test_a_run_with_nothing_due_runs_no_pass(tmp_path, monkeypatch):
+    output, _ = _run(tmp_path, judge_failures=0)
+    before = output.read_bytes()
+    assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 0
+    assert output.read_bytes() == before and not (output.parent / "reverification").exists()
 
 
 def test_due_judge_failures_are_the_selected_ones_with_failure_attempts_left(tmp_path, monkeypatch):
@@ -324,6 +370,177 @@ async def test_a_regrade_that_answered_is_settled_when_a_later_one_disconnects(t
     assert failed == [lost] and due_judge_failures(output) == [lost]  # the lost one is withdrawn, not unknown
     decision = _decision(job)
     assert decision.action == RecoveryAction.REVERIFY, decision.reason
+
+
+async def test_a_failed_pass_records_what_it_settled_and_is_not_counted_as_settling_nothing(tmp_path, monkeypatch):
+    import asyncio
+
+    from aiohttp import ServerDisconnectedError
+
+    from nemo_gym.eval.rollout_reverification import (
+        RolloutReverificationConfig,
+        RolloutReverificationHelper,
+        write_settle_receipt,
+    )
+    from nemo_gym.orchestration.recovery import failed_judge_jobs_blocking
+
+    _, output, (answered, lost) = _job(tmp_path, judge_failures=2)
+
+    async def reply(task, json):
+        if task == 1:
+            await asyncio.sleep(0.05)  # the first re-grade has answered by then
+            raise ServerDisconnectedError()
+        return json | {"reward": 1.0}
+
+    _verifier(monkeypatch, reply)
+    helper = RolloutReverificationHelper()
+    config = RolloutReverificationConfig.model_validate(
+        {
+            "rollouts_jsonl_fpath": str(output),
+            "materialized_inputs_jsonl_fpath": str(materialized_path_for(output)),
+            "output_jsonl_fpath": str(output.parent / "reverification" / "failed-pass" / output.name),
+            "judge_failed_only": True,
+            "settle_into_source": True,
+            "skip_spent_judge_failures": True,
+            "disable_aggregation": True,
+        }
+    )
+    with pytest.raises(ServerDisconnectedError):
+        await helper.run_from_config(config)
+
+    # The failed receipt counts the grade the pass settled and the admission it withdrew.
+    receipt = write_settle_receipt(
+        tmp_path / "receipt.json",
+        state="failed",
+        source=str(output),
+        job_id="1",
+        settlement=helper.settlement,
+        started_at="2026-01-01T00:00:00Z",
+    )
+    assert {name: receipt[name] for name in ("selected", "judged", "settled", "withdrawn")} == {
+        "selected": 2,
+        "judged": 1,
+        "settled": 1,
+        "withdrawn": 1,
+    }
+    # Two failed jobs that each settled a saved answer made progress: recovery is not stopped for settling nothing.
+    failed = {"state": "failed", "settled": receipt["settled"]}
+    assert failed_judge_jobs_blocking([failed | {"job_id": "1"}, failed | {"job_id": "2"}]) is None
+    nothing = {"state": "failed", "settled": 0}
+    assert failed_judge_jobs_blocking([nothing | {"job_id": "1"}, nothing | {"job_id": "2"}]) == ["1", "2"]
+
+
+def _settling_pass(helper, output: Path, tmp_path: Path):
+    """A settling judge-only pass over ``output``, and a reader of the counts its failed receipt records."""
+    from nemo_gym.eval.rollout_reverification import RolloutReverificationConfig, write_settle_receipt
+
+    config = RolloutReverificationConfig.model_validate(
+        {
+            "rollouts_jsonl_fpath": str(output),
+            "materialized_inputs_jsonl_fpath": str(materialized_path_for(output)),
+            "output_jsonl_fpath": str(output.parent / "reverification" / "failed-pass" / output.name),
+            "judge_failed_only": True,
+            "settle_into_source": True,
+            "skip_spent_judge_failures": True,
+            "disable_aggregation": True,
+        }
+    )
+    return config, lambda: {
+        name: value
+        for name, value in write_settle_receipt(
+            tmp_path / "receipt.json",
+            state="failed",
+            source=str(output),
+            job_id="1",
+            settlement=helper.settlement,
+            started_at="2026-01-01T00:00:00Z",
+        ).items()
+        if name in ("selected", "judged", "settled", "withdrawn")
+    }
+
+
+async def test_a_grade_saved_before_the_coverage_write_failed_counts_as_settled(tmp_path, monkeypatch):
+    from nemo_gym.eval.rollout_reverification import RolloutReverificationHelper
+    from nemo_gym.orchestration.recovery import failed_judge_jobs_blocking
+
+    _, output, identities = _job(tmp_path, judge_failures=2)
+
+    async def reply(task, json):
+        return json | {"reward": 1.0}
+
+    _verifier(monkeypatch, reply)
+    # One exit-time coverage write fails, after the pass has fsynced its grades and closed their admissions.
+    record_rejudgment, write_coverage = RolloutStore.record_rejudgment, RolloutStore.write_coverage
+    state = {"graded": False, "failed": False}
+
+    def recording(self, failure, result):
+        state["graded"] = True
+        return record_rejudgment(self, failure, result)
+
+    def failing_once(self, *args, **kwargs):
+        if state["graded"] and not state["failed"] and self._results_file is None:  # the exit-time write
+            state["failed"] = True
+            raise OSError("disk full")
+        return write_coverage(self, *args, **kwargs)
+
+    monkeypatch.setattr(RolloutStore, "record_rejudgment", recording)
+    monkeypatch.setattr(RolloutStore, "write_coverage", failing_once)
+    helper = RolloutReverificationHelper()
+    config, receipt = _settling_pass(helper, output, tmp_path)
+    with pytest.raises(OSError, match="disk full"):
+        await helper.run_from_config(config)
+
+    scored, failed, pending = _state(output)
+    assert {identity: scored[identity] for identity in identities} == {identity: 1.0 for identity in identities}
+    assert failed == [] and pending == {}  # the new grades stay selected and their admissions closed
+    assert receipt() == {"selected": 2, "judged": 2, "settled": 2, "withdrawn": 0}
+    # Two such failed jobs made progress: recovery is not stopped for settling nothing.
+    failed_job = {"state": "failed", "settled": 2}
+    assert failed_judge_jobs_blocking([failed_job | {"job_id": "1"}, failed_job | {"job_id": "2"}]) is None
+
+
+async def test_a_failed_pass_counts_each_withdrawn_admission_once(tmp_path, monkeypatch):
+    from nemo_gym.eval.rollout_reverification import RolloutReverificationHelper
+
+    _, output, identities = _job(tmp_path, judge_failures=2)
+
+    async def reply(task, json):
+        if task == 0:
+            return json | {"reward": 0.0, "mask_sample": True}  # answered without a grade: withdrawn
+        return json | {"reward": 1.0, "response": ANSWER | {"id": "resp_other"}}  # grades another answer: refused
+
+    _verifier(monkeypatch, reply)
+    helper = RolloutReverificationHelper()
+    config, receipt = _settling_pass(helper, output, tmp_path)
+    with pytest.raises(ConfigError):
+        await helper.run_from_config(config)
+
+    _, failed, pending = _state(output)
+    assert failed == sorted(identities) and pending == {}  # both rows stay as they were; both admissions withdrawn
+    assert receipt() == {"selected": 2, "judged": 2, "settled": 0, "withdrawn": 2}
+
+
+@pytest.mark.parametrize(
+    ("counts", "says"),
+    [
+        (
+            {"selected": 2, "settled": 1, "withdrawn": 1},
+            "before it failed it settled 1 of 2 selected saved answer(s), which counts as progress, and withdrew 1, "
+            "left as they were; the others stay as they were",
+        ),
+        (
+            {"selected": 2, "settled": 0, "withdrawn": 2},
+            "before it failed it settled 0 of 2 selected saved answer(s) and withdrew 2, left as they were; the "
+            "others stay as they were",
+        ),
+        ({"selected": 2, "settled": 0, "withdrawn": 0}, "the saved answers it was to grade again stay as they were"),
+    ],
+)
+def test_the_note_on_a_failed_judge_job_says_what_it_settled_and_withdrew(counts, says):
+    from nemo_gym.orchestration.recovery import judge_job_note
+
+    job = {"job_id": "1", "state": "failed", "ended_at": "2026-01-01T00:00:00Z", "error": "OSError: disk full"}
+    assert judge_job_note(job | counts) == f"judge-only job 1 failed: OSError: disk full; {says}"
 
 
 @pytest.mark.parametrize(

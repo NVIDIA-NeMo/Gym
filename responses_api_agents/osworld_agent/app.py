@@ -62,6 +62,7 @@ from nemo_gym.server_runtime import (
     BaseRunRequest,
     BaseVerifyResponse,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.osworld_agent.agent_contract import (
     ResolvedAgentContract,
     assert_train_eval_parity,
@@ -380,7 +381,7 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     ray_task_resources: Dict[str, float] = Field(default_factory=dict)
     docker_port_lock_timeout: float = Field(default=300.0, gt=0)  # concurrent Docker VM port allocation
     evaluator_disable_gpu: bool = True
-    reward_mode: Literal["binary", "raw"] = "binary"
+    reward_mode: Literal["binary", "raw", "signed_v1"] = "binary"  # see reward_modes.py
     runner_name: str = DEFAULT_RUNNER_NAME
     action_space: Optional[str] = None
     observation_type: Optional[str] = None
@@ -824,6 +825,7 @@ def _build_messages_model_fn(
             )
             if structured_response and isinstance(normalized, dict):
                 normalized["finish_reason"] = choice.finish_reason
+                _record_served_response_id(normalized, resp)
             return normalized
 
         normalization_error = None
@@ -836,6 +838,7 @@ def _build_messages_model_fn(
             )
             if structured_response and isinstance(normalized, dict):
                 normalized["finish_reason"] = choice.finish_reason
+                _record_served_response_id(normalized, resp)
         except Exception as exc:  # noqa: BLE001 - log raw output before preserving the original error.
             normalization_exc = exc
             normalization_error = {"type": type(exc).__name__, "message": repr(exc)}
@@ -867,6 +870,19 @@ def _build_messages_model_fn(
         return normalized
 
     return _call
+
+
+def _record_served_response_id(normalized: Dict[str, Any], resp: Any) -> None:
+    """Keep the served Chat envelope id beside one structured model response.
+
+    Token capture keys each captured call by this id. Returning it lets the
+    agent name its scored call (``terminal_response_id``) without inventing
+    an identity the model server never served.
+    """
+
+    response_id = getattr(resp, "id", None)
+    if isinstance(response_id, str) and response_id:
+        normalized["response_id"] = response_id
 
 
 def _recover_first_fenced_action(content: str) -> str | None:
@@ -1658,6 +1674,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 max_trajectory_length=self.config.max_trajectory_length,
                 max_output_tokens=max_tokens,
                 exact_trace_transport_version=self.config.exact_trace_transport_version,
+                served_call_output=self._token_id_capture_enabled(),
             )
 
 
@@ -1725,8 +1742,16 @@ def _build_response(
     max_trajectory_length: Optional[int] = None,
     max_output_tokens: Optional[int] = None,
     exact_trace_transport_version: Literal[2, 3] = 2,
+    served_call_output: bool = False,
 ) -> OSWorldVerifyResponse:
-    """Pack one run without changing its prompt policy for training consumers."""
+    """Pack one run without changing its prompt policy for training consumers.
+
+    ``served_call_output`` is set when training-token capture owns the token
+    evidence. The model server then withholds token arrays from the agent, so
+    exact-trace output is unavailable; the returned history instead carries
+    accepted generations verbatim. Complete call evidence still includes
+    rejected attempts, independently of training selection.
+    """
 
     steps = result.get("steps", [])
     if not isinstance(steps, list):
@@ -1805,6 +1830,11 @@ def _build_response(
             # training evidence. The full projected prompts and their duplicate
             # generation arrays are validation/debug data, not transport data.
             trajectory_fields.pop("trajectory_model_calls", None)
+    terminal_response_id: Optional[str] = None
+    if served_call_output and not capabilities["exact_model_call_evidence"] and model_calls:
+        # An empty accepted history is meaningful; never replace it with
+        # parser-normalized step text that cannot identify captured calls.
+        output, terminal_response_id = _served_model_call_output(model_calls)
 
     response_dict: Dict[str, Any] = {
         "id": f"osworld-{(body.verifier_metadata or {}).get('task_id', 'unknown')}",
@@ -1865,6 +1895,9 @@ def _build_response(
         "verifier_metadata": metadata,
         **runtime_admission,
     }
+    if terminal_response_id is not None:
+        # Names the scored (last) generation by the id the model server served.
+        response_fields["terminal_response_id"] = terminal_response_id
     # A refused rollout is a typed failure row: an infrastructure cause retries, a failed policy call is the model's.
     response_fields |= _admission_failure_fields(result, runtime_admission)
     sandbox_start_failure = result.get("sandbox_start_failure")
@@ -1873,10 +1906,58 @@ def _build_response(
     return OSWorldVerifyResponse(**response_fields)
 
 
+def _served_model_call_output(
+    model_calls: List[Dict[str, Any]],
+) -> tuple[List[Dict[str, Any]], Optional[str]]:
+    """Return accepted served generations and the last observed served call ID.
+
+    Capture fingerprints the content the model server served, which keeps the
+    reasoning inline as ``<think>...</think>``. Step text strips that reasoning
+    and omits parser-retry calls, so it cannot identify captured calls.
+
+    Missing responses and empty served content (such as a local context-overflow
+    reply) provide no usable returned-content witness. Both are skipped; the
+    capture ledger independently records what ran. Rejected calls remain in
+    trajectory evidence but not in accepted history. The terminal still names
+    the last observed non-empty served response,
+    even when rejected. A returned-history consumer must reject an absent
+    terminal or missing selected parent, not silently select another call;
+    an explicit all-captured policy may include rejected calls.
+    """
+
+    output: List[Dict[str, Any]] = []
+    terminal_response_id: Optional[str] = None
+    terminal_accepted = True
+    for model_call in model_calls:
+        response = model_call.get("response")
+        if not isinstance(response, Mapping):
+            continue
+        raw_content = response.get("raw_content")
+        if not isinstance(raw_content, str) or not raw_content:
+            continue
+        response_id = response.get("response_id")
+        terminal_response_id = response_id if isinstance(response_id, str) and response_id else None
+        terminal_accepted = model_call.get("accepted") is True
+        if not terminal_accepted:
+            continue
+        output.append(
+            {
+                "id": f"msg-call-{model_call['turn_id']}",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "annotations": [], "text": raw_content}],
+            }
+        )
+    if not terminal_accepted and terminal_response_id is None:
+        raise ValueError("Rejected terminal call has no served response_id; cannot attribute the captured reward")
+    return output, terminal_response_id
+
+
 # Runtime-admission reasons the policy did not cause: the row is a retryable ``infrastructure_error``. A sandbox guest
 # that never became ready has its own typed fields (``_sandbox_start_failure_fields``); a configuration refusal (a
-# task without a spec, a proxy that is required but disabled or misconfigured) stays an untyped masked row, since a
-# retry would meet the same configuration.
+# task without a spec, a proxy that is required but disabled or misconfigured) is typed ``CONFIGURATION_ERROR``
+# without a failure event, since a retry would meet the same configuration.
 _INFRASTRUCTURE_ADMISSION_REASONS = frozenset(
     {
         "timeout",
@@ -1889,6 +1970,12 @@ _INFRASTRUCTURE_ADMISSION_REASONS = frozenset(
         "evaluation_incomplete",
     }
 )
+# Runtime-admission reasons that refuse a rollout because its configuration is wrong. They are typed, but not as an
+# ``infrastructure_error``: a retry would meet the same configuration.
+_CONFIGURATION_ADMISSION_REASONS = frozenset(
+    {"task_configuration_error", "proxy_configuration_error", "proxy_required_but_disabled"}
+)
+CONFIGURATION_ERROR = "osworld_agent:configuration_error"
 # Runtime-admission reasons a failed policy call caused: the row is a model failure of the kind the call shows.
 _MODEL_ADMISSION_REASONS = frozenset({"model_call_failed", "model_timeout"})
 _HTTP_STATUS_IN_ERROR = re.compile(r"(?:Error code|status(?:_code)?)[:= ]+\s*(\d{3})\b")
@@ -1920,7 +2007,8 @@ def _admission_failure_fields(result: Mapping[str, Any], runtime_admission: Mapp
     a crashed or errored rollout, a runner that recorded no terminal state) is an ``infrastructure_error`` with an
     agent failure event, so the row reaches the failures sidecar and the default retry; a failed policy call is a
     model failure of the kind the call shows (``_model_failure_kind``). Reward and mask stay as they are, so no score
-    changes. Legacy results and configuration refusals are left as they were.
+    changes. A configuration refusal is typed ``osworld_agent:configuration_error`` without a failure event, so it is
+    not retried. Legacy results are left as they were.
     """
     if (
         runtime_admission["runtime_eligible"]
@@ -1948,6 +2036,12 @@ def _admission_failure_fields(result: Mapping[str, Any], runtime_admission: Mapp
             operation=f"osworld.{reason}",
             stage="agent",
         )
+    elif reason in _CONFIGURATION_ADMISSION_REASONS:
+        # No failure event and no failure class: the row stays out of the failures sidecar and its retry.
+        return {
+            "failure_kind": CONFIGURATION_ERROR,
+            "failure_reason": f"OSWorld refused the rollout ({reason}): {detail}"[:2000],
+        }
     else:
         return {}
     return {
@@ -2086,3 +2180,6 @@ if __name__ == "__main__":
 
     require_optional_runtime_dependencies()
     OSWorldAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = OSWorldAgent.run_webserver()  # noqa: F401

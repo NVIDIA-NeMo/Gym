@@ -17,7 +17,15 @@ skillsbench_harbor_agent:
             skill_mode: ${oc.env:SKILLSBENCH_SKILL_MODE,with-skill}
             sandbox_metadata:
               harbor-benchmark: skillsbench
+              nemo.nvidia.com/s3-hostpath: "false"
+              nemo.nvidia.com/oom-kill: process
             sandbox_ttl_s: 21600
             sandbox_ready_timeout_s: 1200
             default_exec_timeout_s: 1800
             allow_unenforced_internet_isolation: true
+
+sandbox:
+  opensandbox:
+    setup:
+      commands:
+      - test "$(cat /sys/fs/cgroup/memory.oom.group)" = 0

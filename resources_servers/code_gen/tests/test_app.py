@@ -13,12 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import sys
 from typing import Generator
 from unittest.mock import MagicMock
 
 import app as code_gen_app
 import pytest
-import ray
 from app import (
     CompCodingResourcesServer,
     CompCodingResourcesServerConfig,
@@ -40,7 +40,6 @@ from nemo_gym.verification import SandboxVerificationError
 class TestApp:
     @pytest.fixture(scope="module")
     def code_gen_resources_server_client(self) -> Generator[TestClient, None, None]:
-        ray.init(num_cpus=1)
         server = CompCodingResourcesServer(
             config=CompCodingResourcesServerConfig(
                 host="0.0.0.0",
@@ -50,16 +49,15 @@ class TestApp:
                 num_processes=1,
                 unit_test_timeout_secs=10,
                 debug=False,
+                sandbox_provider={"local": {}},
+                sandbox_config={"image": "unused-local", "python": sys.executable},
             ),
             server_client=MagicMock(spec=ServerClient),
         )
+        server._sandbox_target = ({"local": {}}, {})
         app = server.setup_webserver()
-        try:
-            with TestClient(app) as client:
-                yield client
-        finally:
-            # Stop the local Ray cluster this fixture started instead of leaving it to interpreter exit.
-            ray.shutdown()
+        with TestClient(app) as client:
+            yield client
 
     async def test_verify_pass_via_response(self, code_gen_resources_server_client: TestClient) -> None:
         # Assistant returns a python code block that squares the input
@@ -281,6 +279,10 @@ class TestApp:
 
 
 def _make_server(**config_overrides):
+    config_overrides = {
+        "sandbox_provider": "sandbox",
+        "sandbox_config": {"image": "code-gen-verifier:test"},
+    } | config_overrides
     return CompCodingResourcesServer(
         config=CompCodingResourcesServerConfig(
             host="127.0.0.1",
@@ -333,7 +335,7 @@ class TestSandboxVerify:
 
     def test_sandbox_provider_requires_image(self) -> None:
         with pytest.raises(ValidationError, match="sandbox_config.image is required"):
-            _make_server(sandbox_provider="sandbox")
+            _make_server(sandbox_provider="sandbox", sandbox_config={})
 
     async def test_sandbox_results_are_scored(self, monkeypatch) -> None:
         calls = []

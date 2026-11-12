@@ -219,6 +219,7 @@ async def test_staged_model_calls_use_only_the_current_prompt(agent_class, confi
             old_output,
         ],
         "cookies": {},
+        "model_url_path": "/v1/responses",
     }
 
     await agent._call_model(state, "current stage")

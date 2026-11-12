@@ -7,6 +7,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -84,7 +85,8 @@ async def server(monkeypatch, tmp_path):
 async def test_empty_output(server, text):
     result = await server.verify(request(text))
     assert result.reward == 0 and result.parse_ok is False and result.scoring_error is None
-    assert not result.mask_sample
+    # An empty answer is a valid wrong answer, not a failure.
+    assert not result.mask_sample and result.failure_kind is None
 
 
 async def test_subprocess_protocol(server, monkeypatch):
@@ -101,6 +103,7 @@ async def test_subprocess_protocol(server, monkeypatch):
     before = body.model_dump()
     result = await server.verify(body)
     assert result.reward == 1.0 and result.layer2_state_score == 0.5
+    assert result.failure_kind is None and not result.mask_sample
     command, payload = score.call_args.args
     assert payload["generation"] == "Answer: CCO"
     assert payload["metadata"] == body.verifier_metadata.model_dump()
@@ -123,6 +126,7 @@ async def test_worker_failure(server, monkeypatch, failure, error):
     result = await server.verify(request("Answer: invalid"))
     assert result.reward == 0 and result.scoring_error == error and result.failure_reason
     assert result.mask_sample
+    assert result.model_dump()["failure_kind"] == "verifier_error"
 
 
 async def test_invalid_worker_response(server, monkeypatch):
@@ -130,6 +134,7 @@ async def test_invalid_worker_response(server, monkeypatch):
     result = await server.verify(request("Answer: invalid"))
     assert result.scoring_error == "invalid_result"
     assert result.mask_sample and result.failure_reason
+    assert result.model_dump()["failure_kind"] == "verifier_error"
 
 
 async def test_disabled_optimization_is_masked(server):
@@ -140,6 +145,8 @@ async def test_disabled_optimization_is_masked(server):
     result = await server.verify(body)
     assert result.reward == 0 and result.mask_sample
     assert result.scoring_error == "molopt_disabled" and result.failure_reason
+    # Disabled scoring is named as such, not as a failed scorer.
+    assert result.model_dump()["failure_kind"] == "chemcotbench:scoring_disabled"
 
 
 async def test_aggregation_excludes_failures_but_keeps_wrong_answers(server, monkeypatch):
@@ -232,6 +239,62 @@ async def test_real_upstream_reference_cases(monkeypatch):
             assert metadata == before
             for key, value in case.get("expected_metrics", {}).items():
                 assert getattr(result, key) == value, (case["name"], key)
+            if case["name"] in ("add_v2 reference", "fg_detect reference"):
+                assert direct["layer3_type1"] is True
+                # Keep the correct final answer but falsify an intermediate count.
+                if case["name"] == "add_v2 reference":
+                    wrong_count = body.response.output_text.replace("n_heavy=40", "n_heavy=41")
+                else:
+                    wrong_count = body.response.output_text.replace(
+                        "MATCH_ATOMS([10 matches:", "MATCH_ATOMS([11 matches:"
+                    )
+                assert wrong_count != body.response.output_text
+                changed = score_record(metadata, wrong_count, True)
+                assert changed["reward"] == 1.0
+                assert changed["layer3_type1"] is False
+                assert changed["layer3_type2"] is False
+            if case["name"] == "ring_sys_scaffold reference":
+                # This fixture has the right label but undercounts both ring totals.
+                assert direct["layer3_type1"] is False
+                corrected_counts = body.response.output_text.replace("RING_COUNT(6)", "RING_COUNT(7)")
+                assert corrected_counts != body.response.output_text
+                corrected = score_record(metadata, corrected_counts, True)
+                assert corrected["reward"] == 1.0
+                assert corrected["layer3_type1"] is True
+                inconsistent = score_record(metadata, corrected_counts.replace("Answer: Yes", "Answer: No"), True)
+                assert inconsistent["reward"] == 0.0
+                assert inconsistent["layer3_type1"] is False
+                assert score_record(metadata, corrected_counts, False)["layer3_type1"] is None
+        # Reuse released traces instead of maintaining synthetic reasoning chains.
+        from evaluation.mol_und.layer3_evaluator import Layer3Evaluator
+
+        for subtask, index, pattern in (
+            ("ring_count", 0, r"RING_COUNT_TOTAL\(\d+\)"),
+            ("murcko_scaffold", 2, r"RING_COUNT\(\d+\)"),
+            ("smiles_equivalent", 0, r'FORMULA\("[^"\n]*"\)'),
+        ):
+            reference = Layer3Evaluator(subtask).gt_records[index]
+            metadata = {"task_family": "mol_und", "subtask": subtask, "upstream_record": reference}
+            text = reference["raw_output"]
+            good = score_record(metadata, text, True)
+            assert good["reward"] == 1.0
+            assert good["layer3_type1"] is True
+            # Murcko reference 2 has stereochemistry that the prompt says to omit.
+            if subtask == "murcko_scaffold":
+                assert "@" in reference["gt_scaffold"] and "@" not in reference["answer"]
+            bad = re.sub(
+                pattern,
+                'FORMULA("CH4")'
+                if subtask == "smiles_equivalent"
+                else "RING_COUNT_TOTAL(99)"
+                if subtask == "ring_count"
+                else "RING_COUNT(99)",
+                text,
+            )
+            assert bad != text
+            scored = score_record(metadata, bad, True)
+            assert scored["reward"] == 1.0
+            assert scored["layer3_type1"] is False
         # Exercise the real JSON worker entry point, including stdout/stderr separation.
         from resources_servers.chemcotbench.worker import main
 

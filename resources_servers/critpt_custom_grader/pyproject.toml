@@ -10,6 +10,7 @@ dependencies = [
     "sympy==1.14.0",
     # Reuse the agent's code_exec schema and result formatting for the opt-in agentic recipe.
     "stirrup==0.1.12",
+    # Stirrup's moviepy dependency declares an older Pillow upper bound; the pillow override lifts it.
     "Pillow==12.3.0",
 ]
 
@@ -33,7 +34,6 @@ override-dependencies = [
     "pycountry; sys_platform == 'never'",
     "gprof2dot; sys_platform == 'never'",
     "pathspec; sys_platform == 'never'",
-    # Stirrup's moviepy dependency declares an older Pillow upper bound.
     "pillow==12.3.0",
 ]
 exclude-dependencies = [

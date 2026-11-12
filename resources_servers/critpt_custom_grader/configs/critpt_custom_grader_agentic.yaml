@@ -29,6 +29,7 @@ critpt_custom_grader:
       execution:
         interpreter: /usr/local/bin/python3
         exec_user: grader
+        # Above the derived minimum with semantic validators configured (9725), so an overlay can add them.
         job_timeout_s: 9800
         max_concurrent_jobs: 4
       comparison:
@@ -95,6 +96,8 @@ critpt_custom_grader_stirrup_agent:
       completion_token_buffer: 1000
       min_completion_tokens: 1024
       truncation_recovery: false
+      # Needs the model server settings named in ../README.md (Runtime and model configuration).
+      context_overflow_recovery: true
       code_exec: false
       finish_tool_names: [finish]
       sandbox_provider: orchestration_sandbox

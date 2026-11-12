@@ -15,7 +15,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym.core import EpisodeId, TaskId
+from nemo_gym.core import SESSION_EXPIRED, EpisodeId, TaskId
 from nemo_gym.sandbox import AsyncSandbox, SandboxConfig, SandboxSpec, create_provider
 from nemo_gym.server_runtime import (
     ResourcesCloseSessionRequest,
@@ -23,12 +23,18 @@ from nemo_gym.server_runtime import (
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
     ResourcesSessionConflictError,
-    ResourcesSessionFence,
+    ResourcesSessionFences,
+    ResourcesSessionLocks,
     ResourcesSessionLostError,
 )
 
 
 LOGGER = logging.getLogger(__name__)
+
+# An exec's command is one argument to the provider's shell (the Docker provider runs `docker exec ... sh -c
+# <command>`), and a provider may quote it once more to switch users (`su -c`). Linux caps a single argument at
+# MAX_ARG_STRLEN (128 KiB on 4 KiB pages), so a command above 127 KiB after one more quoting is refused.
+_MAX_EXEC_COMMAND_BYTES = 127 * 1024
 
 
 @lru_cache(maxsize=1)
@@ -68,7 +74,7 @@ class AgenticExecutionConfig(BaseModel):
     sandbox_spec: AgenticSandboxSpecConfig
     command_timeout_s: float = Field(default=300, gt=0, le=3600, allow_inf_nan=False)
     provider_timeout_margin_s: float = Field(default=60, ge=10, le=600, allow_inf_nan=False)
-    max_command_bytes: int = Field(default=65536, ge=1, le=1048576)
+    max_command_bytes: int = Field(default=65536, ge=1, le=65536)
     max_output_bytes: int = Field(default=1048576, ge=20000, le=16777216)
     max_sessions: int = Field(default=16, ge=1, le=1024)
     create_timeout_s: float = Field(default=600, gt=0, allow_inf_nan=False)
@@ -188,7 +194,12 @@ def _validate_offline(provider_config: dict[str, Any], spec: SandboxSpec) -> Non
         offline = create.get("network") == "none" and not create.get("extra_run_args")
     elif name == "e2b":
         allowed = {"template"}
-        offline = create.get("allow_internet_access") is False
+        # An allow_out entry stays reachable under a full deny, and custom_extension_params are deployment-defined.
+        offline = (
+            create.get("allow_internet_access") is False
+            and not create.get("network")
+            and not create.get("custom_extension_params")
+        )
     else:
         allowed = set()
         offline = False
@@ -221,7 +232,7 @@ class _ExecutionSession:
 
 
 class AgenticExecutionSessions:
-    """Own isolated execution sandboxes and fence their seed, command and close operations."""
+    """Own isolated execution sandboxes; lock each session's seed, commands and close, and fence it once closed."""
 
     def __init__(
         self,
@@ -236,7 +247,8 @@ class AgenticExecutionSessions:
         self._spec = sandbox_spec
         self._provider = create_provider(provider_config)
         self._sessions: dict[str, _ExecutionSession] = {}
-        self._fence = ResourcesSessionFence(close_retry_window_seconds)
+        self._locks = ResourcesSessionLocks()
+        self._fences: ResourcesSessionFences[EpisodeId] = ResourcesSessionFences(close_retry_window_seconds)
         self._shutting_down = False
         self._provider_closed = False
 
@@ -284,19 +296,26 @@ class AgenticExecutionSessions:
         await self._stop_started(state)
 
     async def _abort(self, state: _ExecutionSession) -> None:
-        # Keep the unusable record even after successful cleanup: retries may close it, but must not recreate it.
+        # Keep the unusable record after cleanup until a close or the reaper fences it: a retry must not recreate it.
         state.usable = False
         try:
             await self._stop(state)
         except Exception as error:
             LOGGER.warning("Execution sandbox abort cleanup deferred (%s)", type(error).__name__)
 
+    @staticmethod
+    def _sandbox_stopped(state: _ExecutionSession) -> bool:
+        stop = state.stop_task
+        return stop is not None and stop.done() and not stop.cancelled() and stop.exception() is None
+
     async def _reap_expired(self) -> None:
-        # Each close takes its own fence. Do this before locking a new seed, so concurrent reapers cannot deadlock.
+        # Each close takes its own lock. Do this before locking a new seed, so concurrent reapers cannot deadlock.
+        # A session whose sandbox is already stopped holds nothing: closing it releases its max_sessions slot, and
+        # its fence still refuses a late seed.
         expired = [
             ResourcesCloseSessionRequest(resources_session_id=key, episode_id=state.episode_id)
             for key, state in list(self._sessions.items())
-            if time.monotonic() >= state.expires_at
+            if time.monotonic() >= state.expires_at or self._sandbox_stopped(state)
         ]
         results = await asyncio.gather(*(self.close(request) for request in expired), return_exceptions=True)
         for result in results:
@@ -306,22 +325,22 @@ class AgenticExecutionSessions:
     async def seed(self, body: ResourcesSeedSessionRequest) -> ResourcesSeedSessionResponse:
         """Create once per identity; task data contributes only an identity digest and is never delivered."""
         session_id = body.resources_session_id
-        digest = hashlib.sha256(json.dumps(body.task_data, sort_keys=True, allow_nan=False).encode()).hexdigest()
+        digest = hashlib.sha256(json.dumps(body.task_data, sort_keys=True).encode()).hexdigest()
         await self._reap_expired()
-        async with self._fence.locked(session_id):
+        async with self._locks.locked(session_id):
             if self._shutting_down:
                 raise AgenticExecutionError("execution_shutdown")
-            self._fence.raise_if_closed(session_id)
+            self._fences.raise_if_fenced(session_id)
             state = self._sessions.get(session_id)
             if state is not None:
                 if (state.episode_id, state.task_id, state.task_digest) != (body.episode_id, body.task_id, digest):
                     raise ResourcesSessionConflictError(
-                        "Execution session is already bound to another episode or task"
+                        "resources_session_id is already bound to another episode or task"
                     )
                 if state.usable and time.monotonic() >= state.expires_at:
                     await self._abort(state)
                 if not state.usable:
-                    raise ResourcesSessionConflictError("Execution session is closed or failed")
+                    raise ResourcesSessionConflictError("Resources session is closed or failed")
                 return ResourcesSeedSessionResponse(resources_session_id=session_id)
             if len(self._sessions) >= self.config.max_sessions:
                 raise AgenticExecutionError("execution_capacity_exceeded")
@@ -344,7 +363,7 @@ class AgenticExecutionSessions:
                 await asyncio.wait_for(asyncio.shield(state.creation_task), self.config.create_timeout_s)
             except BaseException as error:
                 await self._abort(state)
-                if isinstance(error, asyncio.CancelledError):
+                if not isinstance(error, Exception):
                     raise
                 LOGGER.warning("Execution sandbox creation failed (%s)", type(error).__name__)
                 raise AgenticExecutionError("execution_create_failed") from None
@@ -354,13 +373,13 @@ class AgenticExecutionSessions:
 
     async def execute(self, session_id: str, cmd: str) -> str:
         """Run one bounded command in a fresh shell, preserving only the episode's filesystem."""
-        async with self._fence.locked(session_id):
+        async with self._locks.locked(session_id):
             state = self._sessions.get(session_id)
             if state is None or not state.usable:
-                raise ResourcesSessionLostError("Execution session is unavailable")
+                raise ResourcesSessionLostError("Resources session is unavailable")
             if time.monotonic() >= state.expires_at:
                 await self._abort(state)
-                raise ResourcesSessionLostError("Execution session expired")
+                raise ResourcesSessionLostError("Resources session has expired", failure_kind=SESSION_EXPIRED)
             try:
                 valid = (
                     bool(cmd.strip())
@@ -383,6 +402,8 @@ class AgenticExecutionSessions:
                     str(self.config.max_output_bytes),
                 )
             )
+            if len(shlex.quote(command).encode("utf-8")) > _MAX_EXEC_COMMAND_BYTES:
+                return _format_result(error_kind="invalid_argument", stderr="Command is empty, invalid or too large.")
             deadline = self.config.command_timeout_s + self.config.provider_timeout_margin_s
             try:
                 result = await asyncio.wait_for(state.sandbox.exec(command, timeout_s=deadline), deadline + 1)
@@ -400,26 +421,26 @@ class AgenticExecutionSessions:
                     raise AgenticExecutionError("execution_provider_failed")
             except BaseException as error:
                 await self._abort(state)
-                if isinstance(error, asyncio.CancelledError):
+                if not isinstance(error, Exception):
                     raise
                 LOGGER.warning("Execution sandbox command failed (%s)", type(error).__name__)
                 raise AgenticExecutionError("execution_provider_failed") from None
             return _format_result(**observation.model_dump())
 
     async def close(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
-        """Stop before forgetting state; a failed stop remains available for a later cleanup retry."""
+        """Stop the sandbox before releasing the session's state; a failed stop remains available for a later retry."""
         session_id = body.resources_session_id
-        async with self._fence.locked(session_id):
-            closed_episode = self._fence.closed_episode(session_id)
+        async with self._locks.locked(session_id):
+            closed_episode = self._fences.get(session_id)
             if closed_episode is not None and closed_episode != body.episode_id:
-                raise ResourcesSessionConflictError("episode_id does not match the closed execution session")
+                raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
             state = self._sessions.get(session_id)
             if state is not None:
                 if state.episode_id != body.episode_id:
-                    raise ResourcesSessionConflictError("episode_id does not match the seeded execution session")
+                    raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
                 await self._stop(state)
                 del self._sessions[session_id]
-            self._fence.mark_closed(session_id, body.episode_id)
+            self._fences.fence(session_id, body.episode_id)
         return ResourcesCloseSessionResponse(resources_session_id=session_id)
 
     async def shutdown(self) -> None:

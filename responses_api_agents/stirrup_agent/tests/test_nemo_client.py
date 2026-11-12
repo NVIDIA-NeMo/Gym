@@ -61,20 +61,12 @@ def _make_response(content: str = "ok"):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", [400, 413])
-@pytest.mark.parametrize(
-    "body",
-    [
-        {"code": "context_length_exceeded", "message": "DO_NOT_LOG_ERROR_BODY"},
-        {"error": {"code": "context_length_exceeded", "message": "DO_NOT_LOG_ERROR_BODY"}},
-        {"detail": {"code": "context_length_exceeded", "message": "DO_NOT_LOG_ERROR_BODY"}},
-    ],
-)
-async def test_explicit_context_rejection_reaches_stirrup_recovery(status, body, caplog) -> None:
-    client = _make_client(truncation_recovery=False)
+async def test_explicit_context_rejection_reaches_stirrup_recovery(status, caplog) -> None:
+    client = _make_client(truncation_recovery=False, context_overflow_recovery=True)
     error = APIStatusError(
         "DO_NOT_LOG_ERROR_BODY",
         response=httpx.Response(status, request=httpx.Request("POST", "http://test/chat/completions")),
-        body=body,
+        body={"code": "context_length_exceeded", "message": "DO_NOT_LOG_ERROR_BODY"},
     )
     client._client.chat.completions.create = AsyncMock(side_effect=error)
     history = [UserMessage(content="original task")]
@@ -91,13 +83,28 @@ async def test_explicit_context_rejection_reaches_stirrup_recovery(status, body,
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 413])
+async def test_a_context_rejection_is_raised_unchanged_when_recovery_is_off(status) -> None:
+    client = _make_client(truncation_recovery=False)
+    error = APIStatusError(
+        "prompt too long",
+        response=httpx.Response(status, request=httpx.Request("POST", "http://test/chat/completions")),
+        body={"code": "context_length_exceeded", "message": "prompt too long"},
+    )
+    client._client.chat.completions.create = AsyncMock(side_effect=error)
+
+    with pytest.raises(APIStatusError) as caught:
+        await client.generate([UserMessage(content="original task")], tools={})
+
+    assert caught.value is error
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("status", "body"),
     [
         (400, {"code": "invalid_output_token_parameter", "message": "context length exceeded"}),
         (400, {"message": "context_length_exceeded"}),
-        (400, {"detail": "context_length_exceeded"}),
-        (400, {"detail": [{"code": "context_length_exceeded"}]}),
         (400, {"code": None}),
         (400, None),
         (400, "context_length_exceeded"),
@@ -107,7 +114,7 @@ async def test_explicit_context_rejection_reaches_stirrup_recovery(status, body,
     ],
 )
 async def test_other_http_failures_are_not_treated_as_context_overflow(status, body) -> None:
-    client = _make_client(truncation_recovery=False)
+    client = _make_client(truncation_recovery=False, context_overflow_recovery=True)
     error = APIStatusError(
         "request refused",
         response=httpx.Response(status, request=httpx.Request("POST", "http://test/chat/completions")),
@@ -124,7 +131,7 @@ async def test_other_http_failures_are_not_treated_as_context_overflow(status, b
 @pytest.mark.asyncio
 @pytest.mark.parametrize("finish_reason", ["length", "max_tokens"])
 async def test_successful_length_response_retains_partial_content(finish_reason) -> None:
-    client = _make_client(truncation_recovery=False)
+    client = _make_client(truncation_recovery=False, context_overflow_recovery=True)
     response = _make_response(content="partial work")
     response.choices[0].finish_reason = finish_reason
     client._client.chat.completions.create = AsyncMock(return_value=response)
@@ -134,62 +141,6 @@ async def test_successful_length_response_retains_partial_content(finish_reason)
     assert result.content == "partial work"
     assert result.token_usage.input == 10
     assert result.token_usage.output == 5
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("reasoning_field", ["reasoning", "reasoning_content"])
-async def test_response_diagnostics_distinguish_inline_and_separate_reasoning_without_exporting_text(reasoning_field):
-    client = _make_client(truncation_recovery=False)
-    response = _make_response(content="<think>PRIVATE_INLINE</think>ANSWER_SECRET")
-    setattr(response.choices[0].message, reasoning_field, "PRIVATE_REASONING")
-    response.choices[0].finish_reason = "length"
-    client._client.chat.completions.create = AsyncMock(return_value=response)
-
-    result = await client.generate([UserMessage(content="task")], tools={})
-
-    diagnostics = client.last_response_diagnostics
-    assert diagnostics["finish_reason"] == "length"
-    assert diagnostics["content_present"] is True
-    assert diagnostics["content_chars"] == 42
-    assert diagnostics["reasoning_chars"] == 17
-    assert diagnostics["reasoning_present"] is True
-    assert diagnostics["inline_think_open"] is True
-    assert diagnostics["inline_think_close"] is True
-    assert diagnostics["tool_calls_count"] == 0
-    assert diagnostics["usage"] == {"input": 10, "answer": 5, "reasoning": 0}
-    assert "PRIVATE" not in json.dumps(diagnostics)
-    assert "ANSWER_SECRET" not in json.dumps(diagnostics)
-    assert result.content == response.choices[0].message.content
-    assert result.reasoning.content == "PRIVATE_REASONING"
-
-
-@pytest.mark.asyncio
-async def test_response_diagnostics_do_not_reuse_a_previous_response_after_http_failure():
-    client = _make_client(truncation_recovery=False)
-    error = APIStatusError(
-        "request failed", response=httpx.Response(500, request=httpx.Request("POST", "http://test")), body=None
-    )
-    client._client.chat.completions.create = AsyncMock(side_effect=[_make_response(), error])
-    await client.generate([UserMessage(content="task")], tools={})
-    assert client.last_response_diagnostics is not None
-
-    with pytest.raises(APIStatusError):
-        await client.generate([UserMessage(content="task")], tools={})
-
-    assert client.last_response_diagnostics is None
-
-
-@pytest.mark.asyncio
-async def test_response_diagnostics_allowlist_finish_reason():
-    client = _make_client(truncation_recovery=False)
-    response = _make_response()
-    response.choices[0].finish_reason = "PRIVATE_UNEXPECTED_PROVIDER_VALUE"
-    client._client.chat.completions.create = AsyncMock(return_value=response)
-
-    await client.generate([UserMessage(content="task")], tools={})
-
-    assert client.last_response_diagnostics["finish_reason"] == "unknown"
-    assert "PRIVATE" not in json.dumps(client.last_response_diagnostics)
 
 
 @pytest.mark.asyncio

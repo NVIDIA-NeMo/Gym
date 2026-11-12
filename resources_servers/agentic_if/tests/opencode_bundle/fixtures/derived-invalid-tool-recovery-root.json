@@ -1,0 +1,526 @@
+{
+ "case": "derived-invalid-tool-recovery-root",
+ "kind": "gateway",
+ "notes": "",
+ "spec": {
+  "schema_version": 1,
+  "harness": "opencode",
+  "task_backend": "swe",
+  "tools": {
+   "tool_names": {
+    "read": "read",
+    "task": "task"
+   },
+   "tool_descriptions": {},
+   "tool_parameter_descriptions": {},
+   "tool_interfaces": {}
+  },
+  "workspace_files": {},
+  "events": [],
+  "checks": [],
+  "provenance": {}
+ },
+ "params": {
+  "input": [
+   {
+    "content": "Fix it",
+    "role": "user",
+    "type": "message"
+   }
+  ],
+  "parallel_tool_calls": true,
+  "tool_choice": "auto",
+  "tools": []
+ },
+ "calls": [
+  {
+   "headers": {
+    "x-session-id": "root"
+   },
+   "opencode_request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "parameters": {
+        "type": "object"
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "task",
+       "parameters": {
+        "type": "object"
+       }
+      }
+     }
+    ]
+   },
+   "upstream_reply": {
+    "json": {
+     "choices": [
+      {
+       "message": {
+        "role": "assistant",
+        "content": "Continue"
+       }
+      }
+     ]
+    }
+   },
+   "returned": {
+    "json": {
+     "choices": [
+      {
+       "message": {
+        "role": "assistant",
+        "content": "Continue"
+       }
+      }
+     ]
+    }
+   },
+   "error": null,
+   "outgoing_request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "parameters": {
+        "type": "object"
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "task",
+       "parameters": {
+        "type": "object"
+       }
+      }
+     }
+    ]
+   },
+   "opencode_request_unchanged": true
+  },
+  {
+   "headers": {
+    "x-session-id": "root"
+   },
+   "opencode_request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "parameters": {
+        "type": "object"
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "task",
+       "parameters": {
+        "type": "object"
+       }
+      }
+     }
+    ]
+   },
+   "upstream_reply": {
+    "json": {
+     "choices": [
+      {
+       "message": {
+        "role": "assistant",
+        "tool_calls": [
+         {
+          "id": "unknown",
+          "type": "function",
+          "function": {
+           "name": "Missing",
+           "arguments": "{ \"path\": \"source\" }"
+          }
+         }
+        ]
+       }
+      }
+     ]
+    }
+   },
+   "returned": {
+    "json": {
+     "choices": [
+      {
+       "message": {
+        "role": "assistant",
+        "tool_calls": [
+         {
+          "id": "unknown",
+          "type": "function",
+          "function": {
+           "name": "Missing",
+           "arguments": "{ \"path\": \"source\" }"
+          }
+         }
+        ]
+       }
+      }
+     ]
+    }
+   },
+   "error": null,
+   "outgoing_request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "parameters": {
+        "type": "object"
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "task",
+       "parameters": {
+        "type": "object"
+       }
+      }
+     }
+    ]
+   },
+   "opencode_request_unchanged": true
+  },
+  {
+   "headers": {
+    "x-session-id": "root"
+   },
+   "opencode_request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Fix it"
+     },
+     {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+       {
+        "id": "unknown",
+        "type": "function",
+        "function": {
+         "name": "invalid",
+         "arguments": "{\"tool\": \"Missing\", \"error\": \"Available tools: read, task\"}"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "tool_call_id": "unknown",
+      "content": "Available tools: read, task"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "parameters": {
+        "type": "object"
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "task",
+       "parameters": {
+        "type": "object"
+       }
+      }
+     }
+    ]
+   },
+   "upstream_reply": {
+    "json": {
+     "choices": [
+      {
+       "message": {
+        "role": "assistant",
+        "content": "Done"
+       }
+      }
+     ]
+    }
+   },
+   "returned": {
+    "json": {
+     "choices": [
+      {
+       "message": {
+        "role": "assistant",
+        "content": "Done"
+       }
+      }
+     ]
+    }
+   },
+   "error": null,
+   "outgoing_request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Fix it"
+     },
+     {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+       {
+        "id": "unknown",
+        "type": "function",
+        "function": {
+         "name": "Missing",
+         "arguments": "{ \"path\": \"source\" }"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "tool_call_id": "unknown",
+      "content": "Missing is unavailable or its arguments are invalid. Available tools: read, task."
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "parameters": {
+        "type": "object"
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "task",
+       "parameters": {
+        "type": "object"
+       }
+      }
+     }
+    ]
+   },
+   "opencode_request_unchanged": true
+  }
+ ],
+ "observations": [
+  {
+   "source": "model",
+   "session_id": "root",
+   "assistant_message_id": null,
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "parameters": {
+        "type": "object"
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "task",
+       "parameters": {
+        "type": "object"
+       }
+      }
+     }
+    ]
+   },
+   "execution_tools": {
+    "task": "task",
+    "read": "read"
+   },
+   "response": {
+    "choices": [
+     {
+      "message": {
+       "role": "assistant",
+       "content": "Continue"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "source": "model",
+   "session_id": "root",
+   "assistant_message_id": null,
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "parameters": {
+        "type": "object"
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "task",
+       "parameters": {
+        "type": "object"
+       }
+      }
+     }
+    ]
+   },
+   "execution_tools": {
+    "task": "task",
+    "read": "read"
+   },
+   "response": {
+    "choices": [
+     {
+      "message": {
+       "role": "assistant",
+       "tool_calls": [
+        {
+         "id": "unknown",
+         "type": "function",
+         "function": {
+          "name": "Missing",
+          "arguments": "{ \"path\": \"source\" }"
+         }
+        }
+       ]
+      }
+     }
+    ]
+   }
+  },
+  {
+   "source": "model",
+   "session_id": "root",
+   "assistant_message_id": null,
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Fix it"
+     },
+     {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+       {
+        "id": "unknown",
+        "type": "function",
+        "function": {
+         "name": "Missing",
+         "arguments": "{ \"path\": \"source\" }"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "tool_call_id": "unknown",
+      "content": "Missing is unavailable or its arguments are invalid. Available tools: read, task."
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "parameters": {
+        "type": "object"
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "task",
+       "parameters": {
+        "type": "object"
+       }
+      }
+     }
+    ]
+   },
+   "execution_tools": {
+    "task": "task",
+    "read": "read"
+   },
+   "response": {
+    "choices": [
+     {
+      "message": {
+       "role": "assistant",
+       "content": "Done"
+      }
+     }
+    ]
+   }
+  }
+ ],
+ "issues": []
+}

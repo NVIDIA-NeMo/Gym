@@ -101,16 +101,16 @@ MAX_TYPE_NAME = 128
 MAX_CODE_LENGTH = 64
 # One result holds at most MAX_CASES bounded wire values plus a fixed envelope.
 RESULT_BYTES_LIMIT = MAX_CASES * (MAX_WIRE_BYTES + 512) + 65_536
-# Reserve two wire/outcome envelopes, a full policy and semantic config per case, two task allowances for
-# transported inputs, and 1 MiB of job fields.
-JOB_BYTES_LIMIT = (
-    2 * MAX_TASK_BYTES
-    + MAX_CASES * (2 * (MAX_WIRE_BYTES + 512) + MAX_POLICY_BYTES + MAX_SEMANTIC_CONFIG_BYTES)
-    + 1_048_576
-)
+# Reserve two wire/outcome envelopes and one full policy per case, plus the task allowance and 1 MiB of
+# job fields.
+JOB_BYTES_LIMIT = MAX_TASK_BYTES + MAX_CASES * (2 * (MAX_WIRE_BYTES + 512) + MAX_POLICY_BYTES) + 1_048_576
+# A compare job that names a semantic validator also carries the transported inputs (a second task allowance) and
+# one validator configuration per case.
+SEMANTIC_JOB_BYTES_LIMIT = JOB_BYTES_LIMIT + MAX_TASK_BYTES + MAX_CASES * MAX_SEMANTIC_CONFIG_BYTES
 # The worker RLIMIT_FSIZE per-file allowance. Neither it nor the job read cap bounds aggregate disk use or
 # authenticates any file.
 FILE_LIMIT_BYTES = max(JOB_BYTES_LIMIT, 4 * RESULT_BYTES_LIMIT)
+SEMANTIC_FILE_LIMIT_BYTES = max(SEMANTIC_JOB_BYTES_LIMIT, 4 * RESULT_BYTES_LIMIT)
 RUN_STATUSES = ("completed", "source_error", "timeout", "runner_error")
 COMPARE_STATUSES = ("completed", "timeout", "runner_error")
 SOURCE_ERROR_CODES = (
@@ -742,7 +742,7 @@ def _reset_signals() -> None:
                 pass
 
 
-def _apply_limits(limits: dict) -> str | None:
+def _apply_limits(limits: dict, file_limit_bytes: int = FILE_LIMIT_BYTES) -> str | None:
     """Worker side: address space, CPU time, file size, core and process-count limits for the task process."""
     import resource
 
@@ -751,7 +751,7 @@ def _apply_limits(limits: dict) -> str | None:
         resource.setrlimit(resource.RLIMIT_AS, (memory, memory))
         cpu = int(limits["cpu_time_s"])
         resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu + 30))
-        resource.setrlimit(resource.RLIMIT_FSIZE, (FILE_LIMIT_BYTES, FILE_LIMIT_BYTES))
+        resource.setrlimit(resource.RLIMIT_FSIZE, (file_limit_bytes, file_limit_bytes))
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         processes = int(limits["processes"])
         resource.setrlimit(resource.RLIMIT_NPROC, (processes, processes))
@@ -777,6 +777,19 @@ def _read_json(path: str, limit: int) -> Any:
     if len(data) > limit:
         raise RunnerError("invalid_job")
     return json.loads(data.decode("utf-8"))
+
+
+def _read_job(path: str, mode: str) -> Any:
+    """Read the job file under its byte cap. Only a compare job that names a semantic validator gets the larger cap."""
+    if mode != COMPARE_MODE:
+        return _read_json(path, JOB_BYTES_LIMIT)
+    data = _read_file(path, SEMANTIC_JOB_BYTES_LIMIT)
+    if len(data) > SEMANTIC_JOB_BYTES_LIMIT:
+        raise RunnerError("invalid_job")
+    job = json.loads(data.decode("utf-8"))
+    if len(data) > JOB_BYTES_LIMIT and not (type(job) is dict and "semantic_validator" in job):
+        raise RunnerError("invalid_job")
+    return job
 
 
 def _load_source(path: str) -> tuple[str | None, str | None]:
@@ -959,9 +972,13 @@ def _compare_worker(channel: int, job: dict) -> None:
     ``limits.per_case_s`` (optional) arms a wall-clock timer around every single comparison, so one heavy case cannot
     consume the batch; a case that overruns it is reported ``uncertain``/``comparator_timeout``.
     """
-    code = _apply_limits(job["limits"])
-    compare_request = compare_semantic_request = _result = None
     semantic = job.get("semantic_validator")
+    if semantic is None:
+        code = _apply_limits(job["limits"])
+    else:
+        # This job may be larger than an expected-value job, and the worker's file allowance covers its job file.
+        code = _apply_limits(job["limits"], SEMANTIC_FILE_LIMIT_BYTES)
+    compare_request = compare_semantic_request = _result = None
     if code is None:
         try:
             try:
@@ -1320,7 +1337,7 @@ def main(argv: list[str]) -> int:
         return EXIT_USAGE
     mode, job_path, result_path = argv
     try:
-        job = _read_json(job_path, JOB_BYTES_LIMIT)
+        job = _read_job(job_path, mode)
         code = validate_job(job, mode)
     except (RunnerError, OSError, ValueError, UnicodeError, RecursionError, MemoryError):
         job, code = None, "invalid_job"

@@ -35,6 +35,8 @@ from nemo_gym.config import (
     ResourcesServerRef,
 )
 from nemo_gym.core import (
+    AGENT_ROUTE_FAILED,
+    ENVIRONMENT_SERVER_FAILED,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -50,6 +52,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyRequest,
     BaseVerifyResponse,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.conversational_tool_use_simulation.prompt import (
     AGENT_PARALLEL_SYSTEM_MESSAGE_TEMPLATE,
     AGENT_SYSTEM_MESSAGE_TEMPLATE,
@@ -60,6 +63,15 @@ from responses_api_agents.conversational_tool_use_simulation.prompt import (
 
 NG_FAILURE_CLASS_KEY = "_ng_failure_class"
 TRANSIENT_FAILURE_CLASS = "transient"
+FAILURE_REASON_MAX_CHARS = 2000
+# A transient failure in the agent's own /v1/responses route is reported as an agent route failure;
+# one in a resources server call (seed or verify) as an environment server failure. The error alone
+# does not say which component behind the route broke, so nothing more specific is claimed.
+TRANSIENT_FAILURE_KIND_BY_STAGE = {
+    "seed_session": ENVIRONMENT_SERVER_FAILED,
+    "rollout": AGENT_ROUTE_FAILED,
+    "verify": ENVIRONMENT_SERVER_FAILED,
+}
 
 
 class ConversationalToolUseAgentConfig(BaseResponsesAPIAgentConfig):
@@ -793,6 +805,8 @@ class ConversationalToolUseAgent(SimpleResponsesAPIAgent):
                 "error_class": TRANSIENT_FAILURE_CLASS,
                 "error_stage": stage,
                 NG_FAILURE_CLASS_KEY: TRANSIENT_FAILURE_CLASS,
+                "failure_kind": TRANSIENT_FAILURE_KIND_BY_STAGE[stage],
+                "failure_reason": reason[:FAILURE_REASON_MAX_CHARS],
                 "mask_sample": True,
             }
         )
@@ -857,3 +871,6 @@ class ConversationalToolUseAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     ConversationalToolUseAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ConversationalToolUseAgent.run_webserver()  # noqa: F401

@@ -2412,6 +2412,12 @@ class TestCli:
             "miniswe_sandboxed_agent",
             "opencode_sandboxed_agent",
             "pi_sandboxed_agent",
+            "browsecomp_agent",
+            "pool_agent",
+            "claude_code_agent",
+            "kilocode_agent",
+            "stirrup_agent",
+            "nooa_agent",
         ],
     )
     def test_shipped_sandboxed_harnesses_declare_model_calls_from_sandbox(self, impl_name):

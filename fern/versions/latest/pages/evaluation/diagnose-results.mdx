@@ -6,6 +6,8 @@ position: 8
 
 NeMo Gym equips agents to diagnose evaluation results: an agent reads the raw artifacts from an evaluation run and produces a structured, evidence-backed report explaining what changed, which tasks failed, and what to fix next. It does this with **analysis skills** — reusable instructions an agent follows to interpret evaluation artifacts consistently.
 
+For a numerical baseline/candidate comparison, start with [Compare Results](/main/evaluation/compare-results). It covers per-benchmark differences and normalized suite aggregates with confidence intervals; diagnosis connects those differences to task-level evidence.
+
 ## BLADE
 
 BLADE (**B**enchmark **L**evel **A**nalysis and **D**iagnostics **E**ngine) is one of NeMo Gym's built-in analysis skills. It answers the questions a headline score can't: **which tasks failed, why, and what to fix.** Given a run's artifacts, it identifies which tasks failed, the dominant failure modes, and the intervention most likely to close the gap — harness work, training, verifier repair, or prompt change.

@@ -14,7 +14,9 @@
 # limitations under the License.
 import warnings
 from argparse import ArgumentParser
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Set, Tuple, Union
@@ -40,10 +42,29 @@ from rich.text import Text
 ########################################
 
 
+_COMMAND_LINE_IGNORED: ContextVar[bool] = ContextVar("nemo_gym_command_line_ignored", default=False)
+
+
+@contextmanager
+def ignoring_command_line() -> Iterator[None]:
+    """Build CLI config models from their given values alone, for a library caller.
+
+    A CLI config model otherwise reads `--help` from `sys.argv` and prints its help and exits on it. A program that
+    uses Gym as a library has its own command line, which Gym must neither read nor exit on.
+    """
+    token = _COMMAND_LINE_IGNORED.set(True)
+    try:
+        yield
+    finally:
+        _COMMAND_LINE_IGNORED.reset(token)
+
+
 class BaseNeMoGymCLIConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def pre_process(cls, data):
+        if _COMMAND_LINE_IGNORED.get():
+            return data
         parser = ArgumentParser(add_help=False)
         parser.add_argument("-h", "--help", action="store_true")
         args, _ = parser.parse_known_args()
@@ -683,6 +704,8 @@ class BaseServerConfig(BaseModel):
     host: str
     port: int
     num_workers: Optional[int] = None
+    # Overrides the top-level `uvicorn_reuse_port` for this server when set.
+    uvicorn_reuse_port: Optional[bool] = None
 
 
 class BaseRunServerConfig(BaseServerConfig):
@@ -1041,6 +1064,8 @@ class AggregateMetrics(BaseModel):
 ROLLOUT_PATH_PREFIX = "ng-rollout"
 TOKEN_CAPTURE_PATH_SEGMENT = "training-token-capture"
 TRACE_CONTEXT_PATH_SEGMENT = "ng-trace"
+# Sampling values for a model call, or `null`, placed after the other prefixes (nemo_gym/core/model_call_sampling.py).
+MODEL_SAMPLING_PATH_SEGMENT = "ng-sampling"
 
 # The listen backlog of every Gym server socket, above uvicorn's default of 2048.
 # A burst of new connections at Gym's concurrency then waits in the queue rather than on TCP retransmission backoff.

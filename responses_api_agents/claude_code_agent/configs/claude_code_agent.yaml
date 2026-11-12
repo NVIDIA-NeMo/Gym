@@ -22,6 +22,7 @@ claude_code_agent:
       # The optional local runtime installs lazily on the first unseeded call.
       sandbox_provider: null  # top-level provider ref; unused with borrowed SandboxAccess
       sandbox_config: {}  # SandboxSpec for owned execution, e.g. {image: ubuntu:24.04, workdir: /app}
+      network_access: inherit  # model_only limits an owned sandbox's egress to the model host
       sandbox_local_executable_path: null  # optional native Linux binary on the Gym host
       sandbox_executable_path: null  # optional native binary already inside the sandbox
       sandbox_executable_sha256: null  # required trusted SHA-256 for either supplied binary option

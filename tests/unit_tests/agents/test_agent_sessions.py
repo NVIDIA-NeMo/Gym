@@ -20,6 +20,7 @@ from nemo_gym.agents.base_responses_api_agent import (
     AgentSeedSessionRequest,
     AgentSeedSessionResponse,
     AgentSessionCapabilitiesResponse,
+    AgentSessionConflictError,
     AgentSessionState,
     RolloutStopRequest,
     RolloutStopResponse,
@@ -172,7 +173,15 @@ def test_a_rejected_seed_is_still_a_value_error() -> None:
     assert rejected.detail == "unsupported"
 
 
-def test_an_unsupported_seed_fails_with_a_final_422_and_keeps_no_session() -> None:
+def test_an_agent_session_conflict_is_a_409_and_still_a_value_error() -> None:
+    conflict = AgentSessionConflictError("episode_id does not match the seeded agent session")
+
+    assert isinstance(conflict, HTTPException) and isinstance(conflict, ValueError)
+    assert conflict.status_code == 409
+    assert conflict.detail == "episode_id does not match the seeded agent session"
+
+
+def test_an_unsupported_seed_fails_with_a_terminal_422_and_keeps_no_session() -> None:
     agent = _GrantCheckingAgent.model_construct(config=MagicMock(num_workers=1), server_client=MagicMock())
     app = agent.setup_webserver()
 
@@ -206,13 +215,13 @@ def test_a_refused_seed_logs_its_reason_once(caplog, agent_class, detail) -> Non
 def test_the_check_catches_a_seed_refusal_that_would_be_retried() -> None:
     agent = _PlainValueErrorAgent.model_construct(config=MagicMock(num_workers=1), server_client=MagicMock())
 
-    with pytest.raises(AssertionError, match="final 422 from AgentSeedRejectedError, got 500"):
+    with pytest.raises(AssertionError, match="terminal 422 from AgentSeedRejectedError, got 500"):
         check_agent_seed_rejected(agent.setup_webserver(), _seed_request(tool_accesses=_REQUIRED_GRANT))
 
 
 def test_the_check_requires_a_422_with_a_string_detail() -> None:
     # An app without the session route answers 404, which is final but is not a refusal.
-    with pytest.raises(AssertionError, match="final 422 from AgentSeedRejectedError, got 404"):
+    with pytest.raises(AssertionError, match="terminal 422 from AgentSeedRejectedError, got 404"):
         check_agent_seed_rejected(FastAPI(), _seed_request())
 
     # A request validation error is also 422, but its detail is a list of errors, not the agent's reason.

@@ -21,11 +21,14 @@ the stop span) live in test_call_sites.py because they need nemo-lens.
 
 import pytest
 
-from nemo_gym.sandbox import api as sandbox_api
 from nemo_gym.sandbox.api import AsyncSandbox, SandboxSpec
 from nemo_gym.telemetry import gym_metrics
 from tests.unit_tests.sandbox.test_sandbox import FakeSandboxProvider
-from tests.unit_tests.telemetry.test_sandbox_active import collected_metrics, sandbox_group_on  # noqa: F401 - fixtures
+from tests.unit_tests.telemetry.test_sandbox_active import (  # noqa: F401 - fixtures
+    collected_metrics,
+    sandbox_group_on,
+    set_sandbox_gates,
+)
 
 
 pytest.importorskip("opentelemetry.sdk.metrics")
@@ -76,9 +79,21 @@ async def test_failed_create_records_no_startup_sample(collected_metrics, sandbo
 
 
 @pytest.mark.asyncio
-async def test_sandbox_group_off_records_no_durations(collected_metrics, monkeypatch):  # noqa: F811
-    monkeypatch.setattr(sandbox_api, "is_span_group_enabled", lambda group: False)
+async def test_sandbox_records_no_durations_without_the_group_or_a_metrics_exporter(collected_metrics, monkeypatch):  # noqa: F811
+    set_sandbox_gates(monkeypatch, group=False, exporter=False)
     sandbox = AsyncSandbox(FakeSandboxProvider(), SandboxSpec(image="img"))
     await sandbox.start()
     await sandbox.exec("echo hi")
     assert STARTUP not in collected_metrics() and EXEC not in collected_metrics()
+
+
+@pytest.mark.asyncio
+async def test_sandbox_metrics_follow_the_exporter_with_the_group_off(collected_metrics, monkeypatch):  # noqa: F811
+    """The `sandbox` span group is off in the default preset; its metrics must not depend on it."""
+    set_sandbox_gates(monkeypatch, group=False, exporter=True)
+    sandbox = AsyncSandbox(FakeSandboxProvider(), SandboxSpec(image="img"))
+    await sandbox.start()
+    await sandbox.exec("echo hi")
+    await sandbox.stop()
+    exported = collected_metrics()
+    assert [p.count for p in exported[STARTUP]] == [1] and [p.count for p in exported[EXEC]] == [1]

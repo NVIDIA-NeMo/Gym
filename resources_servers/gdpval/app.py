@@ -67,12 +67,14 @@ from nemo_gym.server_runtime import (
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
     ResourcesSessionConflictError,
-    ResourcesSessionFence,
+    ResourcesSessionFences,
+    ResourcesSessionLocks,
     ResourcesSessionLostError,
     ReverifyMode,
     SimpleResourcesServer,
     lost_session_verification,
 )
+from nemo_gym.verification.judge import judge_call_failed
 from resources_servers.gdpval import persisted_layout
 from resources_servers.gdpval.judge_panel import (
     ResolvedJudge,
@@ -422,7 +424,8 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
 
     # /verify writes each rollout's files to ``<persist_deliverables_dir>/task_<task_id>/repeat_<n>/``.
     persist_deliverables_dir: str
-    # False persists the deliverables without judging them, e.g. to collect a reference set; the rows are masked.
+    # False persists the deliverables without judging them, e.g. to collect a reference set; the rows are masked
+    # with failure_kind gdpval:judging_disabled.
     judge_deliverables: bool = True
     # Names a top-level sandbox provider block.
     sandbox_provider: str
@@ -562,6 +565,9 @@ def _permanent_judge_failure(
 # out of the fit (`is_answered_agent_deadline`). Without one it is retried like any other timeout.
 _AGENT_TIMEOUT = {NG_FAILURE_CLASS_KEY: AGENT_TIMEOUT, "failure_kind": AGENT_TIMEOUT, "mask_sample": True}
 
+# judge_deliverables=false saves the deliverables without judging them, so the row is masked under this kind.
+JUDGING_DISABLED = "gdpval:judging_disabled"
+
 
 # Recovered by `gym eval reverify --judge-failed-only`, which judges the persisted deliverable again.
 _JUDGE_FAILED = {NG_FAILURE_CLASS_KEY: JUDGE_FAILED, "failure_kind": JUDGE_FAILED, "mask_sample": True}
@@ -610,11 +616,41 @@ class _TaskSession:
     deliverables_dir: Optional[str] = None
 
 
+async def resolve_deliverables(
+    server: "GDPValResourcesServer", request: Request, body: GDPValVerifyRequest
+) -> Tuple[GDPValVerifyRequest, Optional[Dict[str, Any]]]:
+    """The request with the deliverables to judge, or the masked fields of a row that cannot be judged."""
+    if (body.response.metadata or {}).get("stop_reason") == "wall_time":
+        return body, {"reward": 0.0, **_AGENT_TIMEOUT}
+    session = server._sessions.get(request.session.get(SESSION_ID_KEY))
+    if session is not None:
+        body = body.model_copy(update={"deliverables_dir": await server._collect_deliverables(session)})
+    elif body.reuse_cached_deliverable and body.deliverables_dir is None:
+        body = body.model_copy(update={"deliverables_dir": server._cached_deliverables_dir(body)})
+    elif body.deliverables_dir is None:
+        # A session that is gone (a restart, a checkpoint restore) took its files with it, and judging the
+        # transcript alone would score the agent as if it had submitted nothing.
+        return body, dict(
+            lost_session_verification("No live GDPVal session and no deliverables_dir: there is nothing to judge")
+        )
+    if not server.config.judge_deliverables:
+        return body, {
+            "reward": 0.0,
+            "mask_sample": True,
+            "failure_kind": JUDGING_DISABLED,
+            "failure_reason": "judge_deliverables is false, so the deliverables were saved without judging",
+        }
+    return body, None
+
+
 class GDPValResourcesServer(SimpleResourcesServer):
     # Its judge calls go through an external SDK client that notes no model request.
     grading_may_use_uninstrumented_model = True
 
     config: GDPValResourcesServerConfig
+
+    # The agent's working directory in the task sandbox, ``WORKDIR`` when None; a server whose image starts elsewhere sets it.
+    _sandbox_workdir: ClassVar[Optional[str]] = None
 
     def model_post_init(self, context: Any) -> None:
         self._judge_prompt_fpath: str = self.config.judge_prompt_template_fpath or _DEFAULT_JUDGE_PROMPT_FPATH
@@ -625,7 +661,10 @@ class GDPValResourcesServer(SimpleResourcesServer):
         self._sessions: Dict[str, _TaskSession] = {}
         # (task_id, repeat) of the persisted directory each live session will write, to the session holding it.
         self._claimed_directories: Dict[Tuple[str, int], str] = {}
-        self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
+        self._locks = ResourcesSessionLocks()
+        self._fences: ResourcesSessionFences[EpisodeId] = ResourcesSessionFences(
+            self.config.session_close_retry_window_seconds
+        )
         # Normalize the reference-model set: prefer the multi-reference
         # ``reference_models`` mapping; fall back to the legacy single-reference
         # fields (treated as a single reference id ``"reference"``).
@@ -708,8 +747,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
         session_id = body.resources_session_id
         # The cookie is set only on success: a refusal's reply passes through the session middleware too, and must
         # not hand the caller a cookie for a session that another episode holds.
-        async with self._fence.locked(session_id):
-            self._fence.raise_if_closed(session_id)
+        async with self._locks.locked(session_id):
+            self._fences.raise_if_fenced(session_id)
             session = self._sessions.get(session_id)
             if session is not None:
                 if (session.episode_id, session.task_id) != (body.episode_id, body.task_id):
@@ -747,6 +786,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     task_id=task.task_id,
                     reference_dir=reference_dir,
                     reference_files=reference_files,
+                    workdir=self._sandbox_workdir,
                 )
             except BaseException:
                 self._claimed_directories.pop(directory, None)
@@ -782,7 +822,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     provider_config_ref=self.config.sandbox_provider,
                     descriptor=await session.sandbox.serialize(),
                 ),
-                workdir=WORKDIR,
+                workdir=self._sandbox_workdir or WORKDIR,
             ),
         )
 
@@ -790,9 +830,9 @@ class GDPValResourcesServer(SimpleResourcesServer):
         self, request: Request, body: ResourcesCloseSessionRequest
     ) -> ResourcesCloseSessionResponse:
         session_id = body.resources_session_id
-        async with self._fence.locked(session_id):
-            closed_episode = self._fence.closed_episode(session_id)
-            if closed_episode is None:
+        async with self._locks.locked(session_id):
+            fenced_episode = self._fences.get(session_id)
+            if fenced_episode is None:
                 session = self._sessions.get(session_id)
                 if session is not None:
                     if session.episode_id != body.episode_id:
@@ -803,8 +843,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
                         # A failed stop must not hold the directory: every later seed of it would get a terminal 409.
                         self._claimed_directories.pop((session.task_id.task_id, session.repeat), None)
                     del self._sessions[session_id]
-                self._fence.mark_closed(session_id, body.episode_id)
-            elif closed_episode != body.episode_id:
+                self._fences.fence(session_id, body.episode_id)
+            elif fenced_episode != body.episode_id:
                 raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
         request.session.pop(SESSION_ID_KEY, None)
         return ResourcesCloseSessionResponse(resources_session_id=session_id)
@@ -843,7 +883,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
         session = self._get_session(request)
         if session.sandbox is None:
             raise HTTPException(status_code=409, detail="The task sandbox is no longer available")
-        missing = await missing_files(session.sandbox, body.paths)
+        missing = await missing_files(session.sandbox, body.paths, self._sandbox_workdir)
         if missing:
             raise HTTPException(
                 status_code=400,
@@ -870,7 +910,9 @@ class GDPValResourcesServer(SimpleResourcesServer):
             task_dir = persisted_layout.repeat_dir(
                 self.config.persist_deliverables_dir, session.task_id.task_id, session.repeat
             )
-            await collect_deliverables(session.sandbox, session.finish_call, session.reference_dir, task_dir)
+            await collect_deliverables(
+                session.sandbox, session.finish_call, session.reference_dir, task_dir, self._sandbox_workdir
+            )
             await self._release(session)
             session.deliverables_dir = str(task_dir)
         return session.deliverables_dir
@@ -1034,29 +1076,9 @@ class GDPValResourcesServer(SimpleResourcesServer):
         return routed, audio_capable, video_capable
 
     async def verify(self, request: Request, body: GDPValVerifyRequest) -> GDPValVerifyResponse:
-        if (body.response.metadata or {}).get("stop_reason") == "wall_time":
-            return GDPValVerifyResponse(
-                **body.model_dump(), reward=0.0, verify_mode=self.config.reward_mode, **_AGENT_TIMEOUT
-            )
-        session = self._sessions.get(request.session.get(SESSION_ID_KEY))
-        if session is not None:
-            body = body.model_copy(update={"deliverables_dir": await self._collect_deliverables(session)})
-        elif body.reuse_cached_deliverable and body.deliverables_dir is None:
-            body = body.model_copy(update={"deliverables_dir": self._cached_deliverables_dir(body)})
-        elif body.deliverables_dir is None:
-            # A session that is gone (a restart, a checkpoint restore) took its files with it, and judging the
-            # transcript alone would score the agent as if it had submitted nothing.
-            return GDPValVerifyResponse(
-                **body.model_dump(),
-                verify_mode=self.config.reward_mode,
-                **lost_session_verification(
-                    "No live GDPVal session and no deliverables_dir: there is nothing to judge"
-                ),
-            )
-        if not self.config.judge_deliverables:
-            return GDPValVerifyResponse(
-                **body.model_dump(), reward=0.0, mask_sample=True, verify_mode=self.config.reward_mode
-            )
+        body, masked = await resolve_deliverables(self, request, body)
+        if masked is not None:
+            return GDPValVerifyResponse(**body.model_dump(), verify_mode=self.config.reward_mode, **masked)
         if self.config.reward_mode == "comparison":
             return await self._verify_comparison(body)
 
@@ -1743,9 +1765,13 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 return _permanent_judge_failure(
                     body, "comparison", {"error": "permanent_judge_error", "ref_errors": ref_errors}
                 )
-            raise RuntimeError(
-                f"all {attempted_matchups} judge matchup(s) failed for task {body.task_id}; last error: {last_error!r}"
-            )
+            # The judge could not grade this deliverable, which says nothing about the model. Raised as a judge
+            # failure, it leaves the score as a masked row that keeps the saved answer, and recovery grades that
+            # answer again. A bare error would end as an untyped HTTP 500 that reruns the whole episode.
+            raise judge_call_failed(
+                f"all {attempted_matchups} judge matchup(s) failed for task {body.task_id}; last error: {last_error!r}",
+                operation="gdpval.comparison",
+            ) from last_error
 
         total_judged = total_wins + total_losses + total_ties
         strict_failure = _strict_comparison_trial_failure(

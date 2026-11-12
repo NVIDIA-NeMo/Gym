@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import ast
 import json
+import logging
 import os
 import tempfile
 from collections.abc import Iterator
@@ -21,13 +22,15 @@ from pydantic import BaseModel, ValidationError
 from yaml import YAMLError
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, _resolve_under_cwd_or_install
-from nemo_gym.config.config_types import ConfigError
+from nemo_gym.config.config_types import AlmostServerError, ConfigError
 from nemo_gym.config.global_config import (
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     dataset_agent_pins,
+    environment_server_agent_names,
     get_first_server_config_dict,
     resolve_dataset_agent,
+    taskset_environment_server_name,
     translate_interpolation_error,
 )
 from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
@@ -41,6 +44,9 @@ from nemo_gym.environment.manifest import (
     resolve_manifest_config_path,
 )
 from nemo_gym.server_runtime.base_resources_server import BaseRunRequest
+
+
+logger = logging.getLogger(__name__)
 
 
 class EnvironmentValidationError(ConfigError):
@@ -183,13 +189,45 @@ def _resolve_dataset_owner_agent(resolved: DictConfig, owner_instance_name: str)
     return agents.pop()
 
 
-def _resolve_manifest_composition(config_path: Path, *, dataset_owner: str | None = None) -> ResolvedComposition:
-    """Resolve manifest wiring without probing or materializing runtime services."""
+@dataclass(frozen=True)
+class _ConfigWiring:
+    """The servers a workload config wires around its dataset-bearing agent."""
+
+    resolved: DictConfig
+    by_instance: dict[str, Any]
+    selected_agent: Any
+    dataset_rs: Any | None
+    resources_instance: Any | None
+    model_server: str | None
+
+
+class _ServerLookupParser(GlobalConfigDictParser):
+    """Reject partially valid server configs before the parser prints its almost-server banner.
+
+    Catalog lookup remains strict even with ``error_on_almost_servers: false``: its caller falls back to raw names
+    rather than selecting from only the valid blocks. Other parser warnings and metadata fallback are unaffected.
+    """
+
+    def detect_and_report_almost_servers(self, global_config_dict: DictConfig) -> list[tuple[str, ValidationError]]:
+        almost_servers = super().detect_and_report_almost_servers(global_config_dict)
+        if almost_servers:
+            names = ", ".join(name for name, _error in almost_servers)
+            raise AlmostServerError(f"Server blocks failed validation: {names}.")
+        return almost_servers
+
+
+def _resolve_config_wiring(
+    config_path: Path,
+    *,
+    dataset_owner: str | None = None,
+    parser: GlobalConfigDictParser | None = None,
+) -> _ConfigWiring:
+    """Resolve which servers a workload config wires, without probing or materializing runtime services."""
     initial = OmegaConf.merge(
         GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
         {"config_paths": [str(config_path.resolve())]},
     )
-    parser = GlobalConfigDictParser()
+    parser = parser or GlobalConfigDictParser()
     with _with_component_root(config_path):
         try:
             resolved = parser.parse(
@@ -245,7 +283,6 @@ def _resolve_manifest_composition(config_path: Path, *, dataset_owner: str | Non
         # Rejects an `agent:` pin naming anyone but the declaring agent (dispatch would ignore it).
         _resolve_dataset_owner_agent(resolved, selected_agent.name)
 
-    agent_server = _implementation_name(selected_agent)
     agent_config = selected_agent.get_inner_run_server_config_dict()
     resources_ref = agent_config.get("resources_server") or {}
     model_ref = agent_config.get("model_server") or {}
@@ -256,10 +293,24 @@ def _resolve_manifest_composition(config_path: Path, *, dataset_owner: str | Non
         if isinstance(resources_ref, DictConfig)
         else None
     )
+    return _ConfigWiring(
+        resolved=resolved,
+        by_instance=by_instance,
+        selected_agent=selected_agent,
+        dataset_rs=dataset_rs,
+        resources_instance=resources_instance,
+        model_server=model_ref.get("name") if isinstance(model_ref, DictConfig) else None,
+    )
 
+
+def _resolve_manifest_composition(config_path: Path, *, dataset_owner: str | None = None) -> ResolvedComposition:
+    """Resolve manifest wiring, with datasets in manifest form, without probing or materializing runtime services."""
+    wiring = _resolve_config_wiring(config_path, dataset_owner=dataset_owner)
+    selected_agent, resources_instance = wiring.selected_agent, wiring.resources_instance
+    by_instance, model_server = wiring.by_instance, wiring.model_server
+    agent_server = _implementation_name(selected_agent)
     resources_server = _implementation_name(resources_instance) if resources_instance is not None else None
-    model_server = model_ref.get("name") if isinstance(model_ref, DictConfig) else None
-    owner = dataset_rs if dataset_rs is not None else selected_agent
+    owner = wiring.dataset_rs if wiring.dataset_rs is not None else selected_agent
     datasets = tuple(_manifest_dataset(dataset) for dataset in (owner.datasets or []))
     grading_mode = None
     if resources_instance is not None:
@@ -311,10 +362,79 @@ def _resolve_manifest_composition(config_path: Path, *, dataset_owner: str | Non
         agent_server=agent_server,
         model_server=str(model_server) if model_server else None,
         datasets=datasets,
-        rollout_driver=resolved.get("rollout_collection_driver"),
+        rollout_driver=wiring.resolved.get("rollout_collection_driver"),
         grading_mode=str(grading_mode) if grading_mode is not None else None,
         components=tuple(components),
     )
+
+
+def _catalog_resources_server(wiring: _ConfigWiring) -> str | None:
+    """The resources binding selected by all dataset routes, or unknown when they do not identify one instance."""
+    if wiring.dataset_rs is not None:
+        return _implementation_name(wiring.dataset_rs)
+
+    environments = {
+        name: server for name, server in wiring.by_instance.items() if server.SERVER_TYPE == "environment_servers"
+    }
+    fronting = [
+        name
+        for name, server in environments.items()
+        if wiring.selected_agent.name in environment_server_agent_names(server.get_inner_run_server_config_dict())
+    ]
+    resource_names: set[str] = set()
+    for dataset in wiring.selected_agent.datasets:
+        # Match collection's route precedence: tasksets, explicit flat-row route, then the unique agent route.
+        if dataset.taskset is not None:
+            environment_name = taskset_environment_server_name(wiring.resolved, dataset.taskset)
+        else:
+            mode = wiring.resolved.get("environment_routing_mode", "agent")
+            if mode == "legacy":
+                environment_name = wiring.resolved.get("environment_server_name")
+            elif mode == "agent" and len(fronting) == 1:
+                environment_name = fronting[0]
+            else:
+                return None
+        if not isinstance(environment_name, str) or environment_name not in environments:
+            return None
+        environment = environments[environment_name]
+        config = environment.get_inner_run_server_config_dict()
+        if wiring.selected_agent.name not in environment_server_agent_names(config):
+            return None
+        if _implementation_name(environment) == "legacy_agent":
+            # This relay delegates the whole episode to the agent, including its resources binding.
+            resources = wiring.resources_instance
+        else:
+            reference = config.get("resources_server")
+            resources = (
+                wiring.by_instance.get(reference.get("name"))
+                if isinstance(reference, DictConfig)
+                and reference.get("type", "resources_servers") == "resources_servers"
+                else None
+            )
+        if resources is None or resources.SERVER_TYPE != "resources_servers":
+            return None
+        resource_names.add(resources.name)
+    return _implementation_name(wiring.by_instance[next(iter(resource_names))]) if len(resource_names) == 1 else None
+
+
+def resolve_config_servers(config_path: Path) -> tuple[str | None, str | None] | None:
+    """The resources server and agent selected by a workload config's runtime routes.
+
+    Wiring resolution still needs an unambiguous dataset owner and agent, but skips manifest-only dataset checks
+    such as requiring a benchmark preparation script. Returns ``None`` when the config does not resolve on its own:
+    for example, it needs runtime-only values or contains invalid server blocks, even with
+    ``error_on_almost_servers: false``. Parser compatibility warnings can still go to stderr, and the caller's
+    metadata fallback may emit its own diagnostics. A resolved config with ambiguous or differing resources routes
+    returns ``(None, agent)`` so the catalog does not guess from raw names.
+    """
+    try:
+        wiring = _resolve_config_wiring(config_path, parser=_ServerLookupParser())
+        resources_server = _catalog_resources_server(wiring)
+        return resources_server, _implementation_name(wiring.selected_agent)
+    except Exception:
+        # A single config must not abort best-effort catalog discovery; retain unexpected failures for debugging.
+        logger.debug("Could not resolve servers for catalog config %s", config_path, exc_info=True)
+        return None
 
 
 def _mirror_values(composition: ResolvedComposition) -> dict[str, Any]:
@@ -655,8 +775,13 @@ def validate_environment(
     config_path: str | Path | None = None,
     *,
     sync: bool = False,
+    validate_datasets: bool = True,
 ) -> EnvironmentValidationReport:
-    """Validate a manifest without probing services or runtime output paths."""
+    """Validate a manifest without probing services or runtime output paths.
+
+    Component CI may disable dataset checks to exercise committed verifier fixtures
+    without downloading a workload's full benchmark or training dataset.
+    """
     resolved_manifest_path = Path(manifest_path).expanduser().resolve()
     manifest = load_manifest(resolved_manifest_path)
     resolved_config_path = (
@@ -703,6 +828,7 @@ def validate_environment(
                 dataset, standard_prompt_config=manifest.standard_prompt_config, prompt_source=manifest.prompt_source
             )
             for dataset in manifest.datasets
+            if validate_datasets
         )
     if synchronized:
         _write_manifest_atomically(resolved_manifest_path, manifest)

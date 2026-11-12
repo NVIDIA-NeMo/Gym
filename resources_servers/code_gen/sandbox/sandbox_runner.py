@@ -17,7 +17,7 @@
 
 Usage: ``python sandbox_runner.py REQUEST_JSON RESULT_JSON``
 
-Grades one candidate with the same ``check_correctness`` the Ray path uses, so the time,
+Grades one candidate with ``check_correctness``, so the time,
 memory and process limits come from the harness itself rather than from the provider. A
 candidate failure is a normal result; the runner exits nonzero only when grading itself
 could not run, which the server treats as an infrastructure failure.

@@ -128,7 +128,8 @@ if [ "${#missing[@]}" -gt 0 ]; then
 fi
 # Stock OpenCode can download ripgrep itself. A system copy avoids per-session
 # downloads, but must not make cached runtimes or non-root/RHEL images unusable.
-if ! command -v rg >/dev/null 2>&1; then
+# NG_OPENCODE_SKIP_RIPGREP=1: the adapter stages a pinned rg for the session instead.
+if [ "${NG_OPENCODE_SKIP_RIPGREP:-0}" != 1 ] && ! command -v rg >/dev/null 2>&1; then
   if [ "$(id -u)" = 0 ]; then
     if command -v apk >/dev/null 2>&1; then
       apk add --no-cache ripgrep || true

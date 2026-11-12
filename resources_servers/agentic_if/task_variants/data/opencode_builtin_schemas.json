@@ -1,0 +1,218 @@
+{
+  "binary_sha256": "0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded",
+  "schemas": {
+    "apply_patch": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "patchText": {
+          "description": "The full patch text that describes all changes to be made",
+          "type": "string"
+        }
+      },
+      "required": [
+        "patchText"
+      ],
+      "type": "object"
+    },
+    "bash": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "command": {
+          "description": "The command to execute",
+          "type": "string"
+        },
+        "timeout": {
+          "description": "Optional timeout in milliseconds",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991,
+          "minimum": -9007199254740991,
+          "type": "integer"
+        },
+        "workdir": {
+          "description": "The working directory to run the command in. Defaults to the current directory. Use this instead of 'cd' commands.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    "edit": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "filePath": {
+          "description": "The absolute path to the file to modify",
+          "type": "string"
+        },
+        "newString": {
+          "description": "The text to replace it with (must be different from oldString)",
+          "type": "string"
+        },
+        "oldString": {
+          "description": "The text to replace",
+          "type": "string"
+        },
+        "replaceAll": {
+          "description": "Replace all occurrences of oldString (default false)",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "filePath",
+        "oldString",
+        "newString"
+      ],
+      "type": "object"
+    },
+    "glob": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "path": {
+          "description": "The directory to search in. If not specified, the current working directory will be used. IMPORTANT: Omit this field to use the default directory. DO NOT enter \"undefined\" or \"null\" - simply omit it for the default behavior. Must be a valid directory path if provided.",
+          "type": "string"
+        },
+        "pattern": {
+          "description": "The glob pattern to match files against",
+          "type": "string"
+        }
+      },
+      "required": [
+        "pattern"
+      ],
+      "type": "object"
+    },
+    "grep": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "include": {
+          "description": "File pattern to include in the search (e.g. \"*.js\", \"*.{ts,tsx}\")",
+          "type": "string"
+        },
+        "path": {
+          "description": "The directory to search in. Defaults to the current working directory.",
+          "type": "string"
+        },
+        "pattern": {
+          "description": "The regex pattern to search for in file contents",
+          "type": "string"
+        }
+      },
+      "required": [
+        "pattern"
+      ],
+      "type": "object"
+    },
+    "read": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "filePath": {
+          "description": "The absolute path to the file or directory to read",
+          "type": "string"
+        },
+        "limit": {
+          "description": "The maximum number of lines to read (defaults to 2000)",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "offset": {
+          "description": "The line number to start reading from (1-indexed)",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "filePath"
+      ],
+      "type": "object"
+    },
+    "task": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "command": {
+          "description": "The command that triggered this task",
+          "type": "string"
+        },
+        "description": {
+          "description": "A short (3-5 words) description of the task",
+          "type": "string"
+        },
+        "prompt": {
+          "description": "The task for the agent to perform",
+          "type": "string"
+        },
+        "subagent_type": {
+          "description": "The type of specialized agent to use for this task",
+          "type": "string"
+        },
+        "task_id": {
+          "description": "This should only be set if you mean to resume a previous task (you can pass a prior task_id and the task will continue the same subagent session as before instead of creating a fresh one)",
+          "type": "string"
+        }
+      },
+      "required": [
+        "description",
+        "prompt",
+        "subagent_type"
+      ],
+      "type": "object"
+    },
+    "todowrite": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "todos": {
+          "description": "The updated todo list",
+          "items": {
+            "properties": {
+              "content": {
+                "description": "Brief description of the task",
+                "type": "string"
+              },
+              "priority": {
+                "description": "Priority level of the task: high, medium, low",
+                "type": "string"
+              },
+              "status": {
+                "description": "Current status of the task: pending, in_progress, completed, cancelled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "content",
+              "status",
+              "priority"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "todos"
+      ],
+      "type": "object"
+    },
+    "write": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "content": {
+          "description": "The content to write to the file",
+          "type": "string"
+        },
+        "filePath": {
+          "description": "The absolute path to the file to write (must be absolute, not relative)",
+          "type": "string"
+        }
+      },
+      "required": [
+        "content",
+        "filePath"
+      ],
+      "type": "object"
+    }
+  },
+  "source": "Stock OpenCode /experimental/tool, --pure; audit/dummy_model and audit/gpt-5. Installed schemas, not a per-request availability promise.",
+  "version": "1.17.11"
+}

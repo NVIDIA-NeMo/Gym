@@ -11,13 +11,7 @@ from omegaconf import OmegaConf
 from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
 from nemo_gym.config import BenchmarkDatasetConfig, GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.data import (
-    TrainDataProcessor,
-    apply_prompt_to_row,
-    load_prompt_config,
-    normalize_task_fields,
-    validate_prompt_compatibility,
-)
+from nemo_gym.data import TrainDataProcessor, apply_prompt_to_row, load_prompt_config, normalize_task_fields
 from nemo_gym.environment import BenchmarkConfig
 from resources_servers.critpt_custom_grader import app as adapter
 from resources_servers.critpt_custom_grader.task_data import TaskData
@@ -64,6 +58,7 @@ def test_agentic_recipe_routes_remote_tools_and_stateless_verification(monkeypat
     agent = resolved[AGENT]["responses_api_agents"]["stirrup_agent"]
     assert agent["code_exec"] is False
     assert agent["finish_tool_names"] == ["finish"]
+    assert agent["context_overflow_recovery"] is True
     assert agent["agent_max_turns"] == 50
     assert agent["concurrency"] <= config.agentic_execution.max_sessions
     dataset = BenchmarkDatasetConfig.model_validate(block["datasets"][0])
@@ -136,7 +131,8 @@ def test_agentic_example_renders_and_matches_the_endpoint_schemas():
 
     prompt = load_prompt_config(str(ROOT / "prompts" / "agentic.yaml"))
     rows = [json.loads(line) for line in (ROOT / "data" / "agentic_example.jsonl").read_text().splitlines()]
-    validate_prompt_compatibility(rows, prompt)
+    # The prompt config builds the input, so a row must not carry its own.
+    assert all(not row["responses_create_params"].get("input") for row in rows)
     for row in rows:
         rendered = apply_prompt_to_row(row, prompt)
         body = NeMoGymResponseCreateParamsNonStreaming.model_validate(rendered["responses_create_params"])

@@ -35,7 +35,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseOutputItem,
     training_variant_of,
 )
-from nemo_gym.models.chat_completions_converter import _CUSTOM_TOOL_BRIDGE_PARAMETER, ResponsesConverter
+from nemo_gym.models.chat_completions_converter import _CUSTOM_TOOL_BRIDGE_PARAMETER, ChatCompletionsConverter
 from nemo_gym.models.responses_streaming import (
     flatten_namespace_tools,
     restore_namespace_tool_calls,
@@ -64,14 +64,14 @@ EXEC_CODE = 'const out = await tools.shell({command: ["echo", "héllo"]});'
 ENGINE_ARGUMENTS = '{"input": "const out = await tools.shell({command: [\\"echo\\", \\"héllo\\"]});"}'
 
 
-def _bridge_converter() -> ResponsesConverter:
-    return ResponsesConverter(
+def _bridge_converter() -> ChatCompletionsConverter:
+    return ChatCompletionsConverter(
         return_token_id_information=False, uses_reasoning_parser=False, custom_tool_strategy="function_bridge"
     )
 
 
-def _passthrough_converter() -> ResponsesConverter:
-    return ResponsesConverter(return_token_id_information=False, uses_reasoning_parser=False)
+def _passthrough_converter() -> ChatCompletionsConverter:
+    return ChatCompletionsConverter(return_token_id_information=False, uses_reasoning_parser=False)
 
 
 def _params(input_items: list, tools: list) -> NeMoGymResponseCreateParamsNonStreaming:
@@ -171,13 +171,16 @@ def test_decode_returns_malformed_arguments_verbatim() -> None:
 
 def test_decode_logs_each_malformed_shape_with_the_call_context(caplog) -> None:
     with caplog.at_level(logging.WARNING, logger="nemo_gym.models.chat_completions_converter"):
-        assert ResponsesConverter._decode_bridged_input("not json", tool_name="exec", call_id="call_a") == "not json"
         assert (
-            ResponsesConverter._decode_bridged_input('{"input": 5}', tool_name="exec", call_id="call_b")
+            ChatCompletionsConverter._decode_bridged_input("not json", tool_name="exec", call_id="call_a")
+            == "not json"
+        )
+        assert (
+            ChatCompletionsConverter._decode_bridged_input('{"input": 5}', tool_name="exec", call_id="call_b")
             == '{"input": 5}'
         )
         assert (
-            ResponsesConverter._decode_bridged_input(
+            ChatCompletionsConverter._decode_bridged_input(
                 '{"input": "x", "timeout": 5}', tool_name="exec", call_id="call_c"
             )
             == "x"
@@ -234,7 +237,7 @@ def test_lift_handles_a_chat_native_custom_tool_call_under_any_strategy() -> Non
         assert item.input == EXEC_CODE
 
 
-def _replay_arguments_after_lift(converter: ResponsesConverter, engine_arguments: str) -> str:
+def _replay_arguments_after_lift(converter: ChatCompletionsConverter, engine_arguments: str) -> str:
     """Lift a bridged call with the given engine arguments, replay it, return the rendered arguments."""
     params = _params([{"type": "message", "role": "user", "content": "go"}], [EXEC_TOOL])
     chat_completion = _chat_completion_with_tool_calls(
@@ -420,8 +423,8 @@ def test_bridge_lowers_a_custom_tool_without_a_description() -> None:
 def test_grammar_drop_is_warned_once_per_tool_name(caplog) -> None:
     tool = dict(EXEC_TOOL, name="exec_grammar_once")
     with caplog.at_level(logging.WARNING, logger="nemo_gym.models.chat_completions_converter"):
-        ResponsesConverter._custom_tool_to_bridged_function(tool)
-        ResponsesConverter._custom_tool_to_bridged_function(tool)
+        ChatCompletionsConverter._custom_tool_to_bridged_function(tool)
+        ChatCompletionsConverter._custom_tool_to_bridged_function(tool)
     assert caplog.text.count("exec_grammar_once") == 1
 
 
@@ -517,7 +520,7 @@ def test_a_namespaced_custom_sub_tool_in_top_level_tools_follows_the_top_level_r
 
 
 def test_lift_wraps_a_bridged_call_in_the_training_variant_with_its_token_ids() -> None:
-    converter = ResponsesConverter(
+    converter = ChatCompletionsConverter(
         return_token_id_information=True, uses_reasoning_parser=False, custom_tool_strategy="function_bridge"
     )
     params = _params([{"type": "message", "role": "user", "content": "go"}], [EXEC_TOOL])

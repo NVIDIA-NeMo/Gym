@@ -51,7 +51,13 @@ FINGERPRINT_VERSION = 4
 
 _FINGERPRINT_DOMAIN = b"nemo-gym-lineage"
 _CONTEXT_DOMAIN = b"nemo-gym-lineage-context"
+_TOOL_CALL_TURN_DOMAIN = b"nemo-gym-tool-call-turn"
 _INSTRUCTION_ROLES = frozenset({"system", "developer"})
+# The tool OpenCode substitutes, in the history it sends back, for a call to a tool it does not offer.
+_UNAVAILABLE_TOOL_PLACEHOLDER = "invalid"
+# A lookup reads each placeholder-shaped call in an echoed turn either way, which is 2**n keys for n such calls.
+# Beyond this many, the whole-turn fallback abstains instead of deciding from an incomplete set of readings.
+_MAX_INDEPENDENT_PLACEHOLDERS = 6
 
 
 def assistant_fingerprint(messages: list[dict]) -> str:
@@ -61,7 +67,7 @@ def assistant_fingerprint(messages: list[dict]) -> str:
     User and tool content is excluded from the lookup key.
     Dialect-specific tool-call shapes normalize to the same hash input.
     """
-    hasher = hashlib.sha256(_FINGERPRINT_DOMAIN)
+    fields = bytearray()
     count = 0
     for message in messages or []:
         if not isinstance(message, dict):
@@ -70,15 +76,15 @@ def assistant_fingerprint(messages: list[dict]) -> str:
             continue
         count += 1
         for content_type, payload in _content_of(message.get("content")):
-            _update_field(hasher, b"\x00", content_type)
-            _update_field(hasher, b"\x01", payload)
+            _add_field(fields, b"\x00", content_type)
+            _add_field(fields, b"\x01", payload)
         for call_id, name, arguments in _tools_of(message):
-            _update_field(hasher, b"\x02", call_id)
-            _update_field(hasher, b"\x03", name)
-            _update_field(hasher, b"\x04", arguments)
+            _add_field(fields, b"\x02", call_id)
+            _add_field(fields, b"\x03", name)
+            _add_field(fields, b"\x04", arguments)
     if count == 0:
         return ""
-    return hasher.hexdigest()
+    return _digest(_FINGERPRINT_DOMAIN, fields)
 
 
 def conversation_digest(messages: list[dict]) -> str:
@@ -94,27 +100,27 @@ def conversation_digest(messages: list[dict]) -> str:
     conversation. Reusing the parent's tokens then serves the instruction text
     the model actually saw, which is what training needs.
     """
-    hasher = hashlib.sha256(_CONTEXT_DOMAIN)
+    fields = bytearray()
     for message in messages or []:
         if not isinstance(message, dict):
             raise ValueError(f"request item is not an object: {type(message).__name__}")
         role = str(message.get("role") or message.get("type") or "")
-        _update_field(hasher, b"\x00", role)
+        _add_field(fields, b"\x00", role)
         if _is_instruction_item(message):
             continue
         for content_type, payload in _content_of(message.get("content")):
-            _update_field(hasher, b"\x01", content_type)
-            _update_field(hasher, b"\x02", payload)
+            _add_field(fields, b"\x01", content_type)
+            _add_field(fields, b"\x02", payload)
         for call_id, name, arguments in _tools_of(message):
-            _update_field(hasher, b"\x03", call_id)
-            _update_field(hasher, b"\x04", name)
-            _update_field(hasher, b"\x05", arguments)
+            _add_field(fields, b"\x03", call_id)
+            _add_field(fields, b"\x04", name)
+            _add_field(fields, b"\x05", arguments)
         # Include tool results.
         # Summarizing, redacting, or truncating a result changes the request context.
         for call_id, output in _tool_results_of(message):
-            _update_field(hasher, b"\x06", call_id)
-            _update_field(hasher, b"\x07", output)
-    return hasher.hexdigest()
+            _add_field(fields, b"\x06", call_id)
+            _add_field(fields, b"\x07", output)
+    return _digest(_CONTEXT_DOMAIN, fields)
 
 
 def canonicalize_tool_arguments(value: Any) -> str:
@@ -302,15 +308,58 @@ def _canonical_json(value: Any) -> str:
         raise ValueError(f"unsupported prompt content: {type(value).__name__}") from error
 
 
-def _update_field(hasher: Any, tag: bytes, value: str) -> None:
-    """Hash one tagged, length-delimited UTF-8 field."""
+def _add_field(fields: bytearray, tag: bytes, value: str) -> None:
+    """Append one tagged, length-delimited UTF-8 field to a digest's input."""
     encoded = value.encode("utf-8")
-    hasher.update(tag)
-    hasher.update(len(encoded).to_bytes(8, "big"))
-    hasher.update(encoded)
+    fields += tag
+    fields += len(encoded).to_bytes(8, "big")
+    fields += encoded
 
 
-def tool_call_turn_fingerprint(items: list[dict]) -> str:
+def _digest(domain: bytes, fields: bytearray) -> str:
+    """SHA-256 of the domain and every field, hashed in a single update.
+
+    On Python 3.13 and 3.14, a hash object's first update of 2 KiB or more makes it release the GIL.
+    From then on it releases the GIL on every update.
+    That holds even for updates of a single byte.
+    Hashing field by field calls update three times per field: tag, length and value.
+    After the first large field, each of those calls gives up the GIL.
+    The event loop and other threads can run while it is released.
+    Taking it back can then wait up to the interpreter's switch interval, 5 ms by default.
+    A long conversation has hundreds of fields, so one digest could wait that long hundreds of times.
+    One update over a single buffer gives up the GIL at most once, and not at all for a buffer under 2 KiB.
+    The digest is the same as hashing the same bytes field by field.
+
+    One case is slower than field-by-field hashing, and it is expected.
+    When every field is under 2 KiB, hashing field by field never releases the GIL.
+    The single buffer still releases it once when the fields add up to 2 KiB or more.
+    With another thread busy, that digest can wait up to one switch interval.
+    """
+    hasher = hashlib.sha256(domain)
+    hasher.update(fields)
+    return hasher.hexdigest()
+
+
+def _served_tool_name(name: str, arguments: str) -> str:
+    """Return the tool name the model was served, undoing OpenCode's unavailable-tool placeholder.
+
+    OpenCode echoes a call to a tool it does not offer as a call to its ``invalid`` tool with the
+    same ID and ``{"tool": <the served name>, "error": <message>}`` as arguments. Any other call
+    keeps its name, so a renamed call still cannot match.
+    """
+    if name != _UNAVAILABLE_TOOL_PLACEHOLDER:
+        return name
+    try:
+        payload = json.loads(arguments)
+    except (TypeError, ValueError):
+        return name
+    if not isinstance(payload, dict) or set(payload) != {"tool", "error"}:
+        return name
+    served = payload["tool"]
+    return served if isinstance(served, str) and served and isinstance(payload["error"], str) else name
+
+
+def tool_call_turn_fingerprint(items: list[dict], *, read_placeholders: frozenset[str] = frozenset()) -> str:
     """Fingerprint a complete model turn while tolerating rewritten tool arguments.
 
     Every tool ID and name, their order, and all non-tool assistant content must
@@ -319,8 +368,21 @@ def tool_call_turn_fingerprint(items: list[dict]) -> str:
     fields as the strict fingerprint. Empty assistant items remain accounted for.
     This fallback key supplements the versioned content fingerprint and the
     request-context digest in both in-memory and durable lineage indexes.
+
+    Tool names are compared without case: OpenCode renames a call whose lowercase name is a
+    known tool to that lowercase name, and echoes it that way in every later request. The
+    call IDs, their order, the content and the request-context digest still have to agree.
+
+    ``read_placeholders`` names the tool-call IDs whose call, if it has the shape of
+    OpenCode's unavailable-tool placeholder, counts as the call the model was served
+    (``_served_tool_name``). Only a lookup of a harness's echoed history sets it
+    (``echoed_tool_call_turn_fingerprints``). Keys of served output never set it.
+
+    Stored keys lowercase the served names too. A key that an older Gym stored, before names
+    were lowercased, still matches when the turn's served names had no capital letters; a turn
+    served with a capitalized name then resolves only through the strict fingerprint.
     """
-    hasher = hashlib.sha256(b"nemo-gym-tool-call-turn")
+    fields = bytearray()
     seen_ids: set[str] = set()
     for item in items or []:
         if not isinstance(item, dict):
@@ -330,17 +392,47 @@ def tool_call_turn_fingerprint(items: list[dict]) -> str:
         content = _content_of(item.get("content"))
         tools = _tools_of(item)
         if not content and not tools:
-            _update_field(hasher, b"\x05", "empty-assistant")
+            _add_field(fields, b"\x05", "empty-assistant")
         for content_type, payload in content:
-            _update_field(hasher, b"\x00", content_type)
-            _update_field(hasher, b"\x01", payload)
-        for call_id, name, _arguments in tools:
+            _add_field(fields, b"\x00", content_type)
+            _add_field(fields, b"\x01", payload)
+        for call_id, name, arguments in tools:
             if not call_id or not name or call_id in seen_ids:
                 return ""
             seen_ids.add(call_id)
-            _update_field(hasher, b"\x02", call_id)
-            _update_field(hasher, b"\x03", name)
-    return hasher.hexdigest() if seen_ids else ""
+            _add_field(fields, b"\x02", call_id)
+            served = _served_tool_name(name, arguments) if call_id in read_placeholders else name
+            # Without case: OpenCode renames a call whose lowercase name is a known tool to that name.
+            _add_field(fields, b"\x03", served.lower())
+    return _digest(_TOOL_CALL_TURN_DOMAIN, fields) if seen_ids else ""
+
+
+def echoed_tool_call_turn_fingerprints(items: list[dict]) -> list[str]:
+    """The fallback keys an echoed model turn can match, the turn as echoed first.
+
+    Each placeholder-shaped call is read both ways, independently: OpenCode's rewrite of an
+    unavailable tool and a call the model itself made to ``invalid`` look the same, and one
+    turn can hold both. A lookup pools the candidates of every key before it decides
+    uniqueness, so the keys must cover every reading. A turn with more than
+    ``_MAX_INDEPENDENT_PLACEHOLDERS`` such calls gets no keys: the fallback abstains, and the
+    request can resolve only through the strict fingerprint.
+    """
+    placeholder_ids = [
+        call_id
+        for item in items or []
+        if isinstance(item, dict) and _is_assistant_authored(item)
+        for call_id, name, arguments in _tools_of(item)
+        if call_id and _served_tool_name(name, arguments) != name
+    ]
+    if len(placeholder_ids) > _MAX_INDEPENDENT_PLACEHOLDERS:
+        return []
+    keys: list[str] = []
+    for mask in range(1 << len(placeholder_ids)):
+        read_placeholders = frozenset(call_id for bit, call_id in enumerate(placeholder_ids) if mask >> bit & 1)
+        key = tool_call_turn_fingerprint(items, read_placeholders=read_placeholders)
+        if key and key not in keys:
+            keys.append(key)
+    return keys
 
 
 def trailing_assistant_turn(messages: list[dict]) -> list[dict]:

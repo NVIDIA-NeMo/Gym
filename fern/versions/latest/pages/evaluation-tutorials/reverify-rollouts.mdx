@@ -33,11 +33,27 @@ You need the two artifact files that `gym eval run` writes alongside the main ro
 Both files are required. `rollouts.jsonl` alone is not sufficient because many resources servers drop verifier-specific fields from the verify response; those fields are preserved in `*_materialized_inputs.jsonl`.
 
 <Note>
-Ordinary re-scoring supports fresh manifest-backed runs when their files contain no superseded attempts. Write the
-new scores to a separate output. If a saved answer was superseded by a newer attempt, first export the selected
-results using `gym eval aggregate`. Judge-only recovery also supports selected saved answers from manifest-backed
-runs into a separate output. Recovery from superseded histories and appending reverified results back into managed
-runs remain follow-ups; see [evaluation resume](/main/evaluation/resume).
+Ordinary re-scoring reads the currently selected completed answers from a manifest-backed run, including after
+retries or judge-only recovery. Older successes superseded by a later failure or interrupted attempt are excluded.
+Write the new scores to a separate output; the source run and its recovery state remain unchanged. Separate outputs
+record `_ng_reverification_source_run_id` as source provenance, without claiming ownership of the source history,
+and support `--resume` after partial re-scoring. No policy inference is repeated.
+
+Resume checks that every cached score and failure still belongs to the same source run, selected attempt, and
+saved answer. If an answer was replaced or is no longer selected, choose a fresh output; the existing output is
+preserved. Outputs from older versions without these answer bindings also require a fresh output for managed-source
+re-scoring. A source grade changing on the same attempt and answer does not invalidate its cached re-score.
+`--limit` reads selected answers on demand instead of loading all selected trajectories.
+
+For managed-source re-scoring, a completed verifier reply must include a response object and a finite numeric
+reward. A malformed completed reply stops the pass before that reply is saved; scores already written remain
+saved. Correct the verifier and use `--resume` to retry unfinished rows. Resuming without correcting it can fail
+again on the same row. HTTP and connection errors also stop the pass. Replies explicitly marked as failures
+continue through the existing failure-output handling.
+
+Managed judge-only recovery uses `--judge-failed-only --settle-into-source`, as described in
+[evaluation resume](/main/evaluation/resume). It keeps the original attempt identity and admits each re-judgment
+against the saved failure budget before dispatch. Ordinary re-scoring does not settle results into the source run.
 
 For manifest- or journal-backed sources, the output and its supporting files cannot overwrite the source run's
 manifest, saved inputs, results, failures or other recovery files, including when `--rollouts` names the run's
@@ -208,12 +224,10 @@ gym eval reverify \
 ## Recover judge failures from legacy runs
 
 <Note>
-The `--judge-failed-only` and in-place `--append` examples in this section apply only to legacy runs without a recovery
-manifest. A manifest-backed source also supports this command into a **separate output** when all saved
-outcomes remain selected by its history. The original run and its recovery state are unchanged.
-In-place recovery and sources containing superseded outcomes remain deferred to
-[the judge-only recovery follow-up](https://github.com/NVIDIA-NeMo/Gym/pull/3879).
-Ordinary re-scoring has the same selected-source requirement.
+The `--append` examples in this section apply only to runs without a recovery manifest. For a manifest-backed
+run, use `--judge-failed-only --settle-into-source` to settle selected saved judge failures into their original run.
+The command uses a separate output for its working results and retains the original attempt identity.
+Ordinary re-scoring reads selected completed answers into a separate output without changing the original run.
 </Note>
 
 When a run uses an LLM-as-judge verifier, the judge is a second model call made *after* the expensive policy inference. If that judge call fails (bad key, unreachable or rate-limited endpoint), the sample fails even though the policy `response` is already computed and stored in `<rollouts>_failures.jsonl`. `--judge-failed-only` re-runs the judge on **only** those rollouts, reusing the stored responses — no inference — and merges the recovered rows back with the ones that already scored, so the metrics match a clean run.

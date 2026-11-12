@@ -61,7 +61,7 @@ gym eval run \
   --concurrency 32
 ```
 
-Defaults: temperature 1.0, top-p 0.95, 16,384 generated tokens (reasoning plus
+Defaults: temperature 1.0, top-p 0.95, 32,768 generated tokens (reasoning plus
 final response; excludes input). Override tensor parallelism and context length
 through `policy_model.responses_api_models.genrm_model.vllm_serve_kwargs`.
 The model config defaults to eight GPUs. JudgeBench requires both candidate orders;
@@ -71,6 +71,9 @@ incomplete pairs count as incorrect and are reported separately.
 
 `response_tokens` and `reasoning_tokens` use tiktoken's `gpt-4o` encoding.
 Gym aggregates these counts and includes medians in key metrics.
+Key metrics also include `max_token_reached_rate`: the fraction of judgments with
+`incomplete_details.reason=max_output_tokens`, including any with a parseable verdict.
+This reports output-budget exhaustion, not all invalid judgments, and does not change scoring.
 The encoding is loaded at server startup; offline runs require a populated tiktoken cache.
 Recompute metrics from saved outputs on CPU:
 

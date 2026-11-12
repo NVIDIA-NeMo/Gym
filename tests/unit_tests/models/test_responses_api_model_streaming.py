@@ -35,6 +35,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.responses_api_types import (
+    SSE_KEEPALIVE,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
@@ -49,7 +50,7 @@ from nemo_gym.models.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
     SimpleResponsesAPIModel,
 )
-from nemo_gym.models.chat_completions_converter import ResponsesConverter
+from nemo_gym.models.chat_completions_converter import ChatCompletionsConverter
 from nemo_gym.models.model_call_capture import CaptureStore
 from nemo_gym.models.responses_streaming import (
     flatten_namespace_tools,
@@ -180,6 +181,20 @@ ITEM_FIXTURES: dict[str, dict] = {
         "container_id": "cntr_1",
         "outputs": None,
     },
+    "program": {
+        "type": "program",
+        "id": "program_1",
+        "call_id": "program_call_1",
+        "code": "return 1;",
+        "fingerprint": "opaque-synthetic-fingerprint",
+    },
+    "program_output": {
+        "type": "program_output",
+        "id": "program_output_1",
+        "call_id": "program_call_1",
+        "result": "1",
+        "status": "completed",
+    },
     "mcp_call": {
         "type": "mcp_call",
         "id": "mcp_1",
@@ -287,12 +302,14 @@ ITEM_FIXTURES: dict[str, dict] = {
 
 
 # These Responses item types have no Chat Completions representation.
-# ``ResponsesConverter.responses_to_chat_completion_create_params`` raises ``NotImplementedError`` for them.
+# ``ChatCompletionsConverter.responses_to_chat_completion_create_params`` raises ``NotImplementedError`` for them.
 #
 # ``openai_model`` passes Responses requests through without conversion.
 # ``vllm_model`` and ``inference_provider`` convert requests to Chat Completions.
 CHAT_INCONVERTIBLE_TYPES = frozenset(
     {
+        "program",
+        "program_output",
         "code_interpreter_call",
         "computer_call",
         "custom_tool_call",
@@ -368,9 +385,9 @@ class TestSanitizeStreamingBody:
         assert actual["id"].startswith("msg_") if missing_id else actual["id"] == "msg_original"
         assert body == original
         params = validate_streaming_responses_params(cleaned)
-        converted = ResponsesConverter(return_token_id_information=False).responses_to_chat_completion_create_params(
-            params
-        )
+        converted = ChatCompletionsConverter(
+            return_token_id_information=False
+        ).responses_to_chat_completion_create_params(params)
         assert converted.messages == [
             {"role": "user", "content": "before"},
             {"role": "assistant", "content": text},
@@ -391,7 +408,9 @@ class TestSanitizeStreamingBody:
         assert actual == message
         # Chat cannot express phase; preserving it must keep that explicit error.
         with pytest.raises(NotImplementedError, match="phase has no Chat Completions representation"):
-            ResponsesConverter(return_token_id_information=False).responses_to_chat_completion_create_params(params)
+            ChatCompletionsConverter(return_token_id_information=False).responses_to_chat_completion_create_params(
+                params
+            )
 
     @pytest.mark.parametrize("provided_id", [None, "rs_original"])
     def test_codex_reasoning_replay_survives_validation_and_chat_conversion(self, provided_id) -> None:
@@ -414,9 +433,9 @@ class TestSanitizeStreamingBody:
         params = validate_streaming_responses_params(cleaned)
         assert params.input[1].id == provided_id
         assert params.input[1].summary[0].text == summary
-        converted = ResponsesConverter(return_token_id_information=False).responses_to_chat_completion_create_params(
-            params
-        )
+        converted = ChatCompletionsConverter(
+            return_token_id_information=False
+        ).responses_to_chat_completion_create_params(params)
         assert [message["role"] for message in converted.messages] == ["user", "assistant", "tool"]
         assert converted.messages[1]["content"] == f"<think>{summary}</think>"
         assert converted.messages[1]["tool_calls"][0]["id"] == call["call_id"]
@@ -744,6 +763,35 @@ class TestSynthesizeSSE:
         assert len(completed["output"]) == 1
 
     @pytest.mark.parametrize(
+        "cache_write", [{}, {"cache_write_tokens": None}, {"cache_write_tokens": 0}, {"cache_write_tokens": 7}]
+    )
+    @pytest.mark.parametrize("status", ["completed", "incomplete", "failed"])
+    def test_cache_write_usage_omits_only_unknown_on_created_and_terminal_wire(self, cache_write, status) -> None:
+        reasoning = {**ITEM_FIXTURES["reasoning"], "encrypted_content": "opaque-synthetic-ciphertext"}
+        response = _build_response([reasoning]).model_dump(mode="json")
+        response["status"] = status
+        response["usage"]["input_tokens_details"] = {"cached_tokens": None, **cache_write}
+        response["usage"]["output_tokens_details"]["reasoning_tokens"] = None
+        original = json.loads(json.dumps(response))
+        expected_usage = json.loads(json.dumps(response["usage"]))
+        expected_usage["input_tokens_details"]["cached_tokens"] = 0
+        expected_usage["output_tokens_details"]["reasoning_tokens"] = 0
+        if expected_usage["input_tokens_details"].get("cache_write_tokens") is None:
+            expected_usage["input_tokens_details"].pop("cache_write_tokens", None)
+
+        events = self._events("".join(synthesize_responses_sse(response)))
+
+        assert events[0]["type"] == "response.created"
+        assert events[-1]["type"] == f"response.{status}"
+        assert events[0]["response"]["usage"] == expected_usage
+        assert events[-1]["response"]["usage"] == expected_usage
+        assert events[1]["item"] == original["output"][0]
+        assert events[-1]["response"]["output"] == original["output"]
+        assert response == original
+        assert response["usage"]["input_tokens_details"]["cached_tokens"] is None
+        assert response["usage"]["output_tokens_details"]["reasoning_tokens"] is None
+
+    @pytest.mark.parametrize(
         "status,details,error",
         [
             ("incomplete", {"reason": "max_output_tokens"}, None),
@@ -765,7 +813,9 @@ class TestSynthesizeSSE:
         ]
         assert events[1]["item"] == response["output"][0]
         assert events[2]["item"]["status"] == "incomplete"
-        assert events[-1]["response"] == response
+        expected = json.loads(json.dumps(response))
+        expected["usage"]["input_tokens_details"].pop("cache_write_tokens", None)
+        assert events[-1]["response"] == expected
         assert response == original
 
     @pytest.mark.parametrize(
@@ -1189,7 +1239,10 @@ class TestResponsesDispatchRoute:
         events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
         assert events[-1]["response"]["usage"]["input_tokens_details"] == {"cached_tokens": 0}
         [exchange] = CaptureStore(tmp_path).read("r-0")
-        assert exchange["response"]["usage"]["input_tokens_details"] == {"cached_tokens": None}
+        assert exchange["response"]["usage"]["input_tokens_details"] == {
+            "cached_tokens": None,
+            "cache_write_tokens": None,
+        }
         assert exchange["response"]["usage"]["output_tokens_details"] == {"reasoning_tokens": None}
 
     def test_non_streaming_request_returns_plain_json(self) -> None:
@@ -1312,6 +1365,12 @@ class _SlowFailingModel(_EchoModel):
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         await asyncio.sleep(_SLOW_CALL_S)
         raise RuntimeError("backend exploded late")
+
+
+class _SlowHTTPExceptionModel(_EchoModel):
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        await asyncio.sleep(_SLOW_CALL_S)
+        raise HTTPException(status_code=429, detail="rate limited")
 
 
 def _upstream_error(status: int, message: str, body: bytes) -> ClientResponseError:
@@ -1474,7 +1533,10 @@ class TestResponsesStreamKeepalive:
         assert events[1]["type"] == "response.in_progress", "keepalives opened the stream"
         assert events[-1]["response"]["usage"]["input_tokens_details"] == {"cached_tokens": 0}
         [exchange] = CaptureStore(tmp_path).read("r-0")
-        assert exchange["response"]["usage"]["input_tokens_details"] == {"cached_tokens": None}
+        assert exchange["response"]["usage"]["input_tokens_details"] == {
+            "cached_tokens": None,
+            "cache_write_tokens": None,
+        }
         assert exchange["response"]["usage"]["output_tokens_details"] == {"reasoning_tokens": None}
 
     def test_fast_call_keeps_the_buffered_stream(self) -> None:
@@ -1547,6 +1609,138 @@ class TestResponsesStreamKeepalive:
             resp = client.post("/v1/responses", json=self.STREAM_BODY)
         assert resp.status_code == 429
         assert resp.content == error.response_content
+
+    @pytest.mark.parametrize(
+        ("path", "backend", "body"),
+        [
+            ("/v1/responses", "responses", STREAM_BODY),
+            ("/v1/chat/completions", "chat_completions", {"stream": True, "messages": []}),
+        ],
+    )
+    @pytest.mark.parametrize("phase", ["first_interval", "before_first_chunk", "after_keepalive"])
+    @pytest.mark.parametrize("spec_version", ["2.0", "2.4"])
+    async def test_disconnect_waits_for_backend_cleanup(
+        self, monkeypatch, path, backend, body, phase, spec_version
+    ) -> None:
+        keepalive_s = 30.0 if phase == "first_interval" else _KEEPALIVE_S
+        monkeypatch.setattr("nemo_gym.models.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", keepalive_s)
+        client, server = _keepalive_client(_EchoModel, keepalive_s=keepalive_s)
+        server.setup_cancellation_middleware(client.app)
+        started, cleanup_started = asyncio.Event(), asyncio.Event()
+        cleanup_release, cleanup_complete = asyncio.Event(), asyncio.Event()
+        backend_tasks: list[asyncio.Task] = []
+
+        async def blocked(*args, **kwargs):
+            task = asyncio.current_task()
+            assert task is not None
+            backend_tasks.append(task)
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleanup_started.set()
+                await cleanup_release.wait()
+                cleanup_complete.set()
+
+        # The model's external backend is held; invocation, streaming and disconnect handling stay real.
+        monkeypatch.setattr(_EchoModel, backend, blocked)
+        incoming: asyncio.Queue[dict] = asyncio.Queue()
+        await incoming.put({"type": "http.request", "body": json.dumps(body).encode(), "more_body": False})
+        phase_reached = asyncio.Event()
+
+        async def send(message: dict) -> None:
+            if phase == "before_first_chunk" and message["type"] == "http.response.start":
+                phase_reached.set()
+                await asyncio.Event().wait()
+            elif phase == "after_keepalive" and message["type"] == "http.response.body":
+                chunk = message.get("body", b"")
+                if chunk == SSE_KEEPALIVE or b"event: response.in_progress\n" in chunk:
+                    phase_reached.set()
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": spec_version},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": path,
+            "raw_path": path.encode(),
+            "query_string": b"",
+            "root_path": "",
+            "headers": [(b"content-type", b"application/json")],
+            "client": ("127.0.0.1", 50000),
+            "server": ("testserver", 80),
+        }
+
+        async def request() -> tuple[bool, bool, bool]:
+            await client.app(scope, incoming.get, send)
+            task = backend_tasks[0]
+            return cleanup_complete.is_set(), task.done(), task.cancelled()
+
+        call = asyncio.create_task(request())
+        try:
+            await asyncio.wait_for(started.wait(), 5)
+            if phase != "first_interval":
+                await asyncio.wait_for(phase_reached.wait(), 5)
+            await incoming.put({"type": "http.disconnect"})
+            await asyncio.wait_for(cleanup_started.wait(), 5)
+            assert not call.done(), "the request must wait for the backend's asynchronous cleanup"
+            cleanup_release.set()
+            assert await asyncio.wait_for(call, 5) == (True, True, True)
+        finally:
+            cleanup_release.set()
+            if not call.done():
+                call.cancel()
+            for task in backend_tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(call, *backend_tasks, return_exceptions=True)
+
+    @staticmethod
+    def _blocked_backend(monkeypatch) -> tuple[asyncio.Event, asyncio.Event]:
+        started, cancelled = asyncio.Event(), asyncio.Event()
+
+        async def blocked(*args, **kwargs):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        monkeypatch.setattr(_EchoModel, "_invoke_responses", blocked)
+        return started, cancelled
+
+    async def test_cancel_during_the_first_interval_cancels_the_backend(self, monkeypatch) -> None:
+        _, server = _keepalive_client(_EchoModel, keepalive_s=30.0)
+        started, cancelled = self._blocked_backend(monkeypatch)
+        dispatch = asyncio.create_task(server.responses_dispatch(MagicMock(), dict(self.STREAM_BODY)))
+        await asyncio.wait_for(started.wait(), 5)
+        dispatch.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await dispatch
+        assert cancelled.is_set()
+
+    async def test_closing_the_stream_after_keepalives_cancels_the_backend(self, monkeypatch) -> None:
+        _, server = _keepalive_client(_EchoModel)
+        started, cancelled = self._blocked_backend(monkeypatch)
+        response = await server.responses_dispatch(MagicMock(), dict(self.STREAM_BODY))
+        assert "response.created" in await anext(response.body_iterator)
+        assert started.is_set()
+        await response.body_iterator.aclose()
+        assert cancelled.is_set()
+
+    def test_http_exception_after_keepalives_ends_with_response_failed(self) -> None:
+        client, _ = _keepalive_client(_SlowHTTPExceptionModel)
+        resp = client.post("/v1/responses", json=self.STREAM_BODY)
+
+        assert resp.status_code == 200
+        events = _sse_payloads(resp.text)
+        assert [event["type"] for event in events[:2]] == ["response.created", "response.in_progress"]
+        assert [event["type"] for event in events].count("response.failed") == 1
+        failed = events[-1]
+        assert failed["type"] == "response.failed"
+        assert failed["response"]["error"] == {"code": "server_error", "message": "HTTP 429: rate limited"}
+        assert {event["response"]["id"] for event in events} == {events[0]["response"]["id"]}
 
 
 class TestUnionItemTypesThroughDispatch:
@@ -1661,7 +1855,7 @@ class TestUnionItemTypesThroughDispatch:
         The converter supports a subset of those item types.
         Unsupported types raise ``NotImplementedError`` during conversion.
         """
-        converter = ResponsesConverter(return_token_id_information=False)
+        converter = ChatCompletionsConverter(return_token_id_information=False)
         params = NeMoGymResponseCreateParamsNonStreaming(input=[ITEM_FIXTURES[tag]])
         try:
             converter.responses_to_chat_completion_create_params(params)

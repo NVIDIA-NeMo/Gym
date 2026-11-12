@@ -1,0 +1,126 @@
+---
+title: "Design How Agents Interact with Environments"
+description: "Choose the Environment Server that orders each episode: how a task is set up, how the agent is driven, and how the attempt is scored."
+position: 1
+---
+
+An *episode* is one attempt at one task. Rollout collection sends every episode to an Environment Server, which
+decides what happens in it and in what order. Choosing an Environment Server chooses the shape of the interaction:
+one agent turn scored by a verifier, a conversation with a simulated user, or an agent working in a task's own
+container.
+
+## What an Environment Server does
+
+An Environment Server receives each episode on its `/run` endpoint and returns its result, or a failure that says
+whether a retry can help. A server that drives the episode runs it in this order:
+
+1. **Seed.** Set up the task's state, such as a Resources Server session or a sandbox, and open an agent session
+   with the tool and sandbox access the agent needs.
+2. **Activate.** Send the task to the agent session. The agent calls the model and uses its tools until it is done.
+   Some servers activate the agent once per turn. `harbor` opens an agent session per step or, with
+   `turn_sessions: continue`, keeps one and verifies every step but the last before closing it.
+3. **Close.** Close the agent session and keep what the agent observed. A sandbox the agent borrowed stays with
+   its owner.
+4. **Verify.** Score the attempt and return a reward.
+5. **Clean up.** Release the episode's sessions and sandboxes, even after a failure.
+
+It holds no tools or agent logic, and calls the servers that do:
+
+| Server | Its part in an episode |
+| --- | --- |
+| Agent Server | Runs the harness, which calls the model and routes tool calls. |
+| Resources Server | Holds environment tools, per-task state and the verifier for tasks defined as JSONL rows. |
+| Model Server | Serves the model the harness calls. |
+
+When the Environment Server drives agent sessions, it orders the calls. The agent never decides when to verify, and
+you can swap the agent behind a benchmark through configuration alone. [Architecture](/main/about/architecture)
+shows one episode as a sequence diagram.
+
+Rollout collection routes each row to its Environment Server for you, and `gym eval run` writes the route for task
+folders. The routing settings are fields of `SharedRolloutCollectionConfig` in `nemo_gym/rollouts/rollout_collection.py`.
+
+### Episode limits
+
+Every Environment Server built on `BaseEnvironmentServer` takes the same limits in its configuration block:
+
+| Key | What it does |
+| --- | --- |
+| `max_concurrent_episodes` | Caps the episodes each server worker runs at once, so the server runs up to `num_workers` times this. Requires `queue_timeout_seconds`. |
+| `queue_timeout_seconds` | How long an episode may wait for a slot before it fails as retryable. |
+| `default_episode_timeout_seconds` | Wall-clock bound on one episode, not counting the wait for a slot or the final cleanup. |
+| `cleanup_timeout_seconds` | Bound on each cleanup step. |
+
+The fields are defined in `nemo_gym/server_runtime/base_environment_server.py`. Each server's shipped settings are in
+`environment_servers/<name>/configs/`, and its config class in `environment_servers/<name>/app.py` holds the defaults
+those settings override.
+
+`legacy_agent` takes these keys but applies none of them; the agent keeps its own limits.
+
+## Choose an Environment Server
+
+Start from how your tasks are defined (see [Two kinds of task formats](/main/data#two-kinds-of-task-formats)), then
+pick the interaction you want.
+
+| Environment Server | What it does | Use it when |
+| --- | --- | --- |
+| `single_agent_turn` | Gives your agent one turn at a task, then has your Resources Server score the result. | Your tasks are JSONL rows with a Resources Server, and your agent supports agent sessions (see [Integrate Existing Agents](/main/agent-server/integrate-existing-agents)). |
+| `nemo_user_sim` | Runs a multi-turn conversation between your assistant and a simulated user, then scores the conversation. | You want to test an assistant across a conversation, using NeMo User Sim scenarios. It uses its own Resources Server for scoring. See [Run Multi-Turn User Simulation with NeMo User Sim](/main/tutorials/evaluation-tutorials/nemo-user-sim-rollout-collection). |
+| `harbor` | Starts each task folder's own container, lets your agent work in it, then runs the task's tests to score the attempt. | Your tasks are task folders. See [Harbor Environment Server](/main/agent-interactions/harbor). |
+
+You may also see two other Environment Servers in shipped configurations. You don't need to choose either for new
+work. `legacy_agent` runs agents that don't support agent sessions: the agent runs the whole episode itself. Gym adds
+one, with a deprecation warning, for any agent that no Environment Server names. `single_agent_turn_legacy` runs a
+`single_agent_turn` episode for datasets still collected as flat rows.
+
+Some benchmarks ship their own Environment Server under `environment_servers/<name>/`, such as `swe_together`. The
+benchmark's configuration sets it and its README documents it.
+
+Each Environment Server is a block in your configuration that binds an agent, and for `single_agent_turn` a
+Resources Server, by name. For a complete working configuration, see
+[Configure an experiment](/main/agent-server/integrate-existing-agents#configure-an-experiment). Each server's
+settings are fields of its config class in `environment_servers/<name>/app.py`.
+
+## Write your own Environment Server
+
+Write your own when no shipped server orders the episode the way your task needs, such as several agents that take
+turns. `nemo_user_sim` and `swe_together` are worked examples.
+
+A custom server subclasses `BaseEnvironmentServer` from `nemo_gym/server_runtime/base_environment_server.py` (import
+it from `nemo_gym.server_runtime`) and implements two methods:
+
+- `run()` runs one episode. It receives the episode request and a cleanup context. Register every session or
+  sandbox you open with the context's `register_cleanup()`; the callbacks run in reverse order after the episode,
+  also when it fails, times out or is cancelled. Raise `HandledEpisodeError` with an `EpisodeFailure` to return a
+  failure that is terminal or retryable. Any other exception is terminal, except a timeout at the episode deadline,
+  which is retryable.
+- `aggregate_metrics()` turns the episode results into task-level metrics.
+
+It also sets the `request_model` and `response_model` class attributes to subclasses of `BaseEpisodeRequest` and
+`BaseEpisodeResponse`, which define the `/run` schema; the server does not start without them. Declare the server's
+own settings on a subclass of `BaseEnvironmentServerConfig`, which refuses unknown keys.
+
+The base class applies the episode limits above, so `run()` only orders the calls. The agents it drives must
+implement agent sessions; see [Agent Server and Environment Server](/main/agent-server/add-or-update-a-harness#agent-server-and-environment-server)
+for the three endpoints and [Configure Agents](/main/agent-server) for the agent side.
+
+## Next steps
+
+<Cards>
+
+<Card title="Harbor Environment Server" href="/main/agent-interactions/harbor">
+Run task folders: one sandbox per episode, scored by the task's own verifier.
+</Card>
+
+<Card title="Author Task Folders" href="/main/data/task-folders/harbor-tasks">
+Write each task as a folder with its instruction, environment and verifier.
+</Card>
+
+<Card title="Run Multi-Turn User Simulation" href="/main/tutorials/evaluation-tutorials/nemo-user-sim-rollout-collection">
+Evaluate an assistant in conversations with a simulated user.
+</Card>
+
+<Card title="Architecture" href="/main/about/architecture">
+See how the servers call each other in one episode.
+</Card>
+
+</Cards>

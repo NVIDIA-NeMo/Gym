@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 import benchmarks.skillsbench.prepare as prepare_module
-from benchmarks.skillsbench.prepare import _adapt_task
+from benchmarks.skillsbench.prepare import adapt_task
 
 
 def test_adapt_task_preserves_prompt_and_sandbox_policy(tmp_path: Path) -> None:
@@ -38,7 +38,7 @@ Solve the task without changing this prompt.
     (source / "oracle" / "solve.sh").write_text("echo solved\n")
 
     with_skill = tmp_path / "with-skill"
-    _adapt_task(source, with_skill, "with-skill", "registry.example/skillsbench/example:abc123")
+    adapt_task(source, with_skill, "with-skill", "registry.example/skillsbench/example:abc123")
     converted = tomllib.loads((with_skill / "task.toml").read_text())
     assert (with_skill / "instruction.md").read_text() == "Solve the task without changing this prompt.\n"
     assert converted["agent"]["timeout_sec"] == 120
@@ -53,7 +53,7 @@ Solve the task without changing this prompt.
     assert "ln -s /solution /oracle" in (with_skill / "solution" / "solve.sh").read_text()
 
     no_skill = tmp_path / "no-skill"
-    _adapt_task(source, no_skill, "no-skill")
+    adapt_task(source, no_skill, "no-skill")
     # Preserve task setup; no-skill removes baked-in skills at agent setup.
     assert (no_skill / "environment" / "Dockerfile").read_text() == dockerfile
 
@@ -62,7 +62,7 @@ Solve the task without changing this prompt.
     task_definition = (source / "task.md").read_text().replace("sandbox:", "environment:")
     (source / "task.md").write_text(task_definition)
     pinned = tmp_path / "pinned-revision"
-    _adapt_task(source, pinned, "no-skill", "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:abc")
+    adapt_task(source, pinned, "no-skill", "ghcr.io/benchflow-ai/skillsbench-task-env@sha256:abc")
     pinned_toml = tomllib.loads((pinned / "task.toml").read_text())
     assert pinned_toml["environment"]["memory_mb"] == 2048
     assert pinned_toml["environment"]["docker_image"].endswith("@sha256:abc")

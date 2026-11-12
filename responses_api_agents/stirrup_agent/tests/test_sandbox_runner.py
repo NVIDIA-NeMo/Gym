@@ -17,6 +17,7 @@ import pytest
 import stirrup.core.agent as stirrup_agent
 from stirrup.clients.utils import to_openai_tools
 
+from responses_api_agents.stirrup_agent import nemo_agent as runner_agent
 from responses_api_agents.stirrup_agent import sandbox_runner
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoAgent
 from responses_api_agents.stirrup_agent.sandbox import HARNESS_FILES
@@ -241,29 +242,35 @@ def test_a_request_the_model_server_rejects_ends_the_run_as_failed_with_the_turn
     assert [u["total_tokens"] for u in output["usages"]] == [15]
 
 
-@pytest.mark.parametrize("completed_turn", [False, True])
-def test_unrecoverable_context_overflow_is_a_model_rejection_with_partial_history(tmp_path, resources, completed_turn):
-    answers = [_call("code_exec", json.dumps({"cmd": "true"}))] if completed_turn else []
-    model = _ModelServer([*answers, 400], error_code="context_length_exceeded")
+def test_a_run_whose_compaction_summaries_are_unusable_ends_as_failed_with_the_turns_so_far(
+    tmp_path, resources, monkeypatch
+):
+    init = runner_agent.NeMoAgent.__init__
+
+    def compact_after_every_turn(self, *args, **kwargs):
+        init(self, *args, **kwargs)
+        self._context_summarization_cutoff = 0.0
+
+    async def unusable_summary(self, messages, metadata):
+        raise runner_agent.CompactionSummaryError("no usable text after 3 attempts", messages)
+
+    monkeypatch.setattr(runner_agent.NeMoAgent, "__init__", compact_after_every_turn)
+    monkeypatch.setattr(runner_agent.NeMoAgent, "summarize_messages", unusable_summary)
+    workdir = tmp_path / "root"
+    workdir.mkdir()
+    model = _ModelServer([_call("code_exec", json.dumps({"cmd": "true"}))] * 3)
     try:
-        output = _run_main(tmp_path, _payload(model.base_url, resources.base_url, tmp_path))
+        output = _run_main(tmp_path, _payload(model.base_url, resources.base_url, workdir))
     finally:
         model.close()
 
     assert "error" not in output
-    assert output["stop_reason"] == "model_error"
-    assert "context" in output["model_error"].lower()
-    assert output["model_error_status"] == 400
+    assert output["stop_reason"] == "compaction_failed"
+    assert "no usable text" in output["invalid_output"]
+    assert output["model_error"] is None
     assert output["observations"]["status"] == "failed"
-    assert output["observations"]["model_response_ids"] == (["chatcmpl-1"] if completed_turn else [])
-    assert [tool["tool_name"] for tool in output["observations"]["tool_calls"]] == (
-        ["code_exec"] if completed_turn else []
-    )
-    assert [item["type"] for item in output["output_items"]] == (
-        ["function_call", "function_call_output"] if completed_turn else []
-    )
-    assert [usage["total_tokens"] for usage in output["usages"]] == ([15] if completed_turn else [])
-    assert len(model.requests) == (2 if completed_turn else 1)
+    assert output["observations"]["model_response_ids"] == ["chatcmpl-1"]
+    assert [item["type"] for item in output["output_items"]] == ["function_call", "function_call_output"]
 
 
 @pytest.mark.parametrize("earlier_compaction", [False, True])
@@ -295,8 +302,8 @@ def test_summary_exhaustion_preserves_the_just_completed_turn_and_model_observat
         model.close()
 
     assert "error" not in output
-    assert output["stop_reason"] == "compaction_summary_exhausted"
-    assert "no usable text" in output["agent_error"]
+    assert output["stop_reason"] == "compaction_failed"
+    assert "no usable text" in output["invalid_output"]
     assert output["model_error"] is None
     assert output["model_error_status"] is None
     assert output["observations"]["status"] == "failed"
@@ -311,61 +318,73 @@ def test_summary_exhaustion_preserves_the_just_completed_turn_and_model_observat
         ("code_exec", "completed")
     ] * completed_tools
     assert [usage["total_tokens"] for usage in output["usages"]] == [15] * request_count
-    assert len(output["compaction_events"]) >= 3
-    serialized_events = json.dumps(output["compaction_events"])
-    assert "unfinished reasoning" not in serialized_events
-    assert "reasoning only" not in serialized_events
     assert len(model.requests) == request_count
 
 
-def test_unrelated_summary_runtime_errors_remain_infrastructure_failures(tmp_path, resources, monkeypatch):
-    async def broken_summary(self, messages, run_metadata_by_turn):
-        raise RuntimeError("unexpected summarizer implementation error")
-
-    monkeypatch.setattr(NeMoAgent, "summarize_messages", broken_summary)
-    model = _ModelServer([_call("code_exec", json.dumps({"cmd": "true"}))])
+@pytest.mark.parametrize("status", [400, 413])
+@pytest.mark.parametrize("completed_turn", [False, True])
+def test_unrecoverable_context_overflow_is_a_model_rejection_with_partial_history(
+    tmp_path, resources, completed_turn, status
+):
+    answers = [_call("code_exec", json.dumps({"cmd": "true"}))] if completed_turn else []
+    model = _ModelServer([*answers, status], error_code="context_length_exceeded")
     payload = _payload(model.base_url, resources.base_url, tmp_path)
-    payload["client"]["max_tokens"] = 10
-    try:
-        output = _run_main(tmp_path, payload)
-    finally:
-        model.close()
-
-    assert "unexpected summarizer implementation error" in output["error"]
-    assert "Traceback" in output["traceback"]
-    assert "agent_error" not in output
-    assert output["observations"]["status"] == "failed"
-
-
-def test_successful_run_reports_compaction_events_and_preserves_archived_tool_results(tmp_path, resources):
-    model = _ModelServer(
-        [
-            _call("code_exec", json.dumps({"cmd": "true"})),
-            {"role": "assistant", "content": "The shell command completed."},
-            _call("finish", json.dumps({"reason": "done"})),
-        ]
-    )
-    payload = _payload(model.base_url, resources.base_url, tmp_path)
-    payload["client"]["max_tokens"] = 10
+    payload["client"]["context_overflow_recovery"] = True
     try:
         output = _run_main(tmp_path, payload)
     finally:
         model.close()
 
     assert "error" not in output
-    assert output["observations"]["status"] == "completed"
-    assert output["agent_error"] is None
-    assert [event["event"] for event in output["compaction_events"]] == ["summary_accepted"]
-    compactions = output["observations"]["compactions"]
-    assert len(compactions) == 1
-    assert compactions[0]["outcome"] == "completed"
-    assert compactions[0]["summary"] == "The shell command completed."
-    assert compactions[0]["model_calls"] == [{"response_id": "chatcmpl-2"}]
-    assert [item["name"] for item in output["output_items"] if item["type"] == "function_call"] == [
-        "code_exec",
-        "finish",
+    assert output["stop_reason"] == "model_error"
+    # The Model Server's own message and status, as for a rejected request without recovery.
+    assert str(status) in output["model_error"]
+    assert "context_length_exceeded" in output["model_error"]
+    assert output["model_error_status"] == status
+    assert output["observations"]["status"] == "failed"
+    assert output["observations"]["model_response_ids"] == (["chatcmpl-1"] if completed_turn else [])
+    assert [tool["tool_name"] for tool in output["observations"]["tool_calls"]] == (
+        ["code_exec"] if completed_turn else []
+    )
+    assert [item["type"] for item in output["output_items"]] == (
+        ["function_call", "function_call_output"] if completed_turn else []
+    )
+    assert [usage["total_tokens"] for usage in output["usages"]] == ([15] if completed_turn else [])
+    assert len(model.requests) == (2 if completed_turn else 1)
+
+
+def test_a_context_overflow_with_recovery_on_drops_the_latest_turn_and_the_run_continues(tmp_path, resources):
+    model = _ModelServer(
+        [
+            _call("code_exec", json.dumps({"cmd": "echo kept"})),
+            _call("code_exec", json.dumps({"cmd": "echo dropped"})),
+            400,
+            _call("finish", json.dumps({"reason": "done"})),
+        ],
+        error_code="context_length_exceeded",
+    )
+    payload = _payload(model.base_url, resources.base_url, tmp_path)
+    payload["client"]["context_overflow_recovery"] = True
+    try:
+        output = _run_main(tmp_path, payload)
+    finally:
+        model.close()
+
+    assert "error" not in output
+    assert (output["observations"]["status"], output["stop_reason"]) == ("completed", None)
+    function_calls = [item for item in output["output_items"] if item["type"] == "function_call"]
+    assert [(call["name"], json.loads(call["arguments"])) for call in function_calls] == [
+        ("code_exec", {"cmd": "echo kept"}),
+        ("finish", {"reason": "done"}),
     ]
-    assert len(model.requests) == 3
+    # The rejected request held the second turn; the request sent again does not. Its model call stays in the evidence.
+    rejected, sent_again = (json.dumps(request["messages"]) for request in model.requests[2:])
+    assert "echo dropped" in rejected and "echo dropped" not in sent_again
+    assert output["observations"]["model_response_ids"] == ["chatcmpl-1", "chatcmpl-2", "chatcmpl-4"]
+    assert [usage["total_tokens"] for usage in output["usages"]] == [15] * 3
+    # The dropped turn's command ran, so its execution stays in the observations; no output item refers to it.
+    assert [t["tool_name"] for t in output["observations"]["tool_calls"]] == ["code_exec", "code_exec", "finish"]
+    assert len(model.requests) == 4
 
 
 @pytest.mark.parametrize("status", [401, 403, 404])

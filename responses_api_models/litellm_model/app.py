@@ -39,7 +39,7 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.models import Body, VLLMConverter
+from nemo_gym.models import Body, ChatCompletionsConverter
 from nemo_gym.models.chat_completions_converter import _usage_detail
 from responses_api_models.openai_model.app import SimpleModelServer, SimpleModelServerConfig
 
@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 _SENSITIVE_HEADER_RE = re.compile(r"('(?:Authorization|x-litellm-key)': ')[^']*(')", re.IGNORECASE)
 _SENSITIVE_COOKIE_RE = re.compile(r"('(?:Set-)?Cookie': ')[^']*(')", re.IGNORECASE)
 _PROXY_CHECK_TIMEOUT_SECONDS = 5.0
-_CHAT_COMPLETION_CONVERTER = VLLMConverter(
+_CHAT_COMPLETION_CONVERTER = ChatCompletionsConverter(
     return_token_id_information=False,
     uses_reasoning_parser=False,
 )

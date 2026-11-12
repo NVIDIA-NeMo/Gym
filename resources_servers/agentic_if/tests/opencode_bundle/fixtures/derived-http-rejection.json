@@ -1,0 +1,169 @@
+{
+ "case": "derived-http-rejection",
+ "kind": "gateway",
+ "notes": "returned differs by design: the boundary plugin passes the upstream 429 through instead of raising",
+ "spec": {
+  "schema_version": 1,
+  "harness": "opencode",
+  "task_backend": "swe",
+  "tools": {
+   "tool_descriptions": {},
+   "tool_parameter_descriptions": {},
+   "tool_interfaces": {}
+  },
+  "workspace_files": {},
+  "events": [],
+  "checks": [],
+  "provenance": {}
+ },
+ "params": {
+  "input": [
+   {
+    "content": "Fix it",
+    "role": "user",
+    "type": "message"
+   }
+  ],
+  "parallel_tool_calls": true,
+  "tool_choice": "auto",
+  "tools": []
+ },
+ "calls": [
+  {
+   "headers": {
+    "x-session-id": "root",
+    "x-opencode-assistant-message-id": "a"
+   },
+   "opencode_request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ]
+   },
+   "upstream_reply": {
+    "json": {
+     "choices": [
+      {
+       "message": {
+        "role": "assistant",
+        "content": "Done"
+       }
+      }
+     ]
+    },
+    "status": 429,
+    "error_body": "{\"error\": \"rejected\"}"
+   },
+   "returned": null,
+   "error": "ClientResponseError: 429, message='', url='http://model.test/v1/chat/completions'",
+   "outgoing_request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ],
+    "tools": []
+   },
+   "opencode_request_unchanged": true
+  },
+  {
+   "headers": {
+    "x-session-id": "root",
+    "x-opencode-assistant-message-id": "a"
+   },
+   "opencode_request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ]
+   },
+   "upstream_reply": {
+    "json": {
+     "choices": [
+      {
+       "message": {
+        "role": "assistant",
+        "content": "Done"
+       }
+      }
+     ]
+    }
+   },
+   "returned": {
+    "json": {
+     "choices": [
+      {
+       "message": {
+        "role": "assistant",
+        "content": "Done"
+       }
+      }
+     ]
+    }
+   },
+   "error": null,
+   "outgoing_request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ],
+    "tools": []
+   },
+   "opencode_request_unchanged": true
+  }
+ ],
+ "observations": [
+  {
+   "source": "model",
+   "session_id": "root",
+   "assistant_message_id": "a",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ],
+    "tools": []
+   },
+   "execution_tools": {},
+   "transport_error": {
+    "phase": "http_rejected",
+    "status": 429
+   }
+  },
+  {
+   "source": "model",
+   "session_id": "root",
+   "assistant_message_id": "a",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ],
+    "tools": []
+   },
+   "execution_tools": {},
+   "response": {
+    "choices": [
+     {
+      "message": {
+       "role": "assistant",
+       "content": "Done"
+      }
+     }
+    ]
+   }
+  }
+ ],
+ "issues": []
+}

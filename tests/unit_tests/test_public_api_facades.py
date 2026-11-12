@@ -62,7 +62,7 @@ def test_importing_a_package_loads_none_of_its_lazy_submodules(package: str) -> 
     ).format(p=package, lazy=lazy)
     loaded = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout
     # sandbox's existing eager exports import these submodules; nothing else may load.
-    eager = {"sandbox": ["compose_fields", "config", "providers.base", "utils"]}
+    eager = {"sandbox": ["adapters.docker_compose", "compose_fields", "config", "failures", "providers.base", "utils"]}
     assert loaded.strip() == repr(eager.get(package, []))
 
 

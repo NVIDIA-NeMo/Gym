@@ -298,6 +298,99 @@ def test_each_server_reports_itself_as_a_single_rank_world(enabled_console_env, 
     assert captured[NV_DL_WORLD_SIZE] == 1
 
 
+def test_each_server_names_its_own_instance(enabled_console_env, monkeypatch):
+    """The companion to the rank above: nemo-lens derives `service.instance.id` as
+    f"{run_id}-rank{rank}" when a rank is present and no identity was supplied. Rank is
+    pinned to 0 for every server and run_id is deliberately shared fleet-wide, so
+    leaving the derivation to lens gives the whole job one instance id.
+
+    The readable prefix is asserted but the suffix only has to be hex: it is a random
+    nonce, so pinning the whole string would pin a value the next run will not produce.
+    """
+    monkeypatch.setenv("NEMO_GYM_OTEL_RUN_ID", "job-1416252")
+    captured = {}
+
+    def capture(config, **kwargs):
+        captured.update(kwargs.get("resource_attributes") or {})
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr("nemo.lens.setup_telemetry", capture)
+    init_telemetry(server_name="weather")
+
+    instance_id = captured["service.instance.id"]
+    prefix = f"job-1416252-weather-{os.getpid()}-"
+    assert instance_id.startswith(prefix), instance_id
+    nonce = instance_id.removeprefix(prefix)
+    assert nonce and all(c in "0123456789abcdef" for c in nonce), instance_id
+
+
+def test_two_processes_sharing_a_run_a_name_and_a_pid_still_differ(monkeypatch):
+    """A PID is only unique within its host and its container PID namespace.
+
+    Two servers of one run can therefore agree on every readable part of the identity,
+    which is the collision the nonce exists to break. Driven through the helper rather
+    than two `init_telemetry` lifecycles because the helper is where the uniqueness
+    comes from, and the one-shot init guard makes a second lifecycle awkward to stage.
+    """
+    monkeypatch.setattr(os, "getpid", lambda: 42)
+
+    first = telemetry_setup._service_instance_id("job-1", "weather")
+    second = telemetry_setup._service_instance_id("job-1", "weather")
+
+    assert first != second, "two processes would report the same instance id"
+    assert first.startswith("job-1-weather-42-") and second.startswith("job-1-weather-42-")
+
+
+def test_an_instance_id_stays_nonempty_without_a_run_or_a_name(monkeypatch):
+    """Absent parts are dropped, so a standalone server must not get a leading `--`."""
+    monkeypatch.setattr(os, "getpid", lambda: 42)
+
+    assert telemetry_setup._service_instance_id("", None).startswith("42-")
+
+
+def test_an_instance_id_from_the_caller_wins(enabled_console_env, monkeypatch):
+    """Only the `resource_attributes` argument keeps a caller's own identity.
+
+    nemo-lens ranks caller attributes above environment ones and Gym now always passes
+    an id, so a `service.instance.id` in `OTEL_RESOURCE_ATTRIBUTES` is replaced rather
+    than kept -- see `test_an_environment_instance_id_is_replaced` below.
+    """
+    captured = {}
+
+    def capture(config, **kwargs):
+        captured.update(kwargs.get("resource_attributes") or {})
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr("nemo.lens.setup_telemetry", capture)
+    init_telemetry(
+        server_name="weather",
+        resource_attributes={"service.instance.id": "chosen-by-the-caller"},
+    )
+
+    assert captured["service.instance.id"] == "chosen-by-the-caller"
+
+
+def test_an_environment_instance_id_is_replaced(enabled_console_env, monkeypatch):
+    """Gym's servers are spawned into one shared environment.
+
+    An inherited `OTEL_RESOURCE_ATTRIBUTES` id would therefore name every one of them
+    identically, which is the collision this whole helper exists to break, so Gym passes
+    its own and lets lens rank it above the environment.
+    """
+    monkeypatch.setenv("OTEL_RESOURCE_ATTRIBUTES", "service.instance.id=chosen-by-launcher")
+    monkeypatch.setenv("NEMO_GYM_OTEL_RUN_ID", "job-1")
+    captured = {}
+
+    def capture(config, **kwargs):
+        captured.update(kwargs.get("resource_attributes") or {})
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr("nemo.lens.setup_telemetry", capture)
+    init_telemetry(server_name="weather")
+
+    assert captured["service.instance.id"].startswith(f"job-1-weather-{os.getpid()}-")
+
+
 # --------------------------------------------------------------------------- #
 # Another library already initialised nemo-lens in this process (NeMo-RL)
 # --------------------------------------------------------------------------- #

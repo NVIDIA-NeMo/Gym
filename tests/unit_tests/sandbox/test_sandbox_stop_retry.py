@@ -51,8 +51,12 @@ async def test_opensandbox_kill_failure_does_not_close_sdk_before_retry():
     raw = SimpleNamespace(kill=AsyncMock(side_effect=[RuntimeError("kill failed"), None]), close=AsyncMock())
     provider = OpenSandboxProvider(operations={"retries": 0}, probe={"command": None})
     handle = SandboxHandle(sandbox_id="test", provider_name="opensandbox", raw=raw)
-    with pytest.raises(RuntimeError, match="kill failed"):
+    from nemo_gym.core.typed_exceptions import NgFailureEvent
+
+    with pytest.raises(NgFailureEvent) as caught:
         await provider.close(handle)
+    assert caught.value.failure_kind == "provider_request_failed"
+    assert str(caught.value.__cause__) == "kill failed"
     raw.close.assert_not_awaited()
     await provider.close(handle)
     assert raw.kill.await_count == 2

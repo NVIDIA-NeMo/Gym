@@ -5,9 +5,11 @@
 import asyncio
 import json
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from nemo_gym.agents import (
     HARNESS_RUNNER_FILE,
@@ -16,8 +18,8 @@ from nemo_gym.agents import (
     SandboxSession,
     shell_assignments,
 )
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.sandbox import read_text, upload_text
+from nemo_gym.core import MediaFile, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.sandbox import read_text, stage_media, upload_text
 from nemo_gym.trajectory import AgentObservationBundle
 
 
@@ -52,10 +54,6 @@ class PiSandboxSession(AgentSessionState):
     observations: AgentObservationBundle | None = None
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
 
-    async def upload_json(self, name: str, payload: JsonValue) -> None:
-        """Stage adapter input using the shared text-transfer utility."""
-        await upload_text(self.session.sandbox, path=f"{self.session.session_dir}/{name}", text=json.dumps(payload))
-
     async def read_text(self, name: str) -> str:
         """Read adapter output using file transfer."""
         return await read_text(self.session.sandbox, path=f"{self.session.session_dir}/{name}")
@@ -77,19 +75,54 @@ class PiSandboxSession(AgentSessionState):
                 # The agent base replays the activation error independently of close.
 
     async def execute(
-        self, *, command: list[str], env: dict[str, str], prompt: str, timeout: float, close_timeout: float
+        self,
+        *,
+        command: list[str],
+        env: dict[str, str],
+        prompt: str,
+        media: Sequence[MediaFile] = (),
+        timeout: float,
+        close_timeout: float,
+        files: dict[str, str | Path] | None = None,
+        deadline: float | None = None,
     ) -> str:
-        """Run through the common lifecycle; the adapter validates terminal events."""
+        """Run through the common lifecycle; the adapter validates terminal events.
+
+        ``files`` and ``media`` are staged with the invocation; see ``stage_activation``.
+        """
         return await self.session.execute(
-            stage_activation=lambda: self.stage_activation(command=command, env=env, prompt=prompt),
+            stage_activation=lambda: self.stage_activation(
+                command=command, env=env, prompt=prompt, media=media, files=files
+            ),
             collect=self.collect_artifacts,
             timeout=timeout,
             close_timeout=close_timeout,
+            deadline=deadline,
         )
 
-    async def stage_activation(self, *, command: list[str], env: dict[str, str], prompt: str) -> SandboxCommand:
-        """Stage the invocation and return the Pi worker command."""
+    async def stage_activation(
+        self,
+        *,
+        command: list[str],
+        env: dict[str, str],
+        prompt: str,
+        media: Sequence[MediaFile] = (),
+        files: dict[str, str | Path] | None = None,
+    ) -> SandboxCommand:
+        """Stage the invocation and return the Pi worker command.
+
+        ``files`` maps paths under the session directory to text or to a local source file, and ``media`` are prompt
+        images. Both are uploaded here, inside the session's execute, so that close cancels and waits for the uploads
+        before it releases the sandbox, and the activation deadline bounds them.
+        """
         directory = self.session.session_dir
+        for name, content in (files or {}).items():
+            if isinstance(content, Path):
+                await self.session.sandbox.upload(content, f"{directory}/{name}")
+            else:
+                await upload_text(self.session.sandbox, path=f"{directory}/{name}", text=content)
+        if media:
+            await stage_media(self.session.sandbox, media)
         await upload_text(self.session.sandbox, path=f"{directory}/prompt.txt", text=prompt)
         params = {
             "cwd": self.session.workdir,

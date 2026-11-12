@@ -244,7 +244,7 @@ def test_documented_cli_uses_imported_dataset_and_private_overrides(
     collected = AsyncMock()
     prepared = []
     if command == "prepare":
-        monkeypatch.setattr(cli_eval, "_prepare_datasets", lambda datasets, _: prepared.extend(datasets))
+        monkeypatch.setattr(cli_eval, "prepare_datasets", lambda datasets, _: prepared.extend(datasets))
     elif command == "run":
         argv.extend(
             [

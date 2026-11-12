@@ -497,7 +497,8 @@ class Inspector:
         )
 
     def structure(self) -> None:
-        for field in ("task_id", "rollout_id"):
+        capture_field = "capture_key" if self.trajectory.get("schema_version") == "2.0" else "rollout_id"
+        for field in ("task_id", capture_field):
             self.results.run(
                 SchemaCheck(
                     id="trajectory." + field,
@@ -801,7 +802,9 @@ class Inspector:
                 value=self.trajectory.get("tool_calls"),
                 schema={
                     "type": "array",
-                    "items": required_object(status={"enum": ["completed", "failed", "timeout", "cancelled"]}),
+                    "items": required_object(
+                        status={"enum": ["completed", "failed", "timeout", "cancelled", "incomplete"]}
+                    ),
                 },
                 depends_on=("tool_calls.present",),
                 applies=self.scope.tools,
@@ -816,7 +819,22 @@ class Inspector:
                 location="$.ng_trajectory.tool_calls",
                 reason="required evidence does not match its schema",
                 value=self.trajectory.get("tool_calls"),
-                schema={"type": "array", "items": required_object(output={"type": ["string", "array", "object"]})},
+                schema={
+                    "type": "array",
+                    "items": {
+                        "anyOf": [
+                            required_object(output={"type": ["string", "array", "object"]}),
+                            {
+                                "type": "object",
+                                "required": ["status"],
+                                "properties": {
+                                    "status": {"const": "incomplete"},
+                                    "output": {"type": ["string", "array", "object", "null"]},
+                                },
+                            },
+                        ]
+                    },
+                },
                 depends_on=("tool_calls.present",),
                 applies=self.scope.tools,
                 available=self.available,

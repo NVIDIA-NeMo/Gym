@@ -321,10 +321,13 @@ class TestEnvironmentCatalog:
         assert manifest_entry.manifest_path == manifest_path
         assert manifest_entry.version == "0.1.0"
         assert manifest_entry.integration_profile == "custom-gym-verifier"
+        assert (manifest_entry.resources_server, manifest_entry.agent_server) == ("manifest_env", "simple_agent")
         legacy_benchmark = entries[("benchmark", "legacy_benchmark")]
         assert legacy_benchmark.status == "no-manifest"
         assert legacy_benchmark.domain == "math"
         assert legacy_benchmark.description == "Legacy benchmark"
+        # Discovery does not resolve configs without a manifest.
+        assert (legacy_benchmark.resources_server, legacy_benchmark.agent_server) == (None, None)
 
     def test_nested_manifest_identity_uses_its_relative_path(self, tmp_path: Path, monkeypatch) -> None:
         _write_manifest(tmp_path, "environments", "suite/alpha", _manifest("suite/alpha"))
@@ -452,6 +455,17 @@ class TestEnvironmentCatalog:
             "      - {name: test, type: benchmark, jsonl_fpath: test.jsonl}\n",
             encoding="utf-8",
         )
+        # Malformed: `datasets` is not a list, so the config declares no dataset and is not runnable.
+        configs.joinpath("broken.yaml").write_text(
+            "resource:\n"
+            "  resources_servers:\n"
+            "    mcqa: {entrypoint: app.py, domain: knowledge}\n"
+            "agent:\n"
+            "  responses_api_agents:\n"
+            "    simple_agent:\n"
+            "      datasets: 1\n",
+            encoding="utf-8",
+        )
         pure = tmp_path / "resources_servers" / "judge" / "configs"
         pure.mkdir(parents=True)
         pure.joinpath("judge.yaml").write_text(
@@ -503,5 +517,56 @@ class TestReadEnvironmentDetails:
         assert details["domain"] == "agent" and details["description"] == "Desc"
         assert details["value"] == "The value"
         assert details["resources_servers"] == ["my_rs"]
-        assert details["agent"] == "simple_agent"
+        assert details["agents"] == ["simple_agent"]
         assert details["datasets"] == ["train", "example"]
+
+    def test_skips_datasets_that_are_not_a_list(self, tmp_path: Path) -> None:
+        from nemo_gym.environment.registry import read_environment_details
+
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("env_agent:\n  responses_api_agents:\n    simple_agent:\n      datasets: 1\n")
+
+        details = read_environment_details(cfg)
+
+        assert details["agents"] == ["simple_agent"]
+        assert details["datasets"] == []
+
+
+def _workload(name: str, server: str | None, *, manifest: bool = True) -> registry_module.EnvironmentCatalogEntry:
+    root = Path("/catalog") / name
+    return registry_module.EnvironmentCatalogEntry(
+        name=name,
+        config_path=root / "config.yaml",
+        path=root,
+        kind="benchmark",
+        manifest_path=root / "manifest.yaml" if manifest else None,
+        resources_server=server,
+    )
+
+
+def test_a_server_used_by_manifest_workloads_is_validated_through_each_of_them(tmp_path: Path) -> None:
+    catalog = [_workload("bench_b", "rubric"), _workload("bench_a", "rubric"), _workload("other", "elsewhere")]
+
+    found = registry_module.manifest_workloads_for_server("rubric", tmp_path, catalog)
+
+    assert [entry.name for entry in found] == ["bench_b", "bench_a"]
+
+
+@pytest.mark.parametrize("legacy_output", registry_module.LEGACY_SERVER_OUTPUTS)
+def test_either_legacy_output_keeps_a_server_on_the_legacy_contract(tmp_path: Path, legacy_output: str) -> None:
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / legacy_output).write_text("{}\n")
+
+    assert registry_module.manifest_workloads_for_server("rubric", tmp_path, [_workload("bench", "rubric")]) == ()
+
+
+def test_a_server_no_manifest_workload_names_stays_on_the_legacy_contract(tmp_path: Path) -> None:
+    catalog = [_workload("bench", "elsewhere"), _workload("unmigrated", "rubric", manifest=False)]
+
+    assert registry_module.manifest_workloads_for_server("rubric", tmp_path, catalog) == ()
+
+
+def test_manifest_workloads_default_to_the_discovered_catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(registry_module, "discover_environment_catalog", lambda: (_workload("bench", "rubric"),))
+
+    assert [entry.name for entry in registry_module.manifest_workloads_for_server("rubric", tmp_path)] == ["bench"]

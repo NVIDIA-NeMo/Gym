@@ -20,6 +20,7 @@ import os
 import re
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -27,6 +28,7 @@ from fastapi import FastAPI
 from pydantic import Field, field_validator
 
 from nemo_gym.client import request
+from nemo_gym.core.failure_kinds import JUDGE_SKIPPED, PROVIDER_CREDENTIALS_REJECTED, PROVIDER_QUOTA_EXHAUSTED
 from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
@@ -35,6 +37,8 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.verification import judge_provider_stopped, reraise_judge_errors
+from nemo_gym.verification.judge import judge_call_failed
 
 
 # Repo root: resources_servers/critpt/app.py -> nemo-gym/
@@ -73,7 +77,27 @@ def _key_fingerprint(api_key: str) -> str:
     return hashlib.sha256(api_key.encode()).hexdigest()[:8]
 
 
-def refresh_partial_metrics(cache_dir: Optional[Path]) -> None:
+DEFAULT_MAX_JUDGE_ERRORS = 3
+
+
+def graded_accuracy(response: Dict[str, Any], batch_size: int, max_judge_errors: int) -> Optional[float]:
+    """The accuracy of the items AA graded, or None when the batch is not accepted.
+
+    AA reports one accuracy for the whole batch and ``judge_error_count`` items it could not grade. Assumed (AA does
+    not document it): accuracy is correct items over ``batch_size``, so an ungraded item counts as incorrect. A batch
+    with up to ``max_judge_errors`` such items is accepted and its accuracy rescaled to the graded items,
+    ``accuracy * batch_size / (batch_size - judge_error_count)``, clamped to 1.0. A batch with more is rejected.
+    """
+    errors = int(response.get("judge_error_count") or 0)
+    accuracy = float(response.get("accuracy", 0.0))
+    if errors == 0:
+        return accuracy
+    if errors > max_judge_errors or errors >= batch_size:
+        return None
+    return min(1.0, accuracy * batch_size / (batch_size - errors))
+
+
+def refresh_partial_metrics(cache_dir: Optional[Path], max_judge_errors: int = DEFAULT_MAX_JUDGE_ERRORS) -> None:
     """Recompute partial_metrics.json from the on-disk caches.
 
     Called after every successful AA call (live verify() or replay) so the file
@@ -94,10 +118,15 @@ def refresh_partial_metrics(cache_dir: Optional[Path]) -> None:
                 if not line:
                     continue
                 rec = json.loads(line)
-                n = len(rec["submission_ids"])
                 response = rec["response"]
+                n = len(rec["submission_ids"])
+                # A batch with more grader errors than max_judge_errors is rejected at verify time: it stays
+                # pending, never scored.
+                accuracy = graded_accuracy(response, n, max_judge_errors)
+                if accuracy is None:
+                    continue
                 scored += n
-                accuracy_sum += float(response.get("accuracy", 0.0)) * n
+                accuracy_sum += accuracy * n
                 timeout_rate_sum += float(response.get("timeout_rate", 0.0)) * n
                 n_batches += 1
     n_submissions = 0
@@ -122,8 +151,37 @@ def refresh_partial_metrics(cache_dir: Optional[Path]) -> None:
 
 LOG = logging.getLogger(__name__)
 
-# Canonical PUBLIC problem set; used to pad sub-batch fires in smoke-test mode.
-_ALL_PROBLEM_IDS = [f"Challenge_{n}_main" for n in range(1, 71)]
+
+def _quota_reason(exc: "CritPtRateLimitExceeded", now: float) -> str:
+    """Why a batch stopped on a quota error, with the reset time from AA's Retry-After (else its reset header)."""
+    if exc.retry_after_seconds > 0:
+        reset_unix: float = now + exc.retry_after_seconds
+    else:
+        reset_unix = exc.reset_unix
+    when = (
+        datetime.fromtimestamp(reset_unix, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        if reset_unix > 0
+        else "an unknown time"
+    )
+    reason = f"AA quota exhausted, resets at {when}; grade with replay or resubmit after the reset"
+    notes = "; ".join(getattr(exc, "__notes__", []))
+    return f"{reason} ({notes})" if notes else reason
+
+
+def _access_reason(exc: "CritPtAccessDenied") -> str:
+    return (
+        f"AA denied access (HTTP {exc.status}): the account holding the API key is not approved for CritPt grading; "
+        "use an approved key, then grade with replay or resubmit"
+    )
+
+
+# failure_kind of a row graded by nobody on purpose (smoke mode): recovery keeps it as a complete, deliberately
+# unverified result, neither re-judged nor rerun.
+SMOKE_NOT_GRADED = JUDGE_SKIPPED
+SMOKE_NOT_GRADED_REASON = (
+    "CritPt smoke mode (fire_after): the batch was not sent to the grading API, "
+    "so this answer was not graded. A real score needs a full run."
+)
 
 
 class CritPtRateLimitExceeded(RuntimeError):
@@ -145,7 +203,7 @@ class CritPtRateLimitExceeded(RuntimeError):
 
 
 class CritPtAccessDenied(RuntimeError):
-    """Raised when the AA scoring API returns HTTP 403 (key's account not approved).
+    """Raised when the AA scoring API returns HTTP 401 or 403 (key rejected, or its account not approved).
 
     Distinct from :class:`CritPtRateLimitExceeded` (429, "approved but out of
     quota"): a 403 means AA never looked at the submissions, so no quota was
@@ -155,10 +213,11 @@ class CritPtAccessDenied(RuntimeError):
     approved recovers instead of failing the whole cohort.
     """
 
-    def __init__(self, body: str):
+    def __init__(self, body: str, status: int = 403):
         self.body = body
+        self.status = status
         super().__init__(
-            f"CritPt AA denied access (HTTP 403): the account holding this API key is not on "
+            f"CritPt AA denied access (HTTP {status}): the account holding this API key is not on "
             f"AA's CritPt approved list. No quota was consumed and retrying will not help. "
             f"Request approval by emailing critpt@artificialanalysis.ai from an institutional "
             f"address, naming the account that holds the key. AA response: {body!r}"
@@ -175,9 +234,14 @@ class CritPtResourcesServerConfig(BaseResourcesServerConfig):
     api_timeout_seconds: float = 1800.0
     api_max_retries: int = 4
     api_retry_backoff_seconds: float = 5.0
-    # Smoke-test only. When set < batch_size, the buffer fires after this many real
-    # submissions arrive and pads up to batch_size with empty padding submissions.
+    # Smoke-test only. When set < batch_size, the buffer fires after this many real submissions arrive, but the
+    # grading API is never contacted: the batch is cached (when cache_dir is set) and every row comes back masked
+    # as not graded. AA only grades full batches, so a real score needs a full run.
     fire_after: Optional[int] = None
+    # Grader errors AA may report in a batch before the batch is rejected as judge_failed (then masked and graded
+    # again). Up to this many, the batch is accepted and its accuracy rescaled to the graded items. 3 is the benchmark
+    # PIC's v1 value (about 5% of a 70 batch); to be tuned empirically.
+    max_judge_errors: int = DEFAULT_MAX_JUDGE_ERRORS
     # Max time a single verify() will wait for its batch to fill (and the AA call to
     # finish) to prevent hang.
     verify_timeout_seconds: float = 9000.0  # (2.5h)
@@ -229,8 +293,12 @@ class CritPtVerifyRequest(CritPtRunRequest, BaseVerifyRequest):
 
 class CritPtVerifyResponse(BaseVerifyResponse):
     problem_id: str
-    accuracy: float
-    timeout_rate: float
+    # None on a row that was not graded (smoke mode): there is no accuracy to report.
+    accuracy: Optional[float] = None
+    timeout_rate: Optional[float] = None
+    # Grader errors AA reported for this row's batch, and the items it graded. None on a row that was not graded.
+    judge_error_count: Optional[int] = None
+    graded_items: Optional[int] = None
 
 
 class CritPtResourcesServer(SimpleResourcesServer):
@@ -288,6 +356,38 @@ class CritPtResourcesServer(SimpleResourcesServer):
             "batch_size": self.config.batch_size,
         }
 
+    async def _await_batch(self, future: "asyncio.Future", problem_id: str, batch: Dict) -> Dict:
+        try:
+            # Shielded: a waiter's timeout must not cancel the batch's future for its siblings.
+            return await asyncio.wait_for(asyncio.shield(future), timeout=self.config.verify_timeout_seconds)
+        except asyncio.TimeoutError as timeout:
+            pending = len(batch["submissions"])
+            waiting = any(b is batch for b in self._batches)
+            if batch.get("short") or (waiting and pending < self.config.batch_size):
+                batch["short"] = True  # every waiter of this batch fails the same way
+                self._batches[:] = [b for b in self._batches if b is not batch]
+                # AA only grades full batches and nothing is padded, so a short batch (a re-judge of fewer than
+                # batch_size saved answers) can never be graded alone: fail it typed, masked and re-judgeable.
+                LOG.error(
+                    "CritPt verify timed out after %ss: %d submissions pending, fewer than batch_size=%d (problem_id=%s).",
+                    self.config.verify_timeout_seconds,
+                    pending,
+                    self.config.batch_size,
+                    problem_id,
+                )
+                raise judge_call_failed(
+                    f"{pending} saved answers pending, fewer than batch_size ({self.config.batch_size}); grade them "
+                    "with replay together with other runs or after more rows arrive",
+                    operation="critpt.grade",
+                ) from timeout
+            LOG.error(
+                "CritPt verify timed out after %ss waiting for batch to fire (problem_id=%s). "
+                "Likely a sibling rollout failed before reaching verify().",
+                self.config.verify_timeout_seconds,
+                problem_id,
+            )
+            raise
+
     async def verify(self, body: CritPtVerifyRequest) -> CritPtVerifyResponse:
         code = _extract_code(_extract_output_text(body))
         submission = {
@@ -334,27 +434,20 @@ class CritPtResourcesServer(SimpleResourcesServer):
                 submissions_snapshot = list(target_batch["submissions"].values())
                 submission_ids_snapshot = list(target_batch["submission_ids"].values())
                 self._batches.remove(target_batch)
-                # Smoke-mode padding: top up to batch_size with empty padding for missing
-                # problem_ids. Padded entries are synthetic so they get no submission_id.
-                if len(submissions_snapshot) < self.config.batch_size:
-                    existing = {s["problem_id"] for s in submissions_snapshot}
-                    for pid in _ALL_PROBLEM_IDS:
-                        if len(submissions_snapshot) >= self.config.batch_size:
-                            break
-                        if pid not in existing:
-                            submissions_snapshot.append(
-                                {
-                                    "problem_id": pid,
-                                    "generated_code": "```python\n```",
-                                    "model": "unknown",
-                                    "generation_config": {},
-                                }
-                            )
             else:
                 submissions_snapshot = None
                 submission_ids_snapshot = None
 
-        if ready_to_fire:
+        smoke_batch = ready_to_fire and len(submissions_snapshot) < self.config.batch_size
+        if smoke_batch:
+            LOG.warning(
+                "CritPt smoke mode: batch of %d submissions not sent to AA (fire_after=%s, batch_size=%d).",
+                len(submissions_snapshot),
+                self.config.fire_after,
+                self.config.batch_size,
+            )
+            future.set_result({"_not_graded": SMOKE_NOT_GRADED, "_reason": SMOKE_NOT_GRADED_REASON})
+        elif ready_to_fire:
             LOG.warning(
                 "CritPt batch full (%d submissions); firing AA API (key %d/%d).",
                 len(submissions_snapshot),
@@ -387,7 +480,9 @@ class CritPtResourcesServer(SimpleResourcesServer):
                     len(submissions_snapshot),
                     self.config.cache_dir,
                 )
-                future.set_exception(e)
+                future.set_result(
+                    {"_provider_stop": PROVIDER_QUOTA_EXHAUSTED, "_reason": _quota_reason(e, time.time())}
+                )
             except CritPtAccessDenied as e:
                 LOG.error(
                     "CritPt AA REFUSED ACCESS on all %d configured key(s) (HTTP 403). None of the "
@@ -402,23 +497,44 @@ class CritPtResourcesServer(SimpleResourcesServer):
                     len(submissions_snapshot),
                     self.config.cache_dir,
                 )
-                future.set_exception(e)
+                future.set_result({"_provider_stop": PROVIDER_CREDENTIALS_REJECTED, "_reason": _access_reason(e)})
             except Exception as e:
                 LOG.exception("CritPt AA API call failed; failing all %d waiters: %s", len(submissions_snapshot), e)
                 future.set_exception(e)
 
-        try:
-            result = await asyncio.wait_for(future, timeout=self.config.verify_timeout_seconds)
-        except asyncio.TimeoutError:
-            LOG.error(
-                "CritPt verify timed out after %ss waiting for batch to fire (problem_id=%s). "
-                "Likely a sibling rollout failed before reaching verify().",
-                self.config.verify_timeout_seconds,
-                body.problem_id,
+        # A quota or key error is terminal: it stops the run and keeps the saved answer for a later re-judge (see
+        # `_provider_stop` below). Any other failed AA call (4xx/5xx, timeouts) is a grader failure, not a
+        # model failure: type it as judge_failed so judge_failsafe masks the row and it is judged again.
+        result = await reraise_judge_errors(self._await_batch(future, body.problem_id, target_batch))
+        if "_provider_stop" in result:
+            # Typed like a judge failure, so the row keeps its saved answer in the failures sidecar and recovery
+            # grades it again after the operator acts; the kind stops the run and the chain meanwhile.
+            raise judge_provider_stopped(
+                result["_reason"], failure_kind=result["_provider_stop"], operation="critpt.grade"
             )
-            raise
-
-        accuracy = result["accuracy"]
+        if "_not_graded" in result:
+            LOG.warning("CritPt verify: %s not graded (%s)", body.problem_id, result["_not_graded"])
+            return CritPtVerifyResponse(
+                **(
+                    body.model_dump()
+                    | {
+                        "reward": 0.0,
+                        "mask_sample": True,
+                        "failure_kind": result["_not_graded"],
+                        "failure_reason": result["_reason"],
+                    }
+                )
+            )
+        judge_error_count = int(result.get("judge_error_count") or 0)
+        accuracy = graded_accuracy(result, self.config.batch_size, self.config.max_judge_errors)
+        if accuracy is None:
+            # AA could not grade more items than max_judge_errors allows; the aggregate accuracy then undercounts,
+            # so it is not a score.
+            raise judge_call_failed(
+                f"CritPt grader reported judge_error_count={judge_error_count} for the batch "
+                f"(max_judge_errors={self.config.max_judge_errors})",
+                operation="critpt.grade",
+            )
         timeout_rate = result.get("timeout_rate", 0.0)
         # AA returns one aggregate accuracy; distribute it as each rollout's reward (matches nemo-skills).
         return CritPtVerifyResponse(
@@ -426,6 +542,8 @@ class CritPtResourcesServer(SimpleResourcesServer):
             reward=accuracy,
             accuracy=accuracy,
             timeout_rate=timeout_rate,
+            judge_error_count=judge_error_count,
+            graded_items=self.config.batch_size - judge_error_count,
         )
 
     # ──────────────────────────────────────────────────────────
@@ -513,7 +631,7 @@ class CritPtResourcesServer(SimpleResourcesServer):
 
     @staticmethod
     def _critpt_score_fn(r: dict) -> Dict[str, Union[float, bool]]:
-        return {"accuracy": r["accuracy"]} if "accuracy" in r else {}
+        return {"accuracy": r["accuracy"]} if r.get("accuracy") is not None and not r.get("mask_sample") else {}
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
         """Compute CritPt metrics: pass@k, majority@k, per-sample stats — named `accuracy`."""
@@ -594,7 +712,7 @@ class CritPtResourcesServer(SimpleResourcesServer):
         return bid
 
     def _refresh_partial_metrics(self) -> None:
-        refresh_partial_metrics(self.config.cache_dir)
+        refresh_partial_metrics(self.config.cache_dir, self.config.max_judge_errors)
 
 
 def _extract_output_text(body: CritPtVerifyRequest) -> str:
@@ -661,8 +779,8 @@ async def _call_api(
         # grading. AA rejects at the auth layer, so nothing was graded and no quota
         # was spent. Typed so the caller can rotate to another key and log an
         # actionable message instead of a bare RuntimeError.
-        if response.status == 403:
-            raise CritPtAccessDenied(body=body)
+        if response.status in (401, 403):
+            raise CritPtAccessDenied(body=body, status=response.status)
         # Retry only on 5xx (transient AA server errors). Non-429 4xx means a bad
         # request/payload that won't succeed on retry, so fail fast with the
         # response body for debugging.

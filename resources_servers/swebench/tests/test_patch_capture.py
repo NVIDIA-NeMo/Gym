@@ -22,6 +22,7 @@ import pytest
 
 from resources_servers.swebench.patch_capture import (
     PATCH_CAPTURE_MODES,
+    CaptureCommandError,
     PatchCapture,
     TipCandidate,
     capture_model_patch,
@@ -191,6 +192,23 @@ async def test_worktree_diff_failure_is_non_fatal_only_when_a_commit_was_capture
         await capture_model_patch(_FakeSandbox(fail_on="add -N ."), "/repo", BASE, mode="worktree")
     with pytest.raises(RuntimeError):
         await capture_model_patch(_FakeSandbox(fail_on="status --porcelain"), "/repo", BASE, mode="committed")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [None, "timeout", "sandbox", "absent"])
+async def test_failed_command_error_says_whether_git_or_the_provider_failed(error_type):
+    fields = {} if error_type == "absent" else {"error_type": error_type}
+
+    class _Sandbox:
+        async def exec(self, command, **kwargs):
+            return SimpleNamespace(return_code=128, stdout="", stderr="fatal: index.lock exists", **fields)
+
+    with pytest.raises(CaptureCommandError) as error:
+        await capture_model_patch(_Sandbox(), "/repo", BASE)
+    # Still the RuntimeError, with the same message, that callers already catch.
+    assert isinstance(error.value, RuntimeError) and str(error.value) == "fatal: index.lock exists"
+    assert error.value.return_code == 128
+    assert error.value.error_type == (None if error_type == "absent" else error_type)
 
 
 @pytest.mark.asyncio

@@ -50,16 +50,7 @@ class LocalSandbox:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "message",
-    [
-        "identity switch requires CAP_SETUID",
-        # Verbatim OpenSandbox stderr when the pod cannot switch identity.
-        "fork/exec /usr/bin/bash: operation not permitted (switching to uid=0 requires CAP_SETUID)",
-    ],
-)
-@pytest.mark.parametrize("exception", [False, True])
-async def test_root_fallback_when_identity_switch_is_unavailable(exception, message):
+async def test_root_fallback_when_identity_switch_is_unavailable():
     class Sandbox:
         def __init__(self):
             self.users = []
@@ -67,9 +58,7 @@ async def test_root_fallback_when_identity_switch_is_unavailable(exception, mess
         async def exec(self, command, *, cwd, timeout_s, user=None):
             self.users.append(user)
             if user == "root":
-                if exception:
-                    raise RuntimeError(message)
-                return SandboxExecResult(stdout="", stderr=message, return_code=1)
+                return SandboxExecResult(None, None, 125, error_type="user_switch_unavailable")
             return SandboxExecResult(stdout="ready", stderr="", return_code=0)
 
     sandbox = Sandbox()
@@ -78,11 +67,8 @@ async def test_root_fallback_when_identity_switch_is_unavailable(exception, mess
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("exception", [False, True])
-async def test_root_fallback_with_a_provider_error_propagates_as_unavailable(exception):
-    """A refusal to switch identity (raised or returned) followed by a provider failure on the default-user
-    retry is a lost sandbox in both shapes, not a transfer result the caller scores as an oracle failure."""
-    message = "identity switch requires CAP_SETUID"
+async def test_root_fallback_with_a_provider_error_propagates_as_unavailable():
+    """A provider failure after choosing the default user is still an outage."""
 
     class Sandbox:
         def __init__(self):
@@ -91,9 +77,7 @@ async def test_root_fallback_with_a_provider_error_propagates_as_unavailable(exc
         async def exec(self, command, *, cwd, timeout_s, user=None):
             self.users.append(user)
             if user == "root":
-                if exception:
-                    raise RuntimeError(message)
-                return SandboxExecResult(stdout="", stderr=message, return_code=1)
+                return SandboxExecResult(None, None, 125, error_type="user_switch_unavailable")
             return SandboxExecResult(stdout="", stderr="", return_code=125, error_type="timeout")
 
     sandbox = Sandbox()
@@ -905,7 +889,7 @@ async def test_a_file_restore_into_a_parent_the_user_cannot_chmod_succeeds(tmp_p
         async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
             self.commands.append(command)
             if user == "root":
-                return SandboxExecResult(stdout="", stderr="exec: operation not permitted", return_code=1)
+                return SandboxExecResult(None, None, 125, error_type="user_switch_unavailable")
             if "chmod" in command and "/tmp" in command and "if [ -d" not in command:
                 return SandboxExecResult(stdout="", stderr="chmod: /tmp: Operation not permitted", return_code=1)
             return SandboxExecResult(stdout="", stderr="", return_code=0)

@@ -24,7 +24,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from nemo_gym.config import AggregateMetricsRequest
-from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import ModelCallSampling, NeMoGymResponseCreateParamsNonStreaming, encode_model_sampling
 from responses_api_agents.harbor_agent.app import (
     HarborAgent,
     HarborAgentConfig,
@@ -343,6 +343,21 @@ class TestApp:
 
         assert result.agent_metrics["mean/reward"] == 0.5
         assert result.key_metrics["mean/reward"] == 0.5
+
+    @pytest.mark.parametrize("sampled", [False, True])
+    async def test_run_puts_the_rollouts_sampling_values_in_the_model_url(self, sampled):
+        server = _make_server()
+        sampling = ModelCallSampling(temperature=1.0, top_p=1.0, max_output_tokens=8192)
+        request = _make_run_request()
+        if sampled:
+            request = request.model_copy(update={"model_sampling": sampling})
+
+        with _harbor_run_mocks(trajectory=DEFAULT_TRAJECTORY):
+            await server.run(request)
+            api_base = HarborAgent._build_job_config.call_args.args[3]
+
+        segment = f"/ng-sampling/{encode_model_sampling(sampling)}" if sampled else ""
+        assert api_base == f"http://policy-host:9000{segment}/v1"
 
     async def test_run_with_token_details(self):
         server = _make_server()
@@ -914,3 +929,20 @@ class TestLLMClientTeardown:
         # Idempotent: a second close is a no-op (no underlying client to touch).
         await llm.aclose()
         client.aclose.assert_awaited_once()
+
+
+def test_startup_logs_the_deprecation_notice(caplog) -> None:
+    """The server says on startup that it is deprecated, where its replacement lives, and that users need not act yet."""
+    server = _make_server()
+    with caplog.at_level("WARNING", logger="responses_api_agents.harbor_agent.app"):
+        server.model_post_init(None)
+    notices = {record.getMessage() for record in caplog.records if "deprecated" in record.getMessage()}
+    assert len(notices) == 1
+    (notice,) = notices
+    assert "responses_api_agents/harbor_agent is deprecated" in notice
+    assert "environment_servers/harbor" in notice
+    # The notice names the repo path, not a docs URL, so it does not break when the docs pages move.
+    assert "docs.nvidia.com" not in notice
+    # Users of the built-in benchmarks did not pick this agent, so the notice says no action is needed yet.
+    assert "no action is needed" in notice
+    assert server.sem is not None

@@ -54,9 +54,7 @@ stacks as the NumPy 1.26/SciPy 1.13 era and the 2025 current era, but does not d
 environment lockfiles. Use the exact interpreter paths from the run being reproduced and record
 their package inventories with the result.
 
-The benchmark requires two resolved interpreters and fails with a clear error otherwise. The
-original `scicode` benchmark remains backward-compatible and continues to use its resources
-server's current interpreter unless `grading_interpreters` is configured.
+The benchmark requires two resolved interpreters and fails with a clear error otherwise.
 
 ## Run
 
@@ -106,3 +104,36 @@ Before setting the resources server's `verified` metadata to true, require:
 
 Gym code and SciCode-Verified data are Apache 2.0. Cite both the original SciCode benchmark and
 SciCode-Verified, as requested by the release authors.
+
+## Remote grading with OpenSandbox
+
+Use `--benchmark scicode_verified/configs/opensandbox` to execute generated code
+outside the model-serving allocation. Set `OPENSANDBOX_DOMAIN`,
+`OPENSANDBOX_API_KEY`, and `SCICODE_SANDBOX_IMAGE` (an immutable image digest).
+The image must contain the two configured interpreters and the corrected HDF5 at
+`/data/test_data_cleaned.h5`. A reproducible image definition is in
+[`resources_servers/scicode/sandbox_image`](../../resources_servers/scicode/sandbox_image/README.md).
+
+The remote overlay defaults to 64 concurrent grading attempts, with
+each sandbox requesting one CPU and 8 GiB of memory. `num_processes` bounds
+concurrent sandbox attempts; model generation concurrency is independent.
+Size `num_processes` and `sandbox.memory_mib` for the service quota and workload.
+The existing 1,800-second timeout applies to code execution in each environment;
+image creation, trusted import checks and data integrity checks have separate
+budgets. The native per-environment scoring and `run_all_grading_interpreters`
+setting are preserved.
+
+Retain the image digest and CPU architecture when comparing grades. Identical
+dependency versions can produce different floating-point rounding on ARM and
+x86, and generated solutions with unseeded randomness can change verdicts even
+within the same environment.
+
+Every environment attempt receives a fresh sandbox. The server uploads its
+existing grading helper and generated program as files, checks the image's
+interpreter and test-data checksum, executes the grader, and deletes the sandbox
+in a `finally` block. The sandbox also has a finite TTL for interrupted clients.
+No grading environment or HDF5 is needed on the Gym host. API, image, preflight,
+and killed-process failures raise infrastructure errors instead of becoming
+incorrect model answers; ordinary assertions and code timeouts retain their
+existing failure semantics. Keep failed rows unscored and investigate before
+retrying. This backend does not resume or mutate an existing local evaluation.

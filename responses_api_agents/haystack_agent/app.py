@@ -56,6 +56,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyRequest,
     BaseVerifyResponse,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.haystack_agent import chat_generator
 from responses_api_agents.haystack_agent.chat_generator import (
     NeMoGymResponsesChatGenerator,
@@ -285,7 +286,7 @@ class HaystackAgent(SimpleResponsesAPIAgent):
         model_response.output = output_items
         model_response.usage = chat_messages_usage(generated)
 
-        # Forward the Resources Server session so ``run()`` can verify against the same state after
+        # Forward the resources session so ``run()`` can verify against the same state after
         # this internal ``/v1/responses`` call. Preserve model-server cookies separately as well,
         # allowing a model server that uses sessions to continue them on a later request.
         for k, v in request.cookies.items():
@@ -355,3 +356,6 @@ class HaystackAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     HaystackAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = HaystackAgent.run_webserver()  # noqa: F401

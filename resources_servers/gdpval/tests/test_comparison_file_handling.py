@@ -28,6 +28,48 @@ def _text(blocks: list[dict]) -> str:
     return "\n".join(block.get("text", "") for block in blocks if block.get("type") == "text")
 
 
+@pytest.mark.parametrize("media_mode", ["native_pdf", "images_and_text"])
+@pytest.mark.parametrize(
+    "subtitles",
+    [
+        "1\n00:00:01,250 --> 00:00:02,750\nHello, café.\n\n",
+        "1\ninvalid timestamp -> missing end\nHello, café.\n\n",
+    ],
+)
+def test_srt_section_preserves_subtitle_syntax(tmp_path: Path, media_mode: str, subtitles: str) -> None:
+    (tmp_path / "captions.srt").write_text(subtitles, encoding="utf-8")
+
+    blocks = comparison.build_file_section(str(tmp_path), media_mode=media_mode)
+
+    assert blocks == [{"type": "text", "text": "\ncaptions.srt:\n"}, {"type": "text", "text": subtitles}]
+
+
+@pytest.mark.parametrize("media_mode", ["native_pdf", "images_and_text"])
+@pytest.mark.parametrize("cap_name", ["MAX_TEXT_FILE_CHARS_FOR_JUDGE", "MAX_SECTION_TEXT_CHARS_FOR_JUDGE"])
+def test_srt_section_respects_text_caps(tmp_path: Path, monkeypatch, media_mode: str, cap_name: str) -> None:
+    subtitles = "1\n00:00:01,250 --> 00:00:02,750\n" + "Long caption. " * 100
+    (tmp_path / "captions.srt").write_text(subtitles, encoding="utf-8")
+    monkeypatch.setattr(comparison, cap_name, 80)
+
+    blocks = comparison.build_file_section(str(tmp_path), media_mode=media_mode)
+
+    cap = 80 - len("\ncaptions.srt:\n") if cap_name == "MAX_SECTION_TEXT_CHARS_FOR_JUDGE" else 80
+    marker = "\n[...truncated]"
+    assert blocks[1] == {"type": "text", "text": subtitles[: cap - len(marker)] + marker}
+
+
+@pytest.mark.parametrize("media_mode", ["native_pdf", "images_and_text"])
+@pytest.mark.parametrize("name", ["captions.srt", "notes.txt", "table.csv"])
+def test_text_file_in_another_encoding_reaches_the_judge_instead_of_failing_the_section(
+    tmp_path: Path, media_mode: str, name: str
+) -> None:
+    (tmp_path / name).write_bytes("caf\xe9 and \x93quotes\x94".encode("latin-1"))
+
+    blocks = comparison.build_file_section(str(tmp_path), media_mode=media_mode)
+
+    assert _text(blocks).endswith("caf\ufffd and \ufffdquotes\ufffd")
+
+
 def test_same_stem_sidecars_are_used_once_and_stale_plain_pdf_is_suppressed(tmp_path: Path) -> None:
     (tmp_path / "Plan.docx").write_bytes(b"docx source")
     (tmp_path / "Plan.pptx").write_bytes(b"pptx source")

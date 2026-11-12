@@ -104,8 +104,11 @@ def install_runtime(harness: str) -> None:
         cwd=adapter,
         check=True,
     )
-    if harness in ("hermes", "stirrup", "simple", "openclaw"):
-        # Simple is built in; Hermes is locked; Stirrup and OpenClaw provision the task sandbox.
+    if harness == "nooa":
+        subprocess.run([sys.executable, "-m", "scripts.harness_conformance.nooa"], cwd=ROOT, check=True)
+        return
+    if harness in ("hermes", "stirrup", "simple", "openclaw", "copilot"):
+        # Simple is built in; Hermes is locked; Stirrup, OpenClaw and Copilot provision the task sandbox.
         return
     defaults = yaml.safe_load((adapter / "configs" / f"{harness}_agent.yaml").read_text())
     config = defaults[f"{harness}_agent"]["responses_api_agents"][f"{harness}_agent"]
@@ -145,9 +148,10 @@ def report(harness: str, *, output: Path, exit_code: int) -> str:
     else:
         status = "passed"
         message = f"{harness}: P0 conformance requirements are fulfilled; additional checks are reported below."
+    tested_sha = os.environ.get("TESTED_SHA") or os.environ.get("GITHUB_SHA", "local")
     output.mkdir(parents=True, exist_ok=True)
     (output / "ci-result.json").write_text(
-        json.dumps({"harness": harness, "sha": os.environ.get("GITHUB_SHA", "local"), "status": status}) + "\n"
+        json.dumps({"harness": harness, "sha": tested_sha, "status": status}) + "\n"
     )
     markdown = f"## Harness conformance: {harness}\n\n{message}\n\n"
     count, first = failure_details(harness, output)
@@ -155,7 +159,7 @@ def report(harness: str, *, output: Path, exit_code: int) -> str:
     if status != "passed":
         detail = f"{message} Failed scenario checks: {count}. First failure: {first}"
         print(f"::warning title={warning_title}::{detail}".replace("%", "%25"))
-    markdown += f"Source: `{os.environ.get('GITHUB_SHA', 'local')}`\n\n"
+    markdown += f"Source: `{tested_sha}`\n\n"
     report_path = output / "conformance_report.md"
     if report_path.exists():
         markdown += report_path.read_text() + "\n"

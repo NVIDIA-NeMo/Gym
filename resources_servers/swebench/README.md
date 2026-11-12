@@ -45,6 +45,20 @@ Resolved: 300 / 300 (100.00%): [26:31<00:00,  5.30s/it]
 SWE Bench Pro
 
 
+## SWE Bench Multimodal grading
+- **Test-patch binary files.** Some tasks' tests compare against reference images that a text diff cannot carry
+  (`image_assets["test_patch"]`; 51 files in 11 Chart.js dev tasks). SWE-bench's evaluation script downloads them with
+  `curl`. `benchmarks/swebench/multimodal/prepare.py` stores their bytes in the row (`content_base64`), the server
+  uploads them into the verification sandbox only (never the agent's), and the evaluation script copies them into
+  place instead of downloading, so the verification sandbox needs no internet access. A row whose test-patch files
+  lack their bytes is rejected.
+- **Failure-only repositories.** SWE-bench grades Chart.js, marked and p5.js from failures alone: a test missing from
+  the log counts as passing. A resolved verdict for these repositories therefore also needs the test runner's own
+  summary showing that its suite ran to completion (`failure_only_grading.py`): Chrome's Karma run executed every
+  planned test, Jasmine ran its specs without an "Incomplete" report, or every p5.js browser suite printed passing
+  tests. Without it the evaluation is reported as not completed, and the sample is masked as a verifier error.
+
+
 # Licensing information
 Code: ?
 Data: ?

@@ -1,0 +1,282 @@
+{
+ "case": "derived-duplicate-call-identity",
+ "kind": "gateway",
+ "notes": "",
+ "spec": {
+  "schema_version": 1,
+  "harness": "opencode",
+  "task_backend": "swe",
+  "tools": {
+   "tool_names": {
+    "read": "read"
+   },
+   "tool_descriptions": {},
+   "tool_parameter_descriptions": {},
+   "tool_interfaces": {}
+  },
+  "workspace_files": {},
+  "events": [],
+  "checks": [],
+  "provenance": {}
+ },
+ "params": {
+  "input": [
+   {
+    "content": "Fix it",
+    "role": "user",
+    "type": "message"
+   }
+  ],
+  "parallel_tool_calls": true,
+  "tool_choice": "auto",
+  "tools": []
+ },
+ "calls": [
+  {
+   "headers": {
+    "x-session-id": "root",
+    "x-opencode-assistant-message-id": "a1"
+   },
+   "opencode_request": {
+    "stream": true,
+    "messages": [
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "parameters": {
+        "type": "object"
+       }
+      }
+     }
+    ]
+   },
+   "upstream_reply": {
+    "sse_events": [
+     {
+      "id": "chatcmpl-1",
+      "object": "chat.completion.chunk",
+      "choices": [
+       {
+        "index": 0,
+        "delta": {
+         "role": "assistant",
+         "content": ""
+        },
+        "finish_reason": null
+       }
+      ]
+     },
+     {
+      "id": "chatcmpl-1",
+      "object": "chat.completion.chunk",
+      "choices": [
+       {
+        "index": 0,
+        "delta": {
+         "tool_calls": [
+          {
+           "index": 0,
+           "id": "same",
+           "type": "function",
+           "function": {
+            "name": "read"
+           }
+          }
+         ]
+        },
+        "finish_reason": null
+       }
+      ]
+     },
+     {
+      "id": "chatcmpl-1",
+      "object": "chat.completion.chunk",
+      "choices": [
+       {
+        "index": 0,
+        "delta": {
+         "tool_calls": [
+          {
+           "index": 0,
+           "function": {
+            "arguments": "{"
+           }
+          }
+         ]
+        },
+        "finish_reason": null
+       }
+      ]
+     },
+     {
+      "id": "chatcmpl-1",
+      "object": "chat.completion.chunk",
+      "choices": [
+       {
+        "index": 0,
+        "delta": {
+         "tool_calls": [
+          {
+           "index": 0,
+           "function": {
+            "arguments": "}"
+           }
+          }
+         ]
+        },
+        "finish_reason": null
+       }
+      ]
+     },
+     {
+      "id": "chatcmpl-1",
+      "object": "chat.completion.chunk",
+      "choices": [
+       {
+        "index": 0,
+        "delta": {
+         "tool_calls": [
+          {
+           "index": 1,
+           "id": "same",
+           "type": "function",
+           "function": {
+            "name": "read"
+           }
+          }
+         ]
+        },
+        "finish_reason": null
+       }
+      ]
+     },
+     {
+      "id": "chatcmpl-1",
+      "object": "chat.completion.chunk",
+      "choices": [
+       {
+        "index": 0,
+        "delta": {
+         "tool_calls": [
+          {
+           "index": 1,
+           "function": {
+            "arguments": "{"
+           }
+          }
+         ]
+        },
+        "finish_reason": null
+       }
+      ]
+     },
+     {
+      "id": "chatcmpl-1",
+      "object": "chat.completion.chunk",
+      "choices": [
+       {
+        "index": 0,
+        "delta": {
+         "tool_calls": [
+          {
+           "index": 1,
+           "function": {
+            "arguments": "}"
+           }
+          }
+         ]
+        },
+        "finish_reason": null
+       }
+      ]
+     },
+     {
+      "id": "chatcmpl-1",
+      "object": "chat.completion.chunk",
+      "choices": [
+       {
+        "index": 0,
+        "delta": {},
+        "finish_reason": "tool_calls"
+       }
+      ]
+     },
+     {
+      "id": "chatcmpl-1",
+      "object": "chat.completion.chunk",
+      "choices": [],
+      "usage": {
+       "prompt_tokens": 100,
+       "completion_tokens": 10,
+       "total_tokens": 110
+      }
+     }
+    ],
+    "sse_wire": "data: {\"id\": \"chatcmpl-1\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"\"}, \"finish_reason\": null}]}\r\n\r\ndata: {\"id\": \"chatcmpl-1\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"id\": \"same\", \"type\": \"function\", \"function\": {\"name\": \"read\"}}]}, \"finish_reason\": null}]}\r\n\r\ndata: {\"id\": \"chatcmpl-1\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {\"arguments\": \"{\"}}]}, \"finish_reason\": null}]}\r\n\r\ndata: {\"id\": \"chatcmpl-1\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {\"arguments\": \"}\"}}]}, \"finish_reason\": null}]}\r\n\r\ndata: {\"id\": \"chatcmpl-1\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 1, \"id\": \"same\", \"type\": \"function\", \"function\": {\"name\": \"read\"}}]}, \"finish_reason\": null}]}\r\n\r\ndata: {\"id\": \"chatcmpl-1\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 1, \"function\": {\"arguments\": \"{\"}}]}, \"finish_reason\": null}]}\r\n\r\ndata: {\"id\": \"chatcmpl-1\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 1, \"function\": {\"arguments\": \"}\"}}]}, \"finish_reason\": null}]}\r\n\r\ndata: {\"id\": \"chatcmpl-1\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"tool_calls\"}]}\r\n\r\ndata: {\"id\": \"chatcmpl-1\", \"object\": \"chat.completion.chunk\", \"choices\": [], \"usage\": {\"prompt_tokens\": 100, \"completion_tokens\": 10, \"total_tokens\": 110}}\r\n\r\ndata: [DONE]\r\n\r\n"
+   },
+   "returned": null,
+   "error": "ValueError: duplicate tool call identity",
+   "outgoing_request": {
+    "stream": true,
+    "messages": [
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "parameters": {
+        "type": "object"
+       }
+      }
+     }
+    ]
+   },
+   "opencode_request_unchanged": true
+  }
+ ],
+ "observations": [
+  {
+   "source": "model",
+   "session_id": "root",
+   "assistant_message_id": "a1",
+   "request": {
+    "stream": true,
+    "messages": [
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "parameters": {
+        "type": "object"
+       }
+      }
+     }
+    ]
+   },
+   "execution_tools": {
+    "read": "read"
+   }
+  }
+ ],
+ "issues": [
+  "ValueError"
+ ]
+}

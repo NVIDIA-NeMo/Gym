@@ -1,0 +1,37 @@
+# One benchmark entry; variant configs select the source protocol.
+healthbench_subset: ${oc.select:healthbench_variant,oss_eval}
+healthbench_data_paths:
+  oss_eval: benchmarks/healthbench/data/healthbench_benchmark.jsonl
+  consensus: benchmarks/healthbench/data/healthbench_consensus_benchmark.jsonl
+  hard: benchmarks/healthbench/data/healthbench_hard_benchmark.jsonl
+  oss_meta_eval: benchmarks/healthbench/data/healthbench_oss_meta_eval_benchmark.jsonl
+healthbench_data_path: ${healthbench_data_paths.${healthbench_subset}}
+
+prepare_script_args:
+  subset: ${healthbench_subset}
+  output: ${healthbench_data_path}
+
+config_paths:
+  - resources_servers/healthbench_rubric/configs/healthbench_rubric.yaml
+
+judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.select:judge_base_url,${oc.env:JUDGE_MODEL_API_BASE,https://api.openai.com/v1}}
+      openai_api_key: ${oc.select:judge_api_key,${oc.env:OPENAI_API_KEY,dummy}}
+      openai_model: ${oc.select:judge_model_name,${oc.env:JUDGE_MODEL,gpt-4.1-2025-04-14}}
+      openai_default_headers: {}
+
+healthbench_benchmark_simple_agent:
+  _inherit_from: healthbench_rubric_simple_agent
+  responses_api_agents:
+    simple_agent:
+      datasets:
+        - name: healthbench
+          type: benchmark
+          jsonl_fpath: ${copy:healthbench_data_path}
+          prompt_config: null
+          prepare_script: benchmarks/healthbench/prepare.py
+          num_repeats: 1
+          license: MIT

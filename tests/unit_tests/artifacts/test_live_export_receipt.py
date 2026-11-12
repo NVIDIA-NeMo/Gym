@@ -418,6 +418,24 @@ def test_live_upload_uses_actual_producer_default_when_key_is_absent(live):
     assert orjson.loads(artifacts.export_done_fpath("mlflow").read_bytes())["uploaded_rollouts"] is True
 
 
+def test_a_live_run_that_uploads_no_rollouts_is_certified_and_not_exported_again(live, monkeypatch):
+    artifacts, exporter, client = live
+    post = _post_run_client(monkeypatch)
+    exporter.global_config_dict.upload_rollouts = False
+    exporter._delivered_rollouts.clear()
+    OmegaConf.save(exporter.global_config_dict, artifacts.resolved_config_yaml_fpath)
+    exporter.export_config()
+    run_health_checks(
+        artifacts.rollouts_jsonl_fpath,
+        workers=1,
+        run_coverage=[RolloutStore.read(artifacts.rollouts_jsonl_fpath).coverage()],
+    )
+    _finalize_live_exporters(artifacts.rollouts_jsonl_fpath)
+    receipt = orjson.loads(artifacts.export_done_fpath("mlflow").read_bytes())
+    assert receipt["run_id"] == "live-run" and receipt["uploaded_rollouts"] is False
+    assert client.status == "FINISHED" and post.runs == []  # one MLflow run, the live one
+
+
 def test_live_finalizer_streams_rollout_files_without_backend_table_download(live, monkeypatch):
     artifacts, exporter, client = live
     original = Path.read_bytes

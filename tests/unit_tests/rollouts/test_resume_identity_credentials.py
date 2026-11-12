@@ -38,7 +38,7 @@ def credentialed_config(secret: str, model: str = "demo-model") -> dict:
                 "vllm_model": {
                     "model": model,
                     "base_url": "http://127.0.0.1:8000/v1",
-                    "client": {"headers": {"Authorization": f"Bearer {secret}"}},
+                    "client": {"headers": {"Authorization": f"Bearer {secret}", "X-Session": secret}},
                 }
             }
         },
@@ -50,6 +50,8 @@ def credentialed_config(secret: str, model: str = "demo-model") -> dict:
                     "harbor": {"secrets": {"X_TOKEN": secret, "nested": {"anything": secret}}},
                     "env": [{"name": "SERVICE_TOKEN", "value": secret}, {"API_KEY": secret}, f"HF_TOKEN={secret}"],
                     "my_service_pw": secret,
+                    "service_key": secret,
+                    "reference_key": "expected_answer",
                     "artifact_url": f"https://reader:{secret}@artifacts.example.com/store",
                     "judge_prompt": "Grade the answer.",
                 }
@@ -104,7 +106,11 @@ def test_the_identity_keeps_the_semantic_settings_and_marks_credentials_redacted
     settings = identity["servers"]["search_tools"]["resources_servers"]["web_search"]
 
     assert settings["judge_prompt"] == "Grade the answer."
-    assert settings["exa_api_key"] == settings["my_service_pw"] == "<redacted>"
+    assert settings["exa_api_key"] == settings["my_service_pw"] == settings["service_key"] == "<redacted>"
+    # A `..._key` setting that selects what is measured stays, so a resume still sees it change.
+    assert settings["reference_key"] == "expected_answer"
+    model = identity["servers"]["policy_model"]["responses_api_models"]["vllm_model"]
+    assert model["client"]["headers"] == {"Authorization": "<redacted>", "X-Session": "<redacted>"}
     assert settings["harbor"]["secrets"] == {"X_TOKEN": "<redacted>", "nested": {"anything": "<redacted>"}}
     assert CANARY not in json.dumps(identity)
 

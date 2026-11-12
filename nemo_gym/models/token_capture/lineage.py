@@ -57,6 +57,7 @@ from nemo_gym.models.token_capture.fingerprint import (
     FINGERPRINT_VERSION,
     assistant_fingerprint,
     conversation_digest,
+    echoed_tool_call_turn_fingerprints,
     tool_call_turn_fingerprint,
     trailing_assistant_turn,
 )
@@ -323,18 +324,20 @@ class RolloutLineage:
         return ParentResolutionStatus.RESOLVED, candidates[0], reason
 
     def _candidates_by_tool_call_turn(self, messages: list[dict]) -> list["LineageNode"]:
-        """Find complete output turns with unchanged context and only rewritten arguments."""
-        key = tool_call_turn_fingerprint(trailing_assistant_turn(messages))
-        if not key:
-            return []
+        """Find complete output turns with unchanged context and only rewritten arguments.
+
+        Candidates of every key the echoed turn can match are pooled, so the caller decides
+        uniqueness over all of them (``echoed_tool_call_turn_fingerprints``).
+        """
         return [
             node
+            for key in echoed_tool_call_turn_fingerprints(trailing_assistant_turn(messages))
             for call_id in self.by_tool_call_turn.get(key) or []
             if (node := self.by_call_id.get(call_id)) is not None
             and self._continues(node, messages)
             # The context check covers the prefix, while the lookup covers only
             # the trailing turn. Account for every model item between them too.
-            and tool_call_turn_fingerprint(messages[node.context_len :]) == key
+            and key in echoed_tool_call_turn_fingerprints(messages[node.context_len :])
         ]
 
     def _index_tool_call_turn(self, call_id: str, response_items: list[dict]) -> None:

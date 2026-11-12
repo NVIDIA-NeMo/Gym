@@ -42,6 +42,11 @@ places by different agent classes, so up to five witnesses testify:
                  from its own session files keeps these per-item ids even when
                  it never saw the response id, and the last model-authored item
                  names the terminal call even when tool outputs follow it.
+                 OpenCode's unavailable-tool placeholder keeps the served id
+                 but replaces the call's name and arguments, so it matches a
+                 recorded call to the tool it names, or to the placeholder
+                 tool itself, without comparing arguments, unless another
+                 model-authored item reuses its id or reasoning follows it.
   content      — the fingerprint of the response's model-authored items
                  matches one entry. Three readings are pooled: the entry's
                  cumulative ``continuation_fingerprint`` when a lineage-aware
@@ -80,12 +85,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from nemo_gym.models.token_capture.fingerprint import (
+    _UNAVAILABLE_TOOL_PLACEHOLDER,
     FINGERPRINT_VERSION,
     _content_of,
     _is_assistant_authored,
+    _served_tool_name,
     _tools_of,
     assistant_fingerprint,
     canonicalize_tool_arguments,
+    echoed_tool_call_turn_fingerprints,
     tool_call_turn_fingerprint,
 )
 from nemo_gym.models.token_capture.records import (
@@ -293,8 +301,8 @@ def _tool_name_key(name: object) -> str:
     client, and a transcript rebuilt from the client's files, keeps the bare
     name with the namespace in a separate field. Two bare names that differ
     only before their own last ``__`` compare equal here; the witness also
-    requires the served id and the canonical arguments to match, so such a
-    pair cannot be confused on its own.
+    requires the served id (and, except for OpenCode's placeholder, the
+    canonical arguments) to match, so such a pair cannot be confused on its own.
     """
     return str(name or "").rsplit(NAMESPACE_TOOL_DELIMITER, 1)[-1]
 
@@ -338,6 +346,41 @@ def _entry_items_by_served_id(entry: TokenEntry) -> dict[str, tuple]:
     return keyed
 
 
+def _placeholder_tool_names(output: list, last: dict) -> frozenset[str]:
+    """Return the recorded tool names ``last`` can stand for when it is OpenCode's unavailable-tool placeholder.
+
+    The served call was the tool the placeholder names, or the placeholder tool itself when the model called it
+    and OpenCode rewrote its error. Only ``last``'s own name, namespace, call id and arguments are read. The set is
+    empty for any other item; when a reasoning item follows ``last``, because a later call whose only output is
+    reasoning produced it; and when another model-authored item in the transcript carries the same call id,
+    because once arguments are not compared a reused id cannot name one call.
+    """
+    if (
+        last.get("type") != "function_call"
+        or last.get("namespace")
+        or last.get("name") != _UNAVAILABLE_TOOL_PLACEHOLDER
+    ):
+        return frozenset()
+    served = _served_tool_name(_UNAVAILABLE_TOOL_PLACEHOLDER, last.get("arguments"))
+    call_id = last.get("call_id")
+    if served == _UNAVAILABLE_TOOL_PLACEHOLDER or not isinstance(call_id, str) or not call_id:
+        return frozenset()
+    for item in reversed(output):
+        if item is last:
+            break
+        if isinstance(item, dict) and item.get("type") == "reasoning":
+            return frozenset()
+    for item in output:
+        if item is last or not isinstance(item, dict) or not _is_assistant_authored(item):
+            continue
+        try:
+            if any(other == call_id for other, _, _ in _tools_of(item)):
+                return frozenset()
+        except (TypeError, ValueError):
+            return frozenset()
+    return frozenset({_tool_name_key(served), _UNAVAILABLE_TOOL_PLACEHOLDER})
+
+
 def _item_id_witness(
     entries: list[TokenEntry], response: dict, reasons: list[str], identified: set[str]
 ) -> tuple[str, TokenEntry] | None:
@@ -353,7 +396,10 @@ def _item_id_witness(
     An id alone does not name a call. The entry's item with that id must also
     carry the same content (the tool's name and canonical arguments, or the
     message's content parts), so that a reused or colliding id cannot name a
-    call whose output the transcript does not end with. An item whose id no
+    call whose output the transcript does not end with. OpenCode's
+    unavailable-tool placeholder replaces the served call's name and arguments,
+    so it may instead match a recorded call to either name in
+    ``_placeholder_tool_names`` whatever its arguments. An item whose id no
     entry recorded, such as a message the harness composed itself, abstains
     rather than naming an earlier call. A call matched as the single entry is
     added to ``identified``: the witness singled it out rather than collapsing
@@ -371,6 +417,7 @@ def _item_id_witness(
         return None
     try:
         wanted = _item_content_key(last)
+        placeholder_names = _placeholder_tool_names(output, last)
     except ValueError:
         reasons.append("last_item_unfingerprintable")
         return None
@@ -387,7 +434,7 @@ def _item_id_witness(
             continue
         if recorded is None:
             continue
-        if recorded == wanted:
+        if recorded == wanted or (recorded[0] == "function_call" and recorded[1] in placeholder_names):
             matches.append(entry)
         else:
             content_mismatch = True
@@ -501,8 +548,8 @@ def _content_witness(
         # Fourth reading: the complete trailing model turn, ignoring only tool
         # arguments. Tool IDs alone cannot corroborate changed/missing output
         # or an uncaptured final assistant message (the #3972 witness contract).
-        target_turn = tool_call_turn_fingerprint(trailing)
-        if target_turn:
+        target_turns = echoed_tool_call_turn_fingerprints(trailing)
+        if target_turns:
             trailing_ids = {call_id for item in trailing for call_id, _, _ in _tools_of(item)}
             earlier_ids = {
                 call_id
@@ -521,7 +568,7 @@ def _content_witness(
                     own_turn = tool_call_turn_fingerprint(list(entry.output_items))
                 except (TypeError, ValueError):
                     continue
-                if own_turn == target_turn:
+                if own_turn in target_turns:
                     id_matches[entry.model_call_id] = entry
             winner = _collapse_identical(list(id_matches.values()))
             if winner is not None:

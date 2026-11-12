@@ -59,6 +59,7 @@ from nemo_gym.core import (
 from nemo_gym.metrics import compute_pass_majority_metrics
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.telemetry import init_telemetry
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.utils.exception_inspection import sandbox_failure_prefix
 
 
@@ -69,6 +70,22 @@ GYM_ROOT = Path(__file__).resolve().parents[2]
 
 _RAY_WORKER_EVENT_LOOP: asyncio.AbstractEventLoop | None = None
 _RAY_WORKER_HTTP_CONFIG: GlobalAIOHTTPAsyncClientConfig | None = None
+
+
+class HarborTrialError(RuntimeError):
+    """Retain the original trial failure across the Ray worker boundary."""
+
+    def __init__(self, exception_type: str, exception_message: str, trial_dir: str) -> None:
+        super().__init__(exception_type, exception_message, trial_dir)
+        self.exception_type = exception_type
+        self.exception_message = exception_message
+        self.trial_dir = trial_dir
+
+    def __str__(self) -> str:
+        if self.exception_message.startswith("[sandbox "):
+            prefix, _, message = self.exception_message.partition("]")
+            return f"{prefix}] Harbor trial failed with {self.exception_type}: {message.lstrip()}"
+        return f"Harbor trial failed with {self.exception_type}: {self.exception_message}"
 
 
 async def _run_worker_job(job_config_dict: dict, task_name: str, http_config: dict) -> str:
@@ -267,6 +284,11 @@ class HarborAgent(SimpleResponsesAPIAgent):
         global_config = get_global_config_dict()
         self._sem = asyncio.Semaphore(global_config.get(NUM_SAMPLES_IN_PARALLEL_KEY_NAME) or 1)
         self._worker_http_config = GlobalAIOHTTPAsyncClientConfig.model_validate(global_config)
+        logger.warning(
+            "responses_api_agents/harbor_agent_general is deprecated. The built-in benchmarks that use it will be migrated to "
+            "the harbor environment server (environment_servers/harbor, see its README.md); no action is needed "
+            "from you yet. New work should use the harbor environment server."
+        )
 
     def _configure_job_for_run(self, job_config: JobConfig, body: HarborRunRequest) -> None:
         """Customize a request's copied job without modifying the shared template."""
@@ -750,9 +772,10 @@ class HarborAgent(SimpleResponsesAPIAgent):
                         provider=getattr(environment, "value", environment),
                         reason=exception_info.exception_type,
                     )
-                    raise RuntimeError(
-                        f"{facts}Harbor trial failed with {exception_info.exception_type}: "
-                        f"{exception_info.exception_message}"
+                    raise HarborTrialError(
+                        exception_info.exception_type,
+                        f"{facts}{exception_info.exception_message}",
+                        str(trial_dir.resolve()),
                     )
 
                 return str(trial_dir.resolve())
@@ -765,3 +788,6 @@ class HarborAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     HarborAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = HarborAgent.run_webserver()  # noqa: F401

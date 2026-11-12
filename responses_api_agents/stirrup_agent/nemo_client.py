@@ -35,17 +35,16 @@ tokens from its character count and size ``max_completion_tokens`` as::
 raised toward a configurable minimum (historically 1,024 tokens), subject to
 the hard cap. The floor holds even past the estimated context, because the
 estimate can substantially overcount retained reasoning. On the response
-side, we retain partial content from successful ``finish_reason=length``
-responses. Explicit HTTP prompt-overflow rejections instead reach Stirrup's
-existing context recovery, which preserves its original-task and summary
-boundaries.
+side, we replicate Stirrup parsing but do *not* raise on
+``finish_reason=length`` — the agent loop will either terminate when the
+model invokes the ``finish`` tool or exhaust ``max_turns``, yielding a
+clean timeout instead of a crash.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import re
 from time import perf_counter
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -78,12 +77,8 @@ def _is_context_rejection(error: Exception) -> bool:
     """Recognize explicit prompt overflow without treating other invalid requests as recoverable."""
     if not isinstance(error, APIStatusError) or error.status_code not in (400, 413):
         return False
+    # ``body`` is the error object itself: the SDK has already unwrapped OpenAI's ``{"error": {...}}`` envelope.
     body = error.body
-    if not isinstance(body, dict):
-        return False
-    # The SDK unwraps OpenAI's error envelope; Gym's local admission check uses FastAPI's detail envelope.
-    if "code" not in body:
-        body = body.get("error", body.get("detail"))
     return isinstance(body, dict) and body.get("code") == "context_length_exceeded"
 
 
@@ -190,6 +185,7 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
         min_completion_tokens: int = _MIN_COMPLETION_TOKENS,
         prompt_estimator_truncate_history_thinking: Optional[bool] = None,
         truncation_recovery: bool = False,
+        context_overflow_recovery: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -205,11 +201,11 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
         self._min_completion_tokens = min_completion_tokens
         self._prompt_estimator_truncate_history_thinking = prompt_estimator_truncate_history_thinking
         self._truncation_recovery = truncation_recovery
+        self._context_overflow_recovery = context_overflow_recovery
         # Set when the previous call exhausted its completion budget without
         # emitting a tool call; consumed by the very next generate().
         self._recover_from_truncation = False
         self._truncation_overruns = 0
-        self.last_response_diagnostics: Optional[dict[str, Any]] = None
 
     # ------------------------------------------------------------------
     # Token counting
@@ -315,8 +311,6 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
         messages: list[ChatMessage],
         tools: dict[str, Tool],
     ) -> AssistantMessage:
-        # A rejected request must not inherit diagnostics from a previous response.
-        self.last_response_diagnostics = None
         provider_messages = to_provider_openai_messages(messages)
 
         # Recovery turn: the previous call spent its whole completion budget
@@ -373,8 +367,13 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
         try:
             response = await self._client.chat.completions.create(**request_kwargs)
         except Exception as exc:
-            if _is_context_rejection(exc):
-                # Let Stirrup apply its existing progress-boundary checks before discarding any history.
+            if self._context_overflow_recovery and _is_context_rejection(exc):
+                # Opt-in: Stirrup drops the latest completed turn and sends the call again, or raises at a
+                # progress boundary. The runner reads the rejection back from this exception's cause.
+                LOGGER.warning(
+                    "context overflow rejection (HTTP %d); handing the call to Stirrup's overflow recovery",
+                    exc.status_code,
+                )
                 raise ContextOverflowError("The model rejected a prompt that exceeds its context window.") from exc
             LOGGER.error("API call raised %s: %s", type(exc).__name__, exc)
             raise
@@ -417,25 +416,6 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
             # vLLM >= 0.16.0 emits `reasoning` (Responses-API convention) instead of
             # `reasoning_content`; e.g. DeepSeek-V4's `--reasoning-parser deepseek_v4`.
             reasoning = Reasoning(content=msg.reasoning)
-
-        # Record response shape without copying text, tool arguments, or arbitrary provider fields.
-        # Compaction uses this to distinguish empty answers from reasoning-only and truncated outputs.
-        content = msg.content if isinstance(msg.content, str) else ""
-        reasoning_content = reasoning.content if reasoning is not None else ""
-        finish_reason = choice.finish_reason
-        if finish_reason not in {"stop", "length", "max_tokens", "tool_calls", "function_call", "content_filter"}:
-            finish_reason = "unknown"
-        self.last_response_diagnostics = {
-            "finish_reason": finish_reason,
-            "content_present": msg.content is not None,
-            "content_chars": len(content),
-            "reasoning_present": reasoning is not None,
-            "reasoning_chars": len(reasoning_content) if isinstance(reasoning_content, str) else 0,
-            "inline_think_open": bool(re.search(r"<think\s*>", content, re.IGNORECASE)),
-            "inline_think_close": bool(re.search(r"</think\s*>", content, re.IGNORECASE)),
-            "tool_calls_count": len(msg.tool_calls or []),
-            "usage": {"input": prompt_tokens, "answer": answer_tokens, "reasoning": reasoning_tokens},
-        }
 
         tool_calls = [
             ToolCall(

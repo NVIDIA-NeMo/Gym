@@ -1,0 +1,36 @@
+{
+  "ng_trajectory": {
+    "schema_version": "2.0",
+    "task_id": "task",
+    "capture_key": "capture",
+    "invocations": [
+      {
+        "invocation_id": "root"
+      }
+    ],
+    "tool_calls": [
+      {
+        "invocation_id": "root",
+        "tool_call_id": "request",
+        "span_id": "canonical-span",
+        "status": "failed",
+        "failure_id": "failure",
+        "timings": [
+          {
+            "boundary": "lifecycle",
+            "timing_source": "saved.tool",
+            "duration_ms": 10,
+            "duration_source": "reported"
+          }
+        ]
+      }
+    ],
+    "failure_events": {
+      "failure": {
+        "boundary": "harness",
+        "failure_kind": "example:failure",
+        "failure_reason": "tool failed"
+      }
+    }
+  }
+}

@@ -6,7 +6,7 @@ name = "gym-resources-servers-browsecomp-advanced-harness"
 version = "0.0.0"
 requires-python = ">=3.13.14"
 dependencies = [
-    "nemo-gym[dev]",
+    "nemo-gym[dev,sandbox]",
     "tavily-python==0.7.21",
     "pocketshell[pcre]",
 ]

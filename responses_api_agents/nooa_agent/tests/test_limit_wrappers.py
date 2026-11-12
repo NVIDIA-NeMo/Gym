@@ -92,6 +92,8 @@ async def test_actual_codeact_limit_wrappers_remain_gradable(
     assert type(raised[0]) is GenerationError
     assert type(raised[0].__cause__) is cause_type
     assert result.termination_reason is reason
+    if reason is NOOATerminationReason.POLICY_BUDGET_EXCEEDED:
+        assert all(inv.status == "incomplete" for inv in result.trajectory.invocations)
     assert result.episode.response.output
     assert len(result.trajectory.turns) == runner._server_client.post.await_count == 1
 
@@ -185,5 +187,6 @@ async def test_actual_predict_validation_wrapper_remains_gradable() -> None:
     assert type(raised[0]) is GenerationError
     assert isinstance(raised[0].__cause__, InvalidPolicyOutputError)
     assert result.termination_reason is NOOATerminationReason.INVALID_POLICY_OUTPUT
+    assert all(inv.status == "incomplete" for inv in result.trajectory.invocations)
     assert result.episode.response.output
     assert len(result.trajectory.turns) == runner._server_client.post.await_count == 1
