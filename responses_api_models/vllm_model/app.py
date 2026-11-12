@@ -2538,6 +2538,8 @@ class VLLMModel(SimpleResponsesAPIModel):
             ],
         }
 
+        if choice_dict.get("stop_reason") is not None:
+            chat_completion_dict["choices"][0]["stop_reason"] = choice_dict["stop_reason"]
         if completion_dict.get("usage") is not None:
             chat_completion_dict["usage"] = completion_dict["usage"]
         if completion_dict.get("metrics") is not None:
