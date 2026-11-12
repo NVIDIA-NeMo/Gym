@@ -9,21 +9,22 @@ import json
 import logging
 import os
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 import orjson
 from omegaconf import DictConfig, OmegaConf
 from omegaconf.errors import InterpolationResolutionError
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 from yaml import YAMLError
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, _resolve_under_cwd_or_install
 from nemo_gym.config.config_types import AlmostServerError, ConfigError
 from nemo_gym.config.global_config import (
+    ENVIRONMENT_SERVER_ROUTES_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     dataset_agent_pins,
@@ -33,6 +34,7 @@ from nemo_gym.config.global_config import (
     taskset_environment_server_name,
     translate_interpolation_error,
 )
+from nemo_gym.core.episode_types import MaterializedTask, is_materialized_task_row
 from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.environment.manifest import (
     DatasetKind,
@@ -44,6 +46,7 @@ from nemo_gym.environment.manifest import (
     resolve_manifest_config_path,
 )
 from nemo_gym.server_runtime.base_resources_server import BaseRunRequest
+from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnTaskInput
 
 
 logger = logging.getLogger(__name__)
@@ -101,6 +104,8 @@ class ResolvedComposition:
     rollout_driver: str | None
     grading_mode: str | None
     components: tuple[ResolvedComponent, ...]
+    # The implementation of the environment server each routed taskset runs on, from environment_server_routes.
+    taskset_environment_servers: Mapping[str, str] = field(default_factory=dict)
 
 
 def _implementation_name(server: Any) -> str:
@@ -365,7 +370,22 @@ def _resolve_manifest_composition(config_path: Path, *, dataset_owner: str | Non
         rollout_driver=wiring.resolved.get("rollout_collection_driver"),
         grading_mode=str(grading_mode) if grading_mode is not None else None,
         components=tuple(components),
+        taskset_environment_servers=_taskset_environment_servers(wiring),
     )
+
+
+def _taskset_environment_servers(wiring: _ConfigWiring) -> dict[str, str]:
+    """Each routed taskset's environment server implementation, such as ``single_agent_turn``.
+
+    A route to an instance that is not an environment server is left out, so its tasks count as unknown.
+    """
+    routes = wiring.resolved.get(ENVIRONMENT_SERVER_ROUTES_KEY_NAME)
+    implementations: dict[str, str] = {}
+    for taskset in routes if isinstance(routes, DictConfig) else ():
+        server = wiring.by_instance.get(taskset_environment_server_name(wiring.resolved, str(taskset)))
+        if server is not None and server.SERVER_TYPE == "environment_servers":
+            implementations[str(taskset)] = _implementation_name(server)
+    return implementations
 
 
 def _catalog_resources_server(wiring: _ConfigWiring) -> str | None:
@@ -639,6 +659,7 @@ def _validate_dataset(
     *,
     standard_prompt_config: str | None,
     prompt_source: str = "template",
+    taskset_environment_servers: Mapping[str, str] | None = None,
 ) -> DatasetValidation:
     data_path = _resolve_under_cwd_or_install(dataset.jsonl_fpath)
     prompt_path: Path | None = None
@@ -667,6 +688,16 @@ def _validate_dataset(
     row_count = 0
     for line_number, row in _iter_dataset_rows(data_path):
         row_count += 1
+        if is_materialized_task_row(row):
+            _validate_task_row(
+                dataset,
+                line_number,
+                row,
+                prompt_source=prompt_source,
+                templated=prompt is not None,
+                taskset_environment_servers=taskset_environment_servers or {},
+            )
+            continue
         if prompt_source == "prepared" and dataset.type == DatasetKind.BENCHMARK:
             params = row.get("responses_create_params")
             if not isinstance(params, dict) or not params.get("input"):
@@ -705,6 +736,70 @@ def _validate_dataset(
         rows=row_count,
         prompt_config=str(prompt_path) if prompt_path else None,
     )
+
+
+# Environment servers that take single-agent-turn tasks: single_agent_turn_legacy accepts them besides flat rows.
+SINGLE_AGENT_TURN_ENVIRONMENT_SERVERS = frozenset({"single_agent_turn", "single_agent_turn_legacy"})
+
+
+class TaskInputObject(BaseModel):
+    """Any task input object: the input of an environment server whose own input model owns its fields."""
+
+    model_config = ConfigDict(extra="allow")
+
+
+def _validate_task_row(
+    dataset: ManifestDataset,
+    line_number: int,
+    row: dict[str, Any],
+    *,
+    prompt_source: str,
+    templated: bool,
+    taskset_environment_servers: Mapping[str, str],
+) -> None:
+    """Check a materialized task row (``task_id`` and ``task_input``) as rollout collection dispatches it.
+
+    Rollout collection sends only the row's ``task_id`` and ``task_input`` to the environment server its taskset
+    routes to (``environment_server_routes``). A single-agent-turn server validates them as
+    ``MaterializedTask[SingleAgentTurnTaskInput]``. For any other server, or a taskset with no route, only the
+    envelope is checked here, a valid ``TaskId`` and a ``task_input`` object, because that server owns its input.
+    """
+    if templated:
+        # Collation and rollout collection apply a template to the row's top level, which a task never reads.
+        raise EnvironmentValidationError(
+            f"Benchmark dataset '{dataset.name}' row {line_number} is a materialized task, and prompt templates "
+            "are not supported for materialized task rows."
+        )
+    task_input = row.get("task_input")
+    environment_server = taskset_environment_servers.get(row["task_id"].get("taskset"))
+    input_model = (
+        SingleAgentTurnTaskInput if environment_server in SINGLE_AGENT_TURN_ENVIRONMENT_SERVERS else TaskInputObject
+    )
+    if input_model is SingleAgentTurnTaskInput and "responses_create_params" in row:
+        raise EnvironmentValidationError(
+            f"Dataset '{dataset.name}' row {line_number} is not a valid task: "
+            "move top-level responses_create_params into task_input instead of mixing rollout envelopes."
+        )
+    # A prepared prompt is in the task's request, so only an input model that carries one can be checked for it.
+    if (
+        prompt_source == "prepared"
+        and dataset.type == DatasetKind.BENCHMARK
+        and "responses_create_params" in input_model.model_fields
+    ):
+        params = task_input.get("responses_create_params") if isinstance(task_input, dict) else None
+        if not isinstance(params, dict) or not params.get("input"):
+            raise EnvironmentValidationError(
+                f"Benchmark dataset '{dataset.name}' row {line_number} declares prepared prompts "
+                "but has no task_input.responses_create_params.input."
+            )
+    try:
+        MaterializedTask[input_model].model_validate({"task_id": row["task_id"], "task_input": task_input})
+    except ValidationError as error:
+        issue = error.errors(include_url=False, include_context=False, include_input=False)[0]
+        location = ".".join(str(part) for part in issue["loc"]) or "row"
+        raise EnvironmentValidationError(
+            f"Dataset '{dataset.name}' row {line_number} is not a valid task at {location}: {issue['msg']}"
+        ) from error
 
 
 def _validate_benchmark_prompt_contract(manifest: EnvironmentManifest) -> None:
@@ -825,7 +920,10 @@ def validate_environment(
             _validate_rollout_driver(manifest.rollout_driver)
         dataset_reports = tuple(
             _validate_dataset(
-                dataset, standard_prompt_config=manifest.standard_prompt_config, prompt_source=manifest.prompt_source
+                dataset,
+                standard_prompt_config=manifest.standard_prompt_config,
+                prompt_source=manifest.prompt_source,
+                taskset_environment_servers=composition.taskset_environment_servers,
             )
             for dataset in manifest.datasets
             if validate_datasets
