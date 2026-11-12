@@ -63,6 +63,7 @@ from nemo_gym.core.episode_context import (
 )
 from nemo_gym.core.failure_kinds import (
     JUDGE_FAILED,
+    JUDGE_UNPARSEABLE,
     PROVIDER_CREDENTIALS_REJECTED,
     PROVIDER_QUOTA_EXHAUSTED,
 )
@@ -80,6 +81,8 @@ class JudgeGrading:
     dependencies: list[ModelCallRef] = field(default_factory=list)
     unidentified_calls: int = 0
     parsed_dependencies: set[int] = field(default_factory=set)
+    # Replies without a verdict that the call site asked again; the grade rests on the replies that replaced them.
+    superseded_dependencies: set[int] = field(default_factory=set)
 
 
 _judge_grading: ContextVar[JudgeGrading | None] = ContextVar("judge_grading", default=None)
@@ -96,6 +99,18 @@ def record_parsed_judge_verdict() -> None:
         grading.parsed_dependencies.add(len(grading.dependencies) - 1)
 
 
+def record_superseded_judge_reply() -> None:
+    """Mark the active judge grading's latest reply as replaced when the call site asks the same prompt again.
+
+    Call it only for a reply without a verdict that a re-ask replaces. The reply stays a dependency, so the
+    grading still names every judge call its verifier invocation owns; it counts as settled once the grading has
+    a parsed verdict (``record_parsed_judge_verdict``).
+    """
+    grading = _judge_grading.get()
+    if grading is not None and grading.dependencies:
+        grading.superseded_dependencies.add(len(grading.dependencies) - 1)
+
+
 ResponseT = TypeVar("ResponseT", bound=BaseModel)
 
 
@@ -109,7 +124,19 @@ def normalize_math_judge_verdict(text: str) -> str:
 
 
 class JudgeError(Exception):
-    """A parser-declared judge failure; judge_failsafe routes the row to the failures sidecar."""
+    """A parser-declared judge failure; judge_failsafe routes the row to the failures sidecar.
+
+    ``failure_kind`` is ``judge_failed``, or ``judge_unparseable`` for a judge that answered without a valid verdict
+    on every attempt; both are masked and re-judged from the saved answer.
+    """
+
+    failure_kind: str = JUDGE_FAILED
+
+    def __init__(self, *args: object, failure_kind: str = JUDGE_FAILED) -> None:
+        if failure_kind not in (JUDGE_FAILED, JUDGE_UNPARSEABLE):
+            raise ValueError(f"not a parser judge failure kind: {failure_kind!r}")
+        super().__init__(*args)
+        self.failure_kind = failure_kind
 
 
 def judge_call_failed(
@@ -120,11 +147,13 @@ def judge_call_failed(
     operation_id: str | None = None,
     attempt_id: str | None = None,
     http_status: int | None = None,
+    failure_kind: str = JUDGE_FAILED,
 ) -> NgFailureEvent:
-    """The resources server boundary's ``judge_failed``; what was observed stays on the explicit cause."""
+    """The resources server boundary's ``judge_failed`` (or a parser's ``judge_unparseable``); what was observed
+    stays on the explicit cause."""
     return NgFailureEvent(
         boundary=FailureBoundary.RESOURCES_SERVER,
-        failure_kind=JUDGE_FAILED,
+        failure_kind=failure_kind,
         failure_reason=bounded_text(message, 2000),
         operation=operation,
         operation_id=operation_id,
@@ -168,11 +197,12 @@ def is_judge_provider_stop(error: BaseException) -> bool:
 
 
 def is_judge_failure(error: BaseException) -> bool:
-    """Whether ``error`` is a judge failure: the ``JudgeError`` a parser raises, or a ``judge_failed`` event."""
+    """Whether ``error`` is a judge failure: the ``JudgeError`` a parser raises, or a ``judge_failed`` or
+    ``judge_unparseable`` event."""
     return isinstance(error, JudgeError) or (
         isinstance(error, NgFailureEvent)
         and error.boundary == FailureBoundary.RESOURCES_SERVER
-        and error.failure_kind == JUDGE_FAILED
+        and error.failure_kind in (JUDGE_FAILED, JUDGE_UNPARSEABLE)
     )
 
 
@@ -339,7 +369,8 @@ def judge_failsafe(verify_fn: Callable) -> Callable:
         except JUDGE_FAILURES as e:
             if not (is_judge_failure(e) or is_judge_provider_stop(e)):
                 raise
-            kind = e.failure_kind if is_judge_provider_stop(e) else JUDGE_FAILED
+            # A provider stop, a parser's JudgeError and a judge failure event each carry their own judge kind.
+            kind = e.failure_kind
             body = kwargs.get("body") or next(
                 (a for a in (*kwargs.values(), *args) if hasattr(a, "model_dump") and hasattr(a, "response")),
                 None,
@@ -366,7 +397,7 @@ def judge_failsafe(verify_fn: Callable) -> Callable:
             # Legacy/parser JudgeErrors also need a judge-owned event, rather than borrowing an inner kind.
             failure = e
             if not (isinstance(e, NgFailureEvent) and e.failure_kind == kind):
-                failure = judge_call_failed(error, operation="judge.verify")
+                failure = judge_call_failed(error, operation="judge.verify", failure_kind=kind)
                 failure.__cause__ = e
             data |= FailureReportRow.fields(report_for_current_request(failure))
             return JSONResponse(content=jsonable_encoder(data))
