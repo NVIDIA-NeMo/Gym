@@ -1,6 +1,6 @@
 ---
 title: "Legal Agent Bench"
-description: "Configure judges and run Harvey LAB through the Harbor Environment Server."
+description: "Configure judges, run Harvey LAB, and compare agent harnesses."
 position: 20
 ---
 
@@ -43,11 +43,22 @@ Per-judge values override the shared settings. Entries also accept
 entry and remove `judge_profile`. Judge credentials and rubrics reach only the
 separate verifier sandbox.
 
-## Native agent and sandbox
+## Choose a harness and sandbox
 
-`benchmarks/legal_agent_bench/config.yaml` and `config_native.yaml` select
-the same LAB Native agent through the Environment Server.
-The agent uses LAB's updated tools and explicit `finish` behavior.
+All presets are under `benchmarks/legal_agent_bench/`:
+
+| Preset | Agent |
+| --- | --- |
+| `config.yaml`, `config_native.yaml` | LAB Native |
+| `config_hermes.yaml` | Hermes |
+| `config_claude_code.yaml` | Claude Code |
+| `config_codex.yaml` | Codex |
+
+All presets run through the Harbor Environment Server and
+use `legal_agent_bench_benchmark_agent` and the same task rows and verifier.
+Change the preset to compare harnesses while keeping tasks, model, judges,
+sampling, and budgets fixed. LAB Native uses LAB's `finish` tool; CLI harnesses
+keep their own tools and termination rules.
 
 `finish` checks only the agent's listed output files, without consulting the rubric.
 Missing files cause up to two rejections so the agent can correct them; a third
@@ -70,7 +81,8 @@ Rubrics and judge credentials are still injected only into the separate verifier
 Automatic image preparation uses Docker. To run without local Docker, supply
 an accessible, provider-compatible
 LAB tools image using `prepare_script_args.image`. Every sandbox must reach the
-advertised model-server address.
+advertised model-server address. OpenShell policies must also permit harness
+installation; scoped npm packages need encoded slashes allowed on registry requests.
 
 ## Run selected tasks
 
@@ -123,7 +135,8 @@ gym eval run --no-serve \
 ```
 
 The sampling file above targets `openai_model`; configure equivalent defaults
-for other model servers. Explicit row parameters override these defaults.
+for other model servers. Hermes rejects row-level `top_p`, and Codex rejects
+row-level `temperature` and `top_p`, so use shared model defaults for comparisons.
 
 Preparation converts legacy `instance_id` rows into canonical Environment Server
 rows. Original IDs and caller parameters are retained. Shared corpora are stored

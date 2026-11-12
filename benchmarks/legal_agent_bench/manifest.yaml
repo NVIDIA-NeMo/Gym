@@ -4,7 +4,7 @@ experimental: true
 kind: benchmark
 integration_profile: custom-gym-agent-loop
 domain: agent
-description: Harvey LAB legal-document tasks with the native agent and single or dual judging.
+description: Harvey LAB legal-document tasks with configurable session agents and single or dual judging.
 modality: multimodal
 licensing: MIT
 authors:

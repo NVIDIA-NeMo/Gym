@@ -17,7 +17,7 @@ from resources_servers.legal_agent_bench.prepare import INDEX_FILENAME
 
 
 BENCHMARK_DIR = Path(__file__).resolve().parents[1]
-PRESETS = ["native"]
+PRESETS = ["native", "hermes", "claude_code", "codex"]
 
 
 def resolve(harness="native", **overrides):
@@ -147,7 +147,10 @@ def test_harness_switch_preserves_grading_and_dataset(count, reward_mode, tmp_pa
         if expected is None:
             expected = current
         assert current == expected
-        agent = next(iter(resolved.legal_agent_bench_benchmark_agent.responses_api_agents.values()))
+        agents = resolved.legal_agent_bench_benchmark_agent.responses_api_agents
+        expected_type = "legal_agent_bench_native" if harness == "native" else f"{harness}_agent"
+        assert list(agents) == [expected_type]
+        agent = agents[expected_type]
         if harness == "native":
             assert agent.agent_timeout_seconds == 300
         else:
