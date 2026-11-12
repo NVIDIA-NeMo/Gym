@@ -331,7 +331,9 @@ name                                                                            
 
 # How To: Use Ray for parallelizing CPU-intensive tasks
 
-NeMo Gym automatically sets up Ray for distributed computing for CPU-intensive tasks.
+Ray is optional in NeMo Gym. A server that spreads CPU-intensive work across nodes can opt into Ray, and NeMo Gym then starts or joins a Ray cluster for it. Servers don't use Ray to talk to each other: they communicate over HTTP whether or not Ray is running.
+
+If the work needs isolation or its own runtime, such as running generated code, use the [Sandbox API](/infrastructure/sandbox) instead. Remote sandbox providers run that work on their own machines, off the server's host.
 
 ## Ray Setup in NeMo Gym
 
@@ -381,6 +383,8 @@ If no address is specified and a configured server needs Ray, NeMo Gym starts a 
 Here's how to parallelize CPU-intensive functions using Ray's `@ray.remote` decorator. Refer to [Ray documentation](https://docs.ray.io/en/latest/ray-core/api/doc/ray.remote.html) for more options.
 
 ```python
+import asyncio
+
 import ray
 
 # Decorate your CPU-intensive function
@@ -391,15 +395,17 @@ def cpu_intensive_task(data):
     result = expensive_computation(data)
     return result
 
-# Use it in your code
-def process_data_parallel(data_list):
+# Use it in your async server code
+async def process_data_parallel(data_list):
     # Submit all tasks to Ray
     futures = [cpu_intensive_task.remote(data) for data in data_list]
-    
-    # Get results
-    results = ray.get(futures)
+
+    # Ray futures are awaitable, so waiting on them doesn't block the event loop
+    results = await asyncio.gather(*futures)
     return results
 ```
+
+Don't call `ray.get()` in async server code: it blocks the event loop, and every other request the server is handling waits until it returns.
 
 # FAQ: SFT and RL
 Reading time: 5 mins
@@ -431,7 +437,7 @@ Traceback:
 
 **What's happening:**
 
-Ray (NeMo Gym's distributed computing dependency) uses `psutil` to enumerate and monitor processes, which requires calling system calls like `sysctl()` on macOS. In sandboxed execution environments, these system calls are blocked for security reasons.
+Ray, which NeMo Gym starts only when a configured server declares `ray_enabled = True`, uses `psutil` to enumerate and monitor processes, which requires calling system calls like `sysctl()` on macOS. In sandboxed execution environments, these system calls are blocked for security reasons.
 
 **Who is affected:**
 
