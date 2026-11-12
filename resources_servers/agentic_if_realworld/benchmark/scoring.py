@@ -232,7 +232,12 @@ def _checked_result(
 ) -> tuple[dict, dict]:
     """Derive the full grade from the authoritative judge response."""
     choices = response["choices"]
-    if len(choices) != 1 or choices[0]["finish_reason"] != "stop":
+    if (
+        len(choices) != 1
+        or choices[0]["finish_reason"] != "stop"
+        or choices[0].get("native_finish_reason") == "repetition"
+        or choices[0].get("stop_reason") == "repetition_detected"
+    ):
         raise ValueError("Incomplete judge delivery")
     review = json.loads(choices[0]["message"]["content"])
     if indexed:

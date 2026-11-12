@@ -34,15 +34,25 @@ from nemo_gym.agents import (
     AgentSeedSessionRequest,
 )
 from nemo_gym.client import ServerClient
-from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ResourcesServerRef
+from nemo_gym.config import (
+    AGENT_REF_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+    AggregateMetrics,
+    AggregateMetricsRequest,
+    ResourcesServerRef,
+)
 from nemo_gym.core import (
     MODEL_TRANSPORT_ERROR,
     EpisodeId,
+    ModelCallSampling,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NgFailureEvent,
     TaskId,
+    encode_model_sampling,
 )
+from nemo_gym.metrics import compute_aggregate_metrics
 from nemo_gym.server_runtime import (
     BaseVerifyRequest,
     ResourcesCloseSessionRequest,
@@ -67,6 +77,30 @@ def test_module_exports_app_for_multi_worker_import(monkeypatch: pytest.MonkeyPa
     )
 
     assert namespace["app"] is worker_app
+
+
+@pytest.mark.parametrize("token_capture", [False, True])
+def test_the_trained_agents_activation_carries_the_episodes_sampling_values(token_capture: bool) -> None:
+    environment_server, _ = _environment_server(token_capture=token_capture)
+    sampling = ModelCallSampling(temperature=0.6, top_p=0.95, max_output_tokens=64)
+    capture = "/training-token-capture" if token_capture else ""
+
+    path = environment_server._agent_responses_path(_request().model_copy(update={"model_sampling": sampling}))
+
+    assert path == f"/ng-rollout/rollout-a2{capture}/ng-sampling/{encode_model_sampling(sampling)}/v1/responses"
+    # Gym-only evaluation sends no values and gets the path it always had.
+    assert environment_server._agent_responses_path(_request()) == f"/ng-rollout/rollout-a2{capture}/v1/responses"
+
+
+async def test_an_episode_with_sampling_values_runs_and_its_agent_carries_them() -> None:
+    environment_server, client = _environment_server(resources_tool_transports=["direct_http"])
+    sampling = ModelCallSampling(temperature=0.6, top_p=0.95, max_output_tokens=64)
+
+    result = await environment_server.run_request(_request().model_copy(update={"model_sampling": sampling}))
+
+    assert result.failure is None, result.failure
+    assert result.result.reward == 1.0
+    assert client.calls[2][1] == f"/ng-rollout/rollout-a2/ng-sampling/{encode_model_sampling(sampling)}/v1/responses"
 
 
 async def test_single_agent_turn_with_direct_resources_tools() -> None:
@@ -645,11 +679,172 @@ async def test_skip_verification_returns_empty_aggregate_metrics_without_calling
 ) -> None:
     environment_server, client = _skipping_environment_server(environment=environment, agent=agent)
 
-    with pytest.warns(RuntimeWarning, match="skip_verification=True"):
-        metrics = await environment_server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[]))
+    metrics = await environment_server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[]))
 
     assert metrics == AggregateMetrics()
     assert client.calls == []
+
+
+@pytest.mark.parametrize(
+    ("skip_verification", "masked"),
+    # Masking is never read when verification is skipped, so that case needs no masked twin.
+    [(False, False), (False, True), (True, False)],
+)
+async def test_aggregation_reports_execution_metrics_with_or_without_valid_scores(
+    skip_verification: bool, masked: bool
+) -> None:
+    environment_server, client = _skipping_environment_server(
+        environment={"skip_verification": skip_verification}, agent={}
+    )
+    rows = [
+        {
+            TASK_INDEX_KEY_NAME: 0,
+            ROLLOUT_INDEX_KEY_NAME: repeat,
+            "reward": 0.0,
+            "mask_sample": masked,
+            "ng_perf": {"completion_tokens": tokens, "num_turns": 2},
+        }
+        for repeat, tokens in enumerate((10, 30))
+    ]
+    benchmark_rows = [{k: v for k, v in row.items() if k != "ng_perf"} for row in rows]
+    benchmark = compute_aggregate_metrics(benchmark_rows)
+    client.responses = [_Response(benchmark.model_dump())]
+
+    result = await environment_server.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))
+
+    assert result.perf_summary["total_completion_tokens"] == 40
+    assert [row["mean_completion_tokens"] for row in result.repeat_level_metrics] == [10, 30]
+    assert all(AGENT_REF_KEY_NAME not in row for row in result.repeat_level_metrics)
+    assert result.agent_metrics["mean_across_repeats/mean_completion_tokens"] == 20
+    assert result.agent_metrics["ci_low_95_across_repeats/mean_completion_tokens"] < 20
+    assert result.agent_metrics["ci_high_95_across_repeats/mean_completion_tokens"] > 20
+    if skip_verification:
+        assert client.calls == []
+        assert result.key_metrics == {}
+        assert result.group_level_metrics == []
+    else:
+        assert client.calls[0][2]["json"] == {"verify_responses": benchmark_rows}
+        assert result.key_metrics == benchmark.key_metrics
+    if skip_verification or masked:
+        assert "mean/reward" not in result.agent_metrics
+
+
+async def test_aggregation_preserves_benchmark_hooks_and_existing_execution_statistics() -> None:
+    environment_server, client = _environment_server()
+    rows = [
+        {
+            TASK_INDEX_KEY_NAME: task,
+            ROLLOUT_INDEX_KEY_NAME: repeat,
+            "reward": float(task == repeat),
+            "response": {"usage": {"output_tokens": 1000}, "metrics": {"latency": 42}},
+            "num_steps_passed": int(task == repeat),
+            "num_steps_total": task + 1,
+            "ng_perf": {"completion_tokens": tokens, "num_turns": turns},
+        }
+        for task, repeat, tokens, turns in ((0, 0, 4, 1), (1, 0, 8, 2), (0, 1, 12, 2), (1, 1, 20, 4))
+    ]
+
+    def subtask_metrics(tasks: list[list[dict[str, Any]]]) -> dict[str, float]:
+        passed = sum(row["num_steps_passed"] for task in tasks for row in task)
+        total = sum(row["num_steps_total"] for task in tasks for row in task)
+        return {"subtask_accuracy": passed / total}
+
+    hooks = {
+        "compute_metrics_fn": subtask_metrics,
+        "compute_repeat_metrics_fn": subtask_metrics,
+        "get_key_metrics_fn": lambda metrics: {"subtask_accuracy": metrics["subtask_accuracy"]},
+    }
+    benchmark_rows = [{k: v for k, v in row.items() if k != "ng_perf"} for row in rows]
+    benchmark = compute_aggregate_metrics(benchmark_rows, **hooks)
+    assert benchmark.perf_summary is None
+    body = AggregateMetricsRequest(verify_responses=rows)
+    original = body.model_dump_json()
+    for _ in range(2):
+        client.responses = [_Response(benchmark.model_dump())]
+        result = await environment_server.aggregate_metrics(body)
+        assert result == compute_aggregate_metrics(rows, **hooks)
+        assert result.key_metrics == {"subtask_accuracy": pytest.approx(1 / 3)}
+        assert [row["mean_completion_tokens"] for row in result.repeat_level_metrics] == [6, 16]
+        assert result.perf_summary["total_completion_tokens"] == 44
+        assert body.model_dump_json() == original
+        assert client.calls[-1][0:2] == ("resources", "/aggregate_metrics")
+        assert client.calls[-1][2]["json"] == {"verify_responses": benchmark_rows}
+
+
+@pytest.mark.parametrize("indexed", [False, True])
+async def test_aggregation_preserves_custom_repeat_rows_without_indices(indexed: bool) -> None:
+    environment_server, client = _environment_server()
+    repeat_rows = [{"sample_count": 2, "mean/reward": 0.5}]
+    if indexed:
+        repeat_rows.append({ROLLOUT_INDEX_KEY_NAME: 1, "sample_count": 1})
+    benchmark = AggregateMetrics(repeat_level_metrics=repeat_rows, key_metrics={"custom_score": 0.5})
+    client.responses = [_Response(benchmark.model_dump())]
+    rows = [{ROLLOUT_INDEX_KEY_NAME: 0, "ng_perf": {"completion_tokens": 10}}]
+
+    result = await environment_server.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))
+
+    assert result.repeat_level_metrics == repeat_rows
+    assert result.key_metrics == benchmark.key_metrics
+    assert result.perf_summary["total_completion_tokens"] == 10
+    assert "mean_across_repeats/mean_completion_tokens" not in result.agent_metrics
+
+
+async def test_aggregation_counts_execution_before_resources_filters_quality() -> None:
+    environment_server, client = _environment_server()
+    # A resources server override may select a stage with repeated task/repeat identities.
+    rows = [
+        {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": reward, "ng_perf": perf}
+        for reward, perf in ((0.0, {"completion_tokens": 10}), (1.0, {"completion_tokens": 30}))
+    ]
+    benchmark = compute_aggregate_metrics([{k: v for k, v in rows[1].items() if k != "ng_perf"}])
+    client.responses = [_Response(benchmark.model_dump())]
+
+    result = await environment_server.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))
+
+    assert result.group_level_metrics == benchmark.group_level_metrics
+    assert result.key_metrics == benchmark.key_metrics
+    assert result.agent_metrics["mean/reward"] == 1.0
+    assert result.perf_summary["total_completion_tokens"] == 40
+    assert result.repeat_level_metrics[0]["mean_completion_tokens"] == 20
+
+
+async def test_aggregation_withholds_observations_of_any_type_from_resources() -> None:
+    environment_server, client = _environment_server()
+    rows = [
+        {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0, "ng_perf": None},
+        {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.0, "ng_perf": "not-a-summary"},
+        {
+            TASK_INDEX_KEY_NAME: 2,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            "reward": 1.0,
+            "ng_perf": {"completion_tokens": 12, "num_turns": 3},
+        },
+    ]
+    benchmark_rows = [{k: v for k, v in row.items() if k != "ng_perf"} for row in rows]
+    client.responses = [_Response(compute_aggregate_metrics(benchmark_rows).model_dump())]
+
+    result = await environment_server.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))
+
+    assert client.calls[-1][2]["json"] == {"verify_responses": benchmark_rows}
+    assert result.perf_summary["overall_observability_coverage"] == pytest.approx(1 / 3)
+    assert result.perf_summary["total_completion_tokens"] == 12
+    assert result.key_metrics["mean/reward"] == pytest.approx(2 / 3)
+
+
+async def test_aggregation_returns_resources_repeat_rows_as_published_when_nothing_was_observed() -> None:
+    environment_server, client = _environment_server()
+    published = AggregateMetrics(
+        agent_metrics={"mean/reward": 1.0},
+        key_metrics={"mean/reward": 1.0},
+        repeat_level_metrics=[{"mean/reward": 1.0}],
+    )
+    client.responses = [_Response(published.model_dump())]
+
+    result = await environment_server.aggregate_metrics(
+        AggregateMetricsRequest(verify_responses=[{TASK_INDEX_KEY_NAME: 0, "reward": 1.0}])
+    )
+
+    assert result == published
 
 
 async def test_environment_resources_binding_is_independent_of_the_agents() -> None:

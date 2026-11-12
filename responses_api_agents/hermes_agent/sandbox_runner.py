@@ -68,7 +68,7 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
     config = yaml.safe_load(payload["config_yaml"]) or {}
     config.setdefault("auxiliary", {})[_COMPRESSION_CONFIG_KEY] = {
         "provider": "custom",
-        "base_url": payload["model_base_url"],
+        "base_url": payload.get("compression_model_base_url", payload["model_base_url"]),
         "api_key": _MODEL_API_KEY,
         "model": payload["model"],
     }
