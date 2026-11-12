@@ -853,6 +853,19 @@ class TestProviderBackoff:
 class TestExhaustedAttemptCause:
     """The final HTTP error of exhausted retries is caused by the last attempt's observed failure."""
 
+    @pytest.mark.parametrize("error_type", [ClientOSError, TimeoutError])
+    async def test_error_body_read_without_failure_evidence_preserves_the_transport_error(self, error_type) -> None:
+        error = error_type("response body was interrupted")
+        read = AsyncMock(side_effect=error)
+        response = SimpleNamespace(headers={}, content=SimpleNamespace(read=read))
+
+        with pytest.raises(error_type) as raised:
+            await openai_client_module._read_error_body(response, None)
+
+        assert raised.value is error
+        assert raised.value.__cause__ is None
+        read.assert_awaited_once_with()
+
     @staticmethod
     def _http_error() -> ClientResponseError:
         return ClientResponseError(SimpleNamespace(real_url="http://model"), (), status=503, message="unavailable")

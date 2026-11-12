@@ -872,6 +872,19 @@ class TestBuildVerifyPayload:
             "response": {"output": "hello"},
         }
 
+    @pytest.mark.parametrize("task_data", [None, []])
+    def test_materialized_task_data_must_be_an_object(self, task_data) -> None:
+        pair = InputRolloutPair(
+            input={"task_input": {"responses_create_params": {"input": "q1"}, "task_data": task_data}},
+            rollout={"response": {"output": "saved answer"}},
+        )
+        before = json.dumps({"input": pair.input, "rollout": pair.rollout}, sort_keys=True)
+
+        with pytest.raises(ConfigError, match="task_input.task_data must be an object"):
+            _build_verify_payload(pair)
+
+        assert json.dumps({"input": pair.input, "rollout": pair.rollout}, sort_keys=True) == before
+
     def test_generic_task_input_preserves_verifier_fields(self) -> None:
         fields = {"responses_create_params": {"input": "q1"}, "instance_id": "a", "verifier_metadata": {"answer": 42}}
         pair = InputRolloutPair(
@@ -1945,6 +1958,33 @@ class TestPrepareOutputFpaths:
 
 class TestLoadReverifiedResults:
     """Tests for _load_reverified_results: read the main jsonl once, sorted, with minimal routing rows."""
+
+    def test_identity_recovery_ignores_blank_lines_and_keyless_legacy_diagnostics(self, tmp_path: Path) -> None:
+        cached = {
+            AGENT_REF_KEY_NAME: {"name": "agent"},
+            TASK_INDEX_KEY_NAME: 0,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            "response": {"output": []},
+            "reward": 0.25,
+        }
+        stamps = {"_ng_environment_server": "collected_env", "_ng_result_type": "legacy_agent"}
+        source = tmp_path / "source.jsonl"
+        source.write_bytes(
+            b"\n \t\n"
+            + orjson.dumps({"error": "legacy transport diagnostic"})
+            + b"\n"
+            + orjson.dumps(cached | stamps | {"reward": 1.0})
+            + b"\n"
+        )
+        output = tmp_path / "rescored.jsonl"
+        output.write_bytes(orjson.dumps(cached) + b"\n")
+        before = {path: path.read_bytes() for path in (source, output)}
+
+        results, rows = _load_reverified_results(output, (tmp_path / "absent_failures.jsonl", source, source))
+
+        assert results == [cached | stamps]
+        assert rows == [{AGENT_REF_KEY_NAME: cached[AGENT_REF_KEY_NAME], "_ng_environment_server": "collected_env"}]
+        assert {path: path.read_bytes() for path in (source, output)} == before
 
     def test_reads_sorted_results_and_minimal_routing_rows(self, tmp_path: Path) -> None:
         out = tmp_path / "out.jsonl"
@@ -3560,6 +3600,8 @@ class TestRunFromConfigJudgeFailedOnly:
             successes=[self._success(0)],
             failures=[{**self._failure(1), "stage_index": 1}],
         )
+        failures = tmp_path / "rollouts_failures.jsonl"
+        failures.write_bytes(b"\n \t\n" + failures.read_bytes())
         before = {name: (tmp_path / name).read_bytes() for name in ("rollouts.jsonl", "rollouts_failures.jsonl")}
         dispatched: list = []
         self._patch(monkeypatch, dispatched)
