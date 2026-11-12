@@ -48,4 +48,4 @@ gym eval run --no-serve \
 tail -n 1 environments/ether0/data/ether0_rollouts.jsonl | jq | less
 ```
 
-See `prepare.py` to prepare the full dataset.
+See `prepare.py` to prepare the full dataset, or run the `ether0` benchmark: `gym eval prepare --benchmark ether0`.
