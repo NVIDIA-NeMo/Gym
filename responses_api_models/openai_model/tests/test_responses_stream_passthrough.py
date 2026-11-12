@@ -21,8 +21,8 @@ from responses_api_models.openai_model.app import (
 )
 
 
-# The parts of a Codex 0.155.1 request for a catalog model that Gym's typed path cannot carry:
-# an effort newer than the pinned SDK, and code-mode tools shipped in an `additional_tools` item.
+# A Codex 0.155.1 request for a catalog model. The typed path accepts its `max` effort (OpenAI SDK 2.45.0), but it
+# drops the code-mode tools shipped in the `additional_tools` item, which only the relay delivers.
 CODEX_REQUEST = {
     "model": "gpt-6-astra",
     "stream": True,
@@ -144,13 +144,28 @@ def test_non_streaming_requests_keep_the_typed_path() -> None:
 def test_without_the_opt_in_streaming_requests_are_sanitized_and_typed() -> None:
     server = make_server()
     server._client.create_response_stream = AsyncMock()
-    server._client.create_response = AsyncMock()
+    server._client.create_response = AsyncMock(
+        return_value={
+            "id": "resp_1",
+            "created_at": 0,
+            "model": "openai/openai/gpt-6-astra",
+            "object": "response",
+            "output": [],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+    )
     with TestClient(server.setup_webserver()) as client:
         response = client.post("/v1/responses", json=CODEX_REQUEST)
-    # The pinned SDK has no "max" effort, so the typed path rejects the request before any call.
-    assert response.status_code == 422
+    # The typed path makes a non-streaming call and synthesizes the stream from its result.
+    assert response.status_code == 200
     server._client.create_response_stream.assert_not_called()
-    server._client.create_response.assert_not_called()
+    server._client.create_response.assert_awaited_once()
+    sent = server._client.create_response.await_args.kwargs
+    # The sanitizer drops the code-mode tools of the additional_tools item, which only the relay delivers.
+    assert [item["type"] for item in sent["input"]] == ["message"]
+    assert sent["reasoning"]["effort"] == "max"
 
 
 @pytest.mark.parametrize("propagated,expected", [([400], 400), ([], 500)])

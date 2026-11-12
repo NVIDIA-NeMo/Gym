@@ -31,10 +31,9 @@ clients retain their existing unbounded extension for rate-limit statuses;
 `{openai_base_url}/responses` as the client sent them, except that `model` becomes
 `openai_model` (`extra_body` fills only absent fields), and streams the upstream SSE back
 unchanged. Use it for blackbox harnesses whose own requests the typed path cannot
-carry, for example the Codex CLI running a model from its bundled catalog: code-mode
-tools in `additional_tools` items, or a reasoning effort newer than the pinned OpenAI
-SDK. The upstream must serve the OpenAI Responses API. Non-streaming requests keep the
-typed path.
+carry, for example the Codex CLI running a model from its bundled catalog, which sends
+code-mode tools in `additional_tools` items that the typed path drops. The upstream must
+serve the OpenAI Responses API. Non-streaming requests keep the typed path.
 
 The relay is for evaluation: it skips Gym's request sanitizer and rejects token-ID
 capture. Model-call capture still records each exchange, so check the effective request

@@ -265,7 +265,7 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
             "except that `model` becomes openai_model (extra_body fills absent fields), and "
             "stream the upstream SSE back unchanged. For harnesses whose own requests Gym's "
             "typed path cannot represent, such as the Codex CLI with its bundled model catalog "
-            "(code-mode tools, reasoning efforts newer than the pinned SDK). Evaluation only: the "
+            "(code-mode tools in additional_tools items, which the typed path drops). Evaluation only: the "
             "relay skips Gym's request sanitizer and token-ID capture; model-call capture still "
             "records each exchange. Non-streaming requests keep the typed path. For a relayed "
             "stream, upstream_request_timeout_seconds bounds the wait for the response headers and "
