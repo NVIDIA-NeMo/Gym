@@ -96,7 +96,7 @@
       "source_path": "saas_bench/uid_wrappers/gosu",
       "source_url": "https://gitlab-master.nvidia.com/pritamb/saas-bench/-/blob/31177a7a80040edf588388dd982af4b678d1e544/saas_bench/uid_wrappers/gosu",
       "source_sha256": "87e293835f541fb0470af762015f23223a8e9462392d735f82fdb9e05ae45368",
-      "vendored_sha256": "fd6514f58edeca70c91ad49901fb234e05cc890137ebc577cb44be8b6b6642b6",
+      "vendored_sha256": "6aa484ee5beb0833ca7fc2722d8ac4aa5fd5fda283ad0e2f0bb897fd565c7a2c",
       "license": "Apache-2.0",
       "python_ast_unchanged": null
     },
@@ -104,7 +104,7 @@
       "source_path": "saas_bench/uid_wrappers/id",
       "source_url": "https://gitlab-master.nvidia.com/pritamb/saas-bench/-/blob/31177a7a80040edf588388dd982af4b678d1e544/saas_bench/uid_wrappers/id",
       "source_sha256": "fb129364bb78217a2e40fc182c63ca4f5a4dac936398213a28befb61633cbca1",
-      "vendored_sha256": "4f52b41d6d460754a4a1782fbaf943e00cf4f8fb87a84029382318a0c70b0faf",
+      "vendored_sha256": "d7cc3bf97fb53612b73b30fa17a613480838381838170b16a52fc0080e0a9684",
       "license": "Apache-2.0",
       "python_ast_unchanged": null
     },
@@ -112,7 +112,7 @@
       "source_path": "saas_bench/uid_wrappers/runuser",
       "source_url": "https://gitlab-master.nvidia.com/pritamb/saas-bench/-/blob/31177a7a80040edf588388dd982af4b678d1e544/saas_bench/uid_wrappers/runuser",
       "source_sha256": "5255c91efffcc5a58db2eed6e8252187d1d427486bf7bf9f7ac7a5519fa9ecbd",
-      "vendored_sha256": "86e5dd43ad6b5ad1020ebde00825399455c0a57454d1476c5e0306eca0fcdd56",
+      "vendored_sha256": "24505d03ca906e8d28c741c0281ab0e59f38ae644d115c7f9ca94636d6672844",
       "license": "Apache-2.0",
       "python_ast_unchanged": null
     },
@@ -120,7 +120,7 @@
       "source_path": "saas_bench/uid_wrappers/service",
       "source_url": "https://gitlab-master.nvidia.com/pritamb/saas-bench/-/blob/31177a7a80040edf588388dd982af4b678d1e544/saas_bench/uid_wrappers/service",
       "source_sha256": "ae1fd9fb2ea74590d7344fc2723bf30cf8c47d0d79c3c542ecc336a3d0e7b363",
-      "vendored_sha256": "28d5b6717a7fcd769432ac43e4c3f1412403ff260effe52e4f522b0799c5001f",
+      "vendored_sha256": "80660c8568c003022de07cba05c7f280b0f5363d4891a58d1db636b52454e3a5",
       "license": "Apache-2.0",
       "python_ast_unchanged": null
     },
@@ -128,7 +128,7 @@
       "source_path": "saas_bench/uid_wrappers/setpriv",
       "source_url": "https://gitlab-master.nvidia.com/pritamb/saas-bench/-/blob/31177a7a80040edf588388dd982af4b678d1e544/saas_bench/uid_wrappers/setpriv",
       "source_sha256": "fbcb2d2cf35eee92929b95e3c0a2529db5023c6276721d44fbd20d21faf13204",
-      "vendored_sha256": "f506b65e4b791b9979489d2357ebde008208a8287dbc74982bfde81d23026f10",
+      "vendored_sha256": "6c52ce0f1ecdee14df76b2869bdb7a5e8bf8b45eee35881be52ade0a83185cd3",
       "license": "Apache-2.0",
       "python_ast_unchanged": null
     },
@@ -136,7 +136,7 @@
       "source_path": "saas_bench/uid_wrappers/su",
       "source_url": "https://gitlab-master.nvidia.com/pritamb/saas-bench/-/blob/31177a7a80040edf588388dd982af4b678d1e544/saas_bench/uid_wrappers/su",
       "source_sha256": "783472b0637575a26c74b8831eae4f3d136b19637ff4aec3dcb3d913f08e8033",
-      "vendored_sha256": "d503d099a61c8c07078b770827370eff4feef95184e90b227aabcbb2b91e35a7",
+      "vendored_sha256": "162bab9c485a96d11fc346bbf935b1152e0931c213fac3d94f540441c64d2920",
       "license": "Apache-2.0",
       "python_ast_unchanged": null
     },
@@ -144,7 +144,7 @@
       "source_path": "saas_bench/uid_wrappers/su-exec",
       "source_url": "https://gitlab-master.nvidia.com/pritamb/saas-bench/-/blob/31177a7a80040edf588388dd982af4b678d1e544/saas_bench/uid_wrappers/su-exec",
       "source_sha256": "87e293835f541fb0470af762015f23223a8e9462392d735f82fdb9e05ae45368",
-      "vendored_sha256": "57018e9b015e180f9c924ac4b502bb30ce297e8823fc25ad14747eaa96f7e5cf",
+      "vendored_sha256": "95aa77f49c2e7b1d308bac91c0c8455a137bf0e287c3bd4766376e0dc444606e",
       "license": "Apache-2.0",
       "python_ast_unchanged": null
     },
@@ -152,7 +152,7 @@
       "source_path": "saas_bench/uid_wrappers/sudo",
       "source_url": "https://gitlab-master.nvidia.com/pritamb/saas-bench/-/blob/31177a7a80040edf588388dd982af4b678d1e544/saas_bench/uid_wrappers/sudo",
       "source_sha256": "63a2c31b671b17afc8ca6972f79ef9da11685e19e4fc46ab7e70eeb8f03c9de5",
-      "vendored_sha256": "45ba4ab92521de3c19a84d7d2446d345a2e708bfd9db294353860e4072c26251",
+      "vendored_sha256": "351f7bf71cdddaf13f0f107f3afe7d65d9e1f11eebb2808a440481b9a5b29dbc",
       "license": "Apache-2.0",
       "python_ast_unchanged": null
     },
