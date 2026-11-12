@@ -29,6 +29,7 @@ from shlex import quote
 from time import time
 from traceback import format_exc
 from typing import Any
+from urllib.parse import quote
 from uuid import uuid4
 
 from fastapi import Request
@@ -97,8 +98,9 @@ class SWERebenchResourcesServerConfig(BaseResourcesServerConfig):
     # "worktree" (diff of the working tree) or "committed" (committed work only); see swebench/patch_capture.py.
     patch_capture_mode: PatchCaptureMode = "worktree"
     include_model_patch_in_response: bool = True
-    verification_log_dir: Path | None = None
     evaluation_timeout: int | None = 3600
+    # None disables disk logs. Set an output directory to retain per-task, per-attempt logs.
+    verification_log_dir: Path | None = None
     # A verdict-less run is retried on a fresh sandbox: an image pull or a flaky provider start
     # is not evidence about the patch.
     inconclusive_verification_retries: int = 1
@@ -144,6 +146,7 @@ class SWERebenchVerifyRequest(SWERebenchInstanceRequest, BaseVerifyRequest):
 
 
 class SWERebenchVerifyResponse(BaseVerifyResponse):
+    verification_log_dir: str | None = None
     evaluation_completed: bool
     resolved: bool
     patch_applied: bool
@@ -371,7 +374,11 @@ class SWERebenchResourcesServer(SandboxSessionResourcesServer):
         patch = capture.patch
 
         inputs = self._inputs(body, patch)
-        log_dir = (self.config.verification_log_dir or (Path(__file__).parent / "logs")) / uuid4().hex
+        log_dir = (
+            self.config.verification_log_dir / f"instance-{quote(body.instance_id, safe='')}" / uuid4().hex
+            if self.config.verification_log_dir is not None
+            else None
+        )
 
         # Resolve the parser before spending a sandbox on the run: an unknown parser name means
         # this row can never be graded, and finding that out after the tests have run wastes the
@@ -425,7 +432,7 @@ class SWERebenchResourcesServer(SandboxSessionResourcesServer):
                     inputs=inputs,
                     parser=parser,
                     timeout_s=self.config.evaluation_timeout,
-                    log_dir=log_dir / f"attempt-{attempt}",
+                    log_dir=log_dir / f"attempt-{attempt}" if log_dir is not None else None,
                 )
                 verification_time_taken = time() - verification_started
             except Exception as exc:
@@ -458,6 +465,7 @@ class SWERebenchResourcesServer(SandboxSessionResourcesServer):
                 # evaluation_completed distinguishes them so a broken row is not read as a hard task.
                 "reward": 1.0 if result.resolved else 0.0,
                 "evaluation_completed": result.completed,
+                "verification_log_dir": str(log_dir) if log_dir is not None else None,
                 **(
                     {"mask_sample": True, "failure_kind": VERIFIER_ERROR, "failure_reason": result.error}
                     if not result.completed

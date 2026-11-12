@@ -35,6 +35,7 @@ from pathlib import Path
 from time import time
 from traceback import format_exc
 from typing import Any
+from urllib.parse import quote
 from uuid import uuid4
 
 from fastapi import Request
@@ -87,8 +88,9 @@ class SwemerV2ResourcesServerConfig(BaseResourcesServerConfig):
     # "worktree" (diff of the working tree) or "committed" (committed work only); see swebench/patch_capture.py.
     patch_capture_mode: PatchCaptureMode = "worktree"
     include_model_patch_in_response: bool = True
-    verification_log_dir: Path | None = None
     evaluation_timeout: int | None = 1200
+    # None disables disk logs. Set an output directory to retain per-task, per-attempt logs.
+    verification_log_dir: Path | None = None
     # A verdict-less run is retried on a fresh sandbox: an image pull or a flaky provider start
     # is not evidence about the patch.
     inconclusive_verification_retries: int = 1
@@ -130,6 +132,7 @@ class SwemerV2VerifyRequest(SwemerV2InstanceRequest, BaseVerifyRequest):
 
 
 class SwemerV2VerifyResponse(BaseVerifyResponse):
+    verification_log_dir: str | None = None
     evaluation_completed: bool
     resolved: bool
     patch_applied: bool
@@ -371,7 +374,11 @@ class SwemerV2ResourcesServer(SandboxSessionResourcesServer):
         patch = capture.patch
 
         inputs = self._inputs(body, patch)
-        log_dir = (self.config.verification_log_dir or (Path(__file__).parent / "logs")) / uuid4().hex
+        log_dir = (
+            self.config.verification_log_dir / f"instance-{quote(body.instance_id, safe='')}" / uuid4().hex
+            if self.config.verification_log_dir is not None
+            else None
+        )
 
         files = verification_files(inputs)
         attempts = 1 + max(self.config.inconclusive_verification_retries, 0)
@@ -396,7 +403,7 @@ class SwemerV2ResourcesServer(SandboxSessionResourcesServer):
                     sandbox=sandbox,
                     inputs=inputs,
                     timeout_s=self.config.evaluation_timeout,
-                    log_dir=log_dir / f"attempt-{attempt}",
+                    log_dir=log_dir / f"attempt-{attempt}" if log_dir is not None else None,
                 )
                 verification_time_taken = time() - verification_started
             except Exception as exc:
@@ -429,6 +436,7 @@ class SwemerV2ResourcesServer(SandboxSessionResourcesServer):
                 # evaluation_completed distinguishes them so a broken row is not read as a hard task.
                 "reward": 1.0 if result.resolved else 0.0,
                 "evaluation_completed": result.completed,
+                "verification_log_dir": str(log_dir) if log_dir is not None else None,
                 **(
                     {"mask_sample": True, "failure_kind": VERIFIER_ERROR, "failure_reason": result.error}
                     if not result.completed

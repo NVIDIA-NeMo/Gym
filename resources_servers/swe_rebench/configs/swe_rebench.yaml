@@ -11,6 +11,8 @@ swe_rebench_resources_server:
       domain: coding
       verified: false
 
+      # Disk logs are opt-in; set an output directory to retain task/attempt logs.
+      verification_log_dir: null
       evaluation_timeout: 3600
       is_verifying_golden_patch: false
       apply_anti_cheating: true
@@ -54,6 +56,8 @@ swe_rebench_golden_patch_resources_server:
 
       # 20 minutes: the pilot averaged ~6 min/task with nothing near the old 60-minute ceiling,
       # so this caps the tail without truncating honest work.
+      # Disk logs are opt-in; set an output directory to retain task/attempt logs.
+      verification_log_dir: null
       evaluation_timeout: 1200
       is_verifying_golden_patch: true
 
