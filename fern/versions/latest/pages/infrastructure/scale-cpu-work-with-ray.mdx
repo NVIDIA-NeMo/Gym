@@ -8,7 +8,7 @@ position: 3.5
 
 Ray is optional in NeMo Gym. A server that spreads CPU-intensive work across nodes can opt into Ray, and NeMo Gym then starts or joins a Ray cluster for it. Servers don't use Ray to talk to each other: they communicate over HTTP whether or not Ray is running.
 
-If the work needs isolation or its own runtime, such as running generated code, use the [Sandbox API](/infrastructure/sandbox) instead. Remote sandbox providers run that work on their own machines, off the server's host.
+Check the other options first. If the work needs isolation or its own runtime, such as running generated code, use the [Sandbox API](/infrastructure/sandbox): remote sandbox providers run that work on their own machines, off the server's host. If the work runs a model, such as a judge or reward model, call a [model server](/model-server) instead of loading the model in the server. See [Distributing Heavy Work](/about/architecture#distributing-heavy-work) for how these options compare.
 
 ## Upgrade from 0.7.0 or Earlier
 
