@@ -1,0 +1,30 @@
+# GOT-10k val single-object tracking: first frame + box, then frames at 1 fps, boxes on a 0-1000 grid.
+config_paths:
+- resources_servers/got10k/configs/got10k.yaml
+
+got10k_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: got10k_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+got10k_resources_server:
+  resources_servers:
+    got10k:
+      datasets:
+      - name: got10k
+        type: benchmark
+        jsonl_fpath: benchmarks/got10k/data/got10k_benchmark.jsonl
+        prepare_script: benchmarks/got10k/prepare.py
+        num_repeats: 1
+got10k_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: got10k_agent
