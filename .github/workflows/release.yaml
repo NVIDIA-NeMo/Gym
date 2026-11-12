@@ -73,7 +73,7 @@ jobs:
       !cancelled() && !failure()
       && !(needs.pre-flight.outputs.docs_only == 'true'
            || needs.pre-flight.outputs.is_deployment_workflow == 'true')
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_release_library.yml@254abeee7640aac4a3de654630f5346de0a8f46a # v1.4.3 + changelog file/state fixes (#619, #620)
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_release_library.yml@1ea89871720f31b9cacfd40655ad5151edd8be6f
     with:
       release-ref: ${{ inputs.release-ref || github.sha }}
       python-package: nemo_gym
