@@ -223,7 +223,8 @@ AGENT_SERVER_REF_KEY_NAME = "agent_server"
 ENVIRONMENT_SERVER_TYPE_KEY_NAME = "environment_servers"
 # Agent types whose servers implement agent sessions (`_seed_agent_session_state`), so an environment server
 # such as `single_agent_turn_legacy` can drive them. Config composition cannot import agent apps to ask,
-# so this list is the source of truth; a unit test keeps it in step with the agent apps.
+# so this list is the source of truth; a unit test keeps it in step with the agent apps. An agent that inherits
+# sessions from a listed agent (a subclass) may be listed too, so its swaps keep agent sessions.
 AGENT_SESSION_AGENT_TYPES = frozenset(
     {
         "browsecomp_agent",
