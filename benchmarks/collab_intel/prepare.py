@@ -27,7 +27,7 @@ import urllib.request
 from pathlib import Path
 
 
-COMMIT = "3de5f7d0a652c0b393342b4fbae59b78034034ea"
+COMMIT = "3de5f7d0a652c0b393342b4fbae59b78034034ea"  # pragma: allowlist secret
 URL = f"https://github.com/zou-group/collaborative-intelligence/archive/{COMMIT}.tar.gz"
 DATA_DIR = Path(__file__).parent / "data"
 REPO_DIR = DATA_DIR / "repo"

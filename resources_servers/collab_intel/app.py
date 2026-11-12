@@ -21,7 +21,7 @@ from typing import Any, Optional
 
 from pydantic import ConfigDict
 
-from nemo_gym.core.failure_kinds import FailureClass, classify_failure
+from nemo_gym.core import FailureClass, classify_failure
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
