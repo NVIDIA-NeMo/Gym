@@ -2340,12 +2340,11 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
     retry_terminal_timeouts: bool = Field(
         default=False,
         description=(
-            "On resume, retry failures-sidecar rows of class `timeout_exceeded` even when they are stamped "
-            "`_ng_failure_terminal`, up to NEMO_GYM_MAX_ROLLOUT_ATTEMPTS. For sidecars "
-            "whose per-attempt timeouts were stamped terminal but should be retried. Off (default): a sidecar row "
-            "is terminal iff it is stamped `_ng_failure_terminal`, so an agent that marks its timeouts terminal "
-            "on purpose keeps them gated. Managed runs save this policy; omitting the option on resume "
-            "retains the saved value."
+            "Permit retry of terminal `timeout_exceeded` failures when selecting an episode decision, "
+            "within NEMO_GYM_MAX_ROLLOUT_ATTEMPTS. Set before collection: new failures persist the selected "
+            "decision, which later flag changes do not replace. Older sidecar rows without an episode "
+            "decision retain the resume-time override. Managed runs save the flag for future decisions; "
+            "omitting it on resume retains the saved value."
         ),
     )
 
@@ -3909,7 +3908,6 @@ class RolloutCollectionHelper(BaseModel):
         }
         max_attempts = _get_max_rollout_attempts()
         maxed_out = {k for k, n in budget_used.items() if n >= max_attempts}
-        # An agent timeout whose window held a server-side fault kept no answer or grade of the model's: it runs again.
         from nemo_gym.core.outcome_policy import OutcomeAction
         from nemo_gym.rollouts.recovery_policy import _replay_refusal, episode_recovery_action
         from nemo_gym.rollouts.rollout_recovery import (
@@ -4505,14 +4503,12 @@ class RolloutCollectionHelper(BaseModel):
                 if config.retain_results_in_memory:
                     rows.append(row)
                     results.append(result)
-                if upload_spool is not None:
-                    upload_spool.write(orjson.dumps(_rollout_for_export(result)) + b"\n")
 
                 dispatch_name = self._dispatch_name(row)
                 if completed.run_error is not None:
                     # route_failures_to_sidecar is off, so this failed /run ends the run. Its identity, cause and
                     # report are kept as non-superseding evidence: they do not replace a score or earlier failure.
-                    # Admission still stops an unresolved possibly-delivered request from running the agent again.
+                    # The saved episode decision and execution constraints govern a later resume.
                     store.record_unstarted(omitted_rollout_record(result) | {NG_UNROUTED_RUN_ERROR_KEY: True})
                     _record_rollout_outcome(result, "omitted", dispatch_name)
                     print(
@@ -4591,6 +4587,9 @@ class RolloutCollectionHelper(BaseModel):
                     if rollout_id is not None and capture_build_can_retire(token_capture_build):
                         await retire_rollout_token_capture(rollout_id, token_source, token_capture_build)
 
+                # Match retained uploads: include the decision selected at the persistence boundary.
+                if upload_spool is not None:
+                    upload_spool.write(orjson.dumps(_rollout_for_export(result)) + b"\n")
                 counts_left[dispatch_name] -= 1
                 if counts_left[dispatch_name] <= 0:
                     counts_left.pop(dispatch_name)

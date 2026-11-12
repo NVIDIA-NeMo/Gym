@@ -197,15 +197,15 @@ def test_terminal_unscored_failure_alone_stops_and_is_never_complete() -> None:
     assert d.action == RecoveryAction.STOP and not d.complete
 
 
-def test_unknown_ownership_stops_with_a_reason() -> None:
+def test_unknown_failure_uses_the_default_retry_policy() -> None:
     d = decide_recovery(
         materialized=inventory(2),
         results=[scored(0)],
         failures=[infra_failure(1, attempt=0, kind="something odd")],
         budget=OK_BUDGET,
     )
-    assert d.action == RecoveryAction.STOP and "registered kind" in d.reason
-    assert d.identities["unknown"] == [(1, 0)]
+    assert d.action == RecoveryAction.RESUBMIT
+    assert d.identities["retryable"] == [(1, 0)]
 
 
 def test_unavailable_budget_evidence_stops_instead_of_resubmitting() -> None:
@@ -268,13 +268,13 @@ def test_a_kind_named_only_by_the_selected_event_is_known() -> None:
     assert d.counts.get(IdentityState.RETRYABLE) == 1 and d.action == RecoveryAction.RESUBMIT
 
 
-def test_an_unregistered_or_unselected_event_kind_stays_unknown() -> None:
+def test_an_unregistered_or_unselected_event_kind_reaches_the_policy() -> None:
     for row in (
         _selected_event_failure(kind="not_a_registered_kind", selected=True),
         _selected_event_failure(kind="collection_dispatch_failed", selected=False),
     ):
         d = decide_recovery(materialized=inventory(1), results=[], failures=[row], budget=OK_BUDGET)
-        assert d.counts.get(IdentityState.UNKNOWN) == 1 and d.action == RecoveryAction.STOP
+        assert d.counts.get(IdentityState.RETRYABLE) == 1 and d.action == RecoveryAction.RESUBMIT
 
 
 def _verifier_failure_after_answer(
@@ -425,4 +425,4 @@ def test_other_harness_failures_and_malformed_causes_keep_their_replay_decision(
     assert not _policy_replay_is_unsupported(
         {"_ng_failure_id": "h", "_ng_failure_events": other, "response": {"a": 1}}
     )
-    assert _policy_replay_is_unsupported({"_ng_failure_id": "missing", "_ng_failure_events": other})
+    assert not _policy_replay_is_unsupported({"_ng_failure_id": "missing", "_ng_failure_events": other})

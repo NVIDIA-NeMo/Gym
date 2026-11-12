@@ -30,7 +30,8 @@ Every expected identity (``_ng_task_index``, ``_ng_rollout_index``) of the mater
   again, so it is retained, but it is not measured and the run is not complete.
 - ``omitted``: a planned row that a staged collection's accepted partial stage omitted. It is retained, never
   planned again and not measured, and the run is complete without it.
-- ``unknown``: a failure whose kind is unregistered or absent, or a row whose identity is invalid; nobody owns it.
+- ``unknown``: an unsupported action/context, an unresolved saved answer, or invalid identity/evidence.
+  An absent or unregistered failure kind alone uses the episode policy default.
 
 The run-level action follows: ``stop`` for a spent or unknown resubmit budget, or for an unknown identity that a resume
 would run again; ``noop`` when nothing is left to do, ``reverify`` when only judge failures remain, else ``resubmit``.
@@ -60,7 +61,7 @@ from nemo_gym.core.failure_kinds import (
     AGENT_TIMEOUT_INFRASTRUCTURE,
     EMPTY_ANSWER,
     ENVIRONMENT_PROTOCOL_VIOLATION,
-    EPISODE_FAILED,
+    ENVIRONMENT_SERVER_FAILED,
     GRADING_WITHOUT_VERDICT,
     HARBOR_FAILED,
     INFRASTRUCTURE_ERROR,
@@ -70,6 +71,7 @@ from nemo_gym.core.failure_kinds import (
     JUDGE_FAILURE_KINDS,
     JUDGE_SKIPPED,
     JUDGE_UNPARSEABLE,
+    KILL_SHAPED,
     MALFORMED_ANSWER,
     MODEL_CONTEXT_LIMIT,
     MODEL_POLICY_RESPONSE_TIMEOUT,
@@ -116,12 +118,17 @@ from nemo_gym.orchestration.executors.resume_script import (
 from nemo_gym.rollouts.recovery_policy import (
     RecoveryOutcomePolicyConfig,
     _cause_chain,
+    _cause_kind,
     _policy_evidence,
     _recovery_action,
     _replay_refusal,
     _retry_kind,
     _saved_answer,
-    _sidecar_action,
+    _saved_model_patch,
+    _verify_transport_failure,
+    episode_recovery_action,
+    saved_episode_outcome,
+    verification_recovery_action,
 )
 from nemo_gym.rollouts.rollout_recovery import applied_failure_class as _applied_class
 from nemo_gym.rollouts.rollout_recovery import failure_stage as _policy_stage
@@ -623,14 +630,16 @@ def _judge_state(row: Mapping[str, Any], policy: "RecoveryOutcomePolicyConfig") 
     if row.get(TERMINAL) is True:
         return IdentityState.TERMINAL
     kind, status = _policy_evidence(row)
-    if kind in (PROVIDER_QUOTA_EXHAUSTED, PROVIDER_CREDENTIALS_REJECTED):
+    action = verification_recovery_action(row, policy=policy)
+    if action == OutcomeAction.FAIL:
+        return IdentityState.TERMINAL
+    if action == OutcomeAction.VERIFY and kind in (PROVIDER_QUOTA_EXHAUSTED, PROVIDER_CREDENTIALS_REJECTED):
         # The grading provider refused until the operator acts (its quota resets, its key is fixed). The saved answer
         # is graded again, never regenerated; before a quota's named reset time nothing can be graded, so it stops.
         if not _saved_answer(row):
             return IdentityState.UNKNOWN
         reset = _quota_reset_unix(row) if kind == PROVIDER_QUOTA_EXHAUSTED else None
         return IdentityState.TERMINAL if reset is not None and _now() < reset else IdentityState.JUDGE_RECOVERABLE
-    action = _recovery_action(row, kind or JUDGE_FAILED, policy, http_status=status)
     if action == OutcomeAction.VERIFY:
         return IdentityState.JUDGE_RECOVERABLE if _saved_answer(row) else IdentityState.UNKNOWN
     return IdentityState.TERMINAL if action == OutcomeAction.FAIL else IdentityState.UNKNOWN
@@ -641,64 +650,6 @@ def _policy_replay_is_unsupported(
 ) -> bool:
     """Whether replay would replace an answer or a recorded grade."""
     return _replay_refusal(row, classification=classification) is not None
-
-
-def _cause_kind(row: Mapping[str, Any]) -> tuple[str | None, bool, str | None]:
-    """The kind of a failure whose producer recorded none, or an unregistered one, from its recorded cause.
-
-    Returns ``(kind, model_final, reason)``; the kind is None when the cause cannot be determined, with the reason.
-    The cause is the event the row selects, else every event it saved, with the collector's facts of the model call
-    that recorded each one (``COLLECTED_CAUSE``):
-
-    - a model request that failed with HTTP 5xx or in transport is infrastructure: its own kind, retried under the cap;
-    - an HTTP 4xx of the policy's own call is the model's final result: ``model_context_limit`` when the call recorded
-      the context limit, else ``model_request_error``;
-    - an HTTP 4xx of a harness call (a user simulator, a judge, any model that is not the policy) is evaluation-side:
-      ``environment_episode_failed``, retried under the cap;
-    - with no event, the environment's own episode deadline is evaluation-side too: ``environment_episode_failed``.
-
-    As for a kind (``_retry_kind``), the unselected events of a row that keeps a response are attempts, not its cause,
-    and a cause chain that is broken or omitted names no cause.
-    """
-    from nemo_gym.rollouts.rollout_recovery import holds_response
-
-    facts = row.get(COLLECTED_CAUSE)
-    facts = facts if isinstance(facts, Mapping) else {}
-    events, selected = row.get(FAILURE_EVENTS), row.get(FAILURE_ID)
-    if isinstance(events, Mapping) and events:
-        if row.get("_ng_failure_events_omitted") or isinstance(selected, str) and _cause_chain(row) is None:
-            return None, False, "its recorded cause is incomplete"
-        if not isinstance(selected, str) and holds_response(row):
-            return None, False, "it kept a response, so its saved model failures are attempts, not its cause"
-        ids = [selected] if isinstance(selected, str) else [key for key in events if isinstance(key, str)]
-        chosen = [events.get(key) for key in ids]
-        if not chosen or not all(
-            isinstance(e, Mapping)
-            and e.get("boundary") == FailureBoundary.MODEL
-            and e.get("operation") == "model_request"
-            for e in chosen
-        ):
-            return None, False, "its recorded cause is not a failed model request"
-        statuses = [e.get("http_status") for e in chosen]
-        if any(e.get("failure_kind") == MODEL_TRANSPORT_ERROR for e in chosen):
-            return MODEL_TRANSPORT_ERROR, False, None
-        if any(type(s) is int and 500 <= s <= 599 for s in statuses):
-            return MODEL_REQUEST_ERROR, False, None
-        if not all(type(s) is int and 400 <= s <= 499 for s in statuses):
-            return None, False, "its failed model request has no HTTP status"
-        calls = facts.get("event_calls") if isinstance(facts.get("event_calls"), Mapping) else {}
-        owners = [calls.get(key) if isinstance(calls.get(key), Mapping) else {} for key in ids]
-        if any(owner.get("policy") not in (True, False) for owner in owners):
-            return None, False, "the model call that failed is not recorded, so whose call it was is unknown"
-        if all(owner["policy"] is False for owner in owners):
-            return EPISODE_FAILED, False, None
-        if all(owner["policy"] is True for owner in owners):
-            context = any(owner.get("context_limit") is True for owner in owners)
-            return (MODEL_CONTEXT_LIMIT if context else MODEL_REQUEST_ERROR), True, None
-        return None, False, "the failed model calls belong to both the policy and the harness"
-    if facts.get("episode_deadline") is True:
-        return EPISODE_FAILED, False, None
-    return None, False, None
 
 
 def decide_recovery(
@@ -861,7 +812,7 @@ def decide_recovery(
                     evidence.append(
                         IdentityEvidence(
                             identity=identity,
-                            state=IdentityState.JUDGE_RECOVERABLE,
+                            state=_judge_state(row, policy),
                             failure_kind=row.get("failure_kind"),
                             events=_events(row),
                         )
@@ -995,8 +946,10 @@ def decide_recovery(
             cap = fact.max_attempts if fact else default_max_attempts
             state = IdentityState.UNKNOWN
             if not _policy_replay_is_unsupported(last, classification=policy.classification):
-                action = _sidecar_action(last, policy)
-                if action == OutcomeAction.FAIL or last.get(TERMINAL) is True:
+                action = episode_recovery_action(last, policy=policy)
+                if action == OutcomeAction.FAIL or (
+                    last.get(TERMINAL) is True and saved_episode_outcome(last) is None
+                ):
                     policy_stopped = True
                     state = IdentityState.TERMINAL
                 elif action == OutcomeAction.RETRY:
@@ -1032,12 +985,12 @@ def decide_recovery(
         reason = None
         unscored = False
         # A kind the producer did not record, or did not register, is read from the recorded cause instead.
-        derived = None if _known_kind(kind) else _cause_kind(last)
+        derived = None if _known_kind(kind) and kind != ENVIRONMENT_SERVER_FAILED else _cause_kind(last)
         if derived is not None and derived[0] is not None:
             kind = derived[0]
         if is_omitted_rollout_row(last):
             # Only a recorded interruption restarts its input. An adapter's omitted outcome is not a result.
-            interrupted = last.get(FAILURE_CLASS) == "kill_shaped"
+            interrupted = last.get(FAILURE_CLASS) == KILL_SHAPED
             state = IdentityState.MISSING if interrupted else IdentityState.UNKNOWN
             evidence.append(
                 IdentityEvidence(
@@ -1090,11 +1043,12 @@ def decide_recovery(
                 if model_kind and is_terminal_failure(last) and not contradictory
                 else IdentityState.UNKNOWN
             )
-        elif last.get(TERMINAL) is True:
+        elif derived is not None and derived[1] and last.get(TERMINAL) is True:
+            # Preserve the producer's settled model result, without manufacturing another score.
+            state = IdentityState.MODEL_FINAL
+        elif last.get(TERMINAL) is True and saved_episode_outcome(last) is None:
             state = IdentityState.TERMINAL
-        elif (
-            action := _recovery_action(last, kind or "unknown", policy, http_status=_policy_evidence(last)[1])
-        ) == OutcomeAction.FAIL:
+        elif (action := episode_recovery_action(last, policy=policy)) == OutcomeAction.FAIL:
             # Unrestricted resume would still retry this nonterminal saved row.
             policy_stopped = True
             state = IdentityState.TERMINAL
@@ -1102,8 +1056,7 @@ def decide_recovery(
             last, classification=policy.classification
         ):
             # Only a judge failure has a supported saved-answer path. A failed verification can retain a finished
-            # agent answer, so replay must not generate another. For collection-wrapped model failures, the sidecar projection
-            # has no durable model-operation budget accounting: replay must not silently replenish that budget.
+            # agent answer, so replay must not generate another.
             state = IdentityState.UNKNOWN
             reason = (
                 _replay_refusal(last, classification=policy.classification)
@@ -5782,51 +5735,6 @@ REVERIFY_VERIFIER = "verifier"
 _REVERIFY_JUDGE_KINDS = frozenset({JUDGE_FAILED, JUDGE_UNPARSEABLE})
 
 
-def _transport_kind(kind: Any) -> bool:
-    return isinstance(kind, str) and kind.startswith("transport_")
-
-
-def _verify_transport_chain(events: Mapping[str, Any], event: Mapping[str, Any]) -> bool:
-    """Whether ``event`` and every explicit cause below it name only a lost verify call: an agent route failure or a
-    transport kind, with no reply status. A verifier's own failure or an HTTP reply anywhere in the chain is not one."""
-    from nemo_gym.core.failure_kinds import AGENT_ROUTE_FAILED
-
-    seen: set[str] = set()
-    current: Any = event
-    while isinstance(current, Mapping):
-        kind = current.get("failure_kind")
-        foreign = current.get("foreign_error")
-        if not (kind == AGENT_ROUTE_FAILED or _transport_kind(kind)):
-            return False
-        if current.get("http_status") is not None or (
-            isinstance(foreign, Mapping) and foreign.get("http_status") is not None
-        ):
-            return False
-        cause = current.get("cause_id")
-        if cause is None:
-            return True
-        if not isinstance(cause, str) or cause in seen:
-            return False
-        seen.add(cause)
-        current = events.get(cause)
-    return False
-
-
-def _verify_transport_failure(row: Mapping[str, Any]) -> bool:
-    """Whether the row was masked because its verify call was lost in transport: its kind is an agent route failure
-    or a transport kind, and a saved failure event of the ``verify`` operation has a transport-only cause chain."""
-    from nemo_gym.core.failure_kinds import AGENT_ROUTE_FAILED
-
-    kind = row.get("failure_kind")
-    events = row.get(FAILURE_EVENTS)
-    if not (kind == AGENT_ROUTE_FAILED or _transport_kind(kind)) or not isinstance(events, Mapping):
-        return False
-    return any(
-        isinstance(event, Mapping) and event.get("operation") == "verify" and _verify_transport_chain(events, event)
-        for event in events.values()
-    )
-
-
 _FAILED_RESPONSE_STATUSES = frozenset({"failed", "incomplete", "cancelled"})
 _CUT_FINISH = frozenset({"length", "content_filter", "max_tokens", "max_output_tokens"})
 
@@ -5893,18 +5801,6 @@ def _grading_unrecorded(row: Mapping[str, Any]) -> bool:
     if _verifier_model_answered(row, verifiers) and not _judge_error_marker(row):
         return False
     return grading_artifact(row) is None and not _model_failure(row)
-
-
-def _saved_model_patch(row: Mapping[str, Any]) -> bool:
-    """Whether the row saved, intact, the workspace patch its verifier collected and graded: the collector's projected
-    facts, else the same checks on a full saved row (``saved_model_patch``, ``collected_patch``). Only a verifier that
-    collects the patch itself can be given it back; one that reads the agent session at verify time cannot."""
-    facts = row.get("_ng_collected_grading_facts")
-    if isinstance(facts, Mapping) and "saved_model_patch" in facts:
-        return facts["saved_model_patch"] is True and facts.get("collected_patch") is True
-    return (
-        _collector_function("saved_model_patch")(row) is True and _collector_function("collected_patch")(row) is True
-    )
 
 
 def reverification_cause(row: Mapping[str, Any]) -> str | None:

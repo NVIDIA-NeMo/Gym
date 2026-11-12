@@ -63,6 +63,8 @@ from nemo_gym.config.global_config import (
 )
 from nemo_gym.core import VERIFIER_ERROR
 from nemo_gym.core.failure_transport import FailureHeader, FailureReportRow
+from nemo_gym.core.outcome_policy import OutcomeAction
+from nemo_gym.rollouts.recovery_policy import verification_recovery_action
 from nemo_gym.rollouts.rollout_collection import (
     NG_RESULT_TYPE_KEY,
     _coverage_report,
@@ -1400,14 +1402,24 @@ def bind_judge_failures(
     spent = set()
     for row in store.failures():
         identity = logical_rollout_id(row)
-        if row.get("_ng_failure_class") == "judge_failed" and store._state.failure_count(identity) >= cap:
+        if (
+            _is_judge_failure(row)
+            and verification_recovery_action(row, policy=store._state.outcome_policy) == OutcomeAction.VERIFY
+            and store._state.failure_count(identity) >= cap
+        ):
             if not skip_spent:
                 raise ConfigError(
                     f"Rollout {identity!r} has spent its {cap} saved failure attempts; nothing was judged."
                 )
             spent.add(identity)
     saved_results = {
-        logical_rollout_id(row): row for row in store.selected("success") if _reverifiable_saved_result(row)
+        logical_rollout_id(row): row
+        for row in store.selected("success")
+        if _reverifiable_saved_result(row)
+        and (
+            row.get("mask_sample") is not True
+            or verification_recovery_action(row, policy=store._state.outcome_policy) == OutcomeAction.VERIFY
+        )
     }
     return {
         "manifest": store.manifest.model_dump_json(),
@@ -1415,7 +1427,9 @@ def bind_judge_failures(
         "failures": {
             logical_rollout_id(row): row
             for row in store.failures()
-            if row.get("_ng_failure_class") == "judge_failed" and logical_rollout_id(row) not in spent
+            if _is_judge_failure(row)
+            and logical_rollout_id(row) not in spent
+            and verification_recovery_action(row, policy=store._state.outcome_policy) == OutcomeAction.VERIFY
         }
         | saved_results,
         "saved_results": set(saved_results),
@@ -1474,9 +1488,19 @@ def due_judge_failures(output: Path) -> List[str]:
         {
             logical_rollout_id(row)
             for row in store.failures()
-            if _is_judge_failure(row) and store._state.failure_count(logical_rollout_id(row)) < cap
+            if _is_judge_failure(row)
+            and store._state.failure_count(logical_rollout_id(row)) < cap
+            and verification_recovery_action(row, policy=store._state.outcome_policy) == OutcomeAction.VERIFY
         }
-        | {logical_rollout_id(row) for row in store.selected("success") if _reverifiable_saved_result(row)}
+        | {
+            logical_rollout_id(row)
+            for row in store.selected("success")
+            if _reverifiable_saved_result(row)
+            and (
+                row.get("mask_sample") is not True
+                or verification_recovery_action(row, policy=store._state.outcome_policy) == OutcomeAction.VERIFY
+            )
+        }
     )
 
 

@@ -108,7 +108,7 @@ that the tasks and model configuration match the saved experiment; it does not e
 
 Coverage includes `counted_failures`, `failure_budget_exhausted`, and `max_rollout_attempts`. Its `attempts` field counts reserved
 execution numbers, including reservations made immediately before an interruption; it is not the retry-budget counter.
-For example, three interruptions can reserve executions 0, 1, and 2 while consuming zero failures. The failure budget is still intact, but unknown execution or a saved answer blocks replay; only evidence establishing eligibility permits execution 3.
+For example, three interruptions can reserve executions 0, 1, and 2 while consuming zero failures. The failure budget is still intact. The episode policy decides retry eligibility; saved answers and unresolved live dispatches still block a new execution.
 
 Explicit `_ng_rollout_id` values must be valid capture IDs. Preprocessing preserves them for single copies and adds
 `-r<rollout_index>` when repeats or agent fan-out expand a row. Direct preprocessing callers should use the returned
@@ -119,8 +119,37 @@ Invalid or colliding IDs are configuration errors before dispatch.
 Tasks drained before dispatch by `dispatch_budget_s` consume no attempt and remain available on resume.
 The opt-in `retry_terminal_timeouts` and `dispatch_longest_first` controls
 also apply to manifest-backed runs. Incomplete final writes are repaired after history validation;
-conflicting or foreign payloads still fail validation. Core collection retries eligible unfinished tasks from their inputs. Possibly delivered requests and unclassified execution remain stopped. Saved judge answers are re-judged in place, at the end of a run, before the policy work of a resumed run and again at its end, and by `gym eval resubmit --recover` when only judge failures remain; a manifest-backed run settles each re-judgment into its source under the run lock.
+conflicting or foreign payloads still fail validation. Core collection retries eligible unfinished tasks from their inputs. Unknown or possibly delivered failures with no saved answer use the episode policy, whose default is `retry`. Saved judge answers are re-judged in place, at the end of a run, before the policy work of a resumed run and again at its end, and by `gym eval resubmit --recover` when only judge failures remain; a manifest-backed run settles each re-judgment into its source under the run lock.
 GDPVal manages its own cached-deliverable reuse; core invalid-judge migration options are no longer supported.
+
+### Episode outcome decisions
+
+Core collection selects an `OutcomeDecision` from the failure evidence and the benchmark's
+`resumable.recovery_outcome_policy`, then saves its action and attribution as `_ng_episode_outcome`
+in the same JSONL row as the failure. The existing configuration name is retained; collection and
+recovery share one episode policy. Resume reads that saved decision instead of reinterpreting the
+failure under a newer configuration. Older rows without the field use the same policy as a compatibility
+fallback. Invalid saved decisions fail validation rather than silently permitting execution.
+
+| Action | Episode-boundary behavior |
+| --- | --- |
+| `retry` | Permit a new whole-episode attempt after the previous dispatch is resolved, within the existing attempt and run budgets. A saved answer or settled result is not replaced. |
+| `verify` | Re-judge a saved judge answer. If no usable judge answer exists, stop; never generate a replacement answer. |
+| `fail` | Keep the failure ungraded and stop retrying that episode. |
+| `count_as_zero` | Preserve an explicit zero already selected by the producing stage. This collection policy does not accept `count_as_zero` as a configured action or create a new score. |
+
+Unknown causes, incomplete diagnostic chains, and possibly delivered failed requests default to
+`retry` when no answer was saved. This changes the earlier blanket stop for those cases. Recorded
+terminal results, explicit producer `fail`/zero decisions, saved answers, and known final policy-model
+rejections remain protected. A relay `episode.deadline` saves `fail`, because the upstream agent may still be running after the relay stopped waiting. `kill_shaped` defaults to `fail`; it can be configured explicitly.
+
+This is permission for a later whole-episode attempt, not an HTTP retry or continuation inside an
+agent episode. The collector's dispatch loop and internal tool/model retry budgets are unchanged.
+Neither a `retry` decision nor remaining budget permits overlapping unresolved attempts.
+
+For older rows, `retry_terminal_timeouts` retains its compatibility behavior. For new rows it is
+applied when the failure decision is saved; changing it later does not replace an existing episode decision.
+
 
 Managed runs save `retry_terminal_timeouts` in the run manifest. Resume keeps that policy unless the option
 is explicitly set; changing it updates the manifest before dispatch. Offline aggregation and health checks read
@@ -134,7 +163,7 @@ A suppression without a reported failure is an intentional omission. Existing le
 
 The **newest reserved execution number** determines the current outcome. A late result from an older execution
 remains in the append-only artifacts but cannot replace the newer attempt or count as an extra sample. If the newest
-execution has no saved outcome, the rollout remains unfinished without spending a failure retry. Restart still requires eligible execution evidence; older saved answers and uncertain dispatch history block regeneration. Collection and offline aggregation share this rule, recorded as `selection_policy: "latest_allocated"`.
+execution has no saved outcome, the rollout remains unfinished without spending a failure retry. Restart consumes the saved episode decision; older saved answers and unresolved dispatches block regeneration. Collection and offline aggregation share this rule, recorded as `selection_policy: "latest_allocated"`.
 
 Gym writes `<output_stem>_coverage.json` with an exact inventory:
 
@@ -159,7 +188,7 @@ Gym writes `<output_stem>_coverage.json` with an exact inventory:
 | `open` | Rollouts with no final result: `masked_retryable` plus `failed_not_final` plus `not_started` plus `missing`. A chain that stops with `open` above zero reports it as an incomplete run; final failures (terminal, at their attempt cap, or `stopped_not_retried`) are not open, even when they are not settled. The recovery gate's `unsettled` count is wider: it also includes those final failures. |
 | `outcomes_recorded` | All outcomes saved during this collector invocation, including interruptions. |
 | `progress_outcomes_recorded` | Saved successes, omissions, terminal failures or counted failures; distinguishes productive continuation from infrastructure-only retries. |
-| `stopped_not_retried` | Failed rollouts that are neither final nor at their attempt cap and that resume still does not run again (a kept answer or a judge failure left to recovery, or an unclassified execution). |
+| `stopped_not_retried` | Failed rollouts that are neither final nor at their attempt cap and that resume still does not run again (a kept answer or a judge failure left to recovery, or a saved policy decision to stop). |
 | `attempt_extension` | The recorded extension of the per-rollout attempt cap; 0 when none. |
 | `completion_fraction` | Settled rollouts (completed results, less `masked_retryable`, plus final zeros) divided by `expected`; 1.0 for an empty inventory. |
 

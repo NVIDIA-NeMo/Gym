@@ -251,7 +251,7 @@ async def test_selected_model_body_failure_without_answer_uses_episode_retry_pol
 
 
 def test_unselected_body_failure_does_not_override_selected_preanswer_infrastructure():
-    from nemo_gym.rollouts.rollout_recovery import has_unclassified_execution_failure
+    from nemo_gym.rollouts.recovery_policy import _replay_refusal
 
     events = {
         "old": {
@@ -269,6 +269,6 @@ def test_unselected_body_failure_does_not_override_selected_preanswer_infrastruc
         "wrapper": {"boundary": "agent", "failure_kind": "agent_route_failed", "cause_id": "current"},
     }
     row = {"_ng_failure_class": "agent_run_error", "_ng_failure_events": events, "_ng_failure_id": "wrapper"}
-    assert not has_unclassified_execution_failure(row)
+    assert not _replay_refusal(row)
     events["wrapper"]["cause_id"] = "old"
-    assert not has_unclassified_execution_failure(row)
+    assert not _replay_refusal(row)

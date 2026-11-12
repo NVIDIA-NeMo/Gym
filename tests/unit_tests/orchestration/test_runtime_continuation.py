@@ -38,7 +38,7 @@ from tests.unit_tests.rollouts.test_rollout_recovery import runner_config as run
         ("exhausted", "75:0", False, False),
         ("absent", "75:0", False, False),
         ("secondary_cleanup", "75:0", False, False),
-        ("malformed", "75:0", False, False),
+        ("malformed", "75:0", True, True),
     ],
 )
 def test_installed_runtime_authorizes_only_selected_remaining_work(
@@ -200,7 +200,7 @@ def test_owned_infrastructure_cannot_exceed_carried_retry_budget(tmp_path):
     assert (tmp_path / ".gym_infra_retries").read_text() == "3\n"
 
 
-def test_explicit_attempt_reset_does_not_reopen_unknown_selected_execution(tmp_path):
+def test_explicit_attempt_reset_preserves_the_saved_retry_decision(tmp_path):
     output = prepare_managed(tmp_path, "infra")
     sidecar = output.with_name("rollouts_failures.jsonl")
     rows = [json.loads(line) for line in sidecar.read_text().splitlines()]
@@ -215,9 +215,9 @@ def test_explicit_attempt_reset_does_not_reopen_unknown_selected_execution(tmp_p
         )
 
     with RolloutStore.start_or_resume(output, current_inputs, resume=True, resubmit=True) as store:
-        assert store.pending(3) == []
+        assert len(store.pending(3)) == 1
     result = _run_prologue(tmp_path, ResumeConfig(), "FAILED", exit_code="75:0")
-    assert "REACHED_WORK" not in result.stdout
+    assert "REACHED_WORK" in result.stdout
 
 
 def test_generated_reader_uses_same_pinned_checkout_as_driver(tmp_path):

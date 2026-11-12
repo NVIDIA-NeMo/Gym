@@ -434,7 +434,7 @@ async def test_actual_collection_native_outcomes_reach_managed_recovery(runner_c
         1: "model_final",
         2: "exhausted",
         3: "judge_recoverable",
-        4: "unknown",
+        4: "terminal",
         5: "scored",
         6: "unknown",
     }

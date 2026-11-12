@@ -148,10 +148,7 @@ def test_unselected_model_failures_of_a_row_that_kept_a_response_are_not_its_cau
     calls = [_call(SIMULATOR, {"e1": events["e1"]}), _call(SIMULATOR, {"e2": events["e2"]})]
     d = _decide(tmp_path, [_producer_failure(1, events, calls, kept=True)], n=2)
     assert d.counts == {"scored": 1, "unknown": 1}
-    assert d.evidence[1].reason == (
-        "unregistered kind example_agent_error: it kept a response, so its saved model failures are attempts, not "
-        "its cause"
-    )
+    assert d.evidence[1].reason == "the row kept an answer that a rerun would replace"
 
 
 @pytest.mark.parametrize(
@@ -166,13 +163,11 @@ def test_the_policys_refused_request_is_the_models_final_result(tmp_path, extra,
     assert d.action == RecoveryAction.NOOP
 
 
-def test_the_policys_refused_request_that_a_resume_would_rerun_stays_unknown(tmp_path):
+def test_the_policys_refused_request_is_stopped_by_the_episode_policy(tmp_path):
     events, calls = _two_requests(POLICY)
     d = _decide(tmp_path, [_producer_failure(1, events, calls)], n=2)
-    assert d.counts == {"scored": 1, "unknown": 1}
-    assert d.evidence[1].reason == (
-        "the policy's request failed (model_request_error), a final model result, but a resume would run it again"
-    )
+    assert d.counts == {"scored": 1, "terminal": 1}
+    assert d.action == RecoveryAction.STOP
 
 
 @pytest.mark.parametrize(
@@ -190,14 +185,11 @@ def test_a_server_side_or_transport_model_failure_is_infrastructure(tmp_path, se
     assert d.evidence[1].failure_kind == kind
 
 
-def test_a_refused_request_whose_caller_is_not_recorded_stays_unknown_with_a_reason(tmp_path):
+def test_a_refused_request_whose_caller_is_unknown_uses_the_default_episode_policy(tmp_path):
     events, _ = _two_requests(POLICY)
     d = _decide(tmp_path, [_producer_failure(1, events, [])], n=2)
-    assert d.counts == {"scored": 1, "unknown": 1}
-    assert d.evidence[1].reason == (
-        "unregistered kind example_agent_error: the model call that failed is not recorded, so whose call it was is "
-        "unknown"
-    )
+    assert d.counts == {"scored": 1, "retryable": 1}
+    assert d.action == RecoveryAction.RESUBMIT
 
 
 def test_a_store_resume_and_the_decision_agree_on_an_episode_deadline(tmp_path):

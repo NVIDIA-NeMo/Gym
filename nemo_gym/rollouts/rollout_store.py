@@ -36,6 +36,7 @@ from pydantic import ValidationError
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.global_config import ATTEMPT_INDEX_KEY_NAME
 from nemo_gym.core.failure_kinds import ROLLOUT_ALLOCATION_ENDED
+from nemo_gym.rollouts.recovery_policy import EPISODE_OUTCOME_KEY, episode_outcome
 from nemo_gym.rollouts.rollout_records import (
     REJUDGE_OPERATION_ID_KEY,
     REJUDGED_FAILURE_ID_KEY,
@@ -64,6 +65,7 @@ from nemo_gym.rollouts.rollout_recovery import (
     RunManifest,
     _get_max_rollout_attempts,
     atomic_write_json,
+    is_infrastructure_agent_timeout,
     manifest_path_for,
     record_resubmit_offset,
     saved_recovery_outcome_policy,
@@ -129,6 +131,7 @@ _REJUDGE_GRADING_KEYS = frozenset(
         "failure_kind",
         "failure_reason",
         "ng_verifier_invocations",
+        EPISODE_OUTCOME_KEY,
     }
 )
 _REJUDGE_DROPPED_PREFIXES = ("_ng_failure", "_ng_rejudge")
@@ -428,6 +431,9 @@ class RolloutStore:
 
     def check_rejudgment(self, failure: dict, result: dict) -> dict | None:
         """Return the row that would settle ``failure`` (None when already saved); raise when it cannot settle it."""
+        # A fresh verifier outcome gets its own decision; the predecessor's decision
+        # remains in observations, even if a caller copied its metadata into result.
+        result = {k: v for k, v in result.items() if k != EPISODE_OUTCOME_KEY}
         key = self._state._key(failure)
         current = self._state.payloads.get(key)
         if current is None or self._state.latest.get(key[0]) != key[1]:
@@ -475,7 +481,7 @@ class RolloutStore:
             except (TypeError, ValueError) as error:
                 raise ConfigError("Canonical rejudge requires fresh observed verifier invocation evidence.") from error
         saved = current.record.read()
-        if saved == settled:
+        if {k: v for k, v in saved.items() if k != EPISODE_OUTCOME_KEY} == settled:
             return None  # already saved: no new write, judge call or attempt
         pending = self.manifest.pending_rejudge.get(key[0])
         if (
@@ -596,6 +602,19 @@ class RolloutStore:
     def record_outcome(self, result: dict, *, sync: bool = False) -> None:
         """Append the outcome once; a complete JSONL row is the recovery record."""
         self._require_open()
+        if (
+            result.get("_ng_failure_class") is not None
+            or is_infrastructure_agent_timeout(result, classification=self._state.classification)
+            or (
+                result.get("failure_kind") is not None
+                and (result.get("mask_sample") is True or result.get("evaluation_completed") is False)
+            )
+        ):
+            result[EPISODE_OUTCOME_KEY] = episode_outcome(
+                result,
+                policy=self._state.outcome_policy,
+                retry_terminal_timeouts=self._state.retry_terminal_timeouts,
+            ).model_dump(mode="json")
         self._state.check_outcome(result)
         file = self._failures_file if result.get("_ng_failure_class") is not None else self._results_file
         raw = orjson.dumps(result) + b"\n"
@@ -633,13 +652,21 @@ class RolloutStore:
     def record_unstarted(self, row: dict) -> None:
         """Save ``record_omitted_rollouts`` evidence for a row the dispatch budget never started.
 
-        It is not an outcome: the history skips it on load, and resume still runs the rollout.
+        It spends no outcome attempt. Unrouted execution diagnostics retain their episode decision;
+        ordinary unstarted rows remain pending.
         """
         self._require_open()
+        if row.get("_ng_unrouted_run_error") is True:
+            row[EPISODE_OUTCOME_KEY] = episode_outcome(
+                row,
+                policy=self._state.outcome_policy,
+                retry_terminal_timeouts=self._state.retry_terminal_timeouts,
+            ).model_dump(mode="json")
         raw = orjson.dumps(row) + b"\n"
         write_started = perf_counter()
         self._failures_file.write(raw)
         self._failures_file.flush()
+        self._state.diagnostic(row)
         _record_output_write(write_started, raw)
 
     def pending(
@@ -676,8 +703,8 @@ class RolloutStore:
         stopped = self._state.stopped_count(max_attempts)
         if stopped:
             print(
-                f"{stopped} failed rollout(s) are not run again: a kept answer or a judge failure is left to "
-                f"verification recovery, an unclassified execution to recovery. Failures: {failures_path_for(self.output)}."
+                f"{stopped} failed rollout(s) are not run again: a kept answer is left to "
+                f"verification recovery or the saved episode policy stopped the failure. Failures: {failures_path_for(self.output)}."
             )
         rows = [dict(row, **{RUN_ID_KEY: self.manifest.run_id}) for row in self._state.pending(max_attempts)]
         elapsed = {}

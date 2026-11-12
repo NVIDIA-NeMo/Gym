@@ -399,7 +399,7 @@ def test_serialized_legacy_failure_keeps_routing_and_explicit_zero_policy(serial
     assert "reward" not in persisted
 
 
-async def test_serialized_terminal_timeout_retries_only_with_opt_in(
+async def test_saved_terminal_timeout_decision_survives_later_opt_in(
     runner_config, monkeypatch, serialized_legacy_failure
 ):
     payload = serialized_legacy_failure("timeout_exceeded", terminal=True)
@@ -422,9 +422,9 @@ async def test_serialized_terminal_timeout_retries_only_with_opt_in(
     runner_config.retry_terminal_timeouts = True
     client.post = AsyncMock(return_value=FakeResponse(200, {"response": {}, "reward": 1.0}))
     await helper.run_from_config(runner_config)
-    assert client.post.await_count == 1
+    assert client.post.await_count == 0
     store = RolloutStore.read(output)
-    assert store.coverage()["successful"] == 3
+    assert store.coverage()["successful"] == 2
     assert list(read_records(failures_path_for(output))) == [saved]
 
 

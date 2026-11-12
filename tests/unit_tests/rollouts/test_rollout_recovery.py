@@ -1313,6 +1313,7 @@ async def test_budget_drained_work_resumes_without_consuming_attempts(runner_con
 @pytest.mark.parametrize("failure_kind", [None, "agent_timeout"])
 async def test_journal_resume_preserves_terminal_timeout_opt_in(runner_config, monkeypatch, failure_kind):
     from nemo_gym.rollouts.rollout_store import RolloutStore
+    from nemo_gym.utils.path_utils import failures_path_for
 
     async def post(**kwargs):
         if kwargs["json"]["task"] == 0:
@@ -1324,6 +1325,12 @@ async def test_journal_resume_preserves_terminal_timeout_opt_in(runner_config, m
 
     client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
     await RolloutCollectionHelper().run_from_config(runner_config)
+    # Exercise the compatibility fallback for a sidecar written before persisted decisions.
+    output = Path(runner_config.output_jsonl_fpath)
+    failures = list(read_records(failures_path_for(output)))
+    for failure in failures:
+        failure.pop("_ng_episode_outcome", None)
+    failures_path_for(output).write_text("".join(json.dumps(row) + "\n" for row in failures))
     runner_config.resume_from_cache = True
     client.post.reset_mock()
     await RolloutCollectionHelper().run_from_config(runner_config)
@@ -2146,7 +2153,7 @@ async def test_judge_class_with_shared_kind_keeps_a_recoverable_saved_answer(
     post.assert_not_called()
 
 
-async def test_timeout_retry_policy_survives_resume_until_explicitly_changed(runner_config, monkeypatch):
+async def test_saved_timeout_retry_decisions_survive_later_policy_changes(runner_config, monkeypatch):
     from nemo_gym.rollouts.rollout_store import RolloutStore
 
     async def post(**kwargs):
@@ -2169,11 +2176,11 @@ async def test_timeout_retry_policy_survives_resume_until_explicitly_changed(run
     assert client.post.call_count == 2
     assert RolloutStore.read(output).coverage()["failed_not_final"] == 2
 
-    # An explicit false is a deliberate policy change, saved for future readers.
+    # A changed policy applies to the next failure boundary, not the saved retry decision.
     resume.retry_terminal_timeouts = False
     client.post.reset_mock()
     await RolloutCollectionHelper().run_from_config(resume)
-    assert not client.post.called
+    assert client.post.call_count == 2
     offline = RolloutStore.read(output).coverage()
     assert offline["retry_terminal_timeouts"] is False
     assert offline["failed_final"] == 2

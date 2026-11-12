@@ -671,8 +671,8 @@ def _chain_report(model_status: int):
 
 @pytest.mark.parametrize("model_status", [200, 503])
 def test_the_flat_failure_reply_keeps_the_typed_reply_report(model_status: int) -> None:
-    from nemo_gym.core import FailureReportRow
-    from nemo_gym.rollouts.rollout_recovery import has_unclassified_execution_failure
+    from nemo_gym.core import FailureReportRow, OutcomeAction
+    from nemo_gym.rollouts import EpisodeOutcomePolicyConfig, episode_outcome
     from nemo_gym.server_runtime import SingleAgentTurnResponse
 
     environment_server, client = _environment_server()
@@ -691,8 +691,8 @@ def test_the_flat_failure_reply_keeps_the_typed_reply_report(model_status: int) 
     assert FailureReportRow.report(row) == report
     assert row[FailureReportRow.FAILURE_ID] == environment.event_id
     assert row[FailureReportRow.EVENTS][model.event_id]["http_status"] == model_status
-    # A model body failure after successful headers keeps the agent from running again; a 503 stays retryable.
-    assert has_unclassified_execution_failure(row) is (model_status == 200)
+    # Neither failed response headers nor a 503 implies a saved answer; the episode policy permits retry.
+    assert episode_outcome(row, policy=EpisodeOutcomePolicyConfig()).action == OutcomeAction.RETRY
 
 
 @pytest.mark.parametrize("own_failure", [False, True])

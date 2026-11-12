@@ -169,12 +169,14 @@ def test_final_agent_outcome_through_store_and_stdlib_collector(tmp_path, case):
     collected = select_managed_evidence(CollectedEvidence.model_validate_json(raw), tmp_path)
     assert collected.managed_reader_error is None
     decision = decide_from_collected(collected, max_infra_retries=2, max_walltime_s=None, live_job=False)
-    assert decision.action.value == ("resubmit" if case == "503" else "stop")
+    retry = case not in {"exhausted", "completed", "cleanup", "terminal"}
+    assert decision.action.value == ("resubmit" if retry else "stop")
+    assert bool(RolloutStore.read(output).pending()) is retry
     assert decision.evidence[0].attempts == (3 if case == "exhausted" else 0 if case == "terminal" else 1)
     assert decision.evidence[0].failure_id is None or case == "invalid_selected"
     assert decision.evidence[0].state.value == (
         "retryable"
-        if case == "503"
+        if retry
         else "exhausted"
         if case == "exhausted"
         else "terminal"

@@ -22,6 +22,7 @@ if TYPE_CHECKING:
         read_available_model_call_records,
         read_model_call_records,
     )
+    from nemo_gym.rollouts.recovery_policy import EpisodeOutcomePolicyConfig, episode_outcome
     from nemo_gym.rollouts.rollout_collection import (
         AGENT_REQUEST_FAILED_FAILURE_CLASS,
         ENVIRONMENT_SERVER_FAILURE_CLASS,
@@ -58,6 +59,8 @@ if TYPE_CHECKING:
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "EpisodeOutcomePolicyConfig": "recovery_policy",
+    "episode_outcome": "recovery_policy",
     "enrich_run_result": "rollout_collection",
     "AGENT_REQUEST_FAILED_FAILURE_CLASS": "rollout_collection",
     "DispatchLatencyTracker": "rollout_perf",

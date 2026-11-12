@@ -25,7 +25,12 @@ ANSWER = {"object": "response", "id": "resp_saved", "status": "completed", "outp
 
 
 def _run(
-    tmp_path: Path, *, judge_failures: int, rollouts: int = 3, evidence: dict | None = None
+    tmp_path: Path,
+    *,
+    judge_failures: int,
+    rollouts: int = 3,
+    evidence: dict | None = None,
+    result_evidence: dict | None = None,
 ) -> tuple[Path, list[dict]]:
     """A managed run of ``rollouts`` rollouts: the first ``judge_failures`` failed to judge, the others scored 1.0."""
     rows = [{"_ng_task_index": i, "_ng_rollout_index": 0, "agent_ref": {"name": "agent"}} for i in range(rollouts)]
@@ -55,7 +60,7 @@ def _run(
                 store.record_outcome(failure)
                 failures.append(failure)
             else:
-                store.record_outcome(row | {"reward": 1.0, "response": ANSWER})
+                store.record_outcome(row | {"reward": 1.0, "response": ANSWER} | (result_evidence or {}))
     return output, failures
 
 
@@ -628,3 +633,43 @@ def test_the_recovery_pass_withdraws_an_admission_whose_pass_died(tmp_path):
             judge_failed_only=True,
             withdraw_unresolved_admissions=True,
         )
+
+
+async def test_saved_fail_decision_is_not_bound_or_automatically_rejudged(tmp_path, monkeypatch):
+    output, failures = _run(
+        tmp_path,
+        judge_failures=2,
+        evidence={
+            "failure_outcome_action": "fail",
+            "failure_outcome_attribution": "evaluation",
+        },
+    )
+    assert all(row["_ng_episode_outcome"]["action"] == "fail" for row in failures)
+    assert due_judge_failures(output) == []
+    assert bind_judge_failures(output, skip_spent=True)["failures"] == {}
+
+    async def must_not_run(self, config):
+        raise AssertionError("a saved fail decision must not invoke verification")
+
+    monkeypatch.setattr(rollout_reverification.RolloutReverificationHelper, "run_from_config", must_not_run)
+    assert await rejudge_saved_judge_failures({}, output) == 0
+
+
+def test_scored_unparsed_answer_remains_reverifiable_under_failure_stop_policy(tmp_path):
+    artifacts = tmp_path / "job" / "bench" / "artifacts"
+    artifacts.mkdir(parents=True)
+    (artifacts.parent.parent / "resolved-config.yaml").write_text(
+        '{"driver":{"benchmarks":{"bench":{"resumable":{"recovery_outcome_policy":'
+        '{"by_failure_kind":{"judge_failed":"fail"}}}}}}}'
+    )
+    output, failures = _run(
+        artifacts,
+        judge_failures=1,
+        rollouts=2,
+        result_evidence={"judge_evaluations": [{"verdict_label": "judge_parsing_error"}]},
+    )
+    assert failures[0]["_ng_episode_outcome"]["action"] == "fail"
+    assert due_judge_failures(output) == ["1-0"]
+    binding = bind_judge_failures(output, skip_spent=True)
+    assert list(binding["failures"]) == ["1-0"]
+    assert binding["saved_results"] == {"1-0"}

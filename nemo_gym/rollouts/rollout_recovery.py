@@ -261,13 +261,13 @@ def saved_recovery_outcome_policy(output: Path) -> "RecoveryOutcomePolicyConfig"
         raise ConfigError(f"Cannot read saved recovery outcome policy from {resolved}: {error}") from error
 
 
-def saved_failure_classification(output: Path) -> FailureClassificationConfig:
-    """The owning run's recovery classification, shared with its outcome policy."""
-    return saved_recovery_outcome_policy(output).classification
-
-
 def applied_failure_class(row: Mapping[str, Any]) -> FailureClass | None:
     """Read an applied result class, preserving explicit unknown over later configuration."""
+    from nemo_gym.rollouts.recovery_policy import saved_episode_outcome
+
+    saved = saved_episode_outcome(row)
+    if saved is not None:
+        return saved.attribution
     action, attribution = row.get("failure_outcome_action"), row.get("failure_outcome_attribution")
     if (
         isinstance(action, str)
@@ -522,24 +522,6 @@ def holds_response(row: Mapping[str, Any]) -> bool:
     return any(
         isinstance(row.get(key), Mapping)
         for key in ("response", "_ng_failure_response", "_ng_failure_partial_response")
-    )
-
-
-def has_unclassified_execution_failure(row: Mapping[str, Any]) -> bool:
-    """Compatibility predicate for default recovery admission.
-
-    New consumers select an action with ``episode_recovery_action`` and enforce
-    saved-answer constraints separately. An unknown cause alone never vetoes retry.
-    """
-    from nemo_gym.rollouts.recovery_policy import (
-        RecoveryOutcomePolicyConfig,
-        _replay_refusal,
-        episode_recovery_action,
-    )
-
-    return row.get("_ng_failure_class") is not None and (
-        _replay_refusal(row) is not None
-        or episode_recovery_action(row, policy=RecoveryOutcomePolicyConfig()) != OutcomeAction.RETRY
     )
 
 

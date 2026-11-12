@@ -18,7 +18,9 @@ import json
 
 import pytest
 
-from nemo_gym.rollouts.rollout_recovery import RunManifest, has_unclassified_execution_failure
+from nemo_gym.core.outcome_policy import OutcomeAction
+from nemo_gym.rollouts.recovery_policy import RecoveryOutcomePolicyConfig, _replay_refusal, episode_recovery_action
+from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.rollouts.rollout_store import RolloutStore
 
 
@@ -56,15 +58,15 @@ def _lost_connection_row(**extra):
 
 
 def test_a_lost_connection_with_no_saved_response_may_run_again():
-    assert not has_unclassified_execution_failure(_lost_connection_row())
-    assert not has_unclassified_execution_failure(_lost_connection_row(_ng_unrouted_run_error=True))
+    assert not _replay_refusal(_lost_connection_row())
+    assert not _replay_refusal(_lost_connection_row(_ng_unrouted_run_error=True))
 
 
 @pytest.mark.parametrize("key", ["response", "_ng_failure_response", "_ng_failure_partial_response"])
 def test_a_possibly_delivered_request_that_kept_a_response_never_runs_again(key):
     response = {"object": "response", "id": "resp-1", "status": "incomplete", "output": []}
-    assert has_unclassified_execution_failure(_lost_connection_row(**{key: response}))
-    assert has_unclassified_execution_failure(_lost_connection_row(_ng_unrouted_run_error=True, **{key: response}))
+    assert _replay_refusal(_lost_connection_row(**{key: response}))
+    assert _replay_refusal(_lost_connection_row(_ng_unrouted_run_error=True, **{key: response}))
 
 
 def test_the_store_resumes_a_lost_connection_row_within_its_attempt_cap(tmp_path):
@@ -123,11 +125,11 @@ _ANSWER = {
 
 
 def test_a_route_failure_that_kept_no_answer_may_run_again():
-    assert not has_unclassified_execution_failure(_route_failure_row())
+    assert not _replay_refusal(_route_failure_row())
 
 
 def test_a_route_failure_that_kept_an_answer_never_runs_again():
-    assert has_unclassified_execution_failure(_route_failure_row(_ng_failure_response=_ANSWER))
+    assert _replay_refusal(_route_failure_row(_ng_failure_response=_ANSWER))
 
 
 @pytest.mark.parametrize("status,refused", [(500, False), (503, False), (400, False), (None, False)])
@@ -135,20 +137,18 @@ def test_a_legacy_run_error_without_an_agent_event_uses_the_default_retry_policy
     row = _route_failure_row(_ng_failure_http_status=status)
     del row["_ng_failure_events"]["agent"]
     del row["_ng_failure_events"]["dispatch"]["cause_id"]
-    assert has_unclassified_execution_failure(row) is refused
+    assert (_replay_refusal(row) is not None) is refused
 
 
 def test_an_omitted_failure_report_never_blocks_resume_by_itself():
     # The transport's size bound dropped the report: its events say nothing either way, so the row's own record decides.
     omitted = _route_failure_row(_ng_failure_events_omitted=True)
-    assert not has_unclassified_execution_failure(omitted)
+    assert not _replay_refusal(omitted)
     # The selected event may be one the bound dropped: still no veto from the transport.
     partial = _route_failure_row(_ng_failure_events_omitted=True, _ng_failure_id="dropped")
-    assert not has_unclassified_execution_failure(partial)
+    assert not _replay_refusal(partial)
     # A kept answer is still never run again.
-    assert has_unclassified_execution_failure(
-        _lost_connection_row(_ng_failure_events_omitted=True, _ng_failure_response=_ANSWER)
-    )
+    assert _replay_refusal(_lost_connection_row(_ng_failure_events_omitted=True, _ng_failure_response=_ANSWER))
 
 
 def test_a_judge_failure_resume_leaves_to_recovery_is_counted_and_named(tmp_path, capsys):
@@ -189,7 +189,12 @@ def test_a_judge_failure_resume_leaves_to_recovery_is_counted_and_named(tmp_path
 @pytest.mark.parametrize("failure_class", ["judge_failed", "judge_invalid", "judge_unparseable"])
 def test_every_judge_failure_is_left_to_verification_recovery(failure_class):
     # The registered judge_unparseable is a judge failure too: its answer is judged again, never regenerated.
-    assert has_unclassified_execution_failure(_route_failure_row(_ng_failure_class=failure_class))
+    assert (
+        episode_recovery_action(
+            _route_failure_row(_ng_failure_class=failure_class), policy=RecoveryOutcomePolicyConfig()
+        )
+        == OutcomeAction.VERIFY
+    )
 
 
 def test_an_omitted_report_does_not_lift_a_terminal_failure(tmp_path):
@@ -215,5 +220,5 @@ def test_an_omitted_report_does_not_lift_a_terminal_failure(tmp_path):
         }
         store.record_outcome(row | failure)
     reader = RolloutStore.read(output)
-    assert has_unclassified_execution_failure(failure)
+    assert episode_recovery_action(failure, policy=RecoveryOutcomePolicyConfig()) == OutcomeAction.FAIL
     assert reader.pending() == [] and reader.coverage()["stopped_not_retried"] == 0

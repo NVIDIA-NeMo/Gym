@@ -157,10 +157,13 @@ def test_a_masked_judge_failure_stays_with_re_verification(tmp_path):
 
 def test_a_policy_that_fails_session_lost_keeps_it_final(tmp_path):
     from nemo_gym.orchestration.recovery import decide_from_collected
+    from nemo_gym.rollouts.recovery_policy import EPISODE_OUTCOME_KEY, episode_outcome
 
-    _run(tmp_path, [[_masked("session_lost")]])
-    collected, _ = _decide(tmp_path, allocation_cut=False)
     policy = RecoveryOutcomePolicyConfig(by_failure_kind={"session_lost": OutcomeAction.FAIL})
+    row = _masked("session_lost")
+    row[EPISODE_OUTCOME_KEY] = episode_outcome(row, policy=policy).model_dump(mode="json")
+    _run(tmp_path, [[row]])
+    collected, _ = _decide(tmp_path, allocation_cut=False)
     decision = decide_from_collected(
         collected, max_infra_retries=2, max_walltime_s=None, live_job=False, outcome_policy=policy
     )
@@ -369,8 +372,6 @@ def test_saved_launcher_classification_drives_store_resume_and_planner(tmp_path)
     from nemo_gym.core.failure_kinds import FailureClassificationConfig
 
     job = tmp_path / "benchmark"
-    output, prepare = _run(job, [[_masked("provider_oom_killed") | {"_ng_failure_stage": "agent"}]])
-    assert RolloutStore.read(output).pending() == []
     classification = FailureClassificationConfig(
         by_stage={"agent": {"by_failure_kind": {"provider_oom_killed": "evaluation"}}}
     )
@@ -389,6 +390,7 @@ def test_saved_launcher_classification_drives_store_resume_and_planner(tmp_path)
             }
         )
     )
+    output, prepare = _run(job, [[_masked("provider_oom_killed") | {"_ng_failure_stage": "agent"}]])
     assert len(RolloutStore.read(output).pending()) == 1
     from nemo_gym.orchestration.recovery import decide_from_collected
 
@@ -425,7 +427,7 @@ def test_store_refuses_malformed_saved_classification(tmp_path, classification):
             }
         )
     )
-    with pytest.raises(ConfigError, match="saved failure classification"):
+    with pytest.raises(ConfigError, match="saved recovery outcome policy"):
         RolloutStore.read(output)
 
 

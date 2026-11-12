@@ -205,12 +205,12 @@ def test_masked_results_are_retained_and_do_not_block_never_started_rows(tmp_pat
     )
 
 
-def test_unknown_failures_a_resume_would_rerun_still_stop(tmp_path):
+def test_unknown_failures_follow_the_default_retry_policy(tmp_path):
     _cut_run(tmp_path, scored=1, in_flight=0, not_started=1, unowned=1)
     _, decision = _decide(tmp_path, allocation_cut=True)
-    assert decision.action.value == "stop"
-    assert "nobody owns them and a resume would run 1 of them again" in decision.reason
-    assert "unknown 1 (1 unregistered kind not_registered)" in decision.reason
+    assert decision.action.value == "resubmit"
+    assert decision.counts["retryable"] == 1
+    assert decision.counts.get("unknown", 0) == 0
 
 
 def test_only_masked_results_left_stop_and_say_they_are_kept(tmp_path):

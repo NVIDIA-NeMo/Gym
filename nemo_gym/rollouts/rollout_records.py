@@ -45,7 +45,12 @@ from nemo_gym.core.failure_kinds import (
     FailureClassificationConfig,
 )
 from nemo_gym.core.outcome_policy import OutcomeAction
-from nemo_gym.rollouts.recovery_policy import RecoveryOutcomePolicyConfig, _replay_refusal, episode_recovery_action
+from nemo_gym.rollouts.recovery_policy import (
+    RecoveryOutcomePolicyConfig,
+    _replay_refusal,
+    episode_recovery_action,
+    saved_episode_outcome,
+)
 from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
 from nemo_gym.rollouts.rollout_recovery import (
     RunManifest,
@@ -665,6 +670,7 @@ class RolloutRecords:
             and not row.get("_ng_failure_terminal")
         ):
             self.attempt_counts[key[0]] += 1
+        persisted = saved_episode_outcome(row)
         if (
             count_failure
             and key not in self.payloads
@@ -673,7 +679,10 @@ class RolloutRecords:
             and row.get("_ng_failure_terminal")
             and not is_terminal_failure(row, retry_terminal_timeouts=True)
         ):
-            self.overridden_terminal_counts[key[0]] += 1
+            if persisted is None:
+                self.overridden_terminal_counts[key[0]] += 1
+            elif persisted.action == OutcomeAction.RETRY:
+                self.attempt_counts[key[0]] += 1
         # A masked result that kept its answer runs again only when its attempt was approved: then it is retried as
         # any infrastructure-masked result. The approval never widens the rule; the row must still qualify.
         rerun_approved = (
@@ -690,6 +699,18 @@ class RolloutRecords:
             self.attempt_counts[key[0]] += 1
         if row.get("_ng_omitted"):
             self.omitted.add(key)
+        # Plain completed results need no failure policy or model-capture scan.
+        action = timeout_action = OutcomeAction.RETRY
+        if failure_class is not None or row.get("mask_sample"):
+            if persisted is not None:
+                action = timeout_action = persisted.action
+            else:
+                action = episode_recovery_action(row, policy=self.outcome_policy)
+                timeout_action = (
+                    episode_recovery_action(row, policy=self.outcome_policy, retry_terminal_timeouts=True)
+                    if row.get("_ng_failure_terminal")
+                    else action
+                )
         self.payloads[key] = _Outcome(
             record=replace(record, expected_identity=(row.get(RUN_ID_KEY), key[0], key[1])),
             failure_class=failure_class,
@@ -708,10 +729,8 @@ class RolloutRecords:
                 and (row.get("failure_outcome_action") == "count_as_zero" or row.get(COUNTS_AS_ZERO_ROW_KEY) is True)
                 else None
             ),
-            action=episode_recovery_action(row, policy=self.outcome_policy),
-            timeout_retry_action=episode_recovery_action(
-                row, policy=self.outcome_policy, retry_terminal_timeouts=True
-            ),
+            action=action,
+            timeout_retry_action=timeout_action,
             # A recorded grade or a partial native response is retained like a kept answer: a fresh run would
             # replace it. Not when a server-side fault cut the agent's window short: that answer is not its result.
             saved_answer=failure_class is not None
@@ -767,14 +786,7 @@ class RolloutRecords:
                 ):
                     # Diagnostics do not replace an outcome. Their policy action and retained-answer constraints
                     # still apply to the current reservation, including when it has no standing outcome.
-                    if payload.get("_ng_unrouted_run_error") and (
-                        _replay_refusal(payload, classification=state.classification) is not None
-                        or episode_recovery_action(payload, policy=state.outcome_policy) != OutcomeAction.RETRY
-                    ):
-                        key = state._key(payload)
-                        state.check_run_identity(payload, legacy=import_legacy)
-                        if key[1] == manifest.next_attempt.get(key[0], 0) - 1:
-                            state.unresolved_dispatches.add(key[0])
+                    state.diagnostic(payload, legacy=import_legacy)
                     continue
                 if import_legacy and RUN_ID_KEY not in payload:
                     identity = logical_rollout_id(payload)
@@ -811,6 +823,18 @@ class RolloutRecords:
                 # Admitted for re-judgment but no outcome saved: whether the judge ran is unknown.
                 state.unresolved_dispatches.add(identity)
         return state
+
+    def diagnostic(self, row: dict, *, legacy: bool = False) -> None:
+        """Apply an unrouted failure's saved decision without replacing or counting an outcome."""
+        if not row.get("_ng_unrouted_run_error"):
+            return
+        key = self._key(row)
+        self.check_run_identity(row, legacy=legacy)
+        if key[1] == self.manifest.next_attempt.get(key[0], 0) - 1 and (
+            _replay_refusal(row, classification=self.classification) is not None
+            or episode_recovery_action(row, policy=self.outcome_policy) != OutcomeAction.RETRY
+        ):
+            self.unresolved_dispatches.add(key[0])
 
     def disposition(self, identity: str) -> str:
         index = self.latest.get(identity)
@@ -926,7 +950,7 @@ class RolloutRecords:
 
     def stopped_count(self, max_attempts: int) -> int:
         """Failed rollouts resume does not run again although they are neither final nor at their cap: a kept answer
-        or a judge failure (left to verification recovery) and an unclassified execution (left to recovery)."""
+        or a judge failure (left to verification recovery), or a policy decision that stops the episode."""
         return sum(
             self.disposition(identity) == "failure"
             and not self._final(identity)

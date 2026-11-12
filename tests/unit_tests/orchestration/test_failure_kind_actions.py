@@ -225,10 +225,10 @@ def test_a_retry_the_store_does_not_plan_stops_and_names_the_kind(kind):
     )
 
 
-def test_a_failure_with_no_kind_anywhere_stops_and_says_so():
+def test_a_failure_with_no_kind_anywhere_uses_the_default_episode_policy():
     decision = _decide({"_ng_failure_class": "unowned_class"})
-    assert decision.action.value == "stop"
-    assert "unknown 1 (1 no failure kind)" in decision.reason
+    assert decision.action.value == "resubmit"
+    assert decision.counts == {"scored": 1, "retryable": 1}
 
 
 def test_the_store_and_the_plan_agree_on_a_legacy_run_5xx_route_failure(tmp_path):

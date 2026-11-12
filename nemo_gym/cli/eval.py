@@ -508,7 +508,6 @@ def _prepare_run_health_metrics(output: Path) -> dict[str, int | float]:
         COLLECT_SCRIPT,
         CollectedEvidence,
         IdentityState,
-        RecoveryOutcomePolicyConfig,
         _observed_trial_operations,
         decide_from_collected,
         decision_classification,
@@ -520,7 +519,7 @@ def _prepare_run_health_metrics(output: Path) -> dict[str, int | float]:
         trial_population,
         trial_verdict,
     )
-    from nemo_gym.rollouts.rollout_recovery import atomic_output_file, saved_failure_classification
+    from nemo_gym.rollouts.rollout_recovery import atomic_output_file, saved_recovery_outcome_policy
 
     artifacts = RunArtifacts(output)
     version = _artifact_version(artifacts)
@@ -563,7 +562,7 @@ def _prepare_run_health_metrics(output: Path) -> dict[str, int | float]:
             max_infra_retries=None,
             max_walltime_s=None,
             live_job=None,
-            outcome_policy=RecoveryOutcomePolicyConfig(classification=saved_failure_classification(output)),
+            outcome_policy=saved_recovery_outcome_policy(output),
         )
         quality = collected.quality if collected.quality and collected.quality.get("source_matches") is True else None
         response, _ = response_health(decision, quality)

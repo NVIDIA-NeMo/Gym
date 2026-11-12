@@ -106,7 +106,7 @@ async def test_actual_deadline_collection_resume(tmp_path, monkeypatch, expired,
                 )
             )
             assert before == 1
-            assert bool(store.pending()) is expired
+            assert store.pending() == []
             if expired:
                 assert rows[0]["_ng_attempt_index"] == 0
                 assert rows[0]["_ng_failure_max_attempts"] == 3
@@ -117,11 +117,11 @@ async def test_actual_deadline_collection_resume(tmp_path, monkeypatch, expired,
                 assert rows[0]["_ng_elapsed_s"] >= 0.05
                 assert env.config.default_episode_timeout_seconds == 0.05
             await collect(cfg.model_copy(update={"resume_from_cache": True}))
-            assert len(hits) == before + int(expired)
+            assert len(hits) == before
             reloaded = RolloutStore.read(out)
             if expired:
-                assert reloaded.failures()[0]["_ng_attempt_index"] == 1
-                assert reloaded.coverage()["counted_failures"] == 2
+                assert reloaded.failures()[0]["_ng_attempt_index"] == 0
+                assert reloaded.coverage()["counted_failures"] == 1
             else:
                 assert reloaded.selected("success") == rows
         finally:

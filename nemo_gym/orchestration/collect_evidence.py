@@ -106,7 +106,7 @@ KEEP = ("_ng_task_index", "_ng_rollout_index", "_ng_rollout_id", "_ng_attempt_in
         "_ng_failure_terminal", "_ng_failure_counts_as_zero", "_ng_failure_max_attempts", "_ng_failure_id", "_ng_failure_stage",
         "_ng_failure_events", "_ng_failure_events_omitted", "_ng_omitted_rollout", "_ng_unrouted_run_error", "_ng_dispatch_drained", "_line", "reward",
         "mask_sample", "evaluation_completed", "_ng_failure_http_status", "accepted_stage_omission", "_ng_elapsed_s",
-        "ng_policy_model_server", "_ng_rejudge_operation_id", "failure_outcome_action", "failure_outcome_attribution")
+        "ng_policy_model_server", "_ng_rejudge_operation_id", "failure_outcome_action", "failure_outcome_attribution", "_ng_episode_outcome")
 # Only structural response facts leave the run host; response contents stay local.
 # A rollout store's attempt manifest, its attempt journal, or a run-tagged row: only the store can select those
 # attempts. Only their presence leaves the run host, never their content or the run id.

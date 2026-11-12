@@ -1151,6 +1151,11 @@ def test_older_manifest_defaults_to_no_timeout_override_until_resumed(prepared_r
         row = store.pending()[0]
         store.record_dispatch(row)
         store.record_outcome(row | {"_ng_failure_class": "timeout_exceeded", "_ng_failure_terminal": True})
+    # Compatibility fixture: old rows and manifests had no selected episode decision.
+    failures = list(read_records(failures_path_for(output)))
+    for failure in failures:
+        failure.pop("_ng_episode_outcome", None)
+    failures_path_for(output).write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in failures))
     path = manifest_path_for(output)
     legacy = orjson.loads(path.read_bytes())
     legacy.pop("retry_terminal_timeouts")
@@ -1505,6 +1510,7 @@ def test_rejudgment_settles_the_saved_judge_failure_without_a_model_attempt(prep
     (selected,) = reloaded.selected("success")
     assert selected["reward"] == 0.0 and selected["response"] == answer
     assert not [key for key in selected if key.startswith("_ng_failure")]  # the old judge cause is not selected
+    assert "_ng_episode_outcome" not in selected
     assert selected["_ng_rejudged_failure_observations"]["_ng_failure_id"] == "f-1"
     assert reloaded.manifest.next_attempt == store.manifest.next_attempt  # no model attempt added
     assert reloaded._state.attempt_counts[next(iter(reloaded._state.expected))] == 1  # the failure's debit stays
@@ -1637,3 +1643,30 @@ def test_coverage_reports_masked_failure_records_apart_from_masked_results(prepa
         assert (coverage["failed"], coverage["failed_final"], coverage["failed_masked"]) == (1, 1, 1)
         assert (coverage["masked"], coverage["final_zeros"], coverage["open"]) == (0, 0, 0)
         assert coverage["complete"] is False
+
+
+def test_failed_rejudgment_selects_a_new_episode_decision_without_replacing_answer(prepared_run):
+    output, prepare = prepared_run
+    answer = {"object": "response", "id": "saved", "status": "completed", "output": []}
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        row = store.pending()[0]
+        store.record_dispatch(row)
+        failure = row | {"_ng_failure_class": "judge_failed", "_ng_failure_id": "first", "response": answer}
+        store.record_outcome(failure)
+    assert failure["_ng_episode_outcome"]["action"] == "verify"
+    with RolloutStore.open_for_rejudgment(output) as store:
+        pending = store.admit_rejudgment(failure)
+        result = failure | {
+            "_ng_failure_id": "second",
+            "_ng_rejudged_failure_id": "first",
+            "_ng_rejudge_operation_id": pending.operation_id,
+            "_ng_rejudge_admitted_at": pending.admitted_at,
+            "failure_outcome_action": "fail",
+            "failure_outcome_attribution": "evaluation",
+        }
+        assert store.record_rejudgment(failure, result) is True
+        assert store.record_rejudgment(failure, result) is False
+    selected = RolloutStore.read(output).failures()[0]
+    assert selected["_ng_episode_outcome"]["action"] == "fail"
+    assert selected["response"] == answer
+    assert selected["_ng_rejudged_failure_observations"]["_ng_episode_outcome"]["action"] == "verify"
