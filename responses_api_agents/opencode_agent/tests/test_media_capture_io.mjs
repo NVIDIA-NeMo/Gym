@@ -9,7 +9,7 @@ import { test } from "node:test";
 import { privateDirectory, sha256 } from "../media_capture_io.mjs";
 
 test("shared capture hashing retains string and byte semantics", () => {
-  const expected = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+  const expected = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"; // pragma: allowlist secret
   assert.equal(sha256("abc"), expected);
   assert.equal(sha256(Buffer.from("abc")), expected);
 });
