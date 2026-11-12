@@ -46,6 +46,7 @@ except ModuleNotFoundError as exc:
 
 from responses_api_agents.mini_swe_agent_2 import app as mini_swe_app_module
 from responses_api_agents.mini_swe_agent_2.app import (
+    BOXD_API_KEY_ENV,
     E2B_API_KEY_ENV,
     OPENSANDBOX_API_KEY_ENV,
     MiniSWEAgent,
@@ -401,6 +402,24 @@ class TestApp:
         assert "api_key" not in connection_for_disk
         assert connection_for_disk["headers"] == headers
         assert connection_for_disk["api_headers"] == api_headers
+
+    def test_boxd_sandbox_provider_key_reaches_workers_but_not_the_config_dump(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        inline = {"boxd": {"connection": {"org": "acme", "api_key": "fixture-value"}}}  # pragma: allowlist secret
+        provider_for_disk = _sandbox_provider_for_config_dump(inline)
+        assert provider_for_disk["boxd"]["connection"] == {"org": "acme"}
+        assert _sandbox_runtime_env(inline)["env_vars"] == {
+            BOXD_API_KEY_ENV: "fixture-value"  # pragma: allowlist secret
+        }
+
+        # The shipped config names no key: the SDK reads BOXD_API_KEY, so workers get it from the host env.
+        monkeypatch.setenv(BOXD_API_KEY_ENV, "host-value")  # pragma: allowlist secret
+        from_env = {"boxd": {"connection": {"org": "acme"}}}
+        assert _sandbox_runtime_env(from_env)["env_vars"] == {
+            BOXD_API_KEY_ENV: "host-value"  # pragma: allowlist secret
+        }
+        assert "env_vars" not in _sandbox_runtime_env({"docker": {}})
 
     def test_split_trajectory_and_resolution_helpers_cover_edge_cases(self) -> None:
         input_messages, output_items, raw_responses = _split_trajectory_for_responses(
