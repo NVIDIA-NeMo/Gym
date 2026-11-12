@@ -18,7 +18,6 @@ ALLOWED_PREFIX = re.compile(r"^\s*(select|with|pragma\s+table_info)\b", re.IGNOR
 
 def check_sql_allowed(sql: str) -> Optional[str]:
     """Return an error message if ``sql`` is not allowed, else ``None``."""
-
     s = sql.strip()
     if s.endswith(";"):
         s = s[:-1].strip()
@@ -28,15 +27,11 @@ def check_sql_allowed(sql: str) -> Optional[str]:
 
     if _has_unquoted_semicolon(s):
         return "Only one statement per call is allowed."
-    
+
     if not ALLOWED_PREFIX.match(s):
         return "Only read-only SELECT, WITH, or PRAGMA table_info(...) queries are allowed."
-    
-    return None
 
-    
-    
-    raise NotImplementedError
+    return None
 
 
 def _has_unquoted_semicolon(sql: str) -> bool:
