@@ -41,17 +41,28 @@ Two deliberate divergences from upstream, as in ``gdp_pdf``: an empty answer sco
 and output that stays unparseable raises ``JudgeError`` for the whole row (upstream marks it "unscored"), so
 ``judge_failsafe`` routes it to the failures sidecar and it is excluded rather than scored 0. A row without a
 question or golden answer cannot be measured and is masked (``mask_sample``).
+
+Sessions. The server implements the session state hooks, so the base class serves seed and close. With
+``sandbox_provider`` unset (the ``simple_agent`` setting) a session holds nothing. With it set (the OpenCode
+setting), each episode's seed lends the harness a sandbox for its own tools, and verify (or the episode's close)
+stops it. The chart reaches the sandbox with the prompt: the OpenCode agent writes each prompt image into the
+sandbox and attaches it, so the model can open the file with its tools. ``sandbox_network_access: model_only``
+lets the sandbox reach only ``sandbox_model_server``, so the model cannot look answers up. Grading reads only
+the request, never the sandbox, so verify stops the sandbox before it calls the judge.
 """
 
 from __future__ import annotations
 
 import asyncio
-from contextlib import nullcontext
+import logging
+from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
-from typing import Any, ClassVar, Dict, List, Optional
+from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from fastapi import FastAPI, Request
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PrivateAttr
 
+from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
     NeMoGymChatCompletion,
@@ -59,13 +70,22 @@ from nemo_gym.core import (
     NeMoGymResponse,
 )
 from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.sandbox import SandboxAccess, SandboxConfig
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
+    BaseSeedSessionRequest,
+    BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    LentSandboxes,
+    ResourcesSeedRejectedError,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
     ReverifyMode,
     SimpleResourcesServer,
+    lost_session_verification,
     observe_llm_judge_grading,
+    reject_partial_typed_seed,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import JudgeError, VerifierFixture, call_judge, record_parsed_judge_verdict
@@ -74,11 +94,18 @@ from resources_servers.chartography.verifier_fixture import create_chartography_
 
 
 SERVER_DIR = Path(__file__).resolve().parent
+LOGGER = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
+
+
+class ChartographySandboxConfig(SandboxConfig):
+    # An OCI image with OpenCode and a Python image toolkit, built from
+    # resources_servers/visual_coding_opencode/sandbox_image/Dockerfile.
+    image: Optional[str] = None
 
 
 class ChartographyConfig(BaseResourcesServerConfig):
@@ -95,6 +122,20 @@ class ChartographyConfig(BaseResourcesServerConfig):
     judge_max_attempts: int = Field(default=scorer.MAX_ATTEMPTS, ge=1)
     # Per worker: with num_workers > 1, each worker allows this many judge calls at once.
     judge_endpoint_max_concurrency: Optional[int] = Field(default=64, ge=1)
+    # True: a run that did not complete (any response status but `completed`: a timeout, an output cap, a context
+    # limit, or a failed run that the outcome policy still sends to verify) scores 0 without a judge call, whatever
+    # text it left. False (upstream's behavior): it is graded on its last assistant message.
+    score_unfinished_as_zero: bool = False
+
+    # With sandbox_provider set, each episode's seed lends the harness a sandbox and verify or the episode's close
+    # stops it. Unset keeps sessions empty (the simple_agent setting).
+    sandbox_provider: Optional[str] = None
+    sandbox_config: ChartographySandboxConfig = Field(default_factory=ChartographySandboxConfig)
+    # The working directory of the lent sandbox; the image must create it.
+    sandbox_workdir: str = "/workspace"
+    # model_only: the lent sandbox reaches only sandbox_model_server's host. inherit keeps the provider's network.
+    sandbox_network_access: Literal["inherit", "model_only"] = "inherit"
+    sandbox_model_server: Optional[ModelServerRef] = None
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +194,20 @@ def extract_final_answer(response: NeMoGymResponse) -> str:
 class ChartographyResourcesServer(SimpleResourcesServer):
     config: ChartographyConfig
 
+    # Sessions open under this server, and the sandbox access lent to each one (OpenCode setting only).
+    _live_sessions: set[str] = PrivateAttr(default_factory=set)
+    _sandbox_access: dict[str, SandboxAccess] = PrivateAttr(default_factory=dict)
+    _lent_sandboxes: Optional[LentSandboxes] = PrivateAttr(default=None)
+
+    def multiple_workers_unsupported_reason(self) -> Optional[str]:
+        # Like visual_coding_opencode, a lending server runs with one worker: several workers are not tested
+        # with lent sandboxes. The no-tools setting keeps nothing per worker.
+        if self.config.sandbox_provider is None:
+            return None
+        return "lent sandboxes live in one worker's memory"
+
     def model_post_init(self, __context: Any) -> None:
+        super().model_post_init(__context)
         limit = self.config.judge_endpoint_max_concurrency
         self._judge_sem = asyncio.Semaphore(limit) if limit is not None else nullcontext()
         template = Path(self.config.judge_prompt_template_fpath)
@@ -162,7 +216,115 @@ class ChartographyResourcesServer(SimpleResourcesServer):
         # The upstream template verbatim; only the file's trailing newline is dropped.
         self._judge_prompt = template.read_text().rstrip("\n")
 
-    async def verify(self, body: ChartographyVerifyRequest) -> ChartographyVerifyResponse:
+        cfg = self.config
+        if cfg.sandbox_provider is not None:
+            if not cfg.sandbox_config.image:
+                raise ValueError(
+                    "Set sandbox_config.image to an image built from "
+                    "resources_servers/visual_coding_opencode/sandbox_image"
+                )
+            self._lent_sandboxes = LentSandboxes(
+                cfg.sandbox_provider,
+                cfg.sandbox_config,
+                image=cfg.sandbox_config.image,
+                workdir=cfg.sandbox_workdir,
+                network_access=cfg.sandbox_network_access,
+                model_server=cfg.sandbox_model_server.name if cfg.sandbox_model_server is not None else None,
+            )
+        elif cfg.sandbox_network_access != "inherit":
+            raise ValueError("sandbox_network_access applies to a lent sandbox; set sandbox_provider")
+
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+        parent_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def lifespan(app: FastAPI):
+            try:
+                async with parent_lifespan(app) as maybe_state:
+                    yield maybe_state
+            finally:
+                await self.shutdown()
+
+        app.router.lifespan_context = lifespan
+        return app
+
+    async def shutdown(self) -> None:
+        """Stop every sandbox still lent, as when the server exits with episodes still open."""
+        if self._lent_sandboxes is not None:
+            await self._lent_sandboxes.release_all()
+        self._sandbox_access.clear()
+        self._live_sessions.clear()
+
+    # -------------------------------------------------------------------------
+    # Session state hooks (the base class serves seed, close and the session lock)
+    # -------------------------------------------------------------------------
+
+    def has_session_state(self, session_id: str) -> bool:
+        return session_id in self._live_sessions
+
+    async def initialize_session_state(self, session_id: str, body: BaseSeedSessionRequest) -> None:
+        if self._lent_sandboxes is None:
+            self._live_sessions.add(session_id)
+            return
+        identity = self.session_identity(session_id)
+        if identity is None:
+            # A cookie seed comes from an agent's own /run: no harness would receive the sandbox.
+            raise ResourcesSeedRejectedError(
+                "This server lends a sandbox only to an Environment Server's episode seed"
+            )
+        self._live_sessions.add(session_id)
+        # On failure lend() stops the sandbox it started, and the base calls release_session_state.
+        self._sandbox_access[session_id] = await self._lent_sandboxes.lend(session_id, identity[1])
+
+    async def release_session_state(self, session_id: str) -> None:
+        if self._lent_sandboxes is not None:
+            # Raises on a failed stop and keeps the sandbox, so a later verify, close or shutdown retries it.
+            await self._lent_sandboxes.release(session_id)
+        self._sandbox_access.pop(session_id, None)
+        self._live_sessions.discard(session_id)
+
+    async def seed_session(
+        self,
+        request: Request,
+        body: ResourcesSeedSessionRequest
+        | Annotated[BaseSeedSessionRequest, BeforeValidator(reject_partial_typed_seed)],
+    ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
+        """The base seed, plus the lent sandbox's access in the reply of an episode seed."""
+        response = await super().seed_session(body, request=request)
+        if isinstance(response, ResourcesSeedSessionResponse):
+            access = self._sandbox_access.get(response.resources_session_id)
+            if access is not None:
+                response.sandbox_access = access
+        return response
+
+    # -------------------------------------------------------------------------
+    # Verify
+    # -------------------------------------------------------------------------
+
+    async def verify(self, request: Request, body: ChartographyVerifyRequest) -> ChartographyVerifyResponse:
+        """Grade the final answer. The grade reads only the request, so a verify without a seed is graded too
+        (``allow_missing``), as is a retry after a judge failure (``retain(None)``); a verify after the episode's
+        close is masked as lost."""
+        session_id = request.session[SESSION_ID_KEY]
+        async with self.verifying(session_id, allow_missing=True) as verification:
+            if verification.is_lost:
+                return ChartographyVerifyResponse(
+                    **(body.model_dump() | lost_session_verification("the episode's session was already closed"))
+                )
+            verification.retain(None)
+            if self.has_session_state(session_id):
+                # Stop the sandbox before waiting on the judge. If the stop fails, verifying() tries again on exit
+                # and records the failure without replacing the grade.
+                try:
+                    await self.release_session_state(session_id)
+                except Exception:
+                    LOGGER.warning(
+                        "Failed to stop the sandbox of session %s before grading", session_id, exc_info=True
+                    )
+            return await self._grade(body)
+
+    async def _grade(self, body: ChartographyVerifyRequest) -> ChartographyVerifyResponse:
         meta = body.verifier_metadata or {}
         result = ChartographyVerifyResponse(**body.model_dump(), reward=0.0)
         question, golden = meta.get("prompt"), meta.get("golden_answer")
@@ -172,6 +334,8 @@ class ChartographyResourcesServer(SimpleResourcesServer):
             result.failure_reason = "verifier_metadata needs a non-empty prompt and golden_answer"
             return result
 
+        if self.config.score_unfinished_as_zero and body.response.status != "completed":
+            return result
         generated = extract_final_answer(body.response)
         if not generated:
             # Empty or unfinished answers score 0.
