@@ -1988,9 +1988,15 @@ def test_transcript_to_atif_exports_an_endpoint_tool_call_the_harness_never_ran(
     ("fields", "content", "extra"),
     [
         ({"output": "2025-08-10_db.log\n"}, "2025-08-10_db.log\n", None),
-        ({"error": "container unavailable"}, "container unavailable", {"nemo_gym": {"error": True}}),
+        (
+            {"error": "container unavailable"},
+            "container unavailable",
+            {"nemo_gym": {"error": "container unavailable"}},
+        ),
+        # A partial result with an error keeps both: the output as content, the error beside it.
+        ({"output": "partial\n", "error": "timed out"}, "partial\n", {"nemo_gym": {"error": "timed out"}}),
     ],
-    ids=["output", "error"],
+    ids=["output", "error", "output-and-error"],
 )
 def test_transcript_to_atif_an_endpoint_tool_result_is_the_calls_observation(
     fields: dict[str, Any], content: str, extra: dict[str, Any] | None
@@ -2002,11 +2008,21 @@ def test_transcript_to_atif_an_endpoint_tool_result_is_the_calls_observation(
     assert trajectory.extra["nemo_gym"]["conversion"]["open_tool_calls"] == []
 
 
+def test_transcript_to_atif_records_an_endpoint_calls_status_unless_completed() -> None:
+    trajectory = _transcript("go", [_mcp_call("mcp_1", status="incomplete"), _mcp_call("mcp_2")])
+
+    first, second = (step.tool_calls[0].extra["nemo_gym"] for step in trajectory.steps[1:])
+    assert first["status"] == "incomplete" and "status" not in second
+
+
 @pytest.mark.parametrize(
     ("output_items", "message"),
     [
         ([_function_output("call_404", "x")], "matches no pending call"),
         ([_mcp_call("mcp_1"), _mcp_call("mcp_1")], "duplicate function call ID"),
+        ([_mcp_call("x", output="a"), _mcp_call("x", output="b")], "duplicate function call ID"),
+        ([_mcp_call("x"), _function_call("x", "t", {})], "duplicate function call ID"),
+        ([_function_call("x", "t", {}), _mcp_call("x")], "duplicate function call ID"),
         ([_mcp_call("mcp_1", id=None)], "MCP calls need an id and a name"),
         ([_assistant_message("m", "a"), {"role": "system", "content": "later"}], "later system or developer"),
         ([_reasoning("rs", "thinking"), {"role": "system", "content": "later"}], "later system or developer"),

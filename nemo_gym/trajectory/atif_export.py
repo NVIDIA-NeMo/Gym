@@ -1216,8 +1216,10 @@ def transcript_to_atif(
 
     An ``mcp_call`` is a tool call the model endpoint handled itself: gpt-oss calls its built-in
     ``container.exec`` tool even when the request declares no tools, and NVIDIA-hosted endpoints return the
-    call without running it. It exports as an agent step with that one tool call. The endpoint's output or
-    error becomes the step's observation; a call with neither stays in ``open_tool_calls``, since no one ran it.
+    call without running it. It exports as an agent step with that one tool call, with a status other than
+    ``completed`` kept in the call's ``extra``. The endpoint's output, or else its error, becomes the step's
+    observation, and an error is also kept in the result's ``extra``; a call with neither stays in
+    ``open_tool_calls``, since no one ran it.
     """
     if not isinstance(session_id, str) or not session_id.strip():
         raise _path_error("session_id", "expected a non-empty string")
@@ -1230,7 +1232,8 @@ def transcript_to_atif(
     steps: list[AtifStep] = []
     agent_steps: list[AtifStep] = []
     open_calls: dict[str, AtifStep] = {}
-    # Tool calls the model endpoint returned without a result; nothing later in the transcript answers them.
+    # Every endpoint call's ID, so a function call cannot reuse one; the unanswered ones stay open.
+    endpoint_call_ids: set[str] = set()
     unanswered_endpoint_calls: list[str] = []
     pending_reasoning: list[NeMoGymResponseReasoningItem] = []
     reasons: set[str] = set()
@@ -1297,7 +1300,11 @@ def transcript_to_atif(
                 call_path = f"transcript[{index - len(calls) + offset}]"
                 if not call.call_id.strip() or not call.name.strip():
                     raise _path_error(call_path, "function calls need a call_id and a name")
-                if call.call_id in open_calls or any(call.call_id == c.tool_call_id for c in atif_calls):
+                if (
+                    call.call_id in open_calls
+                    or call.call_id in endpoint_call_ids
+                    or any(call.call_id == c.tool_call_id for c in atif_calls)
+                ):
                     raise _path_error(call_path, f"duplicate function call ID {call.call_id!r}")
                 arguments, argument_extra = _live_arguments(call, reasons=reasons)
                 extra = ({"source_item_id": call.id} if call.id is not None else {}) | (argument_extra or {})
@@ -1325,21 +1332,23 @@ def transcript_to_atif(
         if isinstance(item, NeMoGymResponseMcpCall):
             if not item.id or not item.id.strip() or not item.name.strip():
                 raise _path_error(path, "MCP calls need an id and a name")
-            if item.id in open_calls or item.id in unanswered_endpoint_calls:
+            if item.id in open_calls or item.id in endpoint_call_ids:
                 raise _path_error(path, f"duplicate function call ID {item.id!r}")
+            endpoint_call_ids.add(item.id)
             arguments, argument_extra = _live_arguments(item, reasons=reasons)
-            call_extra = {"source_item_type": "mcp_call"} | (
-                {"server_label": item.server_label} if item.server_label else {}
-            )
+            call_extra: dict[str, Any] = {"source_item_type": "mcp_call"}
+            if item.server_label:
+                call_extra["server_label"] = item.server_label
+            if item.status is not None and item.status != "completed":
+                call_extra["status"] = item.status
             observation = None
             if item.output is not None or item.error is not None:
-                is_error = item.output is None
                 observation = AtifObservation(
                     results=[
                         AtifObservationResult(
                             source_call_id=item.id,
-                            content=item.error if is_error else item.output,
-                            extra={"nemo_gym": {"error": True}} if is_error else None,
+                            content=item.output if item.output is not None else item.error,
+                            extra={"nemo_gym": {"error": item.error}} if item.error is not None else None,
                         )
                     ]
                 )

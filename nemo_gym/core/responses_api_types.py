@@ -424,11 +424,13 @@ class NeMoGymResponseFunctionToolCall(BaseModel):
 class NeMoGymResponseMcpCall(McpCall):
     """A hosted-MCP tool call (OpenAI Responses ``mcp_call`` output item).
 
-    Emitted when the upstream endpoint executes a tool *server-side* (e.g.
-    NVIDIA-hosted gpt-oss surfacing its built-in python tool as MCP) instead of
-    returning a client-executed ``function_call``. The ``output``/``error``
-    fields are already populated by the server, so the agent parses and passes
-    it through; there is no client-side execution and hence no training variant.
+    Emitted when the upstream endpoint handles a tool call itself instead of
+    returning a client-executed ``function_call``. NVIDIA-hosted gpt-oss returns
+    one for its built-in ``container.exec`` tool even when the request declares
+    no tools, with ``output`` and ``error`` both null: the endpoint did not run
+    it. When the endpoint does run the tool, those fields carry its result. The
+    agent parses and passes the item through; there is no client-side execution
+    and hence no training variant.
 
     Inherits the upstream ``McpCall`` typing and only relaxes the fields
     NVIDIA-hosted endpoints may omit or widen: ``id``/``server_label`` are made
