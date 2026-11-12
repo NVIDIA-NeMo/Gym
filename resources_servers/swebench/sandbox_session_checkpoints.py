@@ -13,9 +13,11 @@ seed, verify, close, fences and expiry it keeps as they are:
   and a verify after the restore grades the patch the checkpoint saved instead of capturing it again;
 - a release deletes the snapshots of checkpoints the controller no longer keeps.
 
-A snapshot holds the sandbox's files, not its processes. A server whose grader needs processes the agent started
-declares ``restore_policy = "before_agent_close"``: the environment server then starts such an episode over after a
-crash once its agent closed, instead of continuing it in a fork.
+What a snapshot holds depends on the provider: always the sandbox's files, and its running processes too when the
+provider's ``snapshot_keeps_processes`` says so (a VM memory snapshot). On a provider whose snapshots hold files only,
+a server whose grader needs processes the agent started declares ``restore_policy = "before_agent_close"``: the
+environment server then starts such an episode over after a crash once its agent closed, instead of continuing it in
+a fork.
 
 With checkpointing on, a server exports its sessions only when its sandbox provider can snapshot; otherwise it runs
 ``restart_only``, and its episodes start over after a crash.

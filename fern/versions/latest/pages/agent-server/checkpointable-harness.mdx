@@ -46,6 +46,12 @@ confirmed, or continuing fails, the harness is stopped and `run_until_parked` re
 saved conversation. A wait for the agent's own concurrency limit goes inside `activation.queued()`, so a checkpoint
 counts the activation as parked.
 
+On a provider whose snapshot keeps the sandbox's processes (`snapshot_keeps_processes`), create the session with
+`pause_mode="hold"`. The supervisor then acknowledges a pause without signalling anything: the harness keeps running,
+its model calls wait at the checkpoint, and the time held still does not count against the harness timeout. Each
+acknowledgement names the supervisor (`identity`, `PID.START`), and `SandboxSession.checkpoint_state()` records it
+with the pause it holds.
+
 ## Resume after a crash
 
 Per-harness policy stays in the adapter:
