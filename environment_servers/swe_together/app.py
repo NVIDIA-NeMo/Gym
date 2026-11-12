@@ -421,7 +421,12 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
     def _activation_path(self, request: SWETRequest) -> str:
         block = self.server_client.global_config_dict.get(TOKEN_CAPTURE_BLOCK) or {}
         config = get_first_server_config_dict(self.server_client.global_config_dict, self.config.agent_server.name)
-        capture = bool(block.get("enabled")) and (block.get("all_agents") or config.get("token_id_capture"))
+        # A request whose rollout skips capture (a validation rollout) activates the agent without the tag.
+        capture = (
+            not request.skip_token_capture
+            and bool(block.get("enabled"))
+            and (block.get("all_agents") or config.get("token_id_capture"))
+        )
         segment = f"/{TOKEN_CAPTURE_PATH_SEGMENT}" if capture else ""
         return f"/ng-rollout/{request.episode_id.capture_key}{segment}/v1/responses"
 
