@@ -14552,9 +14552,9 @@ class TestUnroutedRunFailure:
             config.model_copy(update={"resume_from_cache": True})
         )
 
-        # The scored row stays done. The possibly delivered request cannot run again; the untouched input can.
+        # The scored row stays done. Unanswered requests follow the retry policy, as does the untouched input.
         # Both reservations remain recorded, and the diagnostic debits no failure budget.
-        assert {row["x"]: row.get(ATTEMPT_INDEX_KEY_NAME) for row in dispatched} == {2: 1}
+        assert {row["x"]: row.get(ATTEMPT_INDEX_KEY_NAME) for row in dispatched} == {1: 1, 2: 1}
         output = Path(config.output_jsonl_fpath)
         from nemo_gym.rollouts.rollout_store import RolloutStore
 
@@ -14640,8 +14640,8 @@ class TestUnroutedRunFailure:
         metrics = _failure_export_metrics([sidecar], identity, {(0, 0)})
         assert (metrics["retries/attempts"], metrics["coverage/failed/provider_unavailable"]) == (1, 1)
         dispatched, *_ = RolloutCollectionHelper()._load_from_cache(resumed)
-        # Attempt 1 may have executed. Keep the older failure's score and debit, but do not dispatch attempt 2.
-        assert dispatched == []
+        # Attempt 1 kept no answer. Its diagnostic does not veto the retry policy or refund the old debit.
+        assert len(dispatched) == 1 and dispatched[0][ATTEMPT_INDEX_KEY_NAME] == 2
         from nemo_gym.rollouts.rollout_store import RolloutStore
 
         store = RolloutStore.read(output)
@@ -14871,7 +14871,7 @@ class TestResumeTerminalGateUsesTheLatestAttempt:
         _, got = self._resume(tmp_path, [judge])
         assert got == {2: None}
         out = capsys.readouterr().out
-        assert "- 1 kept answers, judge failures or unclassified executions → not run again (left to recovery)" in out
+        assert "- 1 kept answers or policy-stopped failures → not run again" in out
         assert "- 0 sidecar-terminal → not retried" in out
 
     def test_a_final_failure_after_the_interruption_is_terminal_again(self, tmp_path: Path) -> None:

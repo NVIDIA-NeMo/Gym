@@ -415,7 +415,7 @@ def test_recover_does_not_queue_beside_a_live_job(tmp_path, fake_executor) -> No
     assert out.decision.action == RecoveryAction.NOOP and fake_executor.calls == ["decide"]
 
 
-def test_recover_stops_on_unknown_ownership(tmp_path, fake_executor) -> None:
+def test_recover_retries_unknown_failure_with_default_policy(tmp_path, fake_executor) -> None:
     fake_executor.job_dir = write_job_dir(
         tmp_path / "job",
         n=2,
@@ -424,7 +424,8 @@ def test_recover_stops_on_unknown_ownership(tmp_path, fake_executor) -> None:
         retries=0,
     )
     out = submit.recover("gym-job-f", "bench")
-    assert not out.ok and out.decision.action == RecoveryAction.STOP and fake_executor.calls == ["decide"]
+    assert out.ok and out.decision.action == RecoveryAction.RESUBMIT
+    assert out.decision.identities["retryable"] == [(1, 0)]
 
 
 def test_plain_resubmit_is_unchanged_and_does_not_decide(tmp_path, fake_executor) -> None:
@@ -2273,11 +2274,7 @@ def test_collector_projection_preserves_verification_stop_without_regenerating(t
     assert "retained-secret-answer" not in collected.model_dump_json()
     assert "ng_trajectory" not in projected and "response" not in projected and "reward" not in projected
     decision = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=3600, live_job=False)
-    assert decision.action == (
-        RecoveryAction.STOP
-        if case.startswith("verifier") or case == "model_operation_budget_unknown"
-        else RecoveryAction.RESUBMIT
-    )
+    assert decision.action == (RecoveryAction.STOP if case.startswith("verifier") else RecoveryAction.RESUBMIT)
     assert decision.evidence[0].attempts == 1 and decision.evidence[0].max_attempts == 3
     assert before == {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in (job / "artifacts").iterdir()}
 
@@ -2329,7 +2326,7 @@ def test_projected_explicit_final_model_zero_stays_settled(tmp_path):
     ],
 )
 @pytest.mark.parametrize("mode", ["default", "terminal", "explicit_fail"])
-def test_projected_broken_selected_chain_cannot_reopen_policy_work(tmp_path, case, mode):
+def test_projected_broken_selected_chain_uses_outcome_policy(tmp_path, case, mode):
     from nemo_gym.core.failure_transport import FailureReportRow
     from nemo_gym.rollouts.rollout_collection import _agent_request_failure_row, _collection_failure_report
 
@@ -2385,10 +2382,8 @@ def test_projected_broken_selected_chain_cannot_reopen_policy_work(tmp_path, cas
     )
     if mode != "default":
         assert decision.identities["terminal"] == [(0, 0)] and decision.action == RecoveryAction.STOP
-    elif case in {"plain_dispatch", "legacy_empty", "legacy_observations", "unselected_broken"}:
-        assert decision.identities["retryable"] == [(0, 0)] and decision.action == RecoveryAction.RESUBMIT
     else:
-        assert decision.identities["unknown"] == [(0, 0)] and decision.action == RecoveryAction.STOP
+        assert decision.identities["retryable"] == [(0, 0)] and decision.action == RecoveryAction.RESUBMIT
     assert decision.evidence[0].attempts == 1 and decision.evidence[0].max_attempts == 3
     assert before == {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in (job / "artifacts").iterdir()}
 
@@ -2484,11 +2479,11 @@ UNROUTED_DISPATCH_ERROR = {
 }
 
 
-def test_an_unrouted_dispatch_error_without_a_standing_outcome_is_unknown_not_missing(tmp_path, fake_executor) -> None:
+def test_an_unrouted_dispatch_error_without_a_standing_outcome_uses_retry_policy(tmp_path, fake_executor) -> None:
     fake_executor.job_dir = write_job_dir(tmp_path / "job", n=1, results=[], failures=[UNROUTED_DISPATCH_ERROR])
     out = submit.recover("gym-job-a", "bench")
-    assert out.decision.action == RecoveryAction.STOP and out.dispatched is None
-    assert out.decision.identities.get("missing") is None and out.decision.identities["unknown"] == [(0, 0)]
+    assert out.decision.action == RecoveryAction.RESUBMIT and out.dispatched is not None
+    assert out.decision.identities.get("missing") is None and out.decision.identities["retryable"] == [(0, 0)]
     (evidence,) = out.decision.evidence
     assert evidence.failure_id == "7becf785f445465b9a6e92b7247153b6" and evidence.attempts == 0
     assert evidence.events == [("collection", "collection.run", None, None, None)]

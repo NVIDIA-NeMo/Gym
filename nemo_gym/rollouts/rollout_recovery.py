@@ -33,7 +33,7 @@ from collections.abc import Collection, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from itertools import combinations
 from pathlib import Path
-from typing import Annotated, Any, BinaryIO, Literal, cast, get_args
+from typing import TYPE_CHECKING, Annotated, Any, BinaryIO, Literal, cast, get_args
 from uuid import uuid4
 
 from omegaconf import OmegaConf
@@ -48,7 +48,6 @@ from nemo_gym.core.failure_kinds import (
     AGENT_TIMEOUT,
     COLLECTION_RESUME_REFUSED,
     JUDGE_FAILED,
-    JUDGE_FAILURE_KINDS,
     JUDGE_UNPARSEABLE,
     MODEL_SERVER_ERROR,
     MODEL_TRANSPORT_ERROR,
@@ -226,18 +225,24 @@ def captured_model_calls(row: Mapping[str, Any]) -> list[dict[str, Any]]:
     return calls
 
 
-def saved_failure_classification(output: Path) -> FailureClassificationConfig:
-    """Read only the owning launcher's saved classification in its conventional artifact layout.
+if TYPE_CHECKING:
+    from nemo_gym.rollouts.recovery_policy import RecoveryOutcomePolicyConfig
+
+
+def saved_recovery_outcome_policy(output: Path) -> "RecoveryOutcomePolicyConfig":
+    """Read the owning launcher's saved outcome policy in its conventional artifact layout.
 
     Standalone outputs have no launcher policy and use shared defaults. A malformed saved policy is never
     silently replaced with defaults. Applied classes on individual results still take precedence.
     """
+    from nemo_gym.rollouts.recovery_policy import RecoveryOutcomePolicyConfig
+
     if output.name != "rollouts.jsonl" or output.parent.name != "artifacts":
-        return FailureClassificationConfig()
+        return RecoveryOutcomePolicyConfig()
     job = output.parent.parent
     resolved = job.parent / "resolved-config.yaml"
     if not resolved.is_file():
-        return FailureClassificationConfig()
+        return RecoveryOutcomePolicyConfig()
     try:
         config = OmegaConf.to_container(OmegaConf.load(resolved), resolve=False)
         benchmark = config["driver"]["benchmarks"][job.name]
@@ -251,9 +256,14 @@ def saved_failure_classification(output: Path) -> FailureClassificationConfig:
             policy = {}
         if not isinstance(policy, Mapping):
             raise ValueError("recovery_outcome_policy must be a mapping")
-        return FailureClassificationConfig.model_validate(policy.get("classification", {}))
+        return RecoveryOutcomePolicyConfig.model_validate(policy)
     except (OSError, KeyError, TypeError, AttributeError, ValueError, OmegaConfBaseException) as error:
-        raise ConfigError(f"Cannot read saved failure classification from {resolved}: {error}") from error
+        raise ConfigError(f"Cannot read saved recovery outcome policy from {resolved}: {error}") from error
+
+
+def saved_failure_classification(output: Path) -> FailureClassificationConfig:
+    """The owning run's recovery classification, shared with its outcome policy."""
+    return saved_recovery_outcome_policy(output).classification
 
 
 def applied_failure_class(row: Mapping[str, Any]) -> FailureClass | None:
@@ -516,86 +526,21 @@ def holds_response(row: Mapping[str, Any]) -> bool:
 
 
 def has_unclassified_execution_failure(row: Mapping[str, Any]) -> bool:
-    """A selected route failure names no owned cause that permits running the agent again.
+    """Compatibility predicate for default recovery admission.
 
-    A request that was possibly delivered permits a fresh run only while the row keeps no full or partial
-    response: then no saved answer can be duplicated or replaced.
+    New consumers select an action with ``episode_recovery_action`` and enforce
+    saved-answer constraints separately. An unknown cause alone never vetoes retry.
     """
-    if matches_failure_class(row, JUDGE_FAILURE_KINDS):
-        return True  # Verification recovery may reuse an answer; it never reruns the agent.
-    record = row.get("_ng_failure_record")
-    failure = record.get("failure") if isinstance(record, Mapping) else None
-    not_sent = isinstance(record, Mapping) and (
-        record.get("delivery") == "not_sent" or isinstance(failure, Mapping) and failure.get("stage") == "admission"
+    from nemo_gym.rollouts.recovery_policy import (
+        RecoveryOutcomePolicyConfig,
+        _replay_refusal,
+        episode_recovery_action,
     )
-    possibly_delivered = (
-        isinstance(record, Mapping)
-        and record.get("source") == "collector"
-        and record.get("delivery") == "possibly_delivered"
-        and not not_sent
+
+    return row.get("_ng_failure_class") is not None and (
+        _replay_refusal(row) is not None
+        or episode_recovery_action(row, policy=RecoveryOutcomePolicyConfig()) != OutcomeAction.RETRY
     )
-    if (
-        row.get("_ng_unrouted_run_error") is True
-        and not not_sent
-        and not (possibly_delivered and not holds_response(row))
-    ):
-        # An aborted collection retains this attempt as diagnostic history, not a replacement outcome.
-        return True
-    if possibly_delivered and holds_response(row):
-        return True
-    if row.get("_ng_failure_events_omitted"):
-        # The transport's size bound omitted the report, so its events say nothing either way: the row's own failure
-        # record and kind decide, as for a row without a report. The answer gates above (and a saved generation,
-        # recorded grade or partial response, which every caller checks beside this) still keep a saved answer.
-        return False
-    events = row.get("_ng_failure_events")
-    selected = row.get("_ng_failure_id")
-    if "_ng_failure_id" not in row:
-        return False  # Legacy producer fields remain usable without a selected event report.
-    if not isinstance(events, Mapping) or not isinstance(selected, str) or not selected:
-        return True
-    seen = set()
-    while selected is not None:
-        if not isinstance(selected, str):
-            return True
-        event = events.get(selected)
-        if not isinstance(event, Mapping) or selected in seen:
-            # Store resume and legacy collection also use this gate, before the recovery reader runs.
-            return True
-        seen.add(selected)
-        status = event.get("http_status")
-        if (
-            event.get("boundary") == "model"
-            and event.get("failure_kind") == "model_request_error"
-            and event.get("operation") == "model_request"
-            and type(status) is int
-            and 200 <= status < 300
-        ):
-            # The provider sent successful headers, but the model operation failed
-            # before its body was usable. Running the agent again could regenerate.
-            return True
-        if (
-            event.get("boundary") == "environment"
-            and event.get("failure_kind") == "environment_server_failed"
-            and event.get("operation") == "episode.deadline"
-        ):
-            # The relay stopped waiting; the agent may already have generated an answer.
-            return True
-        cause = event.get("cause_id")
-        if cause is None:
-            # A route failure with no deeper cause: the agent run returned no answer. It runs again fresh, within
-            # the attempt cap, unless the row kept an answer; a legacy /run error other than 5xx stays refused.
-            if event.get("failure_kind") == "agent_route_failed":
-                return has_saved_generation(row)
-            if (
-                event.get("failure_kind") == "collection_dispatch_failed"
-                and row.get("_ng_failure_class") == "agent_run_error"
-            ):
-                status = row.get("_ng_failure_http_status")
-                return not (type(status) is int and 500 <= status <= 599) or has_saved_generation(row)
-            return False
-        selected = cause
-    return False
 
 
 logger = logging.getLogger(__name__)

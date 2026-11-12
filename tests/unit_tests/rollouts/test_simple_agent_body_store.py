@@ -224,12 +224,11 @@ async def test_body_failure_survives_actual_simple_agent_environment_store(tmp_p
                 assert report.events[observed[-1].event_id].http_status == (500 if mode == "omitted" else 200)
                 if mode == "omitted":
                     assert report.omitted
-                # An omitted report vetoes nothing: the model's 500 (no answer was produced) is retried like any
-                # other. A failed body behind a 2xx header (truncated, timeout) is never run again.
-                assert len(store.pending()) == (1 if mode == "omitted" else 0)
+                # HTTP replay remains separate: failed episodes without saved answers follow the retry policy.
+                assert len(store.pending()) == 1
             before = len(hits)
             await collect(cfg.model_copy(update={"resume_from_cache": True}))
-            assert (len(hits) > before) is (mode == "omitted")
+            assert (len(hits) > before) is (mode != "recovered_503")
             (tmp_path / "persisted-proof.json").write_text(
                 json.dumps(
                     {
@@ -239,7 +238,7 @@ async def test_body_failure_survives_actual_simple_agent_environment_store(tmp_p
                         "selected_failure_id": saved.get("_ng_failure_id"),
                         "observed_event_ids": [x.event_id for x in observed],
                         "pending": len(store.pending()),
-                        "resume_no_new_request": mode != "omitted",
+                        "resume_no_new_request": mode == "recovered_503",
                         "saved_reward": saved.get("reward"),
                     },
                     indent=2,

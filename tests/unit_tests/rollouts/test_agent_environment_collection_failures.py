@@ -179,7 +179,7 @@ async def test_an_exhausted_model_call_reaches_the_row_through_agent_and_environ
     assert sum(1 for e in events.values() if e.get("boundary") == "model") == len(observed) == 2
 
 
-async def test_a_provider_body_failure_after_200_headers_reaches_the_row_and_blocks_another_agent_run(
+async def test_a_provider_body_failure_after_200_headers_allows_a_new_episode_under_policy(
     monkeypatch,
 ) -> None:
     from nemo_gym.rollouts.rollout_recovery import has_unclassified_execution_failure
@@ -196,7 +196,7 @@ async def test_a_provider_body_failure_after_200_headers_reaches_the_row_and_blo
     final = events[chain[-1]]
     assert chain[-1] == observed[-1].event.event_id, "the selected chain ends at the observed model attempt"
     assert final["boundary"] == "model" and final["http_status"] == 200
-    assert has_unclassified_execution_failure(row), "resume must not run the agent again"
+    assert not has_unclassified_execution_failure(row), "episode retry is decided separately from HTTP replay"
 
 
 async def test_a_recovered_503_then_success_stays_a_success_row_that_resume_keeps(monkeypatch) -> None:

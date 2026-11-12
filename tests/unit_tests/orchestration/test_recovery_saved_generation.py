@@ -223,7 +223,7 @@ async def test_confirmed_preanswer_provider_failure_keeps_its_budget(tmp_path, m
     assert "diagnostic only" not in json.dumps(projected.model_dump())
 
 
-async def test_current_unrouted_diagnostic_blocks_projected_older_retryable_outcome(tmp_path, monkeypatch):
+async def test_current_unrouted_diagnostic_keeps_projected_older_retryable_outcome(tmp_path, monkeypatch):
     from nemo_gym.rollouts.omitted_rollouts import omitted_rollout_record
     from tests.unit_tests.rollouts.test_rollout_recovery import known_pre_answer_provider_failure
 
@@ -245,10 +245,10 @@ async def test_current_unrouted_diagnostic_blocks_projected_older_retryable_outc
     selected = select_managed_evidence(CollectedEvidence.model_validate_json(raw.stdout), tmp_path)
     assert selected.managed_reader_error is None
     decision = decide_from_collected(selected, max_infra_retries=3, max_walltime_s=None, live_job=False)
-    assert decision.action.value == "stop"
+    assert decision.action.value == "resubmit"
     assert decision.evidence[0].attempts == 1
     assert RolloutStore.read(output).selected("failure") == [original]
-    assert RolloutStore.read(output).pending() == []
+    assert len(RolloutStore.read(output).pending()) == 1
 
 
 @pytest.mark.parametrize(

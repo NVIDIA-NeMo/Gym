@@ -130,8 +130,8 @@ def test_a_route_failure_that_kept_an_answer_never_runs_again():
     assert has_unclassified_execution_failure(_route_failure_row(_ng_failure_response=_ANSWER))
 
 
-@pytest.mark.parametrize("status,refused", [(500, False), (503, False), (400, True), (None, True)])
-def test_a_legacy_run_error_without_an_agent_event_reruns_only_after_a_5xx(status, refused):
+@pytest.mark.parametrize("status,refused", [(500, False), (503, False), (400, False), (None, False)])
+def test_a_legacy_run_error_without_an_agent_event_uses_the_default_retry_policy(status, refused):
     row = _route_failure_row(_ng_failure_http_status=status)
     del row["_ng_failure_events"]["agent"]
     del row["_ng_failure_events"]["dispatch"]["cause_id"]
@@ -215,5 +215,5 @@ def test_an_omitted_report_does_not_lift_a_terminal_failure(tmp_path):
         }
         store.record_outcome(row | failure)
     reader = RolloutStore.read(output)
-    assert not has_unclassified_execution_failure(failure)
+    assert has_unclassified_execution_failure(failure)
     assert reader.pending() == [] and reader.coverage()["stopped_not_retried"] == 0

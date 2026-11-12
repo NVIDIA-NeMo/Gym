@@ -196,8 +196,10 @@ async def test_failed_agent_partial_output_keeps_the_selected_policy(tmp_path, m
 
 
 @pytest.mark.parametrize("route", [False, True])
-@pytest.mark.parametrize("status,blocked", [(200, True), (201, True), (299, True), (503, False), (None, False)])
-async def test_selected_model_body_delivery_blocks_collection_resume(tmp_path, monkeypatch, route, status, blocked):
+@pytest.mark.parametrize("status,blocked", [(200, False), (201, False), (299, False), (503, False), (None, False)])
+async def test_selected_model_body_failure_without_answer_uses_episode_retry_policy(
+    tmp_path, monkeypatch, route, status, blocked
+):
     import json
 
     from nemo_gym.core.typed_exceptions import NgFailureEvent
@@ -238,10 +240,10 @@ async def test_selected_model_body_delivery_blocks_collection_resume(tmp_path, m
             await RolloutCollectionHelper().run_from_config(config.model_copy(update={"resume_from_cache": resume}))
         except (IncompleteEvaluationError, ClientResponseError):
             pass
-    assert post.await_count == (1 if blocked or not route else 2)
+    assert post.await_count == (1 if blocked else 2)
     store = RolloutStore.read(output)
-    # Default-mode diagnostic failures are independently uncertain-delivery guarded.
-    assert bool(store.pending()) is (not blocked and route)
+    # Missing delivery evidence does not veto the default episode retry policy.
+    assert bool(store.pending()) is (not blocked)
     if route:
         rows = store.failures()
         assert all(failure.event_id in row["_ng_failure_events"] for row in rows)
@@ -269,4 +271,4 @@ def test_unselected_body_failure_does_not_override_selected_preanswer_infrastruc
     row = {"_ng_failure_class": "agent_run_error", "_ng_failure_events": events, "_ng_failure_id": "wrapper"}
     assert not has_unclassified_execution_failure(row)
     events["wrapper"]["cause_id"] = "old"
-    assert has_unclassified_execution_failure(row)
+    assert not has_unclassified_execution_failure(row)

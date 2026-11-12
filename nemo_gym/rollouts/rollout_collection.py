@@ -96,7 +96,9 @@ from nemo_gym.config.global_config import (
 from nemo_gym.core.episode_context import check_rollout_id_length, maybe_rollout_id_from_run_body
 from nemo_gym.core.episode_types import EpisodeId, TaskId, is_materialized_task_row
 from nemo_gym.core.failure_kinds import (
+    AGENT_REQUEST_FAILED,
     AGENT_ROUTE_FAILED,
+    AGENT_RUN_ERROR,
     CANCELLED,
     COLLECTION_DISPATCH_FAILED,
     ENVIRONMENT_PROTOCOL_VIOLATION,
@@ -344,8 +346,8 @@ NG_FAILURE_COUNTS_AS_ZERO_KEY = "_ng_failure_counts_as_zero"
 # instead of its own environment. The `_ng_failure_` prefix keeps it out of the metrics of a counted row.
 NG_FAILURE_MAX_ATTEMPTS_KEY = "_ng_failure_max_attempts"
 NG_FAILURE_JUDGE_ERROR_KEY = "_ng_failure_judge_error"
-AGENT_REQUEST_FAILED_FAILURE_CLASS = "agent_request_failed"
-AGENT_RUN_ERROR_FAILURE_CLASS = "agent_run_error"
+AGENT_REQUEST_FAILED_FAILURE_CLASS = AGENT_REQUEST_FAILED
+AGENT_RUN_ERROR_FAILURE_CLASS = AGENT_RUN_ERROR
 ENVIRONMENT_SERVER_FAILURE_CLASS = ENVIRONMENT_SERVER_FAILED
 NG_ENVIRONMENT_SERVER_KEY = ENVIRONMENT_SERVER_STAMP_KEY_NAME
 # Implementation name under `environment_servers:`, so readers know which result type a record holds.
@@ -3907,25 +3909,25 @@ class RolloutCollectionHelper(BaseModel):
         }
         max_attempts = _get_max_rollout_attempts()
         maxed_out = {k for k, n in budget_used.items() if n >= max_attempts}
+        # An agent timeout whose window held a server-side fault kept no answer or grade of the model's: it runs again.
+        from nemo_gym.core.outcome_policy import OutcomeAction
+        from nemo_gym.rollouts.recovery_policy import _replay_refusal, episode_recovery_action
         from nemo_gym.rollouts.rollout_recovery import (
-            has_recorded_grade,
-            has_saved_generation,
-            has_unclassified_execution_failure,
-            is_infrastructure_agent_timeout,
-            keeps_partial_response,
+            saved_recovery_outcome_policy,
         )
 
-        # An agent timeout whose window held a server-side fault kept no answer or grade of the model's: it runs again.
-        unclassified = {
+        policy = saved_recovery_outcome_policy(output)
+        policy_stopped = {
             k
             for k, row in latest_by_key.items()
-            if has_unclassified_execution_failure(row)
-            or (
-                (has_saved_generation(row) or has_recorded_grade(row) or keeps_partial_response(row))
-                and not is_infrastructure_agent_timeout(row)
+            if not is_omitted_rollout_row(row)
+            and (
+                episode_recovery_action(row, policy=policy, retry_terminal_timeouts=config.retry_terminal_timeouts)
+                != OutcomeAction.RETRY
+                or _replay_refusal(row, classification=policy.classification) is not None
             )
         }
-        gated = successes_seen | terminal_keys | maxed_out | unclassified
+        gated = successes_seen | terminal_keys | maxed_out | policy_stopped
 
         input_rows = [row for row in original_input_rows if get_key(row) not in gated]
 
@@ -3967,8 +3969,7 @@ class RolloutCollectionHelper(BaseModel):
 - {sum(attempts_by_key.values())} prior failure attempts ({len(attempts_by_key)} unique tasks) in sidecar
 - {len(terminal_keys)} sidecar-terminal → not retried
 - {len(maxed_out)} hit max_attempts={max_attempts} → not retried
-- {len(unclassified - successes_seen - terminal_keys - maxed_out)} kept answers, judge failures or unclassified \
-executions → not run again (left to recovery)
+- {len(policy_stopped - successes_seen - terminal_keys - maxed_out)} kept answers or policy-stopped failures → not run again
 - {len(input_rows)} rows that still need to be run"""
         )
 

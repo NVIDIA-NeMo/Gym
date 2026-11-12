@@ -1380,7 +1380,7 @@ def test_missing_reservation_preserves_prior_replay_gate_and_explicit_budget_res
 
 
 @pytest.mark.parametrize("new_attempt", [False, True])
-def test_current_unrouted_dispatch_gates_admission_without_replacing_history(prepared_run, new_attempt):
+def test_current_unrouted_dispatch_retries_without_replacing_history(prepared_run, new_attempt):
     from nemo_gym.rollouts.omitted_rollouts import omitted_rollout_record
 
     output, prepare = prepared_run
@@ -1398,7 +1398,7 @@ def test_current_unrouted_dispatch_gates_admission_without_replacing_history(pre
             | {"_ng_unrouted_run_error": True}
         )
     reader = RolloutStore.read(output)
-    assert not any(item["_ng_task_index"] == 0 for item in reader.pending(3))
+    assert any(item["_ng_task_index"] == 0 for item in reader.pending(3))
     assert reader.coverage()["counted_failures"] == 1
     assert list(read_records(failures_path_for(output)))[0] == original
     # A genuinely newer valid outcome supersedes that diagnostic; no historical blocker leaks forward.

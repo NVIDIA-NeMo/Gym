@@ -17,16 +17,16 @@ from nemo_gym.rollouts.rollout_store import RolloutStore
         ("unowned_route", 1),
         ("known_infra", 1),
         ("no_report_legacy", 1),
-        ("dangling_cause", 0),
-        ("nonstring_cause", 0),
-        ("cycle", 0),
-        ("missing_selected", 0),
-        ("nonstring_selected", 0),
-        ("empty_selected", 0),
-        ("malformed_events", 0),
+        ("dangling_cause", 1),
+        ("nonstring_cause", 1),
+        ("cycle", 1),
+        ("missing_selected", 1),
+        ("nonstring_selected", 1),
+        ("empty_selected", 1),
+        ("malformed_events", 1),
     ],
 )
-def test_selected_execution_evidence_stops_replay_in_store_and_legacy_cache(
+def test_incomplete_execution_evidence_uses_default_retry_in_store_and_legacy_cache(
     tmp_path, monkeypatch, case, expected_pending
 ):
     monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "3")
@@ -91,13 +91,6 @@ def test_selected_execution_evidence_stops_replay_in_store_and_legacy_cache(
     assert reader.selected("failure")[0]["_ng_elapsed_s"] == 7.0
     with RolloutStore.start_or_resume(output, prepare, resume=True) as resumed:
         assert len(resumed.pending(3)) == expected_pending
-    if not expected_pending:
-        # An unfinished newer reservation cannot erase this recorded stop decision.
-        with RolloutStore.start_or_resume(output, prepare, resume=True) as resumed:
-            resumed.record_dispatch(dispatched | {"_ng_attempt_index": 1})
-        assert RolloutStore.read(output).pending(3) == []
-        assert RolloutStore.read(output).attempt_count(identity) == 1
-
     legacy = tmp_path / "legacy"
     legacy.mkdir()
     config = RolloutCollectionConfig(

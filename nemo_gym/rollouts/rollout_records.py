@@ -39,21 +39,22 @@ from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
 from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.core.failure_kinds import (
     AGENT_TIMEOUT_INFRASTRUCTURE,
+    JUDGE_FAILED,
+    KILL_SHAPED,
     ROLLOUT_ALLOCATION_ENDED,
     FailureClassificationConfig,
 )
+from nemo_gym.core.outcome_policy import OutcomeAction
+from nemo_gym.rollouts.recovery_policy import RecoveryOutcomePolicyConfig, _replay_refusal, episode_recovery_action
 from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
 from nemo_gym.rollouts.rollout_recovery import (
     RunManifest,
     _digest,
     _get_max_rollout_attempts,
-    has_recorded_grade,
     has_saved_generation,
-    has_unclassified_execution_failure,
     is_answered_agent_deadline,
     is_infrastructure_agent_timeout,
     is_terminal_failure,
-    keeps_partial_response,
     load_attempt_extension,
     load_rerun_masked_approvals,
     load_resubmit_offset,
@@ -62,7 +63,7 @@ from nemo_gym.rollouts.rollout_recovery import (
     masked_kept_answer_kind,
     matches_failure_class,
     observed_elapsed,
-    saved_failure_classification,
+    saved_recovery_outcome_policy,
 )
 from nemo_gym.utils.path_utils import failures_path_for, resubmit_offset_path_for
 
@@ -213,9 +214,9 @@ class _Outcome:
     # A scored result whose producer applied ``count_as_zero`` (a failure the policy settled as the model's zero): the
     # failure kind. It is a success to selection, so only the coverage report singles it out.
     counted_zero_kind: str | None = None
-    interruption_cause_unknown: bool = False
     saved_answer: bool = False
-    unclassified_execution_failure: bool = False
+    action: OutcomeAction = OutcomeAction.RETRY
+    timeout_retry_action: OutcomeAction = OutcomeAction.RETRY
     # A result masked by an infrastructure failure (``masked_infrastructure_kind``): a failed attempt that is retried.
     masked_infrastructure: bool = False
     # The masked result an operator approved to run again (``masked_kept_answer_kind``): counted as the line above.
@@ -456,7 +457,7 @@ def prepare_append(path: Path) -> None:
 def is_interruption_failure(row: dict) -> bool:
     """Identify failures that spend neither the failure budget nor retry progress."""
     failure = row.get("_ng_failure_record")
-    return matches_failure_class(row, {"kill_shaped"}) or (
+    return matches_failure_class(row, {KILL_SHAPED}) or (
         isinstance(failure, dict)
         and (failure.get("delivery") == "not_sent" or failure.get("failure", {}).get("stage") == "admission")
     )
@@ -512,7 +513,7 @@ def is_rejudgment_of(failure: dict, result: dict) -> bool:
     """
     predecessor_id = rejudge_predecessor_id(failure)
     return (
-        failure.get("_ng_failure_class") in ("judge_failed", None)
+        failure.get("_ng_failure_class") in (JUDGE_FAILED, None)
         and _holds_saved_answer(failure)
         and predecessor_id is not None
         and result.get("_ng_failure_class") is None
@@ -530,10 +531,10 @@ def is_rejudgment_of(failure: dict, result: dict) -> bool:
 def is_rejudgment_failure_of(failure: dict, row: dict) -> bool:
     """Whether ``row`` records that re-judging the saved answer of judge failure ``failure`` failed again."""
     return (
-        failure.get("_ng_failure_class") == "judge_failed"
+        failure.get("_ng_failure_class") == JUDGE_FAILED
         and _holds_saved_answer(failure)
         and failure.get("_ng_failure_id") is not None
-        and row.get("_ng_failure_class") == "judge_failed"
+        and row.get("_ng_failure_class") == JUDGE_FAILED
         and row.get("_ng_failure_id") not in (None, failure["_ng_failure_id"])
         and row.get(RUN_ID_KEY) == failure.get(RUN_ID_KEY)
         and row.get(ATTEMPT_INDEX_KEY_NAME, 0) == failure.get(ATTEMPT_INDEX_KEY_NAME, 0)
@@ -542,22 +543,19 @@ def is_rejudgment_failure_of(failure: dict, row: dict) -> bool:
     )
 
 
-def _has_eligible_interruption_cause(row: dict) -> bool:
-    """Whether the saved interruption names a cause resume may act on: a request never sent or refused at admission."""
-    failure = row.get("_ng_failure_record")
-    return (
-        isinstance(failure, dict)
-        and not _holds_saved_answer(row)
-        and (failure.get("failure") or {}).get("stage") != "verification"
-        and (failure.get("delivery") == "not_sent" or (failure.get("failure") or {}).get("stage") == "admission")
-    )
-
-
 class RolloutRecords:
     def __init__(
-        self, manifest: RunManifest, expected: list[dict], *, classification: FailureClassificationConfig | None = None
+        self,
+        manifest: RunManifest,
+        expected: list[dict],
+        *,
+        classification: FailureClassificationConfig | None = None,
+        outcome_policy: RecoveryOutcomePolicyConfig | None = None,
     ):
-        self.classification = classification
+        self.outcome_policy = outcome_policy or RecoveryOutcomePolicyConfig()
+        self.classification = classification or self.outcome_policy.classification
+        if classification is not None:
+            self.outcome_policy = self.outcome_policy.model_copy(update={"classification": classification})
         self.manifest = manifest
         self.expected = {}
         for row in expected:
@@ -574,6 +572,7 @@ class RolloutRecords:
         self.omitted: set[tuple[str, int]] = set()
         # An unanswered reservation cannot erase an earlier outcome's stop decision.
         self.replay_blocked: set[str] = set()
+        self.prior_actions: dict[str, tuple[int, OutcomeAction, OutcomeAction]] = {}
         self.unresolved_dispatches: set[str] = set()
         self.retry_terminal_timeouts = manifest.retry_terminal_timeouts
         # Attempts an explicit recovery added to every rollout's saved cap (`--extend-attempts`).
@@ -709,23 +708,22 @@ class RolloutRecords:
                 and (row.get("failure_outcome_action") == "count_as_zero" or row.get(COUNTS_AS_ZERO_ROW_KEY) is True)
                 else None
             ),
-            interruption_cause_unknown=interruption and not _has_eligible_interruption_cause(row),
-            unclassified_execution_failure=has_unclassified_execution_failure(row),
+            action=episode_recovery_action(row, policy=self.outcome_policy),
+            timeout_retry_action=episode_recovery_action(
+                row, policy=self.outcome_policy, retry_terminal_timeouts=True
+            ),
             # A recorded grade or a partial native response is retained like a kept answer: a fresh run would
             # replace it. Not when a server-side fault cut the agent's window short: that answer is not its result.
             saved_answer=failure_class is not None
             and not infrastructure
-            and (_holds_saved_answer(row) or has_recorded_grade(row) or keeps_partial_response(row)),
+            and _replay_refusal(row, classification=self.classification) is not None,
             masked_infrastructure=masked_infrastructure,
             rerun_approved=rerun_approved,
         )
         outcome = self.payloads[key]
-        if (
-            outcome.saved_answer
-            or outcome.final_zero
-            or outcome.interruption_cause_unknown
-            or outcome.unclassified_execution_failure
-        ):
+        if key[1] >= self.prior_actions.get(key[0], (-1,))[0]:
+            self.prior_actions[key[0]] = (key[1], outcome.action, outcome.timeout_retry_action)
+        if outcome.saved_answer or outcome.final_zero:
             self.replay_blocked.add(key[0])
 
     def outcome(self, row: dict, *, record: RolloutRecord) -> None:
@@ -749,7 +747,7 @@ class RolloutRecords:
         expected = list(read_records(materialized_path_for(output)))
         if _digest(expected) != manifest.materialized_digest:
             raise ConfigError("Saved materialized inputs do not match the run manifest.")
-        state = cls(manifest, expected, classification=saved_failure_classification(output))
+        state = cls(manifest, expected, outcome_policy=saved_recovery_outcome_policy(output))
         unexpected = manifest.next_attempt.keys() - state.expected.keys()
         if unexpected:
             raise ConfigError(f"Run manifest reserves attempts for unknown rollouts: {sorted(unexpected)!r}.")
@@ -767,9 +765,12 @@ class RolloutRecords:
                 if payload.get("_ng_omitted_rollout") and (
                     payload.get("_ng_dispatch_drained") or payload.get("_ng_unrouted_run_error")
                 ):
-                    # Keep diagnostics out of outcome selection and scoring. An unresolved current dispatch,
-                    # however, cannot be replayed merely because its outcome was lost with the response.
-                    if payload.get("_ng_unrouted_run_error") and has_unclassified_execution_failure(payload):
+                    # Diagnostics do not replace an outcome. Their policy action and retained-answer constraints
+                    # still apply to the current reservation, including when it has no standing outcome.
+                    if payload.get("_ng_unrouted_run_error") and (
+                        _replay_refusal(payload, classification=state.classification) is not None
+                        or episode_recovery_action(payload, policy=state.outcome_policy) != OutcomeAction.RETRY
+                    ):
                         key = state._key(payload)
                         state.check_run_identity(payload, legacy=import_legacy)
                         if key[1] == manifest.next_attempt.get(key[0], 0) - 1:
@@ -847,38 +848,23 @@ class RolloutRecords:
 
     def _retryable(self, identity: str) -> bool:
         payload = self.payloads.get((identity, self.latest.get(identity)))
-        terminal = payload.terminal if payload else False
-        if payload and payload.final_zero:
+        if payload and (payload.final_zero or payload.saved_answer):
             return False
         if identity in self.unresolved_dispatches:
-            # The current dispatch is unresolved even if an older outcome still supplies score/history.
             return False
-        if payload is None and identity in self.replay_blocked:
-            # A missing newer outcome does not reopen a retained answer, settled zero or unknown interruption.
-            return False
-        if payload and payload.unclassified_execution_failure:
-            # A route failure is evidence of an attempt, not permission to repeat an unknown execution.
-            return False
-        if payload and payload.saved_answer:
-            # A finished answer is re-judged by reverification, never regenerated by running the rollout again.
-            return False
-        if payload and payload.interruption_cause_unknown:
-            # An interruption with no recorded eligible cause stops automatic recovery; its history and the
-            # failures counted before it stay, and a saved answer is never regenerated.
-            return False
-        if payload and self.retry_terminal_timeouts:
-            terminal = is_terminal_failure(
-                {
-                    "_ng_failure_class": payload.failure_class,
-                    "_ng_failure_legacy_class": payload.legacy_failure_class,
-                    "_ng_failure_terminal": payload.terminal,
-                },
-                retry_terminal_timeouts=True,
-            )
-        if payload and payload.masked_infrastructure and self.disposition(identity) == "success":
-            # Infrastructure masked this result, so it is retried and a later attempt supersedes it.
-            return True
-        return self.disposition(identity) not in {"success", "omitted"} and not terminal
+        if payload is None:
+            if identity in self.replay_blocked:
+                return False
+            prior = self.prior_actions.get(identity)
+            if prior is not None and prior[1 + int(self.retry_terminal_timeouts)] != OutcomeAction.RETRY:
+                return False
+        if payload:
+            action = payload.timeout_retry_action if self.retry_terminal_timeouts else payload.action
+            if action != OutcomeAction.RETRY:
+                return False
+            if payload.masked_infrastructure and self.disposition(identity) == "success":
+                return True
+        return self.disposition(identity) not in {"success", "omitted"}
 
     def rerun_approved_identities(self) -> set[str]:
         """The logical rollouts whose selected result is a masked one an operator approved to run again."""
@@ -896,24 +882,9 @@ class RolloutRecords:
         )
 
     def exhausted_count(self, max_attempts: int) -> int:
-        exhausted = 0
-        for identity in self.expected:
-            outcome = self.payloads.get((identity, self.latest.get(identity)))
-            # Stopping an unclassified execution does not refund the failures already spent at its cap.
-            stopped_unknown = (
-                outcome is not None
-                and outcome.unclassified_execution_failure
-                and not (
-                    outcome.terminal
-                    or outcome.final_zero
-                    or outcome.saved_answer
-                    or outcome.interruption_cause_unknown
-                )
-            )
-            exhausted += (self._retryable(identity) or stopped_unknown) and self.failure_count(
-                identity
-            ) >= max_attempts
-        return exhausted
+        return sum(
+            self._retryable(identity) and self.failure_count(identity) >= max_attempts for identity in self.expected
+        )
 
     def allocation_end_charges(self) -> list[dict]:
         """The failure rows that charge a rollout for each later end of an allocation it was in flight in.

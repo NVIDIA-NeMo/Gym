@@ -283,6 +283,9 @@ AGENT_TIMEOUT_INFRASTRUCTURE = "agent_timeout_infrastructure"
 INVALID_OUTPUT_BUDGET = "invalid_output_budget"
 INVALID_REQUEST_PARAMETER = "invalid_request_parameter"
 GRADING_WITHOUT_VERDICT = "grading_without_verdict"
+# A recovery reservation has no outcome while the owning allocation's end is unconfirmed.
+RESERVATION_WITHOUT_OUTCOME = "reservation_without_outcome"
+OMITTED_ROLLOUT_UNSUPPORTED = "omitted_rollout_unsupported"
 GATE_DERIVED_KINDS: frozenset[str] = frozenset(
     {
         GRADING_WITHOUT_VERDICT,
