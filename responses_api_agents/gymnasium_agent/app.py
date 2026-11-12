@@ -80,6 +80,9 @@ class GymnasiumRunResponse(BaseVerifyResponse):
     terminated: bool = False
     truncated: bool = False
     info: dict = {}
+    # The environment's own reward record of a finished episode (``result.reward_info.reward``): the sum of the
+    # rewards its steps returned. Absent when the environment did not end the episode or reported its own failure.
+    result: dict | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class GymnasiumAgent(SimpleResponsesAPIAgent):
@@ -308,6 +311,7 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
         last_model_response.output = returned_outputs if self.config.text_only_history else new_outputs
         last_model_response.usage = usage
 
+        environment_failed = step_data.mask_sample or step_data.failure_kind is not None
         return GymnasiumRunResponse(
             responses_create_params=base_body,
             response=last_model_response,
@@ -315,6 +319,7 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
             terminated=step_data.terminated,
             truncated=step_data.truncated,
             info=step_data.info,
+            result={"reward_info": {"reward": total_reward}} if finished and not environment_failed else None,
             # An environment that ended the episode because of its own failure (a user simulator or judge
             # that never answered) reports it on the final step; carry it onto the rollout so the reward
             # is masked out of quality metrics and training data instead of counted as a policy outcome.
