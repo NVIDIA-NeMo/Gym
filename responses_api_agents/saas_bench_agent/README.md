@@ -86,7 +86,7 @@ No SFT/v5-generation stages or training changes are part of this evaluation adap
 
 Runtime provenance: SaaS Bench commit
 `31177a7a80040edf588388dd982af4b678d1e544`,
-https://gitlab-master.nvidia.com/pritamb/saas-bench/-/tree/31177a7a80040edf588388dd982af4b678d1e544 .
+https://github.com/bpritam14/Gym-evaluation/tree/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark .
 The Apache-2.0 runtime is vendored with source headers, licenses, and SHA manifests.
 Benchmark tasks/verifier scripts retain CC-BY-4.0 and attribution; see
 `benchmark/NOTICE`, `benchmark/tasks/LICENSE`, and `benchmark/provenance.json`.
@@ -149,3 +149,11 @@ serialization and recovery. Infrastructure startup failures remain retryable.
 This corrects the scoring denominator and failure attribution. Existing artifacts
 and active campaigns pinned to earlier Gym revisions are not rewritten; use a
 fresh campaign at the corrected pin for comparable evaluation results.
+
+
+Public code provenance links resolve to the initial Gym import snapshot above.
+Original source revisions, original-file hashes, author notices and Apache-2.0
+licenses remain attested in `benchmark/provenance.json`; no private checkout is
+required to inspect or run the shipped code. Header-link cleanup does not change
+any Python AST or task check. Dataset preparation binds to the shipped file
+bytes, so prepare a fresh bundle after changing revisions.
