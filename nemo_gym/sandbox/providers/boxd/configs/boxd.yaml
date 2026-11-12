@@ -12,7 +12,7 @@
 #     --config nemo_gym/sandbox/providers/boxd/configs/boxd.yaml \
 #     --config responses_api_models/vllm_model/configs/vllm_model.yaml
 #
-# Requires the SDK: `pip install 'nemo-gym[sandbox]'` (or `pip install 'boxd>=0.3.1'`).
+# Requires the SDK: `pip install 'nemo-gym[boxd]'` (or `pip install 'boxd>=0.3.1'`).
 #
 # Each sandbox is one boxd machine. With SandboxSpec.image set, the image runs as a
 # container on the machine's Docker daemon and commands run inside it. Without an
@@ -45,7 +45,8 @@ sandbox:
       # no boxd credentials. Keep this on for model-written code.
       isolated: true
       # Seconds without network traffic before standby; 0 keeps the machine running
-      # through long CPU-only commands.
+      # through long CPU-only commands. A machine idle for hours may hibernate; the
+      # next command wakes it.
       auto_suspend_timeout: 0
       name_prefix: nemo-gym-
       labels: {}
@@ -61,7 +62,7 @@ sandbox:
       # Container shell; null uses bash when the image has it, else sh.
       shell: null
     operations:
-      # Retries for transport failures of status, delete and file calls. Machine
+      # Retries for transport failures of delete, connect and file calls. Machine
       # creation and commands are never retried.
       retries: 2
       retry_delay_s: 1.0

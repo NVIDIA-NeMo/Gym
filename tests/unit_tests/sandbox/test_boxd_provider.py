@@ -57,12 +57,13 @@ from nemo_gym.sandbox.providers.boxd.provider import (
     BoxdMachine,
     BoxdProvider,
     machine_size,
-    require_boxd_sdk,
 )
 from nemo_gym.sandbox.providers.registry import create_provider, get_provider_class
 
 
 pytestmark = pytest.mark.sandbox
+
+_REAL_REQUIRE_BOXD_SDK = boxd_provider._require_boxd_sdk
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -156,6 +157,8 @@ class FakeMachines:
         self.hibernated: list[str] = []
         self.woken: list[str] = []
         self.create_error: BaseException | None = None
+        # Fail the create call after the machine was made, as a lost answer would.
+        self.create_error_after_create: BaseException | None = None
         self.ready_error: BaseException | None = None
         self.delete_errors: list[BaseException] = []
         self.get_error: BaseException | None = None
@@ -168,7 +171,16 @@ class FakeMachines:
             raise self.create_error
         machine = FakeMachine(id=f"m-{len(self.machines) + 1}", name=name, labels=dict(kwargs.get("labels") or {}))
         self.machines[machine.id] = machine
+        if self.create_error_after_create is not None:
+            raise self.create_error_after_create
         return machine
+
+    def resolve(self, machine_id: str) -> str:
+        """The SDK takes a machine's id or its name."""
+        for machine in self.machines.values():
+            if machine.name == machine_id:
+                return machine.id
+        return machine_id
 
     async def wait_until_ready(self, machine_id: str, *, timeout: float) -> FakeMachine:
         if self.ready_error is not None:
@@ -178,6 +190,7 @@ class FakeMachines:
     async def get(self, machine_id: str) -> FakeMachine:
         if self.get_error is not None:
             raise self.get_error
+        machine_id = self.resolve(machine_id)
         if machine_id not in self.machines:
             raise NotFoundError(f"machine {machine_id} not found", code="not_found")
         return self.machines[machine_id]
@@ -329,7 +342,7 @@ def test_shipped_config_selects_the_provider_and_keeps_the_key_out() -> None:
 def test_require_boxd_sdk_names_the_extra(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "boxd", None)
     with pytest.raises(ImportError, match=r"nemo-gym\[boxd\]"):
-        require_boxd_sdk()
+        _REAL_REQUIRE_BOXD_SDK()
 
 
 # --------------------------------------------------------------------------
@@ -554,6 +567,31 @@ def test_create_errors_are_classified_by_type(sdk: FakeSdk, error: BaseException
     assert len(sdk.machines.create_calls) == 1
 
 
+def test_create_that_fails_after_making_the_machine_deletes_it_by_name(sdk: FakeSdk) -> None:
+    sdk.machines.create_error_after_create = APIConnectionError("answer lost")
+    with pytest.raises(NgFailureEvent) as raised:
+        _run(_provider().create(SandboxSpec()))
+    assert raised.value.failure_kind == PROVIDER_UNAVAILABLE
+    assert sdk.machines.deleted == ["m-1"]
+    assert sdk.machines.machines == {}
+
+
+def test_create_cleanup_lookup_failure_keeps_the_create_error(sdk: FakeSdk, caplog: pytest.LogCaptureFixture) -> None:
+    sdk.machines.create_error = APIConnectionError("reset")
+    sdk.machines.get_error = APIConnectionError("still down")
+    with pytest.raises(NgFailureEvent) as raised:
+        _run(_provider().create(SandboxSpec()))
+    assert raised.value.failure_kind == PROVIDER_UNAVAILABLE
+    assert "Could not look up boxd machine" in caplog.text
+
+
+def test_refused_credentials_on_create_skip_the_cleanup(sdk: FakeSdk) -> None:
+    sdk.machines.create_error = AuthenticationError("invalid_api_key")
+    with pytest.raises(NgFailureEvent):
+        _run(_provider().create(SandboxSpec()))
+    assert sdk.machines.deleted == []
+
+
 # --------------------------------------------------------------------------
 # Exec
 # --------------------------------------------------------------------------
@@ -650,7 +688,8 @@ def test_exec_error_before_the_deadline_is_a_failure_event(sdk: FakeSdk, monkeyp
     sdk.machines.exec_results = [APIConnectionError("stream reset")]
     with pytest.raises(NgFailureEvent) as raised:
         _run(_provider().exec(_machine_handle(), "make", timeout_s=3))
-    assert raised.value.failure_kind == PROVIDER_UNAVAILABLE
+    # The command may have started before the transport failed.
+    assert raised.value.failure_kind == PROVIDER_COMMAND_OUTCOME_UNKNOWN
     assert raised.value.operation == "exec"
     # Commands are not replayed: the first attempt may have run.
     assert len(sdk.machines.exec_calls) == 1
@@ -692,6 +731,29 @@ def test_exec_stream_that_ends_without_a_status_is_outcome_unknown(
     assert raised.value.failure_kind == PROVIDER_COMMAND_OUTCOME_UNKNOWN
 
 
+@pytest.mark.parametrize(
+    ("error", "kind"),
+    [
+        (AuthenticationError("expired"), PROVIDER_CREDENTIALS_REJECTED),
+        (RateLimitError("quota"), PROVIDER_QUOTA_EXHAUSTED),
+        (APIStatusError("internal", code="internal"), PROVIDER_COMMAND_OUTCOME_UNKNOWN),
+    ],
+)
+def test_exec_errors_keep_kinds_that_prove_the_command_never_ran(sdk: FakeSdk, error: Exception, kind: str) -> None:
+    sdk.machines.exec_results = [error]
+    with pytest.raises(NgFailureEvent) as raised:
+        _run(_provider().exec(_machine_handle(), "make", timeout_s=30))
+    assert raised.value.failure_kind == kind
+
+
+def test_exec_without_an_exit_status_is_outcome_unknown(sdk: FakeSdk) -> None:
+    sdk.machines.exec_results = [FakeExecResult(stdout="partial", exit_code=-1)]
+    with pytest.raises(NgFailureEvent) as raised:
+        _run(_provider().exec(_machine_handle(), "make", timeout_s=30))
+    assert raised.value.failure_kind == PROVIDER_COMMAND_OUTCOME_UNKNOWN
+    assert "without an exit status" in raised.value.failure_reason
+
+
 def test_exec_needs_a_boxd_handle(sdk: FakeSdk) -> None:
     with pytest.raises(RuntimeError, match="carries no boxd machine"):
         _run(_provider().exec(SandboxHandle(sandbox_id="x", provider_name="boxd", raw=None), "true"))
@@ -719,7 +781,10 @@ def test_upload_to_a_root_owned_path_stages_and_moves_with_sudo(sdk: FakeSdk) ->
     _run(_provider().write_file(_machine_handle(), "/workspace/a b.txt", "hi"))
     staged = sdk.machines.files.uploads[1]
     assert staged.startswith("/tmp/nemo-gym-transfer/")
-    assert sdk.machines.commands() == [f"sudo -n mkdir -p /workspace && sudo -n mv {staged} '/workspace/a b.txt'"]
+    assert sdk.machines.commands() == [
+        f"sudo -n mkdir -p /workspace && sudo -n mv {staged} '/workspace/a b.txt'"
+        f" || {{ status=$?; rm -f {staged}; exit $status; }}"
+    ]
 
 
 def test_download_of_a_root_owned_path_copies_out_with_sudo(sdk: FakeSdk) -> None:
@@ -744,6 +809,14 @@ def test_download_of_a_root_owned_path_copies_out_with_sudo(sdk: FakeSdk) -> Non
         "mkdir -p /tmp/nemo-gym-transfer && sudo -n cp /root/out.txt /tmp/nemo-gym-transfer/"
     )
     assert commands[1].startswith("rm -f /tmp/nemo-gym-transfer/")
+
+
+def test_failed_staging_copy_still_removes_the_staged_file(sdk: FakeSdk) -> None:
+    sdk.machines.exec_results = [FakeExecResult(stderr="cp: permission denied", exit_code=1), FakeExecResult()]
+    with pytest.raises(NgFailureEvent) as raised:
+        _run(_provider().read_file(_machine_handle(), "/root/secret"))
+    assert raised.value.failure_kind == PROVIDER_SETUP_FAILED
+    assert sdk.machines.commands()[1].startswith("rm -f /tmp/nemo-gym-transfer/")
 
 
 def test_download_of_a_missing_file_is_a_failure_event(sdk: FakeSdk) -> None:

@@ -66,6 +66,7 @@ from nemo_gym.sandbox.failures import sandbox_failure
 from nemo_gym.sandbox.providers.base import (
     SandboxExecResult,
     SandboxHandle,
+    SandboxResources,
     SandboxSpec,
     SandboxStatus,
 )
@@ -114,21 +115,32 @@ _STATUS_BY_MACHINE_STATE = {
 }
 
 
-def require_boxd_sdk(feature: str = "The boxd sandbox provider") -> Any:
-    """Import the optional ``boxd`` SDK, or explain how to install it."""
+def _require_boxd_sdk() -> Any:
+    """Import the optional ``boxd`` SDK, or explain how to install it.
+
+    Every SDK access goes through this one function, so unit tests can replace the SDK without network access.
+    """
     try:
         import boxd
     except ImportError as exc:
         raise ImportError(
-            f"{feature} requires the boxd SDK. Install it with `pip install 'nemo-gym[boxd]'` "
+            "The boxd sandbox provider requires the boxd SDK. Install it with `pip install 'nemo-gym[boxd]'` "
             f"or `pip install '{BOXD_SDK_CONSTRAINT}'`."
         ) from exc
     return boxd
 
 
-def _require_boxd_sdk() -> Any:
-    """Load the SDK through one seam, so unit tests can replace it without network access."""
-    return require_boxd_sdk()
+def _is_sdk_error(error: BaseException, name: str) -> bool:
+    """Whether ``error`` is an instance of the SDK's ``boxd.errors.<name>``."""
+    cls = getattr(_require_boxd_sdk().errors, name, None)
+    return isinstance(cls, type) and isinstance(error, cls)
+
+
+def _is_unclassified_sdk_error(error: BaseException) -> bool:
+    """A plain ``BoxdError`` without a status code: the call ended without the server naming a reason."""
+    return (
+        type(error) is getattr(_require_boxd_sdk().errors, "BoxdError", None) and getattr(error, "code", None) is None
+    )
 
 
 def _config_from_mapping(cls: type[T], value: Any) -> T:
@@ -277,19 +289,19 @@ def _sizes_text() -> str:
     return ", ".join(f"{vcpu} vCPU / {gib}G" for vcpu, gib in MACHINE_SIZES)
 
 
-def machine_size(resources: Any) -> tuple[int, int] | None:
+def machine_size(resources: SandboxResources) -> tuple[int, int] | None:
     """The smallest machine size that holds ``resources``, or ``None`` when it requests no CPU or memory.
 
     Raises ``ValueError`` for a request no machine size holds: a GPU, more disk than a machine
     has, or more CPU or memory than the largest size.
     """
-    if getattr(resources, "gpu", None) or getattr(resources, "gpu_type", None):
+    if resources.gpu or resources.gpu_type:
         raise ValueError("boxd machines have no GPUs; remove resources.gpu and resources.gpu_type")
-    disk = getattr(resources, "disk_gib", None)
+    disk = resources.disk_gib
     if disk is not None and disk > MACHINE_DISK_GIB:
         raise ValueError(f"boxd machines have a {MACHINE_DISK_GIB} GiB disk; resources.disk_gib={disk} does not fit")
-    cpu = getattr(resources, "cpu", None)
-    memory_mib = getattr(resources, "memory_mib", None)
+    cpu = resources.cpu
+    memory_mib = resources.memory_mib
     if cpu is None and memory_mib is None:
         return None
     for vcpu, gib in MACHINE_SIZES:
@@ -317,6 +329,19 @@ def _env_assignments(env: Mapping[str, str]) -> list[str]:
         if not key or "=" in key:
             raise ValueError(f"Invalid environment variable name: {key!r}")
     return [f"{key}={value}" for key, value in env.items()]
+
+
+def _failure_kind(cause: BaseException) -> str:
+    """The registered failure kind for a boxd SDK error, chosen by its type and status code."""
+    if _is_sdk_error(cause, "AuthenticationError") or _is_sdk_error(cause, "PermissionDeniedError"):
+        return PROVIDER_CREDENTIALS_REJECTED
+    if _is_sdk_error(cause, "RateLimitError"):
+        return PROVIDER_QUOTA_EXHAUSTED
+    if _is_sdk_error(cause, "APIConnectionError") or getattr(cause, "code", None) == "unavailable":
+        return PROVIDER_UNAVAILABLE
+    if isinstance(cause, TimeoutError):
+        return PROVIDER_IO_TIMEOUT
+    return PROVIDER_REQUEST_FAILED
 
 
 class BoxdProvider:
@@ -365,21 +390,7 @@ class BoxdProvider:
     ) -> NgFailureEvent:
         """Classify a boxd SDK error by its type, then build the sandbox failure event."""
         if failure_kind is None:
-            failure_kind = PROVIDER_REQUEST_FAILED
-            errors = getattr(_require_boxd_sdk(), "errors", None)
-
-            def is_a(name: str) -> bool:
-                cls = getattr(errors, name, None)
-                return isinstance(cls, type) and isinstance(cause, cls)
-
-            if is_a("AuthenticationError") or is_a("PermissionDeniedError"):
-                failure_kind = PROVIDER_CREDENTIALS_REJECTED
-            elif is_a("RateLimitError"):
-                failure_kind = PROVIDER_QUOTA_EXHAUSTED
-            elif is_a("APIConnectionError") or getattr(cause, "code", None) == "unavailable":
-                failure_kind = PROVIDER_UNAVAILABLE
-            elif isinstance(cause, (TimeoutError, asyncio.TimeoutError)):
-                failure_kind = PROVIDER_IO_TIMEOUT
+            failure_kind = _failure_kind(cause) if cause is not None else PROVIDER_REQUEST_FAILED
         return sandbox_failure(
             operation=operation,
             failure_kind=failure_kind,
@@ -390,12 +401,9 @@ class BoxdProvider:
             exit_code=exit_code,
         )
 
-    def _is_transient(self, error: BaseException) -> bool:
-        errors = getattr(_require_boxd_sdk(), "errors", None)
-        connection_error = getattr(errors, "APIConnectionError", None)
-        return (isinstance(connection_error, type) and isinstance(error, connection_error)) or (
-            getattr(error, "code", None) == "unavailable"
-        )
+    @staticmethod
+    def _is_transient(error: BaseException) -> bool:
+        return _is_sdk_error(error, "APIConnectionError") or getattr(error, "code", None) == "unavailable"
 
     async def _with_retries(self, factory: Callable[[], Awaitable[T]], *, operation: str, sandbox_id: str | None) -> T:
         """Retry transport failures of a call that is safe to repeat, recording each failed attempt."""
@@ -503,9 +511,10 @@ class BoxdProvider:
             # Not retried: a create whose answer was lost may still have made a machine.
             created = await self._sdk_client().machines.create(name, **kwargs)
         except Exception as exc:
-            raise self._failure(
-                operation="create", cause=exc, reason=f"boxd could not create machine {name!r}"
-            ) from exc
+            failure = self._failure(operation="create", cause=exc, reason=f"boxd could not create machine {name!r}")
+            if failure.failure_kind != PROVIDER_CREDENTIALS_REJECTED:
+                await self._delete_orphan(name)
+            raise failure from exc
 
         machine = BoxdMachine(machine_id=str(created.id), name=name, env={str(k): str(v) for k, v in spec.env.items()})
         handle = SandboxHandle(sandbox_id=machine.machine_id, provider_name=self.name, raw=machine)
@@ -529,7 +538,7 @@ class BoxdProvider:
     async def _wait_ready(self, handle: SandboxHandle, *, timeout_s: float) -> None:
         try:
             await self._sdk_client().machines.wait_until_ready(handle.sandbox_id, timeout=timeout_s)
-        except (TimeoutError, asyncio.TimeoutError) as exc:
+        except TimeoutError as exc:
             raise self._failure(
                 operation="create",
                 cause=exc,
@@ -577,6 +586,16 @@ class BoxdProvider:
                 reason=f"container from {image!r} did not answer the readiness probe: {machine.shell[-200:]!r}",
             )
 
+    async def _delete_orphan(self, name: str) -> None:
+        """Delete the machine a failed create call may still have made; its name is unique to that attempt."""
+        try:
+            machine = await self._sdk_client().machines.get(name)
+        except Exception as exc:  # noqa: BLE001 - nothing to clean up, or nothing we can find
+            if not _is_sdk_error(exc, "NotFoundError"):
+                LOGGER.warning("Could not look up boxd machine %r after a failed create: %s", name, exc)
+            return
+        await self._delete_quietly(SandboxHandle(sandbox_id=str(machine.id), provider_name=self.name, raw=None))
+
     async def _delete_quietly(self, handle: SandboxHandle) -> None:
         try:
             await self._delete(handle)
@@ -584,8 +603,6 @@ class BoxdProvider:
             LOGGER.warning("Could not delete boxd machine %s after a failed create: %s", handle.sandbox_id, exc)
 
     async def _delete(self, handle: SandboxHandle) -> None:
-        errors = getattr(_require_boxd_sdk(), "errors", None)
-        not_found = getattr(errors, "NotFoundError", None)
         try:
             await self._with_retries(
                 lambda: self._sdk_client().machines.delete(handle.sandbox_id),
@@ -593,18 +610,17 @@ class BoxdProvider:
                 sandbox_id=handle.sandbox_id,
             )
         except Exception as exc:
-            if isinstance(not_found, type) and isinstance(exc, not_found):
+            if _is_sdk_error(exc, "NotFoundError"):
                 LOGGER.debug("boxd machine %s already gone on close", handle.sandbox_id)
                 return
             raise
 
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
-        errors = getattr(_require_boxd_sdk(), "errors", None)
-        not_found = getattr(errors, "NotFoundError", None)
+        """The machine's state; in container mode a running machine also needs a running container."""
         try:
             machine = await self._sdk_client().machines.get(handle.sandbox_id)
         except Exception as exc:  # noqa: BLE001 - status must not raise for transient issues
-            if isinstance(not_found, type) and isinstance(exc, not_found):
+            if _is_sdk_error(exc, "NotFoundError"):
                 return SandboxStatus.STOPPED
             return SandboxStatus.UNKNOWN
         status = _STATUS_BY_MACHINE_STATE.get(str(getattr(machine, "status", "")).lower(), SandboxStatus.UNKNOWN)
@@ -748,16 +764,12 @@ class BoxdProvider:
             )
         except Exception as exc:
             elapsed = monotonic() - started
-            boxd = _require_boxd_sdk()
-            boxd_error = getattr(getattr(boxd, "errors", None), "BoxdError", None)
             # The SDK reports its own deadline as a BoxdError with no status code, after the server stopped
             # the command's process group.
             if (
                 effective_timeout is not None
                 and elapsed >= float(effective_timeout)
-                and isinstance(boxd_error, type)
-                and type(exc) is boxd_error
-                and getattr(exc, "code", None) is None
+                and _is_unclassified_sdk_error(exc)
             ):
                 return SandboxExecResult(
                     stdout=None,
@@ -765,14 +777,19 @@ class BoxdProvider:
                     return_code=TIMEOUT_RETURN_CODE,
                     error_type="timeout",
                 )
-            # A stream that ended without a status leaves the command's outcome unknown; it is never replayed.
-            unknown = isinstance(boxd_error, type) and type(exc) is boxd_error and getattr(exc, "code", None) is None
+            # Refused credentials and quota mean the command never ran. Any other failure may come after it
+            # started, so its outcome is unknown and it is never replayed.
+            kind = _failure_kind(exc)
+            if kind not in (PROVIDER_CREDENTIALS_REJECTED, PROVIDER_QUOTA_EXHAUSTED):
+                kind = PROVIDER_COMMAND_OUTCOME_UNKNOWN
+            raise self._failure(operation="exec", cause=exc, sandbox_id=handle.sandbox_id, failure_kind=kind) from exc
+        if result.exit_code < 0:
             raise self._failure(
                 operation="exec",
-                cause=exc,
                 sandbox_id=handle.sandbox_id,
-                failure_kind=PROVIDER_COMMAND_OUTCOME_UNKNOWN if unknown else None,
-            ) from exc
+                failure_kind=PROVIDER_COMMAND_OUTCOME_UNKNOWN,
+                reason="boxd command stream ended without an exit status",
+            )
         stderr = result.stderr
         if keepalive and stderr:
             stderr = stderr.replace("\0", "")
@@ -810,7 +827,10 @@ class BoxdProvider:
             raise self._failure(operation="upload", cause=exc, sandbox_id=handle.sandbox_id) from exc
         parent = posixpath.dirname(target_path) or "/"
         if machine.container is None:
-            line = f"sudo -n mkdir -p {shlex.quote(parent)} && sudo -n mv {shlex.quote(staged)} {shlex.quote(target_path)}"
+            line = (
+                f"sudo -n mkdir -p {shlex.quote(parent)} && sudo -n mv {shlex.quote(staged)} {shlex.quote(target_path)}"
+                f" || {{ status=$?; rm -f {shlex.quote(staged)}; exit $status; }}"
+            )
         else:
             container = shlex.quote(machine.container)
             line = (
@@ -832,8 +852,7 @@ class BoxdProvider:
                     sandbox_id=handle.sandbox_id,
                 )
             except Exception as exc:
-                not_found = getattr(getattr(_require_boxd_sdk(), "errors", None), "NotFoundError", None)
-                if self._is_transient(exc) or (isinstance(not_found, type) and isinstance(exc, not_found)):
+                if self._is_transient(exc) or _is_sdk_error(exc, "NotFoundError"):
                     raise self._failure(operation="download", cause=exc, sandbox_id=handle.sandbox_id) from exc
                 # Not readable by the machine's user: copy it out with sudo first.
         staged = f"{STAGING_DIR}/{uuid.uuid4().hex}"
@@ -844,15 +863,16 @@ class BoxdProvider:
             )
         else:
             line = f"mkdir -p {STAGING_DIR} && docker cp {shlex.quote(machine.container)}:{shlex.quote(source_path)} {shlex.quote(staged)}"
-        await self._run_checked(handle, line, operation="download", timeout_s=300.0)
         try:
-            return await self._with_retries(
-                lambda: files.download(machine.machine_id, staged),
-                operation="download",
-                sandbox_id=handle.sandbox_id,
-            )
-        except Exception as exc:
-            raise self._failure(operation="download", cause=exc, sandbox_id=handle.sandbox_id) from exc
+            await self._run_checked(handle, line, operation="download", timeout_s=300.0)
+            try:
+                return await self._with_retries(
+                    lambda: files.download(machine.machine_id, staged),
+                    operation="download",
+                    sandbox_id=handle.sandbox_id,
+                )
+            except Exception as exc:
+                raise self._failure(operation="download", cause=exc, sandbox_id=handle.sandbox_id) from exc
         finally:
             try:
                 await self._run(machine.machine_id, f"rm -f {shlex.quote(staged)}", timeout_s=60.0)
