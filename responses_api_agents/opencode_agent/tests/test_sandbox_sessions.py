@@ -390,6 +390,20 @@ def count_media_decodes(monkeypatch):
     return decodes
 
 
+@pytest.mark.parametrize("gzip_enabled", [False, True])
+def test_gzip_helpers_are_uploaded_only_when_enabled(setup, gzip_enabled):
+    agent, sandbox = setup
+    agent.config.gzip_requests_enabled = gzip_enabled
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "Fix the code"})
+        assert result.status_code == 200, result.text
+        directory = sandbox.directory
+        assert (f"{directory}/request_gzip.mjs" in sandbox.files) is gzip_enabled
+        assert (f"{directory}/request_gzip_plugin.mjs" in sandbox.files) is gzip_enabled
+
+
 def test_session_attaches_prompt_images_and_declares_image_input(setup, monkeypatch):
     agent, sandbox = setup
     decodes = count_media_decodes(monkeypatch)

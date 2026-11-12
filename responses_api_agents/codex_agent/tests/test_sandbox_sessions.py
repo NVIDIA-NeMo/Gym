@@ -220,6 +220,21 @@ def close_body(session_id):
     return {"agent_session_id": session_id, "episode_id": seed().episode_id.model_dump()}
 
 
+@pytest.mark.parametrize("gzip_enabled", [False, True])
+def test_gzip_helper_is_uploaded_only_when_enabled(setup, gzip_enabled):
+    agent, sandbox = setup
+    agent.config.gzip_requests_enabled = gzip_enabled
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "Fix the code"})
+        assert result.status_code == 200, result.text
+        directory = sandbox.directory
+        assert (f"{directory}/request_gzip.mjs" in sandbox.files) is gzip_enabled
+        payload = json.loads(sandbox.files[f"{directory}/input.json"])
+        assert payload["gzip_requests_enabled"] is gzip_enabled
+
+
 def test_http_agent_session_flow_runs_codex_in_borrowed_sandbox(setup):
     agent, sandbox = setup
     with patch.object(agent, "_run_codex", AsyncMock(side_effect=AssertionError("host Codex must not run"))):
