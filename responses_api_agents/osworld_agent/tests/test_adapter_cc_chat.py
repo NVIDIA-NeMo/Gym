@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""cc_chat history layout: the pre-rebase nemotron_osworld CC prompt."""
+"""cc_chat history layout: the legacy nemotron_osworld agent's prompt."""
 
 from __future__ import annotations
 

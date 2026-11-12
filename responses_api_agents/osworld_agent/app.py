@@ -379,8 +379,8 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     # receives this value as a cooperative deadline so model/step boundaries
     # can stop cleanly before the parent has to cancel the Ray task.
     task_timeout: int = 1800
-    # Agent-loop budget counted from the first step, like the pre-rebase
-    # cc_app rollout_timeout_s; reaching it ends the rollout as a timeout.
+    # Agent-loop budget counted from the first step, like the legacy
+    # nemotron_osworld rollout_timeout_s; reaching it ends the rollout as a timeout.
     rollout_timeout_s: Optional[float] = Field(default=None, gt=0)
     task_cancel_grace_s: float = Field(default=30.0, gt=0)
     # Optional semantic Ray resources for each OSWorld rollout task. This lets
@@ -1926,7 +1926,7 @@ def _build_response(
         # Names the scored (last) generation by the id the model server served.
         response_fields["terminal_response_id"] = terminal_response_id
     if accepted_call_references:
-        # NeMo-RL resolves these served response IDs against capture records.
+        # The trainer resolves these served response IDs against capture records.
         # Keeping membership separate from response.output means rejected
         # retries remain in the capture manifest as exact context evidence.
         response_fields["ng_trajectory"] = {"turns": [{"model_calls": accepted_call_references}]}
@@ -1994,7 +1994,7 @@ def _served_model_call_output(
 def _accepted_call_references(model_calls: List[Dict[str, Any]]) -> List[Dict[str, str]]:
     """Served response IDs of the generations ``_served_model_call_output`` returns, in call order.
 
-    NeMo-RL joins these against capture records, which stays unambiguous even
+    The trainer joins these against capture records, which stays unambiguous even
     when parser retries have identical content. Partial references would be
     rejected, so a member without a served ID leaves content matching in charge.
     """

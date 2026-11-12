@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Pre-rebase ``nemotron_osworld`` response parsing.
+"""Legacy ``nemotron_osworld`` response parsing.
 
-``parse_response_to_cot_and_action`` and ``project_coordinate_to_absolute_scale``
-are copied from the pinned OSWorld ``mm_agents.nvidia.nemotron_agent`` module,
-and ``normalize_vendor_parser_input`` / ``is_invalid_legacy_parse`` from the
-pre-rebase ``nemotron_osworld`` CC agent, so legacy runs accept and execute
+``nemotron_osworld`` is the standalone OSWorld training agent used before this
+Gym integration. ``parse_response_to_cot_and_action`` and
+``project_coordinate_to_absolute_scale`` are copied from the pinned OSWorld
+``mm_agents.nvidia.nemotron_agent`` module, and ``normalize_vendor_parser_input``
+/ ``is_invalid_legacy_parse`` from the ``nemotron_osworld`` agent, so legacy runs accept and execute
 exactly what the old agent did. Keep them byte-for-byte in behavior.
 """
 

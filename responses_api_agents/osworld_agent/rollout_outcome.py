@@ -31,7 +31,7 @@ class RolloutOutcomeFacts:
     environment_done: bool = False
     horizon_reached: bool = False
     policy_stop_reason: Optional[str] = None
-    # Legacy cc_app training masked every rollout that ended without DONE/FAIL
+    # Legacy nemotron_osworld training masked every rollout that ended without DONE/FAIL
     # or environment termination; opt in to reproduce that admission rule.
     mask_unterminated: bool = False
 
