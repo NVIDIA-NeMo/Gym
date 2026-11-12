@@ -239,7 +239,10 @@ class TestApp:
                 "input_tokens": 450,
                 "output_tokens": 220,
                 "total_tokens": 670,
-                "input_tokens_details": {"cached_tokens": None if detail_tokens is None else 2 * detail_tokens},
+                "input_tokens_details": {
+                    "cached_tokens": None if detail_tokens is None else 2 * detail_tokens,
+                    "cache_write_tokens": None,
+                },
                 "output_tokens_details": {"reasoning_tokens": None if detail_tokens is None else 2 * detail_tokens},
             }
             assert verify_data["response"]["usage"] == expected_usage

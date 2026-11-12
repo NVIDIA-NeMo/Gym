@@ -83,17 +83,9 @@ It sets `network_access: model_only`, so the sandbox reaches only the model serv
 overrides it with `model_and_tools`. A restricted sandbox cannot download Codex, so supply
 `sandbox_runtime_dir`.
 
-The pairing also needs one Environment Server setting. HLE's Environment Server, like those of HLE Diamond, GPQA and
-APEX Shortlist, grants the agent its Resources server over `direct_http`, which this agent cannot use, so every seed
-fails with a 422. The judge offers the agent no tools, so load this alongside the benchmark, the profile and the
-model config, under the benchmark's own Environment Server name (`gym env resolve` shows it):
-
-```yaml
-hle_equivalence_llm_judge_environment_server:
-  environment_servers:
-    single_agent_turn_legacy:
-      resources_tool_transports: []
-```
+HLE, HLE Diamond, GPQA and APEX Shortlist need no Environment Server setting: their judges serve no tools, so their
+Environment Servers grant the agent none. This agent rejects a required `direct_http` grant with a 422, so a
+benchmark whose Resources server serves its tools over direct HTTP does not pair with it.
 
 ## Runtime and model requirements
 
@@ -398,7 +390,8 @@ Each rollout result is stamped with a `skills_ref` for provenance and grouping d
 
 ## Legacy direct-agent limitations
 
-- Eval only for now. Token IDs and logprobs are not wired up yet.
+- Training token-ID capture works as in agent sessions when `model_server` is set. A direct
+  `openai_base_url` endpoint bypasses Gym capture.
 - Token counts come from Codex's own usage reporting (`turn.completed`).
 - `turns_used` counts assistant messages right now, not tool calls.
 - Codex has no `--max-turns` equivalent; runaway rollouts are bounded by `timeout`.

@@ -9,7 +9,6 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
-from PIL import Image
 
 from responses_api_agents.agentvista_agent.runtime.data import inventory
 from responses_api_agents.agentvista_agent.runtime.default_worker import run
@@ -20,6 +19,8 @@ def test_original_loop_tool_feedback_and_judge_status(tmp_path: Path, monkeypatc
     source = os.environ.get("AGENTVISTA_ROOT")
     if not source:
         pytest.skip("Set AGENTVISTA_ROOT to the pinned upstream source")
+    from PIL import Image
+
     sys.path.insert(0, source)
     # This unit fixture avoids importing Torch just to load a small local image.
     image_loader = ModuleType("qwen_vl_utils")

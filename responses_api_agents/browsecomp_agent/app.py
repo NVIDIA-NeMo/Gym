@@ -20,7 +20,7 @@ import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, ClassVar, List, Literal, Optional
+from typing import Any, ClassVar, List, Optional
 from uuid import uuid4
 
 import aiohttp
@@ -80,6 +80,7 @@ from nemo_gym.server_runtime import (
     MCPToolAccess,
 )
 from nemo_gym.trajectory import AgentObservationBundle, ObservationGap
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.browsecomp_agent.sandbox import (
     _ERROR_DETAIL_CHARS,
     BrowsecompSandboxSession,
@@ -180,7 +181,6 @@ _ANSWER_COMMIT_RE = re.compile(
 class BrowsecompAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef | None = None
     model_server: ModelServerRef
-    num_workers: Literal[1] = 1
     allow_host_execution: bool = False
     sandbox_provider: str | None = None
     sandbox_config: dict[str, JsonValue] = Field(
@@ -350,7 +350,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         """
         # Thin diagnostic wrapper around the real implementation. A full-400 eval lost 6
         # samples to a 500 out of THIS endpoint with NO traceback anywhere in the log — not
-        # even the `🚨` marker that exception_handling_middleware prints for ordinary app
+        # even the `🚨` marker that the exception middleware prints for ordinary app
         # exceptions (the malformed-JSON bug printed a full ExceptionGroup). With nothing
         # logged the cause can only be bounded, never named. Print whatever escapes, then
         # RE-RAISE unchanged so run()'s containment behaves exactly as before.
@@ -1521,3 +1521,6 @@ def _prompt_tokens_from_tokenize_response(tokenize_response: dict) -> int:
 
 if __name__ == "__main__":
     BrowsecompAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = BrowsecompAgent.run_webserver()  # noqa: F401

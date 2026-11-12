@@ -11,12 +11,13 @@ import sys
 from types import SimpleNamespace
 
 import pytest
-from PIL import Image
 
 
 if not os.environ.get("AGENTVISTA_ROOT"):
     pytest.skip("Set AGENTVISTA_ROOT to the pinned upstream source", allow_module_level=True)
 sys.path.insert(0, os.environ["AGENTVISTA_ROOT"])
+
+from PIL import Image
 
 from responses_api_agents.agentvista_agent.runtime.data import dataset_rows, inventory
 from responses_api_agents.agentvista_agent.runtime.mcp import ToolSession

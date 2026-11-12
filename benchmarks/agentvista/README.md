@@ -45,6 +45,13 @@ for its original image loader. OpenCode additionally requires CLI 1.17.11. Suppl
 `AGENTVISTA_OPENCODE`. `PYTHONPATH` must contain the Gym PR checkout; the dispatcher
 passes the Gym and upstream source paths to each isolated worker.
 
+The Gym server has a managed `responses_api_agents/agentvista_agent/pyproject.toml`
+and `uv.lock`, including Gym's shared resolver policy and optional telemetry extra.
+Install that server with `uv sync --locked --project responses_api_agents/agentvista_agent`.
+The original tools and Torch worker remain in the separate worker environment;
+they are not added to the Gym server's dependencies. Check managed dependency
+locks with `python scripts/component_locks.py` before publishing dependency changes.
+
 `runtime-image/Dockerfile` under the agent directory builds the shared worker
 image from an approved Gym base. Supply a verified CLI binary as `opencode` in
 the build context. `runtime-image/build.py` builds a SQSH directly with Enroot on

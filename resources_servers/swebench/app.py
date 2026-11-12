@@ -61,7 +61,7 @@ from nemo_gym.server_runtime import (
     lost_session_verification,
 )
 from nemo_gym.trajectory import SandboxObservation
-from nemo_gym.utils import bounded_text
+from nemo_gym.utils import bounded_text, is_nemo_gym_fastapi_entrypoint
 from resources_servers.swebench.sandbox_sessions import SandboxSessionResourcesServer
 from resources_servers.swebench.swebench_patches import (
     patch_swebench_multilingual_golden_patch_pass,
@@ -404,8 +404,10 @@ class SwebenchResourcesServer(SandboxSessionResourcesServer):
 
     def _make_test_spec(self, body: SWEBenchInstanceRequest) -> TestSpec:
         test_spec = make_test_spec(
-            # This accepts a SWEbenchInstance which is identically our body.
-            body.model_dump(),
+            # This accepts a SWEbenchInstance: our body's instance fields, without the agent's request and response.
+            # SWE-bench reads some optional keys whenever they are present, such as image_assets for JavaScript,
+            # so an unset optional field is left out rather than sent as null.
+            body.model_dump(include=set(SWEBenchInstanceRequest.model_fields), exclude_none=True),
             namespace="swebench",  # Dockerhub namespace
             instance_image_tag=LATEST,
             env_image_tag=LATEST,
@@ -647,3 +649,6 @@ def _lost_session_response(
 
 if __name__ == "__main__":
     SwebenchResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = SwebenchResourcesServer.run_webserver()  # noqa: F401

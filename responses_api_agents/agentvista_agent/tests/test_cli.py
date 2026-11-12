@@ -13,12 +13,13 @@ from pathlib import Path
 from threading import Thread
 
 import pytest
-from PIL import Image
 
 
 if not os.environ.get("AGENTVISTA_ROOT"):
     pytest.skip("Set AGENTVISTA_ROOT to the pinned upstream source", allow_module_level=True)
 sys.path.insert(0, os.environ["AGENTVISTA_ROOT"])
+
+from PIL import Image
 
 from responses_api_agents.agentvista_agent.runtime.data import inventory
 from responses_api_agents.agentvista_agent.runtime.worker import run

@@ -16,6 +16,8 @@ import nemo_gym.cli.main as cli_main
 import nemo_gym.rollouts.health.checks as health_checks
 import nemo_gym.rollouts.rollout_collection as rollout_collection
 import nemo_gym.rollouts.rollout_health as health
+from nemo_gym.core.responses_api_types import NeMoGymChatCompletion, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.models.chat_completions_converter import ChatCompletionsConverter
 from nemo_gym.rollouts import trajectory_builder
 from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper, _CompletedRollout
 from nemo_gym.rollouts.rollout_health import CHECK_REGISTRY, RolloutStore, run_health_checks
@@ -1263,6 +1265,131 @@ def test_a_length_limited_call_with_only_reasoning_is_a_runaway_generation(
     assert flagged_calls == (["clipped"] if flagged else [])
 
 
+@pytest.mark.parametrize("dialect", ["chat", "responses"])
+@pytest.mark.parametrize(
+    ("output_kind", "stop_reason", "runaway", "faulted"),
+    [
+        *((kind, "repetition_detected", True, True) for kind in ("reasoning", "answer", "tool")),
+        ("reasoning", None, False, True),
+        ("answer", 0, False, False),
+        ("tool", 11, False, False),
+        ("answer", "stop_sequence", False, False),
+    ],
+)
+def test_provider_stop_reason_drives_runaway_health_and_response_faults(
+    tmp_path: Path,
+    output_kind: str,
+    dialect: str,
+    stop_reason: str | int | None,
+    runaway: bool,
+    faulted: bool,
+) -> None:
+    message = {"role": "assistant", "content": None}
+    if output_kind == "reasoning":
+        message["reasoning"] = "Repeated consideration."
+    elif output_kind == "answer":
+        message["content"] = "Retained partial answer."
+    else:
+        message["tool_calls"] = [
+            {"id": "tool-1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}
+        ]
+    response = {
+        "id": "stopped",
+        "created": 0,
+        "object": "chat.completion",
+        "model": "test",
+        "choices": [{"index": 0, "finish_reason": "stop", "stop_reason": stop_reason, "message": message}],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+    }
+    if dialect == "responses":
+        completion = NeMoGymChatCompletion.model_validate(response)
+        if output_kind == "reasoning":
+            completion.choices[0].message.content = "<think>Repeated consideration.</think>"
+        response = (
+            ChatCompletionsConverter(return_token_id_information=False)
+            .chat_completion_to_response(
+                NeMoGymResponseCreateParamsNonStreaming(model="test", input="question"), completion
+            )
+            .model_dump(mode="json")
+        )
+        assert [item["type"] for item in response["output"]] == [
+            {"reasoning": "reasoning", "answer": "message", "tool": "function_call"}[output_kind]
+        ]
+        if output_kind == "reasoning":
+            assert response["output"][0]["summary"][0]["text"] == "Repeated consideration."
+        elif output_kind == "answer":
+            assert response["output"][0]["content"][0]["text"] == "Retained partial answer."
+        else:
+            assert response["output"][0]["name"] == "lookup"
+            assert response["output"][0]["call_id"] == "tool-1"
+    call = build_model_call_record(
+        {"model_call_id": "c1", "status_code": 200, "response": response, "finish_reason": "stop"},
+        call_index=0,
+    ).model_dump(mode="json")
+    record = _record(0, 0, usage={"input_tokens": 3, "output_tokens": 2})
+    rollout_path = _write_fixture(tmp_path, [(record, [call])])
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    findings = [item for item in digest.findings if item.check == "model_call_runaway_generation"]
+    assert [finding.detail for finding in findings] == (
+        [{"finish_reason": "stop", "native_stop_reason": "repetition_detected"}] if runaway else []
+    )
+    assert digest.verdict == ("unhealthy" if runaway else "healthy")
+    assert digest.responses == {"selected": ["c1"], "faulted": ["c1"] if faulted else []}
+    assert (call["tokens_in"], call["tokens_out"]) == (3, 2)
+
+
+@pytest.mark.parametrize(
+    ("finish_reason", "response", "evidence"),
+    [
+        (
+            "repetition",
+            {"choices": [{"finish_reason": "repetition", "message": {"content": "Retained answer."}}]},
+            {"native_finish_reason": "repetition"},
+        ),
+        (
+            "stop",
+            {
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "native_finish_reason": "repetition",
+                        "message": {"content": "Retained answer."},
+                    }
+                ]
+            },
+            {"native_finish_reason": "repetition"},
+        ),
+        (
+            "stop",
+            {"output_text": "Retained answer.", "native_finish_reason": "repetition"},
+            {"native_finish_reason": "repetition"},
+        ),
+        ("repetition", None, {"native_finish_reason": "repetition"}),
+        ("stop", {"output_text": "Retained answer.", "native_finish_reason": "refusal"}, {}),
+    ],
+    ids=["raw-chat", "normalized-chat", "responses", "missing-body", "refusal-control"],
+)
+def test_native_repetition_finish_is_health_evidence(
+    tmp_path: Path, finish_reason: str, response: dict | None, evidence: dict
+) -> None:
+    call = _call(finish_reason=finish_reason, response=response)
+    record = _record(0, 0, usage={"input_tokens": 3, "output_tokens": 2})
+    rollout_path = _write_fixture(tmp_path, [(record, [call])])
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    findings = [item for item in digest.findings if item.check == "model_call_runaway_generation"]
+    assert [finding.detail for finding in findings] == (
+        [{"finish_reason": finish_reason, **evidence}] if evidence else []
+    )
+    assert digest.verdict == ("unhealthy" if evidence else "healthy")
+    assert digest.responses == (
+        None if response is None else {"selected": ["c1"], "faulted": ["c1"] if evidence else []}
+    )
+
+
 _MESSAGES_TURN_CONTENT = {
     "thinking": ([{"type": "thinking", "thinking": "inspect first", "signature": ""}], False),
     "redacted_thinking": ([{"type": "redacted_thinking", "data": "opaque"}], False),
@@ -1304,6 +1431,53 @@ def test_a_messages_turn_with_only_thinking_is_not_hollow(tmp_path: Path, conten
     [digest] = run_health_checks(rollout_path, workers=1).rollouts
 
     assert any(finding.check == "agent_turn_hollow" for finding in digest.findings) is hollow
+
+
+@pytest.mark.parametrize(
+    ("finish_reason", "response", "evidence", "runaway"),
+    [
+        (
+            "stop",
+            {"output_text": "kept", "native_stop_reason": "repetition_detected"},
+            {"native_stop_reason": "repetition_detected"},
+            True,
+        ),
+        (
+            "stop",
+            {"output_text": "kept", "native_finish_reason": "repetition"},
+            {"native_finish_reason": "repetition"},
+            True,
+        ),
+        ("length", {"output": [{"type": "reasoning", "summary": []}]}, {}, True),
+        ("stop", {"output_text": "kept"}, {}, False),
+    ],
+    ids=["explicit-stop", "native-finish", "saved-reasoning-cap", "usable-control"],
+)
+def test_missing_response_retains_conclusive_runaway_evidence(
+    tmp_path: Path, finish_reason: str, response: dict, evidence: dict, runaway: bool
+) -> None:
+    known = _call(model_call_id="known", response_id="r-known", finish_reason=finish_reason, response=response)
+    unknown = _call(
+        call_index=1, model_call_id="unknown", response_id="r-unknown", finish_reason="length", response=None
+    )
+    record = _record(
+        0,
+        0,
+        refs=[{"model_call_id": "known"}, {"model_call_id": "unknown"}],
+        usage={"input_tokens": 6, "output_tokens": 4},
+    )
+    rollout_path = _write_fixture(tmp_path, [(record, [known, unknown])])
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    findings = [finding for finding in digest.findings if finding.check == "model_call_runaway_generation"]
+    assert [finding.locator["call_id"] for finding in findings] == (["known"] if runaway else [])
+    assert [finding.detail for finding in findings] == (
+        [{"finish_reason": finish_reason, **evidence}] if runaway else []
+    )
+    assert "model_call_runaway_generation" in digest.unobserved
+    assert digest.verdict == ("unhealthy" if runaway else "unobserved")
+    assert digest.responses is None
 
 
 def test_runaway_generation_is_unobserved_without_a_saved_response(tmp_path: Path) -> None:
@@ -3659,10 +3833,101 @@ def test_run_provenance_reports_only_what_the_resolved_config_states(tmp_path: P
                 "skip_verification": None,
             },
             "bench_resources": {"kind": "resources_servers", "implementation": "scicode"},
-            "bench_environment": {"kind": "environment_servers", "implementation": "bench_env"},
+            "bench_environment": {
+                "kind": "environment_servers",
+                "implementation": "bench_env",
+                "agent_server": None,
+                "resources_server": None,
+            },
         },
         "mlflow": {"configured": False, "tracking_required": None},
     }
+
+
+@pytest.mark.parametrize(
+    "bindings,agent,resources,malformed",
+    [
+        ({"agent_server": {"name": "policy"}, "resources_server": {"name": "grader"}}, "policy", "grader", False),
+        ({"assistant": {"type": "responses_api_agents", "name": "policy"}}, "policy", None, False),
+        (
+            {
+                "agent_server": {"name": "policy"},
+                "user": {"type": "responses_api_agents", "name": "user"},
+            },
+            "policy",
+            None,
+            False,
+        ),
+        (
+            {
+                "assistant": {"type": "responses_api_agents", "name": "policy"},
+                "user": {"type": "responses_api_agents", "name": "user"},
+            },
+            None,
+            None,
+            False,
+        ),
+        ({"agent_server": {"type": "resources_servers", "name": "grader"}}, None, None, True),
+        ({"agent_server": {"name": 1}}, None, None, True),
+        ({"agent_server": {"name": "${oc.env:AGENT}"}}, None, None, True),
+        (
+            {"agent_server": {"name": "policy"}, "resources_server": {"type": "responses_api_models", "name": "m"}},
+            "policy",
+            None,
+            True,
+        ),
+        ({"agent_server": None}, None, None, False),
+        (
+            {"agent_server": None, "assistant": {"type": "responses_api_agents", "name": "policy"}},
+            "policy",
+            None,
+            False,
+        ),
+        (
+            {"agent_server": {"name": "policy"}, "user": {"type": "responses_api_agents", "name": 1}},
+            "policy",
+            None,
+            True,
+        ),
+        ([], None, None, True),
+    ],
+    ids=[
+        "bound",
+        "single-agent",
+        "primary-agent",
+        "ambiguous",
+        "wrong-kind",
+        "wrong-name",
+        "unresolved",
+        "bad-resource",
+        "unset-primary",
+        "unset-primary-single-agent",
+        "bad-auxiliary-agent",
+        "bad-settings",
+    ],
+)
+def test_run_provenance_records_only_unambiguous_environment_bindings(tmp_path, bindings, agent, resources, malformed):
+    import yaml
+
+    from nemo_gym.rollouts.rollout_health import run_provenance
+
+    rollout_path = tmp_path / "rollouts.jsonl"
+    if isinstance(bindings, dict):
+        bindings = {**bindings, "prompt": "private prompt", "api_key": "private credential"}
+    (tmp_path / "rollouts_resolved_config.yaml").write_text(
+        yaml.safe_dump({"environment": {"environment_servers": {"single_agent_turn": bindings}}})
+    )
+    provenance = run_provenance(rollout_path)
+    expected = {
+        "kind": "environment_servers",
+        "implementation": "single_agent_turn",
+        "agent_server": agent,
+        "resources_server": resources,
+    }
+    if malformed:
+        expected["bindings_malformed"] = True
+    assert provenance["servers"] == {"environment": expected}
+    assert "private" not in json.dumps(provenance)
 
 
 @pytest.mark.parametrize(("content", "state"), [(None, "absent"), ("- a list", "unreadable"), ("a: [", "unreadable")])
@@ -4143,6 +4408,35 @@ def test_missing_agent_turns_names_the_resource_limit_that_ended_the_sandbox(tmp
     }
 
 
+@pytest.mark.parametrize(("error_type", "timed_out"), [("timeout", 1), ("UnknownError", 0), (None, 0)])
+def test_opencode_timeout_is_reported_without_changing_grade_or_verdict(
+    tmp_path: Path, error_type: str | None, timed_out: int
+) -> None:
+    record = _record(0, 0, usage={"input_tokens": 3, "output_tokens": 2, "total_tokens": 5})
+    record.update(
+        reward=0.0,
+        opencode_failed=True,
+        opencode_finished=False,
+        opencode_export_found=True,
+        opencode_exit_code=124 if timed_out else 1,
+        opencode_error_type=error_type,
+    )
+    record["ng_trajectory"]["invocations"] = [
+        {"kind": "agent_invocation", "invocation_id": "root", "status": "incomplete", "model_calls": []}
+    ]
+    rollout_path = _write_fixture(tmp_path, [(record, [_call()])])
+    saved_rollout = rollout_path.read_bytes()
+
+    result = run_health_checks(rollout_path, workers=1)
+
+    timeouts = result.summary["run"]["stats"]["timeouts"]
+    assert timeouts["timed_out"] == timed_out
+    assert timeouts["by_evidence"] == {"typed": 0, "legacy": timed_out}
+    assert timeouts["by_limit"] == ({"opencode_error_type=timeout": 1} if timed_out else {})
+    assert result.summary["run"]["verdicts"] == {"healthy": 1, "unhealthy": 0, "unobserved": 0}
+    assert rollout_path.read_bytes() == saved_rollout
+
+
 @pytest.mark.parametrize("limit", [None, {}, {"detail": "no resource"}, {"resource": ""}, "storage"])
 def test_missing_agent_turns_detail_is_unchanged_without_a_named_resource_limit(tmp_path: Path, limit) -> None:
     updates = {} if limit is None else {"sandbox_resource_limit": limit}
@@ -4150,3 +4444,22 @@ def test_missing_agent_turns_detail_is_unchanged_without_a_named_resource_limit(
     finding = _missing_turns_finding(tmp_path, **updates)
 
     assert finding.detail == {"reason": "no agent turn with model activity"}
+
+
+@pytest.mark.parametrize("schema,key", [("1.0", "rollout_id"), ("2.0", "capture_key")])
+@pytest.mark.parametrize("outer", [None, "outer"])
+def test_health_identity_falls_back_to_schema_capture_identity(schema, key, outer):
+    record = {"ng_trajectory": {"schema_version": schema, "task_id": "task", key: "capture"}}
+    if outer:
+        record[health.ROLLOUT_ID_KEY] = outer
+    assert health.evaluate_record(record, frozenset()).rollout_id == (outer or "capture")
+
+
+@pytest.mark.parametrize("status", ["timeout", "cancelled", "incomplete"])
+def test_interrupted_tool_label_preserves_failure_marker_health(tmp_path, status):
+    _, findings = _tool_call_failed_findings(
+        tmp_path,
+        [_tool_call(1, "ripgrep execution failed: spawn rg ENOENT") | {"status": status}],
+    )
+    assert len(findings) == 1
+    assert findings[0].detail["count"] == 1
