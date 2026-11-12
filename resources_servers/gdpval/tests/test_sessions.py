@@ -451,7 +451,7 @@ def test_sessions_with_rollout_ids_another_orchestrator_assigned_keep_their_file
 
     first_dir, second_dir = (Path(_verify(client)["deliverables_dir"]) for client in (first, second))
 
-    assert (first_dir.name, second_dir.name) == (f"repeat_{first_id}", f"repeat_{second_id}")
+    assert (first_dir.name, second_dir.name) == (f"repeat_id_{first_id}", f"repeat_id_{second_id}")
     assert first_dir.parent == second_dir.parent == tmp_path / "persist" / "task_task-1"
     assert "a.md" in _files(first_dir) and "b.md" not in _files(first_dir)
     assert "b.md" in _files(second_dir) and "a.md" not in _files(second_dir)

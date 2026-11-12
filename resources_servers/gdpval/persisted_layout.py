@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Where persisted deliverables live: ``<root>/task_<task_id>/repeat_<n>/``.
 
-``<n>`` is the rollout index of one of Gym's own rollouts, or the whole rollout id of a rollout another
+``<n>`` is the rollout index of one of Gym's own rollouts, or ``id_<rollout_id>`` for a rollout another
 orchestrator named (see ``repeat_key_from_rollout_id``). /verify writes this layout; the comparison scorer, multistage reuse and the transport assignment read it,
 including reference trees from earlier runs. ``finish_params.json`` in a repeat directory marks a finished run.
 """
@@ -29,11 +29,12 @@ def repeat_key_from_rollout_id(rollout_id: str) -> str:
 
     Gym derives its own rollout ids as ``"<task_index>-<rollout_index>"``; their key is the rollout index, so a task's
     repeats are ``repeat_0``, ``repeat_1``, ... An id that another orchestrator assigns, such as
-    ``trial-<trial_id>-attempt-<n>``, is the key whole, so each such rollout still gets a directory of its own.
+    ``trial-<trial_id>-attempt-<n>``, keeps the whole id under an ``id_`` prefix, so each such rollout still gets a
+    directory of its own and none can share one with a Gym repeat: ``"0"`` keys ``id_0``, not ``0`` like ``"7-0"``.
     ``EpisodeId`` allows only path-safe characters in a rollout id.
     """
     match = _ROLLOUT_ID.fullmatch(rollout_id)
-    return str(int(match.group(2))) if match else rollout_id
+    return str(int(match.group(2))) if match else f"id_{rollout_id}"
 
 
 def repeat_dirs(task_dir: Path) -> List[Path]:
